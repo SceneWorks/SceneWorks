@@ -1628,32 +1628,35 @@ fn pruned_source_reaches_provider_with_source_bound_identity_for_every_partition
 /// and never reports completion for work a user canceled.
 #[test]
 fn supervised_h3_cpu_preparation_cancels_between_bounded_steps_and_joins_the_task() {
-    let cancel = gen_core::CancelFlag::new();
-    let task_cancel = cancel.clone();
     let total = 200usize;
     let completed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let task_completed = completed.clone();
-    let task = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
-        loop {
-            crate::video_jobs::minimax_h3::h3_preparation_checkpoint(&task_cancel)
-                .map_err(|error| WorkerError::Canceled(error.to_string()))?;
-            std::thread::sleep(Duration::from_millis(5));
-            let done = task_completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            if done >= total {
-                return Ok(());
-            }
-        }
-    });
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime builds");
-    let result = runtime.block_on(crate::video_jobs::minimax_h3::supervise_h3_preparation(
-        cancel,
-        task,
-        Duration::from_millis(15),
-        || async { Ok(true) },
-    ));
+    let result = runtime.block_on(async {
+        let cancel = gen_core::CancelFlag::new();
+        let task_cancel = cancel.clone();
+        let task = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            loop {
+                crate::video_jobs::minimax_h3::h3_preparation_checkpoint(&task_cancel)
+                    .map_err(|error| WorkerError::Canceled(error.to_string()))?;
+                std::thread::sleep(Duration::from_millis(5));
+                let done = task_completed.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if done >= total {
+                    return Ok(());
+                }
+            }
+        });
+        crate::video_jobs::minimax_h3::supervise_h3_preparation(
+            cancel,
+            task,
+            Duration::from_millis(15),
+            || async { Ok(true) },
+        )
+        .await
+    });
     match result {
         Err(WorkerError::Canceled(message)) => assert!(
             message.contains("h3-preparation-canceled"),
@@ -1672,24 +1675,27 @@ fn supervised_h3_cpu_preparation_cancels_between_bounded_steps_and_joins_the_tas
 /// The same supervisor without a cancel observes the task's own completion and returns its value.
 #[test]
 fn supervised_h3_cpu_preparation_returns_the_task_result_without_cancel() {
-    let cancel = gen_core::CancelFlag::new();
-    let task = tokio::task::spawn_blocking(move || -> WorkerResult<u32> {
-        for _ in 0..4 {
-            crate::video_jobs::minimax_h3::h3_preparation_checkpoint(&cancel)
-                .map_err(|error| WorkerError::Canceled(error.to_string()))?;
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        Ok(42)
-    });
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime builds");
-    let result = runtime.block_on(crate::video_jobs::minimax_h3::supervise_h3_preparation(
-        gen_core::CancelFlag::new(),
-        task,
-        Duration::from_millis(10),
-        || async { Ok(false) },
-    ));
+    let result = runtime.block_on(async {
+        let cancel = gen_core::CancelFlag::new();
+        let task = tokio::task::spawn_blocking(move || -> WorkerResult<u32> {
+            for _ in 0..4 {
+                crate::video_jobs::minimax_h3::h3_preparation_checkpoint(&cancel)
+                    .map_err(|error| WorkerError::Canceled(error.to_string()))?;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(42)
+        });
+        crate::video_jobs::minimax_h3::supervise_h3_preparation(
+            gen_core::CancelFlag::new(),
+            task,
+            Duration::from_millis(10),
+            || async { Ok(false) },
+        )
+        .await
+    });
     assert_eq!(result.expect("the prepared result reaches the caller"), 42);
 }

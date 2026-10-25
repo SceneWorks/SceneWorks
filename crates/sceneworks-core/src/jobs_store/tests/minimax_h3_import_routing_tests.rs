@@ -146,7 +146,15 @@ fn the_imported_h3_claim_is_narrow_on_every_axis() {
     assert_eq!(claimed_on_both(&t2v(imported_entry())), (true, true));
 
     fn t2v_with_loras(loras: Value) -> Map<String, Value> {
-        payload(IMPORTED_ID, "text_to_video", loras, imported_entry())
+        // `payload`'s `extra` block is an OBJECT whose keys extend the job payload — the adapter
+        // list rides its `loras` key, exactly as an enqueued job's payload spells it. Passing the
+        // raw array here is the merged-suite failure this shape pins.
+        payload(
+            IMPORTED_ID,
+            "text_to_video",
+            json!({ "loras": loras }),
+            imported_entry(),
+        )
     }
 
     // The plan identity is what makes the entry plan-backed at all.
