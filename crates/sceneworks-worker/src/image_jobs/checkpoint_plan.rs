@@ -1705,6 +1705,9 @@ fn checkpoint_plan_raw_settings(
     quant_bits: Option<i64>,
 ) -> JsonObject {
     let mut raw = request.advanced.clone();
+    // This route consumes pinned source layers directly, not a cache derivative. Never echo an
+    // advanced-setting claim as conversion history.
+    raw.remove("checkpointDerivative");
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert(
         "mode".to_owned(),

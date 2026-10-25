@@ -1478,6 +1478,12 @@ pub(super) async fn generate_minimax_h3_using(
     // stale binding or a builtin id refuses before any media is decoded — and then runs this same
     // arm with the explicitly declared task's SEMANTICS (`semantics`) while every identity-bearing
     // record keeps the imported request (`request`).
+    if imported_minimax_h3_checkpoint_id(request).is_some() {
+        tracing::info!(event = "h3_import_load_start", jobId = %job.id, provider = engine_id,
+            backend, native_backend = if cfg!(target_os = "macos") { "mlx" } else { "cuda" },
+            phase = "source-acquisition-through-provider-handle",
+            "Beginning imported H3 acquisition; deferred task components may materialize during generation");
+    }
     let imported = imported_minimax_h3_checkpoint_id(request)
         .map(|_| {
             if !minimax_h3_engine_is_registered() {
@@ -1539,6 +1545,8 @@ pub(super) async fn generate_minimax_h3_using(
         record_imported_minimax_h3_identity(&mut raw_settings, dit, shared_tier);
     }
     let input = VideoGenInput {
+        imported_h3_identity: imported.as_ref().map(imported_h3_load_identity),
+        imported_h3_authority: imported.as_ref().map(|dit| dit.load_authority.clone()),
         veda,
         sampler: None,
         scheduler: None,
@@ -1734,6 +1742,12 @@ pub(super) async fn generate_candle_minimax_h3_using(
         + 'static,
 ) -> WorkerResult<(DecodedVideo, Value)> {
     // Imported weights resolve first; declared task semantics do not replace checkpoint identity.
+    if imported_minimax_h3_checkpoint_id(request).is_some() {
+        tracing::info!(event = "h3_import_load_start", jobId = %job.id, provider = engine_id,
+            backend, native_backend = if cfg!(target_os = "macos") { "mlx" } else { "cuda" },
+            phase = "source-acquisition-through-provider-handle",
+            "Beginning imported H3 acquisition; deferred task components may materialize during generation");
+    }
     let imported = imported_minimax_h3_checkpoint_id(request)
         .map(|_| resolve_imported_minimax_h3_dit(request, settings))
         .transpose()?;
@@ -1831,6 +1845,8 @@ pub(super) async fn generate_candle_minimax_h3_using(
         record_imported_minimax_h3_identity(&mut raw_settings, dit, shared_tier);
     }
     let input = VideoGenInput {
+        imported_h3_identity: imported.as_ref().map(imported_h3_load_identity),
+        imported_h3_authority: imported.as_ref().map(|dit| dit.load_authority.clone()),
         veda,
         sampler: None,
         scheduler: None,
@@ -1911,13 +1927,29 @@ pub(super) struct ImportedMiniMaxH3Dit {
     /// The validated binding, recorded verbatim on the asset.
     pub(super) assembly: Value,
     pub(super) partition: sceneworks_core::minimax_h3_import::MiniMaxH3Partition,
+    /// Complete source table/basis binding; never inferred from filenames or mutable settings.
+    pub(super) pruning: Option<sceneworks_core::minimax_h3_codec::H3PruningBinding>,
     component_bindings: Value,
+    pub(super) load_authority: sceneworks_core::minimax_h3_load::H3SourceAuthority,
     /// Every plan layer in the directory, pinned for the life of the render so the bytes the store
     /// just re-proved cannot be retargeted between this resolve and the provider's load (sc-18306).
     _pins: Vec<gen_core::PinnedWeightsFile>,
-    /// Shared resolved-cache lease keeps normalized native tensors unevictable through rendering.
-    _derivative: Option<sceneworks_core::model_artifacts::resolved_cache::ResolvedCacheLease>,
-    _source_lease: sceneworks_core::file_lock::FileLock,
+}
+
+/// Content hashes already acquired at the verified source boundary, not an assertion that the
+/// backend executed those tensors. The shared handoff reports its separately prepared load files.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn imported_h3_load_identity(dit: &ImportedMiniMaxH3Dit) -> Value {
+    json!({
+        "checkpointId": dit.checkpoint_id,
+        "planId": dit.plan_id,
+        "semanticDigest": dit.semantic_digest,
+        "assembly": dit.assembly,
+        "sourceFiles": dit._pins.iter().map(|pin| json!({
+            "path": pin.loader_path(),
+            "sha256": pin.content_sha256().iter().map(|b| format!("{b:02x}")).collect::<String>(),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// Bracket all header/payload reads; mutation errors win before derivative publication.
@@ -2027,6 +2059,8 @@ pub(super) fn resolve_imported_minimax_h3_dit(
         )
     })
     .map_err(|reason| refuse("invalid-tensor-inventory", reason))?;
+    sceneworks_core::minimax_h3_import::verify_imported_pruning(&assembly, &inventory)
+        .map_err(|reason| refuse("pruning-incompatible", reason))?;
     let (directory, derivative) =
         if inventory.requires_normalization {
             use sceneworks_core::checkpoint_derivative::{
@@ -2091,6 +2125,10 @@ pub(super) fn resolve_imported_minimax_h3_dit(
                 None,
             )
         };
+    with_imported_h3_source_seals(&pins, || {
+        verify_imported_h3_pruning_directory(&directory, assembly.pruning.as_ref())
+    })
+    .map_err(|reason| refuse("pruning-incompatible", reason))?;
     // Refuse newly added/unplanned siblings: native providers map every visible safetensors in the
     // directory, so a verified shard set alone cannot authorize a foreign file beside it.
     let planned: std::collections::BTreeSet<_> = if inventory.requires_normalization {
@@ -2118,18 +2156,94 @@ pub(super) fn resolve_imported_minimax_h3_dit(
             ));
         }
     }
+    let mut load_seals = pins.clone();
+    if let Some(lease) = &derivative {
+        // Bind normalized files to the hashes proven by acquire_complete, rather than treating
+        // a fresh pin of whatever now occupies a published derivative as new authority.
+        for member in &lease.artifact().closure.members {
+            for file in &member.files {
+                let path = directory
+                    .join(&member.destination)
+                    .join(&file.relative_path);
+                let pin = gen_core::PinnedWeightsFile::pin(&path)
+                    .map_err(|e| refuse("source-drift", e.to_string()))?;
+                let actual = format!(
+                    "sha256:{}",
+                    pin.content_sha256()
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                );
+                if file.sha256.as_deref() != Some(actual.as_str()) {
+                    return Err(refuse(
+                        "source-drift",
+                        format!(
+                            "normalized H3 file changed after acquisition: {}",
+                            path.display()
+                        ),
+                    ));
+                }
+                load_seals.push(pin);
+            }
+        }
+    }
+    let load_authority = sceneworks_core::minimax_h3_load::H3SourceAuthority::new(
+        load_seals,
+        directory.clone(),
+        planned,
+    )
+    .map_err(|e| refuse("source-drift", e))?
+    .with_leases(source_lease, derivative);
     Ok(ImportedMiniMaxH3Dit {
+        load_authority,
         semantic_digest: resolved.plan.semantic_digest().ok(),
         plan_id: resolved.plan.plan_id.clone(),
         checkpoint_id,
         transformer_dir: directory,
         partition: assembly.partition,
+        pruning: assembly.pruning.clone(),
         assembly: assembly.to_json(),
         component_bindings: json!({"tier":entry.get("importComponentTier"),"downloads":entry.get("downloads")}),
         _pins: pins,
-        _derivative: derivative,
-        _source_lease: source_lease,
     })
+}
+
+/// Verify the leased canonical component against the source-bound table and complete reduced basis.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(super) fn verify_imported_h3_pruning_directory(
+    directory: &Path,
+    expected: Option<&sceneworks_core::minimax_h3_codec::H3PruningBinding>,
+) -> Result<(), String> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "H3 canonical component filename is not UTF-8")?;
+        if path.is_file()
+            && (path.extension().is_some_and(|ext| ext == "safetensors")
+                || matches!(
+                    name.as_str(),
+                    "config.json" | "diffusion_pytorch_model.safetensors.index.json"
+                ))
+        {
+            files.push((name, path));
+        }
+    }
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+    let canonical = sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)?;
+    if canonical.pruning.as_ref() != Some(expected) {
+        return Err(
+            "sealed H3 component has a different pruning table/basis identity or source precision"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// The request as its declared task partition sees it — for SEMANTICS only (shape validation, the
@@ -2163,6 +2277,15 @@ fn record_imported_minimax_h3_identity(
     shared_tier: &str,
 ) {
     if let Value::Object(raw) = raw_settings {
+        // Advanced settings cannot claim a conversion. Only the lease retained through this
+        // render names an actual shared-cache derivative; the API redeems its bound receipt.
+        raw.remove("checkpointDerivative");
+        if let Some(cache_key) = dit.load_authority.derivative_cache_key() {
+            raw.insert(
+                "checkpointDerivative".to_owned(),
+                json!({"cacheKey":cache_key}),
+            );
+        }
         raw.insert(
             "importPlan".to_owned(),
             json!({
@@ -2575,6 +2698,12 @@ fn stage_imported_minimax_h3_assembly(
         hasher.update(part);
         hasher.update([0]);
     }
+    if let Some(pruning) = &dit.pruning {
+        hasher.update(pruning.topology_id.as_bytes());
+        hasher.update([0]);
+        hasher.update(pruning.identity.as_bytes());
+        hasher.update([0]);
+    }
     let key = format!("{:x}", hasher.finalize());
     let staged = settings
         .data_dir
@@ -2653,6 +2782,8 @@ pub(super) fn resolve_candle_imported_minimax_h3_load(
     dit: &ImportedMiniMaxH3Dit,
 ) -> WorkerResult<(CandleMiniMaxH3Load, &'static str)> {
     let bound = resolve_imported_h3_components(settings, request, dit)?;
+    // Base imports keep their direct path (including linked sources on another Windows volume).
+    // Semantic identity is carried by the supplemental prepared cache context, not by hardlinks.
     let dit_dir = if dit.partition == sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va
     {
         dit.transformer_dir.clone()

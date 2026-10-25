@@ -1469,6 +1469,10 @@ pub(super) struct VideoGenInput {
     /// separate from `memory`: a Resident selection still carries context while preserving the
     /// provider's request defaults with `memory == None`.
     pub(super) memory_context: Option<gen_core::MemoryRunContext>,
+    /// Imported H3 plan/source identity. The shared load handoff seals the actual native component
+    /// closure before deriving the warm key. This is not an executed-tensor attestation.
+    pub(super) imported_h3_identity: Option<Value>,
+    pub(super) imported_h3_authority: Option<sceneworks_core::minimax_h3_load::H3SourceAuthority>,
     /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
     /// SCAIL Candle and the uncalibrated dual-expert VACE-Fun lane set it; other video families leave
     /// it `None`. It is deliberately outside
@@ -1487,6 +1491,8 @@ impl Default for VideoGenInput {
         Self {
             memory: None,
             memory_context: None,
+            imported_h3_identity: None,
+            imported_h3_authority: None,
             engine_id: "",
             veda: None,
             veda_predictor: None,
@@ -2853,8 +2859,9 @@ pub(super) async fn generate_video_using(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Progress>(64);
     let blocking = {
         let cancel = cancel.clone();
-        let spec = video_load_spec(&input);
         let engine_id = input.engine_id;
+        let receipt_job_id = job.id.clone();
+        let receipt_backend = backend.to_owned();
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let cold_load_admission = input.cold_load_admission.take();
         // sc-10671: an in-place ComfyUI Wan MoE takes the bespoke **uncached** load path
@@ -2877,7 +2884,6 @@ pub(super) async fn generate_video_using(
         // `spec` itself moves into the loader) and lets both derivations happen inside `run`, which
         // executes on the generator cache thread — the same position the image lane derives its
         // own from, inside the blocking closure.
-        let admission_spec = spec.clone();
         let admission_geometry = (
             input.width,
             input.height,
@@ -2887,6 +2893,59 @@ pub(super) async fn generate_video_using(
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let host_probe_runtime = tokio::runtime::Handle::current();
         tokio::spawn(async move {
+            let mut spec = video_load_spec(&input);
+            let (spec, h3_receipt) = if input.imported_h3_identity.is_some() {
+                let authority = input.imported_h3_authority.clone().ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "imported H3 load is missing its resolved source authority".into(),
+                    )
+                })?;
+                tokio::task::spawn_blocking(move || {
+                    let receipt =
+                        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare_authorized(
+                            &mut spec,
+                            Some(authority),
+                        )
+                        .map_err(WorkerError::InvalidPayload)?;
+                    Ok::<_, WorkerError>((spec, Some(receipt)))
+                })
+                .await
+                .map_err(|e| WorkerError::Engine(e.to_string()))??
+            } else {
+                (spec, None)
+            };
+            let prepared_h3_context =
+                h3_receipt
+                    .as_ref()
+                    .map(|receipt| crate::generator_cache::PreparedH3CacheContext {
+                        identity:
+                            json!({"import":input.imported_h3_identity, "operation":admission_mode,
+                    "steps":input.steps,"schedulerShift":input.scheduler_shift,
+                    "sampler":input.sampler,"scheduler":input.scheduler})
+                            .to_string(),
+                        receipt: receipt.clone(),
+                    });
+            if cancel.is_cancelled() {
+                return Err(WorkerError::Canceled(
+                    "Video generation canceled before H3 native load.".into(),
+                ));
+            }
+            let cold_h3_receipt = h3_receipt.clone();
+            let load_generator = move |id: &str, spec: &LoadSpec| {
+                if let Some(receipt) = &cold_h3_receipt {
+                    receipt
+                        .validate(spec)
+                        .map_err(gen_core::Error::Unsupported)?;
+                }
+                let generator = load_generator(id, spec)?;
+                if let Some(receipt) = &cold_h3_receipt {
+                    receipt
+                        .validate(spec)
+                        .map_err(gen_core::Error::Unsupported)?;
+                }
+                Ok(generator)
+            };
+            let admission_spec = spec.clone();
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let cold_load_cancel = cancel.clone();
             let run = move |generator: &dyn Generator,
@@ -2902,6 +2961,29 @@ pub(super) async fn generate_video_using(
                 );
                 let load_policy = loaded_policy.offload_policy;
                 let mut input = input;
+                if let (Some(receipt), Some(identity)) = (&h3_receipt, &input.imported_h3_identity)
+                {
+                    receipt
+                        .validate(&admission_spec)
+                        .map_err(WorkerError::InvalidPayload)?;
+                    tracing::info!(
+                        event = "h3_import_prepared_load",
+                        jobId = %receipt_job_id,
+                        provider = engine_id,
+                        backend = %receipt_backend,
+                        native_backend = if cfg!(target_os = "macos") { "mlx" } else { "cuda" },
+                        seal_validated = true,
+                        identity = %identity,
+                        prepared_sources = %receipt.prepared_sources_json(),
+                        cache_state = ?cache_state,
+                        provider_resident_delta_bytes = provider_resident_bytes,
+                        operation = %admission_mode,
+                        steps = ?input.steps,
+                        scheduler_shift = ?input.scheduler_shift,
+                        seed = input.seed,
+                        "Imported H3 acquired a generator with its sealed file closure; not an executed-tensor or peak-memory receipt"
+                    );
+                }
                 let admission_tier =
                     crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
                 let spec_headroom_bytes =
@@ -3071,7 +3153,7 @@ pub(super) async fn generate_video_using(
                     None => {
                         crate::generator_cache::with_cached_generator_for_request_using(
                             engine_id,
-                            spec,
+                            (spec, prepared_h3_context),
                             "video load failed",
                             load_generator,
                             run,
@@ -3085,7 +3167,7 @@ pub(super) async fn generate_video_using(
                 let _ = comfyui_load;
                 crate::generator_cache::with_cached_generator_for_request_using(
                     engine_id,
-                    spec,
+                    (spec, prepared_h3_context),
                     "video load failed",
                     load_generator,
                     run,

@@ -426,6 +426,8 @@ jobs:
       # this skip cannot quietly become a hole.
       - name: Workspace tests (excluding the NAX guard, which needs M5)
         run: cargo test -- --skip nax_16bit_sdpa_is_correct
+      # Model-level H3 forwards, including synthetic weights, stay ignored here. Explicit
+      # pruned/W4A8 native proofs live in server-candle-linux.yml's selected manual-only jobs.
 
       # sc-17119/sc-18477. This is an ordinary weights-free registry walk, so it belongs on the
       # hosted half rather than the scarce M5/NAX pool. `always()` preserves a fresh native artifact

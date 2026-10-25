@@ -2856,7 +2856,7 @@ async fn h3_manifest_publication_failure_rolls_back_and_can_retry() {
 #[tokio::test]
 async fn a_refused_linked_h3_alias_cannot_invalidate_an_existing_models_unchanged_plan() {
     let _env = isolate_hf_cache();
-    let (url, _) = spawn_tree_stub_with_files(vec![]).await;
+    let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
     let fixture = managed_import_fixture_with_id(url, "linked_h3_owner").await;
     let source = fixture.settings.data_dir.join("models/incoming/shared_h3");
     crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
@@ -2871,11 +2871,21 @@ async fn a_refused_linked_h3_alias_cannot_invalidate_an_existing_models_unchange
     super::model_jobs::run_model_import_job(&api,&fixture.settings,&client,&job).await.unwrap();
     let original = fixture.manifest_entry().unwrap();
     let checkpoint_id = original["importPlan"]["checkpointId"].as_str().unwrap();
+    let original_plan = store.resolve(checkpoint_id).unwrap().plan;
+    posts.lock().unwrap().clear();
     job.payload.insert("modelId".into(),json!("bad_alias"));
     job.payload["manifestEntry"]["id"] = json!("bad_alias");
     job.payload["manifestEntry"].as_object_mut().unwrap().remove("minimaxH3Partition");
     super::model_jobs::run_model_import_job(&api,&fixture.settings,&client,&job).await.unwrap();
+    {
+        let updates = posts.lock().unwrap();
+        let failed = updates.iter().find(|post| post["status"] == "failed")
+            .expect("declaration refusal must use the established failed-job update");
+        assert!(failed.to_string().contains("minimaxH3Partition"), "{failed}");
+        assert!(!updates.iter().any(|post| post["status"] == "completed"));
+    }
     let resolved = store.resolve(checkpoint_id).expect("the registered owner's source binding must survive");
+    assert_eq!(resolved.plan, original_plan, "refusal cannot replace the owner's immutable plan");
     sceneworks_core::minimax_h3_import::verify_entry_assembly(original.as_object().unwrap(),&resolved.plan).unwrap();
     assert_eq!(fixture.manifest_entry(),Some(original));
 }

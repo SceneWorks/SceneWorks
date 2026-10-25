@@ -19,6 +19,10 @@ use std::path::{Path, PathBuf};
 
 use gen_core::checkpoint_codec::{CheckpointCodecRegistry, WeightEncoding, DENSE_CODECS};
 use gen_core::convrot_int8::{ConvRotInt8, MAX_DESCRIPTOR_BYTES};
+use gen_core::pruned_adaln::{PrunedAdaLn, PruningIdentity, TABLE_KEY, TOPOLOGY_ID};
+use gen_core::w4a8_int8::W4A8Int8;
+use gen_core::weightsmeta::Dtype;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
 use crate::checkpoint_derivative::{
@@ -253,12 +257,297 @@ impl H3Config {
         add("norm_out.norm.weight".into(), vec![h]);
         Ok(names)
     }
+
+    /// Complete inventory for the centered-curve AdaLN topology (sc-26684). The trunk, heads,
+    /// norms, biases and refiner keep the full geometry; the direct `U*S` table replaces the
+    /// four timestep-MLP tensors, and every AdaLN modulation projection narrows its input columns
+    /// from `time_embed_dim` to `rank`. `grid`/`rank` come from the source table, never a filename.
+    pub fn pruned_shapes(
+        &self,
+        grid: usize,
+        rank: usize,
+    ) -> Result<BTreeMap<String, Vec<usize>>, String> {
+        if grid < 2
+            || rank == 0
+            || grid > i32::MAX as usize
+            || rank > i32::MAX as usize
+            || grid.checked_mul(rank).is_none()
+        {
+            return Err(format!(
+                "MiniMax-H3 pruned AdaLN requires an F32 table with [grid >= 2, rank > 0], got [{grid}, {rank}]"
+            ));
+        }
+        let mut names = self.shapes()?;
+        for leaf in ["linear_1", "linear_2"] {
+            for suffix in ["weight", "bias"] {
+                names.remove(&format!("time_embedder.{leaf}.{suffix}"));
+            }
+        }
+        for (name, shape) in names.iter_mut() {
+            let reduced_input = name == "norm_out.linear.weight"
+                || (name.starts_with("transformer_blocks.")
+                    && name.ends_with(".adaln_proj.linear.weight"));
+            if reduced_input {
+                shape[1] = rank;
+            }
+        }
+        names.insert(TABLE_KEY.to_owned(), vec![grid, rank]);
+        Ok(names)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H3QkvLayout {
     Interleaved,
     Contiguous,
+}
+
+/// Exact consumer binding between an H3 source's reduced centered-curve AdaLN topology and the
+/// shared native generators (sc-26684). `identity` is the full 64-hex engine content hash over
+/// every canonical operand value in contract order, at the ORIGINAL stored dtype, produced by
+/// `gen_core::pruned_adaln::PrunedAdaLn::identity_builder` over the same normalized bytes both
+/// native caches consume. `sourceBytes` counts stored operand bytes at their dtype width and
+/// `computeBytes` counts the same operands once widened to F32; they are deliberately separate
+/// quantities, never interchangeable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct H3PruningBinding {
+    pub topology_id: String,
+    /// Full 64-hex engine identity hash of the complete reduced operand set.
+    pub identity: String,
+    pub grid: usize,
+    pub rank: usize,
+    pub source_bytes: u64,
+    pub compute_bytes: u64,
+}
+
+impl H3PruningBinding {
+    pub fn to_json(&self) -> Value {
+        json!({
+            "topologyId": &self.topology_id,
+            "identity": &self.identity,
+            "grid": self.grid,
+            "rank": self.rank,
+            "sourceBytes": self.source_bytes,
+            "computeBytes": self.compute_bytes,
+        })
+    }
+
+    pub fn from_value(value: &Value) -> Result<Self, String> {
+        let binding: Self = serde_json::from_value(value.clone())
+            .map_err(|error| format!("H3 AdaLN pruning binding: {error}"))?;
+        binding.validate()?;
+        Ok(binding)
+    }
+
+    /// The shared topology identity the native generators consume. A forged or partial binding
+    /// still parses here; it can never pass a provider comparison against the actual source,
+    /// whose identity is recomputed from operand bytes.
+    pub fn engine_identity(&self) -> Result<PruningIdentity, String> {
+        self.validate()?;
+        let mut identity = [0u8; 32];
+        let digits = self.identity.as_bytes();
+        for (index, byte) in identity.iter_mut().enumerate() {
+            let high = (digits[index * 2] as char).to_digit(16);
+            let low = (digits[index * 2 + 1] as char).to_digit(16);
+            *byte = match (high, low) {
+                (Some(high), Some(low)) => (high * 16 + low) as u8,
+                _ => return Err("H3 AdaLN pruning binding: identity is not 64 hex digits".into()),
+            };
+        }
+        Ok(PruningIdentity(identity))
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.topology_id != TOPOLOGY_ID {
+            return Err(format!(
+                "H3 AdaLN pruning binding: topologyId {:?} is not the current shared topology {TOPOLOGY_ID:?}",
+                self.topology_id
+            ));
+        }
+        if self.grid < 2
+            || self.rank == 0
+            || self.grid > i32::MAX as usize
+            || self.rank > i32::MAX as usize
+        {
+            return Err(format!(
+                "H3 AdaLN pruning binding: requires [grid >= 2, rank > 0], got [{}, {}]",
+                self.grid, self.rank
+            ));
+        }
+        let table = self
+            .grid
+            .checked_mul(self.rank)
+            .ok_or("H3 AdaLN pruning binding: table geometry overflows")?;
+        // The table itself is always F32; widened F32 operands are never narrower than stored.
+        let table_bytes = (table as u64)
+            .checked_mul(4)
+            .ok_or("H3 AdaLN pruning binding: table byte count overflows")?;
+        if self.source_bytes < table_bytes {
+            return Err(format!(
+                "H3 AdaLN pruning binding: sourceBytes {} cannot carry the F32 table ({table_bytes} bytes)",
+                self.source_bytes
+            ));
+        }
+        if self.compute_bytes < table_bytes {
+            return Err(format!(
+                "H3 AdaLN pruning binding: computeBytes {} cannot carry the F32 table ({table_bytes} bytes)",
+                self.compute_bytes
+            ));
+        }
+        if !self.compute_bytes.is_multiple_of(4) {
+            return Err(format!(
+                "H3 AdaLN pruning binding: computeBytes {} is not whole F32 elements",
+                self.compute_bytes
+            ));
+        }
+        // Every admitted operand is F16, BF16 or F32, so widening to F32 never shrinks the payload.
+        if self.compute_bytes < self.source_bytes {
+            return Err(format!(
+                "H3 AdaLN pruning binding: computeBytes {} is narrower than sourceBytes {}",
+                self.compute_bytes, self.source_bytes
+            ));
+        }
+        if !self.source_bytes.is_multiple_of(2) {
+            return Err(format!(
+                "H3 AdaLN pruning binding: sourceBytes {} is not a whole operand byte count",
+                self.source_bytes
+            ));
+        }
+        if self.identity.len() != 64 || !self.identity.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(
+                "H3 AdaLN pruning binding: identity must be the full 64-hex engine hash".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// The complete engine identity hex string, lowercase, one byte at a time.
+fn pruning_identity_hex(identity: PruningIdentity) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut hex = String::with_capacity(64);
+    for byte in identity.0 {
+        hex.push(DIGITS[(byte >> 4) as usize] as char);
+        hex.push(DIGITS[(byte & 15) as usize] as char);
+    }
+    hex
+}
+
+/// An iterable F32 view over one stored canonical operand. Reads stay inside one fixed chunk; the
+/// values are decoded losslessly from the ORIGINAL stored dtype exactly as the normalization copy
+/// schedule emits them (the schedule copies bytes, so canonical order equals source order).
+struct OperandValues<'a> {
+    reader: std::io::BufReader<File>,
+    ranges: &'a [(u64, u64)],
+    next_range: usize,
+    base: u64,
+    dtype: Dtype,
+    remaining: u64,
+    chunk: Vec<u8>,
+    values: Vec<f32>,
+    cursor: usize,
+    error: Option<String>,
+}
+
+const OPERAND_CHUNK: usize = 64 * 1024;
+
+impl<'a> OperandValues<'a> {
+    fn open(source: &Path, tensor: &'a Tensor, dtype: Dtype) -> Result<Self, String> {
+        let reader = std::io::BufReader::with_capacity(
+            OPERAND_CHUNK,
+            File::open(source)
+                .map_err(|error| format!("H3 AdaLN: {}: {error}", source.display()))?,
+        );
+        Ok(Self {
+            reader,
+            ranges: &tensor.ranges,
+            next_range: 0,
+            base: tensor.offset,
+            dtype,
+            remaining: 0,
+            chunk: vec![0u8; OPERAND_CHUNK],
+            values: Vec::new(),
+            cursor: 0,
+            error: None,
+        })
+    }
+
+    /// Decode the next bounded chunk of the current operand range. False ends the operand.
+    fn fill(&mut self) -> bool {
+        self.values.clear();
+        self.cursor = 0;
+        while self.values.is_empty() {
+            if self.remaining == 0 {
+                let Some(&(start, length)) = self.ranges.get(self.next_range) else {
+                    return false;
+                };
+                self.next_range += 1;
+                if self
+                    .reader
+                    .seek(SeekFrom::Start(self.base + start))
+                    .is_err()
+                {
+                    self.error = Some("H3 AdaLN: cannot seek the reduced operand payload".into());
+                    return false;
+                }
+                self.remaining = length;
+                if length == 0 {
+                    continue;
+                }
+            }
+            let width = self.dtype.size();
+            let take = self.remaining.min(self.chunk.len() as u64) as usize / width * width;
+            if take == 0 {
+                self.error = Some(format!(
+                    "H3 AdaLN: reduced operand bytes are not aligned to {width}-byte {} values",
+                    self.dtype.as_str()
+                ));
+                return false;
+            }
+            if let Err(error) = self.reader.read_exact(&mut self.chunk[..take]) {
+                self.error = Some(format!(
+                    "H3 AdaLN: truncated reduced operand payload: {error}"
+                ));
+                return false;
+            }
+            self.remaining -= take as u64;
+            let chunk = &self.chunk[..take];
+            match self.dtype {
+                Dtype::F32 => self.values.extend(
+                    chunk
+                        .chunks_exact(4)
+                        .map(|bytes| f32::from_le_bytes(bytes.try_into().unwrap())),
+                ),
+                Dtype::BF16 => self.values.extend(chunk.chunks_exact(2).map(|bytes| {
+                    let bits = (u16::from_le_bytes(bytes.try_into().unwrap()) as u32) << 16;
+                    f32::from_bits(bits)
+                })),
+                Dtype::F16 => self.values.extend(chunk.chunks_exact(2).map(|bytes| {
+                    let bits = u16::from_le_bytes(bytes.try_into().unwrap());
+                    half::f16::from_bits(bits).to_f32()
+                })),
+                _ => unreachable!("inspect admits only dense F16/BF16/F32 AdaLN operands"),
+            }
+        }
+        true
+    }
+}
+
+impl Iterator for OperandValues<'_> {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        if self.error.is_some() {
+            return None;
+        }
+        if self.cursor == self.values.len() && !self.fill() {
+            return None;
+        }
+        let value = self.values[self.cursor];
+        self.cursor += 1;
+        Some(value)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -272,7 +561,7 @@ struct Tensor {
     ranges: Vec<(u64, u64)>,
 }
 
-/// Verified source inventory and exact copy schedule. Header-only memory; no tensor payloads.
+/// Verified copy schedule; pruning values are streamed through bounded buffers, never retained.
 #[derive(Debug, Clone)]
 pub struct H3SourceInventory {
     pub config: H3Config,
@@ -282,6 +571,11 @@ pub struct H3SourceInventory {
     pub requires_normalization: bool,
     /// Descriptor-validated native symmetric INT8, never the affine MLX Q8 dialect.
     pub convrot_int8: bool,
+    /// Packed codebook W4A8, possibly mixed with ConvRot INT8 projections.
+    pub w4a8_int8: bool,
+    /// Content identity of the reduced centered-curve AdaLN topology this source actually carries.
+    /// Present only when the source stores the direct table instead of the timestep MLP.
+    pub pruning: Option<H3PruningBinding>,
     sources: Vec<PathBuf>,
     tensors: BTreeMap<String, Tensor>,
 }
@@ -402,7 +696,6 @@ impl H3SourceInventory {
             );
         }
         let config = config.or(bound_config).ok_or("MiniMax-H3 source has no config.json or embedded h3_config; explicitly select a compatible base to bind its exact configuration before import")?;
-        let mut expected = config.shapes()?;
         let codecs = CheckpointCodecRegistry::new(DENSE_CODECS.iter().copied())
             .map_err(|e| e.to_string())?;
         let mut tensors = BTreeMap::<String, Tensor>::new();
@@ -420,14 +713,21 @@ impl H3SourceInventory {
                 }
             }
         }
+        // The table itself decides whether this is a reduced topology; shapes are validated
+        // against that choice and never guessed from a filename or a metadata claim.
+        let pruned = pruning_geometry(&physical)?;
+        let mut expected = match pruned {
+            Some((grid, rank)) => config.pruned_shapes(grid, rank)?,
+            None => config.shapes()?,
+        };
         let quantized = convrot_outputs(
             &headers, &weights, &physical, native, &config, qkv_layout, &expected,
         )?;
         for outputs in quantized.values() {
             for (logical, shape, _) in outputs {
-                if !logical.ends_with(".weight") {
-                    expected.insert(logical.clone(), shape.clone());
-                }
+                // The packed projection's physical shape is [out, in/2]; the codec already
+                // checked its logical geometry against the architecture before scheduling it.
+                expected.insert(logical.clone(), shape.clone());
             }
         }
         for (source, ((_, path), header)) in weights.iter().zip(&headers).enumerate() {
@@ -447,8 +747,8 @@ impl H3SourceInventory {
                     "BF16" => (Some(WeightEncoding::DenseBf16),2u64),
                     "F16" => (Some(WeightEncoding::DenseF16),2u64),
                     "F32" => (Some(WeightEncoding::DenseF32),4u64),
-                    "I8" | "U8" if quantized.contains_key(key) => (None,1u64),
-                    _ => return Err(format!("unsupported H3 tensor {key:?} encoding {dtype:?}; expected dense or descriptor-validated ConvRot INT8, not pruned/W4A8")),
+                    "I8" | "U8" | "F8_E4M3" if quantized.contains_key(key) => (None,1u64),
+                    _ => return Err(format!("unsupported H3 tensor {key:?} encoding {dtype:?}; expected dense or descriptor-validated ConvRot INT8/W4A8 operands")),
                 };
                 if encoding.is_some_and(|encoding| codecs.for_encoding(encoding).is_none()) {
                     return Err(format!("unregistered H3 dense codec for {key:?}"));
@@ -578,14 +878,33 @@ impl H3SourceInventory {
                 missing.join(", ")
             ));
         }
+        // The complete spine proved above; only now is the reduced topology hashed from its
+        // actual stored bytes, so a refused or partial topology never yields a binding.
+        let sources: Vec<_> = weights.iter().map(|(_, path)| (*path).clone()).collect();
+        let pruning = match pruned {
+            Some((grid, rank)) => Some(pruning_binding(&tensors, &config, &sources, grid, rank)?),
+            None => None,
+        };
         Ok(Self {
             config,
             native,
-            requires_normalization,
-            convrot_int8: tensors.keys().any(|key| key.ends_with(".comfy_quant")),
-            sources: weights.into_iter().map(|(_, p)| p.clone()).collect(),
+            requires_normalization: requires_normalization || pruning.is_some(),
+            convrot_int8: tensors.keys().any(|key| key.ends_with(".weight_scale")),
+            w4a8_int8: tensors.keys().any(|key| key.ends_with(".weight_s_rel")),
+            pruning,
+            sources,
             tensors,
         })
+    }
+
+    pub fn source_encoding(&self) -> Option<&'static str> {
+        if self.w4a8_int8 {
+            Some("asym_w4a8_int8")
+        } else if self.convrot_int8 {
+            Some("convrot_int8")
+        } else {
+            None
+        }
     }
 
     pub fn derivative_request(&self) -> CheckpointDerivativeRequestV1 {
@@ -595,7 +914,9 @@ impl H3SourceInventory {
             kind: CheckpointDerivativeKindV1::NormalizedLayout,
             adapter_id: H3_MAPPING_ID.into(),
             adapter_version: "1".into(),
-            codec_id: if self.convrot_int8 {
+            codec_id: if self.w4a8_int8 {
+                crate::checkpoint_weight_facts::W4A8_INT8_CODEC_ID
+            } else if self.convrot_int8 {
                 crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID
             } else {
                 "dense-f16-bf16-f32"
@@ -681,6 +1002,149 @@ type Output = (String, Vec<usize>, Vec<(u64, u64)>);
 
 type H3Physical<'a> = BTreeMap<&'a str, (usize, &'a Value)>;
 
+/// Timestep-MLP operands the direct centered-curve table replaces, in their canonical Diffusers
+/// spelling and the accepted native export spelling.
+const TIME_MLP_NAMES: [(&str, &str); 4] = [
+    (
+        "time_embedder.linear_1.weight",
+        "time_embedder.proj_in.weight",
+    ),
+    ("time_embedder.linear_1.bias", "time_embedder.proj_in.bias"),
+    (
+        "time_embedder.linear_2.weight",
+        "time_embedder.proj_out.weight",
+    ),
+    ("time_embedder.linear_2.bias", "time_embedder.proj_out.bias"),
+];
+
+/// Read the direct table's own geometry from headers before any operand is mapped. A present but
+/// malformed table refuses; only an absent table selects the full timestep-MLP inventory.
+fn pruning_geometry(physical: &H3Physical<'_>) -> Result<Option<(usize, usize)>, String> {
+    let mut geometry = None;
+    for (key, (_, entry)) in physical {
+        if strip_prefix(key) != TABLE_KEY {
+            continue;
+        }
+        if entry.get("dtype").and_then(Value::as_str) != Some("F32") {
+            return Err(format!(
+                "H3 AdaLN: {TABLE_KEY} must be stored F32, got {:?}",
+                entry.get("dtype")
+            ));
+        }
+        let shape = entry
+            .get("shape")
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("H3 AdaLN: {TABLE_KEY} lacks a shape"))?
+            .iter()
+            .map(|dimension| {
+                dimension
+                    .as_u64()
+                    .and_then(|value| usize::try_from(value).ok())
+            })
+            .collect::<Option<Vec<usize>>>()
+            .ok_or_else(|| format!("H3 AdaLN: {TABLE_KEY} has an invalid shape"))?;
+        if shape.len() != 2 || shape[0] < 2 || shape[1] == 0 {
+            return Err(format!(
+                "H3 AdaLN: {TABLE_KEY} must be [grid >= 2, rank > 0], got {shape:?}"
+            ));
+        }
+        geometry = Some((shape[0], shape[1]));
+    }
+    if geometry.is_some() {
+        for (canonical, native_spelling) in TIME_MLP_NAMES {
+            if physical.keys().any(|key| {
+                let key = strip_prefix(key);
+                key == canonical || key == native_spelling
+            }) {
+                return Err(format!(
+                    "H3 AdaLN: {TABLE_KEY} conflicts with full timestep MLP {canonical}"
+                ));
+            }
+        }
+    }
+    Ok(geometry)
+}
+
+/// Hash the complete reduced topology from the authoritative copy schedule. Every operand is
+/// decoded losslessly from its stored dtype in contract order; a missing operand, an inconsistent
+/// stored dtype or a nonfinite value refuses the inventory before any execution or publication.
+fn pruning_binding(
+    tensors: &BTreeMap<String, Tensor>,
+    config: &H3Config,
+    sources: &[PathBuf],
+    grid: usize,
+    rank: usize,
+) -> Result<H3PruningBinding, String> {
+    let topology = PrunedAdaLn::inspect(
+        config.dim("hidden_size")?,
+        config.dim("num_layers")?,
+        config.dim("time_embed_dim")?,
+        |name| {
+            tensors
+                .get(name)
+                .and_then(|tensor| Dtype::parse(&tensor.dtype).map(|d| (d, tensor.shape.clone())))
+        },
+    )?
+    .ok_or_else(|| {
+        format!("H3 AdaLN: {TABLE_KEY} is present but the reduced AdaLN topology is incomplete")
+    })?;
+    if (topology.grid, topology.rank) != (grid, rank) {
+        return Err(format!(
+            "H3 AdaLN: table geometry [{}, {}] disagrees with the inspected [{grid}, {rank}]",
+            topology.grid, topology.rank
+        ));
+    }
+    let mut builder = topology.identity_builder();
+    let mut source_bytes = 0u64;
+    let mut compute_bytes = 0u64;
+    for operand in topology.operands() {
+        let tensor = tensors
+            .get(&operand.name)
+            .ok_or_else(|| format!("H3 AdaLN: missing reduced operand {}", operand.name))?;
+        if Dtype::parse(&tensor.dtype) != Some(operand.dtype) {
+            return Err(format!(
+                "H3 AdaLN: {} stored as {}, but the inspected topology declares {:?}",
+                operand.name, tensor.dtype, operand.dtype
+            ));
+        }
+        let elements = operand
+            .shape
+            .iter()
+            .try_fold(1usize, |count, &dimension| count.checked_mul(dimension))
+            .ok_or("H3 AdaLN: operand element count overflows")?;
+        let source = sources
+            .get(tensor.source)
+            .ok_or("H3 AdaLN: operand source is outside the declared files")?;
+        let mut values = OperandValues::open(source, tensor, operand.dtype)?;
+        let hashed = builder.operand_values(&operand.name, &mut values);
+        if let Some(error) = values.error.take() {
+            return Err(error);
+        }
+        hashed?;
+        let stored = (elements as u64)
+            .checked_mul(operand.dtype.size() as u64)
+            .ok_or("H3 AdaLN: stored operand bytes overflow")?;
+        source_bytes = source_bytes
+            .checked_add(stored)
+            .ok_or("H3 AdaLN: stored operand bytes overflow")?;
+        compute_bytes = compute_bytes
+            .checked_add(
+                (elements as u64)
+                    .checked_mul(4)
+                    .ok_or("H3 AdaLN: widened operand bytes overflow")?,
+            )
+            .ok_or("H3 AdaLN: widened operand bytes overflow")?;
+    }
+    Ok(H3PruningBinding {
+        topology_id: TOPOLOGY_ID.to_owned(),
+        identity: pruning_identity_hex(builder.finish()?),
+        grid,
+        rank,
+        source_bytes,
+        compute_bytes,
+    })
+}
+
 /// Validate executable operands before scheduling copies. Codes are never decoded or allocated;
 /// descriptor reads are bounded and row scales are scanned one value at a time.
 fn convrot_outputs(
@@ -752,6 +1216,21 @@ fn convrot_outputs(
             {
                 return Err(format!("H3 {key}: requires bounded U8 ConvRot descriptor"));
             }
+            reader
+                .seek(SeekFrom::Start(body + offset(entry)?))
+                .map_err(|e| e.to_string())?;
+            let payload = &mut descriptor_bytes[..descriptor_shape[0]];
+            reader.read_exact(payload).map_err(|e| e.to_string())?;
+            let declaration: Value = serde_json::from_slice(payload)
+                .map_err(|e| format!("H3 {key}: invalid projection descriptor: {e}"))?;
+            match declaration.get("format").and_then(Value::as_str) {
+                Some("asym_w4a8_int8") => {
+                    w4a8_outputs(key, payload, physical, files, native, config, layout, expected, &mut outputs)?;
+                    continue;
+                }
+                Some("int8_tensorwise") => {}
+                other => return Err(format!("H3 {key}: unsupported projection format {other:?}; supported native formats are int8_tensorwise ConvRot and asym_w4a8_int8; export a supported checkpoint")),
+            }
             let weight_key = format!("{base}.weight");
             let scale_key = format!("{base}.weight_scale");
             let (_, weight) = physical
@@ -767,11 +1246,6 @@ fn convrot_outputs(
             }
             let weight_shape = shape(weight)?;
             let scale_shape = shape(scale)?;
-            reader
-                .seek(SeekFrom::Start(body + offset(entry)?))
-                .map_err(|e| e.to_string())?;
-            let payload = &mut descriptor_bytes[..descriptor_shape[0]];
-            reader.read_exact(payload).map_err(|e| e.to_string())?;
             let descriptor = ConvRotInt8::parse(payload, &weight_shape, &scale_shape)
                 .map_err(|e| format!("H3 {key}: {e}"))?;
             let mut foreign_reader;
@@ -847,6 +1321,175 @@ fn convrot_outputs(
         }
     }
     Ok(outputs)
+}
+
+/// Validate the shared native W4A8 contract, then schedule only row copies. Logical rows are
+/// mapped first (QKV and SwiGLU); each companion applies that exact permutation at its own stored
+/// row width. No unpacked int8, float projection, or model-sized scratch is ever constructed.
+#[allow(clippy::too_many_arguments)]
+fn w4a8_outputs(
+    key: &str,
+    payload: &[u8],
+    physical: &H3Physical<'_>,
+    files: &[(&String, &PathBuf)],
+    native: bool,
+    config: &H3Config,
+    layout: H3QkvLayout,
+    expected: &BTreeMap<String, Vec<usize>>,
+    outputs: &mut BTreeMap<String, Vec<Output>>,
+) -> Result<(), String> {
+    let base = key
+        .strip_suffix(".comfy_quant")
+        .ok_or("invalid W4A8 descriptor key")?;
+    let operand =
+        |suffix: &str, dtype: &str| -> Result<(String, usize, Vec<usize>, &Value), String> {
+            let name = format!("{base}.{suffix}");
+            let (source, entry) = physical
+                .get(name.as_str())
+                .ok_or_else(|| format!("H3 {key}: missing W4A8 {suffix}"))?;
+            if entry["dtype"].as_str() != Some(dtype) {
+                return Err(format!(
+                    "H3 {name}: W4A8 requires stored {dtype}, got {}",
+                    entry["dtype"]
+                ));
+            }
+            let shape = entry["shape"]
+                .as_array()
+                .and_then(|shape| {
+                    shape
+                        .iter()
+                        .map(|v| v.as_u64().and_then(|n| usize::try_from(n).ok()))
+                        .collect::<Option<Vec<_>>>()
+                })
+                .ok_or_else(|| format!("H3 {name}: invalid W4A8 shape"))?;
+            Ok((name, *source, shape, *entry))
+        };
+    let weight = operand("weight", "I8")?;
+    let relative = operand("weight_s_rel", "F8_E4M3")?;
+    let channel = operand("weight_s_channel", "F32")?;
+    let codebook = operand("weight_codebook", "F32")?;
+    let descriptor = W4A8Int8::parse(payload, &weight.2, &relative.2, &channel.2, &codebook.2)
+        .map_err(|e| format!("H3 {key}: {e}"))?;
+    // Shared value validators run on bounded chunks. Each chunk is a complete set of groups or
+    // channels; geometry has already been validated above against the original stored operands.
+    for (suffix, item, width) in [
+        ("weight_s_rel", &relative, 1usize),
+        ("weight_s_channel", &channel, 4),
+        ("codebook", &codebook, 4),
+    ] {
+        let mut file = File::open(files[item.1].1).map_err(|e| e.to_string())?;
+        let mut length = [0; 8];
+        file.read_exact(&mut length).map_err(|e| e.to_string())?;
+        let start = item.3["data_offsets"][0]
+            .as_u64()
+            .ok_or("W4A8 operand lacks offset")?;
+        file.seek(SeekFrom::Start(8 + u64::from_le_bytes(length) + start))
+            .map_err(|e| e.to_string())?;
+        let mut remaining = item
+            .2
+            .iter()
+            .try_fold(width, |n, &d| n.checked_mul(d))
+            .ok_or("W4A8 operand byte count overflow")?;
+        let mut buffer = [0u8; 64 * 1024];
+        while remaining != 0 {
+            let count = remaining.min(buffer.len());
+            file.read_exact(&mut buffer[..count])
+                .map_err(|e| e.to_string())?;
+            let validated = if suffix == "weight_s_rel" {
+                // count is a multiple of 16: each rotation group carries sixteen fp8 scales.
+                W4A8Int8 {
+                    out_features: count / 16,
+                    in_features: 256,
+                    ..descriptor
+                }
+                .validate_s_rel(&buffer[..count])
+            } else {
+                let values: Vec<_> = buffer[..count]
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
+                if suffix == "codebook" {
+                    descriptor.validate_codebook(&values)
+                } else {
+                    W4A8Int8 {
+                        out_features: values.len(),
+                        ..descriptor
+                    }
+                    .validate_s_channel(&values)
+                }
+            };
+            validated.map_err(|e| format!("H3 {}: {e}", item.0))?;
+            remaining -= count;
+        }
+    }
+    let logical_shape = vec![descriptor.out_features, descriptor.in_features];
+    let mapped = if native {
+        native_outputs(strip_prefix(&weight.0), config, layout, &logical_shape, 1)?
+    } else {
+        vec![(
+            strip_prefix(&weight.0).into(),
+            logical_shape.clone(),
+            vec![(0, (descriptor.out_features * descriptor.in_features) as u64)],
+        )]
+    };
+    let mut packed = Vec::new();
+    let mut relative_outputs = Vec::new();
+    let mut channel_outputs = Vec::new();
+    let mut codebook_outputs = Vec::new();
+    let mut descriptors = Vec::new();
+    for (logical, dimensions, ranges) in mapped {
+        let supported = (logical.starts_with("transformer_blocks.")
+            || logical.starts_with("token_refiner.refiner_blocks."))
+            && (logical.contains(".attn.to_") || logical.contains(".ff."));
+        if !supported || expected.get(&logical) != Some(&dimensions) {
+            return Err(format!("H3 {key}: W4A8 projection {logical:?} is not a native packed consumer with geometry {dimensions:?}"));
+        }
+        let logical_base = logical
+            .strip_suffix(".weight")
+            .ok_or("invalid W4A8 logical weight")?;
+        let rows = |row_width: u64| {
+            ranges
+                .iter()
+                .map(|&(start, len)| {
+                    (
+                        start / descriptor.in_features as u64 * row_width,
+                        len / descriptor.in_features as u64 * row_width,
+                    )
+                })
+                .collect()
+        };
+        relative_outputs.push((
+            format!("{logical_base}.weight_s_rel"),
+            vec![dimensions[0], descriptor.in_features / 16],
+            rows((descriptor.in_features / 16) as u64),
+        ));
+        channel_outputs.push((
+            format!("{logical_base}.weight_s_channel"),
+            vec![dimensions[0]],
+            rows(4),
+        ));
+        codebook_outputs.push((
+            format!("{logical_base}.weight_codebook"),
+            vec![16],
+            vec![(0, 64)],
+        ));
+        descriptors.push((
+            format!("{logical_base}.comfy_quant"),
+            vec![payload.len()],
+            vec![(0, payload.len() as u64)],
+        ));
+        packed.push((
+            logical,
+            vec![dimensions[0], descriptor.in_features / 2],
+            rows((descriptor.in_features / 2) as u64),
+        ));
+    }
+    outputs.insert(weight.0, packed);
+    outputs.insert(relative.0, relative_outputs);
+    outputs.insert(channel.0, channel_outputs);
+    outputs.insert(codebook.0, codebook_outputs);
+    outputs.insert(key.into(), descriptors);
+    Ok(())
 }
 
 fn native_outputs(

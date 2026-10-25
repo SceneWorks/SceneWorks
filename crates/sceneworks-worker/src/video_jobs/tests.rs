@@ -1422,6 +1422,39 @@ fn production_callback_retains_request_state_and_the_tested_admission_handoff() 
         "the production funnel must use the request-aware cache callback that supplies cold/warm, \
          load policy, external baseline, and fixed provider-resident delta"
     );
+    let spec_preparation = funnel
+        .find("let mut spec = video_load_spec(&input);")
+        .expect("the native LoadSpec must be derived from VideoGenInput");
+    let sealed_preparation = funnel
+        .find("PreparedH3Load::prepare_authorized(")
+        .expect("imported source authority must prepare the same native load spec");
+    assert!(
+        spec_preparation < sealed_preparation
+            && funnel.contains("&mut spec,")
+            && funnel.contains("(spec, prepared_h3_context),"),
+        "the prepared source identity and native spec must reach the original request-aware \
+         callback together, not an alternate cache route or an identity-free LoadSpec"
+    );
+    assert_eq!(
+        funnel.matches("(spec, prepared_h3_context),").count(),
+        2,
+        "both native-platform and Candle cached paths must forward the prepared context"
+    );
+    const CACHE: &str = include_str!("../generator_cache.rs");
+    let callback = CACHE
+        .split_once("pub(crate) async fn with_cached_generator_for_request_using<R>(")
+        .and_then(|(_, rest)| rest.split_once("#[cfg(test)]"))
+        .map(|(body, _)| body.split_whitespace().collect::<Vec<_>>().join(" "))
+        .expect("the original request-aware callback remains identifiable");
+    assert!(
+        callback.contains("let GeneratorRequestLoad { spec, prepared_h3 } = load.into();")
+            && callback.contains(
+                "with_cached_generator_for_request_after_cold_admission_using_on_with_h3("
+            )
+            && callback.contains("engine_id, spec, prepared_h3, load_error_context,"),
+        "the original callback must forward the sealed context, rather than silently substituting \
+         None before the cold/warm, policy, external-baseline and provider-delta handoff"
+    );
     assert!(
         funnel.contains("with_uncached_generator("),
         "the in-place Candle load must use the uncached request-aware callback that captures its \

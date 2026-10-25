@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision 26f850a6 (epic sc-26679 native ConvRot INT8 and authoritative format-identity pin): 786 provenance candidates and 117 production-Rust crate prefixes. Native ConvRot arithmetic follows pinned Comfy Kitchen and comfy-model-tools executable references; the quantized kernels and descriptor contract do not add embedded third-party source or a runtime Python dependency. The identity-only correction adds no arithmetic, dependency or licensing changes. Existing Supra2-IMG, MOSS-Image and body/perceptual dispositions are unchanged. The FLUX.3 crates and other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "26f850a61209bd05e6ae81f562e50a72df2057a6",
-  "auditDigest": "e38f6769810687f01c916e564826bd4bb09a1d966611618e3e94381669f220e4",
+  "_comment": "Audit inventory reviewed at inference revision b956dda6 (epic sc-26679 merged W4A8 CUDA kernel repair and H3 adapter support): 786 provenance candidates and 117 production-Rust crate prefixes. The native W4A8 contract, backend kernels and reference arithmetic remain in the existing quantization/provider source areas; no new embedded third-party data artifact or crate prefix is introduced. Existing source/license classifications and advisory compliance items remain unchanged. Historical measurement and provenance receipts retain their recorded revisions; this generated source inventory is not a measurement-currency assertion.",
+  "inferenceRevision": "b956dda650b8422de238c9c0614e43812bbd5020",
+  "auditDigest": "f094cd0139a303d24d72646bbec76754842d8396e681b8ba5cfb52ef3e1b8158",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "26f850a61209bd05e6ae81f562e50a72df2057a6",
+    "revision": "b956dda650b8422de238c9c0614e43812bbd5020",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 786,
-    "populationSha256": "0602ae13c09677f9598617692b3acb402ebb76f34e5b26680d85025de86209a3"
+    "populationSha256": "e83a386f26586a4dcbaeab645a21510e1e8b6936f0c442a18cdcd79cd356c98f"
   },
   "portedSourceAreas": [
     {
@@ -994,7 +994,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "26f850a61209bd05e6ae81f562e50a72df2057a6",
+    "revision": "b956dda650b8422de238c9c0614e43812bbd5020",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 117,
     "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"

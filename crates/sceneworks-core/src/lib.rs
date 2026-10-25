@@ -49,6 +49,7 @@ pub mod memory_anchor;
 pub mod memory_calibration;
 pub mod minimax_h3_codec;
 pub mod minimax_h3_import;
+pub mod minimax_h3_load;
 pub mod minimax_h3_turbo;
 pub mod mlx_tier_completeness;
 pub mod model_artifacts;

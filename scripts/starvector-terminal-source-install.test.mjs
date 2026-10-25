@@ -129,8 +129,7 @@ test("existing default-branch workflow bridges every pre-merge terminal operatio
     const suffix = reusable ? `-${reusable}` : "";
     assert.match(bridge, new RegExp(`uses: \\.\\/.github/workflows/starvector-terminal${suffix}\\.yml`));
   }
-  const options = /options: \[([^\]]+)\]/.exec(bridge)[1].split(',').map(value => value.trim());
-  for (const operation of ['standard', 'source', 'provision', 'readiness', 'campaign', 'diagnostic-candle-1b']) assert.ok(options.includes(operation), `standing ${operation} selection retained`);
+  assert.match(bridge, /options: \[standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both, h3-terminal-mlx, h3-terminal-cuda\]/);
   assert.match(bridge, /starvector-readiness:[\s\S]*?uses: \.\/.github\/workflows\/starvector-terminal-readiness\.yml[\s\S]*?with:[\s\S]*?permanent_pin: \$\{\{ inputs\.permanent_pin \}\}/);
 });
 

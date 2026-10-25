@@ -113,6 +113,38 @@ multiple source claims must agree. Weight-only files instead bind the explicitly
 base's exact primary configuration, never a published architecture default.
 The task-neutral codec never derives the explicit partition declaration from names or shapes.
 
+### Reduced centered-curve AdaLN imports (sc-26684)
+
+The same import workflow also accepts the source checkpoint's complete reduced AdaLN topology:
+an F32 `adaln_t_table`, every reduced block projection and the final projection, with their folded
+biases. Native/ComfyUI names are normalized without reconstructing the full timestep MLP or
+changing the source basis. Stored BF16 projection weights and F16 folded biases remain at their
+original precision in the derivative; native execution widens these supplied operands to F32.
+The table replaces the timestep MLP, not the source architecture declaration.
+
+Coordinates follow the pinned
+[WanGP implementation](https://github.com/deepbeepmeep/Wan2GP/blob/47b06ff920c16b4b7b36de068367a5de0e0968e9/models/minimax_h3/transformer.py):
+`t = 1 - sigma` in `[0, 1]`, clamped linear interpolation at `t * (grid - 1)` (no `1000` multiplier).
+Text uses the video timestep; conditioned video uses `max(video_t, 0.999)`, audio uses its own
+timestep, and conditioned audio uses `1`. The observed rank-eight topology has 1025 table rows;
+admission checks the complete supplied geometry rather than a filename or publisher allowlist.
+
+The persisted assembly binds the entire table, reduced weights and folded biases, including
+their source dtypes, to the shared engine content identity. Canonical sources also receive an
+identity-addressed derivative directory, so a different table or basis cannot share a provider
+cache entry. Missing/inconsistent pruning data, forged assembly declarations and mismatched
+sealed derivatives refuse before provider loading. Native synthetic fixtures in
+`minimax_h3_import_fixture` execute both Metal and CUDA after managed ingest, comparing endpoints,
+off-grid and conditioned timesteps against the pinned executable CPU oracle, and refusing a
+same-shaped foreign cache. No downloaded checkpoint payload is committed as a fixture.
+
+The pinned engine's shared `SourcePruneSizing` authority charges the supplied operands at their
+actual F32 compute widths plus retained F32 modulation/coordinate buffers over the full admitted
+scheduler-shift domain. Pruned precompute does not release those operands, so it receives no
+fictitious stock AdaLN eviction credit. Mixed task routes compare corrected per-task footprints;
+the worker does not maintain a second estimator. Existing dense/stock packed Q4/Q8 behavior is
+preserved.
+
 ### Reusable managed and linked assembly (sc-26686)
 
 The baseline is the existing LTX/Eros compatible-base conversion and co-requisite workflow

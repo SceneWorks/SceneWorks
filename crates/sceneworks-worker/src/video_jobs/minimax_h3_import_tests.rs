@@ -934,7 +934,7 @@ fn imported_companion_config_mismatches_are_refused_not_defaulted() {
 #[cfg(target_os = "macos")]
 #[test]
 fn native_and_sharded_managed_and_linked_sources_preserve_explicit_partition_operations() {
-    for layout in ["native", "sharded"] {
+    for layout in ["native", "sharded", "w4a8"] {
         for partition in ["fl2va", "ref2va", "hybrid"] {
             for linked in [false, true] {
                 let companions: &[&str] = match partition {
@@ -1052,7 +1052,24 @@ fn native_and_sharded_managed_and_linked_sources_preserve_explicit_partition_ope
                     let inventory =
                         sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files)
                             .unwrap();
-                    assert!(!inventory.native && !inventory.requires_normalization);
+                    assert!(!inventory.native);
+                    assert_eq!(
+                        inventory.requires_normalization,
+                        inventory.pruning.is_some()
+                    );
+                    if layout == "w4a8" {
+                        assert!(inventory.w4a8_int8 && inventory.convrot_int8);
+                        assert_eq!(
+                            raw["importPlan"]["assembly"]["sourceEncoding"],
+                            "asym_w4a8_int8"
+                        );
+                        assert!(
+                            raw["checkpointDerivative"]["cacheKey"]
+                                .as_str()
+                                .is_some_and(|key| !key.is_empty()),
+                            "receipt comes from the retained normalized derivative lease"
+                        );
+                    }
                     assert_eq!(raw["model"], json!(id));
                     assert_eq!(
                         raw["importPlan"]["assembly"],
@@ -1124,7 +1141,7 @@ fn an_explicit_h3_declaration_cannot_relabel_a_linked_non_h3_source() {
 
 #[test]
 fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
-    for layout in ["dense", "native", "sharded", "convrot"] {
+    for layout in ["dense", "native", "sharded", "convrot", "pruned", "w4a8"] {
         let data = tempfile::tempdir().unwrap();
         let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_layout(
             data.path(),
@@ -1139,6 +1156,38 @@ fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
         let provider =
             crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(&request, &settings)
                 .unwrap();
+        if layout == "w4a8" {
+            assert_eq!(imported.entry["importQuantFormat"], "asym_w4a8_int8");
+            assert_eq!(provider.assembly["sourceEncoding"], "asym_w4a8_int8");
+            assert_eq!(
+                sceneworks_core::jobs_store::imported_entry_source_codec(&imported.entry),
+                Some("w4a8-int8-native")
+            );
+            let files: Vec<_> = std::fs::read_dir(&provider.transformer_dir)
+                .unwrap()
+                .filter(|e| {
+                    e.as_ref().is_ok_and(|e| {
+                        e.path().extension().is_some_and(|ext| ext == "safetensors")
+                            || matches!(
+                                e.file_name().to_str(),
+                                Some(
+                                    "config.json"
+                                        | "diffusion_pytorch_model.safetensors.index.json"
+                                )
+                            )
+                    })
+                })
+                .map(|e| {
+                    let e = e.unwrap();
+                    (e.file_name().to_string_lossy().into_owned(), e.path())
+                })
+                .collect();
+            let inventory =
+                sceneworks_core::minimax_h3_codec::H3SourceInventory::from_files(&files).unwrap();
+            assert!(inventory.w4a8_int8 && inventory.convrot_int8);
+            assert_eq!(inventory.pruning, provider.pruning);
+            assert_eq!(inventory.derivative_request().codec_id, "w4a8-int8-native");
+        }
         let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(data.path());
         let refusal = store.remove_managed("leased_h3").unwrap_err();
         assert!(
@@ -1147,7 +1196,33 @@ fn provider_resolution_holds_dense_and_native_source_leases_until_release() {
         );
         assert!(imported.install_dir.is_dir());
         assert!(store.resolve(&imported.checkpoint_id).is_ok());
+        // An uncancellable blocking preparation retains its authority after the async owner
+        // drops. Both the managed source and normalized derivative must remain leased.
+        let receipt_key = provider.load_authority.derivative_cache_key();
+        assert_eq!(
+            receipt_key.is_some(),
+            matches!(layout, "native" | "convrot" | "pruned" | "w4a8")
+        );
+        let blocking_authority = provider.load_authority.clone();
         drop(provider);
+        blocking_authority.validate().unwrap();
+        assert_eq!(
+            blocking_authority.derivative_cache_key(),
+            receipt_key,
+            "receipt identity and both leases survive cancellation of the async owner"
+        );
+        assert!(
+            store.remove_managed("leased_h3").is_err(),
+            "{layout}: reader still holds the source lease"
+        );
+        let derivatives =
+            sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(data.path())
+                .unwrap();
+        assert!(
+            derivatives.remove_managed_install("leased_h3").is_err(),
+            "{layout}: active preparation cannot lose its normalized source"
+        );
+        drop(blocking_authority);
         sceneworks_core::checkpoint_derivative::CheckpointDerivativeStore::open(data.path())
             .unwrap()
             .remove_managed_install("leased_h3")
@@ -1378,5 +1453,82 @@ fn bound_shared_tier_and_exact_snapshots_reach_native_loadspec_despite_distracti
             "a complete mutable main cannot rescue a torn bound snapshot"
         );
         assert!(probe.spec.lock().unwrap().is_none());
+    }
+}
+
+#[test]
+fn pruned_source_reaches_provider_with_source_bound_identity_for_every_partition() {
+    use crate::video_jobs::minimax_h3::{
+        resolve_imported_minimax_h3_dit, verify_imported_h3_pruning_directory,
+    };
+    for partition in ["fl2va", "ref2va", "hybrid"] {
+        let data = tempfile::tempdir().unwrap();
+        let imported = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+            data.path(),
+            "source_owned_pruned",
+            "pruned",
+            partition,
+        );
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..offline_settings()
+        };
+        let request = imported_minimax_h3_request("source_owned_pruned", &imported.entry);
+        let provider = resolve_imported_minimax_h3_dit(&request, &settings).unwrap();
+        let pruning = provider.pruning.as_ref().expect("complete pruning binding");
+        assert_eq!((pruning.grid, pruning.rank), (1025, 8));
+        assert_eq!(provider.partition.as_str(), partition);
+        assert_eq!(provider.assembly["adalnPruning"], pruning.to_json());
+        assert_ne!(
+            canonical(&provider.transformer_dir),
+            canonical(&imported.install_dir),
+            "even canonical pruning sources use a content-addressed provider path"
+        );
+        verify_imported_h3_pruning_directory(&provider.transformer_dir, Some(pruning)).unwrap();
+
+        let foreign = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+            data.path(),
+            "foreign_source_owned_pruned",
+            "pruned-other",
+            partition,
+        );
+        let foreign_provider = resolve_imported_minimax_h3_dit(
+            &imported_minimax_h3_request("foreign_source_owned_pruned", &foreign.entry),
+            &settings,
+        )
+        .unwrap();
+        assert_ne!(
+            pruning.identity,
+            foreign_provider.pruning.as_ref().unwrap().identity
+        );
+        assert_ne!(provider.transformer_dir, foreign_provider.transformer_dir);
+        assert!(verify_imported_h3_pruning_directory(
+            &foreign_provider.transformer_dir,
+            Some(pruning)
+        )
+        .is_err());
+
+        for binding in [
+            Value::Null,
+            foreign.entry["importPlan"]["assembly"]["adalnPruning"].clone(),
+        ] {
+            let mut forged = imported.entry.clone();
+            if binding.is_null() {
+                forged["importPlan"]["assembly"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("adalnPruning");
+            } else {
+                forged["importPlan"]["assembly"]["adalnPruning"] = binding;
+            }
+            assert!(
+                resolve_imported_minimax_h3_dit(
+                    &imported_minimax_h3_request("source_owned_pruned", &forged),
+                    &settings,
+                )
+                .is_err(),
+                "missing or same-shaped foreign pruning data refuses before provider loading"
+            );
+        }
     }
 }

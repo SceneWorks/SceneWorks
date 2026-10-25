@@ -160,17 +160,18 @@ const workflowJob = (text, name) => {
   const start=text.indexOf(`\n  ${name}:\n`); assert.ok(start>=0,`missing ${name} job`);
   const next=text.slice(start+1).search(/\n  [a-z][\w-]*:\n/); return text.slice(start,next<0?undefined:start+1+next);
 };
-const workflowExpression = (expression, inputs, github={event_name:'workflow_dispatch',run_id:'unit_fake_101',run_attempt:'1',ref:'refs/heads/unit_fake'}) => runInNewContext(expression.trim().replace(/^\$\{\{\s*|\s*\}\}$/g,''),{
-  inputs,github,fromJSON:JSON.parse,toJSON:JSON.stringify,format:(template,...values)=>template.replace(/\{(\d+)\}/g,(_,n)=>String(values[Number(n)])),
+const workflowExpression = (expression, inputs, github={}) => runInNewContext(expression.trim().replace(/^\$\{\{\s*|\s*\}\}$/g,''),{
+  inputs,github:{event_name:'workflow_dispatch',run_id:'unit_fake_101',run_attempt:'1',ref:'refs/heads/unit_fake',...github},fromJSON:JSON.parse,toJSON:JSON.stringify,format:(template,...values)=>template.replace(/\{(\d+)\}/g,(_,n)=>String(values[Number(n)])),
 },{timeout:100});
 test('registered Candle entrypoint positively routes only explicit H3 selections to the same-ref reusable job',async()=>{
   const router=await readFile(new URL('../.github/workflows/server-candle-linux.yml',import.meta.url),'utf8');
   const callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
   const job=workflowJob(router,'h3-terminal'),selected=/^    if: (.+)$/m.exec(job)[1],authorization=/^      stationary_pair_authorized: (.+)$/m.exec(job)[1];
   assert.match(job,/uses: \.\/.github\/workflows\/h3-finetune-terminal\.yml/);assert.doesNotMatch(job,/uses:.*@main|registration_only|activation/);assert.match(callee,/workflow_call:/);
-  for(const operation of ['standard','','source','provision','readiness','campaign','diagnostic-candle-1b','h3-terminal','unknown'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation}),false,operation);
+  for(const operation of ['standard','','source','provision','readiness','campaign','diagnostic-candle-1b','h3-import-mlx','h3-import-cuda','h3-import-both','h3-terminal','unknown'])assert.equal(workflowExpression(selected,{starvector_terminal_operation:operation}),false,operation);
   for(const operation of ['h3-terminal-mlx','h3-terminal-cuda']){
     const inputs={starvector_terminal_operation:operation,campaign_run_id:JSON.stringify({stationary_pair_authorized:true})};assert.equal(workflowExpression(selected,inputs),true);assert.equal(workflowExpression(authorization,inputs),true);
+    for(const event of ['push','pull_request','merge_group','schedule'])assert.equal(workflowExpression(selected,inputs,{event_name:event}),false);
     const backend=/^      backend: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(backend,inputs),operation.endsWith('-mlx')?'mlx':'cuda');
     for(const value of [false,null,1,'true','false'])assert.equal(workflowExpression(authorization,{...inputs,campaign_run_id:JSON.stringify({stationary_pair_authorized:value})}),false);
   }
@@ -188,6 +189,9 @@ test('H3 bridge preserves all standing dispatch keys, old flow selection and iso
   for(const operation of ['standard','']){assert.equal(workflowExpression(build,{starvector_terminal_operation:operation}),true);assert.equal(workflowExpression(cancel,{starvector_terminal_operation:operation}),true);assert.match(workflowExpression(rootGroup,{starvector_terminal_operation:operation}),/^server-candle-linux-/);}
   for(const operation of ['source','provision','readiness','campaign','diagnostic-candle-1b']){assert.equal(workflowExpression(rootGroup,{starvector_terminal_operation:operation}),'starvector-terminal-bridge');assert.equal(workflowExpression(cancel,{starvector_terminal_operation:operation}),false);assert.equal(workflowExpression(build,{starvector_terminal_operation:operation}),false);}
   for(const operation of ['h3-terminal-mlx','h3-terminal-cuda']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(cancel,inputs),false);assert.equal(workflowExpression(build,inputs),false);assert.notEqual(workflowExpression(rootGroup,inputs),workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102',run_attempt:'1'}));assert.match(workflowExpression(rootGroup,inputs),/^h3-terminal-bridge-/);}
+  for(const operation of ['h3-import-mlx','h3-import-cuda','h3-import-both']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(cancel,inputs),false);assert.equal(workflowExpression(build,inputs),false);assert.equal(workflowExpression(rootGroup,inputs),'h3-import-native-unit_fake_101');assert.equal(workflowExpression(rootGroup,inputs,{run_id:'unit_fake_102'}),'h3-import-native-unit_fake_102');}
+  for(const operation of ['h3-import-mlx','h3-import-cuda','h3-import-both','h3-terminal-mlx','h3-terminal-cuda'])for(const event of ['push','pull_request','merge_group','schedule'])assert.equal(workflowExpression(rootGroup,{starvector_terminal_operation:operation},{event_name:event}),'starvector-terminal-bridge');
+  for(const operation of ['unknown','h3-import','h3-terminal']){const inputs={starvector_terminal_operation:operation};assert.equal(workflowExpression(build,inputs),false);assert.equal(workflowExpression(rootGroup,inputs),'starvector-terminal-bridge');}
   for(const [name,file] of [['source-closure','starvector-terminal-source.yml'],['provision','starvector-terminal-provision.yml'],['readiness','starvector-terminal-readiness.yml'],['campaign','starvector-terminal.yml']])assert.ok(workflowJob(router,`starvector-${name}`).includes(`uses: ./.github/workflows/${file}`));
 });
 test('H3 caller forwards only explicit request fields and the standing read token without duplicate execution logic',async()=>{

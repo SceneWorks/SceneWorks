@@ -42,6 +42,31 @@ pub(crate) use tower::ServiceExt;
 
 pub(crate) const PNG_32X32: &[u8] = include_bytes!("../../../desktop/icons/32x32.png");
 
+/// Persist the same immutable plan/inventory pair admission resolves in production.
+pub(crate) fn persist_checkpoint_plan_fixture(
+    settings: &Settings,
+    checkpoint_id: &str,
+    plan: &sceneworks_core::checkpoint_import::ImportPlanV1,
+) {
+    use sceneworks_core::checkpoint_import::{CheckpointCatalogRecordV1, CheckpointInventoryV1};
+    let record = CheckpointCatalogRecordV1::from_plan(checkpoint_id, plan).unwrap();
+    let plans = settings.data_dir.join("checkpoints/plans");
+    std::fs::create_dir_all(&plans).unwrap();
+    std::fs::write(
+        plans.join(format!("{}.json", plan.plan_id)),
+        plan.canonical_json().unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        settings.data_dir.join("checkpoints/inventory.json"),
+        CheckpointInventoryV1::new(vec![record])
+            .unwrap()
+            .canonical_json()
+            .unwrap(),
+    )
+    .unwrap();
+}
+
 /// The single process-global lock every rust-api test that mutates HF-cache env serializes on.
 /// rust-api's `#[test]`s run as threads in ONE binary, so a `set_var`/`remove_var` in one is visible
 /// to all the others; mutual exclusion must therefore be crate-wide — a per-module lock serializes
