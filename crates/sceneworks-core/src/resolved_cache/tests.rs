@@ -2113,6 +2113,420 @@ fn only_a_derived_journal_declares_the_widened_document_version() {
     );
 }
 
+/// Late-delta review finding 2: a CONTENDED lock wait must observe cancellation, not block until
+/// the holder finishes. The holder below keeps the metadata lock across a window far longer than
+/// the whole test; the checked lookup must surface its own cancellation while the lock is still
+/// held — a blocking acquisition would instead queue behind the holder and return the entry.
+#[test]
+fn a_canceled_lookup_waiting_on_a_contended_metadata_lock_returns_before_the_holder_releases() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+    std::fs::write(staging.join("index.json"), b"{}").unwrap();
+    reservation
+        .publish_produced(&plan)
+        .expect("fixture publishes a complete entry");
+    let key = plan.cache_key().unwrap();
+    let digest = cache_key_digest(&key).unwrap();
+
+    // Another operation holds the metadata lock across a long content verification window.
+    let holder = store.lock_metadata(&digest).unwrap();
+    let released = Arc::new(AtomicBool::new(false));
+    let flag = released.clone();
+    let holder_thread = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(1200));
+        drop(holder);
+        flag.store(true, Ordering::SeqCst);
+    });
+
+    // The pre-lock checkpoint passes; the CONTENDED wait must observe the flip and return the
+    // cancellation itself, never queue silently behind the holder.
+    let calls = std::cell::Cell::new(0u32);
+    let started = std::time::Instant::now();
+    let error = store
+        .lookup_complete_with_check(&key, &|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "[h3-preparation-canceled] checkpoint preparation canceled",
+                ))
+            }
+        })
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("h3-preparation-canceled"),
+        "the contended wait must surface the caller's own cancellation: {error}"
+    );
+    assert!(
+        !released.load(Ordering::SeqCst),
+        "the canceled wait returned while the lock was still held (after {:?})",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "the wait must not queue behind the holder's full window"
+    );
+    holder_thread.join().unwrap();
+    // The entry is untouched by the canceled read.
+    assert!(store.lookup_complete(&key).unwrap().is_some());
+}
+
+/// Late-delta review finding 2, second half: a cancellation observed while WAITING for the FINAL
+/// publication lock must not be followed by a complete receipt or `Complete` metadata. Driven at
+/// the materializer-style completion, where the transaction's bundle is already in place at its
+/// published path and the ONLY metadata lock left to take is the final one — so the flip (which
+/// lands while this transaction is contending for it, before the holder releases) can be seen by
+/// the cancellation-aware wait or the under-lock re-check alone. The still-owned unpublished
+/// bundle is rolled back and nothing completes. Under the pre-lock-only shape, the blocking
+/// acquisition outlives the flip and publishes — this regression is what goes red then.
+#[test]
+fn a_cancellation_observed_while_waiting_for_the_publication_lock_publishes_nothing() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let key = plan.cache_key().unwrap();
+    let bundle = store.bundle_path(&key).unwrap();
+    let digest = cache_key_digest(&key).unwrap();
+
+    // This transaction's bundle already sits at its published path, exactly as a completed
+    // rename would have left it: only the final publication lock separates it from Complete.
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("index.json"), b"{}").unwrap();
+    let artifact = plan.artifact_at(&bundle, ArtifactState::Published);
+
+    // The holder keeps the final publication lock contended; the flip lands well after the
+    // in-place validation (a one-file fixture finishes in microseconds) and while this
+    // transaction is still waiting, then the lock is released so a blocking acquisition would
+    // proceed straight to publishing.
+    let flip = Arc::new(AtomicBool::new(false));
+    let released = Arc::new(AtomicBool::new(false));
+    let holder = store.lock_metadata(&digest).unwrap();
+    let trip = flip.clone();
+    let released_by_holder = released.clone();
+    let holder_thread = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(400));
+        trip.store(true, Ordering::SeqCst);
+        thread::sleep(Duration::from_millis(300));
+        drop(holder);
+        released_by_holder.store(true, Ordering::SeqCst);
+    });
+
+    let error = reservation
+        .record_complete_checked(
+            artifact,
+            &|| {
+                if flip.load(Ordering::SeqCst) {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "[h3-preparation-canceled] checkpoint preparation canceled",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            true,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("h3-preparation-canceled"),
+        "the cancellation observed while waiting for the publication lock must surface, \
+         not publish: {error}"
+    );
+    assert!(
+        !released.load(Ordering::SeqCst),
+        "the canceled publication wait must return before the lock holder finishes"
+    );
+    let artifact_probe =
+        FileLock::try_shared(open_lock_file(&store.artifact_lock_path(&digest)).unwrap());
+    assert!(
+        artifact_probe.is_err(),
+        "owned rollback retains its exclusive artifact lease until cleanup ends"
+    );
+    assert!(
+        !store
+            .entry_path(&key)
+            .unwrap()
+            .join("complete.receipt.json")
+            .exists(),
+        "a canceled waiter cannot publish while cleanup is pending"
+    );
+    let pending = store.canceled_cleanup_receipt(&key).unwrap().unwrap();
+    assert_eq!(pending.state, CanceledCleanupState::Pending);
+    assert!(
+        pending.process_exit_before_cleanup_possible,
+        "Pending explicitly records that process exit still requires recovery"
+    );
+    // Make the source unavailable before cleanup runs. Success must require NO source reads,
+    // while the unrelated source bytes remain unchanged and outside the deletion boundary.
+    std::fs::write(input.join("outside.bin"), b"unowned source bytes").unwrap();
+    let hidden_source = scratch.path().join("source-still-owned-by-user");
+    std::fs::rename(&input, &hidden_source).unwrap();
+    holder_thread.join().unwrap();
+    store.join_canceled_cleanups().unwrap();
+    assert_eq!(
+        store.canceled_cleanup_receipt(&key).unwrap().unwrap().state,
+        CanceledCleanupState::Cleaned
+    );
+    assert_eq!(
+        std::fs::read(hidden_source.join("outside.bin")).unwrap(),
+        b"unowned source bytes"
+    );
+    std::fs::rename(&hidden_source, &input).unwrap();
+    assert!(
+        !bundle.exists(),
+        "the still-owned unpublished bundle was rolled back"
+    );
+    assert_eq!(
+        store.lookup_complete(&key).unwrap(),
+        None,
+        "no complete receipt and no Complete metadata may follow the canceled publication"
+    );
+    assert!(
+        !store
+            .entry_path(&key)
+            .unwrap()
+            .join("complete.receipt.json")
+            .exists(),
+        "cancellation must not leave a complete receipt either"
+    );
+    assert_eq!(
+        store.read_metadata_locked(&digest).unwrap().state,
+        ResolvedCacheEntryState::Interrupted,
+        "the retained reservation records interruption after owned cleanup"
+    );
+
+    // The interruption is retryable, not a poisoned entry: a fresh reservation publishes.
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+    std::fs::write(staging.join("index.json"), b"{}").unwrap();
+    let published = reservation
+        .publish_produced_with_check(&plan, &|| Ok(()))
+        .expect("retry publishes after the canceled publication");
+    assert_eq!(published.state, ResolvedCacheEntryState::Complete);
+}
+
+#[test]
+fn canceled_cleanup_deadline_is_recorded_pinned_and_recoverable() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let key = plan.cache_key().unwrap();
+    let digest = cache_key_digest(&key).unwrap();
+    let bundle = store.bundle_path(&key).unwrap();
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("index.json"), b"{}").unwrap();
+    let holder = store.lock_metadata(&digest).unwrap();
+    let started = std::time::Instant::now();
+    reservation
+        .schedule_canceled_cleanup(true, Duration::from_millis(40))
+        .unwrap();
+    store.join_canceled_cleanups().unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "tracked cleanup never waits forever for the holder"
+    );
+    let receipt = store.canceled_cleanup_receipt(&key).unwrap().unwrap();
+    assert_eq!(receipt.state, CanceledCleanupState::NeedsRetry);
+    assert!(receipt.detail.contains("deadline"));
+    assert!(receipt.process_exit_before_cleanup_possible);
+    assert!(
+        FileLock::try_shared(open_lock_file(&store.artifact_lock_path(&digest)).unwrap()).is_err(),
+        "the timed-out reservation remains pinned instead of becoming an ownerless bundle"
+    );
+    assert_eq!(
+        store.read_metadata_locked(&digest).unwrap().state,
+        ResolvedCacheEntryState::Materializing,
+        "cleanup outstanding must not read as settled Interrupted"
+    );
+    assert!(!store
+        .entry_path(&key)
+        .unwrap()
+        .join("complete.receipt.json")
+        .exists());
+    drop(holder);
+    store.recover().unwrap();
+    assert!(
+        !bundle.exists(),
+        "later recovery reclaims the verified owned unpublished bundle"
+    );
+    assert_eq!(
+        store.canceled_cleanup_receipt(&key).unwrap().unwrap().state,
+        CanceledCleanupState::Cleaned
+    );
+    assert_eq!(
+        store.read_metadata_locked(&digest).unwrap().state,
+        ResolvedCacheEntryState::Interrupted
+    );
+}
+
+#[test]
+fn closing_cleanup_owner_leaves_durable_recovery_evidence_for_a_new_session() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    let data = scratch.path().join("data");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&data).unwrap();
+    let old_session = store.session_id().to_owned();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let key = plan.cache_key().unwrap();
+    let digest = cache_key_digest(&key).unwrap();
+    let bundle = store.bundle_path(&key).unwrap();
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("index.json"), b"{}").unwrap();
+    let holder = store.lock_metadata(&digest).unwrap();
+    reservation
+        .schedule_canceled_cleanup(true, Duration::from_millis(40))
+        .unwrap();
+    drop(store);
+    let restarted = ResolvedCacheStore::open(&data).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !restarted.session_lock_is_acquirable(&old_session).unwrap()
+        && std::time::Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(
+        restarted.session_lock_is_acquirable(&old_session).unwrap(),
+        "the bounded cleanup owner exits rather than pinning an orphan forever"
+    );
+    let receipt = restarted.canceled_cleanup_receipt(&key).unwrap().unwrap();
+    assert_eq!(receipt.state, CanceledCleanupState::NeedsRetry);
+    assert!(receipt.process_exit_before_cleanup_possible);
+    drop(holder);
+    restarted.recover().unwrap();
+    assert!(!bundle.exists());
+    assert_eq!(
+        restarted
+            .canceled_cleanup_receipt(&key)
+            .unwrap()
+            .unwrap()
+            .state,
+        CanceledCleanupState::Cleaned
+    );
+    assert!(restarted.lookup_complete(&key).unwrap().is_none());
+}
+
+#[test]
+fn canceled_cleanup_does_not_remove_a_new_reservations_bundle() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let key = plan.cache_key().unwrap();
+    let digest = cache_key_digest(&key).unwrap();
+    let bundle = store.bundle_path(&key).unwrap();
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("index.json"), b"new owner's bytes").unwrap();
+    let holder = store.lock_metadata(&digest).unwrap();
+    reservation
+        .schedule_canceled_cleanup(true, Duration::from_secs(1))
+        .unwrap();
+    // Deterministic ownership drift under the real lock; the cleanup must check this before any
+    // deletion, even though it still holds the artifact pin from the former reservation.
+    let mut metadata = store.read_metadata_locked(&digest).unwrap();
+    metadata.reservation_id = Some(random_id().unwrap());
+    store.write_metadata_unlocked(&digest, &metadata).unwrap();
+    drop(holder);
+    store.join_canceled_cleanups().unwrap();
+    assert_eq!(
+        std::fs::read(bundle.join("index.json")).unwrap(),
+        b"new owner's bytes"
+    );
+    assert_eq!(
+        store.canceled_cleanup_receipt(&key).unwrap().unwrap().state,
+        CanceledCleanupState::OwnershipChanged
+    );
+    assert_eq!(
+        store.read_metadata_locked(&digest).unwrap().reservation_id,
+        metadata.reservation_id
+    );
+    assert!(!store
+        .entry_path(&key)
+        .unwrap()
+        .join("complete.receipt.json")
+        .exists());
+}
+
+/// The last cancellation checkpoint is UNDER the publication lock, not merely before it. This
+/// real-lock interleaving trips the flag after a contended acquisition succeeds, immediately
+/// before that checkpoint; a pre-lock-only mutant publishes and this assertion goes red.
+#[test]
+fn cancellation_at_the_publication_fence_never_writes_complete_metadata_or_receipt() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&["index.json"]);
+    let reservation = derived_reservation(&store, &input, &plan);
+    let key = plan.cache_key().unwrap();
+    let digest = cache_key_digest(&key).unwrap();
+    let bundle = store.bundle_path(&key).unwrap();
+    std::fs::create_dir_all(&bundle).unwrap();
+    std::fs::write(bundle.join("index.json"), b"{}").unwrap();
+    let artifact = plan.artifact_at(&bundle, ArtifactState::Published);
+    let canceled = Arc::new(AtomicBool::new(false));
+    let trip = canceled.clone();
+    FINAL_PUBLICATION_LOCK_ACQUIRED_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || trip.store(true, Ordering::SeqCst)));
+    });
+    let holder = store.lock_metadata(&digest).unwrap();
+    let holder_thread = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(80));
+        drop(holder);
+    });
+    let error = reservation
+        .record_complete_checked(
+            artifact,
+            &|| {
+                if canceled.load(Ordering::SeqCst) {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "canceled at publication fence",
+                    ))
+                } else {
+                    Ok(())
+                }
+            },
+            true,
+        )
+        .unwrap_err();
+    holder_thread.join().unwrap();
+    assert!(
+        error.to_string().contains("canceled at publication fence"),
+        "{error}"
+    );
+    assert!(
+        !bundle.exists(),
+        "the under-lock rollback removes only its own unpublished bundle"
+    );
+    assert!(!store
+        .entry_path(&key)
+        .unwrap()
+        .join("complete.receipt.json")
+        .exists());
+    assert_eq!(
+        store.read_metadata_locked(&digest).unwrap().state,
+        ResolvedCacheEntryState::Interrupted
+    );
+    assert!(store.lookup_complete(&key).unwrap().is_none());
+}
+
 #[test]
 fn a_canceled_derivative_publication_removes_staging_and_publishes_nothing() {
     let scratch = TempDir::new().unwrap();

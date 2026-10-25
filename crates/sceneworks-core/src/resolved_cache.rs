@@ -581,9 +581,55 @@ pub struct ResolvedCacheStore {
 struct StoreInner {
     root: PathBuf,
     session_id: String,
+    /// Bounded cleanup tasks are owned by this store, never fire-and-forget. A timed-out task
+    /// leaves its artifact pin here and a durable NeedsRetry receipt for `recover` or restart.
+    cleanup_tasks: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+    cleanup_pins: std::sync::Mutex<std::collections::BTreeMap<String, FileLock>>,
     /// `None` only for the read-only inspection handle created by
     /// [`ResolvedCacheStore::enumerate_existing`]; every runtime session holds its lock.
     _session_lock: Option<FileLock>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CanceledCleanupState {
+    Pending,
+    NeedsRetry,
+    Cleaned,
+    OwnershipChanged,
+}
+
+/// Operational cleanup evidence, NOT a content or completion receipt. Pending/NeedsRetry never
+/// means Interrupted/settled: the original reservation remains Materializing and pinned until
+/// owned cleanup succeeds, `recover` retries it, or process/session loss makes it recoverable.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanceledCleanupReceipt {
+    pub schema_version: u32,
+    pub cache_key: String,
+    pub reservation_id: String,
+    pub session_id: String,
+    pub state: CanceledCleanupState,
+    pub cleanup_unpublished: bool,
+    pub process_exit_before_cleanup_possible: bool,
+    pub detail: String,
+}
+
+impl Drop for StoreInner {
+    fn drop(&mut self) {
+        // Every live task holds the store Arc. Therefore the final drop can only encounter
+        // finished tasks and, possibly, the current cleanup thread returning its last Arc.
+        for task in self
+            .cleanup_tasks
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            if task.thread().id() != std::thread::current().id() {
+                let _ = task.join();
+            }
+        }
+    }
 }
 
 impl std::fmt::Debug for ResolvedCacheStore {
@@ -624,6 +670,8 @@ impl ResolvedCacheStore {
             inner: Arc::new(StoreInner {
                 root,
                 session_id,
+                cleanup_tasks: std::sync::Mutex::new(Vec::new()),
+                cleanup_pins: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 _session_lock: Some(session_lock),
             }),
         })
@@ -679,6 +727,8 @@ impl ResolvedCacheStore {
             inner: Arc::new(StoreInner {
                 root,
                 session_id: "read-only-inspection".to_owned(),
+                cleanup_tasks: std::sync::Mutex::new(Vec::new()),
+                cleanup_pins: std::sync::Mutex::new(std::collections::BTreeMap::new()),
                 _session_lock: None,
             }),
         }))
@@ -891,6 +941,66 @@ impl ResolvedCacheStore {
 
     pub fn root(&self) -> &Path {
         &self.inner.root
+    }
+
+    /// Join this store's tracked, bounded canceled-publication cleanups. No source reads or
+    /// publication occur in them. A lock timeout is recorded as NeedsRetry with its reservation
+    /// still pinned; it does not make shutdown wait indefinitely for that lock.
+    pub fn join_canceled_cleanups(&self) -> Result<(), ResolvedCacheError> {
+        let tasks = std::mem::take(
+            &mut *self
+                .inner
+                .cleanup_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+        for task in tasks {
+            task.join().map_err(|_| {
+                ResolvedCacheError::new(
+                    "canceled cache cleanup task panicked; inspect its Pending receipt",
+                )
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn canceled_cleanup_receipt(
+        &self,
+        cache_key: &str,
+    ) -> Result<Option<CanceledCleanupReceipt>, ResolvedCacheError> {
+        let path = self
+            .entry_path(cache_key)?
+            .join("canceled-publication.cleanup.json");
+        match std::fs::read(&path) {
+            Ok(bytes) => {
+                let receipt: CanceledCleanupReceipt = serde_json::from_slice(&bytes)
+                    .map_err(|e| ResolvedCacheError::new(e.to_string()))?;
+                if receipt.schema_version != 1
+                    || receipt.cache_key != cache_key
+                    || !is_valid_session_id(&receipt.session_id)
+                    || !is_valid_session_id(&receipt.reservation_id)
+                {
+                    return Err(ResolvedCacheError::new(
+                        "invalid canceled-cleanup receipt identity",
+                    ));
+                }
+                Ok(Some(receipt))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    fn write_canceled_cleanup_receipt(
+        &self,
+        receipt: &CanceledCleanupReceipt,
+    ) -> Result<(), ResolvedCacheError> {
+        atomic_write_json(
+            &self
+                .entry_path(&receipt.cache_key)?
+                .join("canceled-publication.cleanup.json"),
+            receipt,
+        )
     }
 
     pub fn session_id(&self) -> &str {
@@ -1158,7 +1268,8 @@ impl ResolvedCacheStore {
     ) -> Result<Option<ResolvedCacheMetadata>, ResolvedCacheError> {
         check()?;
         let digest = cache_key_digest(cache_key)?;
-        let metadata_lock = self.lock_metadata(&digest)?;
+        let metadata_lock = self.lock_metadata_with_check(&digest, check)?;
+        check()?;
         let result = match self.read_metadata_unlocked(&digest)? {
             JournalRead::Valid { metadata, .. }
                 if metadata.state == ResolvedCacheEntryState::Complete =>
@@ -1331,8 +1442,9 @@ impl ResolvedCacheStore {
         check()?;
         let logical_model_owner = validate_model_owner(logical_model_owner)?.to_owned();
         let digest = cache_key_digest(cache_key)?;
-        let artifact_lock = FileLock::shared(open_lock_file(&self.artifact_lock_path(&digest))?)?;
-        let metadata_lock = self.lock_metadata(&digest)?;
+        let artifact_lock = self.artifact_lock_shared_with_check(&digest, check)?;
+        let metadata_lock = self.lock_metadata_with_check(&digest, check)?;
+        check()?;
         let mut metadata = match self.read_metadata_unlocked(&digest)? {
             JournalRead::Valid { metadata, .. }
                 if metadata.state == ResolvedCacheEntryState::Complete =>
@@ -1389,6 +1501,24 @@ impl ResolvedCacheStore {
         let summaries = self.enumerate()?;
         for summary in &summaries {
             let digest = cache_key_digest(&summary.cache_key)?;
+            let cleanup = self
+                .canceled_cleanup_receipt(&summary.cache_key)?
+                .filter(|receipt| {
+                    receipt.schema_version == 1 && receipt.cache_key == summary.cache_key
+                });
+            if cleanup
+                .as_ref()
+                .is_some_and(|receipt| receipt.state == CanceledCleanupState::NeedsRetry)
+            {
+                // A bounded cleanup timed out. Explicit recovery may release its in-process
+                // retention pin, then acquire the normal exclusive artifact + metadata guards
+                // and verify the exact reservation before removing any unpublished bytes.
+                self.inner
+                    .cleanup_pins
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&digest);
+            }
             let _artifact_lock =
                 match FileLock::try_exclusive(open_lock_file(&self.artifact_lock_path(&digest))?) {
                     Ok(lock) => lock,
@@ -1450,7 +1580,47 @@ impl ResolvedCacheStore {
                         } else {
                             false
                         };
-                    if materializing_session_is_stale {
+                    let canceled_cleanup = cleanup.as_ref().filter(|receipt| {
+                        metadata.state == ResolvedCacheEntryState::Materializing
+                            && metadata.reservation_id.as_deref()
+                                == Some(receipt.reservation_id.as_str())
+                            && metadata.session_id.as_deref() == Some(receipt.session_id.as_str())
+                            && ((receipt.state == CanceledCleanupState::NeedsRetry
+                                && receipt.session_id == self.inner.session_id)
+                                || materializing_session_is_stale)
+                    });
+                    if let Some(receipt) = canceled_cleanup {
+                        if receipt.cleanup_unpublished {
+                            let bundle = self.bundle_path(&summary.cache_key)?;
+                            if std::fs::symlink_metadata(&bundle).is_ok() {
+                                validate_regular_tree(&bundle)?;
+                                remove_managed_tree(
+                                    &bundle,
+                                    &self.entry_path(&summary.cache_key)?,
+                                )?;
+                            }
+                        }
+                        metadata.state = ResolvedCacheEntryState::Interrupted;
+                        metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+                        metadata.reservation_id = None;
+                        metadata.reservation_owner = None;
+                        metadata.session_id = None;
+                        metadata.updated_at = now_seconds()?;
+                        self.write_metadata_unlocked(&digest, &metadata)?;
+                        let mut settled = receipt.clone();
+                        settled.state = CanceledCleanupState::Cleaned;
+                        settled.process_exit_before_cleanup_possible = false;
+                        settled.detail = "Recovery verified the canceled reservation, cleaned its unpublished bundle and recorded interruption; no source reads or publication.".into();
+                        self.write_canceled_cleanup_receipt(&settled)?;
+                        let record = self
+                            .inner
+                            .root
+                            .join("sessions")
+                            .join(&receipt.session_id)
+                            .join(format!("{}.json", receipt.reservation_id));
+                        let _ = std::fs::remove_file(record);
+                        changed = false;
+                    } else if materializing_session_is_stale {
                         metadata.state = ResolvedCacheEntryState::Interrupted;
                         metadata.recovery_status = RecoveryStatus::InterruptedReservation;
                         metadata.reservation_id = None;
@@ -1595,6 +1765,50 @@ impl ResolvedCacheStore {
         Ok(FileLock::exclusive(open_lock_file(
             &self.metadata_lock_path(digest),
         )?)?)
+    }
+
+    /// Cancellation-aware metadata locking for the checked cache APIs. An UNCONTENDED acquisition
+    /// is the historical fast path with zero added work; a CONTENDED wait re-checks the caller's
+    /// cooperative checkpoint between bounded retries, so a canceled preparation queued behind
+    /// another operation's long content verification surfaces its own cancellation instead of
+    /// blocking until that operation finishes. Cancellation is the bound on the wait: the
+    /// non-cancellable callers keep the plain [`Self::lock_metadata`] behaviour unchanged.
+    fn lock_metadata_with_check(
+        &self,
+        digest: &str,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<FileLock, ResolvedCacheError> {
+        loop {
+            let file = open_lock_file(&self.metadata_lock_path(digest))?;
+            match FileLock::try_exclusive(file) {
+                Ok(lock) => return Ok(lock),
+                Err(error) if is_lock_contended(&error) => {
+                    check()?;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+
+    /// The shared artifact lock with the same contended-wait cancellation contract as
+    /// [`Self::lock_metadata_with_check`].
+    fn artifact_lock_shared_with_check(
+        &self,
+        digest: &str,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<FileLock, ResolvedCacheError> {
+        loop {
+            let file = open_lock_file(&self.artifact_lock_path(digest))?;
+            match FileLock::try_shared(file) {
+                Ok(lock) => return Ok(lock),
+                Err(error) if is_lock_contended(&error) => {
+                    check()?;
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
     fn read_metadata_locked(
@@ -2091,7 +2305,7 @@ impl ResolvedCacheReservation {
                     "resolved cache bundle appeared before atomic publication",
                 ));
             }
-            let _metadata_lock = self.store.lock_metadata(&self.digest)?;
+            let _metadata_lock = self.store.lock_metadata_with_check(&self.digest, check)?;
             let metadata = self.store.read_metadata_locked(&self.digest)?;
             self.verify_ownership(&metadata)?;
             check()?;
@@ -2310,9 +2524,32 @@ impl ResolvedCacheReservation {
                 return Err(error);
             }
         };
-        let _metadata_lock = self.store.lock_metadata(&self.digest)?;
+        let _metadata_lock = match self.store.lock_metadata_with_check(&self.digest, check) {
+            Ok(lock) => lock,
+            Err(error) => {
+                // A canceled waiter must not block again in Drop/rollback on that same lock.
+                // The owned cleanup task keeps this reservation and its exclusive artifact lock
+                // alive until the metadata holder releases; it can then verify ownership and
+                // roll back safely. No source reads or publication run after this error.
+                if let Err(teardown) = self.schedule_canceled_cleanup(
+                    cleanup_unpublished,
+                    std::time::Duration::from_secs(30),
+                ) {
+                    tracing::warn!(error = %teardown, "canceled publication cleanup could not be scheduled; reservation remains pinned for recovery");
+                }
+                return Err(error);
+            }
+        };
         let mut metadata = self.store.read_metadata_locked(&self.digest)?;
         self.verify_ownership(&metadata)?;
+        #[cfg(test)]
+        run_final_publication_lock_acquired_hook();
+        // Cancellation observed while WAITING for this final publication lock must not be
+        // followed by publishing: re-check under the lock, immediately before the completion
+        // writes, and roll the still-owned unpublished bundle back rather than complete it.
+        if let Err(error) = check() {
+            return Err(self.rollback_canceled_publication(metadata, error, cleanup_unpublished));
+        }
         metadata.artifact = artifact;
         metadata.state = ResolvedCacheEntryState::Complete;
         metadata.verified_bytes = verified_bytes;
@@ -2330,6 +2567,152 @@ impl ResolvedCacheReservation {
         Ok(metadata)
     }
 
+    fn schedule_canceled_cleanup(
+        mut self,
+        cleanup_unpublished: bool,
+        wait: std::time::Duration,
+    ) -> Result<(), ResolvedCacheError> {
+        let store = self.store.clone();
+        // Disable blocking Drop before transferring ownership. The store holds the artifact pin
+        // even if thread creation or receipt persistence fails; later recovery remains safe.
+        self.finished = true;
+        if let Some(pin) = self.artifact_lock.take() {
+            store
+                .inner
+                .cleanup_pins
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(self.digest.clone(), pin);
+        }
+        let mut receipt = CanceledCleanupReceipt {
+            schema_version: 1,
+            cache_key: self.cache_key.clone(),
+            reservation_id: self.reservation_id.clone(),
+            session_id: self.session_id.clone(),
+            state: CanceledCleanupState::Pending,
+            cleanup_unpublished,
+            process_exit_before_cleanup_possible: true,
+            detail: "Owned cleanup pending; reservation/artifact pin retained. Process exit requires session recovery, not an assumption that cleanup finished.".into(),
+        };
+        store.write_canceled_cleanup_receipt(&receipt)?;
+        let failure_receipt = receipt.clone();
+        let task = std::thread::Builder::new().name("resolved-cache-canceled-cleanup".into()).spawn(move || {
+            let deadline = std::time::Instant::now() + wait;
+            let result = (|| -> Result<(), ResolvedCacheError> {
+                let _metadata_lock = self.store.lock_metadata_with_check(&self.digest, &|| {
+                    if std::time::Instant::now() >= deadline {
+                        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "metadata holder did not release before cleanup deadline"))
+                    } else { Ok(()) }
+                })?;
+                let mut metadata = self.store.read_metadata_locked(&self.digest)?;
+                if self.verify_ownership(&metadata).is_err() {
+                    receipt.state = CanceledCleanupState::OwnershipChanged;
+                    receipt.detail = "Reservation ownership changed; cleanup removed no bundle or source bytes.".into();
+                    self.store.write_canceled_cleanup_receipt(&receipt)?;
+                    self.store.inner.cleanup_pins.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.digest);
+                    let _ = std::fs::remove_file(&self.record_path);
+                    return Ok(());
+                }
+                // Cache metadata/path checks only. No source reads, hash reads or publication.
+                if cleanup_unpublished {
+                    let bundle = self.bundle_path()?;
+                    if std::fs::symlink_metadata(&bundle).is_ok() {
+                        validate_regular_tree(&bundle)?;
+                        remove_managed_tree(&bundle, &self.store.entry_path(&self.cache_key)?)?;
+                    }
+                }
+                metadata.state = ResolvedCacheEntryState::Interrupted;
+                metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+                metadata.reservation_id = None;
+                metadata.reservation_owner = None;
+                metadata.session_id = None;
+                metadata.updated_at = now_seconds()?;
+                self.store.write_metadata_unlocked(&self.digest, &metadata)?;
+                receipt.state = CanceledCleanupState::Cleaned;
+                receipt.process_exit_before_cleanup_possible = false;
+                receipt.detail = "Owned unpublished bundle cleaned; interruption recorded; no source reads and no completion/publication writes.".into();
+                self.store.write_canceled_cleanup_receipt(&receipt)?;
+                let _ = std::fs::remove_file(&self.record_path);
+                self.store.inner.cleanup_pins.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.digest);
+                Ok(())
+            })();
+            if let Err(error) = result {
+                receipt.state = CanceledCleanupState::NeedsRetry;
+                receipt.detail = format!("{error}; reservation remains pinned. Retry recover after the metadata holder releases, or recover the stale session after restart.");
+                if let Err(write) = self.store.write_canceled_cleanup_receipt(&receipt) {
+                    tracing::warn!(error = %write, "could not record canceled-cleanup outcome; Pending receipt and pin remain");
+                }
+            }
+        });
+        match task {
+            Ok(task) => {
+                store
+                    .inner
+                    .cleanup_tasks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(task);
+                Ok(())
+            }
+            Err(error) => {
+                let mut receipt = failure_receipt;
+                receipt.state = CanceledCleanupState::NeedsRetry;
+                receipt.detail = format!("cleanup thread creation failed: {error}; reservation remains pinned for recover");
+                store.write_canceled_cleanup_receipt(&receipt)?;
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Roll back a publication that was canceled while HOLDING the final metadata lock. The lock
+    /// is already held, so this never re-enters metadata locking (which would self-deadlock); it
+    /// removes only this transaction's still-owned renamed bundle, records the entry interrupted,
+    /// and consumes the reservation so its Drop cannot repeat the work.
+    fn rollback_canceled_publication(
+        mut self,
+        mut metadata: ResolvedCacheMetadata,
+        error: std::io::Error,
+        cleanup_unpublished: bool,
+    ) -> ResolvedCacheError {
+        if cleanup_unpublished {
+            match (self.bundle_path(), self.store.entry_path(&self.cache_key)) {
+                (Ok(bundle), Ok(entry)) => {
+                    if std::fs::symlink_metadata(&bundle).is_ok()
+                        && validate_regular_tree(&bundle).is_ok()
+                    {
+                        if let Err(teardown) = remove_managed_tree(&bundle, &entry) {
+                            tracing::warn!(
+                                error = %teardown,
+                                "canceled publication could not remove its unpublished bundle"
+                            );
+                        }
+                    }
+                }
+                (bundle, entry) => tracing::warn!(
+                    ?bundle,
+                    ?entry,
+                    "canceled publication could not resolve its bundle paths for rollback"
+                ),
+            }
+        }
+        metadata.state = ResolvedCacheEntryState::Interrupted;
+        metadata.reservation_id = None;
+        metadata.reservation_owner = None;
+        metadata.session_id = None;
+        metadata.recovery_status = RecoveryStatus::InterruptedReservation;
+        metadata.updated_at = now_seconds().unwrap_or(metadata.updated_at);
+        if let Err(write) = self.store.write_metadata_unlocked(&self.digest, &metadata) {
+            tracing::warn!(
+                error = %write,
+                "canceled publication could not record its interrupted entry"
+            );
+        }
+        self.finished = true;
+        let _ = std::fs::remove_file(&self.record_path);
+        self.artifact_lock.take();
+        error.into()
+    }
+
     fn verify_ownership(&self, metadata: &ResolvedCacheMetadata) -> Result<(), ResolvedCacheError> {
         if metadata.state != ResolvedCacheEntryState::Materializing
             || metadata.reservation_id.as_deref() != Some(&self.reservation_id)
@@ -2342,6 +2725,22 @@ impl ResolvedCacheReservation {
         }
         Ok(())
     }
+}
+
+// Deterministic interleaving at the actual publication fence; no production hook or API.
+#[cfg(test)]
+thread_local! {
+    static FINAL_PUBLICATION_LOCK_ACQUIRED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_final_publication_lock_acquired_hook() {
+    FINAL_PUBLICATION_LOCK_ACQUIRED_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
 }
 
 impl Drop for ResolvedCacheReservation {
