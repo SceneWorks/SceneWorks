@@ -140,10 +140,13 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
         "diffusion_pytorch_model.safetensors".to_owned(),
         "config.json".to_owned(),
     ];
-    if matches!(layout, "native" | "convrot" | "pruned" | "pruned-other") {
-        let pruned = matches!(layout, "pruned" | "pruned-other");
+    if matches!(
+        layout,
+        "native" | "convrot" | "pruned" | "pruned-other" | "w4a8"
+    ) {
+        let pruned = matches!(layout, "pruned" | "pruned-other" | "w4a8");
         let mut config = h3_fixture_config();
-        if matches!(layout, "convrot" | "pruned" | "pruned-other") {
+        if matches!(layout, "convrot" | "pruned" | "pruned-other" | "w4a8") {
             config["hidden_size"] = json!(256);
             config["attention_head_dim"] = json!(128);
             config["ffn_dim"] = json!(256);
@@ -200,13 +203,18 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
                     break;
                 }
             }
-            let quantized = matches!(layout, "convrot" | "pruned" | "pruned-other")
-                && key.starts_with("blocks.")
+            let quantized = matches!(layout, "convrot" | "pruned" | "pruned-other" | "w4a8")
+                && (key.starts_with("blocks.")
+                    || (layout == "w4a8" && key.starts_with("token_refiner.blocks.")))
                 && shape.len() == 2
                 && key.ends_with(".weight")
                 && (key.contains(".attn.")
                     || key.contains(".mlp.")
                     || (!pruned && key.contains(".adaln_proj.linear.")));
+            let w4a8 = layout == "w4a8" && quantized && key.starts_with("blocks.");
+            if w4a8 {
+                shape[1] /= 2;
+            }
             let dtype = if quantized {
                 "I8"
             } else if reduced_weight {
@@ -252,7 +260,35 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
                 key.clone(),
                 json!({"dtype":dtype,"shape":shape,"data_offsets":[offset,payload.len()]}),
             );
-            if quantized {
+            if w4a8 {
+                let base = key.strip_suffix(".weight").unwrap();
+                let offset = payload.len();
+                payload.resize(offset + shape[0] * shape[1] / 8, 0x38);
+                header.insert(format!("{base}.weight_s_rel"), json!({"dtype":"F8_E4M3","shape":[shape[0],shape[1]/8],"data_offsets":[offset,payload.len()]}));
+                let offset = payload.len();
+                for _ in 0..shape[0] {
+                    payload.extend(0.125f32.to_le_bytes());
+                }
+                header.insert(
+                    format!("{base}.weight_s_channel"),
+                    json!({"dtype":"F32","shape":[shape[0]],"data_offsets":[offset,payload.len()]}),
+                );
+                let offset = payload.len();
+                for i in 0..16 {
+                    payload.extend((i as f32 - 7.5).to_le_bytes());
+                }
+                header.insert(
+                    format!("{base}.weight_codebook"),
+                    json!({"dtype":"F32","shape":[16],"data_offsets":[offset,payload.len()]}),
+                );
+                let descriptor =
+                    json!({"format":"asym_w4a8_int8","group_size":16,"convrot_groupsize":256})
+                        .to_string()
+                        .into_bytes();
+                let offset = payload.len();
+                payload.extend_from_slice(&descriptor);
+                header.insert(format!("{base}.comfy_quant"), json!({"dtype":"U8","shape":[descriptor.len()],"data_offsets":[offset,payload.len()]}));
+            } else if quantized {
                 let base = key.strip_suffix(".weight").unwrap();
                 let offset = payload.len();
                 for _ in 0..shape[0] {
@@ -330,7 +366,10 @@ pub(crate) fn stage_managed_minimax_h3_import_source(
     }
     let install = ingest
         .finalize(
-            if matches!(layout, "native" | "convrot" | "pruned" | "pruned-other") {
+            if matches!(
+                layout,
+                "native" | "convrot" | "pruned" | "pruned-other" | "w4a8"
+            ) {
                 "renamed-user-checkpoint.safetensors"
             } else if layout == "sharded" {
                 "renamed-part-0.safetensors"
@@ -943,6 +982,132 @@ fn assert_pruned_period(actual: &[f32], case: &Value, rows: usize, tolerance: f3
             (value - expected).abs() <= tolerance,
             "{label}[{row}]={value}, expected {expected}"
         );
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "requires explicit native Metal fixture workflow; never run in ordinary CI"]
+fn w4a8_import_native_mlx_projection_smoke() {
+    use mlx_rs::{Array, Dtype};
+    use platform_runtime::providers::minimax_h3 as h3;
+    let data = tempfile::tempdir().unwrap();
+    let artifact = stage_sealed_pruned_artifact(data.path(), "packed-native-mlx", "w4a8");
+    assert_eq!(
+        artifact.imported.entry["importQuantFormat"],
+        "asym_w4a8_int8"
+    );
+    let mut weights = platform_runtime::media::weights::Weights::from_file(
+        artifact
+            .output
+            .join("diffusion_pytorch_model-00001-of-00001.safetensors"),
+    )
+    .unwrap();
+    let cfg = h3::MiniMaxH3DitConfig::from_diffusers_json(
+        &std::fs::read_to_string(artifact.output.join("config.json")).unwrap(),
+    )
+    .unwrap();
+    let mut model = h3::MiniMaxH3Dit::from_weights(&mut weights, &cfg, Dtype::Bfloat16).unwrap();
+    model
+        .ensure_pruning_identity(&artifact.binding.engine_identity().unwrap())
+        .unwrap();
+    model.verify_head_sources().unwrap();
+    model.verify_adaln_sources().unwrap();
+    model.verify_body_sources().unwrap();
+    for (base, packed) in [
+        ("transformer_blocks.0.attn.to_q", true),
+        ("transformer_blocks.0.ff.net.0.proj", true),
+        ("token_refiner.refiner_blocks.0.attn.to_q", false),
+    ] {
+        let linear = h3::quant::lin(&weights, base, false).unwrap();
+        assert_eq!(linear.w4a8_base().is_some(), packed);
+        assert_eq!(linear.convrot_base().is_some(), !packed);
+        if let Some(q) = linear.w4a8_base() {
+            let rows = if base.contains(".ff.") { 512 } else { 256 };
+            assert_eq!(
+                q.nbytes(),
+                rows * (128 + 16 + 4) + 64,
+                "only packed original operands are resident"
+            );
+        }
+        let mut values = vec![0f32; 256];
+        values[3] = 1.0;
+        let x = Array::from_slice(&values, &[1, 256])
+            .as_dtype(Dtype::Bfloat16)
+            .unwrap();
+        let out = linear
+            .forward_upcast(&x)
+            .unwrap()
+            .as_dtype(Dtype::Float32)
+            .unwrap();
+        out.eval().unwrap();
+        assert!(out.as_slice::<f32>().iter().all(|v| v.is_finite()));
+        assert!(out.as_slice::<f32>().iter().any(|v| *v != 0.0));
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[test]
+#[ignore = "requires explicit native CUDA fixture workflow; never run in ordinary CI"]
+fn w4a8_import_native_cuda_projection_smoke() {
+    use candle_gen::candle_core::{DType, Device, Tensor};
+    use platform_runtime::providers::minimax_h3 as h3;
+    let device = Device::new_cuda(0).expect("CUDA fixture must execute, never skip-as-pass");
+    let data = tempfile::tempdir().unwrap();
+    let artifact = stage_sealed_pruned_artifact(data.path(), "packed-native-cuda", "w4a8");
+    assert_eq!(
+        artifact.imported.entry["importQuantFormat"],
+        "asym_w4a8_int8"
+    );
+    let weights = candle_gen::Weights::from_files_native_int8(
+        &[artifact
+            .output
+            .join("diffusion_pytorch_model-00001-of-00001.safetensors")],
+        &device,
+    )
+    .unwrap();
+    let cfg = h3::MiniMaxH3DitConfig::from_diffusers_json(
+        &std::fs::read_to_string(artifact.output.join("config.json")).unwrap(),
+    )
+    .unwrap();
+    let model = h3::MiniMaxH3Dit::from_weights(&weights, &cfg, &device, DType::BF16).unwrap();
+    model
+        .ensure_pruning_identity(&artifact.binding.engine_identity().unwrap())
+        .unwrap();
+    for (base, packed) in [
+        ("transformer_blocks.0.attn.to_q", true),
+        ("transformer_blocks.0.ff.net.0.proj", true),
+        ("token_refiner.refiner_blocks.0.attn.to_q", false),
+    ] {
+        let loaded = h3::quant::lin(&weights, h3::quant::DIT, base, false, DType::BF16).unwrap();
+        assert_eq!(loaded.linear.is_w4a8(), packed);
+        assert_eq!(loaded.linear.is_convrot_int8(), !packed);
+        if packed {
+            let rows = if base.contains(".ff.") { 512 } else { 256 };
+            assert_eq!(
+                loaded.base_bytes,
+                rows * (128 + 16 + 4) + 64,
+                "only packed original operands are resident"
+            );
+        }
+        let mut values = vec![0f32; 256];
+        values[3] = 1.0;
+        let x = Tensor::from_vec(values, (1, 256), &device)
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let out = loaded
+            .linear
+            .forward_upcast(&x)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+        assert!(out.iter().all(|v| v.is_finite()));
+        assert!(out.iter().any(|v| *v != 0.0));
     }
 }
 
