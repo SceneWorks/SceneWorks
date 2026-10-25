@@ -941,6 +941,149 @@ mod tests {
         )
     }
 
+    // Production imports capture this declaration before managed finalization/linked compile.
+    // Keep constructor fixtures honest too: complete synthetic files in an independently guarded
+    // source snapshot, actual bounded hashes, and the same acquired-seal comparison as loading.
+    fn bind_fresh_component_declaration(
+        plan: &mut ImportPlanV1,
+        entry: &mut Map<String, Value>,
+    ) -> (
+        tempfile::TempDir,
+        crate::hf_home::test_support::CacheRootGuard,
+    ) {
+        use crate::model_artifacts::provenance::{
+            capture_h3_component_closure_with_check, import_declaration_context,
+            verify_prepared_h3_component_closure, MODEL_DECLARATION_KEY,
+        };
+        let temporary = tempfile::tempdir().unwrap();
+        let data_dir = temporary.path().join("data");
+        let hub = temporary.path().join("private-hub");
+        let guard =
+            crate::hf_home::test_support::CacheRootGuard::new(data_dir.clone(), hub.clone());
+        let library = crate::hf_home::model_source_library(&data_dir);
+        assert_eq!(library.root(), hub, "the per-data guard must override every inherited real-cache setting BEFORE any fixture write");
+        let snapshot = library
+            .repository_root("fixture/h3-components")
+            .unwrap()
+            .join("snapshots")
+            .join("1".repeat(40));
+        assert!(
+            snapshot.starts_with(temporary.path()),
+            "synthetic bytes must stay inside the guarded temporary root"
+        );
+        let partition = MiniMaxH3Partition::from_entry(entry).unwrap();
+        let mut components = vec![
+            (
+                "text_encoder",
+                "q4/text_encoder",
+                vec![
+                    "config.json",
+                    "model.safetensors.index.json",
+                    "model.safetensors",
+                ],
+            ),
+            (
+                "tokenizer",
+                "tokenizer",
+                vec!["tokenizer.json", "tokenizer_config.json"],
+            ),
+            ("video_vae", "vae", vec!["config.json", "model.safetensors"]),
+            (
+                "audio_vae",
+                "audio_vae",
+                vec!["config.json", "model.safetensors"],
+            ),
+            (
+                "fl2va_audio_vae_config",
+                "FL2VA/audio_vae",
+                vec!["config.json", "config.yaml", "metadata.json"],
+            ),
+        ];
+        if partition == MiniMaxH3Partition::Fl2va {
+            components.push((
+                "transformer_ref",
+                "q4/transformer_ref",
+                vec![
+                    "config.json",
+                    "diffusion_pytorch_model.safetensors.index.json",
+                    "model.safetensors",
+                ],
+            ));
+        } else if partition == MiniMaxH3Partition::Ref2va {
+            components.push((
+                "transformer",
+                "q4/transformer",
+                vec![
+                    "config.json",
+                    "diffusion_pytorch_model.safetensors.index.json",
+                    "model.safetensors",
+                ],
+            ));
+        }
+        let mut downloads = Vec::new();
+        for (component, directory, files) in &components {
+            let mut declared = Vec::new();
+            for file in files {
+                let relative = format!("{directory}/{file}");
+                let path = snapshot.join(&relative);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                let bytes = if file.ends_with(".index.json") {
+                    serde_json::to_vec(&json!({"weight_map":{"fixture":"model.safetensors"}}))
+                        .unwrap()
+                } else if file.ends_with(".safetensors") {
+                    let header = serde_json::to_vec(
+                        &json!({"fixture":{"dtype":"U8","shape":[3],"data_offsets":[0,3]}}),
+                    )
+                    .unwrap();
+                    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+                    bytes.extend(header);
+                    bytes.extend([1, 2, 3]);
+                    bytes
+                } else if file.ends_with(".yaml") {
+                    b"synthetic_fixture: true\n".to_vec()
+                } else {
+                    serde_json::to_vec(&json!({"syntheticFixture":component,"text_config":{"hidden_size":5120},"latent_channels":32})).unwrap()
+                };
+                std::fs::write(path, bytes).unwrap();
+                declared.push(relative);
+            }
+            downloads.push(json!({"provider":"huggingface", "repo":"fixture/h3-components", "revision":"1".repeat(40),
+                "componentId":component,"variant":"q4","subdir":directory,"files":declared}));
+        }
+        entry.insert("family".into(), json!(MINIMAX_H3_IMPORT_FAMILY));
+        entry.insert("importComponentTier".into(), json!("q4"));
+        entry.insert("downloads".into(), json!(downloads));
+        let mut context = import_declaration_context(entry).unwrap();
+        let closure =
+            capture_h3_component_closure_with_check(&data_dir, entry, &|| Ok(())).unwrap();
+        assert_eq!(closure.as_array().unwrap().len(), components.len());
+        assert!(closure
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|row| !row["files"].as_array().unwrap().is_empty()));
+        let pins: Vec<_> = downloads
+            .iter()
+            .flat_map(|row| row["files"].as_array().unwrap())
+            .map(|file| {
+                gen_core::PinnedWeightsFile::pin(snapshot.join(file.as_str().unwrap())).unwrap()
+            })
+            .collect();
+        verify_prepared_h3_component_closure(
+            &data_dir,
+            &json!({"componentClosure":closure}),
+            &pins,
+        )
+        .unwrap();
+        context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = closure;
+        plan.context.insert(
+            MODEL_DECLARATION_KEY.into(),
+            context.remove(MODEL_DECLARATION_KEY).unwrap(),
+        );
+        plan.validate().unwrap();
+        (temporary, guard)
+    }
+
     #[test]
     fn identical_weights_require_explicit_compatible_task_declarations() {
         let plan = dense_dit_plan();
@@ -975,6 +1118,8 @@ mod tests {
             ),
         ] {
             let mut entry = json!({"baseModel":base,"minimaxH3Partition":partition,"importPlan":{"checkpointId":"fixture"}}).as_object().unwrap().clone();
+            let mut plan = plan.clone();
+            let _components = bind_fresh_component_declaration(&mut plan, &mut entry);
             let assembly = MiniMaxH3ImportAssembly::from_declared_plan(&plan, &entry).unwrap();
             stamp_imported_minimax_h3_entry(&mut entry, &assembly);
             apply_minimax_h3_studio_surface_defaults(&mut entry);
@@ -1119,7 +1264,11 @@ mod tests {
 
     #[test]
     fn the_stamp_is_what_the_discriminator_and_the_render_time_check_read() {
-        let entry = stamped_entry();
+        let mut entry = stamped_entry();
+        let mut plan = dense_dit_plan();
+        let _components = bind_fresh_component_declaration(&mut plan, &mut entry);
+        let assembly = MiniMaxH3ImportAssembly::from_declared_plan(&plan, &entry).unwrap();
+        stamp_imported_minimax_h3_entry(&mut entry, &assembly);
         assert_eq!(entry["type"], json!("video"), "content decides the type");
         assert_eq!(
             entry["importPlan"]["checkpointId"],
@@ -1127,7 +1276,7 @@ mod tests {
             "the stamp merges into the plan identity rather than replacing it"
         );
         assert!(entry_is_imported_minimax_h3(&entry));
-        assert!(verify_entry_assembly(&entry, &dense_dit_plan()).is_ok());
+        assert!(verify_entry_assembly(&entry, &plan).is_ok());
 
         // Each discriminating field, removed alone, flips the verdict.
         for (path, mutate) in [
@@ -1168,9 +1317,88 @@ mod tests {
         let mut tampered = entry.clone();
         tampered["importPlan"]["assembly"]["components"]["transformer"]["layerId"] =
             json!("artifact:other.safetensors");
-        assert!(verify_entry_assembly(&tampered, &dense_dit_plan())
+        assert!(verify_entry_assembly(&tampered, &plan)
             .unwrap_err()
             .contains("no longer matches"));
+    }
+
+    #[test]
+    fn structural_legacy_stamp_does_not_invent_immutable_component_authority() {
+        let plan = dense_dit_plan();
+        let entry = stamped_entry();
+        assert!(
+            MiniMaxH3ImportAssembly::from_declared_plan(&plan, &entry).is_ok(),
+            "structural inspection remains available for historical plans"
+        );
+        assert!(entry_is_imported_minimax_h3(&entry));
+        assert!(
+            verify_entry_assembly(&entry, &plan)
+                .unwrap_err()
+                .contains("content is unknown"),
+            "render-time verification cannot authorize unknown historical components"
+        );
+    }
+
+    #[test]
+    fn fresh_component_fixture_refuses_empty_or_changed_acquired_content_and_rebinds_explicitly() {
+        use crate::model_artifacts::provenance::{
+            capture_h3_component_closure_with_check, verify_prepared_h3_component_closure,
+            MODEL_DECLARATION_KEY,
+        };
+        let mut plan = dense_dit_plan();
+        let mut entry = stamped_entry();
+        let (temporary, _guard) = bind_fresh_component_declaration(&mut plan, &mut entry);
+        let data_dir = temporary.path().join("data");
+        let assembly = MiniMaxH3ImportAssembly::from_declared_plan(&plan, &entry).unwrap();
+        stamp_imported_minimax_h3_entry(&mut entry, &assembly);
+        assert!(verify_entry_assembly(&entry, &plan).is_ok());
+        let original_semantic = plan.semantic_digest().unwrap();
+        let sources =
+            crate::model_artifacts::provenance::h3_component_source_files(&data_dir, &entry)
+                .unwrap();
+        let paths: Vec<_> = sources
+            .iter()
+            .flat_map(|(_, snapshot, files)| files.iter().map(|file| snapshot.join(file)))
+            .collect();
+        let tokenizer = paths
+            .iter()
+            .find(|path| path.ends_with("tokenizer/tokenizer.json"))
+            .unwrap();
+        std::fs::write(tokenizer, br#"{"syntheticFixture":"changed-tokenizer"}"#).unwrap();
+        let pins: Vec<_> = paths
+            .iter()
+            .map(|path| gen_core::PinnedWeightsFile::pin(path).unwrap())
+            .collect();
+        assert!(
+            verify_prepared_h3_component_closure(&data_dir, &assembly.to_json(), &pins)
+                .unwrap_err()
+                .contains("content drift"),
+            "fresh seals do not authorize replacement bytes under the old commitment"
+        );
+        assert!(
+            verify_prepared_h3_component_closure(&data_dir, &json!({"componentClosure":[]}), &pins)
+                .is_err(),
+            "empty closure is not authority"
+        );
+        let mut empty = plan.clone();
+        empty.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = json!([]);
+        assert!(
+            empty.canonical_json().is_err(),
+            "empty declarations cannot publish immutable plans"
+        );
+        assert!(verify_entry_assembly(&entry, &empty).is_err());
+        let replacement =
+            capture_h3_component_closure_with_check(&data_dir, &entry, &|| Ok(())).unwrap();
+        plan.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = replacement;
+        assert_ne!(
+            plan.semantic_digest().unwrap(),
+            original_semantic,
+            "explicit rebind is a new semantic/replay identity"
+        );
+        let rebound = MiniMaxH3ImportAssembly::from_declared_plan(&plan, &entry).unwrap();
+        stamp_imported_minimax_h3_entry(&mut entry, &rebound);
+        assert!(verify_entry_assembly(&entry, &plan).is_ok());
+        assert!(verify_prepared_h3_component_closure(&data_dir, &rebound.to_json(), &pins).is_ok());
     }
 
     #[test]

@@ -67,8 +67,8 @@ fn default_huggingface_home_from_env() -> Option<PathBuf> {
 
 /// CPU integration-fixture cache roots, keyed by the exact app data directory. Unlike an
 /// environment guard, this remains isolated across runtime threads and nested app fixtures.
-/// Absent this opt-in test feature, cache resolution has no override branch or registry.
-#[cfg(feature = "test-support")]
+/// Outside unit tests and the opt-in test feature, cache resolution has no override or registry.
+#[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
     use super::*;
     use std::collections::HashMap;
@@ -122,7 +122,7 @@ pub mod test_support {
 /// by the rust-api and rust-worker so cache-path resolution can't drift between
 /// them (sc-4279 / F-MLXW-15).
 pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
-    #[cfg(feature = "test-support")]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(root) = test_support::root(data_dir) {
         return root;
     }
