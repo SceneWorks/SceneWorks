@@ -299,6 +299,25 @@ describe("managed-form field selectors", () => {
     expect(result.ok).toBe(true);
   });
 
+  it("refuses a page-scoped checked radio", () => {
+    const source = [
+      managedCase(MANAGED_FORM_FIELDS.map((field) => `  labelledField(form, "${field}")`).join("\n")),
+      `  const ownership = page.locator('[role="radio"][aria-checked="true"]').first();`,
+    ].join("\n");
+    const result = evaluateCaseFieldSelectors(source);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/scoped to the ownership choices/);
+  });
+
+  it("refuses a name-based asset-picker trigger", () => {
+    const source = [
+      `  await field.getByRole("button", { name: /Select (image|images)|Edit references/ }).first().click();`,
+    ].join("\n");
+    const result = evaluateCaseFieldSelectors(source);
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/found structurally/);
+  });
+
   it("refuses a source with no managed reimport case", () => {
     const result = evaluateCaseFieldSelectors("export const CASES = [];");
     expect(result.ok).toBe(false);

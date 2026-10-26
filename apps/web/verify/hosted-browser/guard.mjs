@@ -220,6 +220,19 @@ export const MANAGED_FORM_FIELDS = [
 // The managed-form case that reads the import panel's fields.
 const MANAGED_FORM_CASE = "caseModelManagerReimport";
 
+// Two lookups that have each silently stopped matching the control they meant. Both failed the
+// same way: the case timed out on the product's MARKUP instead of failing on its BEHAVIOUR.
+export const BANNED_CASE_SELECTORS = [
+  {
+    pattern: /page\.locator\(\s*'\[role="radio"\]\[aria-checked="true"\]'\s*\)/g,
+    message: 'the checked radio must be scoped to the ownership choices, not to the whole page',
+  },
+  {
+    pattern: /getByRole\(\s*"button"\s*,\s*\{\s*name:\s*\/Select\s*\(image/g,
+    message: "the asset picker's trigger must be found structurally, not by its name",
+  },
+];
+
 /**
  * The hosted managed-form case must not address a managed-form field with an anchored
  * `getByLabel` regex.
@@ -239,6 +252,14 @@ const MANAGED_FORM_CASE = "caseModelManagerReimport";
 export function evaluateCaseFieldSelectors(source) {
   const errors = [];
   const text = String(source ?? "");
+  // The banned shapes are checked against the WHOLE case source, before the managed-form region
+  // is extracted: a source that does not even contain that case can still carry one of them.
+  for (const { pattern, message } of BANNED_CASE_SELECTORS) {
+    const hits = text.match(pattern) ?? [];
+    if (hits.length) {
+      errors.push(`${message} (${hits.length} found)`);
+    }
+  }
   const start = text.indexOf(`function ${MANAGED_FORM_CASE}`);
   const end = start < 0 ? -1 : text.indexOf("\n}", start);
   const scoped = start < 0 || end < 0 ? null : text.slice(start, end + 2);

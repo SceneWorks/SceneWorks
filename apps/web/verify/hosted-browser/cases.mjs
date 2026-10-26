@@ -110,7 +110,11 @@ async function pickAsset(page, fieldLabel, assetName) {
     .filter({ has: page.locator(".asset-picker-label", { hasText: fieldLabel }) })
     .first();
   await field.waitFor({ state: "visible", timeout: LONG });
-  await field.getByRole("button", { name: /Select (image|images)|Edit references/ }).first().click();
+  // The trigger is found STRUCTURALLY, not by its name: the button's text changes with the
+  // field's state ("Select image" when the field is empty, "Change" when it already holds a
+  // value), so a name pattern silently stops matching a field that has a selection — and the
+  // case then times out on the product's MARKUP instead of failing on its behaviour.
+  await field.locator('.asset-picker-actions button[aria-haspopup="dialog"]').first().click();
   const modal = page.locator(".asset-picker-modal").last();
   await modal.waitFor({ state: "visible", timeout: LONG });
   await modal.locator(".asset-picker-card").filter({ hasText: assetName }).first().click();
@@ -178,7 +182,10 @@ async function caseModelManagerReimport(page, recorder) {
     { label: "the reimport declaration to be seeded" },
   );
 
-  const ownership = page.locator('[role="radio"][aria-checked="true"]').first();
+  // Scoped to the OWNERSHIP choices: the page carries other checked radios (the Simple/Advanced
+  // tab), and the first checked radio on the page is not the ownership choice. The assertion
+  // then still means something — among the OWNERSHIP radios, the selected one is the managed one.
+  const ownership = form.locator('[role="radio"].checkpoint-ownership-choice[aria-checked="true"]').first();
   assert(((await ownership.textContent()) ?? "").includes("Add to SceneWorks"), "managed ownership must stay selected");
 
   const typeValue = await labelledField(form, "Type").inputValue();
