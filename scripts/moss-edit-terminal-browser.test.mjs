@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, writeFile, lstat, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { createFreshCaptureDirectory, captureUi, capturePackageInstallUi, openAsset, selectedAssetExport, installerComponent, installedDownloadJobs, completedUiJob, describeUiRow, multipartFile, jobSnapshots, eventSnapshots } from './moss-edit-terminal-browser.mjs';
+import { createFreshCaptureDirectory, captureUi, capturePackageInstallUi, openAsset, editPreviewInEditor, selectedAssetExport, installerComponent, installedDownloadJobs, completedUiJob, describeUiRow, multipartFile, jobSnapshots, eventSnapshots } from './moss-edit-terminal-browser.mjs';
 import { createPlan, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
 
 const inputs = { provenance: 'inert browser route fixture', single_case: { references: ['B'], width: 768, height: 512, prompt: 'single' },
@@ -212,4 +212,27 @@ test('production control extraction remains frozen and latent guards use the sam
 test('submission polling acknowledges only the real positive recipe choice before awaiting the actual POST',async()=>{
   const source=await readFile(new URL('./moss-edit-terminal-browser.mjs',import.meta.url),'utf8');
   assert.match(source,/await acknowledgeRecipeChoice\(page,actions\);return observation.submissions\[0\]/);
+});
+
+function editorHandoffFixture({closeWorks=true,loadedName='Original B.png',editorVisible=true}={}) {
+  let modal=true,launched=false;const events=[];
+  const preview={getByRole(role,options){assert.equal(role,'button');assert.equal(options.exact,true);return {async click(...args){assert.deepEqual(args,[],'normal clicks only');assert.ok(modal,'preview controls must remain scoped');events.push(options.name);if(options.name==='Edit')launched=true;else {assert.equal(options.name,'Close');assert.ok(launched);if(closeWorks)modal=false;}}};},async waitFor({state}){assert.equal(state,'hidden');events.push('preview-hidden');if(modal)throw Error('modal still intercepts editor');}};
+  const editor={async waitFor({state}){assert.equal(state,'visible');assert.ok(!modal);if(!editorVisible||!launched)throw Error('editor did not open');events.push('editor-visible');},locator(selector){
+    if(selector==='.ie-acc-head')return {filter({hasText}){assert.equal(String(hasText),String(/^AI Edit$/));return {async click(...args){assert.deepEqual(args,[]);if(modal)throw Error('modal-backdrop intercepts pointer events');assert.ok(events.includes('original-loaded'));events.push('AI Edit');}};}};
+    assert.equal(selector,'.ie-doc-name[title="Original B.png"]');return {async waitFor({state}){assert.equal(state,'visible');if(loadedName!=='Original B.png')throw Error('wrong editor document');events.push('original-loaded');}};
+  }};
+  const page={getByLabel(name,options){assert.equal(name,'Asset preview');assert.deepEqual(options,{exact:true});return preview;},getByRole(){throw Error('global controls could select the background');},locator(selector){assert.equal(selector,'.image-editor-surface');return editor;}};
+  return {page,events};
+}
+test('Editor handoff closes the actual preview before waiting for original B and opening AI Edit',async()=>{
+  const f=editorHandoffFixture(),actions=[];await editPreviewInEditor(f.page,{id:'original-B',displayName:'Original B.png'},actions);
+  assert.deepEqual(f.events,['Edit','Close','preview-hidden','editor-visible','original-loaded','AI Edit']);
+  assert.deepEqual(actions.find(item=>item.action==='observe-editor-source').assetId,'original-B');
+  const source=await readFile(new URL('./moss-edit-terminal-browser.mjs',import.meta.url),'utf8');
+  assert.match(source,/await openAsset\(page, uploaded\.B, actions\);\s*await editPreviewInEditor\(page,uploaded\.B,actions\)/);
+});
+test('Editor handoff never clicks through an unclosed modal or a missing/wrong loaded document',async()=>{
+  for(const options of [{closeWorks:false},{loadedName:'Previous result.png'},{editorVisible:false}]){
+    const f=editorHandoffFixture(options);await assert.rejects(()=>editPreviewInEditor(f.page,{id:'original-B',displayName:'Original B.png'},[]));assert.ok(!f.events.includes('AI Edit'));
+  }
 });

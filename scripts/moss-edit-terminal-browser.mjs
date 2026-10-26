@@ -156,6 +156,20 @@ export async function openAsset(page, asset, actions) {
   await page.getByLabel('Asset preview', { exact: true }).getByRole('button', { name: 'Save As…', exact: true }).waitFor({ state: 'visible' });
 }
 
+export async function editPreviewInEditor(page,asset,actions) {
+  const preview=page.getByLabel('Asset preview',{exact:true});
+  await click(preview.getByRole('button',{name:'Edit',exact:true}),actions,'Edit original B in Image Editor');
+  // Edit hands the asset to the editor while the preview remains modal. Dismiss
+  // it through its normal control before interacting with the editor underneath.
+  await click(preview.getByRole('button',{name:'Close',exact:true}),actions,'Close Asset preview after Editor handoff');
+  await preview.waitFor({state:'hidden'});
+  const editor=page.locator('.image-editor-surface');
+  await editor.waitFor({state:'visible'});
+  await editor.locator(`.ie-doc-name[title=${JSON.stringify(asset.displayName)}]`).waitFor({state:'visible'});
+  actions.push({at:now(),action:'observe-editor-source',assetId:asset.id,displayName:asset.displayName});
+  await click(editor.locator('.ie-acc-head').filter({hasText:/^AI Edit$/}),actions,'Editor AI Edit tool');
+}
+
 async function originFor(state, rowId, sampleIndex, read) {
   const receipt = await json(resolve(state.root, 'rows', rowId, 'receipt.json'));
   requireThat(receipt.execution === 'VERIFIED' && receipt.outputs[sampleIndex]?.assetId, 'original row/sample is not verified');
@@ -433,8 +447,8 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
     if (route.history) history = await historyReplay(page, row, route, origin, expected, actions);
     if (route.workflow) workflow = await workflowReplay(page, state, row, origin, expected, uploaded, observation, actions, captureRoot);
     if (route.shell === 'editor') {
-      await openAsset(page, uploaded.B, actions); await click(page.getByRole('button', { name: 'Edit', exact: true }), actions, 'Edit original B in Image Editor');
-      await click(page.locator('.ie-acc-head').filter({ hasText: /^AI Edit$/ }), actions, 'Editor AI Edit tool');
+      await openAsset(page, uploaded.B, actions);
+      await editPreviewInEditor(page,uploaded.B,actions);
     } else if (route.shell === 'simple') {
       await shell(page, 'simple', actions); await click(page.getByRole('tab', { name: 'Edit', exact: true }), actions, 'Simple Edit');
     } else if (!route.workflow && !route.history) await click(page.getByRole('button', { name: 'Edit', exact: true }).or(page.getByRole('tab', { name: 'Edit', exact: true })), actions, 'Image Edit');

@@ -566,6 +566,12 @@ export async function validateContinuation(config) {
   requireThat(transfer.to===config.hfHome&&transfer.candidateId===config.candidateId&&transfer.sourceSha===config.sourceSha&&transfer.inferenceSha===config.inferenceSha&&canonical(await privateHfIntegrity(config))===canonical(transfer.after),'stopped private HF ownership or package bytes changed');
   return {manifest,manifestIdentity,lock,binding,launch,rows,remaining,retry};
 }
+export function controlledQualityTooling(config) {
+  if(config.backend!=='cuda'||config.continuation||config.toolingRoot||config.cudaRebase||config.completedMlx)return null;
+  const head=config.executionTooling?.head??config.sourceSha;
+  requireThat(/^[a-f0-9]{40}$/.test(head??'')&&(!config.reusedExecution||config.executionTooling),'controlled quality requires its actual ordinary or reused CUDA tooling');
+  return head;
+}
 export async function executeBackend(config) {
   const continuing=Boolean(config.continuation);
   const repairTooling=Boolean(config.toolingRoot||continuing);
@@ -784,9 +790,10 @@ export async function executeBackend(config) {
       }finally{await mutation.restore();}
     }
     let controlledQuality=null;
-    if(config.reusedExecution&&config.backend==='cuda') {
+    const qualityTooling=controlledQualityTooling(config);
+    if(qualityTooling) {
       try {
-        controlledQuality=await captureControlledCudaQuality({api:stack.api,config,state,outputRoot:resolve(state.root,'controlled-quality'),toolingSha:config.executionTooling.head,helpers:{...protocolLibrary,sourceIdentity,nativeDevice,waitJob,retainQualityPairs:originalActions?.retainQualityPairs??retainQualityPairs}});
+        controlledQuality=await captureControlledCudaQuality({api:stack.api,config,state,outputRoot:resolve(state.root,'controlled-quality'),toolingSha:qualityTooling,helpers:{...protocolLibrary,sourceIdentity,nativeDevice,waitJob,retainQualityPairs:originalActions?.retainQualityPairs??retainQualityPairs}});
       } catch(error) {
         controlledQuality={execution:'FAILED',renders:0,message:String(error.message).slice(0,4096),acceptance:'AWAITING_FRESH_VISUAL_COMPARISON'};
         await save(resolve(state.root,'controlled-quality-setup-failure.json'),controlledQuality);

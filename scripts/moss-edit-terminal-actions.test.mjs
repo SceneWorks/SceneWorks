@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
-import { runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, compareCrossBackendHistoryJob, relocateImportedCudaModelLibrary, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
+import { controlledQualityTooling, runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, compareCrossBackendHistoryJob, relocateImportedCudaModelLibrary, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
@@ -1022,4 +1022,13 @@ test('exact Mac external HF/artifact storage preserves internal Cargo identity a
   for(const key of ['MOSS_ROOT','MOSS_BUILDS'])assert.equal(mossArtifactRoute(key,resolve(MAC_MOSS_BASE,leaf),base,'darwin').external,true);
   for(const [key,path,platform]of [['MOSS_BUNDLE',resolve(MAC_MOSS_BASE,leaf),'darwin'],['MOSS_ROOT',resolve(MAC_MOSS_BASE,leaf),'linux'],['MOSS_ROOT',resolve(MAC_MOSS_BASE,'../escape',leaf),'darwin'],['MOSS_ROOT',resolve(MAC_MOSS_BASE,'not-owned'),'darwin']])assert.throws(()=>mossArtifactRoute(key,path,base,platform),/escaped/);
   assert.equal(mossArtifactRoute('MOSS_BUNDLE',resolve(base,'moss-bundle-123-1'),base,'darwin').external,false);
+});
+
+test('controlled CUDA supplement selects actual ordinary product or separate reuse tooling and leaves legacy routes alone',()=>{
+  const sourceSha='a'.repeat(40),tooling='b'.repeat(40);
+  assert.equal(controlledQualityTooling({backend:'cuda',sourceSha}),sourceSha);
+  assert.equal(controlledQualityTooling({backend:'cuda',sourceSha,reusedExecution:{},executionTooling:{head:tooling}}),tooling);
+  for(const excluded of [{backend:'mlx'},{backend:'cuda',continuation:{}},{backend:'cuda',toolingRoot:'/legacy'},{backend:'cuda',cudaRebase:{}},{backend:'cuda',completedMlx:{}}])assert.equal(controlledQualityTooling({...excluded,sourceSha}),null);
+  assert.throws(()=>controlledQualityTooling({backend:'cuda',sourceSha,reusedExecution:{}}),/actual ordinary or reused/);
+  assert.throws(()=>controlledQualityTooling({backend:'cuda',sourceSha:'main'}),/actual ordinary or reused/);
 });
