@@ -113,8 +113,11 @@ async function pickAsset(page, fieldLabel, assetName) {
   // The trigger is found STRUCTURALLY, not by its name: the button's text changes with the
   // field's state ("Select image" when the field is empty, "Change" when it already holds a
   // value), so a name pattern silently stops matching a field that has a selection — and the
-  // case then times out on the product's MARKUP instead of failing on its behaviour.
-  await field.locator('.asset-picker-actions button[aria-haspopup="dialog"]').first().click();
+  // case then times out on the product's MARKUP instead of failing on its behaviour. The trigger
+  // is the field's own dialog-opening button; it sits directly in the field's head for the
+  // reference pickers and inside the head's actions group for the frame pickers, so it is
+  // located by the behaviour that identifies it rather than by where it is nested.
+  await field.locator('button[aria-haspopup="dialog"]').first().click();
   const modal = page.locator(".asset-picker-modal").last();
   await modal.waitFor({ state: "visible", timeout: LONG });
   await modal.locator(".asset-picker-card").filter({ hasText: assetName }).first().click();
@@ -183,9 +186,11 @@ async function caseModelManagerReimport(page, recorder) {
   );
 
   // Scoped to the OWNERSHIP choices: the page carries other checked radios (the Simple/Advanced
-  // tab), and the first checked radio on the page is not the ownership choice. The assertion
-  // then still means something — among the OWNERSHIP radios, the selected one is the managed one.
-  const ownership = form.locator('[role="radio"].checkpoint-ownership-choice[aria-checked="true"]').first();
+  // tab), and the first checked radio on the page is not the ownership choice. The ownership
+  // choice is the panel's FIRST decision, so it sits OUTSIDE the managed form — the form holds the
+  // source-kind radios (Upload / Local copy / URL / Hugging Face / Civitai). The assertion then
+  // still means something: among the OWNERSHIP radios, the selected one is the managed one.
+  const ownership = page.locator('section.checkpoint-import [role="radio"].checkpoint-ownership-choice[aria-checked="true"]').first();
   assert(((await ownership.textContent()) ?? "").includes("Add to SceneWorks"), "managed ownership must stay selected");
 
   const typeValue = await labelledField(form, "Type").inputValue();
