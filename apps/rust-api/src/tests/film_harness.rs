@@ -2129,6 +2129,11 @@ impl Harness {
         .expect("builtin models writes");
         let (app, state) =
             create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+        // These controller tests use the shipped capability/fit facts, not live download sizes.
+        // Keep the complete catalog and real routes, using their manifest size fallbacks instead
+        // of repeating unrelated Hugging Face metadata requests for every fresh app/crash window.
+        // The catalog tests separately exercise live estimation and its failure/cache behavior.
+        *state.model_size_estimate_disabled_override.lock() = Some(true);
         // The fixture's image-conditioned shot is only MLX-routed; judge the enqueue as a Mac on
         // every lane so the suite means the same thing on ubuntu and on the hosted macOS job.
         *state.video_platform_override.lock() = Some("macos");
@@ -2197,6 +2202,8 @@ impl Harness {
         let mut settings = test_settings(&temp_dir);
         settings.mcp_api_url = format!("http://{address}");
         let (app, state) = create_app_with_state(settings).expect("app and state create");
+        // Match the in-process harness: film execution does not depend on live download sizes.
+        *state.model_size_estimate_disabled_override.lock() = Some(true);
         *state.video_platform_override.lock() = Some("macos");
         let mut server_app = app.clone();
         if let Some(boundary) = boundary {
@@ -2714,6 +2721,64 @@ impl Drop for Harness {
         }
         if let Some(server) = self.server.take() {
             server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn film_apps_keep_the_full_shipped_catalog_without_live_size_requests() {
+    for http in [false, true] {
+        let harness = if http {
+            Harness::start_http(false, vec![]).await
+        } else {
+            Harness::start(false, vec![]).await
+        };
+        // A tripwire at the real metadata-request seam, after the disabled check. If the film
+        // fixture stops opting out, the call count (and manifest-fallback sizes) make this fail.
+        let metadata = crate::models::ModelSizeEstimateTestHook::immediate(Some(1));
+        *harness.state.model_size_estimate_test_hook.lock() = Some(metadata.clone());
+        let expected = crate::models::model_catalog_snapshot(&harness.state)
+            .await
+            .unwrap();
+        let (status, response) =
+            request(harness.app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, axum::http::StatusCode::OK);
+        assert_eq!(metadata.call_count(), 0, "http={http}");
+        let actual = response.as_array().expect("full catalog array");
+        assert_eq!(actual.len(), expected.len(), "http={http}");
+        assert!(actual.iter().any(|model| model["id"] == "minimax_h3"));
+        assert!(actual.iter().any(|model| {
+            model["downloadSizeEstimated"] == true
+                && model["downloadSizeBytes"]
+                    .as_u64()
+                    .is_some_and(|size| size > 0)
+        }));
+        for model in expected.iter() {
+            let returned = actual
+                .iter()
+                .find(|candidate| candidate["id"] == model["id"])
+                .expect("every production catalog entry remains present");
+            for field in ["capabilities", "video", "mlx", "candle"] {
+                assert_eq!(
+                    returned[field], model[field],
+                    "http={http} {} {field}",
+                    model["id"]
+                );
+            }
+            let tiers = |entry: &Value| {
+                entry["variants"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .map(|variant| variant["variant"].clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(
+                tiers(returned),
+                tiers(model),
+                "http={http} {} tiers",
+                model["id"]
+            );
         }
     }
 }
@@ -4793,6 +4858,7 @@ async fn a_crash_at_every_window_replays_without_duplicate_work_or_a_moved_take(
                      than a project + reference + two dispatches + timeline + export should",
                     window - 1
                 );
+                eprintln!("{mode:?}: swept {} crash windows", window - 1);
                 break;
             }
             crashed.expect_err("the fault stops the controller");
