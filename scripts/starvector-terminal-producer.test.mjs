@@ -86,8 +86,12 @@ test("failed fixture setup releases its registered inference worktree and scratc
 
 test("required CI fetches the exact terminal inference revision", async () => {
   const workflow = await readFile(".github/workflows/check.yml", "utf8");
-  assert.ok(workflow.includes(`git -C "$inference_root" fetch --depth=2 origin ${permanentPin}`));
-  assert.ok(workflow.includes(`test "$(git -C "$inference_root" rev-parse HEAD)" = ${permanentPin}`));
+  const { historyRequirements } = await import("./prepare-inference-history.mjs");
+  const requirements = historyRequirements(process.cwd());
+  assert.equal(requirements.terminal, permanentPin);
+  assert.ok(requirements.revisions.includes(preflightRevision));
+  assert.match(workflow, /name: Fetch and verify all immutable inference history\n        run: node scripts\/prepare-inference-history\.mjs/);
+  assert.match(workflow, /name: Run historical source and anchor closure integration\n        run: node scripts\/scaffold-test-selection\.mjs --history/);
 });
 
 test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", { skip: process.platform === "win32" ? "canonical evidence sealing runs on macOS; Windows only produces portable tuple artifacts" : inferenceSkip }, async () => {
