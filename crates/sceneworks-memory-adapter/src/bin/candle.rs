@@ -3084,6 +3084,10 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
     } else {
         certifying_vram_probe()
     };
+    if request.get("sdxlEndpoint").is_some() {
+        // Match the ordinary worker's advanced.flashAttn default before loading SDXL.
+        runtime_cuda::providers::sdxl::set_flash_attn(true);
+    }
     let load_sample = vram.phase();
     let generator = catalog
         .media()
@@ -3493,6 +3497,13 @@ fn run_five_rung_reference_loaded(
         let report = vram.report();
         fragment["endpointMeasurement"] = json!({
             "inferencePin": protocol::INFERENCE_PIN,
+            "engineBuild": {
+                "adapterCandleFeature": cfg!(feature = "candle"),
+                "cudaComputeCapabilityCompileTarget": option_env!("CUDA_COMPUTE_CAP"),
+                // sc-9032 removed the no-op feature; the pinned provider components() selects
+                // false unconditionally. The runner checks that source policy before capture.
+                "sdxlFlashAttentionKernelCompiled": false,
+            },
             "output": endpoint_output,
             "loadPeakBytes": decimal_gb_to_bytes(report.load_peak_gb),
             "baselineBytes": decimal_gb_to_bytes(report.baseline_gb),
@@ -3504,6 +3515,10 @@ fn run_five_rung_reference_loaded(
                 "seed": generation.seed, "steps": generation.steps,
                 "sampler": generation.sampler, "scheduler": generation.scheduler,
                 "guidance": generation.guidance, "memory": format!("{:?}", generation.memory),
+                "flashAttn": runtime_cuda::providers::sdxl::flash_attn_enabled(),
+                "count": generation.count, "cfgInterval": generation.cfg_interval,
+                "guidanceMethod": generation.guidance_method,
+                "schedulerShift": generation.scheduler_shift,
             },
         });
     }

@@ -50,6 +50,14 @@ export function validateEndpoint(measurement, endpoint, expectedInferencePin) {
       || output.spatiallyNonFlat !== true || !/^[a-f0-9]{64}$/.test(output.rgbSha256 ?? "")) {
     throw new Error("endpoint did not return a non-flat 1024-square RGB image receipt");
   }
+  const settings = measurement.settings;
+  if (settings?.flashAttn !== true || settings.count !== 1 || settings.cfgInterval !== null
+      || settings.guidanceMethod !== null || settings.schedulerShift !== null) {
+    throw new Error("endpoint kernel/request settings differ from the ordinary SDXL worker defaults");
+  }
+  if (measurement.engineBuild?.adapterCandleFeature !== true || measurement.engineBuild.sdxlFlashAttentionKernelCompiled !== false) {
+    throw new Error("endpoint did not attest the pinned CUDA build and SDXL attention kernel policy");
+  }
   const cleanup = measurement.cleanup;
   if (!cleanup || cleanup.adapterProcessExited !== true
       || [cleanup.beforeBytes, cleanup.afterBytes, cleanup.toleranceBytes].some((value) => !Number.isSafeInteger(value) || value < 0)
@@ -108,7 +116,13 @@ export async function main(argv = process.argv.slice(2)) {
   const env = { ...process.env, ...row.env,
     SCENEWORKS_MEMORY_MODEL_BYTES: String(inventory.bytes), SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256: inventory.sha256 };
   const command = providerCommand(args.adapter);
-  const pipelineSource = await readFile(path.join(args.inferenceRepo, "crates/media/candle-gen/candle-gen-sdxl/src/pipeline.rs"), "utf8");
+  const sdxlCrate = path.join(args.inferenceRepo, "crates/media/candle-gen/candle-gen-sdxl");
+  const providerSource = await readFile(path.join(sdxlCrate, "src/lib.rs"), "utf8");
+  const providerCargo = await readFile(path.join(sdxlCrate, "Cargo.toml"), "utf8");
+  if (!/let flash = false;/.test(providerSource) || /^flash-attn\s*=/m.test(providerCargo)) {
+    throw new Error("SDXL flash-attention build policy changed; refresh the endpoint build receipt before capture");
+  }
+  const pipelineSource = await readFile(path.join(sdxlCrate, "src/pipeline.rs"), "utf8");
   const resolvedDefaults = {
     steps: Number(/const DEFAULT_STEPS: usize = (\d+);/.exec(pipelineSource)?.[1]),
     guidance: Number(/const DEFAULT_GUIDANCE: f64 = ([0-9.]+);/.exec(pipelineSource)?.[1]),
