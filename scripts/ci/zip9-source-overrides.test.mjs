@@ -57,7 +57,7 @@ test('a final upstream producer replaces all three engine overrides while retain
     'upstream identity cannot masquerade as the historical measured backport');
 });
 
-test('upstream receipt binds actual dependency revision, tree, targets and remaining local bytes', async () => {
+async function upstreamFixture() {
   const directory = await vendorFixture();
   try {
     const checkout = path.join(directory, 'inference');
@@ -68,10 +68,16 @@ test('upstream receipt binds actual dependency revision, tree, targets and remai
     for (const pkg of value.packages.filter((p) => p.source)) {
       const base = path.join(checkout, pkg.name);
       await fs.mkdir(path.join(base, 'src'), { recursive: true });
-      await fs.writeFile(path.join(base, 'Cargo.toml'), '[package]\n');
-      await fs.writeFile(path.join(base, 'src/lib.rs'), '// owned fixture, never built\n');
+      await fs.writeFile(path.join(base, 'Cargo.toml'), '[package]\nbuild = "build.rs"\n');
+      await fs.writeFile(path.join(base, 'src/lib.rs'), 'mod inner; // owned fixture, never built\n');
+      await fs.writeFile(path.join(base, 'src/inner.rs'), '// declared module, never executed\n');
+      await fs.writeFile(path.join(base, 'build.rs'), 'mod build_support; // never executed\n');
+      await fs.writeFile(path.join(base, 'build_support.rs'), '// declared build module, never executed\n');
       pkg.manifest_path = path.join(base, 'Cargo.toml');
-      pkg.targets = [{ name: pkg.name, kind: ['lib'], src_path: path.join(base, 'src/lib.rs') }];
+      pkg.targets = [
+        { name: pkg.name, kind: ['lib'], src_path: path.join(base, 'src/lib.rs') },
+        { name: 'build-script-build', kind: ['custom-build'], src_path: path.join(base, 'build.rs') },
+      ];
     }
     git(['add', '.']);
     git(['-c', 'user.name=Codex', '-c', 'user.email=codex@example.invalid', 'commit', '-qm', 'owned source fixture']);
@@ -80,10 +86,21 @@ test('upstream receipt binds actual dependency revision, tree, targets and remai
       pkg.source = `git+https://github.com/SceneWorks/inference?rev=${revision}#${revision}`;
     }
     await fs.writeFile(path.join(checkout, '.cargo-ok'), '');
+    return { directory, checkout, git, value, revision };
+  } catch (error) {
+    await fs.rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+test('upstream receipt binds actual dependency revision, tree, targets and remaining local bytes', async () => {
+  const { directory, checkout, git, value, revision } = await upstreamFixture();
+  try {
     const receipt = await verifySecuritySources(value, directory, revision);
     assert.equal(receipt.kind, 'pinned-inference-with-local-updater');
     assert.equal(receipt.engine_revision, revision);
     assert.equal(receipt.inference_checkouts[0].tree, git(['rev-parse', 'HEAD^{tree}']));
+    assert.match(receipt.inference_checkouts[0].tracked_files_sha256, /^[a-f0-9]{64}$/);
     assert.deepEqual(receipt.packages.map((pkg) => pkg.name), ['tauri-plugin-updater']);
     assert(receipt.inference_targets.every((target) => /^[a-f0-9]{64}$/.test(target.sha256)));
     assert(!Object.hasOwn(receipt, 'audited_unchanged_cuda_anchors'), 'new closure does not inherit old CUDA audit');
@@ -93,6 +110,49 @@ test('upstream receipt binds actual dependency revision, tree, targets and remai
     git(['checkout', '--', '.']);
     await fs.writeFile(path.join(checkout, 'build.rs'), '// untracked automatic target\n');
     await assert.rejects(verifySecuritySources(value, directory, revision), /must be clean/);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const [flag, relative] of [
+  ['--assume-unchanged', 'src/inner.rs'],
+  ['--skip-worktree', 'src/inner.rs'],
+  ['--assume-unchanged', 'build_support.rs'],
+  ['--skip-worktree', 'build.rs'],
+]) {
+  test(`upstream receipt refuses hidden ${relative} edits with ${flag} before handoff`, async () => {
+    const { directory, checkout, git, value, revision } = await upstreamFixture();
+    try {
+      const before = await verifySecuritySources(value, directory, revision);
+      const pkg = value.packages.find((item) => item.source);
+      const file = path.join(path.dirname(pkg.manifest_path), relative);
+      git(['update-index', flag, '--', path.relative(checkout, file)]);
+      await fs.writeFile(file, '// changed hidden source, never executed\n');
+      assert.equal(git(['status', '--porcelain', '--untracked-files=no']), '', 'mutation evades the old status check');
+      assert.equal(git(['rev-parse', 'HEAD^{tree}']), before.inference_checkouts[0].tree);
+      assert.equal(validateCargoSources(value, directory, revision), before.cargo_source_graph_sha256);
+      let handedOff = false;
+      await assert.rejects(async () => {
+        await verifySecuritySources(value, directory, revision);
+        handedOff = true;
+      }, /inference tracked bytes differ/);
+      assert.equal(handedOff, false, 'changed committed modules must never reach execution');
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test('upstream receipt refuses executable mode overlays hidden from git status', { skip: process.platform === 'win32' }, async () => {
+  const { directory, checkout, git, value, revision } = await upstreamFixture();
+  try {
+    const pkg = value.packages.find((item) => item.source);
+    const file = path.join(path.dirname(pkg.manifest_path), 'src/inner.rs');
+    git(['config', 'core.filemode', 'false']);
+    await fs.chmod(file, 0o755);
+    assert.equal(git(['status', '--porcelain', '--untracked-files=no']), '');
+    await assert.rejects(verifySecuritySources(value, directory, revision), /inference source mode changed/);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }

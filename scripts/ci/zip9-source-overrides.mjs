@@ -115,6 +115,44 @@ export function validateCargoSources(metadata, repository = root, inferenceRevis
   return sha(JSON.stringify(graph));
 }
 
+async function verifyCommittedCheckout(checkout, revision) {
+  const git = (args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(git(['rev-parse', '--show-object-format']).trim(), 'sha1');
+  const files = [], directories = new Set();
+  // Read the named tree, not the index: assume-unchanged/skip-worktree flags can conceal edits
+  // to modules and build scripts from both git status and target-root-only hashing.
+  for (const entry of git(['ls-tree', '-rz', '--full-tree', revision]).split('\0').filter(Boolean)) {
+    const match = /^(100644|100755|120000) blob ([a-f0-9]{40})\t(.+)$/.exec(entry);
+    assert(match, `unsupported inference tree entry ${entry}`);
+    const [, mode, expected, relative] = match;
+    assert(path.posix.normalize(relative) === relative && !relative.includes('\\') && !relative.startsWith('../') && !path.posix.isAbsolute(relative));
+    for (let parent = path.posix.dirname(relative); parent !== '.'; parent = path.posix.dirname(parent)) {
+      if (directories.has(parent)) break;
+      const stat = await fs.lstat(path.join(checkout, parent));
+      assert(stat.isDirectory() && !stat.isSymbolicLink(), `unsafe inference source directory ${parent}`);
+      directories.add(parent);
+    }
+    const file = path.join(checkout, relative), stat = await fs.lstat(file);
+    let bytes;
+    if (mode === '120000') {
+      assert(stat.isSymbolicLink(), `inference source mode changed: ${relative}`);
+      bytes = await fs.readlink(file, { encoding: 'buffer' });
+    } else {
+      assert(stat.isFile() && !stat.isSymbolicLink(), `inference source mode changed: ${relative}`);
+      // Windows has no POSIX executable bit. File/symlink identity and bytes are still checked.
+      if (process.platform !== 'win32') {
+        assert.equal(Boolean(stat.mode & 0o111), mode === '100755', `inference source mode changed: ${relative}`);
+      }
+      bytes = await fs.readFile(file);
+    }
+    const actual = createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
+    assert.equal(actual, expected, `inference tracked bytes differ from ${revision}: ${relative}`);
+    files.push([relative, mode, sha(bytes)]);
+  }
+  assert(files.length > 0, 'inference checkout must contain committed source');
+  return { revision, tree: git(['rev-parse', `${revision}^{tree}`]).trim(), tracked_files_sha256: sha(JSON.stringify(files)) };
+}
+
 export async function verifySecuritySources(metadata, repository = root, inferenceRevision = SECURITY_BACKPORT.engine_revision) {
   const cargoDigest = validateCargoSources(metadata, repository, inferenceRevision);
   if (inferenceRevision !== SECURITY_BACKPORT.engine_revision) {
@@ -134,7 +172,7 @@ export async function verifySecuritySources(metadata, repository = root, inferen
         const changes = git(['status', '--porcelain', '--untracked-files=all']).split('\n')
           .filter((line) => line && line !== '?? .cargo-ok');
         assert.deepEqual(changes, [], 'actual inference dependency checkout must be clean');
-        checkouts.set(checkout, { revision: inferenceRevision, tree: git(['rev-parse', 'HEAD^{tree}']) });
+        checkouts.set(checkout, await verifyCommittedCheckout(checkout, inferenceRevision));
       }
       assert(Array.isArray(pkg.targets) && pkg.targets.length > 0, `Cargo targets required for ${pkg.name}`);
       for (const target of pkg.targets) {
