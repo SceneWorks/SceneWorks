@@ -11,6 +11,8 @@ function receipt() {
     loadPeakBytes: 1024, wholeRunPeakBytes: 2048, baselineBytes: 512, wholeDevicePeakBytes: 2560,
     output: { width: 1024, height: 1024, channels: 3, rgbBytes: 1024 * 1024 * 3,
       spatiallyNonFlat: true, rgbSha256: "a".repeat(64) },
+    settings: { flashAttn: true, count: 1, cfgInterval: null, guidanceMethod: null, schedulerShift: null },
+    engineBuild: { adapterCandleFeature: true, sdxlFlashAttentionKernelCompiled: false },
     cleanup: { beforeBytes: 512, afterBytes: 512, toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true } };
 }
 
@@ -37,6 +39,12 @@ test("endpoint receipt rejects missing load inclusion, context mismatch, flat ou
     (value) => { value.cudaContextUuid = "GPU-foreign"; },
     (value) => { value.inferencePin = "missing"; },
     (value) => { value.output.spatiallyNonFlat = false; },
+    (value) => { value.settings.flashAttn = false; },
+    (value) => { value.settings.cfgInterval = [0.1, 0.9]; },
+    (value) => { value.settings.guidanceMethod = "apg"; },
+    (value) => { value.settings.schedulerShift = 3; },
+    (value) => { value.settings.count = 2; },
+    (value) => { value.engineBuild.sdxlFlashAttentionKernelCompiled = true; },
     (value) => { value.cleanup.afterBytes += value.cleanup.toleranceBytes + 1; },
   ]) {
     const value = receipt(); mutate(value);
