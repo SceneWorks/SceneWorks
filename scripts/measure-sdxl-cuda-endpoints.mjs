@@ -128,17 +128,35 @@ export function admittedReplayRequest(projectId) {
 
 export function assertAdmittedReplaySelection(selection) {
   const parameters = selection?.parameters;
+  const noDecode = parameters?.decodeTileEdge == null && parameters?.decodeOverlap == null;
+  const boundedDecode = parameters?.decodeTileEdge === 512 && parameters?.decodeOverlap === 64;
+  const noAttention = parameters?.attentionChunkSize == null;
+  const recipe = typeof parameters?.stageResidency === "boolean" && parameters.transformerWindowSize == null
+    && Object.keys(parameters).every((key) => ["stageResidency", "decodeTileEdge", "decodeOverlap", "attentionChunkSize", "transformerWindowSize"].includes(key))
+    && (selection.strategy === "resident" && !parameters.stageResidency && noDecode && noAttention
+      || selection.strategy === "staged_residency" && parameters.stageResidency && noDecode && noAttention
+      || selection.strategy === "bounded_decode" && boundedDecode && noAttention
+      || selection.strategy === "bounded_attention" && boundedDecode && parameters.attentionChunkSize === 67_108_864);
+  const coverage = selection?.strategy === "resident" ? "measured_resident"
+    : selection?.strategy === "bounded_attention" && parameters?.stageResidency ? "measured_minimum" : "estimated_intermediate";
+  // availableGb is the selector's pool AFTER subtracting its reserve. Compare the
+  // widened admission to that pool, and account for the reserve once against the
+  // six-GiB guard. The selector canonicalizes decimal GiB ceilings to whole bytes.
+  const roundingGiB = 1 / 1024 ** 3;
   if (selection?.backend !== "candle" || selection.route !== "sdxl" || selection.actualTier !== "q4"
-      || selection.mode !== "text_to_image" || selection.strategy !== "bounded_attention"
-      || selection.basis !== "measured_endpoint" || selection.geometry?.width !== 1024
+      || selection.mode !== "text_to_image" || !recipe
+      || selection.basis !== (coverage === "estimated_intermediate" ? "anchor_derived" : "measured_endpoint") || selection.geometry?.width !== 1024
       || selection.geometry?.height !== 1024 || selection.geometry?.batch !== 1
-      || parameters?.stageResidency !== true || parameters.decodeTileEdge !== 512
-      || parameters.decodeOverlap !== 64 || parameters.attentionChunkSize !== 67_108_864
       || !Number.isSafeInteger(selection.predictedPeakBytes) || selection.predictedPeakBytes <= 0
       || !Number.isFinite(selection.reserveGb) || selection.reserveGb <= 0
-      || !Number.isFinite(selection.availableGb) || selection.availableGb > 6) {
-    throw new Error("ordinary worker did not admit the measured SDXL q4 optimized recipe under the guarded six-GiB budget");
+      || !Number.isFinite(selection.availableGb) || selection.availableGb <= 0
+      || !Number.isFinite(selection.admittedPeakGb) || selection.admittedPeakGb <= 0
+      || selection.predictedPeakBytes / 1024 ** 3 > selection.admittedPeakGb + roundingGiB
+      || selection.admittedPeakGb > selection.availableGb + roundingGiB
+      || selection.availableGb + selection.reserveGb > 6 + roundingGiB) {
+    throw new Error("ordinary worker did not admit a supported endpoint-priced SDXL q4 recipe within the guarded six-GiB budget");
   }
+  return coverage;
 }
 
 export function admittedReplaySelection(workerLog) {
@@ -283,6 +301,7 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
     sampling = false; await sampler; if (samplerError) throw samplerError;
     if (receipt.completedJob.workerId !== workerId || receipt.completedJob.backend !== "candle") throw new Error("completed image was not rendered by the owned CUDA worker");
     receipt.selection = admittedReplaySelection(await readFile(path.join(workDir, "worker.log"), "utf8"));
+    receipt.selectionCoverage = assertAdmittedReplaySelection(receipt.selection);
     receipt.selectionSource = "complete emit_event payload flattened into worker.log by SceneworksJsonFormat";
     if (!receipt.samples.some((sample) => sample.gpuUtilization > 0)) throw new Error("no physical GPU1 activity was sampled during the actual render");
     const peak = Math.max(...receipt.samples.map((sample) => sample.usedBytes));
