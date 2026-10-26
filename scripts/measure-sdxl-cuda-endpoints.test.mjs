@@ -5,7 +5,7 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample } from "./measure-sdxl-cuda-endpoints.mjs";
 
 const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
 const uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
@@ -158,6 +158,44 @@ test("admitted replay requires actual measured optimized worker selection and bu
     assert.throws(() => assertAdmittedReplaySelection({ ...selection, ...patch }));
   }
   assert.throws(() => assertAdmittedReplaySelection({ ...selection, parameters: { ...selection.parameters, stageResidency: false } }));
+  const emitted = { event: "image_memory_strategy_selected", ...selection };
+  const flat = { event: emitted.event, route: "sdxl", actual_tier: "q4", predicted_peak_bytes: selection.predictedPeakBytes };
+  const workerLog = ["non-JSON startup diagnostic", JSON.stringify(flat), JSON.stringify(emitted)].join("\n");
+  assert.deepEqual(admittedReplaySelection(workerLog), emitted, "retain the complete emitted payload, ignoring its adjacent flat tracing summary");
+  assert.throws(() => admittedReplaySelection(JSON.stringify(flat)), /saw 0/);
+  assert.throws(() => admittedReplaySelection(`${workerLog}\n${JSON.stringify(emitted)}`), /saw 2/);
+  assert.throws(() => admittedReplaySelection(JSON.stringify({ ...emitted, parameters: { ...selection.parameters, stageResidency: false } })), /did not admit/);
+});
+
+test("admitted replay waits for API persisted assets and validates the actual sidecar shape", () => {
+  const image = { id: "asset_replay", projectId: "project_replay", type: "image", lineage: { jobId: "job_replay" },
+    file: { path: "assets/images/replay.png", mimeType: "image/png", width: 1024, height: 1024 } };
+  const job = { status: "completed", result: { assets: [image], assetIds: [image.id] } };
+  assert.equal(persistedReplayAsset({ status: "completed", result: { assetWrites: [{ mediaPath: image.file.path }] } }, "project_replay", "job_replay"), null,
+    "completed worker facts do not prove durable API asset persistence");
+  assert.equal(persistedReplayAsset({ ...job, result: { ...job.result, assetWrites: [] } }, "project_replay", "job_replay"), null);
+  assert.deepEqual(persistedReplayAsset(job, "project_replay", "job_replay"), image);
+  for (const result of [{ ...job.result, assetIds: ["other"] }, { ...job.result, assets: [image, image] },
+    { ...job.result, assets: [{ ...image, projectId: "other" }] },
+    { ...job.result, assets: [{ ...image, lineage: { jobId: "other" } }] },
+    { ...job.result, assets: [{ ...image, file: { ...image.file, width: 768 } }] },
+    { ...job.result, assets: [{ ...image, file: { ...image.file, path: "../replay.png" } }] },
+    { ...job.result, assets: [{ ...image, file: { ...image.file, path: "C:\\replay.png" } }] },
+    { ...job.result, assets: [{ ...image, file: { ...image.file, mimeType: "video/mp4" } }] }]) {
+    assert.throws(() => persistedReplayAsset({ ...job, result }, "project_replay", "job_replay"), /sidecar/);
+  }
+});
+
+test("admitted replay rejects malformed or incomplete physical GPU1 telemetry", () => {
+  assert.deepEqual(parseReplayGpuSample(`${uuid}, 2048, 90000, 0, 3`, "sample-time"), {
+    at: "sample-time", uuid, usedBytes: 2048 * 1024 ** 2, freeBytes: 90000 * 1024 ** 2, gpuUtilization: 0, memoryUtilization: 3,
+  });
+  for (const csv of [`${uuid},2048,90000,0`, `${uuid},2048,90000,0,`, `${uuid},2048,90000,0,NaN`,
+    `${uuid},2048,90000,0,N/A`, `${uuid},2048,90000,0,101`, `${uuid},2048,90000,101,0`,
+    `${uuid},-1,90000,0,0`, `${uuid},2048,Infinity,0,0`, `${uuid},2048,90000,0,0,extra`,
+    `${uuid},2048,90000,0,0\n${uuid},2048,90000,0,0`, "GPU-wrong,2048,90000,0,0"]) {
+    assert.throws(() => parseReplayGpuSample(csv), /telemetry identity or counters unavailable/);
+  }
 });
 
 test("admitted replay workflow remains manual and runs native pure gates on GPU1 before one app job", async () => {
@@ -172,4 +210,7 @@ test("admitted replay workflow remains manual and runs native pure gates on GPU1
   assert.match(script, /POST", "\/api\/v1\/image\/jobs"/);
   assert.match(script, /child\.stdin\.end\(\)/, "owned worker uses existing natural stdin-EOF shutdown");
   assert.match(script, /SCENEWORKS_PARENT_PID/, "owned API uses existing parent-death natural shutdown");
+  assert.match(script, /receipt\.selection = admittedReplaySelection\(await readFile/);
+  assert.match(script, /persistedReplayAsset\(job, project\.id, jobId\)/);
+  assert.match(script, /\/assets\/\$\{encodeURIComponent\(persisted\.image\.id\)\}/, "read the persisted sidecar through the ordinary asset API");
 });

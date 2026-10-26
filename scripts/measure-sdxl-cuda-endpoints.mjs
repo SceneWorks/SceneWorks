@@ -141,6 +141,52 @@ export function assertAdmittedReplaySelection(selection) {
   }
 }
 
+export function admittedReplaySelection(workerLog) {
+  // emit_event's complete payload is flattened by SceneworksJsonFormat. The nearby
+  // tracing::info! has the same event name, but only snake_case summary fields.
+  const selections = workerLog.split(/\r?\n/).flatMap((line) => {
+    try {
+      const event = JSON.parse(line);
+      return event?.event === "image_memory_strategy_selected" && event.route === "sdxl"
+        && typeof event.actualTier === "string" && event.geometry && event.parameters ? [event] : [];
+    } catch { return []; }
+  });
+  if (selections.length !== 1) throw new Error(`expected one complete emitted worker memory selection, saw ${selections.length}`);
+  assertAdmittedReplaySelection(selections[0]);
+  return selections[0];
+}
+
+export function persistedReplayAsset(job, projectId, jobId) {
+  const result = job?.result;
+  // Terminal status can precede the API's durable side effects. Never accept the
+  // worker's assetWrites facts as proof that the API persisted the asset.
+  if (!Array.isArray(result?.assets) || !Array.isArray(result.assetIds) || result.assetWrites !== undefined) return null;
+  const image = result.assets[0];
+  const mediaPath = image?.file?.path;
+  if (result.assets.length !== 1 || result.assetIds.length !== 1 || typeof image?.id !== "string"
+      || !image.id || result.assetIds[0] !== image.id || image.projectId !== projectId
+      || image.lineage?.jobId !== jobId || image.type !== "image" || image.file?.mimeType !== "image/png"
+      || image.file.width !== 1024 || image.file.height !== 1024 || typeof mediaPath !== "string"
+      || !mediaPath.endsWith(".png") || mediaPath.split("/").some((part) => !part || part === "." || part === "..")
+      || /[\\:\u0000-\u001f\u007f]/.test(mediaPath)) {
+    throw new Error("ordinary job did not persist exactly one matching project PNG asset sidecar");
+  }
+  return image;
+}
+
+export function parseReplayGpuSample(stdout, at = new Date().toISOString()) {
+  const fields = stdout.trim().split(",").map((value) => value.trim());
+  const numbers = fields.slice(1).map(Number);
+  if (fields.length !== 5 || fields[0] !== "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
+      || fields.slice(1).some((value) => !value) || numbers.some((value) => !Number.isFinite(value) || value < 0)
+      || numbers[2] > 100 || numbers[3] > 100
+      || !numbers.slice(0, 2).every((value) => Number.isSafeInteger(value * 1024 ** 2))) {
+    throw new Error("physical GPU1 replay telemetry identity or counters unavailable");
+  }
+  return { at, uuid: fields[0], usedBytes: numbers[0] * 1024 ** 2, freeBytes: numbers[1] * 1024 ** 2,
+    gpuUtilization: numbers[2], memoryUtilization: numbers[3] };
+}
+
 export function admittedReplayEnv(env, { state, hub, workerId, port, parentPid }) {
   const child = Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith("SCENEWORKS_")
     && !/TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/.test(key)));
@@ -210,10 +256,7 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
   const wait = async (probe, seconds, label) => { const deadline = Date.now() + seconds * 1000; while (Date.now() < deadline) { alive(); const value = await probe(); if (value) return value; await delay(1000); } throw new Error(`${label} exceeded ${seconds}s`); };
   const smi = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe");
   const gpuSample = async () => {
-    const fields = (await run(smi, ["-i", "1", "--query-gpu=uuid,memory.used,memory.free,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"], { timeoutMs: 10_000 })).stdout.trim().split(",").map((value) => value.trim());
-    const numbers = fields.slice(1).map(Number);
-    if (fields[0] !== "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" || numbers.some((value) => !Number.isFinite(value) || value < 0)) throw new Error("physical GPU1 replay telemetry identity or counters unavailable");
-    return { at: new Date().toISOString(), uuid: fields[0], usedBytes: numbers[0] * 1024 ** 2, freeBytes: numbers[1] * 1024 ** 2, gpuUtilization: numbers[2], memoryUtilization: numbers[3] };
+    return parseReplayGpuSample((await run(smi, ["-i", "1", "--query-gpu=uuid,memory.used,memory.free,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"], { timeoutMs: 10_000 })).stdout);
   };
   const stableBaseline = async () => { const samples = []; for (let index = 0; index < 5; index++) { const sample = await gpuSample(); if (sample.gpuUtilization || sample.memoryUtilization || sample.freeBytes < 16 * 1024 ** 3) throw new Error("physical GPU1 must be idle with real headroom for guarded replay"); samples.push(sample); await delay(200); } if (Math.max(...samples.map((item) => item.usedBytes)) - Math.min(...samples.map((item) => item.usedBytes)) > 64 * 1024 ** 2) throw new Error("GPU1 replay baseline is unstable"); return samples; };
   try {
@@ -239,10 +282,8 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
     receipt.completedJob = await wait(async () => { const job = await apiCall("GET", `/api/v1/jobs/${jobId}`); if (["failed", "canceled"].includes(job.status)) throw new Error(`ordinary worker job ${job.status}: ${job.error ?? job.message}`); return job.status === "completed" && job; }, 3600, "ordinary admitted image render");
     sampling = false; await sampler; if (samplerError) throw samplerError;
     if (receipt.completedJob.workerId !== workerId || receipt.completedJob.backend !== "candle") throw new Error("completed image was not rendered by the owned CUDA worker");
-    const events = (await readFile(path.join(workDir, "worker.log"), "utf8")).split(/\r?\n/).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
-    const selections = events.filter((event) => event.event === "image_memory_strategy_selected" && event.route === "sdxl");
-    if (selections.length !== 1) throw new Error(`expected one real worker memory selection, saw ${selections.length}`);
-    receipt.selection = selections[0]; assertAdmittedReplaySelection(receipt.selection);
+    receipt.selection = admittedReplaySelection(await readFile(path.join(workDir, "worker.log"), "utf8"));
+    receipt.selectionSource = "complete emit_event payload flattened into worker.log by SceneworksJsonFormat";
     if (!receipt.samples.some((sample) => sample.gpuUtilization > 0)) throw new Error("no physical GPU1 activity was sampled during the actual render");
     const peak = Math.max(...receipt.samples.map((sample) => sample.usedBytes));
     const observed = Math.max(0, peak - baseline);
@@ -250,10 +291,16 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
       rawDifferenceBytes: observed - receipt.selection.predictedPeakBytes, reserveBytes: Math.round(receipt.selection.reserveGb * 1024 ** 3),
       baselineBytes: baseline, absoluteSampledPeakBytes: peak };
     if (observed <= 0 || observed > receipt.prediction.predictedPeakBytes + receipt.prediction.reserveBytes) throw new Error("observed worker GPU growth exceeded the selected prediction plus its explicit reserve");
-    const writes = receipt.completedJob.result?.assetWrites ?? [];
-    const image = writes.find((item) => typeof item.mediaPath === "string" && item.mediaPath.endsWith(".png"));
-    if (writes.length !== 1 || !image) throw new Error("ordinary job did not publish exactly one PNG asset");
-    const sourcePath = path.resolve(projectPath, image.mediaPath); const relative = path.relative(projectPath, sourcePath);
+    const persisted = await wait(async () => {
+      const job = await apiCall("GET", `/api/v1/jobs/${jobId}`);
+      const image = persistedReplayAsset(job, project.id, jobId);
+      return image && { job, image };
+    }, 60, "API persisted image asset");
+    receipt.completedJob = persisted.job;
+    const image = await apiCall("GET", `/api/v1/projects/${project.id}/assets/${encodeURIComponent(persisted.image.id)}`);
+    persistedReplayAsset({ result: { assets: [image], assetIds: [persisted.image.id] } }, project.id, jobId);
+    if (image.file.path !== persisted.image.file.path) throw new Error("asset API sidecar differs from the completed job asset");
+    const sourcePath = path.resolve(projectPath, image.file.path); const relative = path.relative(projectPath, sourcePath);
     if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("served image escaped owned project");
     const response = await fetch(`http://127.0.0.1:${port}/api/v1/projects/${project.id}/files/${relative.split(path.sep).map(encodeURIComponent).join("/")}`, { signal: AbortSignal.timeout(30_000) });
     if (!response.ok) throw new Error(`product PNG serving failed: ${response.status}`);
