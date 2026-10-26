@@ -11155,6 +11155,21 @@ fn candle_tier_fit(
     }
 }
 
+/// A generic SDXL request has a narrower, artifact-bound staging contract than its descriptor.
+/// Bespoke edit/IP/detail lanes never reach this path. Keep the legacy tier verdict unless the
+/// exact request selector has admitted the candidate; a declaration alone grants no saving.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_tier_fit_after_shared_selection(
+    legacy: TierFit,
+    selection: Option<&crate::candle_memory_strategy::CandleMemoryEvaluation>,
+) -> TierFit {
+    if selection.is_some() {
+        TierFit::Fits
+    } else {
+        legacy
+    }
+}
+
 /// FLUX.2-dev's caption-upsample lifecycle has exact bounded high-waters only for the Q4 and Q8
 /// turnkey tiers. `predicted_peak_gb` intentionally falls back to `minMemoryGb` for legacy sparse
 /// manifests, but doing that here would admit the unmeasured 113 GB BF16 tier at the 48 GB Q4 floor.
@@ -13213,6 +13228,43 @@ async fn generate_candle_stream_using(
         )));
     }
     let adapter_source_bytes = krea_adapter_bytes.unwrap_or(0);
+    // Ordinary SDXL reaches a request-scoped provider contract whose staging support is narrower
+    // than the descriptor shared with its bespoke surfaces. Price each installed candidate with
+    // that contract before the resident-only capability clamp can reject it. Other SDXL surfaces
+    // retain their existing gates; no descriptor capability is broadened here.
+    let sdxl_request_tier_admission = engine_id == "sdxl"
+        && request.model == "sdxl"
+        && matches!(request.mode.as_str(), "image_generation" | "text_to_image")
+        && edit_reference.is_none()
+        && img2img_reference.is_none()
+        && edit_refs.is_empty()
+        && edit_mask.is_none()
+        && hires_fix.is_none()
+        && !use_pid
+        && native_batch.is_none();
+    let sdxl_endpoints = if sdxl_request_tier_admission
+        && request.count == 1
+        && adapter_count == 0
+        && flash_attn
+        && lane_controls.cfg_interval.is_none()
+        && guidance_method.is_none()
+        && scheduler.is_none()
+        && scheduler_shift.is_none()
+    {
+        sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::packaged_sdxl_cuda_memory_endpoints()
+            .filter(|endpoints| {
+                endpoints.settings.get("steps").and_then(Value::as_u64) == Some(u64::from(steps))
+                    && endpoints.settings.get("guidance").and_then(Value::as_f64)
+                        == guidance.map(f64::from)
+                    && endpoints.settings.get("flashAttn").and_then(Value::as_bool) == Some(true)
+                    && sampler.as_deref().is_none_or(|sampler| {
+                        endpoints.resolved_defaults.get("sampler").and_then(Value::as_str)
+                            == Some(sampler)
+                    })
+            })
+    } else {
+        None
+    };
     // sc-10733 capability downtier: for a DEFAULT job (no explicit per-(screen,model) pick, and not the
     // bespoke ConvRot tier), if the resolved tier won't fit the live budget, step DOWN to the highest
     // installed tier that does — floored at the per-model quality floor — rejecting only when nothing
@@ -13244,13 +13296,105 @@ async fn generate_candle_stream_using(
         let candidates: Vec<(&'static str, TierFit)> =
             downtier_candidate_tiers(request, settings, tier, floor)
                 .into_iter()
-                .map(|candidate| {
+                .map(|candidate| -> WorkerResult<_> {
                     let candidate_adapter_bytes = candle_adapter_resident_bytes(
                         engine_id,
                         candidate,
                         adapter_source_bytes,
                     );
-                    let fit = if krea_turbo_ladder && adapter_count == 0 {
+                    let fit = if sdxl_request_tier_admission {
+                        let legacy = candle_tier_fit(
+                            &request.model_manifest_entry,
+                            candidate,
+                            budget,
+                            sequential_capable,
+                            candidate_adapter_bytes,
+                        );
+                        let selected = if let Some(dir) =
+                            resolve_tier_dir(request, settings, candidate)
+                        {
+                            let (candidate_quant, _) = candle_quant_for_resolved_tier(
+                                request,
+                                candidate,
+                                &dir,
+                                model.supports_quant(),
+                                false,
+                            );
+                            let spec = load_spec(dir, candidate_quant, adapters.clone(), None)
+                                .with_resolved_route(request.model.clone());
+                            let spec = attach_required_components(
+                                spec,
+                                engine_id,
+                                &request.model_manifest_entry,
+                                settings,
+                            )?;
+                            let spec =
+                                attach_manifest_text_encoder(spec, engine_id, request, settings)?
+                                    .into_load_spec();
+                            let spec = apply_declared_candle_image_load_shape(
+                                engine_id,
+                                Some(candidate),
+                                &request.mode,
+                                &request.model_manifest_entry,
+                                spec,
+                                false,
+                            );
+                            let certified = candle_certified_load_spec(
+                                engine_id,
+                                settings,
+                                &spec,
+                                &request.model_manifest_entry,
+                                candidate,
+                            );
+                            let overlay_bytes = candidate_adapter_bytes.saturating_add(
+                                lane_controls::declared_activation_overlay_bytes(
+                                    request,
+                                    None,
+                                    memory_width,
+                                    memory_height,
+                                )?,
+                            );
+                            crate::candle_memory_strategy::evaluate_shared_image_priced(
+                                engine_id,
+                                &request.model,
+                                &spec,
+                                certified,
+                                &request.model_manifest_entry,
+                                candidate,
+                                &request.mode,
+                                (adapter_count > 0).then_some("lora"),
+                                gen_core::MemoryGeometry {
+                                    width: memory_width,
+                                    height: memory_height,
+                                    batch: 1,
+                                    frames: 1,
+                                    reference_count: 0,
+                                },
+                                false,
+                                false,
+                                false,
+                                false,
+                                budget,
+                                shared_reserve_gb,
+                                crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+                                    &request.model_manifest_entry,
+                                    candidate,
+                                    overlay_bytes,
+                                ),
+                                overlay_bytes,
+                                if reclaimable_gb > 0.0 {
+                                    gen_core::MemoryCacheState::Warm
+                                } else {
+                                    gen_core::MemoryCacheState::Cold
+                                },
+                                None,
+                                sdxl_endpoints,
+                            )?
+                        } else {
+                            None
+                        };
+                        candle_tier_fit_after_shared_selection(legacy, selected.as_ref())
+                    } else if krea_turbo_ladder && adapter_count == 0 {
                         let candidate_runtime = resolve_tier_dir(request, settings, candidate)
                             .and_then(|dir| {
                                 krea_runtime_evidence_context(
@@ -13321,9 +13465,9 @@ async fn generate_candle_stream_using(
                             candidate_adapter_bytes,
                         )
                     };
-                    (candidate, fit)
+                    Ok((candidate, fit))
                 })
-                .collect();
+                .collect::<WorkerResult<_>>()?;
         match choose_downtier(tier, &candidates) {
             DowntierPick::Keep => {}
             DowntierPick::Downtier(chosen) => {
@@ -13646,6 +13790,7 @@ async fn generate_candle_stream_using(
             gen_core::MemoryCacheState::Cold
         },
         prefix_kv_cache_surcharge,
+        sdxl_endpoints,
     )?;
     let first_pass_shared_memory = if hires_fix.is_some()
         && matches!(
@@ -13731,13 +13876,23 @@ async fn generate_candle_stream_using(
         }
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
+        if sdxl_request_tier_admission
+            && evaluation.context.selection.strategy == gen_core::MemoryStrategy::Resident
+        {
+            // The measured resident endpoint is literal: disable the provider's legacy automatic
+            // decode fallback by carrying an explicit all-false request memory block.
+            generation_memory = Some(gen_core::GenerationMemory::default());
+        }
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
         ideogram_warm_staged = evaluation.warm_staged;
         // Resident is the selector's conservative sentinel, not authority to reconfigure a request.
         // In particular, a later legacy low-VRAM decision may choose sequential residency; carrying a
         // Resident scope would then overwrite that request memory back to resident in configure_request.
-        selected_memory_strategy_context =
-            optimized_shared_memory_context(engine_id, evaluation.context);
+        selected_memory_strategy_context = if sdxl_request_tier_admission {
+            Some(evaluation.context)
+        } else {
+            optimized_shared_memory_context(engine_id, evaluation.context)
+        };
     }
     if let Some(evaluation) = first_pass_shared_memory {
         hires_first_pass_generation_memory = evaluation.memory;
@@ -13803,8 +13958,14 @@ async fn generate_candle_stream_using(
     // Some exactly when the receipt produced a graded selection for this request, including a
     // Resident one — which is a real decision the load must honor, not an absence of one.
     let receipt_selector_authoritative = receipt_priced_selection.is_some();
+    // The generic SDXL selector validates the exact artifact, request and composition, including
+    // resident scratch-bounding rungs. The descriptor's deliberately broad staging flag and the
+    // old geometry-free resident row must not veto that same decision after it passed the tier
+    // chooser. Missing or refused selection still reaches the unchanged legacy resident gate.
+    let request_selector_authoritative = receipt_selector_authoritative
+        || (sdxl_request_tier_admission && memory_strategy_selection.is_some());
     let use_sequential =
-        if receipt_selector_authoritative {
+        if request_selector_authoritative {
             generation_memory.is_some_and(|memory| memory.stage_residency)
         } else if let Some(
             fit @ crate::vram_gate::KreaTurboFit::Resident {
