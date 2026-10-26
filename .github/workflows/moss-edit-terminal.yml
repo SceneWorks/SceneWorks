@@ -466,6 +466,7 @@ jobs:
             ${{ env.MOSS_ROOT }}/*.json
             ${{ env.MOSS_ROOT }}/*.jsonl
             ${{ env.MOSS_ROOT }}/*.log
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 90
   execute-cuda:
@@ -537,6 +538,7 @@ jobs:
             ${{ env.MOSS_ROOT }}/*.json
             ${{ env.MOSS_ROOT }}/*.jsonl
             ${{ env.MOSS_ROOT }}/*.log
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 90
   continue-mlx:

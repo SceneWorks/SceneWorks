@@ -41,6 +41,26 @@ test('CUDA rebase invokes the protocol from its declared source checkout, not th
  assert.equal(globalThis.__mossProtocolOrigin,'tooling','the wrong checkout would load a different protocol before freeze');
  delete globalThis.__mossProtocolOrigin;
 });
+test('ordinary MLX and CUDA artifacts retain hidden handoff metadata on the owned evidence paths',async t=>{
+ const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8');
+ const mlx=workflow.match(/^  execute-mlx:\n([\s\S]*?)(?=^  execute-cuda:)/m)?.[1],cuda=workflow.match(/^  execute-cuda:\n([\s\S]*?)(?=^  continue-mlx:)/m)?.[1];
+ for(const [backend,job] of [['mlx',mlx],['cuda',cuda]]){
+  assert.ok(job,`ordinary ${backend} job missing`);
+  const upload=job.match(/- name: Retain complete and partial evidence; never upload HF caches, targets or credentials\n([\s\S]*?)retention-days: 90/)?.[1];
+  assert.ok(upload,`ordinary ${backend} artifact upload missing`);
+  assert.match(upload,/\$\{\{ env\.MOSS_ROOT \}\}\/handoff\//);
+  assert.match(upload,/\$\{\{ env\.MOSS_ROOT \}\}\/evidence\//);
+  assert.match(upload,/include-hidden-files: true/);
+  assert.doesNotMatch(upload,/\$\{\{ env\.MOSS_ROOT \}\}\/hf\/|\$\{\{ env\.MOSS_ROOT \}\}\/target\//);
+ }
+ const handoff=resolve(MAC_MOSS_BASE,'moss-execute-40198829729-1-mlx/handoff');
+ if(!existsSync(resolve(handoff,'handoff.json'))){t.diagnostic('retained H27 Mac handoff absent on this host; workflow transport contract checked');return;}
+ const manifest=await json(resolve(handoff,'handoff.json'));
+ const hidden=manifest.files.filter(item=>item.file.split('/').some(part=>part.startsWith('.')));
+ assert.equal(manifest.files.length,311);
+ assert.deepEqual(hidden.map(item=>item.file).sort(),[...H27_HIDDEN_HANDOFF_FILES].sort());
+ for(const item of hidden)assert.deepEqual(await fileIdentity(resolve(handoff,'data',item.file)),{byteLength:item.byteLength,sha256:item.sha256});
+});
 test('official pin output permits only regenerated closure facts and exact audited source population',()=>{
   const old='a'.repeat(40),next='b'.repeat(40),path='crates/media/candle-gen/candle-gen-moss-image/src/lib.rs',oldBlob='c'.repeat(40),newBlob='d'.repeat(40);
   const manifest=(sha)=>`moss = { git = "https://github.com/SceneWorks/inference", rev = "${sha}" }\n`;
@@ -176,6 +196,33 @@ test('transferred Mac model-library binding is adopted through product dry-run a
     ['/api/v1/model-library','GET',undefined],['/api/v1/model-library/relocate','POST',true],['/api/v1/model-library/relocate','POST',undefined],['/api/v1/model-library','GET',undefined]]);
   assert.deepEqual(receipt.oldBinding,old);assert.deepEqual(receipt.newBinding,newBinding);
   assert.equal((await json(resolve(config.root,'evidence/external/cuda-model-library-relocation.json'))).adoptedFile.sha256,receipt.adoptedFile.sha256);
+  assert.deepEqual(await json(resolve(config.handoffRoot,relative)),old);
+});
+test('ordinary CUDA adopts only its authenticated imported Mac model-library binding',async t=>{
+  const root=await temporary('ordinary-library-adoption');t.after(()=>rm(root,{recursive:true,force:true}));
+  const config={root,backend:'cuda',sourceSha:identity.sourceSha,inferenceSha:identity.inferenceSha,projectId:'project',hfHome:resolve(root,'hf'),handoffRoot:resolve(root,'prior/handoff'),stateRoot:resolve(root,'state')};
+  const handoff={version:VERSION,projectId:config.projectId,sources:{sceneworks:{head:config.sourceSha},inference:{head:config.inferenceSha}},files:[]};
+  await save(resolve(config.handoffRoot,'handoff.json'),handoff);
+  await save(resolve(root,'state-relocation.json'),{version:VERSION,manifestSha256:digest(handoff)});
+  config.importedMacHandoff={manifestSha256:digest(handoff),projectId:handoff.projectId,sources:handoff.sources};
+  const relative='data/models/.sceneworks-external-library-state.json';
+  const old={schemaVersion:1,configuredPath:'/old/mac/hf/hub',canonicalPath:'/old/mac/hf/hub',physicalIdentity:{volumeId:'mac',directoryId:7},boundAt:1};
+  await save(resolve(config.handoffRoot,relative),old);await save(resolve(config.stateRoot,relative),old);await mkdir(resolve(config.hfHome,'hub'),{recursive:true});
+  const hub=resolve(config.hfHome,'hub'),newBinding={...old,configuredPath:hub,canonicalPath:hub,physicalIdentity:{volumeId:'windows',directoryId:8},boundAt:2};
+  const calls=[];const api={async request(path,options={}){
+    calls.push([path,options.method??'GET',options.body]);
+    if(path==='/api/v1/model-library')return calls.length===1?{configuredLibraryPath:hub,expectedLibrary:old,probeStatus:'unavailable',available:false}:{configuredLibraryPath:hub,expectedLibrary:newBinding,probeStatus:'available',available:true};
+    assert.equal(path,'/api/v1/model-library/relocate');assert.equal(options.method,'POST');assert.equal(options.body.path,config.hfHome);
+    if(options.body.dryRun)return {adopted:false,hfHome:config.hfHome,libraryRoot:hub};
+    await writeFile(resolve(config.stateRoot,relative),JSON.stringify(newBinding));return {adopted:true,hfHome:config.hfHome,libraryRoot:hub};
+  }};
+  config.importedMacHandoff.manifestSha256='changed';
+  await assert.rejects(()=>relocateImportedCudaModelLibrary(api,config),/ordinary imported Mac handoff identity changed/);assert.equal(calls.length,0);
+  config.importedMacHandoff.manifestSha256=digest(handoff);
+  const receipt=await relocateImportedCudaModelLibrary(api,config);
+  assert.deepEqual(calls.map(([path,method,body])=>[path,method,body?.dryRun]),[
+    ['/api/v1/model-library','GET',undefined],['/api/v1/model-library/relocate','POST',true],['/api/v1/model-library/relocate','POST',undefined],['/api/v1/model-library','GET',undefined]]);
+  assert.deepEqual(receipt.oldBinding,old);assert.deepEqual(receipt.newBinding,newBinding);
   assert.deepEqual(await json(resolve(config.handoffRoot,relative)),old);
 });
 test('model-library handoff refuses changed imported bytes, wrong API binding and failed closure dry-run without image submission',async t=>{

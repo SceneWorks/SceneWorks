@@ -445,7 +445,11 @@ export async function authenticateCrossBackendHistory(api,evidenceRoot,readbackR
   return comparisons;
 }
 export async function relocateImportedCudaModelLibrary(api,config) {
-  requireThat(config.backend==='cuda'&&config.completedMlx&&config.hfHome===resolve(config.root,'hf'),'only the authenticated cross-backend CUDA handoff may rebind its imported model library');
+  requireThat(config.backend==='cuda'&&config.hfHome===resolve(config.root,'hf')&&(config.completedMlx||config.importedMacHandoff),'only the authenticated cross-backend CUDA handoff may rebind its imported model library');
+  if(!config.completedMlx) {
+    const handoff=await json(resolve(config.handoffRoot,'handoff.json')),relocation=await json(resolve(config.root,'state-relocation.json'));
+    requireThat(canonical(config.importedMacHandoff)===canonical({manifestSha256:digest(handoff),projectId:handoff.projectId,sources:handoff.sources})&&relocation.manifestSha256===digest(handoff)&&handoff.projectId===config.projectId&&handoff.sources.sceneworks.head===config.sourceSha&&handoff.sources.inference.head===config.inferenceSha,'ordinary imported Mac handoff identity changed before model-library adoption');
+  }
   const relative='models/.sceneworks-external-library-state.json';
   const imported=resolve(config.handoffRoot,'data',relative),live=resolve(config.stateRoot,'data',relative),hub=resolve(config.hfHome,'hub');
   const [oldIdentity,liveIdentity,oldBinding]=await Promise.all([fileIdentity(imported),fileIdentity(live),json(imported)]);
@@ -609,6 +613,7 @@ export async function executeBackend(config) {
   if(config.backend==='cuda') {
     const handoff=await json(resolve(config.handoffRoot,'handoff.json'));config.projectId=handoff.projectId;
     await importState(config,config.handoffRoot,cudaRebase?{authenticatedMac:cudaRebase.old}:{});
+    if(!cudaRebase&&!config.completedMlx)config.importedMacHandoff={manifestSha256:digest(handoff),projectId:handoff.projectId,sources:handoff.sources};
     if(!cudaRebase)await importCompletedMlxEvidence(config);
     if(config.completedMlx) {
       await save(resolve(config.root,'evidence/external/completed-mlx-artifact-for-cuda.json'),config.completedMlx);
@@ -649,7 +654,7 @@ export async function executeBackend(config) {
       config.guardRequests=await json(resolve(config.root,'evidence','resolved-guards.json'));
       const project=await stack.api.request(`/api/v1/projects/${encodeURIComponent(config.projectId)}`);requireThat(project.id===config.projectId,'target API did not reopen the original transferred project identity');
       await authenticateCrossBackendHistory(stack.api,resolve(config.root,'evidence'));
-      if(config.completedMlx)await relocateImportedCudaModelLibrary(stack.api,config);
+      await relocateImportedCudaModelLibrary(stack.api,config);
     }
     if((config.backend==='mlx'||cudaRebase)&&!continuing)for(const backend of (cudaRebase?['cuda']:['mlx','cuda'])) {
       const toolchain=await json(resolve(config.buildRoot,backend,'toolchain.json'));requireThat(toolchain.installation?.files?.length,'actual installer capture missing from native artifact');
