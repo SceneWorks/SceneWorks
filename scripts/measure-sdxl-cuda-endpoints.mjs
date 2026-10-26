@@ -30,10 +30,14 @@ export function endpointCase(plan, endpoint) {
   return planned;
 }
 
-export function validateEndpoint(measurement, endpoint) {
+export function validateEndpoint(measurement, endpoint, expectedInferencePin) {
   if (measurement?.endpoint !== endpoint.name || measurement.deviceUuid !== "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
       || measurement.cudaContextUuid !== measurement.deviceUuid || measurement.logicalCudaDevice !== 0) {
     throw new Error("endpoint identity or physical GPU1 UUID differs from the requested capture");
+  }
+  if (!/^[a-f0-9]{40}$/.test(measurement.inferencePin ?? "")
+      || (expectedInferencePin && measurement.inferencePin !== expectedInferencePin)) {
+    throw new Error("endpoint adapter was compiled against a different inference pin");
   }
   for (const key of ["loadPeakBytes", "wholeRunPeakBytes", "baselineBytes", "wholeDevicePeakBytes"]) {
     if (!Number.isSafeInteger(measurement[key]) || measurement[key] < 0) throw new Error(`missing ${key}`);
@@ -50,6 +54,19 @@ export function validateEndpoint(measurement, endpoint) {
   if (!cleanup || cleanup.adapterProcessExited !== true
       || [cleanup.beforeBytes, cleanup.afterBytes, cleanup.toleranceBytes].some((value) => !Number.isSafeInteger(value) || value < 0)
       || cleanup.afterBytes > cleanup.beforeBytes + cleanup.toleranceBytes) throw new Error("endpoint leaked device residency or lacks exit telemetry");
+}
+
+export function endpointEvidenceReference(bundle, bundleBytes, { inventorySha256, inferencePin, deviceUuid }) {
+  const [record] = bundle.records ?? [];
+  if (bundle.records?.length !== 1 || !/^imc-[a-f0-9]{20}$/.test(record?.id ?? "")) {
+    throw new Error("endpoint evidence must contain exactly one identified source record");
+  }
+  if (record.artifact?.inventorySha256 !== inventorySha256
+      || record.repositories?.inference?.revision !== inferencePin
+      || record.hardware?.deviceId !== deviceUuid) {
+    throw new Error("endpoint source record differs from the measured inventory, compiled pin or physical device");
+  }
+  return { recordId: record.id, evidenceSha256: createHash("sha256").update(bundleBytes).digest("hex") };
 }
 
 export function compareRgb(reference, selected) {
@@ -101,7 +118,7 @@ export async function main(argv = process.argv.slice(2)) {
   const summary = { schemaVersion: 1, profile: "sdxl-cuda-endpoints", inferencePin: pin,
     artifactInventory: inventory, stagedArtifacts: row.env, resolvedDefaults, physicalEightGiBDeviceValidated: false,
     reserveBytes: 2 * 1024 ** 3, reserveIncludedInMeasuredPeaks: false,
-    telemetry: "stable-baseline-subtracted physical-GPU1 device-level upper bound; not a per-process allocator peak",
+    telemetry: "measured sampled physical-device growth under stable pre/post baseline; not a per-process allocator peak or mathematical upper bound",
     endpoints: [] };
   const smi = process.platform === "win32"
     ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe") : "/usr/bin/nvidia-smi";
@@ -109,6 +126,18 @@ export async function main(argv = process.argv.slice(2)) {
     const value = Number((await run(smi, ["-i", "1", "--query-gpu=memory.used", "--format=csv,noheader,nounits"], { env, timeoutMs: 30_000 })).stdout.trim());
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid physical GPU1 cleanup telemetry");
     return value * 1024 ** 2;
+  };
+  const settledUsedBytes = async () => {
+    const samples = [];
+    for (let index = 0; index < 5; index++) {
+      const values = (await run(smi, ["-i", "1", "--query-gpu=memory.used,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"], { env, timeoutMs: 30_000 })).stdout.trim().split(",").map((value) => Number(value.trim()));
+      if (values.length !== 3 || values.some((value) => !Number.isSafeInteger(value) || value < 0)
+          || values[1] !== 0 || values[2] !== 0) throw new Error("post-exit physical GPU1 is not idle or observable");
+      samples.push(values[0] * 1024 ** 2);
+      if (index < 4) await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    if (Math.max(...samples) - Math.min(...samples) > 64 * 1024 ** 2) throw new Error("post-exit physical GPU1 baseline is unstable");
+    return Math.max(...samples);
   };
   for (const endpoint of ENDPOINTS) {
     let measurement;
@@ -119,6 +148,7 @@ export async function main(argv = process.argv.slice(2)) {
       executeProvider: async (program, programArgs, input) => {
         const request = JSON.parse(input);
         if (request.action === "run") Object.assign(request, { action: "sdxl_endpoint", sdxlEndpoint: endpoint.name, outputPath });
+        else if (request.action === "probe") request.action = "sdxl_endpoint_probe";
         const requestFile = path.join(workDir, `${endpoint.name}-${request.action}-request.json`);
         await writeFile(requestFile, JSON.stringify(request, null, 2) + "\n");
         const beforeBytes = request.action === "sdxl_endpoint" ? await usedBytes() : null;
@@ -135,8 +165,8 @@ export async function main(argv = process.argv.slice(2)) {
         if (request.action === "sdxl_endpoint") {
           measurement = fragment.endpointMeasurement;
           delete fragment.endpointMeasurement;
-          measurement.cleanup = { beforeBytes, afterBytes: await usedBytes(), toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true };
-          validateEndpoint(measurement, endpoint);
+          measurement.cleanup = { beforeBytes, afterBytes: await settledUsedBytes(), toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true };
+          validateEndpoint(measurement, endpoint, pin);
         }
         return JSON.stringify(fragment);
       },
@@ -147,8 +177,12 @@ export async function main(argv = process.argv.slice(2)) {
     measurement.output.pngSha256 = createHash("sha256").update(png).digest("hex");
     measurement.output.pngBytes = png.length;
     const bundlePath = path.join(workDir, `${endpoint.name}-evidence.json`);
-    await writeFile(bundlePath, JSON.stringify(bundle, null, 2) + "\n");
-    summary.endpoints.push({ ...measurement, planned, evidencePath: bundlePath });
+    const bundleBytes = JSON.stringify(bundle, null, 2) + "\n";
+    const evidenceReference = endpointEvidenceReference(bundle, bundleBytes, {
+      inventorySha256: inventory.sha256, inferencePin: measurement.inferencePin, deviceUuid: measurement.deviceUuid,
+    });
+    await writeFile(bundlePath, bundleBytes);
+    summary.endpoints.push({ ...measurement, ...evidenceReference, planned, evidencePath: bundlePath });
     await writeFile(path.join(workDir, "sdxl-cuda-endpoints.json"), JSON.stringify(summary, null, 2) + "\n");
   }
   summary.qualityComparison = compareRgb(

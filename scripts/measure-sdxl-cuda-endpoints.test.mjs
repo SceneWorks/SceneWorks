@@ -2,12 +2,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference } from "./measure-sdxl-cuda-endpoints.mjs";
 
 const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
 const uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
 function receipt() {
-  return { endpoint: "resident", deviceUuid: uuid, cudaContextUuid: uuid, logicalCudaDevice: 0,
+  return { inferencePin: "b".repeat(40), endpoint: "resident", deviceUuid: uuid, cudaContextUuid: uuid, logicalCudaDevice: 0,
     loadPeakBytes: 1024, wholeRunPeakBytes: 2048, baselineBytes: 512, wholeDevicePeakBytes: 2560,
     output: { width: 1024, height: 1024, channels: 3, rgbBytes: 1024 * 1024 * 3,
       spatiallyNonFlat: true, rgbSha256: "a".repeat(64) },
@@ -35,6 +35,7 @@ test("endpoint receipt rejects missing load inclusion, context mismatch, flat ou
   for (const mutate of [
     (value) => { value.wholeRunPeakBytes = value.loadPeakBytes - 1; },
     (value) => { value.cudaContextUuid = "GPU-foreign"; },
+    (value) => { value.inferencePin = "missing"; },
     (value) => { value.output.spatiallyNonFlat = false; },
     (value) => { value.cleanup.afterBytes += value.cleanup.toleranceBytes + 1; },
   ]) {
@@ -51,4 +52,21 @@ test("saved RGB quality comparison measures every channel and rejects a shape mi
   assert.equal(comparison.changedChannels, 1);
   assert.equal(comparison.identical, false);
   assert.throws(() => compareRgb(Buffer.from([0]), Buffer.from([0, 1])));
+});
+
+// CI_IMPACT: pure bytes/identity checks extend the existing endpoint receipt tests; no inference.
+test("endpoint summary binds exact evidence bytes, record, artifact inventory, compiled pin and device", () => {
+  const inventorySha256 = "a".repeat(64); const inferencePin = "b".repeat(40);
+  const record = { id: "imc-" + "c".repeat(20), artifact: { inventorySha256 },
+    repositories: { inference: { revision: inferencePin } }, hardware: { deviceId: uuid } };
+  const bundle = { records: [record] }; const bytes = JSON.stringify(bundle) + "\n";
+  const expected = { inventorySha256, inferencePin, deviceUuid: uuid };
+  const reference = endpointEvidenceReference(bundle, bytes, expected);
+  assert.equal(reference.recordId, record.id);
+  assert.match(reference.evidenceSha256, /^[a-f0-9]{64}$/);
+  assert.notEqual(reference.evidenceSha256, endpointEvidenceReference(bundle, bytes + " ", expected).evidenceSha256);
+  for (const patch of [{ inventorySha256: "d".repeat(64) }, { inferencePin: "d".repeat(40) }, { deviceUuid: "GPU-foreign" }]) {
+    assert.throws(() => endpointEvidenceReference(bundle, bytes, { ...expected, ...patch }));
+  }
+  assert.throws(() => endpointEvidenceReference({ records: [record, record] }, bytes, expected));
 });
