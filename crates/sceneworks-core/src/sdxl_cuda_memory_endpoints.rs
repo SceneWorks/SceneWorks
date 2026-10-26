@@ -58,7 +58,17 @@ pub struct SdxlCudaMemoryEndpoints {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Config {
     schema_version: u32,
+    #[serde(deserialize_with = "required_pair")]
     pair: RequiredNullable<StoredPair>,
+}
+
+// A custom field deserializer makes omission an error at the containing struct. Without it,
+// RequiredNullable delegates to Option and Serde treats a missing field like explicit null.
+fn required_pair<'de, D>(deserializer: D) -> Result<RequiredNullable<StoredPair>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    RequiredNullable::deserialize(deserializer)
 }
 
 #[derive(Deserialize)]
@@ -296,6 +306,8 @@ fn validate_endpoint(
             && receipt["evidenceSha256"] == anchor.source.sha256,
         "summary/source digest or record binding",
     )?;
+    // Capture provenance only: the adapter that ran must match the captured source checkout.
+    // No active runtime pin is consulted; a later merge/pin does not invalidate this measurement.
     require(
         receipt["inferencePin"] == summary["inferencePin"]
             && record["repositories"]["inference"]["revision"] == summary["inferencePin"],
