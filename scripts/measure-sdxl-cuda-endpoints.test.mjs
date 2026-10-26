@@ -1,9 +1,11 @@
 // CI_IMPACT: pure request/receipt validation only, <1 second; no model, CUDA context or build.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory } from "./measure-sdxl-cuda-endpoints.mjs";
 
 const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
 const uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
@@ -101,4 +103,26 @@ test("only the manual SDXL profile omits historical inference anchor queries", a
   assert.deepEqual(wanted(""), { revisions: [`wanted:${pin}`, `wanted:${historical}`], queried: true });
   const workflow = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
   assert.match(workflow, /MEMORY_CAMPAIGN_PROFILE: \$\{\{ inputs\.profile \|\| 'catalog' \}\}/);
+});
+
+// CI_IMPACT: four tiny source-directory fixtures prove all actual SDXL assembly roles are bound.
+test("SDXL assembly inventory binds shared VAE and both tokenizer roots beside the base tier", async () => {
+  const hub = await mkdtemp(path.join(tmpdir(), "sdxl-assembly-"));
+  const roots = {};
+  for (const role of ["base", "tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]) {
+    const root = path.join(hub, `models--fixture--${role}`, "snapshots", "a".repeat(40));
+    roots[role] = role === "base" ? path.join(root, "q4") : root;
+    await mkdir(roots[role], { recursive: true });
+    await writeFile(path.join(roots[role], "weights.bin"), role);
+  }
+  const row = { tierRoot: roots.base, env: {
+    SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L: roots.tokenizer_clip_l,
+    SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG: roots.tokenizer_clip_bigg,
+    SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX: roots.vae_fp16_fix,
+  } };
+  const first = await sdxlAssemblyInventory(row);
+  assert.deepEqual(first.entries.map((entry) => entry.path), ["base/weights.bin", "components/tokenizer_clip_bigg/weights.bin", "components/tokenizer_clip_l/weights.bin", "components/vae_fp16_fix/weights.bin"]);
+  await writeFile(path.join(roots.vae_fp16_fix, "weights.bin"), "changed-shared-vae");
+  assert.notEqual((await sdxlAssemblyInventory(row)).sha256, first.sha256);
+  await assert.rejects(() => sdxlAssemblyInventory({ ...row, env: {} }), /source missing/);
 });

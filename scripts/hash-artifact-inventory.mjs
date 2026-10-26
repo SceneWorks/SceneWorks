@@ -84,9 +84,37 @@ async function inventoryFiles(
   return files;
 }
 
+function inventoryDigest(files) {
+  const hash = createHash("sha256");
+  for (const file of files) {
+    hash.update(file.path); hash.update("\0"); hash.update(String(file.bytes));
+    hash.update("\0"); hash.update(file.sha256); hash.update("\n");
+  }
+  return hash.digest("hex");
+}
+
+/** Ordered, portable source receipt. Never sort here: the listed order is the digest order. */
+export function artifactInventoryReceipt(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) throw new Error("artifact inventory entries must be nonempty");
+  const paths = new Set();
+  for (const entry of entries) {
+    if (!entry || typeof entry.path !== "string" || !entry.path
+        || /[\\:\x00-\x1f\x7f]/.test(entry.path) || entry.path.startsWith("/")
+        || entry.path.split("/").some((part) => !part || part === "." || part === "..")
+        || paths.has(entry.path)) throw new Error("artifact inventory entry paths must be unique confined portable relative files");
+    if (!Number.isSafeInteger(entry.bytes) || entry.bytes <= 0 || !/^[a-f0-9]{64}$/.test(entry.sha256 ?? "")) {
+      throw new Error("artifact inventory entry requires positive bytes and an exact SHA-256");
+    }
+    paths.add(entry.path);
+  }
+  const bytes = entries.reduce((total, entry) => total + entry.bytes, 0);
+  if (!Number.isSafeInteger(bytes)) throw new Error("artifact inventory byte sum exceeds the safe integer range");
+  return { files: entries.length, bytes, sha256: inventoryDigest(entries), entries };
+}
+
 export async function hashArtifactInventory(
   root,
-  { signal, excludeDirectories = [], includeFiles, trustedRoot } = {},
+  { signal, excludeDirectories = [], includeFiles, trustedRoot, includeEntries = false } = {},
 ) {
   const absolute = path.resolve(root);
   const excluded = new Set(excludeDirectories.map((directory) => {
@@ -147,16 +175,13 @@ export async function hashArtifactInventory(
   }
   if (files.length === 0) throw new Error(`artifact inventory is empty: ${absolute}`);
   const bytes = files.reduce((total, file) => total + file.bytes, 0);
-  const hash = createHash("sha256");
-  for (const file of files) {
-    hash.update(file.path);
-    hash.update("\0");
-    hash.update(String(file.bytes));
-    hash.update("\0");
-    hash.update(file.sha256);
-    hash.update("\n");
+  const receipt = { root: absolute, files: files.length, bytes, sha256: inventoryDigest(files) };
+  // Opt-in only: the default corpus shape and digest algorithm are unchanged.
+  if (includeEntries) {
+    artifactInventoryReceipt(files);
+    receipt.entries = files;
   }
-  return { root: absolute, files: files.length, bytes, sha256: hash.digest("hex") };
+  return receipt;
 }
 
 export async function listCachedArtifactFiles(root, trustedRoot) {
