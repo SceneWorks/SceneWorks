@@ -14323,7 +14323,11 @@ async fn generate_candle_stream_using(
     // exactly what a later swap-in reclaims after the single-slot cache evicts this model. Reached only
     // when the gate ADMITTED the load (the reject arms `return` above), so we never record a peak we
     // didn't actually attempt to allocate.
-    let incurred_peak = if use_sequential {
+    let incurred_peak = if sdxl_request_tier_admission && memory_strategy_selection.is_some() {
+        // An endpoint-priced resident/scratch-bound run must not credit the old padded resident
+        // manifest row during the next eviction. Only the admitted raw working set is reclaimable.
+        adapted_peak_gb
+    } else if use_sequential {
         adapted_peak_gb.or_else(|| {
             crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
                 &request.model_manifest_entry,

@@ -3179,7 +3179,7 @@ mod tests {
             .find(|surface| {
                 surface.contract.provider_id == "sdxl"
                     && surface.selector.tier == gen_core::MemoryContractSurfaceTier::Q4
-                    && surface.contract.load_shape == gen_core::LoadShape::DeferredMaterialization
+                    && surface.contract.load_shape == gen_core::LoadShape::EagerMaterialization
             })
             .expect("registered q4 SDXL contract")
             .contract;
