@@ -65,15 +65,15 @@ export function validateEndpoint(measurement, endpoint, expectedInferencePin) {
       || cleanup.afterBytes > cleanup.beforeBytes + cleanup.toleranceBytes) throw new Error("endpoint leaked device residency or lacks exit telemetry");
 }
 
-/** Same four complete sources SDXL's artifact seal binds, with host-independent role paths. */
+/** Full base plus the exact shared files the SDXL pipeline reads, under portable role paths. */
 export async function sdxlAssemblyInventory(row) {
   const sources = [
     { role: "base", root: row.tierRoot, tier: true, includeFiles: row.inventoryFiles },
     ...[
-      ["tokenizer_clip_l", "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L"],
-      ["tokenizer_clip_bigg", "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG"],
-      ["vae_fp16_fix", "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX"],
-    ].map(([role, key]) => ({ role: `components/${role}`, root: row.env?.[key] })),
+      ["tokenizer_clip_l", "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L", "tokenizer.json"],
+      ["tokenizer_clip_bigg", "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG", "tokenizer.json"],
+      ["vae_fp16_fix", "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX", "diffusion_pytorch_model.safetensors"],
+    ].map(([role, key, file]) => ({ role: `components/${role}`, root: row.env?.[key], includeFiles: [file] })),
   ];
   const entries = [];
   for (const source of sources) {
