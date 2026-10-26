@@ -180,10 +180,17 @@ async function main() {
     for (const error of errors) console.error(` - ${error}`);
   };
 
+  // The refusal reasons go to stderr, which is ASYNCHRONOUS when it is a pipe: an immediate exit
+  // can truncate them, and the reason is the whole point of a refusal. The receipt file keeps the
+  // same reasons, but the log is what a reader sees first.
+  const refuseAndExit = (stage, errors, code = 2) => {
+    refuse(stage, errors);
+    process.stderr.write("", () => process.exit(code));
+  };
+
   const guard = evaluateEnvironment(process.env, { repoRoot: REPO_ROOT, realpath: realpathSync });
   if (!guard.ok) {
-    refuse("environment-guard", guard.errors);
-    process.exit(2);
+    refuseAndExit("environment-guard", guard.errors);
   }
 
   const commit = git(["rev-parse", "HEAD"]);
@@ -214,8 +221,7 @@ async function main() {
     s8Ancestor: s8IsAncestor,
   });
   if (!identity.ok) {
-    refuse("source-identity", identity.errors);
-    process.exit(2);
+    refuseAndExit("source-identity", identity.errors);
   }
   // The managed-form case must read the import panel's fields through their label elements.
   // Checked BEFORE the browser starts: a case whose field selector cannot resolve times out on
@@ -223,8 +229,7 @@ async function main() {
   // budget proving nothing about the import panel.
   const caseSelectors = evaluateCaseFieldSelectors(readFileSync(resolve(HERE, "cases.mjs"), "utf8"));
   if (!caseSelectors.ok) {
-    refuse("case-field-selectors", caseSelectors.errors);
-    process.exit(2);
+    refuseAndExit("case-field-selectors", caseSelectors.errors);
   }
   if (!expectedHead) {
     console.warn(
@@ -234,8 +239,7 @@ async function main() {
   }
 
   if (!resolvedArtifactDir) {
-    refuse("artifact-directory", ["could not create the bounded artifact directory"]);
-    process.exit(2);
+    refuseAndExit("artifact-directory", ["could not create the bounded artifact directory"]);
   }
   const artifactDir = resolvedArtifactDir;
 
@@ -254,15 +258,13 @@ async function main() {
       "Set SC26687_PLAYWRIGHT_ROOT to the private prefix the workflow installed " +
       `playwright@${PLAYWRIGHT_VERSION} into (and PLAYWRIGHT_BROWSERS_PATH under it).\n` +
       `Original error: ${error.message}`;
-    refuse("dependency-contract", [message]);
-    process.exit(2);
+    refuseAndExit("dependency-contract", [message]);
   }
   const installedPlaywright = assertPlaywrightVersion(playwrightTools.version);
   try {
     assertPlaywrightVersion(installedPlaywright);
   } catch (error) {
-    refuse("dependency-contract", [error.message]);
-    process.exit(2);
+    refuseAndExit("dependency-contract", [error.message]);
   }
 
   const results = [];
