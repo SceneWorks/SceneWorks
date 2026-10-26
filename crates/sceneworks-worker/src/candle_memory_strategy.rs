@@ -757,7 +757,7 @@ impl CandleMemoryEvaluation {
             "overlay": self.context.overlay.clone(),
             "strategy": strategy_label(selection.strategy),
             "parameters": {
-                "stageResidency": parameters.stage_residency,
+                "stageResidency": self.memory.as_ref().is_some_and(|memory| memory.stage_residency),
                 "decodeTileEdge": parameters.decode_tile_edge,
                 "decodeOverlap": parameters.decode_overlap,
                 "attentionChunkSize": parameters.attention_chunk_size,
@@ -7151,6 +7151,9 @@ mod tests {
 
         // E7: the event names the rung and its three derived phase peaks.
         let telemetry = evaluation.selection_telemetry("z_image_turbo", "q4");
+        // CI_IMPACT: one assertion on the existing pure selector fixture; no model execution.
+        // Staging is engaged even though its optional explicit parameter is absent above.
+        assert_eq!(telemetry["parameters"]["stageResidency"], true);
         assert_eq!(telemetry["strategy"], "bounded_transformer_residency");
         assert_eq!(telemetry["basis"], "anchor_derived");
         assert_eq!(telemetry["authority"], "estimated");
@@ -7704,6 +7707,10 @@ mod tests {
         assert_eq!(
             near_idle.context.selection.strategy,
             MemoryStrategy::Resident
+        );
+        assert_eq!(
+            near_idle.selection_telemetry("sd3_5_large", "q4")["parameters"]["stageResidency"],
+            false
         );
         assert_eq!(near_idle.admitted.reserve_gb, reserve_gb);
         assert_eq!(
