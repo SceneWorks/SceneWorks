@@ -5,7 +5,19 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, validatePackagedEndpointSummarySource } from "./measure-sdxl-cuda-endpoints.mjs";
+import { EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
+
+// CI_IMPACT: one pure cross-module path contract; no files, build, API or model execution.
+test("replay accepts the packager's dedicated summary and rejects other source paths", () => {
+  const source = { path: `${EVIDENCE_DIR}/sdxl-cuda-endpoints.json`, sha256: "a".repeat(64) };
+  assert.equal(validatePackagedEndpointSummarySource(source), source);
+  for (const path of ["docs/calibration/sdxl-cuda-endpoints.json", "../sdxl-cuda-endpoints.json", `${EVIDENCE_DIR}/other.json`]) {
+    assert.throws(() => validatePackagedEndpointSummarySource({ ...source, path }));
+  }
+  assert.throws(() => validatePackagedEndpointSummarySource({ ...source, sha256: "bad" }));
+  assert.throws(() => validatePackagedEndpointSummarySource(null));
+});
 
 const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
 const uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";

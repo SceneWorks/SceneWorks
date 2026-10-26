@@ -126,6 +126,14 @@ export function admittedReplayRequest(projectId) {
     width: 1024, height: 1024, count: 1, seed: 16402, loras: [], advanced: { mlxQuantize: 4 } };
 }
 
+export function validatePackagedEndpointSummarySource(source) {
+  if (source?.path !== "config/sdxl-cuda-memory-endpoint-evidence/sdxl-cuda-endpoints.json"
+      || !/^[a-f0-9]{64}$/.test(source?.sha256 ?? "")) {
+    throw new Error("replay requires the dedicated packaged measured endpoint summary");
+  }
+  return source;
+}
+
 export function assertAdmittedReplaySelection(selection) {
   const parameters = selection?.parameters;
   const noDecode = parameters?.decodeTileEdge == null && parameters?.decodeOverlap == null;
@@ -227,8 +235,7 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
   if (!apiBinary || !path.isAbsolute(apiBinary)) throw new Error("SDXL_REPLAY_API must name the built native API/worker executable");
   const configBytes = await readFile(path.join(ROOT, "config/sdxl-cuda-memory-endpoints.json"));
   const packageConfig = JSON.parse(configBytes);
-  const summarySource = packageConfig.pair?.summary;
-  if (!summarySource?.path?.startsWith("docs/calibration/") || summarySource.path.includes("..")) throw new Error("replay requires the packaged measured endpoint pair");
+  const summarySource = validatePackagedEndpointSummarySource(packageConfig.pair?.summary);
   const summaryBytes = await readFile(path.join(ROOT, summarySource.path));
   if (createHash("sha256").update(summaryBytes).digest("hex") !== summarySource.sha256) throw new Error("packaged endpoint summary digest mismatch");
   const captured = JSON.parse(summaryBytes);
