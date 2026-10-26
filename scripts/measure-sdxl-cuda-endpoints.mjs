@@ -20,6 +20,7 @@ export const ENDPOINTS = Object.freeze([
 
 export function endpointCase(plan, endpoint) {
   const planned = planAnchor(plan, "sdxl:q4:candle");
+  planned.loadShape = "eager_materialization";
   planned.target.geometry = { width: 1024, height: 1024, batch: 1, frames: 1 };
   planned.strategy = structuredClone(endpoint.strategy);
   planned.calibrationFingerprint = "sdxl-candle-sdxl-staged-decode-attention-v2";
