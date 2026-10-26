@@ -44,7 +44,7 @@ test('precision encoding is frozen to the reviewed native merge and sealed paylo
  const upload={phase:'upload-encoding-precision',artifact_id:null,artifact_run_id:null},execute={phase:'execute-encoding-precision',artifact_id:'123456',artifact_run_id:'123457'};
  assert.deepEqual(encodingPrecisionProfile(),{pin:ENCODING_PRECISION_PIN,sha:ENCODING_PRECISION_SHA,kind:'sc-26752-normal-encoding-precision/v1',staged:ENCODING_PRECISION_STAGED,precision:true});
  assert.equal(ENCODING_PRECISION_PIN,'7275f7c672eecabeba9342e99897ef484e992e14');
- assert.equal(ENCODING_PRECISION_SHA,'64939983787c060873043ecc2fd0604353bba0d2bc30efc0998dc3ef38d3a59d');
+ assert.equal(ENCODING_PRECISION_SHA,'f819d901ce8caa815dc9bdd06cc781dee881f30ba1672a8f91cd4f3ab910cd5f');
  assert.deepEqual(encodingEnvelope(JSON.stringify(upload),ref,ref,'mlx'),upload);
  assert.deepEqual(encodingEnvelope(JSON.stringify(execute),ref,ref,'mlx'),execute);
  const profile=encodingPrecisionProfile('b'.repeat(40),'c'.repeat(64));
@@ -63,6 +63,17 @@ test('frozen precision payload retains the historical upstream tensors under the
  assert.equal(manifest.historicalNativePin,pin);
  assert.equal(manifest.historicalManifestSha256,ENCODING_SHA);
  assert.equal(manifest.files.length,13);
+ const source=await readFile(resolve(ENCODING_PRECISION_STAGED,'overlay/encoding_probe.rs'),'utf8');
+ const original=JSON.parse(await readFile(resolve(ENCODING_PRECISION_STAGED,'upstream/inputs.json')));
+ const historical=source.match(/const HISTORICAL_PIN: &str = "([a-f0-9]{40})";/)?.[1];
+ const current=source.match(/const PIN: &str = "([a-f0-9]{40})";/)?.[1];
+ assert.equal(historical,manifest.historicalNativePin);
+ assert.equal(original.nativeHead,historical);
+ assert.equal(current,manifest.nativePin);
+ assert.notEqual(historical,current);
+ assert.match(source,/assert_eq!\(upstream\["nativeHead"\], HISTORICAL_PIN\);/);
+ assert.match(source,/"nativePin":PIN/);
+ assert.doesNotMatch(source,/assert_eq!\(upstream\["nativeHead"\], PIN\);/);
 });
 test('precision payload binds the exact historical tensors, request and B image independently of new overlay',async t=>{
  try{await access(resolve(ENCODING_STAGED,'payload-manifest.json'));}catch{t.skip('retained sealed encoding payload unavailable on this host');return;}
