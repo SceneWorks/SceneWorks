@@ -72,6 +72,13 @@ describe("BatchPromptPanel (sc-9955)", () => {
     expect(container.querySelector(".batch-preview-text").textContent).toBe("a landscape");
   });
 
+  it("previews the largest approximate ratio bucket and adapts to device filtering", async () => {
+    await mount({ initialPrompts: "[3:4] a portrait", extra: { resolutionOptions: ["768x1024", "896x1152", "1408x2048", "2048x2048"] } });
+    expect(container.querySelector(".batch-preview-res").textContent).toBe("1408×2048");
+    await mount({ initialPrompts: "[3:4] a portrait", extra: { resolutionOptions: ["768x1024", "896x1152", "2048x2048"] } });
+    expect(container.querySelector(".batch-preview-res").textContent).toBe("896×1152");
+  });
+
   it("renders a chip editor per unique {{key}} referenced in the prompts", () => {
     mount({ initialPrompts: "{{name}} with {{hair}} hair\n{{name}} smiling" });
     expect(varKeys()).toEqual(["{{name}}", "{{hair}}"]);

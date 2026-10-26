@@ -233,9 +233,8 @@ describe("Image Studio img2img reference aspect snap", () => {
     await pickReference();
     expect(aspectSelect().value).toBe("1152x2048");
 
-    // Switching models resets the Aspect to the new model's default (1024x1024). The reference is
-    // still armed, so the snap must run again on the NEW bucket list — otherwise a 9:16 reference
-    // would silently render square, the wrong-shaped-latent failure sc-10195 exists to prevent.
+    // The reference is still armed, so the snap must run again on the NEW bucket list
+    // when switching models, preserving the reference's 9:16 composition.
     const select = document.body.querySelector(".settings-field-model select");
     await act(async () => {
       root.render(studio([REFERENCE_ASSET], [KREA_MODEL, OTHER_MODEL]));
@@ -264,8 +263,8 @@ describe("Image Studio img2img reference aspect snap", () => {
     await pickReference();
     expect(aspectSelect().value).toBe("1152x2048");
 
-    // The armed reference is not cleared by a model change, but the panel that owns it is gone, so
-    // the model's own default must stand rather than an invisible reference's closest bucket.
+    // The panel owning the reference is gone. Resolution continuity still preserves the
+    // previous composition, but the invisible reference must not steer later manual choices.
     const select = document.body.querySelector(".settings-field-model select");
     await act(async () => {
       select.value = "flux2_klein_9b";
@@ -273,6 +272,12 @@ describe("Image Studio img2img reference aspect snap", () => {
     });
     await settle();
 
+    expect(aspectSelect().value).toBe("896x1600");
+    await act(async () => {
+      aspectSelect().value = "1024x1024";
+      aspectSelect().dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
     expect(aspectSelect().value).toBe("1024x1024");
   });
 
