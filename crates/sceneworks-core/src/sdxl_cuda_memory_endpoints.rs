@@ -7,6 +7,7 @@
 //! created here. The immutable capture summary binds the bundle bytes, actual CUDA context,
 //! compiled capture pin, artifact inventory, exact execution settings and retained image receipts.
 
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use serde::Deserialize;
@@ -35,6 +36,16 @@ pub struct EndpointArtifact {
     pub variant: String,
     pub inventory_sha256: String,
     pub resolved_path_fingerprint: String,
+    /// Exact capture order; the composite digest commits to this order as well as each file.
+    pub files: Vec<EndpointArtifactFile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndpointArtifactFile {
+    pub path: String,
+    pub bytes: u64,
+    pub sha256: String,
 }
 
 /// Validated raw measurements. Neither endpoint is a runtime-certification record.
@@ -133,6 +144,7 @@ pub fn load_sdxl_cuda_memory_endpoints(
     )?;
     let pin = text(&summary, "/inferencePin")?;
     require(is_hex(pin, 40), "capture inference pin")?;
+    let files = validate_inventory(&summary["artifactInventory"])?;
     let inventory = text(&summary, "/artifactInventory/sha256")?;
     require(is_hex(inventory, 64), "artifact inventory digest")?;
     require(
@@ -222,6 +234,7 @@ pub fn load_sdxl_cuda_memory_endpoints(
         inventory_sha256: inventory.to_owned(),
         resolved_path_fingerprint: text(resident_record, "/loadability/resolvedPathFingerprint")?
             .to_owned(),
+        files,
     };
     Ok(Some(SdxlCudaMemoryEndpoints {
         resident: pair.resident,
@@ -472,6 +485,74 @@ fn validate_endpoint(
     Ok(())
 }
 
+fn validate_inventory(value: &Value) -> Result<Vec<EndpointArtifactFile>, String> {
+    let files: Vec<EndpointArtifactFile> = serde_json::from_value(value["entries"].clone())
+        .map_err(|error| format!("SDXL endpoints: artifact inventory entries: {error}"))?;
+    require(
+        !files.is_empty() && files.len() as u64 == number(value, "/files")?,
+        "inventory file count",
+    )?;
+    let mut seen = BTreeSet::new();
+    let mut total = 0u64;
+    for file in &files {
+        require(
+            !file.path.is_empty()
+                && !file
+                    .path
+                    .chars()
+                    .any(|c| c.is_control() || c == '\\' || c == ':')
+                && file
+                    .path
+                    .split('/')
+                    .all(|part| !part.is_empty() && part != "." && part != "..")
+                && seen.insert(file.path.as_str()),
+            "inventory path must be unique and confined",
+        )?;
+        require(
+            file.bytes > 0 && is_hex(&file.sha256, 64),
+            "inventory file size/digest",
+        )?;
+        total = total
+            .checked_add(file.bytes)
+            .ok_or("SDXL endpoints: inventory byte overflow")?;
+    }
+    let roots = [
+        "base/",
+        "components/tokenizer_clip_l/",
+        "components/tokenizer_clip_bigg/",
+        "components/vae_fp16_fix/",
+    ];
+    require(
+        roots
+            .iter()
+            .all(|root| files.iter().any(|file| file.path.starts_with(root)))
+            && files
+                .iter()
+                .all(|file| roots.iter().any(|root| file.path.starts_with(root))),
+        "inventory must bind the complete stock SDXL source assembly",
+    )?;
+    require(total == number(value, "/bytes")?, "inventory byte total")?;
+    require(
+        inventory_digest(&files) == text(value, "/sha256")?,
+        "ordered inventory composite digest",
+    )?;
+    Ok(files)
+}
+
+fn inventory_digest(files: &[EndpointArtifactFile]) -> String {
+    let mut hash = Sha256::new();
+    // Consume the recorded order. Do not reproduce the capture host's path sorting/locale here.
+    for file in files {
+        hash.update(file.path.as_bytes());
+        hash.update(b"\0");
+        hash.update(file.bytes.to_string().as_bytes());
+        hash.update(b"\0");
+        hash.update(file.sha256.as_bytes());
+        hash.update(b"\n");
+    }
+    format!("{hash:x}", hash = hash.finalize())
+}
+
 fn expected_strategy(name: &str) -> Value {
     if name == "resident" {
         json!({"rung":"resident","engagedRungs":["resident"],"parameters":{}})
@@ -565,7 +646,25 @@ mod tests {
         summary: Value,
     }
 
+    fn fixture_inventory() -> Value {
+        let entries: Vec<EndpointArtifactFile> = [
+            "base/weights.safetensors",
+            "components/tokenizer_clip_l/tokenizer.json",
+            "components/tokenizer_clip_bigg/tokenizer.json",
+            "components/vae_fp16_fix/vae.safetensors",
+        ]
+        .into_iter()
+        .map(|path| EndpointArtifactFile {
+            path: path.into(),
+            bytes: 1000,
+            sha256: "a".repeat(64),
+        })
+        .collect();
+        json!({"files":entries.len(), "bytes":4000, "sha256":inventory_digest(&entries), "entries":entries.iter().map(|file| json!({"path":file.path,"bytes":file.bytes,"sha256":file.sha256})).collect::<Vec<_>>()})
+    }
+
     fn fixture() -> Fixture {
+        let inventory = fixture_inventory();
         let base: Value = serde_json::from_str(include_str!(
             "../../../docs/calibration/sc-22738/sdxl-q4-candle-evidence.json"
         ))
@@ -586,7 +685,7 @@ mod tests {
             record["calibrationFingerprint"] = json!(FINGERPRINT);
             record["fixture"] = json!(FIXTURE);
             record["loadShape"] = json!("eager_materialization");
-            record["artifact"]["inventorySha256"] = json!("a".repeat(64));
+            record["artifact"]["inventorySha256"] = inventory["sha256"].clone();
             record["hardware"]["deviceId"] = json!(GPU_UUID);
             record["target"]["geometry"] = json!({"width":1024,"height":1024,"batch":1,"frames":1});
             record["strategy"] = expected_strategy(name);
@@ -630,7 +729,7 @@ mod tests {
         }
         Fixture {
             config: json!({"schemaVersion":1,"pair":{"resident":anchors[0],"sequential":anchors[1],"summary":{"path":"summary.json","sha256":""}}}),
-            summary: json!({"schemaVersion":1,"profile":"sdxl-cuda-endpoints","inferencePin":bundles[0]["records"][0]["repositories"]["inference"]["revision"],"artifactInventory":{"files":10,"bytes":1000,"sha256":"a".repeat(64)},"reserveBytes":2u64*1024*1024*1024,"reserveIncludedInMeasuredPeaks":false,"resolvedDefaults":{"steps":30,"guidance":7.0,"sampler":"euler"},"endpoints":receipts,"qualityComparison":{"result":"measured","reference":"resident","selected":"sequential","channels":RGB_BYTES,"maximumAbsoluteRgbDelta255":0,"meanAbsoluteRgbDelta255":0.0,"maximumAbsoluteError":0.0,"meanAbsoluteError":0.0,"changedChannels":0,"identical":true}}),
+            summary: json!({"schemaVersion":1,"profile":"sdxl-cuda-endpoints","inferencePin":bundles[0]["records"][0]["repositories"]["inference"]["revision"],"artifactInventory":inventory,"reserveBytes":2u64*1024*1024*1024,"reserveIncludedInMeasuredPeaks":false,"resolvedDefaults":{"steps":30,"guidance":7.0,"sampler":"euler"},"endpoints":receipts,"qualityComparison":{"result":"measured","reference":"resident","selected":"sequential","channels":RGB_BYTES,"maximumAbsoluteRgbDelta255":0,"meanAbsoluteRgbDelta255":0.0,"maximumAbsoluteError":0.0,"meanAbsoluteError":0.0,"changedChannels":0,"identical":true}}),
             bundles,
         }
     }
@@ -791,6 +890,33 @@ mod tests {
             *fixture.bundles[1].pointer_mut(path).unwrap() = value;
             assert!(fixture.load().is_err(), "accepted source mutation {path}");
         }
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_binds_order_contents_and_complete_source_assembly() {
+        let inventory = fixture_inventory();
+        assert_eq!(validate_inventory(&inventory).unwrap().len(), 4);
+        for (pointer, replacement) in [
+            ("/entries/0/path", json!("../weights.safetensors")),
+            (
+                "/entries/0/path",
+                json!("components/tokenizer_clip_l/tokenizer.json"),
+            ),
+            ("/entries/0/path", json!("other/weights.safetensors")),
+            ("/entries/0/bytes", json!(1001)),
+            ("/entries/0/sha256", json!("b".repeat(64))),
+            ("/files", json!(3)),
+            ("/bytes", json!(3999)),
+        ] {
+            let mut changed = inventory.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            assert!(validate_inventory(&changed).is_err(), "accepted {pointer}");
+        }
+        let mut reordered = inventory;
+        reordered["entries"].as_array_mut().unwrap().swap(0, 1);
+        assert!(validate_inventory(&reordered)
+            .unwrap_err()
+            .contains("ordered inventory composite"));
     }
 
     #[test]

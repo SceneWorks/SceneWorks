@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { anchorCandidate } from "./extract-memory-anchors.mjs";
 import { anchorLoaderDigests } from "./anchor-loader-closure.mjs";
 import { validateBundle } from "./memory-calibration-harness.mjs";
+import { artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const EVIDENCE_DIR = "config/sdxl-cuda-memory-endpoint-evidence";
@@ -25,6 +26,14 @@ export function buildEndpointConfig(summaryRaw, bundleRaws, loaderClosureDigest)
   const summary = JSON.parse(summaryRaw);
   require(summary.profile === "sdxl-cuda-endpoints" && summary.schemaVersion === 1, "wrong capture profile");
   require(summary.endpoints?.length === 2, "requires exactly two endpoints");
+  const inventory = artifactInventoryReceipt(summary.artifactInventory?.entries);
+  for (const field of ["files", "bytes", "sha256"]) {
+    require(inventory[field] === summary.artifactInventory[field], `ordered artifact inventory ${field} differs`);
+  }
+  const roots = ["base/", "components/tokenizer_clip_l/", "components/tokenizer_clip_bigg/", "components/vae_fp16_fix/"];
+  require(roots.every((root) => inventory.entries.some((entry) => entry.path.startsWith(root)))
+    && inventory.entries.every((entry) => roots.some((root) => entry.path.startsWith(root))),
+  "inventory must cover the complete stock SDXL source assembly");
   const pair = {};
   for (const name of NAMES) {
     const matches = summary.endpoints.filter((entry) => entry.endpoint === name);

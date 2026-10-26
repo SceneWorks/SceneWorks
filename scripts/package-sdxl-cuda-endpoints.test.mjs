@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
 import { logicalCaseId, recordId } from "./memory-calibration-harness.mjs";
 import { buildEndpointConfig, compiledSources, verifyOutputBytes, EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
 
@@ -10,6 +11,8 @@ const seed = JSON.parse(await readFile(new URL("../docs/calibration/sc-22738/sdx
 
 // Unit-only data derived from a valid historical gated shape. Never packaged as a measurement.
 function fixture() {
+  const inventory = artifactInventoryReceipt(["base/weights.safetensors", "components/tokenizer_clip_l/tokenizer.json", "components/tokenizer_clip_bigg/tokenizer.json", "components/vae_fp16_fix/vae.safetensors"]
+    .map((path) => ({ path, bytes: 1000, sha256: "a".repeat(64) })));
   const bundles = {};
   const endpoints = [];
   for (const [index, name] of ["resident", "sequential"].entries()) {
@@ -17,7 +20,7 @@ function fixture() {
     const record = bundle.records[0];
     record.id = `imc-${String(index + 1).padStart(20, "0")}`;
     record.loadShape = "eager_materialization";
-    record.artifact.inventorySha256 = "a".repeat(64);
+    record.artifact.inventorySha256 = inventory.sha256;
     record.target.geometry = { width: 1024, height: 1024, frames: 1, batch: 1 };
     record.strategy = name === "resident"
       ? { rung: "resident", engagedRungs: ["resident"], parameters: {} }
@@ -32,7 +35,7 @@ function fixture() {
   }
   return { bundles, summary: { schemaVersion: 1, profile: "sdxl-cuda-endpoints",
     inferencePin: seed.records[0].repositories.inference.revision,
-    artifactInventory: { sha256: "a".repeat(64) }, endpoints } };
+    artifactInventory: inventory, endpoints } };
 }
 
 const build = (f) => buildEndpointConfig(JSON.stringify(f.summary), f.bundles, "b".repeat(64));
@@ -73,6 +76,11 @@ test("packaging refuses changed or incomplete capture bindings", () => {
     (f) => { f.summary.endpoints[1].recordId = f.summary.endpoints[0].recordId; },
     (f) => { f.summary.endpoints[1].inferencePin = "f".repeat(40); },
     (f) => { f.summary.artifactInventory.sha256 = "f".repeat(64); },
+    (f) => { f.summary.artifactInventory.entries.reverse(); },
+    (f) => { f.summary.artifactInventory.entries[0].path = "../escape"; },
+    (f) => { f.summary.artifactInventory.entries[0].bytes++; },
+    (f) => { f.summary.artifactInventory.entries[0].sha256 = "f".repeat(64); },
+    (f) => { f.summary.artifactInventory.entries[0] = f.summary.artifactInventory.entries[1]; },
     (f) => { f.summary.endpoints[1].wholeRunPeakBytes++; },
   ]) {
     const f = fixture(); mutate(f); assert.throws(() => build(f));
