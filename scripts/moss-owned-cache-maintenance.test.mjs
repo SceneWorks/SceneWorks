@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { win32 as path } from 'node:path';
-import { OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
+import { SELECTED_HF, selectedHfEnvelope, selectedArtifact, selectedRuntime, partialBuildRuntime, selectedEntries, selectedProcesses, maintainSelectedHf, OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
 const runtimes = await Promise.all([4, 5, 6, 10, 12, 13, 14, 15].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
 const env = { GITHUB_REPOSITORY: 'SceneWorks/SceneWorks', GITHUB_RUN_ID: '99999999999', GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKSPACE: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', MOSS_ROOT: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-99999999999-1-cuda', MOSS_SOURCE_SHA: 'a'.repeat(40), MOSS_INFERENCE_SHA: 'b'.repeat(40) };
 const state = binding => ({ id: Number(binding.run), run_attempt: 1, head_sha: binding.source, status: 'completed', conclusion: 'failure' });
@@ -281,4 +281,66 @@ test('fixed reference HF-only recovery never copies or removes any target even w
 test('reference cleanup CLI requires exact Actions/source and the same closed reference artifact envelope',()=>{
  const base={GITHUB_ACTIONS:'true',MOSS_SOURCE_SHA:'a'.repeat(40),GITHUB_SHA:'a'.repeat(40),MOSS_REFERENCE_BACKEND:'mlx',MOSS_REFERENCE:JSON.stringify({phase:'upload',artifact_id:null,artifact_run_id:null})};validateHfOnlyEnvelope(base);
  for(const changes of [{GITHUB_ACTIONS:'false'},{GITHUB_SHA:'b'.repeat(40)},{MOSS_REFERENCE_BACKEND:'candle'},{MOSS_REFERENCE:'{}'},{MOSS_REFERENCE:JSON.stringify({phase:'upload',artifact_id:null,artifact_run_id:null,command:'id'})}])assert.throws(()=>validateHfOnlyEnvelope({...base,...changes}));
+});
+
+// CI_IMPACT: metadata-only fixed-owner recovery; inert IO, no Windows process/model invocation.
+// Fixture contains exact archived JSON only: R19/H39/H42 execution runtime and R19/H39 transfer.
+const selectedRecords=JSON.parse(gunzipSync(await readFile(new URL('./fixtures/moss-stopped-runtime/h39-h42-selected.json.gz',import.meta.url))));
+const selectedEnv={...env,GITHUB_ACTIONS:'true',GITHUB_JOB:'moss-owned-hf-maintenance',GITHUB_SHA:env.MOSS_SOURCE_SHA,MOSS_REFERENCE_BACKEND:'candle',MOSS_REFERENCE:JSON.stringify({phase:'inventory',candidate:null})};
+function selectedFixture({candidate=null,mutateRead,mutateEntries,mutateInspect,activeAtMutation=false,processMatch=false,artifactChange}={}) {
+  const runtimes=SELECTED_HF.map((_,i)=>Buffer.from(selectedRecords[i])),packages=JSON.parse(selectedRecords[3]).after;
+  const files=new Map(SELECTED_HF.map((b,i)=>[path.join(b.root,'runtime.json'),runtimes[i]]));
+  files.set(path.join(SELECTED_HF[0].root,'hf-transfer.json'),Buffer.from(selectedRecords[3]));files.set(path.join(SELECTED_HF[1].root,'hf-transfer.json'),Buffer.from(selectedRecords[4]));files.set(path.join(path.dirname(SELECTED_HF[2].leaf),'runtime.json'),partialBuildRuntime(JSON.parse(selectedRecords[2])));
+  const present=new Set(SELECTED_HF.map(b=>b.leaf)),calls=[],reports=[],removed=[],stopCounts=new Map();
+  const entries=b=>(b.key==='h42-partial'?packages.slice(0,3):packages).map((item,i)=>({path:item.file,type:'file',dev:'1',ino:String(9007199254740993n+BigInt(i)),nlink:'1',byteLength:String(b.key==='h42-partial'?Math.min(item.byteLength,13):item.byteLength)}));
+  const io={
+    volume:async()=>{calls.push('volume');return {drive:'D',size:1024**4,free:1000+removed.length*987};},
+    read:async file=>{calls.push(['read',file]);assert.ok(files.has(file),'only fixed ownership JSON may be read');return mutateRead?.(file,files.get(file))??files.get(file);},
+    inspect:async file=>{calls.push(['inspect',file]);const b=SELECTED_HF.find(b=>b.leaf===file);const list=b&&present.has(file)?entries(b):[];return mutateInspect?.(file)??{...tree(file,b?present.has(file):true),bytes:list.reduce((n,x)=>n+Number(x.byteLength),0),fileCount:list.length};},
+    entries:async leaf=>{calls.push(['entries',leaf]);const b=SELECTED_HF.find(b=>b.leaf===leaf);assert.ok(b);return mutateEntries?.(b,entries(b))??entries(b);},
+    stopped:async b=>{calls.push(['stopped',b.key]);const count=(stopCounts.get(b.key)??0)+1;stopCounts.set(b.key,count);const latest={...state(b),...(activeAtMutation&&count>1?{status:'in_progress'}:{})};validateStopped(b,latest,state(b),jobs(b));return {run:b.run,head:b.source,status:'completed',jobs:jobs(b)};},
+    artifact:async b=>({id:Number(b.artifact),name:`moss-execution-cuda-${b.run}-1`,size_in_bytes:b.artifactBytes,digest:`sha256:${b.artifactSha}`,expired:false,workflow_run:{id:Number(b.run),head_sha:b.source},...artifactChange}),
+    processes:async b=>{calls.push(['processes',b.key]);return {complete:true,matches:processMatch?[{pid:8692,name:'ambiguous recycled PID'}]:[]};},
+    remove:async leaf=>{assert.ok(SELECTED_HF.slice(1).some(b=>b.leaf===leaf));calls.push(['remove',leaf]);assert.ok(reports.some(x=>x.stage==='validated-before-single-leaf-cleanup'));removed.push(leaf);present.delete(leaf);},
+    report:value=>reports.push(structuredClone(value)),
+  };
+  return {io,calls,reports,removed,present,files,packages,env:{...selectedEnv,MOSS_REFERENCE:JSON.stringify({phase:candidate?'cleanup':'inventory',candidate})}};
+}
+test('selected HF fixture authenticates exact archived producer bytes and separate H42 derived build config',()=>{
+  for(const [i,b]of SELECTED_HF.entries())assert.equal(selectedRuntime(b,Buffer.from(selectedRecords[i])).sourceSha,b.product);
+  const bytes=partialBuildRuntime(JSON.parse(selectedRecords[2]));assert.equal(bytes.length,71584);assert.equal(createHash('sha256').update(bytes).digest('hex'),'449d09a6d6f2dddb5c3ef9293fe3385f3b6d659da82f48b531710b50d9b95c21');
+  assert.equal(JSON.parse(bytes).packageSource,SELECTED_HF[0].leaf);assert.equal(JSON.parse(bytes).root,path.dirname(SELECTED_HF[2].leaf));
+  assert.equal(SELECTED_HF[1].source,'63874fe81e45750a8b98a5bf1b821383af40ae72');assert.notEqual(SELECTED_HF[1].source,SELECTED_HF[1].product);
+  for(const i of [3,4]){const b=SELECTED_HF[i===3?0:1];assert.equal(createHash('sha256').update(selectedRecords[i]).digest('hex'),b.transferSha);assert.equal(JSON.parse(selectedRecords[i]).after.reduce((n,x)=>n+x.byteLength,0),59241637664);}
+});
+test('manual inventory authenticates all three owners and metadata without any deletion/process/weight reads',async()=>{
+  const f=selectedFixture(),receipt=await maintainSelectedHf(f.env,f.io);assert.equal(receipt.candidates.length,3);assert.deepEqual(f.removed,[]);assert.equal(f.calls.some(x=>Array.isArray(x)&&x[0]==='processes'),false);assert.equal(receipt.candidates[0].protected,true);assert.equal(receipt.candidates[0].inventory.bytes,59241637664);assert.equal(receipt.candidates[2].derivedRuntime.sha256,SELECTED_HF[2].derivedRuntimeSha);
+  for(const report of f.reports)assert.equal(report.receiptSha256,createHash('sha256').update(JSON.stringify(report.receipt)).digest('hex'));assert.equal(receipt.before.free,receipt.after.free);
+});
+test('explicit cleanup removes exactly selected HF leaf after repeated stopped/runtime/metadata/process checks',async()=>{
+  for(const candidate of ['h39','h42-partial']){const f=selectedFixture({candidate}),receipt=await maintainSelectedHf(f.env,f.io),binding=SELECTED_HF.find(b=>b.key===candidate);assert.deepEqual(f.removed,[binding.leaf]);assert.equal(f.present.has(SELECTED_HF[0].leaf),true);assert.equal(receipt.operations.length,1);assert.equal(receipt.after.free-receipt.before.free,987);assert.equal(f.calls.filter(x=>Array.isArray(x)&&x[0]==='processes').length,2);assert.equal(f.calls.filter(x=>Array.isArray(x)&&x[0]==='stopped'&&x[1]===candidate).length,2);assert.notEqual(receipt.operations[0].observedBytesBefore,987);}
+});
+test('closed maintenance ref/backend/job/run/phase/candidate failures precede all IO',async()=>{
+  for(const changes of [{GITHUB_ACTIONS:'false'},{GITHUB_REPOSITORY:'other/repo'},{GITHUB_JOB:'moss-upstream-reference'},{GITHUB_SHA:'b'.repeat(40)},{MOSS_REFERENCE_BACKEND:'mlx'},{GITHUB_RUN_ID:SELECTED_HF[0].run},{GITHUB_RUN_ATTEMPT:'0'},{GITHUB_WORKSPACE:'E:\\user-cache'},...[{}, {phase:'inventory',candidate:'h39'},{phase:'cleanup',candidate:null},{phase:'cleanup',candidate:'r19-protected'},{phase:'cleanup',candidate:'H39'},{phase:'cleanup',candidate:['h39','h42-partial']},{phase:'cleanup',candidate:'h39',path:SELECTED_HF[0].leaf},{phase:'execute',candidate:'h39'}].map(x=>({MOSS_REFERENCE:JSON.stringify(x)}))]){const f=selectedFixture();await assert.rejects(()=>maintainSelectedHf({...f.env,...changes},f.io));assert.deepEqual(f.calls,[]);assert.deepEqual(f.removed,[]);}
+  assert.deepEqual(selectedHfEnvelope(selectedEnv),{phase:'inventory',candidate:null});
+});
+test('artifact/runtime/reparse/foreign/nonexclusive/extent/live ownership failures prevent every cleanup',async()=>{
+  const h42Runtime=path.join(path.dirname(SELECTED_HF[2].leaf),'runtime.json');
+  for(const options of [
+    {artifactChange:{digest:'sha256:'+'0'.repeat(64)}},{artifactChange:{expired:true}},{artifactChange:{workflow_run:{id:1,head_sha:SELECTED_HF[0].product}}},
+    {mutateRead:(file,bytes)=>file===h42Runtime?Buffer.concat([bytes,Buffer.from(' ')]):bytes},
+    {mutateRead:(file,bytes)=>file===path.join(SELECTED_HF[1].root,'runtime.json')?Buffer.from('{}'):bytes},
+    {mutateInspect:file=>file===SELECTED_HF[2].leaf?{...tree(file),reparsePoints:1}:undefined},
+    ...[x=>({...x,nlink:'2'}),x=>({...x,type:'symlink'}),x=>({...x,path:'../../user-cache'}),x=>({...x,byteLength:String(2**48)}),x=>({...x,ino:'0'})].map(change=>({mutateEntries:(b,list)=>b.key==='h42-partial'?[change(list[0]),...list.slice(1)]:list})),
+    {activeAtMutation:true},{processMatch:true},
+  ]){const f=selectedFixture({candidate:'h42-partial',...options});await assert.rejects(()=>maintainSelectedHf(f.env,f.io));assert.deepEqual(f.removed,[]);}
+  assert.throws(()=>selectedProcesses({complete:false,matches:[]}));assert.throws(()=>selectedProcesses({complete:true,matches:[{pid:1}]}));
+  const f=selectedFixture(),entries=[{path:f.packages[0].file,type:'file',dev:'1',ino:'1',nlink:'1',byteLength:'1'}];assert.throws(()=>selectedEntries(SELECTED_HF[2],[...entries,{...entries[0],path:f.packages[1].file}],f.packages),/ownership/);
+  assert.throws(()=>selectedArtifact(SELECTED_HF[1],{}));assert.throws(()=>selectedRuntime(SELECTED_HF[1],Buffer.from('{}')));
+});
+test('assembled manual workflow streams exact helper with no checkout, cache copy, model job or old-route selection changes',async()=>{
+  const source=await readFile(new URL('../.github/workflows/memory-catalog-campaign.yml',import.meta.url),'utf8'),job=source.slice(source.indexOf('  moss-owned-hf-maintenance:'),source.indexOf('  moss-reference-maintenance:'));
+  assert.match(job,/if: inputs.profile == 'moss-owned-hf-maintenance'/);assert.match(job,/runs-on: \[self-hosted, Windows, X64, cuda\]/);assert.doesNotMatch(job,/real-weights|uses:|checkout|cargo|nvidia|npm /);assert.match(job,/contents: read/);assert.match(job,/actions: read/);assert.match(job,/--moss-selected-hf/);assert.match(job,/externals\\node24\\bin\\node.exe/);assert.match(job,/moss-owned-cache-maintenance.mjs\?ref=\$env:MOSS_SOURCE_SHA/);
+  const helper=await readFile(new URL('./ci/moss-owned-cache-maintenance.mjs',import.meta.url));assert.ok(job.includes(createHash('sha256').update(helper).digest('hex')),'workflow must bind exact helper SHA');
+  const old=source.slice(source.indexOf('  moss-reference-maintenance:'),source.indexOf('  moss-upstream-reference:'));assert.match(old,/inputs.profile == 'moss-upstream-reference'/);assert.doesNotMatch(old,/moss-selected-hf|h42-partial/);
 });
