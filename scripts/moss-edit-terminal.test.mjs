@@ -84,6 +84,24 @@ test('manual job ID and terminal status cannot substitute actual persisted reque
   checkJob(row, request, job); assert.throws(() => checkJob(row, request, { ...job, backend: 'cuda' }));
   assert.throws(() => checkJob(row, request, { ...job, result: { ...job.result, outputPublication: { state: 'pending' } } }));
 });
+
+// Actual H43 run40388147087/1 Editor row. Request SHA6304a53281a2f6782a3903488fd35cc2746cf82696d9e23ffc7c48338ceb6ab4;
+// terminal-job SHA383fd963735d8aa5638b338f220b9664874bba006a7f7148a2f07207be573f34.
+// Keep every authored payload field; omit unrelated server-added catalog/result metadata only.
+test('actual Editor job binds authored GPU routing on envelope while every generation field and UI POST stay strict',()=>{
+  const request={"projectId":"project_bf98fa406d6e29990994d3e42e8c70a3","projectName":"MOSS edit sc-26752-final-r19","requestedGpu":"auto","mode":"edit_image","model":"moss_image_sft","prompt":"Change only the blue bottle body and blue cap to deep red. Keep its silver collar, handle shape, water droplets, exact silhouette and position unchanged. Preserve both orange pieces, pale stone surface, lighting, shadows, background, framing and empty space on the left. Do not add text or objects.","negativePrompt":"","seed":173,"count":1,"width":768,"height":512,"referenceAssetIds":["asset_67b88aa63ad9e007f68966ab1ba37e5c"],"advanced":{"mossImage":{"acceleration":"off","max_sequence_length":4096,"training_shift":1,"uncond_skip_layers":[]},"mossImageEdit":{"reference_max_edge":512,"use_kv_cache":true},"mossImageAdvanced":{"output":"images"},"steps":30,"guidanceScale":4,"schedulerShift":5}};
+  const job={"id":"job_5c5b69b99e7d7ba5358c6f9c9bec6494","projectId":"project_bf98fa406d6e29990994d3e42e8c70a3","requestedGpu":"auto","assignedGpu":"1","backend":"1","status":"completed","workerId":"moss-sc-26752-final-r19-cuda","startedAt":"2026-10-26T20:00:54Z","completedAt":"2026-10-26T20:02:59Z","payload":{"projectId":"project_bf98fa406d6e29990994d3e42e8c70a3","projectName":"MOSS edit sc-26752-final-r19","mode":"edit_image","model":"moss_image_sft","prompt":"Change only the blue bottle body and blue cap to deep red. Keep its silver collar, handle shape, water droplets, exact silhouette and position unchanged. Preserve both orange pieces, pale stone surface, lighting, shadows, background, framing and empty space on the left. Do not add text or objects.","negativePrompt":"","seed":173,"count":1,"width":768,"height":512,"referenceAssetIds":["asset_67b88aa63ad9e007f68966ab1ba37e5c"],"advanced":{"guidanceScale":4,"mossImage":{"acceleration":"off","max_sequence_length":4096,"slg":null,"training_shift":1,"uncond_skip_layers":[]},"mossImageAdvanced":{"output":"images"},"mossImageEdit":{"reference_max_edge":512,"use_kv_cache":true},"schedulerShift":5,"steps":30}},"result":{"assets":[{"id":"asset_0c794a168ece4dec9750dbf5b4d2a788"}]}};
+  const row={id:'quality-cuda-sft-single',backend:'cuda',expected:'completed',outputCount:1};
+  assert.equal(Object.hasOwn(job.payload,'requestedGpu'),false);assert.equal(job.requestedGpu,'auto');assert.equal(job.assignedGpu,'1');
+  checkJob(row,request,job,'1');
+  for(const requestedGpu of [undefined,'0','1','mlx'])assert.throws(()=>checkJob(row,request,{...job,requestedGpu},'1'),/routing field requestedGpu/);
+  for(const change of [{seed:174},{prompt:'changed'},{referenceAssetIds:['foreign-reference']},{advanced:{...job.payload.advanced,steps:29}},{advanced:{...job.payload.advanced,mossImageEdit:{...job.payload.advanced.mossImageEdit,use_kv_cache:false}}}])assert.throws(()=>checkJob(row,request,{...job,payload:{...job.payload,...change}},'1'),/frozen request field/);
+  assert.throws(()=>checkJob(row,request,job,'0'),/worker launch contract/);
+  assert.throws(()=>checkJob(row,request,{...job,backend:'0'},'1'),/worker launch contract/);
+  verifyUiRequestBinding(request,structuredClone(request));assert.throws(()=>verifyUiRequestBinding(request,job.payload),/frozen request field requestedGpu/);
+  assert.throws(()=>assertRequestBinding(request,{...request,requestedGpu:'0'}),/frozen request field requestedGpu/);
+});
+
 test('cancellation cannot publish images or stale completed reports', () => {
   const row = { expected: 'canceled', outputCount: 0, backend: 'mlx' }, request = { projectId: 'p' };
   const job = { id: 'j', projectId: 'p', payload: request, backend: 'mlx', status: 'canceled', result: { assets: [] } };

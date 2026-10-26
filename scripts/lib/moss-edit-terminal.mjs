@@ -368,7 +368,11 @@ export function validateEditorSource({ row, expected, capture, intent, original,
 }
 export function checkJob(row, request, job, workerGpuId = row.backend === 'cuda' ? '1' : 'mlx') {
   requireThat(job.id && job.projectId === request.projectId, 'job/project identity mismatch');
-  assertRequestBinding(request, job.payload);
+  // The API removes requestedGpu from the generation payload and persists routing
+  // on the job envelope. The actual UI POST remains subject to the strict checker.
+  const {requestedGpu,...payloadRequest}=request;
+  if(Object.hasOwn(request,'requestedGpu'))requireThat(job.requestedGpu===requestedGpu,'actual job changed frozen routing field requestedGpu');
+  assertRequestBinding(payloadRequest, job.payload);
   // JobsStore keeps the first backend label. Pin progress uses worker settings.gpu_id;
   // generation events use mlx/candle. Only the native report proves execution_device.
   requireThat(typeof workerGpuId === 'string' && workerGpuId && (row.backend !== 'cuda' || workerGpuId === '1') && [row.backend === 'cuda' ? 'candle' : 'mlx', workerGpuId].includes(job.backend), 'queue backend label differs from the frozen worker launch contract');
