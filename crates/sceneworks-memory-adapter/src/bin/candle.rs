@@ -2515,9 +2515,15 @@ fn five_rung_load_spec(
     } else {
         OffloadPolicy::Sequential
     };
+    let load_shape = if request.get("sdxlEndpoint").is_some() {
+        // Stock SDXL worker loads eagerly; its request-scoped phase staging does not require BTR.
+        LoadShape::EagerMaterialization
+    } else {
+        LoadShape::DeferredMaterialization
+    };
     let spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(offload)
-        .with_load_shape(LoadShape::DeferredMaterialization);
+        .with_load_shape(load_shape);
     // sc-22731: the worker binds the exact resolved route on every Candle image load
     // (`image_jobs/base.rs`: `.with_resolved_route(request.model.clone())`), and
     // `candle-gen-chroma`'s `validate_load_shape` refuses a spec without it by name. Set for the

@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference } from "./measure-sdxl-cuda-endpoints.mjs";
 
 const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
@@ -24,6 +25,7 @@ test("endpoint pair keeps one q4 artifact and renders only maximum and minimum",
   assert.deepEqual(cases.map((item) => item.target), [cases[0].target, cases[0].target]);
   assert.deepEqual(cases[0].target.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
   assert.equal(cases[0].target.tier, "q4");
+  assert.deepEqual(cases.map((item) => item.loadShape), ["eager_materialization", "eager_materialization"]);
   assert.notEqual(cases[0].logicalCaseId, cases[1].logicalCaseId);
   assert.deepEqual(cases[1].strategy.parameters, { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 64 * 1024 ** 2 });
   assert.deepEqual(plan, original);
@@ -77,4 +79,26 @@ test("endpoint summary binds exact evidence bytes, record, artifact inventory, c
     assert.throws(() => endpointEvidenceReference(bundle, bytes, { ...expected, ...patch }));
   }
   assert.throws(() => endpointEvidenceReference({ records: [record, record] }, bytes, expected));
+});
+
+// CI_IMPACT: executes only the shell revision-list guard with a synthetic node function; no Git,
+// network, model, CUDA context or source preparation is executed.
+test("only the manual SDXL profile omits historical inference anchor queries", async () => {
+  const source = await readFile(new URL("./ci/memory-catalog/inference.sh", import.meta.url), "utf8");
+  const block = source.slice(source.indexOf('WANTED=("$PIN")'), source.indexOf("# A space-separated string"));
+  assert.ok(block.includes("--anchor-revisions"));
+  const pin = "a".repeat(40); const historical = "b".repeat(40);
+  const script = `set -euo pipefail\nPIN=${pin}\nnode() { printf '%s\\n' ${historical}; printf 'historical-query\\n' >&2; }\n${block}\nprintf 'wanted:%s\\n' "\${WANTED[@]}"\n`;
+  const wanted = (profile) => {
+    const result = spawnSync("bash", ["-c", script], {
+      env: { ...process.env, MEMORY_CAMPAIGN_PROFILE: profile }, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return { revisions: result.stdout.trim().split("\n").filter((line) => line.startsWith("wanted:")), queried: result.stderr.includes("historical-query") };
+  };
+  assert.deepEqual(wanted("sdxl-cuda-endpoints"), { revisions: [`wanted:${pin}`], queried: false });
+  assert.deepEqual(wanted("catalog"), { revisions: [`wanted:${pin}`, `wanted:${historical}`], queried: true });
+  assert.deepEqual(wanted(""), { revisions: [`wanted:${pin}`, `wanted:${historical}`], queried: true });
+  const workflow = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
+  assert.match(workflow, /MEMORY_CAMPAIGN_PROFILE: \$\{\{ inputs\.profile \|\| 'catalog' \}\}/);
 });

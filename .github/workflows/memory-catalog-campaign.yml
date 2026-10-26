@@ -451,6 +451,7 @@ jobs:
       SCENEWORKS_GPU_ID: "1"
       CARGO_NET_OFFLINE: "true"
       BACKEND: candle
+      MEMORY_CAMPAIGN_PROFILE: ${{ inputs.profile || 'catalog' }}
       DEFAULT_HF_CACHE: 'E:\huggingface\hub'
       # The persistent inference clone, on the drive this runner already keeps its per-runner caches
       # on. Deliberately NOT under $GITHUB_WORKSPACE or $RUNNER_TEMP: both are wiped between jobs,
