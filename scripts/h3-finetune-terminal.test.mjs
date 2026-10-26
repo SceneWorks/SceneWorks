@@ -165,6 +165,25 @@ test('the macOS terminal lane selects a reviewed CPython 3.12 instead of the hos
   // The macOS lane must never reach the hosted-tool-cache action at all.
   assert.doesNotMatch(workflow, /- uses: actions\/setup-python@\S+[^\n]*\n\s+if: \$\{\{ fromJSON/);
 });
+test('the Windows terminal lane selects the exact listener the request names', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  const job = workflowJob(workflow, 'terminal');
+  // Two approved full-weights CUDA listeners both match the generic label set, so the job could
+  // land on the one the request did NOT name — and the exact-runner assertion then refuses. Each
+  // listener carries its own name as a label, so the requested runner selects itself.
+  const runsOn = /^    runs-on: (.+)$/m.exec(job)[1];
+  assert.deepEqual(workflowExpression(runsOn, { backend: 'cuda', expected_runner: 'cuda-windows-2' }), [
+    'self-hosted', 'windows', 'cuda', 'real-weights', 'cuda-windows-2',
+  ]);
+  assert.deepEqual(workflowExpression(runsOn, { backend: 'cuda', expected_runner: 'cuda-windows' }), [
+    'self-hosted', 'windows', 'cuda', 'real-weights', 'cuda-windows',
+  ]);
+  // The macOS lane needs only the label exactly one macOS listener carries.
+  assert.deepEqual(workflowExpression(runsOn, { backend: 'mlx', expected_runner: 'nax-macos' }), [
+    'self-hosted', 'macOS', 'ARM64', 'real-weights',
+  ]);
+});
+
 test('the Windows terminal lane selects Git Bash before its first bash step', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
   const job = workflowJob(workflow, 'terminal');

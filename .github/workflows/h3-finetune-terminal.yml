@@ -55,7 +55,13 @@ concurrency:
 jobs:
   terminal:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.stationary_pair_authorized == true && (inputs.backend == 'mlx' || inputs.backend == 'cuda') }}
-    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","real-weights"]') || fromJSON('["self-hosted","windows","cuda","real-weights"]') }}
+    # The Windows lane SELECTS the exact listener the request names: each approved full-weights
+    # CUDA listener carries its own name as a label, so appending the requested runner to the label
+    # set lands the job on that one. Without it, the lane's two listeners both match and the job
+    # can land on the other one, which the exact-runner assertion then refuses — a coin flip
+    # between two approved machines. The macOS lane needs only the `real-weights` label, which
+    # exactly one macOS listener carries.
+    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","real-weights"]') || fromJSON(format('["self-hosted","windows","cuda","real-weights","{0}"]', inputs.expected_runner)) }}
     concurrency:
       group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || 'h3-import-proofs-nax-macos' }}
       cancel-in-progress: false
