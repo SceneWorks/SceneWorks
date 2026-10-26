@@ -3,7 +3,7 @@
 import {readFile} from 'node:fs/promises';
 import {resolve,posix} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {canonical,digest,fileIdentity,json,requireThat,safePath,sha,reviewVerdict} from './moss-edit-terminal.mjs';
+import {VERSION,canonical,digest,fileIdentity,json,requireThat,safePath,sha,reviewVerdict,validateBinding} from './moss-edit-terminal.mjs';
 import {CASES_MANIFEST_SHA256} from '../ci/moss-upstream-quality.mjs';
 
 export const AMENDMENT_SHA256='596ad6038ae5e1ab211e646255b9a1f67be1cdd3a79ea07a741fce506d414fe9';
@@ -38,12 +38,50 @@ export function validateExecutionToolingCapture(capture,executionToolingSha,veri
   return true;
 }
 
-export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha,executionToolingSha,finalExecutionOrdinal,verificationToolingSha,verificationSourceRoot,cudaLockSha256}={}){
+export function ordinaryExecutionCapture(lock,binding,env=process.env){
+  validateBinding(binding,lock,binding.backend);
+  requireThat(env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&env.GITHUB_SHA===lock.sources.sceneworks.head&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT??''),'ordinary quality capture requires actual paired Actions execution');
+  return {version:VERSION,candidateId:lock.candidateId,backend:binding.backend,lockSha256:digest(lock),bindingSha256:digest(binding),sources:lock.sources,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,artifactName:`moss-execution-${binding.backend}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`};
+}
+async function ordinaryQualityContext(root,lock,comparison,{bundleRoot,executionRunId,executionRunAttempt}){
+  requireThat(lock.qualityPolicy?.amendmentSha256===AMENDMENT_SHA256&&bundleRoot&&/^[1-9][0-9]*$/.test(executionRunId??'')&&/^[1-9][0-9]*$/.test(executionRunAttempt??''),'ordinary quality requires frozen policy and actual execution artifact run');
+  const inventoryPath=resolve(bundleRoot,'bundle-inventory.json');
+  requireThat(canonical(await fileIdentity(inventoryPath))===canonical(lock.files.qualityBundleInventory),'historical quality bundle inventory changed');
+  const inventory=await json(inventoryPath);
+  const frozenPath=async file=>{
+    const matches=inventory.files.filter(item=>item.file===file);requireThat(matches.length===1,'historical quality provenance absent from frozen bundle');
+    return identity(bundleRoot,matches[0]);
+  };
+  const historical=await json(await frozenPath('historical/original-quality-upstream-comparison.json'));
+  const map=await json(await frozenPath('historical/upstream-four-cell-map.json'));
+  for(const cell of CELLS)for(const role of ['image','diagnostic','authentication']){
+    const records=map.references.filter(item=>item.cell===cell&&item.role===role),entry=comparison.upstream?.[cell],old=historical.upstream?.[cell];
+    requireThat(records.length===1&&entry&&old,'historical upstream cell omitted');
+    const record=records[0];await frozenPath(record.file);
+    requireThat(entry[role]?.sha256===record.sha256&&entry[role]?.sha256===old[role]?.sha256&&entry[role]?.byteLength===old[role]?.byteLength&&String(entry.runId)===String(record.runId)&&String(entry.artifactId)===String(record.artifactId)&&entry.toolingSha===record.toolingSha&&entry.attempt===old.attempt,'historical upstream bytes or producer substituted');
+  }
+  requireThat(comparison.suiteSummary?.sha256===historical.suiteSummary?.sha256&&comparison.suiteSummary?.byteLength===historical.suiteSummary?.byteLength,'historical suite summary substituted');
+  await validateOrdinaryExecutionCaptures(root,lock,comparison,{executionRunId,executionRunAttempt});
+  return historical;
+}
+export async function validateOrdinaryExecutionCaptures(root,lock,comparison,{executionRunId,executionRunAttempt}){
+  requireThat(canonical(Object.keys(comparison.nativeExecutions??{}).sort())===canonical(['cuda','mlx']),'ordinary comparison needs both actual native captures');
+  for(const backend of ['mlx','cuda']){
+    const file=`external/ordinary-execution-${backend}.json`,entry=comparison.nativeExecutions[backend];
+    requireThat(entry?.file===file,'ordinary execution capture path changed');
+    const capture=await json(await identity(root,entry)),binding=validateBinding(await json(resolve(root,'bindings',`${backend}.json`)),lock,backend);
+    const expected=ordinaryExecutionCapture(lock,binding,{GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'SceneWorks/SceneWorks',GITHUB_SHA:lock.sources.sceneworks.head,GITHUB_RUN_ID:executionRunId,GITHUB_RUN_ATTEMPT:executionRunAttempt});
+    requireThat(canonical(capture)===canonical(expected),'ordinary capture differs from actual execution artifact, lock or binding');
+  }
+}
+export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha,executionToolingSha,finalExecutionOrdinal,verificationToolingSha,verificationSourceRoot,cudaLockSha256,ordinary}={}){
   const file=resolve(root,'quality-upstream-comparison.json');
   const comparison=await json(file).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
-  if(!comparison)return null;
+  if(!comparison){requireThat(!lock.qualityPolicy,'selected approved quality comparison missing');return null;}
   requireThat(sha(await readFile(resolve(root,'quality-acceptance-amendment.md')))===AMENDMENT_SHA256,'approved quality amendment bytes changed');
   requireThat(comparison.version===(cudaLockSha256?'sc-26757-upstream-comparison-dual/v1':'sc-26757-upstream-comparison/v1')&&comparison.amendmentSha256===AMENDMENT_SHA256&&comparison.lockSha256===digest(lock)&&(!cudaLockSha256||comparison.cudaLockSha256===cudaLockSha256),'quality comparison not bound to approved policy and both frozen locks');
+  const historical=ordinary?await ordinaryQualityContext(root,lock,comparison,ordinary):null;
+  if(!ordinary){
   const captureEntry=comparison.executionToolingCapture;
   requireThat(captureEntry?.file==='execution-tooling-capture.json'&&String(captureEntry.runId)==='40214209083'&&String(captureEntry.artifactId)==='12607298574'&&captureEntry.attempt===1&&historicalExecutionToolingSha==='2cd0363d59cb3eb0989bbb708000b6ffc907932a'&&verificationSourceRoot,'amended review requires actual H21 execution-tooling capture');
   const capture=await json(await identity(root,captureEntry));
@@ -53,6 +91,7 @@ export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExec
   execFileSync('git',['-C',verificationSourceRoot,'merge-base','--is-ancestor',executionToolingSha,verificationToolingSha]);
   const finalCapture=await json(await identity(root,finalEntry));
   validateExecutionToolingCapture(finalCapture,executionToolingSha,verificationSourceRoot,finalExecutionOrdinal);
+  }
   requireThat(canonical(Object.keys(comparison.upstream??{}).sort())===canonical([...CELLS].sort())&&Array.isArray(comparison.rows)&&comparison.rows.length===8,'all four upstream cells and eight native comparisons required');
   const qualityRows=rows.filter(row=>row.anchors);
   requireThat(qualityRows.length===8&&canonical(comparison.rows.map(r=>r.rowId).sort())===canonical(qualityRows.map(r=>r.id).sort()),'quality comparison omitted or duplicated native cell');
@@ -71,7 +110,7 @@ export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExec
     requireThat(result?.result?.width===(cell.endsWith('four')?512:768)&&result.result.height===(cell.endsWith('four')?768:512)&&result.result.seed===173&&result.result.actual_steps===30&&result.result.cfg===4&&result.result.inference_shift===5&&result.result.kv_cache===true&&result.result.dit_quantization==='none'&&result.result.text_quantization==='none'&&result.noiseAllocations===1,'upstream diagnostic settings differ from frozen quality case');
     requireThat(result.noiseSha256===NOISE_SHA&&entry.noiseSha256===NOISE_SHA&&auth&&typeof auth==='object','upstream noise/authentication evidence missing');
     if(cell==='base-single')requireThat(auth.payloadManifestSha256==='269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df'&&result.wrapperSha256==='ffe0e18dbf021ca5f8f62cf7cacb54f4b0c2a40c4d6142c862bd4df9d42f248d'&&result.frozenFilesVerifiedAfterRun===24,'original Base/single frozen learned source changed');
-    else requireThat(auth.qualityCasesManifestSha256===CASES_MANIFEST_SHA256&&auth.priorPayloadManifestSha256==='269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df'&&auth.toolingSha===entry.toolingSha&&entry.toolingSha===UPSTREAM_SUITE_TOOLING_SHA&&auth.nativeProductSha===lock.sources.sceneworks.head&&auth.nativeInferenceSha===lock.sources.inference.head&&auth.wrapperSha256===result.wrapperSha256&&result.caseId===cell&&result.variant===cell.split('-')[0]&&result.frozenFilesVerifiedAfterRun===24&&canonical(result.noiseShape)===canonical(cell.endsWith('four')?[1,128,48,32]:[1,128,32,48]),'three-case upstream producer/source/shape identity changed');
+    else requireThat(auth.qualityCasesManifestSha256===CASES_MANIFEST_SHA256&&auth.priorPayloadManifestSha256==='269f9dc9e9d7852d131457aaa6a1fe9c558a9dffee71b9fd57a2026f5663b9df'&&auth.toolingSha===entry.toolingSha&&entry.toolingSha===UPSTREAM_SUITE_TOOLING_SHA&&(ordinary?entry.authentication.sha256===historical.upstream[cell].authentication.sha256:auth.nativeProductSha===lock.sources.sceneworks.head&&auth.nativeInferenceSha===lock.sources.inference.head)&&auth.wrapperSha256===result.wrapperSha256&&result.caseId===cell&&result.variant===cell.split('-')[0]&&result.frozenFilesVerifiedAfterRun===24&&canonical(result.noiseShape)===canonical(cell.endsWith('four')?[1,128,48,32]:[1,128,32,48]),'three-case upstream producer/source/shape identity changed');
     const expectedRefs=cell.endsWith('four')?['B','L','P','G']:['B'];
     requireThat(canonical(entry.inputs?.map(item=>item.id))===canonical(expectedRefs)&&entry.inputs.every(item=>item.sha256===inputs[item.id]?.sha256),'upstream reference inputs differ from frozen ordered images');
     requireThat(result.result.references?.length===expectedRefs.length&&result.result.references.every((path,index)=>path.endsWith(`/${expectedRefs[index]}.png`))&&result.result.prompt===qualityRows.find(row=>row.variant===cell.split('-')[0]&&row.refs.length===expectedRefs.length).request.prompt&&result.result.negative_prompt==='','upstream prompt/reference order differs from frozen quality case');

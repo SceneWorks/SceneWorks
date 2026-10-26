@@ -920,6 +920,9 @@ jobs:
           path: ${{ env.MOSS_ROOT }}/reviews
       - name: Verify original H17 execution without repair
         if: inputs.phase == 'verify' && inputs.tooling_sha == ''
+        env:
+          MOSS_EXECUTION_RUN_ID: ${{ inputs.execution_run_id }}
+          MOSS_EXECUTION_RUN_ATTEMPT: ${{ inputs.execution_run_attempt }}
         run: node source/scripts/moss-edit-terminal-actions.mjs finalize "${{ env.MOSS_ROOT }}/runtime.json"
       - name: Verify original H17 product with separately identified repair tooling
         if: inputs.phase == 'verify' && inputs.tooling_sha != ''

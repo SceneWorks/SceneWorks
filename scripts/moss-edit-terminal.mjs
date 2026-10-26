@@ -9,7 +9,7 @@ import { VERSION, sha, digest, canonical, requireThat, json, save, safePath, fil
 import { BACKEND_FILES, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource } from './lib/moss-edit-terminal.mjs';
 import { OBSERVATION_METHOD, noLoadComparison, hostTensorInvariant, hostGuardSpec, hostBudgetHeader } from './lib/moss-edit-terminal-observation.mjs';
 import { assertOriginalEvidence, assertH18CheckpointFiles, validateFailedUiCapture, postRowsGuardFrontier, postDmdGuardFrontier, correctedDmdRequest, lexicalParserRefusal, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
-import {loadQualityAmendment,compareQualityRow} from './lib/moss-edit-quality-amendment.mjs';
+import {AMENDMENT_SHA256,loadQualityAmendment,compareQualityRow} from './lib/moss-edit-quality-amendment.mjs';
 import {cudaSourceContinuity} from './lib/moss-edit-cuda-rebase.mjs';
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
@@ -136,7 +136,11 @@ export async function freeze(configPath) {
   requireThat(plan.cacheComparisonPolicy.implementationSha256 === files.harnessLibrary.sha256,'cache metric must freeze the actual source-owned implementation');
   const sharedFiles = Object.fromEntries(Object.entries(files).filter(([name]) => !BACKEND_FILES.includes(name)));
   const reuse=cudaRebase?await correctedCudaPackageReuse(config,config.cudaRebase.continuity):null;
+  const selectedPolicy=(await json(resolve(root,'inputs.original.json'))).quality_acceptance_amendment;
+  const qualityPolicy=!cudaRebase&&selectedPolicy?{amendmentSha256:AMENDMENT_SHA256}:null;
+  if(qualityPolicy)requireThat(selectedPolicy.sha256===AMENDMENT_SHA256&&files.qualityBundleInventory&&config.qualityBundleRoot,'freeze approved ordinary quality policy and historical bundle inventory');
   const lock = { version: VERSION, candidateId:config.candidateId, createdAt: new Date().toISOString(), planSha256: digest(plan), guardRequestsSha256: digest(config.guardRequests), inputIdentitiesSha256: digest(await json(resolve(root, 'input-identities.json'))), sources, files:sharedFiles, artifacts, ...(cudaRebase?{scope:'corrected-cuda-only',macProducer:config.cudaRebase.old,sourceContinuity:config.cudaRebase.continuity,packageReuse:reuse}:{}) ,approvals: { by: config.approvedBy, evidence: config.approvalEvidenceSha256, phase18Review: config.phase18ReviewSha256, inferencePreMergeReview: config.inferencePreMergeReviewSha256 }, counts: { renders: cudaRebase?25:plan.renderExecutions, guards: plan.requiredGuardCases.length*(cudaRebase?1:2), guardCasesPerBackend:plan.requiredGuardCases.length } };
+  if(qualityPolicy)lock.qualityPolicy=qualityPolicy;
   await verifyFrozenSources(config, lock);
   executionBinding(config,lock,files); // Validate the actual local endpoint before writing the immutable lock.
   await save(resolve(root, 'protocol.lock.json'), lock);
@@ -710,6 +714,11 @@ export async function validateRecoveryAdjudication(state,expectedInventorySha256
     for(const entry of proof.rawEvidence)requireThat(canonical(await fileIdentity(safePath(state.root,entry.file)))===canonical({byteLength:entry.byteLength,sha256:entry.sha256}),'recovery raw evidence changed');
     return true;
 }
+// Shared by the assembled verifier and its ordinary-candidate regression fixtures.
+export async function loadCandidateQualityAmendment(state,mac=null){
+  const dual=state.lock.scope==='corrected-cuda-only';
+  return loadQualityAmendment(state.root,mac??state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:dual?'2cd0363d59cb3eb0989bbb708000b6ffc907932a':state.config.repair?.historicalExecutionToolingSha,executionToolingSha:dual?state.lock.macProducer.toolingSha:state.config.repair?.executionToolingSha,finalExecutionOrdinal:dual?8:state.config.repair?.retryOrdinal,verificationToolingSha:dual?state.lock.sources.sceneworks.head:state.config.repair?.verificationToolingSha,verificationSourceRoot:dual?state.config.sources.sceneworks:state.config.repair?.tooling?.sourceRoot,...(dual?{cudaLockSha256:digest(state.lock)}:{}),...(!dual&&!state.config.repair&&state.lock.qualityPolicy?{ordinary:{bundleRoot:state.config.qualityBundleRoot,...state.config.qualityExecution}}:{})});
+}
 export function acceptedRecoveryFailure(acceptedRecovery,backend,name,postRowsGuard=false,postGuardDmd=false) {
   return acceptedRecovery&&backend==='mlx'&&(name==='advanced-mlx-sft.failure.json'||(postRowsGuard&&name==='guard-training-shift-nonfinite.failure.json')||(postGuardDmd&&name==='guard-edit-dmd.failure.json'));
 }
@@ -724,7 +733,7 @@ async function verify(configPath, retained = false) {
   if(!historicalOnly)await requireEvidence('quality-policy',async()=>{
     const dual=state.lock.scope==='corrected-cuda-only',mac=dual?await json(resolve(state.root,'../prior/evidence/protocol.lock.json')):null;
     if(dual)requireThat(digest(mac)===state.lock.macProducer.lockSha256&&canonical(mac.sources)===canonical(state.lock.macProducer.sources),'aggregate changed completed Mac lock or source pair');
-    qualityComparison=await loadQualityAmendment(state.root,mac??state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:dual?'2cd0363d59cb3eb0989bbb708000b6ffc907932a':state.config.repair?.historicalExecutionToolingSha,executionToolingSha:dual?state.lock.macProducer.toolingSha:state.config.repair?.executionToolingSha,finalExecutionOrdinal:dual?8:state.config.repair?.retryOrdinal,verificationToolingSha:dual?state.lock.sources.sceneworks.head:state.config.repair?.verificationToolingSha,verificationSourceRoot:dual?state.config.sources.sceneworks:state.config.repair?.tooling?.sourceRoot,...(dual?{cudaLockSha256:digest(state.lock)}:{})});
+    qualityComparison=await loadCandidateQualityAmendment(state,mac);
     requireThat(!dual||qualityComparison,'dual-source candidate needs actual eight-row approved upstream comparison');
   });
   if(state.lock.scope==='corrected-cuda-only')await requireEvidence('completed-mac-producer',async()=>{

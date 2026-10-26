@@ -13,6 +13,7 @@ import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18C
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 import { cudaSourceContinuity, validateCudaRebaseRecord } from './lib/moss-edit-cuda-rebase.mjs';
+import {ordinaryExecutionCapture} from './lib/moss-edit-quality-amendment.mjs';
 
 import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 
@@ -476,7 +477,10 @@ async function launcher(config,projectId) {
   files.fixtureBindings=resolve(root,'guard-fixtures/bindings.json');
   files.hostTensorBound=resolve(root,'host-tensor-bound.json');
   requireThat((await fileIdentity(files.numericalCarryForward)).sha256===config.numericalCarryForward.sha256,'numerical source carry-forward artifact changed');
+  const policy=(await json(safePath(config.bundleRoot,config.inputManifest))).quality_acceptance_amendment;
+  if(policy&&!config.cudaRebase&&!config.toolingRoot&&!config.continuation)files.qualityBundleInventory=resolve(config.bundleRoot,'bundle-inventory.json');
   return {version:VERSION,candidateId:config.candidateId,localBackend:config.backend,plan:resolve(root,'cases.json'),evidenceRoot:root,
+    ...(files.qualityBundleInventory?{qualityBundleRoot:config.bundleRoot}:{}),
     sources:{sceneworks:config.sourceRoot,inference:config.inferenceRoot},inferenceMainRef:'origin/main',files,
     artifactInventories:Object.fromEntries(['mlx','cuda'].map(backend=>[backend,resolve(config.buildRoot,backend,'inventory.json')])),
     backends:{[config.backend]:{apiUrl:`http://127.0.0.1:${config.port}`,projectId,workerId:config.workerId,workerGpuId:config.backend==='cuda'?'1':'mlx',tokenEnv:'MOSS_EDIT_ACTIONS_TOKEN'}},
@@ -675,6 +679,7 @@ export async function executeBackend(config) {
     const state=await frozen(launchPath),toolchain=await json(paths.toolchain),expectedJournal={candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,workerId:config.workerId,
       gpuId:state.binding.endpoint.workerGpuId,
       binarySha256:state.lock.artifacts[config.backend].files.workerBinary.sha256,producerSha256:toolchain.observationProducerSha256};
+    if(state.lock.qualityPolicy&&!repairTooling&&!continuing&&!cudaRebase)await save(resolve(state.root,'external',`ordinary-execution-${config.backend}.json`),ordinaryExecutionCapture(state.lock,state.binding));
     await actualJournal(config,expectedJournal);
     if(!continuing)await harness(config,['upload',launchPath,config.backend,await deviceReceipt(config,state,'upload')],'upload');
     const samplerSha256=(await fileIdentity(resolve(config.sourceRoot,'scripts/lib/moss-edit-terminal-actions.mjs'))).sha256;
@@ -795,6 +800,7 @@ export async function finalize(config) {
   const root=resolve(config.root,'evidence'),binding=await json(resolve(root,'bindings',`${config.backend}.json`));
   config.guardRequests=await json(resolve(root,'resolved-guards.json'));
   const launch=await launcher(config,binding.endpoint.projectId),launchPath=resolve(config.root,'review-launch.json');
+  if(!config.toolingRoot&&!config.cudaRebaseReview)launch.qualityExecution={executionRunId:process.env.MOSS_EXECUTION_RUN_ID,executionRunAttempt:process.env.MOSS_EXECUTION_RUN_ATTEMPT};
   if(config.cudaRebaseReview) {
     const {oldSourceRoot,oldInferenceRoot,oldMlxBuildRoot}=config.cudaRebaseReview;
     launch.cudaRebase={...config.cudaRebase,historicalLaunchPath:await historicalMlxLaunchForCudaRebase(config,resolve(config.root,'prior'),oldSourceRoot,oldInferenceRoot,oldMlxBuildRoot,config.sourceRoot)};launch.stoppedCuda=config.stoppedCuda;

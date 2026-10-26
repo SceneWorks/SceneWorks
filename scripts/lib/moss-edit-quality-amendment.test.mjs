@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {copyFile,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
+import {copyFile,mkdir,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
-import {VERSION,reviewVerdict,sha,digest} from './moss-edit-terminal.mjs';
-import {compareQualityRow,validateExecutionToolingCapture,validateSuiteOutputs,loadQualityAmendment,AMENDMENT_SHA256,UPSTREAM_SUITE_TOOLING_SHA} from './moss-edit-quality-amendment.mjs';
+import {VERSION,reviewVerdict,sha,digest,fileIdentity} from './moss-edit-terminal.mjs';
+import {loadCandidateQualityAmendment} from '../moss-edit-terminal.mjs';
+import {compareQualityRow,ordinaryExecutionCapture,validateOrdinaryExecutionCaptures,validateExecutionToolingCapture,validateSuiteOutputs,loadQualityAmendment,AMENDMENT_SHA256,UPSTREAM_SUITE_TOOLING_SHA} from './moss-edit-quality-amendment.mjs';
 
 const hash='a'.repeat(64),reviewHash='b'.repeat(64),upstreamHash='c'.repeat(64);
 const row={id:'quality-mlx-base-single',variant:'base',refs:['B'],anchors:['Bottle color','Bottle and orange placement']};
@@ -79,6 +80,30 @@ test('three-case suite rejects swapped same-shape images without local model evi
 });
 
 const originalResult='/Volumes/Models/sceneworks-terminal-sc-26752/moss-upstream-reference-40191507328-1';
+test('ordinary Actions captures bind both backends to the same real artifact run and selected policy never falls back',{timeout:10000},async()=>{
+  const root=await mkdtemp(resolve(tmpdir(),'moss-ordinary-captures-'));
+  const lock={version:VERSION,candidateId:'ordinary-fixture',sources:{sceneworks:{head:'e'.repeat(40)},inference:{head:'f'.repeat(40)}},files:{},artifacts:{mlx:{files:{}},cuda:{files:{}}},qualityPolicy:{amendmentSha256:AMENDMENT_SHA256}};
+  const env={GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'SceneWorks/SceneWorks',GITHUB_SHA:lock.sources.sceneworks.head,GITHUB_RUN_ID:'40200000011',GITHUB_RUN_ATTEMPT:'1'},value={nativeExecutions:{}};
+  const expected={executionRunId:env.GITHUB_RUN_ID,executionRunAttempt:env.GITHUB_RUN_ATTEMPT};
+  try{
+    await mkdir(resolve(root,'bindings'));await mkdir(resolve(root,'external'));
+    for(const backend of ['mlx','cuda']){
+      const binding={version:VERSION,lockSha256:digest(lock),backend,sources:lock.sources,files:{},endpoint:{apiUrl:'http://127.0.0.1:12345',projectId:'project',workerId:`worker-${backend}`,tokenEnv:'TOKEN',workerGpuId:backend==='cuda'?'1':'mlx'}};
+      await writeFile(resolve(root,'bindings',`${backend}.json`),JSON.stringify(binding));
+      const capture=ordinaryExecutionCapture(lock,binding,env),file=`external/ordinary-execution-${backend}.json`;
+      await writeFile(resolve(root,file),JSON.stringify(capture));value.nativeExecutions[backend]={file,...await fileIdentity(resolve(root,file))};
+      assert.throws(()=>ordinaryExecutionCapture(lock,binding,{...env,GITHUB_ACTIONS:'false'}),/actual paired Actions/);
+    }
+    await validateOrdinaryExecutionCaptures(root,lock,value,expected);
+    await assert.rejects(()=>loadQualityAmendment(root,lock,[],{}),/selected approved quality comparison missing/);
+    const missing=structuredClone(value);delete missing.nativeExecutions.mlx;await assert.rejects(()=>validateOrdinaryExecutionCaptures(root,lock,missing,expected),/both actual native captures/);
+    const file=value.nativeExecutions.cuda.file,bytes=await readFile(resolve(root,file));
+    for(const mutate of [c=>{c.runId='40200000012';},c=>{c.attempt='2';},c=>{c.bindingSha256=hash;},c=>{c.lockSha256=hash;},c=>{c.sources.inference.head='d'.repeat(40);},c=>{c.artifactName='unrelated-artifact';}]){
+      const changed=JSON.parse(bytes);mutate(changed);await writeFile(resolve(root,file),JSON.stringify(changed));value.nativeExecutions.cuda={file,...await fileIdentity(resolve(root,file))};
+      await assert.rejects(()=>validateOrdinaryExecutionCaptures(root,lock,value,expected),/actual execution artifact, lock or binding/);
+    }
+  }finally{await rm(root,{recursive:true,force:true});}
+});
 test('complete four-cell overlay loads and actual suite summary rejects swapped same-shape images',{skip:!existsSync(resolve(originalResult,'upstream-base-single.png'))},async()=>{
   const sourceRoot=fileURLToPath(new URL('../../',import.meta.url)),h21='2cd0363d59cb3eb0989bbb708000b6ffc907932a';
   const verificationSha=execFileSync('git',['-C',sourceRoot,'rev-parse','HEAD'],{encoding:'utf8'}).trim();
@@ -125,8 +150,60 @@ test('complete four-cell overlay loads and actual suite summary rejects swapped 
     assert.deepEqual(await loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,finalExecutionOrdinal:5,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),comparison);
     await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:UPSTREAM_SUITE_TOOLING_SHA,finalExecutionOrdinal:5,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/distinct actual final execution-tooling capture/);
     await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,finalExecutionOrdinal:4,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/distinct actual final execution-tooling capture/);
+    // Assemble the ordinary finalizer's actual no-repair launch shape. Upstream
+    // keeps its old producer while new native captures bind the new paired lock.
+    const bundleRoot=resolve(root,'bundle');await mkdir(bundleRoot);
+    const frozenFiles=[],frozenPut=async(file,bytes)=>{await writeFile(resolve(bundleRoot,file),bytes);frozenFiles.push({file,byteLength:Buffer.byteLength(bytes),sha256:sha(bytes)});};
+    const references=[];
+    for(const [cell,entry] of Object.entries(upstream))for(const role of ['image','diagnostic','authentication']){
+      const item=entry[role];if(!frozenFiles.some(record=>record.file===item.file))await frozenPut(item.file,await readFile(resolve(root,item.file)));
+      references.push({cell,role,file:item.file,sha256:item.sha256,runId:entry.runId,artifactId:entry.artifactId,toolingSha:entry.toolingSha});
+    }
+    await mkdir(resolve(bundleRoot,'historical'));
+    await frozenPut('historical/original-quality-upstream-comparison.json',JSON.stringify(comparison));
+    await frozenPut('historical/upstream-four-cell-map.json',JSON.stringify({references}));
+    await writeFile(resolve(bundleRoot,'bundle-inventory.json'),JSON.stringify({files:frozenFiles}));
+    const ordinaryLock={version:VERSION,candidateId:'ordinary-fixture',sources:{sceneworks:{head:'e'.repeat(40)},inference:{head:'f'.repeat(40)}},files:{qualityBundleInventory:await fileIdentity(resolve(bundleRoot,'bundle-inventory.json'))},artifacts:{mlx:{files:{}},cuda:{files:{}}},qualityPolicy:{amendmentSha256:AMENDMENT_SHA256}};
+    await mkdir(resolve(root,'bindings'));await mkdir(resolve(root,'external'));
+    const env={GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'SceneWorks/SceneWorks',GITHUB_SHA:ordinaryLock.sources.sceneworks.head,GITHUB_RUN_ID:'40200000011',GITHUB_RUN_ATTEMPT:'1'};
+    const nativeExecutions={};
+    for(const backend of ['mlx','cuda']){
+      const binding={version:VERSION,lockSha256:digest(ordinaryLock),backend,sources:ordinaryLock.sources,files:ordinaryLock.files,endpoint:{apiUrl:'http://127.0.0.1:12345',projectId:'actual-project',workerId:`worker-${backend}`,tokenEnv:'TOKEN',workerGpuId:backend==='cuda'?'1':'mlx'}};
+      await put(`bindings/${backend}.json`,JSON.stringify(binding));
+      nativeExecutions[backend]=await put(`external/ordinary-execution-${backend}.json`,JSON.stringify(ordinaryExecutionCapture(ordinaryLock,binding,env)));
+      assert.throws(()=>ordinaryExecutionCapture(ordinaryLock,binding,{...env,GITHUB_SHA:lock.sources.sceneworks.head}),/actual paired Actions/);
+    }
+    await put('input-identities.json',JSON.stringify(inputs));
+    const ordinary={...comparison,lockSha256:digest(ordinaryLock),nativeExecutions};
+    delete ordinary.executionToolingCapture;delete ordinary.finalExecutionToolingCapture;
+    const state={root,lock:ordinaryLock,plan:{rows},config:{qualityBundleRoot:bundleRoot,qualityExecution:{executionRunId:env.GITHUB_RUN_ID,executionRunAttempt:'1'}}};
+    const loadOrdinary=()=>loadCandidateQualityAmendment(state);
+    await writeFile(path,JSON.stringify(ordinary));assert.deepEqual(await loadOrdinary(),ordinary);
+    await rm(path);await assert.rejects(loadOrdinary,/selected approved quality comparison missing/);
+    const mutations=[
+      [value=>{value.lockSha256=hash;},/both frozen locks/],
+      [value=>{delete value.nativeExecutions.mlx;},/both actual native captures/],
+      [value=>{value.nativeExecutions.cuda.sha256=hash;},/bytes changed/],
+      [value=>{value.upstream['base-four'].runId='40200000099';},/producer substituted/],
+      [value=>{value.upstream['base-four'].authentication.sha256=hash;},/producer substituted/],
+      [value=>{value.rows.pop();},/eight native comparisons/],
+    ];
+    for(const [mutate,pattern] of mutations){const changed=structuredClone(ordinary);mutate(changed);await writeFile(path,JSON.stringify(changed));await assert.rejects(loadOrdinary,pattern);}
+    await writeFile(path,JSON.stringify(ordinary));state.config.qualityExecution.executionRunId='40200000012';await assert.rejects(loadOrdinary,/actual execution artifact/);state.config.qualityExecution.executionRunId=env.GITHUB_RUN_ID;
+    const diagnosticFile=upstream['base-four'].diagnostic.file,diagnosticBytes=await readFile(resolve(root,diagnosticFile)),changedDiagnostic=JSON.parse(diagnosticBytes);changedDiagnostic.result.cfg=5;
+    await writeFile(resolve(root,diagnosticFile),JSON.stringify(changedDiagnostic));await assert.rejects(loadOrdinary,/bytes changed/);await writeFile(resolve(root,diagnosticFile),diagnosticBytes);
+    // Even after loading the ordinary policy, fresh native output/review hashes
+    // and material native-only differences retain the same strict row checks.
+    const actual=comparisonForOrdinaryRow(rows[0]);
+    assert.equal(compareQualityRow(actual.row,actual.review,reviewHash,outputs,actual.comparison),'PASS');
+    assert.throws(()=>compareQualityRow(actual.row,actual.review,reviewHash,[{sha256:upstreamHash}],actual.comparison),/review.*output|reviewed outputs/);
+    await writeFile(path,JSON.stringify(comparison));
     [upstream['base-four'].image,upstream['sft-four'].image]=[upstream['sft-four'].image,upstream['base-four'].image];
     await writeFile(path,JSON.stringify(comparison));
     await assert.rejects(()=>loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha:h21,executionToolingSha:verificationSha,finalExecutionOrdinal:5,verificationToolingSha:verificationSha,verificationSourceRoot:sourceRoot}),/actual three-case suite output/);
   } finally {await rm(root,{recursive:true,force:true});}
 });
+
+function comparisonForOrdinaryRow(){
+  return {row,review,comparison:comparison()};
+}
