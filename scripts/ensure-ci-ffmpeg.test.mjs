@@ -8,6 +8,9 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const script = path.join(root, "scripts/ensure-ci-ffmpeg.sh");
+// Native Windows spawn cannot execute the extensionless shebang stubs on PATH. These fixtures
+// exercise the Ubuntu Bash helper; the static workflow contract below still runs everywhere.
+const skipWithoutShebang = process.platform === "win32" && "the stub CLIs are shebang scripts on PATH";
 
 function runFixture(options = {}) {
   const fixture = mkdtempSync(path.join(os.tmpdir(), "ci-ffmpeg-test-"));
@@ -77,7 +80,7 @@ process.exit(97);
   }
 }
 
-test("a real AV-mux/decode probe reuses a suitable existing ffmpeg without sudo or APT", () => {
+test("a real AV-mux/decode probe reuses a suitable existing ffmpeg without sudo or APT", { skip: skipWithoutShebang }, () => {
   const result = runFixture({ existing: "working" });
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(result.calls.map(call => call.name), ["ffmpeg", "ffmpeg", "ffmpeg"]);
@@ -86,7 +89,7 @@ test("a real AV-mux/decode probe reuses a suitable existing ffmpeg without sudo 
   assert.ok(result.calls[2].args.includes("0:v:0") && result.calls[2].args.includes("0:a:0"));
 });
 
-test("missing ffmpeg uses only signed official Ubuntu sources and separates download from unpack", () => {
+test("missing ffmpeg uses only signed official Ubuntu sources and separates download from unpack", { skip: skipWithoutShebang }, () => {
   const result = runFixture();
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.sources, /URIs: https:\/\/archive\.ubuntu\.com\/ubuntu/);
@@ -113,30 +116,30 @@ test("missing ffmpeg uses only signed official Ubuntu sources and separates down
   ]);
 });
 
-test("a binary that reports a version but cannot encode is replaced and re-probed", () => {
+test("a binary that reports a version but cannot encode is replaced and re-probed", { skip: skipWithoutShebang }, () => {
   const result = runFixture({ existing: "broken-codec" });
   assert.equal(result.status, 0, result.stderr);
   assert.equal(result.calls.filter(call => call.name === "apt-get").length, 3);
 });
 
-test("an APT metadata/signature failure stops before package download or installation", () => {
+test("an APT metadata/signature failure stops before package download or installation", { skip: skipWithoutShebang }, () => {
   const result = runFixture({ fail: "update" });
   assert.equal(result.status, 100);
   assert.equal(result.calls.filter(call => call.name === "apt-get").length, 1);
 });
 
-test("a continuously slow download is bounded and never reaches dpkg installation", () => {
+test("a continuously slow download is bounded and never reaches dpkg installation", { skip: skipWithoutShebang }, () => {
   const result = runFixture({ fail: "download-timeout" });
   assert.equal(result.status, 124);
   assert.ok(!result.calls.some(call => call.name === "apt-get" && call.args.includes("--no-download")));
 });
 
-test("install failure and an unsuitable installed binary both fail closed", () => {
+test("install failure and an unsuitable installed binary both fail closed", { skip: skipWithoutShebang }, () => {
   assert.equal(runFixture({ fail: "install" }).status, 100);
   assert.equal(runFixture({ postBroken: true }).status, 1);
 });
 
-test("automatic installation refuses a different distribution or unsupported architecture", () => {
+test("automatic installation refuses a different distribution or unsupported architecture", { skip: skipWithoutShebang }, () => {
   for (const options of [{ os: "debian" }, { arch: "arm64" }]) {
     const result = runFixture(options);
     assert.equal(result.status, 1);
