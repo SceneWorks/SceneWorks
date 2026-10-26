@@ -7,7 +7,7 @@ import { readFile, writeFile, mkdir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { ROOT, parseArgs, planRun, providerCommand, run } from "./measure-memory-catalog.mjs";
 import { capturePlannedCase, logicalCaseId, planAnchor } from "./memory-calibration-harness.mjs";
-import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { hashArtifactInventory, artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
 
 export const ENDPOINTS = Object.freeze([
   { name: "resident", strategy: { rung: "resident", engagedRungs: ["resident"], parameters: {} } },
@@ -65,6 +65,31 @@ export function validateEndpoint(measurement, endpoint, expectedInferencePin) {
       || cleanup.afterBytes > cleanup.beforeBytes + cleanup.toleranceBytes) throw new Error("endpoint leaked device residency or lacks exit telemetry");
 }
 
+/** Same four complete sources SDXL's artifact seal binds, with host-independent role paths. */
+export async function sdxlAssemblyInventory(row) {
+  const sources = [
+    { role: "base", root: row.tierRoot, tier: true, includeFiles: row.inventoryFiles },
+    ...[
+      ["tokenizer_clip_l", "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L"],
+      ["tokenizer_clip_bigg", "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG"],
+      ["vae_fp16_fix", "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX"],
+    ].map(([role, key]) => ({ role: `components/${role}`, root: row.env?.[key] })),
+  ];
+  const entries = [];
+  for (const source of sources) {
+    if (!source.root) throw new Error(`SDXL assembly source missing: ${source.role}`);
+    // The resolver supplies hub snapshot roots; files may point into their own repo's blobs/.
+    const trustedRoot = source.tier
+      ? path.dirname(path.dirname(path.dirname(source.root))) : path.dirname(path.dirname(source.root));
+    const inventory = await hashArtifactInventory(source.root, {
+      includeEntries: true, trustedRoot, ...(source.includeFiles ? { includeFiles: source.includeFiles } : {}),
+    });
+    entries.push(...inventory.entries.map((entry) => ({ ...entry, path: `${source.role}/${entry.path}` })));
+  }
+  entries.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  return { root: path.resolve(row.tierRoot), ...artifactInventoryReceipt(entries) };
+}
+
 export function endpointEvidenceReference(bundle, bundleBytes, { inventorySha256, inferencePin, deviceUuid }) {
   const [record] = bundle.records ?? [];
   if (bundle.records?.length !== 1 || !/^imc-[a-f0-9]{20}$/.test(record?.id ?? "")) {
@@ -112,8 +137,7 @@ export async function main(argv = process.argv.slice(2)) {
   const { plan, rows } = await planRun({ ...args, backend: "candle", anchors: ["sdxl:q4:candle"], models: ["sdxl"], skipCurrent: false });
   const row = rows[0];
   if (row?.status !== "runnable") throw new Error(`SDXL q4 cannot be captured: ${row?.status}: ${row?.reason}`);
-  const inventory = await hashArtifactInventory(row.tierRoot, row.inventoryFiles
-    ? { includeFiles: row.inventoryFiles, trustedRoot: path.dirname(path.dirname(row.tierRoot)) } : {});
+  const inventory = await sdxlAssemblyInventory(row);
   const env = { ...process.env, ...row.env,
     SCENEWORKS_MEMORY_MODEL_BYTES: String(inventory.bytes), SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256: inventory.sha256 };
   const command = providerCommand(args.adapter);
