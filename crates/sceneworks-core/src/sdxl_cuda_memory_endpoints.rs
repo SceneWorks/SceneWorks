@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
-use super::{validate_anchor_with_sources, AnchorBackend, MemoryAnchor};
+use super::{validate_anchor_with_sources, AnchorBackend, AnchorLoadShape, MemoryAnchor};
 use crate::memory_calibration::{load_bundle, RequiredNullable};
 
 pub const PACKAGED_SDXL_CUDA_MEMORY_ENDPOINTS: &str =
@@ -255,6 +255,12 @@ fn validate_endpoint(
             && anchor.tier == "q4"
             && anchor.mode == "text_to_image",
         "endpoint model identity",
+    )?;
+    // Stock SDXL uses eager LoadSpec materialization. Phase staging remains an independent
+    // strategy axis; a deferred capture cannot stand in for the ordinary product request.
+    require(
+        anchor.load_shape == AnchorLoadShape::EagerMaterialization,
+        "ordinary SDXL eager load shape",
     )?;
     require(
         anchor.overlay.is_none()
@@ -579,6 +585,7 @@ mod tests {
             record["logicalCaseId"] = json!(format!("implan-{:020x}", index + 1));
             record["calibrationFingerprint"] = json!(FINGERPRINT);
             record["fixture"] = json!(FIXTURE);
+            record["loadShape"] = json!("eager_materialization");
             record["artifact"]["inventorySha256"] = json!("a".repeat(64));
             record["hardware"]["deviceId"] = json!(GPU_UUID);
             record["target"]["geometry"] = json!({"width":1024,"height":1024,"batch":1,"frames":1});
@@ -688,6 +695,14 @@ mod tests {
         );
         assert_eq!(pair.resident_load_peak_bytes, 1_000_000_000);
         assert_eq!(pair.sequential_parameters["stageResidency"], true);
+        assert_eq!(
+            pair.resident.load_shape,
+            AnchorLoadShape::EagerMaterialization
+        );
+        assert_eq!(
+            pair.sequential.load_shape,
+            AnchorLoadShape::EagerMaterialization
+        );
         for bundle in &fixture.bundles {
             assert_eq!(bundle["records"][0]["status"], "gated");
             assert_eq!(bundle["records"][0]["predictedPeakBytes"], Value::Null);
@@ -768,6 +783,19 @@ mod tests {
             *fixture.bundles[1].pointer_mut(path).unwrap() = value;
             assert!(fixture.load().is_err(), "accepted source mutation {path}");
         }
+    }
+
+    #[test]
+    fn sdxl_endpoint_rejects_consistently_deferred_capture_for_stock_eager_request() {
+        let mut fixture = fixture();
+        for (index, name) in ["resident", "sequential"].into_iter().enumerate() {
+            fixture.config["pair"][name]["loadShape"] = json!("deferred_materialization");
+            fixture.bundles[index]["records"][0]["loadShape"] = json!("deferred_materialization");
+            fixture.summary["endpoints"][index]["planned"]["loadShape"] =
+                json!("deferred_materialization");
+        }
+        let error = fixture.load().unwrap_err();
+        assert!(error.contains("ordinary SDXL eager load shape"), "{error}");
     }
 
     #[test]
