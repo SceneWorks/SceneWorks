@@ -167,7 +167,10 @@ pub fn frozen_h3_component_downloads(entry: &Map<String, Value>) -> Result<Value
         })
         .cloned()
         .collect();
-    for row in &rows {
+    for row in &mut rows {
+        // JobsStore canonicalizes object keys; preserve_order must not change the row-array order
+        // (or its frozen identity) merely because a request crossed that persistence boundary.
+        row.sort_all_objects();
         let repo = row
             .get("repo")
             .and_then(Value::as_str)
@@ -1009,6 +1012,110 @@ mod tests {
             }],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn frozen_components_survive_job_key_canonicalization_without_accepting_real_drift() {
+        use crate::jobs_store::{CreateJob, JobsStore};
+        let temporary = tempfile::tempdir().unwrap();
+        let data = temporary.path().join("data");
+        let hub = temporary.path().join("hub");
+        let _guard = crate::hf_home::test_support::CacheRootGuard::new(data.clone(), hub.clone());
+        // The real fixture's provider/repo-first row spelling sorts by repository before the
+        // JobsStore sort_all_objects boundary, but by componentId afterward under preserve_order.
+        let entry = json!({"family":"minimax-h3","baseModel":"minimax_h3","minimaxH3Partition":"fl2va","importComponentTier":"q4","downloads":[
+            {"provider":"huggingface","repo":"MiniMaxAI/MiniMax-H3","revision":"1".repeat(40),"coRequisite":true,"componentId":"tokenizer","files":["tokenizer/config.json"]},
+            {"provider":"huggingface","repo":"SceneWorks/minimax-h3-mlx","revision":"2".repeat(40),"coRequisite":true,"variant":"q4","componentId":"text_encoder","files":["q4/text_encoder/config.json"]}
+        ]}).as_object().unwrap().clone();
+        let input_json = serde_json::to_string(&entry).unwrap();
+        let sources = [
+            hub.join("models--MiniMaxAI--MiniMax-H3/snapshots")
+                .join("1".repeat(40))
+                .join("tokenizer/config.json"),
+            hub.join("models--SceneWorks--minimax-h3-mlx/snapshots")
+                .join("2".repeat(40))
+                .join("q4/text_encoder/config.json"),
+        ];
+        for path in &sources {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"{}").unwrap();
+        }
+        let frozen = frozen_h3_component_downloads(&entry).unwrap();
+        let closure = capture_h3_component_closure_with_check(&data, &entry, &|| Ok(())).unwrap();
+        let mut bound = plan();
+        bound.family = "minimax-h3".into();
+        bound.context = import_declaration_context(&entry).unwrap();
+        bound.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = closure.clone();
+        let baseline = bound.semantic_digest().unwrap();
+        let store = JobsStore::new(temporary.path().join("jobs.db"));
+        store.initialize().unwrap();
+        let created = store
+            .create_job(CreateJob {
+                job_type: crate::contracts::JobType::ModelImport,
+                project_id: None,
+                project_name: None,
+                payload: json!({"manifestEntry":entry}).as_object().unwrap().clone(),
+                requested_gpu: "auto".into(),
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status: None,
+            })
+            .unwrap();
+        let persisted = store.get_job(&created.id).unwrap();
+        let replay_entry = persisted.payload["manifestEntry"].as_object().unwrap();
+        assert_eq!(
+            Value::Object(entry.clone()),
+            Value::Object(replay_entry.clone()),
+            "no row/revision/tier/default VALUES changed at storage"
+        );
+        assert_eq!(
+            frozen_h3_component_downloads(replay_entry).unwrap(),
+            frozen,
+            "map key order must not reorder the immutable component array"
+        );
+        assert_eq!(
+            serde_json::to_string(&entry).unwrap(),
+            input_json,
+            "normalization never mutates the request"
+        );
+        let loaded: ImportPlanV1 = serde_json::from_str(&bound.canonical_json().unwrap()).unwrap();
+        validate_entry_declaration(&loaded, replay_entry).unwrap();
+        let mut replay = loaded.clone();
+        replay.context = import_declaration_context(replay_entry).unwrap();
+        replay.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] =
+            closure.clone();
+        assert_eq!(baseline, replay.semantic_digest().unwrap());
+        for (field, value) in [
+            ("revision", json!("3".repeat(40))),
+            ("repo", json!("fixture/foreign-source")),
+        ] {
+            let mut drifted = replay_entry.clone();
+            drifted["downloads"][0][field] = value;
+            assert!(validate_entry_declaration(&loaded, &drifted)
+                .unwrap_err()
+                .contains("downloads differ"));
+        }
+        let pins = sources
+            .iter()
+            .map(|path| gen_core::PinnedWeightsFile::pin(path).unwrap())
+            .collect::<Vec<_>>();
+        let assembly = json!({"componentClosure":closure});
+        verify_prepared_h3_component_closure(&data, &assembly, &pins).unwrap();
+        for (field, value, diagnostic) in [
+            (
+                "sha256",
+                json!(format!("sha256:{}", "0".repeat(64))),
+                "content drift",
+            ),
+            ("sizeBytes", json!(3), "size mismatch"),
+        ] {
+            let mut drifted = assembly.clone();
+            drifted["componentClosure"][0]["files"][0][field] = value;
+            assert!(verify_prepared_h3_component_closure(&data, &drifted, &pins)
+                .unwrap_err()
+                .contains(diagnostic));
+        }
     }
 
     #[test]

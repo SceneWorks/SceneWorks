@@ -174,7 +174,7 @@ async fn actual_api_retry_chain_recovers_committed_h3_and_refuses_unrelated_or_c
         app.clone(),
         "POST",
         &format!("/api/v1/jobs/{}/duplicate", original.id),
-        json!({}),
+        json!({"payloadChanges": {}}),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{unrelated}");

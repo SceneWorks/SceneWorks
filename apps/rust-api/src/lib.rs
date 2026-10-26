@@ -2223,7 +2223,7 @@ fn create_app_with_state_mode(
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
         .route(
-            "/api/v1/models/{model_id}/repair",
+            "/api/v1/models/:model_id/repair",
             post(repair_model_import_job)
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
