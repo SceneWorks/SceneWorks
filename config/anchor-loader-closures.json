@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "2883eef063d7380faeaf86bcdd8f7c19f8bb3aae",
+  "inferenceRevision": "7275f7c672eecabeba9342e99897ef484e992e14",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -3267,7 +3267,7 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "227dff9c8252c9adbd46e1b00354b61e124cb33c2ee04c6e4d93e1523883b051",
+      "digest": "af46e0fb5001ac2cb4dd66e15375c8aff82afc14d3bfe60b28b38fb09476d105",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -3956,7 +3956,7 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "536b7fdcb202e0b43782c4c080f590154285a3f19fec4bd0699d4f84bdc36974",
+      "digest": "7de9fbb50eed1fc686433819518adb2061560b1effe77cdb12c1d41e1257208c",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -4647,7 +4647,7 @@
         "crates/media/mlx-gen/mlx-gen-flux2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-flux2/src/model.rs"
       ],
-      "digest": "98ef9c3b76a7825f8bdaad05bdc643cc3f34fdab22d8699179c6bc098ccc591a",
+      "digest": "16009c15ae00918f548c161c855e618845713b99a85a1e210dba364467f607a3",
       "closureFileCount": 277,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -6497,7 +6497,7 @@
         "crates/media/mlx-gen/mlx-gen-ideogram/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-ideogram/src/model.rs"
       ],
-      "digest": "2d8dcb89c7e38aafd12afc4c2c04308c844623db8f587c14b30b587350087062",
+      "digest": "e75cf798ba6e40b038160341a94fc0f27bfce1283fbd8477e528cd07eb7018af",
       "closureFileCount": 296,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -7094,7 +7094,7 @@
         "crates/media/mlx-gen/mlx-gen-ideogram/src/lib.rs",
         "crates/media/mlx-gen/mlx-gen-ideogram/src/model.rs"
       ],
-      "digest": "7fdb3e8fa1d32eef349b86ee62a644fdb8c005ac881fe4c10542e489b200ae01",
+      "digest": "d9b30128d8aba3354029f139f211c1fe2f994a660f562fae93e6e579af9e4a13",
       "closureFileCount": 296,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -9448,7 +9448,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/model.rs"
       ],
-      "digest": "c081b076618132aa6e0c7ea5d1e29a2546383fe3cca9961f25fbb0a6cdf26b15",
+      "digest": "3312a28c1880f300e722ebfd2062baf93d19961813ff83bd1e1e9919b8a2dfbc",
       "closureFileCount": 241,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -10084,7 +10084,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/depth.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
       ],
-      "digest": "7e4eeddeb7d319f7dc5300abf0307c7976d1fd8d4f0bfbb1f6f043f810171aef",
+      "digest": "8f46102b6dea700276caf4384411f2668c55d2a4a6b712066d42e26f453fe1e3",
       "closureFileCount": 241,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -10720,7 +10720,7 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/restoration.rs"
       ],
-      "digest": "4e287c993f3fbdf556ba40577bb08ab1540fce0a75d01ffb2ec82e309318f454",
+      "digest": "a0ff0ab752ec4707ad6cfd646ebdb288734421783d396cc7067e9d4c03bfa37c",
       "closureFileCount": 241,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -13529,7 +13529,7 @@
         "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-lens/src/registry.rs"
       ],
-      "digest": "f78873fe5b78747d0fb33a90e7e1ad9580ae795c10a556c59e589cf87672f320",
+      "digest": "eb1c4a6efcc87614b1a871cfabe963d023ade0f6a738f04b5fe3762a3a46df38",
       "closureFileCount": 314,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -14247,7 +14247,7 @@
         "crates/media/mlx-gen/mlx-gen-lens/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-lens/src/registry.rs"
       ],
-      "digest": "8322251dad43fd55d46c0734779260220688fe557512e038f6cf7cbb71894130",
+      "digest": "67b3e8c602436760044b6156c0f726d377be934537200bfe6308d7f46c60b6df",
       "closureFileCount": 314,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -14997,7 +14997,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "f894b3b24512c0e9d866bb1a2138322fbaa7f32c4606f9038148b79ce6d4dea5",
+      "digest": "cad23f27a13b3768e59b8cb0335308403c886057e0f65fadf336d7b6a3c1ebab",
       "closureFileCount": 291,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -15724,7 +15724,7 @@
         "crates/media/mlx-gen/mlx-gen-ltx/src/memory_strategy_2_5.rs",
         "crates/media/mlx-gen/mlx-gen-ltx/src/model.rs"
       ],
-      "digest": "6e5c98dc07a03c0701460974c04ab21e850e560e8ae68053ddd5b1bfb2902228",
+      "digest": "7b71d12287e1887fde36f43ba26a938b310dc3148101cf2fed7aab2754c4aafa",
       "closureFileCount": 291,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -22702,7 +22702,7 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "a838f8e93b80ba1dc08d6e663a1de259c21de48dc8cc9db82390d7b6b61255e1",
+      "digest": "25e899bc226a8c251649f7e2101923133b0619afe86b20e561f7d00cc32e8dcc",
       "closureFileCount": 281,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -23390,7 +23390,7 @@
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-qwen-image-2-1/src/model.rs"
       ],
-      "digest": "64876bffc99a946f6f0fbb933db6cbce357e3f6294d5353270b43df13c530581",
+      "digest": "0b6a5159aac4a7801284d0e354e5642fedd0bee7d340062a3794db306003a9c6",
       "closureFileCount": 281,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -29952,7 +29952,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "a349747ac476758e11075f53c0e8cb98ae5108a4216750831bd76117186541c2",
+      "digest": "12c3a6702fc7871274ec6c4ab3361eb13b13165f28ea83dff5e93e49d65b0691",
       "closureFileCount": 221,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -30522,7 +30522,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "3ec3db80f3243037e3d8d5be3dad35ceff3e3822d74278e91a5e46d5f7c1a46c",
+      "digest": "91c77f7f20603a28e74a05eac60ee9e2a8d80848ddff027209b3178c5c21579c",
       "closureFileCount": 221,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -31094,7 +31094,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "58fc07b4514edfddda6b494b574cfaece1f3eb8aa23d7536ea194ca6269fd74c",
+      "digest": "ab6e442a5b930533e7b71e5e3bbb35d1b2367e04b8c02f19dd38f25f3b977e15",
       "closureFileCount": 221,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -31666,7 +31666,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "bd52cb5e0c194d2c1ec9b6ee20bd64ef0d20ddd6bbe48c55873a2b459399c1d4",
+      "digest": "c9d939201a9f8bb8df9a7c5a8a91a6ec72a4e57890c69859fed2bb9799446f55",
       "closureFileCount": 221,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -32238,7 +32238,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "e2c58956b8faee7f7f459be6749f359eabc22a472a124661ee57d50682916a35",
+      "digest": "aa9b80a94e47adc9ac3bd375bca2b0a768d38e8d0313eeb515406b922e07923b",
       "closureFileCount": 221,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
@@ -32810,7 +32810,7 @@
         "crates/media/mlx-gen/mlx-gen-sensenova/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-sensenova/src/model.rs"
       ],
-      "digest": "43ecd44409550e6c047a49c04c3433952fb89b11f3e73ac2ae277994c9cfe985",
+      "digest": "2af9364b4318bf7853e132cb310f436ac5753272f8f36fc172cc51f754c42531",
       "closureFileCount": 221,
       "closureFiles": [
         "crates/contracts/core-llm/core-llm-testkit/src/defaults.rs",
