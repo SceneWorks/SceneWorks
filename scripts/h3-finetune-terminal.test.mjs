@@ -149,6 +149,22 @@ test('API assertions fail on dropped selected-model propagation and external ser
   await assert.rejects(runScenario(s, { fetchImpl: async () => response({ id: 'wrong-job' }, 201) }));
   assert.throws(() => pointer({}, '/missing'), /missing/);
 });
+test('the macOS terminal lane selects a reviewed CPython 3.12 instead of the hosted tool cache', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  // setup-python installs into the HOSTED runner's tool cache, "/Users/runner", which does not
+  // exist on a self-hosted Mac whose home is the operator's: the action cannot create its cache
+  // there and the job dies before any model work. The macOS lane therefore selects the reviewed
+  // CPython 3.12 already on the runner, through the repository's own selector.
+  const setupPython = /- uses: actions\/setup-python@\S+[^\n]*\n\s+if: ([^\n]+)\n\s+id: (\w+)/.exec(workflow);
+  assert.ok(setupPython, 'the setup-python step is still declared');
+  assert.match(setupPython[1], /runner\.os == 'Windows'/, 'setup-python must be Windows-only');
+  assert.equal(setupPython[2], 'speech_python_windows');
+  assert.match(workflow, /id: speech_python_macos/);
+  assert.match(workflow, /select-starvector-macos-python\.mjs select \/opt\/homebrew\/bin\/python3\.12/);
+  assert.match(workflow, /SPEECH_BASE_PYTHON: \$\{\{ steps\.speech_python_windows\.outputs\.python-path \|\| steps\.speech_python_macos\.outputs\.python-path \}\}/);
+  // The macOS lane must never reach the hosted-tool-cache action at all.
+  assert.doesNotMatch(workflow, /- uses: actions\/setup-python@\S+[^\n]*\n\s+if: \$\{\{ fromJSON/);
+});
 test('manual workflow is execution-only and uses existing runner/token infrastructure without global locks', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
   assert.match(workflow, /workflow_call:/); assert.doesNotMatch(workflow,/^  workflow_dispatch:/m,'only the existing registered terminal routes may call asset ensure'); assert.doesNotMatch(workflow, /^  (push|pull_request|schedule):/m);

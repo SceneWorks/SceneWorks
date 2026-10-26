@@ -100,17 +100,33 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+      # The Windows lane installs a pinned CPython 3.12 through setup-python. The macOS lane uses
+      # the reviewed python3.12 already present on the self-hosted Mac: setup-python installs into
+      # the HOSTED runner's tool cache, "/Users/runner", which does not exist on a self-hosted Mac
+      # whose home is the operator's, so the action cannot create its cache there and the job dies
+      # before any model work. The selection is the repository's existing macOS python selector,
+      # which requires an absolute CPython 3.12 arm64 interpreter.
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        if: ${{ fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
-        id: speech_python
+        if: ${{ runner.os == 'Windows' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        id: speech_python_windows
         with:
           python-version: "3.12"
+      - name: Select the reviewed macOS CPython 3.12
+        if: ${{ runner.os == 'macOS' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        id: speech_python_macos
+        shell: bash
+        working-directory: sceneworks
+        run: |
+          set -euo pipefail
+          candidate="$(node scripts/select-starvector-macos-python.mjs select /opt/homebrew/bin/python3.12 /usr/local/bin/python3.12)"
+          "$candidate" --version | grep -E '^Python 3\.12\.'
+          echo "python-path=$candidate" >> "$GITHUB_OUTPUT"
       - name: Prepare private CPU-only conditioning and source-variant tools
         if: ${{ fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
         shell: bash
         working-directory: sceneworks
         env:
-          SPEECH_BASE_PYTHON: ${{ steps.speech_python.outputs.python-path }}
+          SPEECH_BASE_PYTHON: ${{ steps.speech_python_windows.outputs.python-path || steps.speech_python_macos.outputs.python-path }}
           EXPECTED_RUNNER: ${{ inputs.expected_runner }}
         run: |
           set -euo pipefail
