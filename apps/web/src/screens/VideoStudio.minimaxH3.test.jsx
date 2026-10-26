@@ -267,6 +267,118 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect([...container.querySelectorAll("button")].find(b=>b.textContent.includes("Render clip")).disabled).toBe(true);
   });
 
+  // The ambient first frame. The studio adopts the app's current asset as its starting image when
+  // the user has not chosen one here (sc-11964) — a convenience for a model that REQUIRES a source
+  // image. It must not become an invented first frame on a request the user framed around the LAST
+  // frame: the API accepts a last-only request for an imported FL2VA/hybrid model, so the studio
+  // has to be able to send one (sc-26687 S8).
+  const ambientImported = { ...MINIMAX, id: "imported_ambient_fl2va", family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint", planId: "plan", assembly: { schemaVersion: 1, partition: "fl2va" } }, minimaxH3Partition: "fl2va" };
+
+  async function pickAssetFromField(fieldLabel, assetName) {
+    const field = fieldLabelled(fieldLabel);
+    expect(field, `the ${fieldLabel} picker is rendered`).toBeTruthy();
+    const trigger = field.querySelector(".asset-picker-actions button");
+    expect(trigger, `the ${fieldLabel} picker opens from its own control`).toBeTruthy();
+    await click(trigger);
+    const modal = document.querySelector(".asset-picker-modal");
+    expect(modal, "the asset picker modal opens").toBeTruthy();
+    const option = [...modal.querySelectorAll('[role="option"]')].find((node) => node.textContent.includes(assetName));
+    expect(option, `${assetName} is offered in the picker`).toBeTruthy();
+    await click(option);
+    await click([...modal.querySelectorAll("button")].find((node) => node.textContent.trim() === "Use Selection"));
+  }
+
+  it("drops the ambient first frame when the user picks a LAST frame for an imported last-only model", async () => {
+    const ambient = asset("other", "image", "Other image");
+    const context = baseContext({ videoModels: [ambientImported], assets: [ambient, asset("last", "image", "Last frame")], selectedAsset: ambient });
+    await render(context);
+    await act(async () => setSelect(selectLabelled("Model"), ambientImported.id));
+    await click(modeTab("Image → Video"));
+    // Nobody chose this first frame in this studio: it is the app's current asset.
+    expect(fieldLabelled("First frame").textContent).toContain("Other image");
+
+    await pickAssetFromField("Last frame", "Last frame");
+
+    // The ambient first frame is dropped rather than sent as an invented first frame.
+    expect(fieldLabelled("First frame").textContent).not.toContain("Other image");
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: null, lastFrameAssetId: "last" });
+  });
+
+  it("keeps the ambient first frame in First -> Last, where the first frame is required", async () => {
+    const ambient = asset("other", "image", "Other image");
+    const context = baseContext({ videoModels: [ambientImported], assets: [ambient, asset("last", "image", "Last frame")], selectedAsset: ambient });
+    await render(context);
+    await act(async () => setSelect(selectLabelled("Model"), ambientImported.id));
+    await click(modeTab("First → Last"));
+
+    await pickAssetFromField("Last frame", "Last frame");
+
+    // Both frames are required in this mode, so the studio's starting-image default stays.
+    expect(fieldLabelled("First frame").textContent).toContain("Other image");
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ mode: "first_last_frame", sourceAssetId: "other", lastFrameAssetId: "last" });
+  });
+
+  // The request is guarded where it is built, not only in the picker: the ambient first frame can
+  // still reach a last-only request by another route — the mode can change after the last frame was
+  // picked, and the app's ambient selection can land afterwards. This is that route (sc-26687).
+  it("does not send an ambient first frame when the mode changes to Image -> Video after the LAST frame was picked", async () => {
+    const ambient = asset("other", "image", "Other image");
+    const context = baseContext({ videoModels: [ambientImported], assets: [ambient, asset("last", "image", "Last frame")], selectedAsset: ambient });
+    await render(context);
+    await act(async () => setSelect(selectLabelled("Model"), ambientImported.id));
+    await click(modeTab("First → Last"));
+    await pickAssetFromField("Last frame", "Last frame");
+    // First -> Last REQUIRES a first frame, so the ambient one is kept there.
+    expect(fieldLabelled("First frame").textContent).toContain("Other image");
+
+    await click(modeTab("Image → Video"));
+
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: null, lastFrameAssetId: "last" });
+  });
+
+  // Stock `minimax_h3` is deliberately OUT of this change: an ambient first frame is part of that
+  // model's shipped behaviour, and this epic is about the import platform. Pinning it here means a
+  // later change cannot quietly widen the imported-only rule back onto stock.
+  it("keeps the ambient first frame for the STOCK minimax_h3", async () => {
+    const ambient = asset("other", "image", "Other image");
+    const context = baseContext({ videoModels: [MINIMAX], assets: [ambient, asset("last", "image", "Last frame")], selectedAsset: ambient });
+    await render(context);
+    await act(async () => setSelect(selectLabelled("Model"), MINIMAX.id));
+    await click(modeTab("Image → Video"));
+
+    await pickAssetFromField("Last frame", "Last frame");
+
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: MINIMAX.id, mode: "image_to_video", sourceAssetId: "other", lastFrameAssetId: "last" });
+  });
+
+  it("keeps a first frame the user chose when they then pick a LAST frame", async () => {
+    const ambient = asset("other", "image", "Other image");
+    const context = baseContext({ videoModels: [ambientImported], assets: [ambient, asset("last", "image", "Last frame"), asset("first", "image", "First image")], selectedAsset: ambient });
+    await render(context);
+    await act(async () => setSelect(selectLabelled("Model"), ambientImported.id));
+    await click(modeTab("Image → Video"));
+
+    await pickAssetFromField("First frame", "First image");
+    await pickAssetFromField("Last frame", "Last frame");
+
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: "first", lastFrameAssetId: "last" });
+  });
+
   for (const partition of ["fl2va", "hybrid"]) {
     const imported = { ...MINIMAX, id: `imported_${partition}`, family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint", planId: "plan", assembly: { schemaVersion: 1, partition } }, minimaxH3Partition: partition };
     it(`restores imported ${partition} last-only without seeding the selected first frame`, async () => {

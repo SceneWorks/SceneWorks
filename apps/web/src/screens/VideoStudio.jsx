@@ -398,14 +398,22 @@ export function VideoStudio() {
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
   // Imported catalog entries carry their explicit task partition; an id prefix/family alone
   // cannot prove FL2VA support (Ref2VA shares the same architecture).
-  const supportsLastOnly = (entry) => entry?.id === "minimax_h3" || (
+  // An IMPORTED H3 partition that serves a last-only request (sc-26687). Stock `minimax_h3` is
+  // deliberately NOT in this set: an ambient first frame is part of the shipped stock behaviour
+  // for that model, and changing it here would alter an existing model rather than fix the
+  // import platform this epic is about.
+  const importedLastOnlyModel = (entry) => Boolean(
     entry?.family === "minimax-h3" && entry?.baseModel === "minimax_h3" &&
     entry?.importSourceShape === "transformer_directory" &&
     Boolean(entry?.importPlan?.checkpointId?.trim?.()) &&
     ["fl2va", "hybrid"].includes(entry?.minimaxH3Partition) &&
     entry?.capabilities?.includes("image_to_video")
   );
+  const supportsLastOnly = (entry) => entry?.id === "minimax_h3" || importedLastOnlyModel(entry);
   const acceptsLastOnly = supportsLastOnly(selectedModel);
+  // Whether an ambient first frame must be withheld from this model's request (sc-26687).
+  // IMPORTED H3 partitions only; stock `minimax_h3` keeps its shipped behaviour.
+  const importedLastOnly = importedLastOnlyModel(selectedModel);
   const ltx25Dev = model === ltx25VideoModelId && transformerVariant === "dev";
   const ltx25AutoDurationEnabled = model === ltx25VideoModelId && autoDuration;
   // Multi-reference SCAIL-2 needs a reference/mask pair per character. Keep this source-ready UI
@@ -552,11 +560,17 @@ export function VideoStudio() {
   // one-shot restore-validation effect drops any restored id that no longer resolves once the asset
   // / person-track catalogs land.
   const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId || (supportsLastOnly(videoModels.find((entry) => entry.id === saved.model)) && saved.lastFrameAssetId));
-  const [sourceAssetId, setSourceAssetId] = useState(
-    hasRestoredSource
-      ? (saved.sourceAssetId ?? "")
-      : (["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : ""),
-  );
+  const restoredSourceAssetId = hasRestoredSource ? (saved.sourceAssetId ?? "") : "";
+  const ambientSourceAssetId = !hasRestoredSource && ["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "";
+  const [sourceAssetId, setSourceAssetId] = useState(restoredSourceAssetId || ambientSourceAssetId);
+  // Where the current FIRST frame came from. "ambient" = the studio adopted the app's current
+  // asset selection on the user's behalf (the seed above, or the selection sync below);
+  // "explicit" = the user picked it here, or a recipe restored it. A last-only-capable model
+  // (H3 FL2VA/hybrid) must not condition on a first frame the user never chose: choosing the
+  // LAST frame frames the request around it, and an ambient first frame would ride along as an
+  // invented first frame (sc-26687 S8). The API accepts a last-only request, so the studio has
+  // to be able to send one.
+  const sourceAssetOriginRef = useRef(restoredSourceAssetId ? "explicit" : (ambientSourceAssetId ? "ambient" : "none"));
   // How the starting image is fitted to the output resolution for the image-conditioned
   // modes (sc-6139), mirroring Image Studio Edit. Crop/Pad only — video has no inpaint
   // mask, so Outpaint is hidden (`inpaintCapable={false}`). Default crop = fill, not stretch.
@@ -1090,6 +1104,9 @@ export function VideoStudio() {
       return;
     }
     if (selectedAsset.type === "image" || selectedAsset.type === "frame") {
+      // The app's selection, not a first-frame pick made in this studio: it stays AMBIENT, so a
+      // last-only request never inherits it as a first frame the user never chose.
+      sourceAssetOriginRef.current = "ambient";
       setSourceAssetId(selectedAsset.id);
     }
     if (selectedAsset.type === "video") {
@@ -1137,6 +1154,8 @@ export function VideoStudio() {
       setSourceClipAssetId(selectedAsset.id);
     }
     if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
+      // The user sent THIS asset to the Video Studio: an explicit first frame.
+      sourceAssetOriginRef.current = "explicit";
       setSourceAssetId(selectedAsset.id);
     }
     // A persistent launch is applied once per launch/asset identity, not on catalog object refresh.
@@ -1364,6 +1383,8 @@ export function VideoStudio() {
 
     // Sources. A deleted asset is left to the existing `hasInputs` + validation machinery to
     // surface — the same path a user hits by clearing a picker, rather than a bespoke gate.
+    // A recipe's recorded source is the user's own earlier pick, restored verbatim.
+    sourceAssetOriginRef.current = sourceAssetIdFromRecipe ? "explicit" : "none";
     setSourceAssetId(sourceAssetIdFromRecipe);
     setLastFrameAssetId(lastFrameAssetIdFromRecipe);
     setSourceClipAssetId(settings.sourceClipAssetId ?? "");
@@ -1928,7 +1949,16 @@ export function VideoStudio() {
         presetPromptResolvedClientSide: stackActive || styleApplied || undefined,
         characterId: characterId || null,
         characterLookId: characterLookId || null,
-        sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
+        // The authoritative guard (sc-26687): an IMPORTED H3 partition that accepts a last-only
+        // request must never carry a first frame the user did not choose. The picker clears the
+        // ambient one when a last frame is picked, but the ambient selection can also arrive
+        // afterwards and the mode can change afterwards, so the request is decided HERE, where
+        // the payload is built. A first frame the user chose here is theirs and is sent.
+        sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode)
+          ? (importedLastOnly && mode === "image_to_video" && sourceAssetOriginRef.current === "ambient"
+            ? null
+            : (sourceAssetId || null))
+          : null,
         // Crop/Pad fit for the starting image (sc-6139) — only the image-conditioned
         // modes carry it; `effectiveFitMode(_, false)` coerces any stale outpaint back to
         // crop (video has no inpaint mask). Other modes omit it (DTO defaults to crop).
@@ -2193,7 +2223,11 @@ export function VideoStudio() {
                 eyebrow="Video Studio"
                 importAsset={importAsset}
                 label="First frame"
-                onChange={setSourceAssetId}
+                onChange={(value) => {
+                  // The user picked the first frame here: it is theirs, and it stays theirs.
+                  sourceAssetOriginRef.current = value ? "explicit" : "none";
+                  setSourceAssetId(value);
+                }}
                 projectId={activeProject?.id}
                 value={sourceAssetId}
               />
@@ -2208,7 +2242,20 @@ export function VideoStudio() {
                 eyebrow="Video Studio"
                 importAsset={importAsset}
                 label="Last frame"
-                onChange={setLastFrameAssetId}
+                onChange={(value) => {
+                  setLastFrameAssetId(value);
+                  // Choosing the LAST frame frames the request around it. In Image-to-Video on an
+                  // IMPORTED H3 partition that accepts a last-only request, the studio's ambient
+                  // first frame (the app's current asset, never chosen here) is dropped rather
+                  // than sent as an invented first frame. A first frame the user DID choose stays,
+                  // and so does the ambient one in First -> Last, where the first frame is REQUIRED.
+                  // The request itself is guarded at submit time as well, because this picker is
+                  // not the only way the ambient selection can arrive.
+                  if (value && mode === "image_to_video" && importedLastOnly && sourceAssetOriginRef.current === "ambient") {
+                    sourceAssetOriginRef.current = "none";
+                    setSourceAssetId("");
+                  }
+                }}
                 projectId={activeProject?.id}
                 value={lastFrameAssetId}
               />
