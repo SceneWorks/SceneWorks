@@ -113,7 +113,8 @@ test("SDXL assembly inventory binds shared VAE and both tokenizer roots beside t
     const root = path.join(hub, `models--fixture--${role}`, "snapshots", "a".repeat(40));
     roots[role] = role === "base" ? path.join(root, "q4") : root;
     await mkdir(roots[role], { recursive: true });
-    await writeFile(path.join(roots[role], "weights.bin"), role);
+    const file = role === "base" ? "weights.bin" : role === "vae_fp16_fix" ? "diffusion_pytorch_model.safetensors" : "tokenizer.json";
+    await writeFile(path.join(roots[role], file), role);
   }
   const row = { tierRoot: roots.base, env: {
     SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L: roots.tokenizer_clip_l,
@@ -121,8 +122,13 @@ test("SDXL assembly inventory binds shared VAE and both tokenizer roots beside t
     SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX: roots.vae_fp16_fix,
   } };
   const first = await sdxlAssemblyInventory(row);
-  assert.deepEqual(first.entries.map((entry) => entry.path), ["base/weights.bin", "components/tokenizer_clip_bigg/weights.bin", "components/tokenizer_clip_l/weights.bin", "components/vae_fp16_fix/weights.bin"]);
-  await writeFile(path.join(roots.vae_fp16_fix, "weights.bin"), "changed-shared-vae");
-  assert.notEqual((await sdxlAssemblyInventory(row)).sha256, first.sha256);
+  assert.deepEqual(first.entries.map((entry) => entry.path), ["base/weights.bin", "components/tokenizer_clip_bigg/tokenizer.json", "components/tokenizer_clip_l/tokenizer.json", "components/vae_fp16_fix/diffusion_pytorch_model.safetensors"]);
+  await writeFile(path.join(roots.tokenizer_clip_l, "model.safetensors"), "unused cached CLIP weights");
+  assert.equal((await sdxlAssemblyInventory(row)).sha256, first.sha256);
+  await writeFile(path.join(roots.tokenizer_clip_l, "tokenizer.json"), "changed consumed tokenizer");
+  const changedTokenizer = await sdxlAssemblyInventory(row);
+  assert.notEqual(changedTokenizer.sha256, first.sha256);
+  await writeFile(path.join(roots.vae_fp16_fix, "diffusion_pytorch_model.safetensors"), "changed-shared-vae");
+  assert.notEqual((await sdxlAssemblyInventory(row)).sha256, changedTokenizer.sha256);
   await assert.rejects(() => sdxlAssemblyInventory({ ...row, env: {} }), /source missing/);
 });
