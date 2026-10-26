@@ -165,6 +165,18 @@ test('the macOS terminal lane selects a reviewed CPython 3.12 instead of the hos
   // The macOS lane must never reach the hosted-tool-cache action at all.
   assert.doesNotMatch(workflow, /- uses: actions\/setup-python@\S+[^\n]*\n\s+if: \$\{\{ fromJSON/);
 });
+test('the macOS terminal lane reads and writes its staged set on the reviewed-weights volume', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  // The runner service carries no HF_HOME, so the staging probe would otherwise read a
+  // different hub than the one the reviewed weights are seeded into, and the lane's private
+  // copy of the staged set would land on the runner's smaller internal disk instead of the
+  // volume that holds it.
+  assert.match(workflow, /HF_HOME: \$\{\{ inputs\.backend == 'mlx' && '\/Volumes\/Models\/huggingface' \|\| '' \}\}/);
+  // The macOS lane must still be the one that probes that hub: the Windows lane's paths are
+  // absolute on E: and must not be redirected by the macOS volume.
+  assert.match(workflow, /\["self-hosted","macOS","ARM64","real-weights"\]/);
+});
+
 test('manual workflow is execution-only and uses existing runner/token infrastructure without global locks', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
   assert.match(workflow, /workflow_call:/); assert.doesNotMatch(workflow,/^  workflow_dispatch:/m,'only the existing registered terminal routes may call asset ensure'); assert.doesNotMatch(workflow, /^  (push|pull_request|schedule):/m);

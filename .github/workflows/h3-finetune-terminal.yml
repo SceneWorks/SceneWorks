@@ -61,6 +61,12 @@ jobs:
       cancel-in-progress: false
     timeout-minutes: 1440
     env:
+      # The macOS real-weights lane keeps its HF home on the reviewed-weights volume, so the
+      # staging probe reads the SAME hub the reviewed weights are pre-seeded into, and the
+      # lane's private copy of the staged set lands on that volume instead of the runner's
+      # smaller internal disk. The runner service does not carry HF_HOME, and without this the
+      # probe would read a different directory than the one the weights are seeded into.
+      HF_HOME: ${{ inputs.backend == 'mlx' && '/Volumes/Models/huggingface' || '' }}
       H3_NATIVE_EVIDENCE_REF: ${{ inputs.native_evidence_ref }}
       H3_NATIVE_EVIDENCE_SHA: ${{ inputs.native_evidence_sha }}
       H3_SCENEWORKS_SHA: ${{ inputs.sceneworks_sha }}
