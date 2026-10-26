@@ -9,7 +9,7 @@
 // guard.test.mjs and never start a server or a browser.
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync, writeSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -46,6 +46,24 @@ const PORT = Number(process.env.SC26687_VERIFY_PORT || 5317);
 // bounded here are sub-second in practice — and the timeout rejects, so the caller decides
 // whether the failure is fatal.
 const BOUND_MS = { browser: 15000, context: 15000, server: 10000, request: 10000 };
+
+// Write a reason straight to the fd. A stream write to a pipe is asynchronous, so an immediate
+// exit can truncate it — and a DEFERRED exit is worse: the run keeps going after the refusal, so
+// later stages can still execute and the refusal receipt can be overwritten with a later stage
+// instead of the root cause. A synchronous write hands the bytes to the OS before returning, so
+// the process can stop at once with its reason intact.
+function writeAll(fd, text) {
+  const buffer = Buffer.from(String(text));
+  let offset = 0;
+  while (offset < buffer.length) {
+    try {
+      offset += writeSync(fd, buffer, offset, buffer.length - offset);
+    } catch (error) {
+      if (error.code === "EAGAIN") continue;
+      return; // the stream is gone; the receipt file still carries the reason
+    }
+  }
+}
 async function bounded(label, work, ms) {
   let timer;
   try {
@@ -176,8 +194,8 @@ async function main() {
       artifacts: { directory: resolvedArtifactDir },
     });
     writeReceipt({ ...summary, stage, errors, ok: false });
-    console.error(`sc-26687 hosted browser proof refused at ${stage}:`);
-    for (const error of errors) console.error(` - ${error}`);
+    writeAll(2, `sc-26687 hosted browser proof refused at ${stage}:\n`);
+    for (const error of errors) writeAll(2, ` - ${error}\n`);
   };
 
   // The refusal reasons go to stderr, which is ASYNCHRONOUS when it is a pipe: an immediate exit
@@ -185,7 +203,7 @@ async function main() {
   // same reasons, but the log is what a reader sees first.
   const refuseAndExit = (stage, errors, code = 2) => {
     refuse(stage, errors);
-    process.stderr.write("", () => process.exit(code));
+    process.exit(code);
   };
 
   const guard = evaluateEnvironment(process.env, { repoRoot: REPO_ROOT, realpath: realpathSync });
@@ -403,12 +421,12 @@ async function main() {
     writeFileSync(resolve(artifactDir, "mock-server-requests.json"), JSON.stringify(serverLog, null, 2));
     wroteSummary = true;
 
-    console.log(JSON.stringify(summary.totals, null, 2));
-    console.log(`artifacts: ${artifactDir}`);
+    writeAll(1, `${JSON.stringify(summary.totals, null, 2)}\n`);
+    writeAll(1, `artifacts: ${artifactDir}\n`);
     try {
       assertSummaryPassed(summary);
     } catch (error) {
-      console.error(error.message);
+      writeAll(2, `${error.message}\n`);
       process.exitCode = 1;
     }
   } catch (error) {
@@ -437,15 +455,12 @@ async function main() {
       console.error(error.message);
     });
   }
-  // The proof is over and everything it claims is on disk. Exit explicitly once stdout has
-  // drained, so that no lingering handle can keep the job open.
-  await new Promise((drain) => process.stdout.write("", drain));
+  // The proof is over and everything it claims is on disk. Exit explicitly, so that no lingering
+  // handle can keep the job open.
   process.exit(process.exitCode ?? 0);
 }
 
-main().catch(async (error) => {
-  console.error(error.stack ?? error.message);
-  // stderr is asynchronous when it is a pipe, so an immediate exit can truncate the reason.
-  await new Promise((drain) => process.stderr.write("", drain));
+main().catch((error) => {
+  writeAll(2, `${error.stack ?? error.message}\n`);
   process.exit(1);
 });
