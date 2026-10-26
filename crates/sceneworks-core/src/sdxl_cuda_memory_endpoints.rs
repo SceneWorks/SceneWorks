@@ -781,11 +781,13 @@ mod tests {
 
     #[test]
     fn sdxl_endpoint_packaged_pair_validates_against_compiled_sources() {
-        load_sdxl_cuda_memory_endpoints(
+        let declared: Value = serde_json::from_str(PACKAGED_SDXL_CUDA_MEMORY_ENDPOINTS).unwrap();
+        let loaded = load_sdxl_cuda_memory_endpoints(
             PACKAGED_SDXL_CUDA_MEMORY_ENDPOINTS,
             PACKAGED_ENDPOINT_SOURCES,
         )
         .expect("packaged endpoint data must pass the full source and summary handshake");
+        assert_eq!(loaded.is_some(), !declared["pair"].is_null());
     }
 
     #[test]
