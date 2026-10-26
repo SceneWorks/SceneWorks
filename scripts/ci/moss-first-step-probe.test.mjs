@@ -4,8 +4,11 @@ import {readFile,writeFile,mkdtemp,rm,symlink,realpath,mkdir,stat,link,cp,access
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {envelope,PAYLOAD_SHA} from './moss-upstream-reference.mjs';
 import {verifyProbePayload,verifyPriorBinding,probeBinary,PROBE_SHA,ENCODING_STAGED,ENCODING_SHA,ENCODING_PRECISION_STAGED,ENCODING_PRECISION_PIN,ENCODING_PRECISION_SHA,verifyEncodingPayload,encodingEnvelope,encodingPrecisionProfile,cloneEncodingTarget,encodingMetrics} from './moss-first-step-probe.mjs';
+import {BLOCK_TRACE_STAGED,BLOCK_TRACE_SHA,BLOCK_TRACE_PIN,blockTraceProfile,blockTraceEnvelope,blockTraceRun,verifyBlockTracePayload,blockTraceDelta,blockTraceTestList,blockTraceProducer} from './moss-first-step-probe.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex'),ref='a'.repeat(40),pin='857f7a1996e3678a0773c3509ac0087522c19ce6';
 test('probe dispatch is closed, immutable-artifact-only, and cannot select backend/source/commands',()=>{
  for(const phase of ['upload-probe','execute-probe']){const value={phase,artifact_id:phase==='upload-probe'?null:'123456',artifact_run_id:phase==='upload-probe'?null:'1234567'};assert.deepEqual(envelope(JSON.stringify(value),ref,ref,'mlx'),value);for(const bad of [{...value,command:'cargo test'},{...value,payload:'/tmp/x'},{...value,device:'cpu'}])assert.throws(()=>envelope(JSON.stringify(bad),ref,ref,'mlx'));assert.throws(()=>envelope(JSON.stringify(value),ref,ref,'candle'));assert.throws(()=>envelope(JSON.stringify(value),ref,'b'.repeat(40),'mlx'));}
@@ -108,11 +111,62 @@ test('encoding COW clone preserves original after destination writes and rejects
  await assert.rejects(()=>cloneEncodingTarget(source,resolve(root,'linked')),/link\/type/);
 });
 test('encoding route has no upstream execution and retains ordinary route behavior',async()=>{
- const code=await readFile(new URL('./moss-first-step-probe.mjs',import.meta.url),'utf8'),encoding=code.slice(code.indexOf('export async function executeEncoding('),code.indexOf('async function encodingMain('));
+ const code=await readFile(new URL('./moss-first-step-probe.mjs',import.meta.url),'utf8'),encoding=code.slice(code.indexOf('export async function executeEncoding('),code.indexOf('// Separate diagnostic, never a replacement'));
  assert.doesNotMatch(encoding,/capture_first_step|runtime.launcher|executeProbe|sample_latents/);
  assert.match(encoding,/cloneEncodingTarget\(ENCODING_WARM/);assert.ok(encoding.indexOf('cloneEncodingTarget(')<encoding.indexOf("run('rustup'"));assert.match(encoding,/encoding_probe::fixed_normal_encoding_only/);
  const workflow=await readFile(new URL('../../.github/workflows/memory-catalog-campaign.yml',import.meta.url),'utf8');assert.match(workflow,/moss-first-step-probe.mjs route validate/);assert.match(workflow,/phase == 'execute-encoding'/);
  assert.match(workflow,/phase == 'execute-encoding-precision'/);assert.match(workflow,/ref: \$\{\{ steps\.reference\.outputs\.native_pin \}\}/);
  assert.match(workflow,/ref: '857f7a1996e3678a0773c3509ac0087522c19ce6'/);
  assert.match(code,/moss-upstream-reference-common.mjs/);assert.doesNotMatch(code,/import .*from '.\/moss-upstream-reference.mjs'/);
+});
+
+const traceEnv={GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'SceneWorks/SceneWorks',GITHUB_JOB:'moss-upstream-reference',GITHUB_SHA:ref,SOURCE_REF:ref,GITHUB_RUN_ID:'1234567',GITHUB_RUN_ATTEMPT:'2',GITHUB_WORKSPACE:'/inert/owned'};
+test('block trace has its own fixed payload and closed source/job/run envelope; old profiles remain fixed',()=>{
+ assert.deepEqual(blockTraceProfile(),{pin:BLOCK_TRACE_PIN,sha:BLOCK_TRACE_SHA,kind:'sc-26752-encoding-block-trace-inputs/v1',staged:BLOCK_TRACE_STAGED});
+ assert.equal(BLOCK_TRACE_SHA,'6c2af571f051539d3a3156fdfd8352fe73fe057ac63d37b9a3d157d3731327b8');assert.notEqual(BLOCK_TRACE_SHA,ENCODING_PRECISION_SHA);
+ for(const phase of ['upload-encoding-block-trace','execute-encoding-block-trace']){
+  const v={phase,artifact_id:phase.startsWith('upload')?null:'123456',artifact_run_id:phase.startsWith('upload')?null:'123457'};
+  assert.deepEqual(blockTraceEnvelope(JSON.stringify(v),ref,ref,'mlx'),v);
+  for(const bad of [{...v,command:'anything'},{...v,payload:'/tmp/other'},{...v,native_pin:'b'.repeat(40)},{...v,phase:'execute-encoding-precision'},{...v,artifact_id:'0'}])assert.throws(()=>blockTraceEnvelope(JSON.stringify(bad),ref,ref,'mlx'));
+  assert.throws(()=>blockTraceEnvelope(JSON.stringify(v),ref,'b'.repeat(40),'mlx'));assert.throws(()=>blockTraceEnvelope(JSON.stringify(v),ref,ref,'candle'));
+ }
+ const p=blockTraceRun(traceEnv,'darwin','arm64');assert.equal(p.runId,traceEnv.GITHUB_RUN_ID);
+ for(const change of [{GITHUB_JOB:'normal-ci'},{GITHUB_SHA:'main'},{SOURCE_REF:'b'.repeat(40)},{GITHUB_RUN_ID:'0'},{GITHUB_RUN_ATTEMPT:'0'},{GITHUB_REPOSITORY:'Other/repo'},{GITHUB_WORKSPACE:'relative'}])assert.throws(()=>blockTraceRun({...traceEnv,...change},'darwin','arm64'));
+ assert.throws(()=>blockTraceRun(traceEnv,'linux','x64'));
+ const identity={sourcePath:'src/text_encoder.rs',newModulePath:'src/encoding_block_trace.rs'},delta=' M src/text_encoder.rs\n?? src/encoding_block_trace.rs';blockTraceDelta(delta,identity);assert.throws(()=>blockTraceDelta(delta+'\n M src/qwen.rs',identity));
+ const name='text_encoder::encoding_block_trace::fixed_block_trace';blockTraceTestList(`${name}: test\n\n1 test, 0 benchmarks`,name);
+ for(const output of ['',`other: test`,`${name}: test\nother: test`])assert.throws(()=>blockTraceTestList(output,name));
+ const native={kind:'sc-26752-encoding-block-trace/v1',backend:'native-mlx',device:'metal',nativePin:BLOCK_TRACE_PIN,manifestSha256:BLOCK_TRACE_SHA,actualToolingSha:ref,runId:p.runId,attempt:p.attempt};blockTraceProducer(native,p);
+ for(const change of [{runId:'111111'},{attempt:'1'},{actualToolingSha:'b'.repeat(40)},{nativePin:pin},{manifestSha256:ENCODING_PRECISION_SHA},{device:'cpu'}])assert.throws(()=>blockTraceProducer({...native,...change},p));
+});
+
+test('assembled block trace CLI validates inert immutable upload bytes and refuses drift/wrong job before model work',async t=>{
+ const root=await mkdtemp(resolve(await realpath(tmpdir()),'moss-trace-route-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const scripts=resolve(root,'scripts/ci'),payload=resolve(root,'payload');await mkdir(scripts,{recursive:true});await mkdir(payload);
+ let source=await readFile(new URL('./moss-first-step-probe.mjs',import.meta.url),'utf8');
+ const files=JSON.parse(source.match(/const BLOCK_TRACE_FILES=(\[[^\n]+\]);/)[1].replaceAll("'",'"'));
+ const identity={baseHead:BLOCK_TRACE_PIN,baseTree:'d73f2887baa5776b734ef955f1eca2608d288788',sourcePath:'crates/media/mlx-gen/mlx-gen-moss-image/src/text_encoder.rs',newModulePath:'crates/media/mlx-gen/mlx-gen-moss-image/src/encoding_block_trace.rs',test:'text_encoder::encoding_block_trace::fixed_block_trace'};
+ const entries=[];for(const file of files){const bytes=Buffer.from(file==='overlay/source-identity.json'?JSON.stringify(identity):`INERT ${file}`);const path=resolve(payload,file);await mkdir(resolve(path,'..'),{recursive:true});await writeFile(path,bytes);entries.push({file,byteLength:bytes.length,sha256:sha(bytes)});}
+ const manifest={kind:blockTraceProfile().kind,nativePin:BLOCK_TRACE_PIN,nativeTree:identity.baseTree,referencePayload:'/Volumes/Models/sceneworks-terminal-sc-26752/moss-upstream-reference-40191507328-1/payload',runtimeInventory:{path:'/Volumes/Models/sceneworks-terminal-sc-26752/moss-upstream-reference-40191507328-1/payload/runtime-files.json'},files:entries};const bytes=Buffer.from(JSON.stringify(manifest));await writeFile(resolve(payload,'payload-manifest.json'),bytes);
+ // Only the isolated metadata fixture's byte bindings differ. No production profile is mutated.
+ source=source.replace(BLOCK_TRACE_STAGED,payload).replace(BLOCK_TRACE_SHA,sha(bytes)).replace(/const REQUEST_SHA='[a-f0-9]+'/,`const REQUEST_SHA='${entries.find(x=>x.file==='request.json').sha256}'`).replace(/const B_SHA='[a-f0-9]+'/,`const B_SHA='${entries.find(x=>x.file==='B.png').sha256}'`);
+ await writeFile(resolve(scripts,'moss-first-step-probe.mjs'),source);for(const file of ['moss-upstream-reference-common.mjs','moss-owned-cache-maintenance.mjs'])await cp(new URL(file,import.meta.url),resolve(scripts,file));
+ const program=resolve(scripts,'moss-first-step-probe.mjs'),output=resolve(root,'outputs');
+ const child=env=>spawnSync(process.execPath,['--input-type=module','-e',`Object.defineProperty(process,'platform',{value:'darwin'});Object.defineProperty(process,'arch',{value:'arm64'});process.argv=[process.execPath,${JSON.stringify(program)},'route','validate'];await import(${JSON.stringify('file://'+program)});`],{encoding:'utf8',env:{...process.env,...traceEnv,GITHUB_WORKSPACE:root,GITHUB_OUTPUT:output,INPUT_BACKEND:'mlx',MOSS_REFERENCE:JSON.stringify({phase:'upload-encoding-block-trace',artifact_id:null,artifact_run_id:null}),...env}});
+ const valid=child({});assert.equal(valid.status,0,valid.stderr);const routed=await readFile(output,'utf8');assert.match(routed,/phase=upload-encoding-block-trace/);assert.ok(routed.includes('native_pin='+BLOCK_TRACE_PIN));assert.ok(routed.includes('payload='+payload));assert.ok(routed.includes('moss-encoding-block-trace-1234567-2'));await rm(output);
+ const wrong=child({GITHUB_JOB:'normal-ci'});assert.notEqual(wrong.status,0);assert.match(wrong.stderr,/dedicated Mac job/);await assert.rejects(()=>access(output));
+ await writeFile(resolve(payload,'trace-spec.json'),'changed');const changed=child({});assert.notEqual(changed.status,0);assert.match(changed.stderr,/payload file mismatch/);await assert.rejects(()=>access(output));
+});
+
+test('block trace assembled workflow preserves Metal lane, exact checkout, compile preflight, sequential captures and bounded artifact allowlist',async()=>{
+ const code=await readFile(new URL('./moss-first-step-probe.mjs',import.meta.url),'utf8'),trace=code.slice(code.indexOf('export async function executeBlockTrace('),code.indexOf('async function encodingMain('));
+ assert.ok(trace.indexOf("'--no-run'")<trace.indexOf('MOSS_BLOCK_TRACE_ADMITTED'));assert.ok(trace.indexOf('blockTraceTestList(')<trace.indexOf('MOSS_BLOCK_TRACE_ADMITTED'));
+ assert.ok(trace.indexOf('MOSS_BLOCK_TRACE_ADMITTED')<trace.indexOf("'capture_block_trace.py'"));assert.ok(trace.indexOf("'capture_block_trace.py'")<trace.indexOf("'compare_block_traces.py'"));
+ assert.match(trace,/cloneEncodingTarget\(BLOCK_TRACE_WARM/);assert.match(trace,/identity\.overlaySourceSha256/);assert.match(trace,/verifyPriorBinding/);assert.match(trace,/validateRuntime/);assert.match(trace,/blockTraceProducer/);assert.doesNotMatch(trace,/capture_first_step|executeEncoding\(|sample_latents|MOSS_ENCODING_ADMITTED/);
+ const workflow=await readFile(new URL('../../.github/workflows/memory-catalog-campaign.yml',import.meta.url),'utf8'),job=workflow.slice(workflow.indexOf('  moss-upstream-reference:'),workflow.indexOf('  moss-dispatch:'));
+ assert.match(job,/runs-on: \[self-hosted, macOS, ARM64, rw-starvector\]/);assert.match(job,/group: memory-catalog-campaign-mlx-nax/);assert.match(job,/cancel-in-progress: false/);
+ const checkout=job.slice(job.indexOf('      - name: Checkout reviewed native precision'),job.indexOf('      - name: Run one reviewed'));
+ assert.match(checkout,/execute-encoding-block-trace/);assert.match(checkout,/ref: \$\{\{ steps.reference.outputs.native_pin \}\}/);
+ const artifacts=job.slice(job.indexOf('      - name: Retain only'));for(const path of ['native/*/boundary-*.f32le','upstream/*/boundary-*.f32le','native/*.json','upstream/*.json','comparison.json'])assert.ok(artifacts.includes(path));
+ assert.doesNotMatch(artifacts,/root \}\}\/\*\*|\/payload\/|\/hf\/|\/target\/|\/cargo-home\/|\/snapshot-view\//);
 });

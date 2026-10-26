@@ -195,8 +195,83 @@ export async function executeEncoding(root,payload,env=process.env,profile=OLD_E
  await verifyEncodingPayload(payload,profile);await cp(resolve(payload,'upstream'),resolve(root,'upstream'),{recursive:true,errorOnExist:true,force:false});
  await writeFile(resolve(root,'probe-completion.json'),JSON.stringify({kind:'sc-26752-encoding-completion/v1',nativePin:profile.pin,...(profile.precision?{historicalNativePin:PIN,historicalManifestSha256:ENCODING_SHA}:{}),binary,binarySha256,inputsSha256:INPUT_SHA,upstreamSha256:UPSTREAM_SHA,nativeSha256:await fileHash(resolve(root,'native/native.json')),comparisonSha256:await fileHash(resolve(root,'comparison.json')),scope:'normal encoding only; upstream reused byte-for-byte; no DiT/sampling/image run'},null,2)+'\n',{flag:'wx'});
 }
+
+// Separate diagnostic, never a replacement for the sealed normal-encoding profiles above.
+export const BLOCK_TRACE_STAGED='/Users/michael/.codex/epic-runs/sc-26752/resume-20261026/encoding-block-trace-prep/payload';
+export const BLOCK_TRACE_SHA='6c2af571f051539d3a3156fdfd8352fe73fe057ac63d37b9a3d157d3731327b8';
+export const BLOCK_TRACE_PIN='78100568d8e5b9fb5b199872dc57cb28f5b87340';
+const BLOCK_TRACE_TREE='d73f2887baa5776b734ef955f1eca2608d288788';
+const BLOCK_TRACE_WARM='/Users/michael/actions-runner-sceneworks/_work/SceneWorks/moss-sc-26752/moss-encoding-40345250725-1/target';
+const BLOCK_TRACE_PHASES=['upload-encoding-block-trace','execute-encoding-block-trace'];
+const BLOCK_TRACE_FILES=['B.png','capture_block_trace.py','compare_block_traces.py','historical/native-h40/native.json','historical/native-h40/negative.f32le','historical/native-h40/positive.f32le','historical/native-h40/probe-authentication.json','historical/native-h40/probe-completion.json','historical/prior-authentication-binding.json','historical/runtime-source-authentication.json','historical/upstream/inputs.json','historical/upstream/negative.f32le','historical/upstream/negative_mask.f32le','historical/upstream/positive.f32le','historical/upstream/positive_mask.f32le','historical/upstream/upstream.json','overlay/encoding_block_trace.rs','overlay/source-identity.json','overlay/text_encoder.rs.patch','request.json','trace-spec.json'];
+export function blockTraceProfile(){return {pin:BLOCK_TRACE_PIN,sha:BLOCK_TRACE_SHA,kind:'sc-26752-encoding-block-trace-inputs/v1',staged:BLOCK_TRACE_STAGED};}
+export function blockTraceEnvelope(raw,ref,sha,backend){
+ const value=JSON.parse(raw);
+ check(value&&Object.keys(value).sort().join(',')==='artifact_id,artifact_run_id,phase'&&BLOCK_TRACE_PHASES.includes(value.phase),'closed block trace envelope required');
+ check(/^[a-f0-9]{40}$/.test(ref)&&ref===sha&&backend==='mlx','exact block trace source and mlx required');
+ for(const key of ['artifact_id','artifact_run_id'])check(value.phase.startsWith('upload-')?value[key]===null:typeof value[key]==='string'&&/^[1-9][0-9]{5,19}$/.test(value[key]),'exact block trace artifact identity required');
+ return value;
+}
+export function blockTraceRun(env,platform=process.platform,arch=process.arch){
+ check(env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&env.GITHUB_JOB==='moss-upstream-reference'&&platform==='darwin'&&arch==='arm64','block trace requires its registered dedicated Mac job');
+ check(/^[a-f0-9]{40}$/.test(env.GITHUB_SHA??'')&&env.SOURCE_REF===env.GITHUB_SHA&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT??''),'actual block trace source/run/attempt required');
+ check(typeof env.GITHUB_WORKSPACE==='string'&&env.GITHUB_WORKSPACE.startsWith('/')&&resolve(env.GITHUB_WORKSPACE)===env.GITHUB_WORKSPACE,'exact block trace workspace required');
+ return {toolingSha:env.GITHUB_SHA,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,job:env.GITHUB_JOB};
+}
+export async function verifyBlockTracePayload(root,profile=blockTraceProfile()){
+ await noLinks(root);const bytes=await readFile(resolve(root,'payload-manifest.json'));check(bytes.length<65536&&digest(bytes)===profile.sha,'block trace manifest SHA mismatch');const manifest=JSON.parse(bytes);
+ check(manifest.kind===profile.kind&&manifest.nativePin===BLOCK_TRACE_PIN&&profile.pin===BLOCK_TRACE_PIN&&manifest.nativeTree===BLOCK_TRACE_TREE&&manifest.referencePayload===resolve(PRIOR,'payload')&&manifest.runtimeInventory?.path===resolve(PRIOR,'payload/runtime-files.json'),'block trace provenance mismatch');
+ check(Array.isArray(manifest.files)&&manifest.files.map(x=>x.file).sort().join('\n')===[...BLOCK_TRACE_FILES].sort().join('\n'),'exact block trace payload closure required');
+ const wanted=new Set(['payload-manifest.json']);
+ for(const item of manifest.files){const path=safe(root,item.file);await noLinks(path);const info=await lstat(path);check(info.isFile()&&info.nlink===1&&Number.isSafeInteger(item.byteLength)&&item.byteLength<=4*1024*1024&&info.size===item.byteLength&&await fileHash(path)===item.sha256,'block trace payload file mismatch');wanted.add(item.file);}
+ async function walk(path,prefix=''){for(const entry of await readdir(path,{withFileTypes:true})){check(!entry.isSymbolicLink(),'block trace payload link');const file=prefix+entry.name;if(entry.isDirectory())await walk(resolve(path,entry.name),file+'/');else check(wanted.has(file),'unlisted block trace payload file');}}await walk(root);
+ check(await fileHash(resolve(root,'request.json'))===REQUEST_SHA&&await fileHash(resolve(root,'B.png'))===B_SHA,'block trace original request or reference changed');
+ const identity=JSON.parse(await readFile(resolve(root,'overlay/source-identity.json')));
+ check(identity.baseHead===profile.pin&&identity.baseTree===BLOCK_TRACE_TREE&&identity.sourcePath==='crates/media/mlx-gen/mlx-gen-moss-image/src/text_encoder.rs'&&identity.newModulePath==='crates/media/mlx-gen/mlx-gen-moss-image/src/encoding_block_trace.rs'&&identity.test==='text_encoder::encoding_block_trace::fixed_block_trace','fixed block trace child-module identity required');
+ return manifest;
+}
+export function blockTraceDelta(delta,identity){check(delta.split('\n').sort().join('\n')===[' M '+identity.sourcePath,'?? '+identity.newModulePath].sort().join('\n'),'unexpected block trace native source delta');}
+export function blockTraceTestList(output,test){check(output.split('\n').filter(line=>line.endsWith(': test')).join('\n')===`${test}: test`,'exact compiled block trace test must exist before model execution');}
+export function blockTraceProducer(trace,producer){check(trace.kind==='sc-26752-encoding-block-trace/v1'&&trace.backend==='native-mlx'&&trace.device==='metal'&&trace.nativePin===BLOCK_TRACE_PIN&&trace.manifestSha256===BLOCK_TRACE_SHA&&trace.actualToolingSha===producer.toolingSha&&trace.runId===producer.runId&&trace.attempt===producer.attempt,'native block trace changed actual producer');}
+export async function executeBlockTrace(root,payload,env=process.env){
+ const producer=blockTraceRun(env),profile=blockTraceProfile(),manifest=await verifyBlockTracePayload(payload,profile);
+ await verifyPayload(resolve(PRIOR,'payload'));const binding=JSON.parse(await readFile(resolve(payload,'historical/prior-authentication-binding.json')));await verifyPriorBinding(binding);
+ const runtimeBytes=await readFile(resolve(PRIOR,'payload/runtime-files.json'));check(digest(runtimeBytes)===manifest.runtimeInventory.sha256,'block trace original runtime inventory changed');const runtime=JSON.parse(runtimeBytes);validateRuntime(runtime);
+ check(await realpath(runtime.launcher)===runtime.executable,'block trace runtime executable changed');for(const item of runtime.files){const info=await lstat(item.path);check(info.isFile()&&info.size===item.byteLength&&await fileHash(item.path)===item.sha256,'block trace installed runtime changed');}
+ const source=resolve(env.GITHUB_WORKSPACE,`moss-first-step-native-${producer.runId}-${producer.attempt}`),nativeRoot=resolve(env.GITHUB_WORKSPACE,'..','moss-sc-26752',`moss-encoding-block-trace-${producer.runId}-${producer.attempt}`);
+ await noLinks(source);await noLinks(dirname(nativeRoot));await mkdir(nativeRoot,{mode:0o700});
+ const common={...env,CARGO_HOME:resolve(nativeRoot,'cargo-home'),CARGO_TARGET_DIR:resolve(nativeRoot,'target'),CARGO_BUILD_JOBS:'2',CMAKE_BUILD_PARALLEL_LEVEL:'2',CARGO_PROFILE_RELEASE_STRIP:'none',CARGO_INCREMENTAL:'0',PYTHONPATH:'',PYTHONDONTWRITEBYTECODE:'1',PYTHONPYCACHEPREFIX:resolve(root,'pycache'),HF_HOME:resolve(root,'hf'),HF_MODULES_CACHE:resolve(root,'modules'),TORCH_HOME:resolve(root,'torch'),XDG_CACHE_HOME:resolve(root,'cache'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',PYTORCH_ENABLE_MPS_FALLBACK:'0',CUDA_VISIBLE_DEVICES:'',OMP_NUM_THREADS:'1'};
+ let index=0;const git=async args=>(await run('git',args,{cwd:source,env:common,log:resolve(root,`trace-git-${++index}.log`)})).trimEnd();
+ check(await git(['rev-parse','HEAD'])===profile.pin&&await git(['rev-parse','HEAD^{tree}'])===BLOCK_TRACE_TREE&&await git(['status','--porcelain'])==='','block trace native checkout must be clean exact pin/tree');
+ check((await run('git',['rev-parse','HEAD'],{cwd:env.GITHUB_WORKSPACE,env:common,log:resolve(root,'tooling-source.log')})).trim()===producer.toolingSha,'block trace actual tooling checkout changed');
+ const identity=JSON.parse(await readFile(resolve(payload,'overlay/source-identity.json'))),text=safe(source,identity.sourcePath);
+ check(await fileHash(text)===identity.originalSourceSha256,'block trace original text encoder changed');await git(['apply','--check',resolve(payload,'overlay/text_encoder.rs.patch')]);await git(['apply',resolve(payload,'overlay/text_encoder.rs.patch')]);await copyFile(resolve(payload,'overlay/encoding_block_trace.rs'),safe(source,identity.newModulePath),constants.COPYFILE_EXCL);check(await fileHash(text)===identity.overlaySourceSha256,'block trace patched text encoder changed');
+ const delta=await git(['status','--porcelain','--untracked-files=all']);blockTraceDelta(delta,identity);
+ const clone=await cloneEncodingTarget(BLOCK_TRACE_WARM,common.CARGO_TARGET_DIR);await noLinks(CARGO_SEED);await copyCacheExclusive(CARGO_SEED,common.CARGO_HOME);
+ const models={base:ENCODING_HUB+'/models--OpenMOSS-Team--MOSS-Image-Base/snapshots/1ceede80badddd6a7812069619edaa5633587192',shared:ENCODING_HUB+'/models--OpenMOSS-Team--MOSS-Image-SFT/snapshots/fc5de0d56fc910cbca6f6625a70f5f582b26deb1',adapter:ENCODING_HUB+'/models--chinoll--Moss-Image-Edit/snapshots/3be9c40037e1b89b17aa85ff6f8ee805872aa558'};
+ await writeFile(resolve(root,'probe-authentication.json'),JSON.stringify({kind:'sc-26752-block-trace-authentication/v1',...producer,nativePin:profile.pin,nativeTree:BLOCK_TRACE_TREE,manifestSha256:profile.sha,overlay:identity,sourceDelta:delta,source,nativeRoot,clone,warmTarget:BLOCK_TRACE_WARM,models,originalRuntimeInventory:manifest.runtimeInventory,originalModelAuthenticationSha256:binding.authenticationSha256,modelAuthentication:'unchanged Sources/ArtifactSeal plus original full-request native admission; frozen MPS runtime/fork/stat binding',runner:{name:env.RUNNER_NAME,os:env.RUNNER_OS,arch:env.RUNNER_ARCH},scope:'three native text forwards then three frozen MPS text forwards; no VAE/DiT/sampling/vision forward; metrics only'},null,2)+'\n',{flag:'wx'});
+ await run('rustup',['run','1.98.0','rustc','--version','--verbose'],{cwd:source,env:common,log:resolve(root,'toolchain.log')});await run('/usr/sbin/system_profiler',['SPDisplaysDataType','-json'],{cwd:source,env:common,log:resolve(root,'device.log')});
+ const build=await run('rustup',['run','1.98.0','cargo','test','--locked','--release','-p','mlx-gen-moss-image','--lib','--no-run','--message-format=json'],{cwd:source,env:common,log:resolve(root,'native-build.log')}),binary=probeBinary(build,common.CARGO_TARGET_DIR),binarySha256=await fileHash(binary);
+ blockTraceTestList(await run(binary,[identity.test,'--exact','--ignored','--list'],{cwd:source,env:common,log:resolve(root,'native-test-list.log')}),identity.test);
+ await verifyBlockTracePayload(payload);await verifyPriorBinding(binding);
+ const nativeOutput=await run(binary,[identity.test,'--exact','--ignored','--nocapture','--test-threads=1'],{cwd:source,env:{...common,MOSS_BLOCK_TRACE_ADMITTED:'1',MOSS_TRACE_PAYLOAD:payload,MOSS_TRACE_MANIFEST_SHA:profile.sha,MOSS_TRACE_NATIVE_OUTPUT:resolve(root,'native'),MOSS_ENCODING_BASE:models.base,MOSS_ENCODING_SHARED:models.shared,MOSS_ENCODING_ADAPTER:models.adapter},log:resolve(root,'native.log')});check(/test result: ok\. 1 passed; 0 failed; 0 ignored/.test(nativeOutput),'block trace native test did not execute exactly once');
+ blockTraceProducer(JSON.parse(await readFile(resolve(root,'native/trace.json'))),producer);
+ await verifyBlockTracePayload(payload);await verifyPriorBinding(binding);
+ await run(runtime.launcher,['-B',resolve(payload,'capture_block_trace.py'),'--payload',payload,'--manifest-sha',profile.sha,'--native-trace',resolve(root,'native'),'--reference-payload',resolve(PRIOR,'payload'),'--snapshot-view',resolve(PRIOR,'snapshot-view'),'--output-dir',resolve(root,'upstream')],{cwd:payload,env:common,log:resolve(root,'upstream.log')});
+ await run(runtime.launcher,['-B',resolve(payload,'compare_block_traces.py'),'--native',resolve(root,'native'),'--upstream',resolve(root,'upstream'),'--output',resolve(root,'comparison.json')],{cwd:payload,env:common,log:resolve(root,'comparison.log')});
+ await verifyBlockTracePayload(payload);await verifyPriorBinding(binding);
+ await writeFile(resolve(root,'probe-completion.json'),JSON.stringify({kind:'sc-26752-block-trace-completion/v1',...producer,nativePin:profile.pin,manifestSha256:profile.sha,binary,binarySha256,nativeTraceSha256:await fileHash(resolve(root,'native/trace.json')),upstreamTraceSha256:await fileHash(resolve(root,'upstream/trace.json')),comparisonSha256:await fileHash(resolve(root,'comparison.json')),scope:'three paired text traces; metrics and capture-drift observations only, no acceptance or causal verdict'},null,2)+'\n',{flag:'wx'});
+}
+async function blockTraceMain(){
+ const env=process.env;blockTraceRun(env);const value=blockTraceEnvelope(env.MOSS_REFERENCE,env.SOURCE_REF,env.GITHUB_SHA,env.INPUT_BACKEND),profile=blockTraceProfile(),root=resolve(BASE,`moss-encoding-block-trace-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+ check(process.argv[2]==='route','fixed block trace route required');
+ if(process.argv[3]==='validate'){if(value.phase.startsWith('upload-'))await verifyBlockTracePayload(profile.staged);await appendFile(env.GITHUB_OUTPUT,Object.entries({...value,root,payload:profile.staged,native_pin:profile.pin}).map(([k,v])=>`${k}=${v??''}\n`).join(''));return;}
+ check(process.argv[3]==='execute'&&value.phase==='execute-encoding-block-trace','fixed block trace execute required');await noLinks(BASE);check((await lstat('/Volumes/Models')).dev!==(await lstat('/Volumes')).dev,'mounted Models volume required');await mkdir(root,{mode:0o700});
+ const download=resolve(env.RUNNER_TEMP,`moss-upstream-reference-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);await verifyBlockTracePayload(download);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await executeBlockTrace(root,resolve(root,'payload'),env);
+}
 async function encodingMain(){
  const phase=JSON.parse(process.env.MOSS_REFERENCE??'{}').phase;
+ if(BLOCK_TRACE_PHASES.includes(phase))return blockTraceMain();
  if(!['upload-encoding','execute-encoding','upload-encoding-precision','execute-encoding-precision'].includes(phase)){
   check(process.argv[2]==='route'&&['validate','execute'].includes(process.argv[3]),'fixed reference route required');
   const code=await new Promise((done,fail)=>{const child=spawn(process.execPath,[fileURLToPath(new URL('./moss-upstream-reference.mjs',import.meta.url)),process.argv[3]],{stdio:'inherit',env:process.env});child.on('error',fail);child.on('close',done);});check(code===0,'original reference route failed');return;

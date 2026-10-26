@@ -3,7 +3,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { resolve, isAbsolute, basename, dirname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { acknowledgeRecipeChoice, advanced, click, fill, select, checked, modelPicker, labelledSelect, configure, waitForModelCatalog, waitForReplayForm } from './lib/moss-edit-terminal-controls.mjs';
+import { acknowledgeRecipeChoice, advanced, click, fill, select, checked, modelPicker, labelledSelect, controlScope, configure, waitForModelCatalog, waitForReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 export { labelledSelect, configure, verifyReplayForm } from './lib/moss-edit-terminal-controls.mjs';
 import { frozen } from './moss-edit-terminal.mjs';
 import { VERSION, sha, digest, requireThat, json, save, replaceInputs, assertRequestBinding, resumeUiAttempt, LATENT_UPSCALE_GUARDS } from './lib/moss-edit-terminal.mjs';
@@ -470,7 +470,7 @@ export async function captureUi({ launchPath, rowId, captureRoot, playwrightModu
     shots.push(await screenshot(page, captureRoot, 'before'));
     requireThat(observation.posts.length === 0, 'UI interaction dispatched an unallocated image job before Generate');
     const generateName = route.shell === 'editor' ? 'Generate edit' : route.shell === 'simple' ? `Generate ${expected.count} image${expected.count > 1 ? 's' : ''}` : 'Generate';
-    const generate = page.getByRole('button', { name: generateName, exact: true });
+    const generate = controlScope(page,route.shell).getByRole('button', { name: generateName, exact: true });
     requireThat(await generate.isEnabled(), 'frozen UI request is not runnable; inspect the retained screen');
     submissionPhase='generate-attempted';
     await click(generate, actions, generateName);

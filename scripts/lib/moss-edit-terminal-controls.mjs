@@ -11,6 +11,9 @@ const escapeRegExp = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export const labelledSelect = (scope, label) => scope.locator('label').filter({ hasText: new RegExp(`^${escapeRegExp(label)}`) }).locator('select');
 const tensorPicker=labelledSelect;
 export const modelPicker = page => page.locator('label.settings-field-model select');
+// KeepAlive retains Studio forms while Image Editor is active. Never resolve its
+// shared control labels against the whole page or choose an arbitrary first match.
+export const controlScope = (page,kind) => kind==='editor' ? page.locator('.image-editor-surface:visible .ie-insp-body:visible') : page;
 export async function waitForModelCatalog(page,actions,timeoutMs=120000) {
   const started=Date.now(),deadline=started+timeoutMs,responses=[];
   const onResponse=response=>{try {if(new URL(response.url()).pathname==='/api/v1/models')responses.push({status:response.status(),at:now()});}catch{}};
@@ -110,9 +113,11 @@ export async function waitForReplayForm(page, expected, actions, timeoutMs=10000
 }
 
 export async function configure(page, expected, kind, actions) {
+  const form=controlScope(page,kind);
   if (kind === 'editor') {
-    await select(page.locator('.ie-insp-body select.ie-select').first(), expected.model, actions, 'Editor model');
-    await fill(page.locator('.ie-insp-body textarea.ie-textarea').first(), expected.prompt, actions, 'Editor instruction');
+    await form.waitFor({state:'visible'});
+    await select(form.locator('.ie-section').filter({has:page.getByText('Model',{exact:true})}).locator(':scope > select.ie-select'), expected.model, actions, 'Editor model');
+    await fill(form.locator('.ie-field').filter({has:page.getByText('Instruction',{exact:true})}).locator('textarea.ie-textarea'), expected.prompt, actions, 'Editor instruction');
   } else {
     if (kind === 'simple') {
       const field = page.locator('.su-settings-bar .su-field').filter({ has: page.getByText('Model', { exact: true }) });
@@ -134,17 +139,17 @@ export async function configure(page, expected, kind, actions) {
     'Context limit': expected.advanced.mossImage.max_sequence_length ?? 4096,
     [kind === 'editor' ? 'Output width' : kind === 'simple' ? 'Custom width' : 'Width override']: expected.width,
     [kind === 'editor' ? 'Output height' : kind === 'simple' ? 'Custom height' : 'Height override']: expected.height };
-  for (const [label,value] of Object.entries(controls)) await fill(page.getByLabel(label, { exact: true }), value, actions, label);
-  await checked(page.getByLabel('Cache reference K/V', { exact: true }), expected.advanced.mossImageEdit.use_kv_cache, actions, 'Cache reference K/V');
+  for (const [label,value] of Object.entries(controls)) await fill(form.getByLabel(label, { exact: true }), value, actions, label);
+  await checked(form.getByLabel('Cache reference K/V', { exact: true }), expected.advanced.mossImageEdit.use_kv_cache, actions, 'Cache reference K/V');
   const native = expected.advanced.mossImageAdvanced ?? { output: 'images' };
-  await select(labelledSelect(page,'Native output'), native.output, actions, 'Native output');
+  await select(labelledSelect(form,'Native output'), native.output, actions, 'Native output');
   for (const [label,ref] of [['Positive embeddings',native.positive?.values],['Positive attention mask',native.positive?.mask],['Negative embeddings',native.negative?.values],['Negative attention mask',native.negative?.mask],['Explicit initial noise',native.noise]]) {
-    const picker = tensorPicker(page,label);
+    const picker = tensorPicker(form,label);
     if (ref || await picker.isEnabled()) await select(picker, ref?.assetId ?? '', actions, label);
     else requireThat(await picker.inputValue() === '', `disabled tensor role ${label} retained a stale selection`);
   }
-  await checked(page.getByLabel('Per-prompt negative strings', { exact: true }), Boolean(native.negativePrompts), actions, 'Per-prompt negative strings');
-  if (native.negativePrompts) await fill(page.getByLabel('One negative string per conditioning row', { exact: true }), native.negativePrompts.join('\n'), actions, 'One negative string per conditioning row');
+  await checked(form.getByLabel('Per-prompt negative strings', { exact: true }), Boolean(native.negativePrompts), actions, 'Per-prompt negative strings');
+  if (native.negativePrompts) await fill(form.getByLabel('One negative string per conditioning row', { exact: true }), native.negativePrompts.join('\n'), actions, 'One negative string per conditioning row');
   if (kind !== 'editor') {
     const batch = page.getByLabel('Native text prompt batch', { exact: true });
     if (await batch.isEnabled()) await checked(batch, Boolean(expected.prompts), actions, 'Native text prompt batch');
@@ -152,13 +157,13 @@ export async function configure(page, expected, kind, actions) {
     if (kind === 'full') await fill(page.getByLabel('Variations', { exact: true }), expected.count, actions, 'Variations');
   }
   if (!native.noise) {
-    const seed = kind === 'editor' ? page.locator('.ie-insp-body .ie-field').filter({ has: page.getByText('Seed', { exact: true }) }).locator('input') : page.getByLabel('Seed', { exact: true });
+    const seed = kind === 'editor' ? form.locator('.ie-field').filter({ has: page.getByText('Seed', { exact: true }) }).locator('input') : page.getByLabel('Seed', { exact: true });
     await fill(seed, expected.seed ?? '', actions, 'Seed');
   }
-  const negative = page.getByLabel('Negative prompt', { exact: true });
+  const negative = form.getByLabel('Negative prompt', { exact: true });
   if (await negative.count() && await negative.isEnabled()) await fill(negative, expected.negativePrompt ?? '', actions, 'Negative prompt');
   if (kind === 'full') await checked(page.getByLabel('Upscale', { exact: true }), false, actions, 'Upscale');
-  const adapter = page.getByText(/^Edit adapter: installed\./);
+  const adapter = form.getByText(/^Edit adapter: installed\./);
   await adapter.waitFor({ state: 'visible' }); actions.push({ at: now(), action: 'observe-installed-adapter', text: await adapter.innerText(), model: expected.model });
 }
 
