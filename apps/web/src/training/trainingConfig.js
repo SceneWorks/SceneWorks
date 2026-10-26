@@ -327,16 +327,27 @@ export function draftWithResolution(configDraft, target, resolution) {
 
 // Draft rows (string-typed, like every other draft field) from a stored bucket list; null = off.
 export function resolutionBucketsDraft(value) {
-  return Array.isArray(value)
-    ? value.map((row) => (
-        Object.hasOwn(row ?? {}, "resolution")
-          ? { resolution: numericDraft(row?.resolution), repeats: numericDraft(row?.repeats) }
-          : {
-              width: numericDraft(row?.width),
-              height: numericDraft(row?.height),
-              repeats: numericDraft(row?.repeats),
-            }
-      ))
+  return Array.isArray(value) ? value.map((row) => mapResolutionBucket(row, numericDraft)) : null;
+}
+
+// Keep every supplied geometry key, even on an invalid mixed row. Dropping a
+// conflicting key here would silently turn a refused plan into a different plan.
+function mapResolutionBucket(row, convert) {
+  const keys = ["resolution", "width", "height"].filter((key) => Object.hasOwn(row ?? {}, key));
+  return Object.fromEntries([...keys, "repeats"].map((key) => [key, convert(row?.[key], key)]));
+}
+
+// Validate literal whole-number draft text BEFORE Number can round a fraction
+// into an integer. Shared by validation and serialization; invalid values stay
+// null on the wire, never silently becoming a different, accepted bucket.
+function resolutionBucketNumber(value, key) {
+  const text = String(value ?? "").trim();
+  if (!/^\d+$/.test(text)) return null;
+  const number = Number(text);
+  const repeats = key === "repeats";
+  const max = repeats ? resolutionBucketRepeatsMax : 0xffffffff;
+  return Number.isSafeInteger(number) && number >= 1 && number <= max && (repeats || number % resolutionBucketStride === 0)
+    ? number
     : null;
 }
 
@@ -393,11 +404,10 @@ export function seedResolutionBuckets(target, resolution) {
   const current = numberFromDraft(resolution);
   const offered = targetResolutions(target).filter((value) => current === null || value <= current);
   const resolutions = (offered.length ? offered : [current ?? 1024]).slice(-resolutionBucketsMax);
-  return resolutions.map((value) => (
-    target?.kernel === "moss_image_lora"
-      ? { width: String(value), height: String(value), repeats: "1" }
-      : { resolution: String(value), repeats: "1" }
-  ));
+  // Legacy rows train every image at EACH resolution. Equal-aspect rectangular
+  // rows instead compete for one closest-aspect assignment (ties pick the first),
+  // so an all-square rectangular ladder would train only its smallest row.
+  return resolutions.map((value) => ({ resolution: String(value), repeats: "1" }));
 }
 
 // Whether the target's trainer honors weight noise / gradient noise — the targets endpoint's
@@ -953,9 +963,10 @@ function validateResolutionBuckets(rows, target, issues) {
     }
     form = nextForm;
     const dimensions = square ? ["resolution"] : ["width", "height"];
-    const values = dimensions.map((key) => numberFromDraft(row?.[key]));
-    if (values.some((value) => value === null || !Number.isInteger(value) || value <= 0 || value > 0xffffffff || value % resolutionBucketStride !== 0)) {
-      issues.push(issue.error(field, `Bucket ${n}: ${square ? "resolution" : "width and height"} must be positive u32 ${resolutionBucketStride}px multiples`));
+    const values = dimensions.map((key) => resolutionBucketNumber(row?.[key], key));
+    const invalidDimensions = dimensions.filter((_, index) => values[index] === null);
+    if (invalidDimensions.length) {
+      issues.push(issue.error(field, `Bucket ${n}: ${invalidDimensions.join(" and ")} must be whole-number decimal text, positive u32 ${resolutionBucketStride}px multiples`));
     } else if (square && offered.length && !offered.includes(values[0])) {
       issues.push(issue.error(field, `Bucket ${n}: this target trains at ${offered.join(", ")}`));
     } else {
@@ -965,8 +976,8 @@ function validateResolutionBuckets(rows, target, issues) {
       }
       seen.add(key);
     }
-    const repeats = numberFromDraft(row?.repeats);
-    if (repeats === null || !Number.isInteger(repeats) || repeats < 1 || repeats > resolutionBucketRepeatsMax) {
+    const repeats = resolutionBucketNumber(row?.repeats, "repeats");
+    if (repeats === null) {
       issues.push(issue.error(field, `Bucket ${n}: repeats must be a whole number from 1 to ${resolutionBucketRepeatsMax}`));
     }
   });
@@ -1395,18 +1406,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     // Preserve the selected wire form—square rows are never silently expanded into
     // rectangles, and rectangular width/height never collapse into a square edge.
     resolutionBuckets: Array.isArray(configDraft.resolutionBuckets)
-      ? configDraft.resolutionBuckets.map((row) => (
-          Object.hasOwn(row ?? {}, "resolution")
-            ? {
-                resolution: numberFromDraft(row?.resolution),
-                repeats: numberFromDraft(row?.repeats),
-              }
-            : {
-                width: numberFromDraft(row?.width),
-                height: numberFromDraft(row?.height),
-                repeats: numberFromDraft(row?.repeats),
-              }
-        ))
+      ? configDraft.resolutionBuckets.map((row) => mapResolutionBucket(row, resolutionBucketNumber))
       : undefined,
     ...auxLossesSnapshot(configDraft),
     // Omitted entirely when off, so a default job's snapshot is unchanged.

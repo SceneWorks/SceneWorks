@@ -1144,8 +1144,15 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
     run_five_rung_reference: false,
     provision_qwen_snapshot: false,
     provision_z_image_snapshot: false,
+    run_moss_native_validation: false,
   };
-  const validate = (candidate) => {
+  const validate = (candidate, candidateJob = job) => {
+    const guard = workflowStep(candidateJob, "Reject conflicting browser fixture selectors before setup");
+    assert.ok(guard, "mixed selectors must not be a skipped-green dispatch");
+    assert.ok(candidateJob.indexOf("Reject conflicting browser fixture selectors") < candidateJob.indexOf("actions/checkout"));
+    assert.ok(candidateJob.indexOf("Reject conflicting browser fixture selectors") < candidateJob.indexOf("dtolnay/rust-toolchain"));
+    assert.match(guard, /\$\{!selector\}/);
+    assert.match(guard, /echo "::error::browser-fixture-artifact cannot be combined with \$selector"\n\s+exit 1/);
     const run = (event, inputs = {}) => Boolean(evaluateWorkflow(candidate, event, inputs));
     for (const event of ["push", "pull_request", "merge_group"]) {
       assert.equal(run(event, { verification_profile: "browser-fixture-artifact", ...disabled }), false, event);
@@ -1157,18 +1164,20 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
     for (const selector of Object.keys(disabled)) {
       assert.equal(
         run("workflow_dispatch", { verification_profile: "browser-fixture-artifact", ...disabled, [selector]: true }),
-        false,
-        `${selector} must exclude the artifact producer`,
+        true,
+        `${selector} must reach the hosted early rejection instead of skipping green`,
       );
     }
   };
   validate(expression);
   for (const mutant of [
     expression.replace("inputs.verification_profile == 'browser-fixture-artifact'", "inputs.verification_profile != 'legacy'"),
-    expression.replace(" && !inputs.run_memory_calibration", ""),
+    `${expression} && !inputs.run_memory_calibration`,
   ]) {
     assert.throws(() => validate(mutant));
   }
+  const rejectStep = workflowStep(job, "Reject conflicting browser fixture selectors before setup");
+  assert.throws(() => validate(expression, job.replace(rejectStep, "")));
 
   assert.match(job, /^    runs-on: macos-26$/m);
   assert.match(job, /github\.repository == 'SceneWorks\/SceneWorks'/);
@@ -4725,7 +4734,7 @@ function mlxJobSteps(workflow, job) {
 // it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
 // caught it: that assertion exists precisely so a guard living outside the scanned job cannot
 // ship unpinned, and the fix it asks for is to enumerate that job, which is this.
-const MLX_GUARD_JOBS = ["macos-checks", "nax-worker", "moss-native-api-mlx"];
+const MLX_GUARD_JOBS = ["macos-checks", "nax-worker", "moss-native-api-mlx", "browser-fixture-artifact"];
 
 function mlxGuardSteps(workflow) {
   return MLX_GUARD_JOBS.flatMap((job) => mlxJobSteps(workflow, job));
@@ -4738,6 +4747,12 @@ function mlxGuardSteps(workflow) {
 // string from an `else` fallthrough and from a following `-d` re-check, and the two
 // "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
 const MLX_FATAL_GUARDS = [
+  {
+    step: "Reject conflicting browser fixture selectors before setup",
+    detects: "a selected browser artifact dispatch combined with any legacy model or calibration selector",
+    branch: ['if [ "${!selector}" = "true" ]; then'],
+    diagnostic: /^echo "::error::browser-fixture-artifact cannot be combined with \$selector"$/,
+  },
   {
     step: "Refuse conflicting MOSS validation inputs before compiler setup",
     detects: "a MOSS model-validation dispatch combined with another profile or provisioning selector",
@@ -4915,6 +4930,7 @@ const MLX_FATAL_GUARDS = [
 // backed tests fail closed, and `always()` lets the producer and its paired upload still run so
 // the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
+  "Reject conflicting browser fixture selectors before setup": null,
   "Refuse conflicting MOSS validation inputs before compiler setup": null,
   "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",

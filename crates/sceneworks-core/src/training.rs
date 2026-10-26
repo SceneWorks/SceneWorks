@@ -4134,6 +4134,7 @@ pub fn validate_training_config_for_target(
     validate_training_config(config)?;
     if target.kernel == "moss_image_lora" {
         moss_training_seed(config.seed)?;
+        validate_moss_training_field_shapes(&config.advanced)?;
     }
     validate_advertised_advanced_choices(target, config)?;
     if iris::is_iris_training_kernel(&target.kernel) {
@@ -4488,6 +4489,53 @@ fn validate_advertised_advanced_choices(
             "Training target '{}' does not implement gradient checkpointing.",
             target.id
         )));
+    }
+    Ok(())
+}
+
+/// Validate MOSS's JSON controls before submission or native request lowering.
+/// Missing controls retain the worker defaults; present values must match the native
+/// bool/string-array/i32 contract. The native options bag accepts only its deterministic
+/// posterior policy (an empty or absent bag also selects that policy).
+pub fn validate_moss_training_field_shapes(advanced: &JsonObject) -> Result<(), TrainingPlanError> {
+    let invalid = |field: &str, message: &str| TrainingPlanError::InvalidField {
+        field: field.to_owned(),
+        message: format!("MOSS {field} {message}"),
+    };
+    if let Some(options) = advanced.get("modelOptions") {
+        let options = options
+            .as_object()
+            .ok_or_else(|| invalid("modelOptions", "must be an object"))?;
+        if options
+            .iter()
+            .any(|(k, v)| k != "vae_posterior" || v.as_str() != Some("posterior_mean_v1"))
+        {
+            return Err(invalid(
+                "modelOptions",
+                "accepts only vae_posterior=posterior_mean_v1",
+            ));
+        }
+    }
+    if let Some(modules) = advanced.get("loraTargetModules") {
+        let modules = modules
+            .as_array()
+            .ok_or_else(|| invalid("loraTargetModules", "must be an array"))?;
+        if modules.iter().any(|module| !module.is_string()) {
+            return Err(invalid("loraTargetModules", "must contain only strings"));
+        }
+    }
+    if let Some(factor) = advanced.get("decomposeFactor") {
+        let factor = factor
+            .as_i64()
+            .ok_or_else(|| invalid("decomposeFactor", "must be an integer"))?;
+        if factor != -1 && (factor <= 0 || i32::try_from(factor).is_err()) {
+            return Err(invalid("decomposeFactor", "must be -1 or a positive i32"));
+        }
+    }
+    for key in ["cacheLatents", "cacheTextEmbeddings"] {
+        if advanced.get(key).is_some_and(|value| !value.is_boolean()) {
+            return Err(invalid(key, "must be true or false"));
+        }
     }
     Ok(())
 }
@@ -5422,6 +5470,81 @@ mod moss_training_s1_tests {
                 assert!(!metadata.contains_key("appleSiliconOnly"));
                 assert!(!metadata.contains_key("requiresBackend"));
             }
+        }
+    }
+
+    #[test]
+    fn moss_field_shapes_preserve_defaults_and_native_boundaries() {
+        validate_moss_training_field_shapes(&JsonObject::new()).unwrap();
+        for target in builtin_training_targets()
+            .targets
+            .iter()
+            .filter(|t| t.kernel == "moss_image_lora")
+        {
+            for network in ["lora", "lokr"] {
+                let mut config = target.defaults.clone();
+                config.advanced.insert("networkType".into(), json!(network));
+                validate_training_config_for_target(target, &config).unwrap();
+                for factor in [-1, 1, 4, i32::MAX] {
+                    for cached in [false, true] {
+                        config
+                            .advanced
+                            .insert("decomposeFactor".into(), json!(factor));
+                        config.advanced.insert("cacheLatents".into(), json!(cached));
+                        config
+                            .advanced
+                            .insert("cacheTextEmbeddings".into(), json!(!cached));
+                        config.advanced.insert(
+                            "loraTargetModules".into(),
+                            json!(["q", "layers.0.proj.ffn_up_gate"]),
+                        );
+                        for options in [json!({}), json!({"vae_posterior":"posterior_mean_v1"})] {
+                            config.advanced.insert("modelOptions".into(), options);
+                            validate_training_config_for_target(target, &config).unwrap();
+                        }
+                    }
+                }
+                for key in [
+                    "cacheLatents",
+                    "cacheTextEmbeddings",
+                    "loraTargetModules",
+                    "decomposeFactor",
+                    "modelOptions",
+                ] {
+                    config.advanced.remove(key);
+                }
+                validate_training_config_for_target(target, &config).unwrap();
+            }
+        }
+        for (field, invalid) in [
+            ("cacheLatents", json!("false")),
+            ("cacheTextEmbeddings", json!(0)),
+            ("loraTargetModules", json!([7])),
+            ("loraTargetModules", json!("q")),
+            ("modelOptions", json!({"vae_posterior":"sample"})),
+            ("modelOptions", json!({"unknown":true})),
+            ("modelOptions", json!([])),
+            ("decomposeFactor", json!(0)),
+            ("decomposeFactor", json!(-2)),
+            ("decomposeFactor", json!(2_147_483_648_i64)),
+            ("decomposeFactor", json!(1.5)),
+            ("decomposeFactor", json!("4")),
+        ]
+        .into_iter()
+        .chain(
+            [
+                "cacheLatents",
+                "cacheTextEmbeddings",
+                "loraTargetModules",
+                "decomposeFactor",
+                "modelOptions",
+            ]
+            .map(|key| (key, Value::Null)),
+        ) {
+            let advanced = [(field.to_owned(), invalid)].into_iter().collect();
+            assert!(
+                matches!(validate_moss_training_field_shapes(&advanced), Err(TrainingPlanError::InvalidField { field: actual, .. }) if actual == field)
+            );
         }
     }
 

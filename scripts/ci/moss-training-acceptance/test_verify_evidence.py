@@ -6,6 +6,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = Path(__file__).resolve().parent
 SCRATCH = HERE.parents[2] / ".claude" / "tmp" / "moss-semantic-contract-tests"
@@ -136,6 +137,35 @@ class StaticContractTests(unittest.TestCase):
         source = (HERE / "verify_evidence.py").read_text()
         self.assertIn('raw.get("prepared_evaluation")', source)
         self.assertNotIn('raw.get("prepared_evaluations")', source)
+
+    def test_future_inspection_rejected_from_environment_and_file_envelopes(self):
+        clock = verifier.timestamp("2026-10-25T12:00:00Z")
+        inspection = {"reviewer": "SCHEMA TEST ONLY", "completedAt": "2026-10-25T12:10:00Z",
+                      "findings": ["SCHEMA TEST ONLY - NOT CAMPAIGN EVIDENCE"],
+                      "reviewedArtifact": {"path": "SCHEMA_TEST_ONLY.png", "sha256": "a" * 64}}
+        document = {"fixtureLabel": "SCHEMA TEST ONLY - NOT CAMPAIGN EVIDENCE",
+                    "manifestSha256": verifier.MANIFEST_SHA256, "captureRunId": "123",
+                    "cases": [{"caseId": case, "inspections": [copy.deepcopy(inspection) for _ in range(3)]}
+                              for case in verifier.CELLS]}
+        encoded = json.dumps(document)
+        (self.root / "inspections.json").write_text(encoded)
+        for source in ("environment", "file"):
+            with self.subTest(source=source), patch.dict(verifier.os.environ, {
+                    "MOSS_INSPECTION_JSON": encoded if source == "environment" else "",
+                    "MOSS_CAPTURE_RUN_ID": "123"}):
+                with self.assertRaisesRegex(verifier.EvidenceError, "verification future"):
+                    verifier.inspection_set(self.root, clock)
+
+    def test_completed_post_execution_inspection_remains_legal_within_original_case_window(self):
+        started = verifier.timestamp("2026-10-25T12:00:00Z")
+        ended = verifier.timestamp("2026-10-25T12:01:00Z")
+        clock = verifier.timestamp("2026-10-25T12:03:00Z")
+        at = verifier.verify_inspection_clock("2026-10-25T12:02:00Z", clock)
+        self.assertGreater(at, ended)
+        self.assertTrue(started <= at <= started + 3600)
+        self.assertEqual(verifier.verify_inspection_clock("2026-10-25T12:03:00Z", clock), clock)
+        with self.assertRaisesRegex(verifier.EvidenceError, "verification future"):
+            verifier.verify_inspection_clock("2026-10-25T12:03:00.001Z", clock)
 
     def test_optional_diagnostic_complete_keys_validate_with_and_without_mask(self):
         manifest = verifier.read_json(HERE / "campaign.json")

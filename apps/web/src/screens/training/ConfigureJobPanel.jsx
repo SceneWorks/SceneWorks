@@ -1318,7 +1318,7 @@ export function ConfigureJobPanel({
                       event.target.checked ? seedResolutionBuckets(selectedTarget, configDraft.resolution) : null,
                     )
                   }
-                  title="Train every image at several resolutions, each with its own repeat count per epoch (e.g. 512/768/1024 at 16/4/1). Replaces the single Resolution above. Off by default."
+                  title="Train every image at several resolutions with square rows, or explicitly choose width × height rows to assign images by closest aspect. Each row has its own repeat count per epoch. Replaces the single Resolution above. Off by default."
                 />
               ) : null}
               {auxLosses.map((loss) => (
@@ -1369,7 +1369,7 @@ export function ConfigureJobPanel({
               <fieldset className="training-resolution-buckets" {...invalidProps(configValidity, "resolutionBuckets")}>
                 <legend>Resolution buckets</legend>
                 <span className="training-field-hint">
-                  Square rows preserve the established every-image-at-each-resolution behavior. Rectangular rows use an explicit width × height geometry; row order is preserved.
+                  Square rows train every image at each listed resolution. Width × height rows assign each image only to its closest-aspect bucket; equal-aspect ties use the first row, not every resolution. Repeats apply within the assigned bucket.
                 </span>
                 <button
                   className="secondary-action"
@@ -1388,19 +1388,20 @@ export function ConfigureJobPanel({
                 {resolutionBuckets.map((row, index) => (
                   <div className="training-resolution-bucket-row" key={index}>
                     {rectangularBuckets ? (
-                      <label>
-                        Width × height
-                        <input
-                          aria-label={`Bucket ${index + 1} dimensions`}
-                          onChange={(event) => {
-                            const [width = "", height = ""] = event.target.value.split("x", 2);
-                            updateConfigDraft("resolutionBuckets", resolutionBuckets.map((bucket, rowIndex) => (
-                              rowIndex === index ? { ...bucket, width, height } : bucket
-                            )));
-                          }}
-                          value={`${row.width ?? ""}x${row.height ?? ""}`}
-                        />
-                      </label>
+                      <div>
+                        {["width", "height"].map((dimension) => (
+                          <label key={dimension}>
+                            {dimension === "width" ? "Width" : "Height"}
+                            <input
+                              aria-label={`Bucket ${index + 1} ${dimension}`}
+                              inputMode="numeric"
+                              onChange={(event) => updateResolutionBucket(index, dimension, event.target.value)}
+                              type="text"
+                              value={row[dimension] ?? ""}
+                            />
+                          </label>
+                        ))}
+                      </div>
                     ) : (
                       <label>
                         Resolution

@@ -1791,7 +1791,8 @@ pub(crate) async fn create_training_job(
     // Enforce the Rust-owned target capability before touching a dataset, allocating
     // output ids, or normalizing an image in place. The target catalog is returned
     // directly to clients, so every advertised numeric bound is a submit-time
-    // contract rather than an advisory UI hint.
+    // contract rather than an advisory UI hint. This also runs the shared MOSS field-shape
+    // validator used by worker preflight, before malformed controls can enter the queue.
     sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
         .map_err(training_plan_error_to_api_error)?;
     // ControlNet training (epic 10159) reuses this submit path — same target registry, dataset

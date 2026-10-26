@@ -504,7 +504,7 @@ jobs:
   # hosted (never NAX), dispatch-only, and refuses every legacy calibration selector so
   # selecting an artifact cannot accidentally spend self-hosted capacity or run a campaign.
   browser-fixture-artifact:
-    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.verification_profile == 'browser-fixture-artifact' && !inputs.run_memory_calibration && !inputs.run_five_rung_reference && !inputs.provision_qwen_snapshot && !inputs.provision_z_image_snapshot && !inputs.run_moss_native_validation }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.verification_profile == 'browser-fixture-artifact' }}
     runs-on: macos-26
     permissions:
       contents: read
@@ -522,6 +522,21 @@ jobs:
       CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none"
       CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none"
     steps:
+      - name: Reject conflicting browser fixture selectors before setup
+        env:
+          RUN_MEMORY_CALIBRATION: ${{ inputs.run_memory_calibration }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          PROVISION_QWEN_SNAPSHOT: ${{ inputs.provision_qwen_snapshot }}
+          PROVISION_Z_IMAGE_SNAPSHOT: ${{ inputs.provision_z_image_snapshot }}
+          RUN_MOSS_NATIVE_VALIDATION: ${{ inputs.run_moss_native_validation }}
+        run: |
+          set -euo pipefail
+          for selector in RUN_MEMORY_CALIBRATION RUN_FIVE_RUNG_REFERENCE PROVISION_QWEN_SNAPSHOT PROVISION_Z_IMAGE_SNAPSHOT RUN_MOSS_NATIVE_VALIDATION; do
+            if [ "${!selector}" = "true" ]; then
+              echo "::error::browser-fixture-artifact cannot be combined with $selector"
+              exit 1
+            fi
+          done
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}

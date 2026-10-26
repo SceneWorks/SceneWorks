@@ -872,46 +872,8 @@ fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static
     if plan.target.kernel == "moss_image_lora" {
         sceneworks_core::training::moss_training_seed(plan.config.seed)
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
-        if let Some(options) = advanced.get("modelOptions") {
-            let options = options.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload("MOSS modelOptions must be an object".into())
-            })?;
-            if options
-                .iter()
-                .any(|(k, v)| k != "vae_posterior" || v.as_str() != Some("posterior_mean_v1"))
-            {
-                return Err(WorkerError::InvalidPayload(
-                    "MOSS modelOptions accepts only vae_posterior=posterior_mean_v1".into(),
-                ));
-            }
-        }
-        if let Some(modules) = advanced.get("loraTargetModules") {
-            let modules = modules.as_array().ok_or_else(|| {
-                WorkerError::InvalidPayload("MOSS loraTargetModules must be an array".into())
-            })?;
-            if modules.iter().any(|module| !module.is_string()) {
-                return Err(WorkerError::InvalidPayload(
-                    "MOSS loraTargetModules must contain only strings".into(),
-                ));
-            }
-        }
-        if let Some(factor) = advanced.get("decomposeFactor") {
-            let factor = factor.as_i64().ok_or_else(|| {
-                WorkerError::InvalidPayload("MOSS decomposeFactor must be an integer".into())
-            })?;
-            if factor != -1 && (factor <= 0 || i32::try_from(factor).is_err()) {
-                return Err(WorkerError::InvalidPayload(
-                    "MOSS decomposeFactor must be -1 or a positive i32".into(),
-                ));
-            }
-        }
-        for key in ["cacheLatents", "cacheTextEmbeddings"] {
-            if advanced.get(key).is_some_and(|value| !value.is_boolean()) {
-                return Err(WorkerError::InvalidPayload(format!(
-                    "MOSS {key} must be true or false"
-                )));
-            }
-        }
+        sceneworks_core::training::validate_moss_training_field_shapes(advanced)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     }
     let base_model = plan.target.base_model.as_str();
     let network_type = preflight_string(advanced, "networkType", "lora")?.to_ascii_lowercase();
@@ -4412,6 +4374,90 @@ async fn run_training_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn moss_field_shapes_worker_and_submission_have_identical_refusals() {
+        let targets = sceneworks_core::training::builtin_training_targets();
+        for target in targets
+            .targets
+            .iter()
+            .filter(|t| t.kernel == "moss_image_lora")
+        {
+            for network in ["lora", "lokr"] {
+                let mut value = plan_json(
+                    Path::new("/unused-moss-shape-test"),
+                    &target.kernel,
+                    &target.base_model,
+                    network,
+                    &[],
+                );
+                value["config"] = serde_json::to_value(&target.defaults).unwrap();
+                value["config"]["advanced"]["networkType"] = json!(network);
+                let plan = parse(value.clone());
+                sceneworks_core::training::validate_training_config_for_target(
+                    target,
+                    &plan.config,
+                )
+                .unwrap();
+                validate_training_target_config(&plan).unwrap();
+                for (field, invalid) in [
+                    ("cacheLatents", json!("false")),
+                    ("cacheTextEmbeddings", json!(0)),
+                    ("loraTargetModules", json!([7])),
+                    ("modelOptions", json!({"vae_posterior":"sample"})),
+                    ("decomposeFactor", json!(0)),
+                ] {
+                    let mut refused = value.clone();
+                    refused["config"]["advanced"][field] = invalid;
+                    let plan = parse(refused);
+                    let submission =
+                        sceneworks_core::training::validate_training_config_for_target(
+                            target,
+                            &plan.config,
+                        )
+                        .unwrap_err();
+                    let worker = validate_training_target_config(&plan).unwrap_err();
+                    assert!(
+                        matches!(worker, WorkerError::InvalidPayload(message) if message == submission.to_string()),
+                        "{field}"
+                    );
+                }
+                // Omission and empty/native-valid bags retain the same defaults, with no IO/load.
+                for key in [
+                    "cacheLatents",
+                    "cacheTextEmbeddings",
+                    "loraTargetModules",
+                    "decomposeFactor",
+                    "modelOptions",
+                ] {
+                    value["config"]["advanced"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove(key);
+                }
+                for options in [
+                    None,
+                    Some(json!({})),
+                    Some(json!({"vae_posterior":"posterior_mean_v1"})),
+                ] {
+                    if let Some(options) = options {
+                        value["config"]["advanced"]["modelOptions"] = options;
+                    }
+                    let plan = parse(value.clone());
+                    sceneworks_core::training::validate_training_config_for_target(
+                        target,
+                        &plan.config,
+                    )
+                    .unwrap();
+                    validate_training_target_config(&plan).unwrap();
+                }
+            }
+        }
+    }
 
     // Every test that mutates the process-global `HF_HUB_CACHE` goes through the crate-wide env
     // seam. This module used to own a module-level mutex, on the reasoning that per-function

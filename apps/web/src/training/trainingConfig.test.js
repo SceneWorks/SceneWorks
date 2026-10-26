@@ -1878,10 +1878,10 @@ describe("MOSS training draft serialization", () => {
     });
     expect(snapshot.config.alpha).toBe(0.5);
     expect(seedResolutionBuckets(moss, "1024")).toEqual([
-      { width: "256", height: "256", repeats: "1" },
-      { width: "512", height: "512", repeats: "1" },
-      { width: "768", height: "768", repeats: "1" },
-      { width: "1024", height: "1024", repeats: "1" },
+      { resolution: "256", repeats: "1" },
+      { resolution: "512", repeats: "1" },
+      { resolution: "768", repeats: "1" },
+      { resolution: "1024", repeats: "1" },
     ]);
     expect(snapshot.config.advanced).toMatchObject({
       loraTargetModules: ["q", "layers.0.proj.ffn_up_gate"],
@@ -1892,6 +1892,54 @@ describe("MOSS training draft serialization", () => {
     expect(configValidation(draft, { activeDataset: dataset, selectedTarget: moss }).filter(
       (entry) => entry.field === "resolutionBuckets",
     )).toEqual([]);
+  });
+
+  it("serializes toggle defaults as the legacy every-image-at-each-resolution ladder and round-trips it", () => {
+    const draft = { ...configDraftFromTarget(moss, dataset, ["auto"]), resolutionBuckets: seedResolutionBuckets(moss, "1024") };
+    const snapshot = trainingConfigSnapshot({ activeDataset: dataset, configDraft: draft, selectedTarget: moss });
+    const expected = [{ resolution: 256, repeats: 1 }, { resolution: 512, repeats: 1 }, { resolution: 768, repeats: 1 }, { resolution: 1024, repeats: 1 }];
+    expect(snapshot.config.advanced.resolutionBuckets).toEqual(expected);
+    const restored = configDraftFromTarget({ ...moss, defaults: snapshot.config }, dataset, ["auto"]);
+    expect(restored.resolutionBuckets).toEqual(draft.resolutionBuckets);
+    expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft: restored, selectedTarget: moss }).config.advanced.resolutionBuckets).toEqual(expected);
+  });
+
+  it.each(["width", "height", "resolution", "repeats"])("rejects fractional %s draft text before conversion, including rounded-to-integer text", (field) => {
+    const base = configDraftFromTarget(moss, dataset, ["auto"]);
+    const initial = field === "resolution" ? { resolution: "768", repeats: "1" } : { width: "768", height: "1024", repeats: "1" };
+    for (const value of ["768.0000000000000001", "1.0000000000000001", "1.5", "1e0", "0x20", "", "-32"]) {
+      const row = { ...initial, [field]: value };
+      const configDraft = { ...base, resolutionBuckets: [row] };
+      const errors = configValidation(configDraft, { activeDataset: dataset, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets");
+      expect(errors.length, `${field}=${value}`).toBeGreaterThan(0);
+      expect(errors.map((entry) => entry.message).join(" "), `${field}=${value}`).toContain(field);
+      expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft, selectedTarget: moss }).config.advanced.resolutionBuckets[0][field], `${field}=${value}`).toBeNull();
+    }
+  });
+
+  it("checks bucket integer bounds and stride in validation and serialization", () => {
+    const base = configDraftFromTarget(moss, dataset, ["auto"]);
+    for (const row of [{ width: "32", height: "4294967264", repeats: "100" }, { width: "4294967264", height: "32", repeats: "1" }]) {
+      const configDraft = { ...base, resolutionBuckets: [row] };
+      expect(configValidation(configDraft, { activeDataset: dataset, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets")).toEqual([]);
+      expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft, selectedTarget: moss }).config.advanced.resolutionBuckets).toEqual([Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Number(value)]))]);
+    }
+    for (const [field, values] of [["width", ["0", "31", "33", "4294967295", "4294967296"]], ["height", ["0", "4294967296"]], ["repeats", ["0", "101"]]]) {
+      for (const value of values) {
+        const configDraft = { ...base, resolutionBuckets: [{ width: "768", height: "1024", repeats: "1", [field]: value }] };
+        expect(configValidation(configDraft, { activeDataset: dataset, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets").length).toBeGreaterThan(0);
+        expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft, selectedTarget: moss }).config.advanced.resolutionBuckets[0][field]).toBeNull();
+      }
+    }
+  });
+
+  it("does not silently discard conflicting geometry keys on draft reload or serialization", () => {
+    const row = { resolution: 768, width: 768, height: 1024, repeats: 1 };
+    const target = { ...moss, defaults: { ...moss.defaults, advanced: { resolutionBuckets: [row] } } };
+    const configDraft = configDraftFromTarget(target, dataset, ["auto"]);
+    expect(configDraft.resolutionBuckets).toEqual([{ resolution: "768", width: "768", height: "1024", repeats: "1" }]);
+    expect(configValidation(configDraft, { activeDataset: dataset, selectedTarget: moss }).filter((entry) => entry.field === "resolutionBuckets")[0].message).toMatch(/resolution or width/);
+    expect(trainingConfigSnapshot({ activeDataset: dataset, configDraft, selectedTarget: moss }).config.advanced.resolutionBuckets).toEqual([row]);
   });
 
   it("persists literal seeds, explicit zero and one concrete Randomize result without Auto semantics", () => {
