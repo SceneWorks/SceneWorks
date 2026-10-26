@@ -872,7 +872,7 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo check -p sceneworks-rust-api --features backend-candle
+          cargo check -p sceneworks-rust-api --features backend-candle --tests
       # PR guard for the Candle memory-calibration adapter binary (epic 15448). Like the
       # candle-gated worker code it is invisible to every other lane: `src/bin/candle.rs` is
       # `compile_error!` on macOS, macos-mlx.yml builds only `--bin memory-mlx-adapter`, and the

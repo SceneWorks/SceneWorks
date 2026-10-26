@@ -271,7 +271,8 @@ fn moss_acceptance_device(
         let cuda = device
             .as_cuda_device()
             .map_err(|error| unsupported(&error))?;
-        let context = cuda.cuda_stream().context();
+        let stream = cuda.cuda_stream();
+        let context = stream.context();
         let (_, total) = context
             .mem_get_info()
             .map_err(|error| unsupported(&error))?;
