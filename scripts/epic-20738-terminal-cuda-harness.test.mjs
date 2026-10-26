@@ -4206,6 +4206,6 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.equal(packageJson.devDependencies.ajv, "8.20.0");
   assert.equal(packageJson.devDependencies["ajv-formats"], "3.0.1");
   assert.equal(packageLock.packages[""].devDependencies.ajv, "8.20.0");
-  assert.match(checks, /parity-scaffold:[\s\S]*?npm ci --ignore-scripts[\s\S]*?npm run check/);
+  assert.match(checks, /parity-scaffold:[\s\S]*?npm ci --ignore-scripts[\s\S]*?node scripts\/scaffold-test-selection\.mjs --portable/);
   assert.match(workflow, /name: Upload every epic-20738 terminal receipt[\s\S]*?if: \$\{\{ always\(\)/);
 });

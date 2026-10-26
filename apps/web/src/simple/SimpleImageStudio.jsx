@@ -12,6 +12,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
+import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { resultGridColumns } from "./breakpoint.js";
@@ -222,7 +223,13 @@ export function SimpleImageStudio() {
       return;
     }
     if (resolutions.length && !resolutions.includes(resolution)) {
-      setResolution(mossEdit ? "512x512" : preferredResolution(selectedModel, resolutions));
+      const dims = parseResolution(resolution);
+      setResolution(
+        mossEdit
+          ? "512x512"
+          : (dims && pickClosestResolution(dims.width, dims.height, resolutions))
+            || preferredResolution(selectedModel, resolutions),
+      );
     }
   }, [resolutions, resolution, selectedModel, setResolution, mossEdit]);
 

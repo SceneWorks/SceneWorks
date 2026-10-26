@@ -114,19 +114,19 @@ describe("ImageStudio Save as Preset", () => {
   it("previews and submits ratio batches at the largest closest model bucket", async () => {
     window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
       model: Z_IMAGE.id, count: 1, batchMode: true,
-      batchPromptsText: "[10:8] first prompt\n[16:9] second prompt\n[832x1216] exact prompt",
+      batchPromptsText: "[10:8] first prompt\n[16:9] second prompt\n[832x1216] exact prompt\n[3:4] large portrait",
     }));
     let sequence = 0;
     const createImageJob = vi.fn(async () => ({ id: `ratio-${sequence++}` }));
     await render(baseContext({ createImageJob, imageModels: [{ ...Z_IMAGE, limits: {
-      resolutions: ["1024x1024", "1280x1024", "1600x1280", "1920x1080"],
+      resolutions: ["1024x1024", "1280x1024", "1600x1280", "1920x1080", "768x1024", "896x1152", "1408x2048"],
     } }] }));
     expect(container.querySelector(".batch-preview-res")?.textContent).toBe("1600×1280");
     expect(container.querySelector(".batch-preview-text")?.textContent).toBe("first prompt");
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
-    expect(createImageJob).toHaveBeenCalledTimes(3);
+    expect(createImageJob).toHaveBeenCalledTimes(4);
     expect(createImageJob.mock.calls.map(([payload]) => [payload.prompt, payload.width, payload.height]))
-      .toEqual([["first prompt", 1600, 1280], ["second prompt", 1920, 1080], ["exact prompt", 832, 1216]]);
+      .toEqual([["first prompt", 1600, 1280], ["second prompt", 1920, 1080], ["exact prompt", 832, 1216], ["large portrait", 1408, 2048]]);
   });
 
   // The Advanced disclosure belongs INSIDE the work-panel, not floating beneath it:
@@ -422,7 +422,7 @@ describe("ImageStudio advanced model defaults", () => {
     await act(async () => {});
   }
 
-  it("resets advanced overrides to the newly selected model defaults", async () => {
+  it("preserves supported resolution while resetting model-specific advanced overrides", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
       baseContext({
@@ -492,13 +492,65 @@ describe("ImageStudio advanced model defaults", () => {
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.model).toBe("qwen_image");
     expect(payload.advanced).toMatchObject({
-      resolution: "1536x1024",
+      resolution: "1024x1024",
       sampler: "unipc",
       scheduler: "shift",
       schedulerShift: 4.2,
     });
     expect(payload.advanced).not.toHaveProperty("steps");
     expect(payload.advanced).not.toHaveProperty("guidanceScale");
+  });
+});
+
+describe("ImageStudio resolution continuity", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    ["exact 2K landscape", "2048x1408", ["1024x1024", "2048x1408"], "2048x1408"],
+    ["nearby 2K landscape", "2048x1408", ["1024x1024", "1536x1024", "2048x1440"], "2048x1440"],
+    ["smaller landscape", "2048x1408", ["1024x1024", "1536x1024", "1024x1536"], "1536x1024"],
+    ["portrait", "1408x2048", ["1024x1024", "1024x1536", "1536x1024"], "1024x1536"],
+    ["closest square size", "2048x2048", ["1024x1024", "1536x1536"], "1536x1536"],
+  ])("keeps the %s composition through switching and submission", async (_, previous, options, expected) => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const source = { ...Z_IMAGE, limits: { resolutions: ["1024x1024", previous] } };
+    const destination = {
+      ...Z_IMAGE,
+      id: "destination",
+      name: "Destination",
+      limits: { resolutions: options },
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={baseContext({ createImageJob, imageModels: [source, destination] })}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    const resolutionSelect = () => field(container, "Aspect");
+    await act(async () => setSelect(resolutionSelect(), previous));
+    await act(async () => setSelect(field(container, "Model"), destination.id));
+    expect(resolutionSelect().value).toBe(expected);
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    expect(createImageJob.mock.calls[0][0].advanced.resolution).toBe(expected);
+
+    // Returning to the source preserves the current choice when possible, rather than
+    // restoring an old per-model preference or resetting to the square default.
+    await act(async () => setSelect(field(container, "Model"), source.id));
+    expect(resolutionSelect().value).toBe(previous);
   });
 });
 

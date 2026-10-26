@@ -249,15 +249,19 @@ export function firstResolvedPrompt(prompts, variables) {
 }
 
 // A leading `[WxH]` renders a prompt at an exact size, overriding the Studio Aspect
-// (sc-10063); `[W:H]` instead selects the closest available model aspect at its largest
-// size. Non-numeric brackets stay literal. Returns the stripped prompt and {width,height}
+// (sc-10063); `[W:H]` instead selects the largest available size near the requested
+// aspect ratio. Non-numeric brackets stay literal. Returns the stripped prompt and {width,height}
 // (or null for no directive / no numeric options). The caller validates exact dimensions
 // against the selected model's range and stride.
 const RESOLUTION_DIRECTIVE = /^\s*\[\s*(\d{2,5})\s*[x×X]\s*(\d{2,5})\s*\]\s*/;
 const RATIO_DIRECTIVE = /^\s*\[\s*([1-9]\d{0,4})\s*:\s*([1-9]\d{0,4})\s*\]\s*/;
 
-// Aspect distance wins; equally close buckets prefer the greatest pixel count.
-// Use the Studio's effective options so model and device limits remain authoritative.
+// Prefer the largest bucket within a 10% multiplicative aspect-ratio tolerance.
+// Log distance treats portrait and landscape symmetrically. If no bucket is close
+// enough, use the closest aspect, preferring more pixels on ties. Use the Studio's
+// effective options so model and device limits remain authoritative.
+const RATIO_ASPECT_TOLERANCE = Math.log(1.1);
+
 function resolutionForRatio(width, height, options) {
   const target = Math.log(width / height);
   let best = null;
@@ -266,7 +270,9 @@ function resolutionForRatio(width, height, options) {
   for (const option of options) {
     const dims = parseResolution(option);
     if (!dims) continue;
-    const nextDistance = Math.abs(Math.log(dims.width / dims.height) - target);
+    const aspectDistance = Math.abs(Math.log(dims.width / dims.height) - target);
+    // All close-enough aspects share rank zero, so pixel count decides among them.
+    const nextDistance = Math.max(0, aspectDistance - RATIO_ASPECT_TOLERANCE);
     const nextPixels = dims.width * dims.height;
     if (nextDistance < distance - 1e-12 ||
         (Math.abs(nextDistance - distance) <= 1e-12 && nextPixels > pixels)) {
