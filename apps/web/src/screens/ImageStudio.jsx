@@ -1613,7 +1613,6 @@ export function ImageStudio() {
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
     );
-    setResolution(preferredResolution(selectedModel, resolutionOptions));
     setStepsOverride("");
     setGuidanceOverride("");
   }, [
@@ -1670,9 +1669,8 @@ export function ImageStudio() {
       setEnhancePrompt(false);
     }
   }, [enhancePrompt, promptEnhance]);
-  // Keep the selected resolution valid for the current model's buckets. Switching
-  // to a model whose options exclude the current value snaps to its default (or
-  // 1024x1024, then the first option) rather than leaving a stale, unselectable value.
+  // Preserve resolution across models; if unavailable, choose the closest supported
+  // aspect ratio and size instead of resetting the composition to the model default.
   // Guard on a resolved model (sc-11962): before the catalog loads `resolutionOptions`
   // falls back to DEFAULT_RESOLUTION_OPTIONS, so an un-guarded snap would revert a
   // restored model-specific resolution (e.g. 1536x1536) during restart-restore.
@@ -1683,7 +1681,11 @@ export function ImageStudio() {
     if (resolutionOptions.includes(resolution)) {
       return;
     }
-    setResolution(preferredResolution(selectedModel, resolutionOptions));
+    const dims = parseResolution(resolution);
+    setResolution(
+      (dims && pickClosestResolution(dims.width, dims.height, resolutionOptions))
+        || preferredResolution(selectedModel, resolutionOptions),
+    );
   }, [resolutionOptions, resolution, selectedModel]);
   // Keep the selected quant tier valid for the active model (sc-8515). When the current tier is
   // still installed for this model, leave it; otherwise snap to the model's default selection
