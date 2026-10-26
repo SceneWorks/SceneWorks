@@ -403,6 +403,29 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: null, lastFrameAssetId: "last" });
   });
 
+  // A snapshot written before the origin was recorded is not proof that the user chose the frame:
+  // the studio's ambient seed is the common producer of a saved sourceAssetId. It is therefore read
+  // as ambient, and an ambient frame is withheld from an imported last-only request (sc-26687).
+  it("does not send a first frame from a snapshot that records no origin", async () => {
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
+      mode: "image_to_video",
+      model: ambientImported.id,
+      prompt: "A cyclist rides",
+      sourceAssetId: "other",
+      lastFrameAssetId: "last",
+    }));
+    const context = baseContext({
+      videoModels: [ambientImported],
+      assets: [asset("other", "image", "other"), asset("last", "image", "last")],
+      selectedAsset: asset("other", "image", "other"),
+    });
+    await render(context);
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: null, lastFrameAssetId: "last" });
+  });
+
   it("sends a first frame the snapshot records as the user's own pick", async () => {
     window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
       mode: "image_to_video",

@@ -574,9 +574,14 @@ export function VideoStudio() {
   // the request is built from. A snapshot written before this field existed restores as "explicit",
   // which is the behaviour that shipped.
   const [sourceAssetOrigin, setSourceAssetOrigin] = useState(
-    saved.sourceAssetOrigin === "ambient"
-      ? "ambient"
-      : (restoredSourceAssetId ? "explicit" : (ambientSourceAssetId ? "ambient" : "none")),
+    // A snapshot that records the origin is authoritative. One that does NOT is not proof that the
+    // user chose the frame: the studio's ambient seed is the common producer of a saved
+    // sourceAssetId, so a snapshot without the origin is read as ambient. That only ever withholds
+    // a frame from an IMPORTED last-only request, so no other model is affected — and the import
+    // platform ships with this epic, so there is no such legacy state in the wild either.
+    saved.sourceAssetOrigin === "explicit"
+      ? "explicit"
+      : (restoredSourceAssetId ? "ambient" : (ambientSourceAssetId ? "ambient" : "none")),
   );
   // How the starting image is fitted to the output resolution for the image-conditioned
   // modes (sc-6139), mirroring Image Studio Edit. Crop/Pad only — video has no inpaint
