@@ -3479,8 +3479,20 @@ fn run_five_rung_reference_loaded(
         "overall": cuda_phase_metrics(overall_bytes),
     });
     if request.get("sdxlEndpoint").is_some() {
+        // The runner hashes this exact staged tier inventory before invoking the adapter. Keep
+        // that content identity in the immutable evidence record, not only its companion summary.
+        let inventory_sha256 = protocol::required_env("SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256")?;
+        if inventory_sha256.len() != 64
+            || !inventory_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        {
+            return Err("SDXL endpoint requires the captured artifact inventory SHA-256".into());
+        }
+        fragment["artifact"]["inventorySha256"] = json!(inventory_sha256);
         let report = vram.report();
         fragment["endpointMeasurement"] = json!({
+            "inferencePin": protocol::INFERENCE_PIN,
             "output": endpoint_output,
             "loadPeakBytes": decimal_gb_to_bytes(report.load_peak_gb),
             "baselineBytes": decimal_gb_to_bytes(report.baseline_gb),
@@ -8411,6 +8423,16 @@ fn run(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+fn probe_sdxl_endpoint() -> Result<Value, String> {
+    let mut response = probe()?;
+    let uuid = NvidiaSmi::resolve()?.query("uuid")?;
+    if uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" {
+        return Err(format!("SDXL endpoint probe GPU1 UUID mismatch: {uuid}"));
+    }
+    response["hardware"]["deviceId"] = json!(uuid);
+    Ok(response)
+}
+
 fn sdxl_endpoint_context_uuid() -> Result<String, String> {
     // SDXL's loader uses this same production device constructor (logical CUDA 0).
     let device = candle_gen::default_device()
@@ -8577,6 +8599,7 @@ fn main() {
     let response = match protocol::action(&request).unwrap_or_else(|error| protocol::fail(error)) {
         "probe" => probe(),
         "sdxl_endpoint" => run_sdxl_endpoint(&request),
+        "sdxl_endpoint_probe" => probe_sdxl_endpoint(),
         "run" => run(&request),
         "run_batch" => run_five_rung_batch(&request),
         // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
