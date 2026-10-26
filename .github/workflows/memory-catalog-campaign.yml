@@ -20,6 +20,8 @@
 # The issue-3197 sdxl-cuda-endpoints profile reuses the candle build, pin and cache setup,
 # then captures only resident maximum + fully optimized sequential minimum in fresh processes.
 # It retains JSON evidence and PNG output as artifacts; it makes no branch, commit, push or PR.
+# After packaging the pair, sdxl-cuda-admitted-replay exercises one ordinary owned API/worker
+# request at a six-GiB admission cap, with measured GPU1 activity/peak and real served PNG output.
 # CI_IMPACT: manual only, two real renders, 60 minutes each; 180-minute job ceiling includes
 # the existing native CUDA build. Normal CI adds only a small pure metadata test.
 #
@@ -81,6 +83,7 @@ on:
           - iris-mlx-real-weights
           - supra2-mlx-real-weights
           - sdxl-cuda-endpoints
+          - sdxl-cuda-admitted-replay
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -431,7 +434,7 @@ jobs:
         run: bash scripts/ci/memory-catalog/pr.sh
 
   candle:
-    if: ${{ inputs.profile == 'sdxl-cuda-endpoints' || ((inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle') }}
+    if: ${{ startsWith(inputs.profile, 'sdxl-cuda-') || ((inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle') }}
     name: candle catalog campaign
     # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
     # choice here: both Windows runners are processes on ONE box.
@@ -441,7 +444,7 @@ jobs:
       cancel-in-progress: false
     # Shorter than the MLX ceiling because the candle plan is a smaller set of anchors, but still a
     # day: same reasoning -- a wedge ceiling, not a measured budget.
-    timeout-minutes: ${{ inputs.profile == 'sdxl-cuda-endpoints' && 180 || 1440 }}
+    timeout-minutes: ${{ startsWith(inputs.profile, 'sdxl-cuda-') && 180 || 1440 }}
     env:
       # Native sm_120 (Blackwell) -- this runner IS the RTX PRO 6000 box, same as windows-candle.yml.
       CUDA_COMPUTE_CAP: "120"
@@ -537,7 +540,7 @@ jobs:
           Write-Host "bash for this job: $bash"
 
       - name: Cut the campaign branch
-        if: ${{ inputs.profile != 'sdxl-cuda-endpoints' }}
+        if: ${{ !startsWith(inputs.profile, 'sdxl-cuda-') }}
         id: branch
         run: bash scripts/ci/memory-catalog/branch.sh
 
@@ -629,18 +632,39 @@ jobs:
           if errorlevel 1 exit /b 1
           echo ADAPTER=%GITHUB_WORKSPACE%\target\release\memory-candle-adapter.exe>>%GITHUB_ENV%
 
+      # CI_IMPACT: explicit replay only. Reuses this job's native CUDA toolchain and caches,
+      # runs the new pure gate contracts and strict worker Clippy, then builds the real app/worker.
+      # No normal-CI inference is added; the single real render is the next explicit replay step.
+      - name: Validate the SDXL gate and build the native app for admitted replay
+        if: ${{ inputs.profile == 'sdxl-cuda-admitted-replay' }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test --release --locked -p sceneworks-core --lib sdxl_endpoint_ -- --nocapture
+          if errorlevel 1 exit /b 1
+          cargo test --release --locked -p sceneworks-worker --features backend-candle --lib candle_memory_strategy::tests::sdxl_ -- --nocapture
+          if errorlevel 1 exit /b 1
+          cargo test --release --locked -p sceneworks-worker --features backend-candle --lib generator_cache::tests::sdxl_cuda_policy_transitions_reload_without_fragmenting_other_provider_caches -- --exact --nocapture
+          if errorlevel 1 exit /b 1
+          cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings
+          if errorlevel 1 exit /b 1
+          cargo build --release --locked -p sceneworks-rust-api --features backend-candle --bin sceneworks-rust-api
+          if errorlevel 1 exit /b 1
+          echo SDXL_REPLAY_API=%GITHUB_WORKSPACE%\target\release\sceneworks-rust-api.exe>>%GITHUB_ENV%
+
       # BEFORE the walk, and it FAILS THE JOB rather than warning (sc-22738). Run 34272596969 spent
       # 51 guarded renders -- about an hour of GPU time -- refusing every peak as contaminated by
       # pid 6308, an adapter orphaned by the cancelled run before it. See the script's header.
       - name: Census the profiled GPU
-        if: ${{ inputs.profile != 'sdxl-cuda-endpoints' }}
+        if: ${{ !startsWith(inputs.profile, 'sdxl-cuda-') }}
         run: bash scripts/ci/memory-catalog/gpu-preflight.sh
 
       - name: Bind the operator-staged identity bundles
         run: bash scripts/ci/memory-catalog/stage-identity-bundles.sh
 
       - name: Plan the walk
-        if: ${{ inputs.profile != 'sdxl-cuda-endpoints' }}
+        if: ${{ !startsWith(inputs.profile, 'sdxl-cuda-') }}
         run: bash scripts/ci/memory-catalog/plan.sh
 
       - name: Measure the two SDXL q4 CUDA endpoints
@@ -649,15 +673,19 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/ci/memory-catalog/sdxl-endpoints.sh
 
+      - name: Replay one ordinary admitted SDXL q4 app job
+        if: ${{ inputs.profile == 'sdxl-cuda-admitted-replay' }}
+        run: bash scripts/ci/memory-catalog/sdxl-endpoints.sh
+
       - name: Walk the catalog
-        if: ${{ inputs.profile != 'sdxl-cuda-endpoints' }}
+        if: ${{ !startsWith(inputs.profile, 'sdxl-cuda-') }}
         id: walk
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/ci/memory-catalog/run.sh
 
       - name: Push whatever landed
-        if: ${{ always() && inputs.profile != 'sdxl-cuda-endpoints' }}
+        if: ${{ always() && !startsWith(inputs.profile, 'sdxl-cuda-') }}
         run: bash scripts/ci/memory-catalog/push.sh
 
       - name: Upload the campaign work dir
@@ -670,7 +698,7 @@ jobs:
           retention-days: 30
 
       - name: Open the results PR
-        if: ${{ always() && inputs.profile != 'sdxl-cuda-endpoints' }}
+        if: ${{ always() && !startsWith(inputs.profile, 'sdxl-cuda-') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/memory-catalog/pr.sh

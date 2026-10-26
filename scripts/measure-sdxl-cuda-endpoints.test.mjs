@@ -5,7 +5,7 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection } from "./measure-sdxl-cuda-endpoints.mjs";
 
 const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
 const uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
@@ -99,6 +99,7 @@ test("only the manual SDXL profile omits historical inference anchor queries", a
     return { revisions: result.stdout.trim().split("\n").filter((line) => line.startsWith("wanted:")), queried: result.stderr.includes("historical-query") };
   };
   assert.deepEqual(wanted("sdxl-cuda-endpoints"), { revisions: [`wanted:${pin}`], queried: false });
+  assert.deepEqual(wanted("sdxl-cuda-admitted-replay"), { revisions: [`wanted:${pin}`], queried: false });
   assert.deepEqual(wanted("catalog"), { revisions: [`wanted:${pin}`, `wanted:${historical}`], queried: true });
   assert.deepEqual(wanted(""), { revisions: [`wanted:${pin}`, `wanted:${historical}`], queried: true });
   const workflow = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
@@ -131,4 +132,44 @@ test("SDXL assembly inventory binds shared VAE and both tokenizer roots beside t
   await writeFile(path.join(roots.vae_fp16_fix, "diffusion_pytorch_model.safetensors"), "changed-shared-vae");
   assert.notEqual((await sdxlAssemblyInventory(row)).sha256, changedTokenizer.sha256);
   await assert.rejects(() => sdxlAssemblyInventory({ ...row, env: {} }), /source missing/);
+});
+
+// CI_IMPACT: pure production-request/environment/receipt contracts; never starts API or worker.
+test("admitted replay submits ordinary explicit-q4 defaults without a strategy override", () => {
+  const request = admittedReplayRequest("owned-project");
+  assert.deepEqual(request.advanced, { mlxQuantize: 4 });
+  assert.equal(request.width, 1024); assert.equal(request.height, 1024); assert.equal(request.count, 1);
+  assert.equal(request.model, "sdxl"); assert.deepEqual(request.loras, []);
+  const env = admittedReplayEnv({ PATH: "/tools", CUDA_VISIBLE_DEVICES: "0", SCENEWORKS_GPU_ID: "0", SCENEWORKS_DATA_DIR: "/user", HF_TOKEN: "secret" },
+    { state: "/owned/state", hub: "/cache/hub", workerId: "owned-worker", port: 17931, parentPid: 1234 });
+  assert.equal(env.CUDA_VISIBLE_DEVICES, "1"); assert.equal(env.SCENEWORKS_GPU_ID, "1");
+  assert.equal(env.SCENEWORKS_CUDA_VRAM_CAP_GB, "6"); assert.equal(env.SCENEWORKS_PARENT_PID, "1234");
+  assert.equal(env.SCENEWORKS_DATA_DIR, path.join("/owned/state", "data")); assert.equal(env.HF_TOKEN, undefined);
+  assert.equal(env.SCENEWORKS_WORKER_CHILD, "1"); assert.equal(env.SCENEWORKS_BACKEND_CANDLE_ENABLED, "true");
+});
+
+test("admitted replay requires actual measured optimized worker selection and budget telemetry", () => {
+  const selection = { backend: "candle", route: "sdxl", actualTier: "q4", mode: "text_to_image", strategy: "bounded_attention",
+    basis: "measured_endpoint", geometry: { width: 1024, height: 1024, batch: 1 },
+    parameters: { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 },
+    predictedPeakBytes: 3_000_000_000, reserveGb: 1.5, availableGb: 4.5 };
+  assert.doesNotThrow(() => assertAdmittedReplaySelection(selection));
+  for (const patch of [{ strategy: "resident" }, { actualTier: "q8" }, { basis: "estimated" }, { predictedPeakBytes: null }, { availableGb: 95 }]) {
+    assert.throws(() => assertAdmittedReplaySelection({ ...selection, ...patch }));
+  }
+  assert.throws(() => assertAdmittedReplaySelection({ ...selection, parameters: { ...selection.parameters, stageResidency: false } }));
+});
+
+test("admitted replay workflow remains manual and runs native pure gates on GPU1 before one app job", async () => {
+  const source = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
+  assert.match(source, /- sdxl-cuda-admitted-replay/);
+  assert.match(source, /CUDA_VISIBLE_DEVICES: "1"/); assert.match(source, /SCENEWORKS_GPU_ID: "1"/);
+  assert.match(source, /cargo test --release --locked -p sceneworks-core --lib sdxl_endpoint_/);
+  assert.match(source, /cargo test --release --locked -p sceneworks-worker --features backend-candle --lib candle_memory_strategy::tests::sdxl_/);
+  assert.match(source, /cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings/);
+  assert.ok(source.indexOf("Validate the SDXL gate") < source.indexOf("Replay one ordinary admitted SDXL"));
+  const script = await readFile(new URL("./measure-sdxl-cuda-endpoints.mjs", import.meta.url), "utf8");
+  assert.match(script, /POST", "\/api\/v1\/image\/jobs"/);
+  assert.match(script, /child\.stdin\.end\(\)/, "owned worker uses existing natural stdin-EOF shutdown");
+  assert.match(script, /SCENEWORKS_PARENT_PID/, "owned API uses existing parent-death natural shutdown");
 });
