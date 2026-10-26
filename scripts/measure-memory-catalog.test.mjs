@@ -6145,7 +6145,8 @@ test("the campaign can raise one lane's budget from the dispatch, with no source
   assert.match(await readFile(path.join(ROOT, "scripts/ci/memory-catalog/run.sh"), "utf8"), /build_catalog_args/);
 });
 
-test("HF_TOKEN reaches only the two catalog walk steps that can fetch missing snapshots", async () => {
+// CI_IMPACT: extends the existing static workflow assertion for one manual fetch-capable profile.
+test("HF_TOKEN reaches only catalog walks and the bounded SDXL endpoint step that can fetch snapshots", async () => {
   const workflow = await readFile(path.join(ROOT, ".github/workflows/memory-catalog-campaign.yml"), "utf8");
   const topLevel = workflow.slice(0, workflow.indexOf("\njobs:"));
   assert.doesNotMatch(topLevel, /^  HF_TOKEN:/m, "no workflow-wide token");
@@ -6157,8 +6158,14 @@ test("HF_TOKEN reaches only the two catalog walk steps that can fetch missing sn
     const walk = job.match(/      - name: Walk the catalog\n([\s\S]*?)(?=\n      - |$)/)?.[1];
     assert.ok(walk, `${name} walk step exists`);
     assert.match(walk, /^        env:\n          HF_TOKEN: \$\{\{ secrets\.HF_TOKEN \}\}$/m);
-    assert.equal((job.match(/secrets\.HF_TOKEN/g) ?? []).length, 1, `${name} has no other token exposure`);
-    assert.match(job, /      - name: Plan the walk\n        run: bash scripts\/ci\/memory-catalog\/plan\.sh/);
+    const endpoint = job.match(/      - name: Measure the two SDXL q4 CUDA endpoints\n([\s\S]*?)(?=\n      - |$)/)?.[1];
+    if (name === "candle") {
+      assert.ok(endpoint, "bounded SDXL endpoint step exists");
+      assert.match(endpoint, /if: \$\{\{ inputs\.profile == 'sdxl-cuda-endpoints' \}\}/);
+      assert.match(endpoint, /^        env:\n          HF_TOKEN: \$\{\{ secrets\.HF_TOKEN \}\}$/m);
+    } else assert.equal(endpoint, undefined);
+    assert.equal((job.match(/secrets\.HF_TOKEN/g) ?? []).length, name === "candle" ? 2 : 1, `${name} has no other token exposure`);
+    assert.match(job, /      - name: Plan the walk\n(?:        if: \$\{\{ inputs\.profile != 'sdxl-cuda-endpoints' \}\}\n)?        run: bash scripts\/ci\/memory-catalog\/plan\.sh/);
   }
 });
 

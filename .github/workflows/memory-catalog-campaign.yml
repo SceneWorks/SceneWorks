@@ -17,6 +17,12 @@
 # jobs, including every plan/walk/branch/push/PR step described below. Catalog is
 # still the default profile; no app run can publish catalog measurements.
 #
+# The issue-3197 sdxl-cuda-endpoints profile reuses the candle build, pin and cache setup,
+# then captures only resident maximum + fully optimized sequential minimum in fresh processes.
+# It retains JSON evidence and PNG output as artifacts; it makes no branch, commit, push or PR.
+# CI_IMPACT: manual only, two real renders, 60 minutes each; 180-minute job ceiling includes
+# the existing native CUDA build. Normal CI adds only a small pure metadata test.
+#
 # WHAT IT PRODUCES. A NEW branch `story/<campaign>-<backend>-campaign-<run_id>` carrying one commit
 # per measured anchor, pushed as the walk proceeds (never only at the end), plus a work-dir artifact
 # with the summary JSON, the per-anchor logs and the retained raw bundles. The last step opens a PR
@@ -74,6 +80,7 @@ on:
           - qwen-image-2-1-app-lifecycle
           - iris-mlx-real-weights
           - supra2-mlx-real-weights
+          - sdxl-cuda-endpoints
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -206,7 +213,7 @@ on:
         default: ""
 
 # `gh pr create` and the branch pushes both run as the default GITHUB_TOKEN. The only other secret
-# this workflow reads is `HF_TOKEN`, scoped to the two walk steps that can fetch
+# this workflow reads is `HF_TOKEN`, scoped to the walk and SDXL endpoint steps that can fetch
 # missing Hugging Face snapshots when `download_missing` is enabled.
 permissions:
   contents: write
@@ -424,7 +431,7 @@ jobs:
         run: bash scripts/ci/memory-catalog/pr.sh
 
   candle:
-    if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle' }}
+    if: ${{ (inputs.profile == '' || inputs.profile == 'catalog' || inputs.profile == 'sdxl-cuda-endpoints') && inputs.backend == 'candle' }}
     name: candle catalog campaign
     # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
     # choice here: both Windows runners are processes on ONE box.
@@ -434,13 +441,14 @@ jobs:
       cancel-in-progress: false
     # Shorter than the MLX ceiling because the candle plan is a smaller set of anchors, but still a
     # day: same reasoning -- a wedge ceiling, not a measured budget.
-    timeout-minutes: 1440
+    timeout-minutes: ${{ inputs.profile == 'sdxl-cuda-endpoints' && 180 || 1440 }}
     env:
       # Native sm_120 (Blackwell) -- this runner IS the RTX PRO 6000 box, same as windows-candle.yml.
       CUDA_COMPUTE_CAP: "120"
       # The runbook keeps exactly one device visible on the CUDA capture host; the harness's own
       # preflight refuses the walk when this is unset.
       CUDA_VISIBLE_DEVICES: "1"
+      SCENEWORKS_GPU_ID: "1"
       CARGO_NET_OFFLINE: "true"
       BACKEND: candle
       DEFAULT_HF_CACHE: 'E:\huggingface\hub'
@@ -528,6 +536,7 @@ jobs:
           Write-Host "bash for this job: $bash"
 
       - name: Cut the campaign branch
+        if: ${{ inputs.profile != 'sdxl-cuda-endpoints' }}
         id: branch
         run: bash scripts/ci/memory-catalog/branch.sh
 
@@ -623,22 +632,31 @@ jobs:
       # 51 guarded renders -- about an hour of GPU time -- refusing every peak as contaminated by
       # pid 6308, an adapter orphaned by the cancelled run before it. See the script's header.
       - name: Census the profiled GPU
+        if: ${{ inputs.profile != 'sdxl-cuda-endpoints' }}
         run: bash scripts/ci/memory-catalog/gpu-preflight.sh
 
       - name: Bind the operator-staged identity bundles
         run: bash scripts/ci/memory-catalog/stage-identity-bundles.sh
 
       - name: Plan the walk
+        if: ${{ inputs.profile != 'sdxl-cuda-endpoints' }}
         run: bash scripts/ci/memory-catalog/plan.sh
 
+      - name: Measure the two SDXL q4 CUDA endpoints
+        if: ${{ inputs.profile == 'sdxl-cuda-endpoints' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash scripts/ci/memory-catalog/sdxl-endpoints.sh
+
       - name: Walk the catalog
+        if: ${{ inputs.profile != 'sdxl-cuda-endpoints' }}
         id: walk
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: bash scripts/ci/memory-catalog/run.sh
 
       - name: Push whatever landed
-        if: ${{ always() }}
+        if: ${{ always() && inputs.profile != 'sdxl-cuda-endpoints' }}
         run: bash scripts/ci/memory-catalog/push.sh
 
       - name: Upload the campaign work dir
@@ -651,7 +669,7 @@ jobs:
           retention-days: 30
 
       - name: Open the results PR
-        if: ${{ always() }}
+        if: ${{ always() && inputs.profile != 'sdxl-cuda-endpoints' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/memory-catalog/pr.sh

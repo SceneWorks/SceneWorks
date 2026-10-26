@@ -1142,7 +1142,7 @@ fn sdxl_candle_route_fingerprint(model_id: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("-");
-    format!("sdxl-candle-{tokens}-staged-decode-attention-v1")
+    format!("sdxl-candle-{tokens}-staged-decode-attention-v2")
 }
 
 /// The SDXL-specific half of the shared five-rung spec: the resolved catalog route the engine
@@ -2083,7 +2083,14 @@ fn planned_selection_with_tier(
     Ok(MemorySelection {
         strategy,
         parameters: MemoryStrategyParameters {
-            stage_residency: None,
+            stage_residency: protocol::strategy_parameters(request)?
+                .get("stageResidency")
+                .map(|value| {
+                    value.as_bool().ok_or_else(|| {
+                        "planned.strategy.parameters.stageResidency must be boolean".to_owned()
+                    })
+                })
+                .transpose()?,
             decode_tile_edge: protocol::optional_parameter(request, "decodeTileEdge")?,
             decode_overlap: protocol::optional_parameter(request, "decodeOverlap")?,
             attention_chunk_size: protocol::optional_parameter(request, "attentionChunkSize")?,
@@ -2503,8 +2510,13 @@ fn five_rung_load_spec(
     tier: &str,
     root: PathBuf,
 ) -> Result<LoadSpec, String> {
+    let offload = if request.get("sdxlEndpoint").and_then(Value::as_str) == Some("resident") {
+        OffloadPolicy::Resident
+    } else {
+        OffloadPolicy::Sequential
+    };
     let spec = LoadSpec::new(WeightsSource::Dir(root))
-        .with_offload_policy(OffloadPolicy::Sequential)
+        .with_offload_policy(offload)
         .with_load_shape(LoadShape::DeferredMaterialization);
     // sc-22731: the worker binds the exact resolved route on every Candle image load
     // (`image_jobs/base.rs`: `.with_resolved_route(request.model.clone())`), and
@@ -3067,7 +3079,11 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
     };
     let catalog =
         runtime_cuda::catalog().map_err(|error| format!("build CUDA catalog: {error}"))?;
-    let mut vram = certifying_vram_probe();
+    let mut vram = if request.get("sdxlEndpoint").is_some() {
+        endpoint_vram_probe()?
+    } else {
+        certifying_vram_probe()
+    };
     let load_sample = vram.phase();
     let generator = catalog
         .media()
@@ -3110,7 +3126,7 @@ fn run_five_rung_reference_loaded(
     let strategy = measured_strategy(
         request,
         &selection,
-        &contract.engaged_composition(selection.strategy),
+        &contract.engaged_composition_for_selection(&selection),
     )?;
     let calibration = contract
         .calibration
@@ -3221,6 +3237,11 @@ fn run_five_rung_reference_loaded(
         }
         None => five_rung_provider_generation_request(provider_id, width, height, edit),
     };
+    if request.get("sdxlEndpoint").is_some() {
+        // The issue's ordinary request uses the provider's default sampler and steps.
+        generation.steps = Some(30);
+        generation.guidance = Some(7.0);
+    }
     scope
         .configure_request(&mut generation)
         .map_err(|error| format!("apply {provider_id} fresh-reference strategy: {error}"))?;
@@ -3282,8 +3303,13 @@ fn run_five_rung_reference_loaded(
         });
         return Err(message);
     }
+    let mut endpoint_output = Value::Null;
     match result {
-        Ok(runtime_cuda::gen_core::GenerationOutput::Images(images)) if images.len() == 1 => {}
+        Ok(runtime_cuda::gen_core::GenerationOutput::Images(images)) if images.len() == 1 => {
+            if request.get("sdxlEndpoint").is_some() {
+                endpoint_output = retain_sdxl_endpoint_output(request, &images[0])?;
+            }
+        }
         Ok(runtime_cuda::gen_core::GenerationOutput::Images(images)) => {
             return Err(format!(
                 "{provider_id} fresh reference returned {} images",
@@ -3322,7 +3348,11 @@ fn run_five_rung_reference_loaded(
         decode_peak_gb
             .ok_or_else(|| format!("{provider_id} fresh reference did not complete decode"))?,
     );
-    let overall_bytes = conditioning_bytes.max(denoise_bytes).max(decode_bytes);
+    let overall_bytes = if request.get("sdxlEndpoint").is_some() {
+        decimal_gb_to_bytes(vram.report().peak_gb)
+    } else {
+        conditioning_bytes.max(denoise_bytes).max(decode_bytes)
+    };
     let blocker = if provider_id == QWEN_ID {
         concat!(
             "SC-15817 five-rung conformance measures exact per-rung memory, strategy identity, ",
@@ -3381,12 +3411,26 @@ fn run_five_rung_reference_loaded(
             "promotion-quality, negative-mutation, and lifecycle scenario suite"
         )
     };
+    // stageResidency names a discrete composition, not a numeric sweep axis. Keep its boolean
+    // in the executed case while the existing sweep schema describes numeric knobs only.
+    let sweep = if request.get("sdxlEndpoint").is_some() {
+        let mut numeric_request = request.clone();
+        numeric_request["planned"]["strategy"]["parameters"]
+            .as_object_mut()
+            .ok_or("missing endpoint strategy parameters")?
+            .remove("stageResidency");
+        let mut sweep = protocol::reference_sweep(&numeric_request, "passed")?;
+        sweep["cases"][0]["parameters"] = json!(protocol::strategy_parameters(request)?);
+        sweep
+    } else {
+        protocol::reference_sweep(request, "passed")?
+    };
     let mut fragment = protocol::plain_gated_fragment(
         request,
         execution_path,
         protocol::PlainGatedFragment {
             artifact: artifact(repository, revision, planned_tier(request)?),
-            sweep: protocol::reference_sweep(request, "passed")?,
+            sweep,
             blocker,
             quality: json!({ "result": "not_run" }),
             negative_mutation: Value::Null,
@@ -3434,6 +3478,23 @@ fn run_five_rung_reference_loaded(
         "decode": cuda_phase_metrics(decode_bytes),
         "overall": cuda_phase_metrics(overall_bytes),
     });
+    if request.get("sdxlEndpoint").is_some() {
+        let report = vram.report();
+        fragment["endpointMeasurement"] = json!({
+            "output": endpoint_output,
+            "loadPeakBytes": decimal_gb_to_bytes(report.load_peak_gb),
+            "baselineBytes": decimal_gb_to_bytes(report.baseline_gb),
+            "wholeRunPeakBytes": decimal_gb_to_bytes(report.peak_gb),
+            "wholeDevicePeakBytes": decimal_gb_to_bytes(report.baseline_gb + report.peak_gb),
+            "offloadPolicy": if request.get("sdxlEndpoint").and_then(Value::as_str) == Some("resident") { "resident" } else { "sequential" },
+            "settings": {
+                "prompt": generation.prompt, "negativePrompt": generation.negative_prompt,
+                "seed": generation.seed, "steps": generation.steps,
+                "sampler": generation.sampler, "scheduler": generation.scheduler,
+                "guidance": generation.guidance, "memory": format!("{:?}", generation.memory),
+            },
+        });
+    }
     Ok(fragment)
 }
 
@@ -8350,10 +8411,172 @@ fn run(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+fn sdxl_endpoint_context_uuid() -> Result<String, String> {
+    // SDXL's loader uses this same production device constructor (logical CUDA 0).
+    let device = candle_gen::default_device()
+        .map_err(|error| format!("SDXL endpoint CUDA context: {error}"))?;
+    let cuda = device.as_cuda_device().map_err(|error| error.to_string())?;
+    let uuid = cuda
+        .cuda_stream()
+        .context()
+        .uuid()
+        .map_err(|error| error.to_string())?;
+    let bytes = uuid.bytes.map(|byte| byte as u8);
+    let hex = bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Ok(format!(
+        "GPU-{}-{}-{}-{}-{}",
+        &hex[..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..]
+    ))
+}
+
+// A persistent idle CUDA context is part of the sampled baseline, not evidence of activity.
+// This manual profile verifies repeated physical-device activity and stable residency before load.
+fn endpoint_vram_probe() -> Result<VramProbe, String> {
+    let smi = NvidiaSmi::resolve()?;
+    let mut used = Vec::new();
+    for _ in 0..5 {
+        let fields = smi.query("memory.used,memory.free,utilization.gpu,utilization.memory")?;
+        let values = fields
+            .split(',')
+            .map(|value| value.trim().parse::<u64>())
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("SDXL endpoint activity telemetry: {error}"))?;
+        if values.len() != 4 || values[1] < 16 * 1024 || values[2] != 0 || values[3] != 0 {
+            return Err(format!("SDXL endpoint requires idle GPU1 with at least 16 GiB free (includes 2 GiB headroom): {fields}"));
+        }
+        used.push(values[0]);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    if used.iter().max().unwrap() - used.iter().min().unwrap() > 64 {
+        return Err(format!(
+            "SDXL endpoint baseline drift exceeds 64 MiB: {used:?}"
+        ));
+    }
+    let mut probe = VramProbe::start_rendered();
+    let context_sample = probe.phase();
+    let uuid = sdxl_endpoint_context_uuid()?;
+    probe.end_load(context_sample);
+    if uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" {
+        return Err(format!(
+            "SDXL endpoint logical CUDA0 context UUID mismatch: {uuid}"
+        ));
+    }
+    eprintln!("SDXL endpoint stable GPU1 baseline MiB: {used:?}; actual logical CUDA0 UUID={uuid}");
+    Ok(probe)
+}
+
+// Issue 3197: bounded manual endpoint capture; the catalog keeps its one-anchor contract.
+fn retain_sdxl_endpoint_output(request: &Value, output: &Image) -> Result<Value, String> {
+    let path = request
+        .get("outputPath")
+        .and_then(Value::as_str)
+        .ok_or("SDXL endpoint requires outputPath")?;
+    let (width, height) = protocol::target_geometry(request)?;
+    if output.width != width
+        || output.height != height
+        || output.pixels.len() != output.width as usize * output.height as usize * 3
+        || output.pixels.len() < 3
+    {
+        return Err("SDXL endpoint output is not the requested RGB8 geometry".into());
+    }
+    if !output
+        .pixels
+        .chunks_exact(3)
+        .any(|pixel| pixel != &output.pixels[..3])
+    {
+        return Err("SDXL endpoint output is spatially flat".into());
+    }
+    image::save_buffer_with_format(
+        path,
+        &output.pixels,
+        output.width,
+        output.height,
+        image::ColorType::Rgb8,
+        image::ImageFormat::Png,
+    )
+    .map_err(|error| format!("retain SDXL endpoint PNG: {error}"))?;
+    let rgb_path = PathBuf::from(path).with_extension("rgb");
+    std::fs::write(&rgb_path, &output.pixels)
+        .map_err(|error| format!("retain SDXL endpoint RGB: {error}"))?;
+    let minimum = output.pixels.iter().min().copied().unwrap_or(0);
+    let maximum = output.pixels.iter().max().copied().unwrap_or(0);
+    Ok(json!({
+        "path": path, "rgbPath": rgb_path, "width": output.width, "height": output.height,
+        "channels": 3, "rgbBytes": output.pixels.len(), "spatiallyNonFlat": true,
+        "minimumChannel": minimum, "maximumChannel": maximum,
+        "rgbSha256": format!("{:x}", Sha256::digest(&output.pixels)),
+    }))
+}
+
+fn run_sdxl_endpoint(request: &Value) -> Result<Value, String> {
+    let endpoint = request
+        .get("sdxlEndpoint")
+        .and_then(Value::as_str)
+        .ok_or("SDXL endpoint name is required")?;
+    let expected_rung = match endpoint {
+        "resident" => "resident",
+        "sequential" => "bounded_attention",
+        _ => return Err("SDXL endpoint must be resident or sequential".into()),
+    };
+    if planned_provider(request)? != SDXL_ID
+        || planned_tier(request)? != "q4"
+        || protocol::planned_rung(request)? != expected_rung
+        || protocol::planned(request)?
+            .pointer("/target/modelId")
+            .and_then(Value::as_str)
+            != Some("sdxl")
+    {
+        return Err("SDXL endpoint only accepts base SDXL q4 and its exact endpoint rung".into());
+    }
+    if std::env::var("CUDA_VISIBLE_DEVICES").as_deref() != Ok("1")
+        || std::env::var("SCENEWORKS_GPU_ID").as_deref() != Ok("1")
+    {
+        return Err("SDXL endpoint requires physical GPU1 in both CUDA_VISIBLE_DEVICES and SCENEWORKS_GPU_ID".into());
+    }
+    let (width, height) = protocol::target_geometry(request)?;
+    let parameters = protocol::strategy_parameters(request)?;
+    let expected_parameters = if endpoint == "resident" {
+        json!({})
+    } else {
+        json!({
+            "stageResidency": true, "decodeTileEdge": 512, "decodeOverlap": 64,
+            "attentionChunkSize": runtime_cuda::gen_core::attention_budget::CONSTRAINED_ATTN_SCORES_BUDGET,
+        })
+    };
+    if (width, height) != (1024, 1024) || json!(parameters) != expected_parameters {
+        return Err("SDXL endpoint requires 1024-square geometry and the exact resident/fully-optimized composition".into());
+    }
+    let smi = NvidiaSmi::resolve()?;
+    let uuid = smi.query("uuid")?;
+    if uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" {
+        return Err(format!("SDXL endpoint GPU1 UUID mismatch: {uuid}"));
+    }
+    let before = smi.used_bytes()?;
+    let mut fragment = run_five_rung_reference(request)?;
+    // run_five_rung_reference drops the request scope and generator before returning.
+    let after = smi.used_bytes()?;
+    fragment["endpointMeasurement"]["providerDrop"] = json!({
+        "beforeBytes": before, "afterBytes": after, "generatorDropped": true,
+    });
+    fragment["endpointMeasurement"]["deviceUuid"] = json!(uuid);
+    fragment["endpointMeasurement"]["cudaContextUuid"] = json!(sdxl_endpoint_context_uuid()?);
+    fragment["endpointMeasurement"]["logicalCudaDevice"] = json!(0);
+    fragment["endpointMeasurement"]["endpoint"] = json!(endpoint);
+    Ok(fragment)
+}
+
 fn main() {
     let request = protocol::request_from_stdin().unwrap_or_else(|error| protocol::fail(error));
     let response = match protocol::action(&request).unwrap_or_else(|error| protocol::fail(error)) {
         "probe" => probe(),
+        "sdxl_endpoint" => run_sdxl_endpoint(&request),
         "run" => run(&request),
         "run_batch" => run_five_rung_batch(&request),
         // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
