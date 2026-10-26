@@ -28,6 +28,7 @@
 // since that teardown.
 
 import { execFileSync } from "node:child_process";
+import { SECURITY_BACKPORT } from "./ci/zip9-source-overrides.mjs";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -154,6 +155,26 @@ function repin(manifestText, sha, manifestPath = MANIFEST) {
 
 // Before any bump writes, require the root workspace patch to carry every vendored package.
 // Cargo ignores a dependency workspace's [patch], so repinning direct crates alone is unsafe.
+export function prepareInferencePatches(manifestText, sha) {
+  if (sha === SECURITY_BACKPORT.engine_revision) return manifestText;
+  const core = 'candle-core = { path = "vendor/zip9-candle-core" }';
+  if (!manifestText.includes(core)) return manifestText;
+  // The exact-revision ports must never shadow the newer producer. Keep the frozen source
+  // manifest and bytes as historical evidence; only retire their effective Cargo overrides.
+  const marker = '[patch."https://github.com/SceneWorks/inference"]';
+  const section = manifestText.slice(manifestText.indexOf(marker)).trim();
+  const expected = [marker, core,
+    'candle-audio-kokoro = { path = "vendor/zip9-candle-audio-kokoro" }',
+    'mlx-gen = { path = "vendor/zip9-mlx-gen" }'].join("\n");
+  if (section !== expected) throw new Error("review changed inference security overrides before advancing the pin");
+  const comment = manifestText.indexOf('# Exact 91ff leaf source');
+  const retired = `${manifestText.slice(0, comment >= 0 ? comment : manifestText.indexOf(marker)).trimEnd()}\n`;
+  return retired.replace(core,
+    `candle-core = { git = "${INFERENCE_GIT}", rev = "${sha}" }`)
+    .replace(/# inference revision; candle-core is an explicit exact-revision leaf security backport, recorded in\n# vendor\/zip9-source-overrides.json\. The source guard refuses missing, upstream or skewed sources\./,
+      "# inference revision. The retired exact-revision security ports remain preserved as historical\n# source evidence in vendor/zip9-source-overrides.json; they are no longer Cargo overrides.");
+}
+
 function verifyCandlePatches(manifestText, sha) {
   const marker = `[patch."https://github.com/huggingface/candle"]`;
   const lines = manifestText.split("\n");
@@ -166,9 +187,11 @@ function verifyCandlePatches(manifestText, sha) {
   for (const crate of PATCHED_CRATES) {
     const matches = section.filter((line) =>
       new RegExp(`^${crate}\\s*=`).test(line.trim()));
-    if (matches.length !== 1 ||
+    const historicalCore = crate === "candle-core" && sha === SECURITY_BACKPORT.engine_revision &&
+      matches[0]?.trim() === 'candle-core = { path = "vendor/zip9-candle-core" }';
+    if (matches.length !== 1 || (!historicalCore && (
         !matches[0].includes(`git = "${INFERENCE_GIT}"`) ||
-        !matches[0].includes(`rev = "${sha}"`)) {
+        !matches[0].includes(`rev = "${sha}"`)))) {
       throw new Error(`root Candle [patch] must pin exactly one ${crate} at inference ${sha}`);
     }
   }
@@ -1687,7 +1710,7 @@ function main() {
     // three and left one behind. Discovery makes the next such crate correct by default.
     ...inferenceManifests().map((path) => ({
       path,
-      rewrite: (text) => repin(text, sha, path),
+      rewrite: (text) => repin(path === ROOT_MANIFEST ? prepareInferencePatches(text, sha) : text, sha, path),
       updatesCargoLock: true,
     })),
     { path: SEMANTIC_PROVENANCE, rewrite: (text) => repinSemanticProvenance(text, sha) },

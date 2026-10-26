@@ -1,6 +1,7 @@
 // Exact leaf security overrides are part of the effective producer, not hidden by a Git pin.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import path from 'node:path';
@@ -43,11 +44,12 @@ async function verifyDirectoryClosure(repository, pkg) {
   assert.deepEqual([...seen].sort(), [...declared].sort(), `incomplete vendor closure ${pkg.path}`);
 }
 
-export async function verifyVendorBytes(repository = root) {
+export async function verifyVendorBytes(repository = root, packageNames = names) {
   assert.equal(sha(await fs.readFile(path.join(repository, 'vendor/zip9-source-overrides.json'))), SECURITY_BACKPORT_MANIFEST_SHA256);
   assert.deepEqual(SECURITY_BACKPORT.packages.map((p) => p.name).sort(), [...names].sort());
   const packages = [];
   for (const pkg of SECURITY_BACKPORT.packages) {
+    if (!packageNames.includes(pkg.name)) continue;
     // Cargo may autodiscover untracked build.rs/bin targets; known hashes alone
     // are insufficient. Generated outputs belong outside these audited roots.
     await verifyDirectoryClosure(repository, pkg);
@@ -67,12 +69,19 @@ export async function verifyVendorBytes(repository = root) {
     manifest_sha256: SECURITY_BACKPORT_MANIFEST_SHA256, security_diff_sha256: SECURITY_BACKPORT.security_diff_sha256, packages };
 }
 
-export function validateCargoSources(metadata, repository = root) {
+export function validateCargoSources(metadata, repository = root, inferenceRevision = SECURITY_BACKPORT.engine_revision) {
   assert(Array.isArray(metadata.packages));
+  assert(/^[a-f0-9]{40}$/.test(inferenceRevision), 'exact inference revision required');
+  const upstream = inferenceRevision !== SECURITY_BACKPORT.engine_revision;
+  const source = `git+https://github.com/SceneWorks/inference?rev=${inferenceRevision}#${inferenceRevision}`;
   for (const expected of SECURITY_BACKPORT.packages) {
     const matches = metadata.packages.filter((p) => p.name === expected.name);
     assert.equal(matches.length, 1, `one effective ${expected.name} required`);
     const pkg = matches[0];
+    if (upstream && expected.name !== 'tauri-plugin-updater') {
+      assert.equal(pkg.source, source, `${expected.name} must use the current pinned inference producer`);
+      continue;
+    }
     assert.equal(pkg.version, expected.version);
     assert.equal(pkg.source, null, `${expected.name} must use the audited local security port`);
     assert.equal(path.resolve(pkg.manifest_path), path.resolve(repository, expected.path, 'Cargo.toml'));
@@ -85,7 +94,11 @@ export function validateCargoSources(metadata, repository = root) {
         `unaudited Cargo target ${expected.name}: ${target.src_path}`);
     }
   }
-  const source = `git+https://github.com/SceneWorks/inference?rev=${SECURITY_BACKPORT.engine_revision}#${SECURITY_BACKPORT.engine_revision}`;
+  for (const pkg of metadata.packages) {
+    if (pkg.source?.startsWith('git+https://github.com/SceneWorks/inference')) {
+      assert.equal(pkg.source, source, `mixed or foreign inference source: ${pkg.name}`);
+    }
+  }
   for (const anchor of SECURITY_BACKPORT.audited_unchanged_cuda_anchors) {
     const matches = metadata.packages.filter((p) => p.name === anchor.package);
     assert.equal(matches.length, 1, `unambiguous CUDA anchor package ${anchor.package}`);
@@ -102,9 +115,45 @@ export function validateCargoSources(metadata, repository = root) {
   return sha(JSON.stringify(graph));
 }
 
-export async function verifySecuritySources(metadata, repository = root) {
+export async function verifySecuritySources(metadata, repository = root, inferenceRevision = SECURITY_BACKPORT.engine_revision) {
+  const cargoDigest = validateCargoSources(metadata, repository, inferenceRevision);
+  if (inferenceRevision !== SECURITY_BACKPORT.engine_revision) {
+    const local = await verifyVendorBytes(repository, ['tauri-plugin-updater']);
+    const source = `git+https://github.com/SceneWorks/inference?rev=${inferenceRevision}#${inferenceRevision}`;
+    const packages = metadata.packages.filter((pkg) => pkg.source === source);
+    assert(packages.length > 0, 'current inference source closure required');
+    const checkouts = new Map(), targets = [];
+    for (const pkg of packages) {
+      const directory = path.dirname(pkg.manifest_path);
+      const git = (args) => execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim();
+      const checkout = await fs.realpath(git(['rev-parse', '--show-toplevel']));
+      if (!checkouts.has(checkout)) {
+        assert.equal(git(['rev-parse', 'HEAD']), inferenceRevision, 'actual dependency checkout revision');
+        // Cargo adds only its completion marker. Untracked source must not become an automatic
+        // build script or target hidden behind an unchanged committed source identity.
+        const changes = git(['status', '--porcelain', '--untracked-files=all']).split('\n')
+          .filter((line) => line && line !== '?? .cargo-ok');
+        assert.deepEqual(changes, [], 'actual inference dependency checkout must be clean');
+        checkouts.set(checkout, { revision: inferenceRevision, tree: git(['rev-parse', 'HEAD^{tree}']) });
+      }
+      assert(Array.isArray(pkg.targets) && pkg.targets.length > 0, `Cargo targets required for ${pkg.name}`);
+      for (const target of pkg.targets) {
+        const relative = path.relative(checkout, await fs.realpath(target.src_path)).split(path.sep).join('/');
+        assert(!relative.startsWith('../') && !path.isAbsolute(relative));
+        git(['ls-files', '--error-unmatch', '--', `:(top,literal)${relative}`]);
+        const stat = await fs.lstat(target.src_path);
+        assert(stat.isFile() && !stat.isSymbolicLink(), `unsafe inference target ${relative}`);
+        targets.push({ package: pkg.name, path: relative, sha256: sha(await fs.readFile(target.src_path)) });
+      }
+    }
+    return { kind: 'pinned-inference-with-local-updater', engine_revision: inferenceRevision,
+      historical_backport_manifest_sha256: SECURITY_BACKPORT_MANIFEST_SHA256,
+      packages: local.packages, cargo_source_graph_sha256: cargoDigest,
+      inference_checkouts: [...checkouts.values()].sort((a, b) => a.tree.localeCompare(b.tree)),
+      inference_targets: targets.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) };
+  }
   const result = await verifyVendorBytes(repository);
-  result.cargo_source_graph_sha256 = validateCargoSources(metadata, repository);
+  result.cargo_source_graph_sha256 = cargoDigest;
   result.audited_unchanged_cuda_anchors = [];
   for (const anchor of SECURITY_BACKPORT.audited_unchanged_cuda_anchors) {
     const pkg = metadata.packages.find((p) => p.name === anchor.package);

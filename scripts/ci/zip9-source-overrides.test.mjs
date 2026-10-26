@@ -4,7 +4,8 @@ import path from 'node:path';
 import os from 'node:os';
 import * as fs from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { SECURITY_BACKPORT, SECURITY_BACKPORT_MANIFEST_SHA256, verifyVendorBytes, validateCargoSources } from './zip9-source-overrides.mjs';
+import { execFileSync } from 'node:child_process';
+import { SECURITY_BACKPORT, SECURITY_BACKPORT_MANIFEST_SHA256, verifyVendorBytes, validateCargoSources, verifySecuritySources } from './zip9-source-overrides.mjs';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 function graph() {
   const packages = SECURITY_BACKPORT.packages.map((p) => ({ name: p.name, version: p.version, source: null,
@@ -24,6 +25,77 @@ test('all exact security leaf bytes and small port diff match declared source id
 });
 test('source graph retains exact security overrides without widening automatic workspace tests', () => {
   assert.match(validateCargoSources(graph()), /^[a-f0-9]{64}$/);
+});
+
+function upstreamGraph(revision = 'a'.repeat(40), repository = root) {
+  const value = graph();
+  for (const pkg of value.packages) {
+    if (pkg.name === 'tauri-plugin-updater') {
+      const declared = SECURITY_BACKPORT.packages.find((p) => p.name === pkg.name);
+      pkg.manifest_path = path.join(repository, declared.path, 'Cargo.toml');
+      pkg.targets[0].src_path = path.join(repository, declared.path, 'src/lib.rs');
+    } else {
+      pkg.source = `git+https://github.com/SceneWorks/inference?rev=${revision}#${revision}`;
+      pkg.manifest_path = `/inference/${pkg.name}/Cargo.toml`;
+    }
+  }
+  return value;
+}
+
+test('a final upstream producer replaces all three engine overrides while retaining the updater port', () => {
+  const revision = 'a'.repeat(40), value = upstreamGraph(revision);
+  assert.match(validateCargoSources(value, root, revision), /^[a-f0-9]{64}$/);
+  for (const name of ['candle-core', 'candle-audio-kokoro', 'mlx-gen']) {
+    const mixed = structuredClone(value);
+    mixed.packages.find((pkg) => pkg.name === name).source = null;
+    assert.throws(() => validateCargoSources(mixed, root, revision), /current pinned inference producer/);
+  }
+  const skew = structuredClone(value);
+  skew.packages.at(-1).source = `git+https://github.com/SceneWorks/inference?rev=${'b'.repeat(40)}#${'b'.repeat(40)}`;
+  assert.throws(() => validateCargoSources(skew, root, revision), /mixed or foreign inference source/);
+  assert.throws(() => validateCargoSources(value), /audited local security port/,
+    'upstream identity cannot masquerade as the historical measured backport');
+});
+
+test('upstream receipt binds actual dependency revision, tree, targets and remaining local bytes', async () => {
+  const directory = await vendorFixture();
+  try {
+    const checkout = path.join(directory, 'inference');
+    await fs.mkdir(checkout);
+    const git = (args) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8' }).trim();
+    git(['init', '-q']);
+    const value = upstreamGraph('a'.repeat(40), directory);
+    for (const pkg of value.packages.filter((p) => p.source)) {
+      const base = path.join(checkout, pkg.name);
+      await fs.mkdir(path.join(base, 'src'), { recursive: true });
+      await fs.writeFile(path.join(base, 'Cargo.toml'), '[package]\n');
+      await fs.writeFile(path.join(base, 'src/lib.rs'), '// owned fixture, never built\n');
+      pkg.manifest_path = path.join(base, 'Cargo.toml');
+      pkg.targets = [{ name: pkg.name, kind: ['lib'], src_path: path.join(base, 'src/lib.rs') }];
+    }
+    git(['add', '.']);
+    git(['-c', 'user.name=Codex', '-c', 'user.email=codex@example.invalid', 'commit', '-qm', 'owned source fixture']);
+    const revision = git(['rev-parse', 'HEAD']);
+    for (const pkg of value.packages.filter((p) => p.source)) {
+      pkg.source = `git+https://github.com/SceneWorks/inference?rev=${revision}#${revision}`;
+    }
+    await fs.writeFile(path.join(checkout, '.cargo-ok'), '');
+    const receipt = await verifySecuritySources(value, directory, revision);
+    assert.equal(receipt.kind, 'pinned-inference-with-local-updater');
+    assert.equal(receipt.engine_revision, revision);
+    assert.equal(receipt.inference_checkouts[0].tree, git(['rev-parse', 'HEAD^{tree}']));
+    assert.deepEqual(receipt.packages.map((pkg) => pkg.name), ['tauri-plugin-updater']);
+    assert(receipt.inference_targets.every((target) => /^[a-f0-9]{64}$/.test(target.sha256)));
+    assert(!Object.hasOwn(receipt, 'audited_unchanged_cuda_anchors'), 'new closure does not inherit old CUDA audit');
+    const target = value.packages.find((pkg) => pkg.source).targets[0].src_path;
+    await fs.writeFile(target, '// changed actual source\n');
+    await assert.rejects(verifySecuritySources(value, directory, revision), /must be clean/);
+    git(['checkout', '--', '.']);
+    await fs.writeFile(path.join(checkout, 'build.rs'), '// untracked automatic target\n');
+    await assert.rejects(verifySecuritySources(value, directory, revision), /must be clean/);
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });
 for (const [label, mutate] of [
   ['old registry/upstream implementation', (g) => { g.packages[0].source = 'registry+https://github.com/rust-lang/crates.io-index'; }],

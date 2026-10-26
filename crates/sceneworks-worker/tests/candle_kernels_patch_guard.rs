@@ -139,6 +139,15 @@ fn candle_kernels_resolves_through_the_inference_patch() {
     let lock = std::fs::read_to_string(&lock_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", lock_path.display()));
     let root = lock_path.parent().expect("workspace root");
+    if parse_lock_packages(&lock)
+        .iter()
+        .any(|(name, source)| name == "candle-core" && source.is_some())
+    {
+        // After the terminal pin, all three Candle patches resolve directly through that one
+        // inference revision. The frozen ZIP9 manifest remains historical provenance only.
+        check_lock(&lock).unwrap_or_else(|message| panic!("{message}"));
+        return;
+    }
     let manifest: serde_json::Value = serde_json::from_slice(
         &std::fs::read(root.join("vendor/zip9-source-overrides.json"))
             .expect("security provenance"),
