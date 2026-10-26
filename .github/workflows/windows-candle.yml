@@ -1853,7 +1853,6 @@ jobs:
       contents: read
     timeout-minutes: 180
     env:
-      MOSS_NATIVE_OUTPUT: ${{ runner.temp }}\moss-native-api-${{ github.run_id }}-${{ github.run_attempt }}
       MOSS_NATIVE_RSS_CAP_GB: "2"
       MOSS_NATIVE_WORKFLOW_FILE: .github/workflows/windows-candle.yml
     steps:
@@ -1902,6 +1901,8 @@ jobs:
       # runs the four cases in the same shell, and records everything before exit.
       - name: Run the MOSS native API validation (candle)
         shell: cmd
+        env:
+          MOSS_NATIVE_OUTPUT: ${{ runner.temp }}\moss-native-api-${{ github.run_id }}-${{ github.run_attempt }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -1911,7 +1912,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: moss-native-api-candle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.MOSS_NATIVE_OUTPUT }}
+          path: ${{ runner.temp }}\moss-native-api-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 14
 

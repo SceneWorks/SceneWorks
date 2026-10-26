@@ -112,10 +112,23 @@ jobs:
         if: ${{ matrix.backend == 'mlx' }}
         with:
           toolchain: "1.98.0"
-      - name: Prepare release MLX library (not model weights)
+      - name: Prepare MLX library for the test profile (not model weights)
         if: ${{ matrix.backend == 'mlx' }}
         shell: bash
-        run: scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+        # The driver uses cargo test without --release, matching the pinned
+        # mlx-sys build script's Debug cell. Missing archives use its source build.
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Debug --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no Debug prebuilt for the pinned mlx-rs rev; building libmlx from its pinned source"
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       - name: Consume the exact shared fixed-dataset artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -237,10 +250,23 @@ jobs:
         if: ${{ matrix.backend == 'mlx' }}
         with:
           toolchain: "1.98.0"
-      - name: Prepare release MLX library (not model weights)
+      - name: Prepare MLX library for the test profile (not model weights)
         if: ${{ matrix.backend == 'mlx' }}
         shell: bash
-        run: scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+        # The driver uses cargo test without --release, matching the pinned
+        # mlx-sys build script's Debug cell. Missing archives use its source build.
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Debug --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no Debug prebuilt for the pinned mlx-rs rev; building libmlx from its pinned source"
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: capture-*-attempt-*

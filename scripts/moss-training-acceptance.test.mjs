@@ -382,3 +382,28 @@ test('assembled controller uses real stat inventory and refuses absent cache bef
  assert.equal(receipt.cacheInventory.ready,false);assert.ok(receipt.cacheInventory.missing.length>0);
  assert.match(receipt.failures.join(),/missing before compilation/);
 });
+
+test('both MLX setup steps match cargo test and fall back only for absent exact prebuilts',async t=>{
+ const receipt=await run(mockRun(t).options);
+ const compile=receipt.commands.find(command=>command.command[0]==='cargo'&&command.command[1]==='test');
+ assert.ok(compile);assert.equal(compile.command.includes('--release'),false);assert.equal(compile.command.includes('--profile'),false);
+ const workflow=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
+ const bash=process.platform==='win32'?'C:/Program Files/Git/bin/bash.exe':'bash';
+ for(const phase of ['capture','cross-load']) {
+  const section=workflow.split(`  ${phase}:\n`)[1].split(/^  [a-z][a-z-]+:\n/m)[0];
+  const step=section.split('      - name: Prepare MLX library for the test profile (not model weights)\n')[1].split('\n      - ')[0];
+  assert.match(step,/if: \$\{\{ matrix\.backend == 'mlx' \}\}/);
+  assert.match(step,/scripts\/fetch-prebuilt-mlx\.sh --build-type Debug --github-env/);
+  const body=step.split('        run: |\n')[1].replace(/^          /gm,'');
+  const directory=fixture(t),script=path.join(directory,'fixture-fetch.sh');
+  writeFileSync(script,'if [ "$*" != "--build-type Debug --github-env" ]; then exit 2; fi\nif [ "$FIXTURE_FETCH_RC" = 0 ]; then\n  printf "%s\\n" PMETAL_MLX_PREBUILT_DIR=Debug PMETAL_METALLIB_PATH=Debug.metallib >> "$GITHUB_ENV"\nfi\nexit "$FIXTURE_FETCH_RC"\n');
+  const mocked=body.replace('scripts/fetch-prebuilt-mlx.sh --build-type Debug --github-env','bash ./fixture-fetch.sh --build-type Debug --github-env');
+  for(const rc of [0,1,2,3]) {
+   const output=path.join(directory,`env-${rc}`);writeFileSync(output,'PMETAL_MLX_PREBUILT_DIR=stale\nPMETAL_METALLIB_PATH=stale.metallib\n');
+   const result=spawnSync(bash,['-e','-c',mocked],{cwd:directory,encoding:'utf8',env:{...process.env,GITHUB_ENV:output.replaceAll('\\','/'),FIXTURE_FETCH_RC:String(rc)}});
+   assert.equal(result.status,rc<2?0:rc,result.stderr);
+   const lines=readFileSync(output,'utf8').trim().split('\n');
+   assert.deepEqual(lines.slice(-2),rc===0?['PMETAL_MLX_PREBUILT_DIR=Debug','PMETAL_METALLIB_PATH=Debug.metallib']:rc===1?['PMETAL_MLX_PREBUILT_DIR=','PMETAL_METALLIB_PATH=']:['PMETAL_MLX_PREBUILT_DIR=stale','PMETAL_METALLIB_PATH=stale.metallib']);
+  }
+ }
+});

@@ -644,3 +644,15 @@ for (const phase of ["planning", "post-termination"]) {
       [[false, true, false], [false, true, false], [false, true, false]]);
   });
 }
+
+test('Candle MOSS output uses runner context only at step scope and uploads the same path',()=>{
+ const block=jobBlock(readFileSync(path.join(ROOT,'.github/workflows/windows-candle.yml'),'utf8'),'moss-native-api-candle');
+ const jobConfiguration=block.split('    steps:\n')[0];
+ assert.doesNotMatch(jobConfiguration,/runner\.temp/);
+ const run=block.split('      - name: Run the MOSS native API validation (candle)\n')[1].split('\n      - ')[0];
+ assert.match(run,/env:\n          MOSS_NATIVE_OUTPUT: \$\{\{ runner\.temp \}\}/);
+ const expected=/MOSS_NATIVE_OUTPUT: (.+)/.exec(run)[1];
+ const upload=block.split('      - name: Upload MOSS native validation evidence\n')[1];
+ assert.ok(upload.includes(`path: ${expected}\n`));
+ assert.match(run,/--output "%MOSS_NATIVE_OUTPUT%"/);
+});
