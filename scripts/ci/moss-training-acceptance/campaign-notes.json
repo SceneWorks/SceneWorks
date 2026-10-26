@@ -1,6 +1,6 @@
 {
   "kind": "moss-campaign-configuration-notes",
-  "manifestSha256": "cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296",
+  "manifestSha256": "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320",
   "authority": "Coordinator configuration decision; informational notes, not acceptance evidence or an automatic control input",
   "evidenceStatus": "Reported native fixture investigation, locally verified by its investigator, not independently executed here and not merged at the time of the relay; not real-weight evidence",
   "firstCampaignDecision": {
@@ -33,7 +33,7 @@
   "conditionalConfigurationDecisionOnly": {
     "condition": "The first real-weight campaign honestly fails its strict learning criterion",
     "candidate": {"optimizer": "adamw", "baseLearningRate": 0.1, "schedule": "constant", "optimizerUpdates": 60},
-    "status": "Requires a new explicit documented coordinator configuration decision, new manifest/schema seal and complete eight-cell rerun. No candidate is applied by these notes.",
+    "status": "Requires a new explicit documented coordinator configuration decision, new manifest/schema seal and rerun of all eight cells because the shared optimizer configuration would change. No candidate is applied by these notes.",
     "allowAutomaticTuning": false,
     "allowPerCellTweak": false,
     "allowAssertionOracleOrToleranceChange": false
@@ -77,5 +77,14 @@
     "referenceAuthority": "Coordinator-provided read-only source snapshot; original human ratification was conveyed as yes, ratify the snapshot. No provided source bytes were modified.",
     "runtimeAcceptanceExecuted": false
   },
+  "terminalCampaignCorrection": {
+    "recordedAt": "2026-10-26",
+    "crossLoad": "Ordinary generation assets and header demand only; retain exact physical device identity, frozen product cap and actual transferred-adapter pre-load check. Each import has its own 3600-second compute bound after separately bounded preparation.",
+    "inspection": "Named findings and exact reviewed PNG hashes remain mandatory before acceptance. Record actual review time; human latency is outside the compute deadline.",
+    "invalidation": "Changed behavior, inputs or execution closure invalidate affected observations. Schema, verifier, notes, deadline or source-hash movement alone does not require model re-execution when preserved raw observations remain valid. Retain original product and tooling provenance. No cross-run reuse system is implemented; same-run exact-source checks remain.",
+    "hashing": "Retain full cached-file authentication. Native preflight, JS recheck and native execution each authenticate files; this costs 48 full inventory passes across 16 cells before production generator pinning. Cross-load now excludes unconsumed DMD files. Removing additional passes needs an immutable file-proof lifecycle, beyond this focused correction.",
+    "runtimeEvidence": false
+  },
+  "CI_IMPACT": "Focused pure JS/Python regressions and native metadata-only contracts add no model inference, training, workflow jobs or broad matrix to normal CI. Manual campaign retains eight training cells and eight ordinary cross-loads, all learning/recovery/precision assertions and resource guards. Per-import clocks exclude separately bounded preparation; human inspection remains required before acceptance. Full inventory hashing remains unchanged except unused cross-load DMD files are excluded.",
   "checkpointStallInvariant": "Observe and forward the native checkpoint event only after the step-20 optimizer update and durable state land. Never wait between a loss computation and its pending update, and never skip or replay an update. Compare final reference and canceled/resumed factors exactly."
 }

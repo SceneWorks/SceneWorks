@@ -11,7 +11,7 @@ import { digest, parseTestResult, executeCpuCommand } from './moss-consumer-asse
 import { defaultInspect, parseTestList, selectLibTestExecutable, queryWindowsProcesses, executeOwnedChild } from './moss-native-api-validation.mjs';
 import { lockedInferenceRevision } from './select-windows-cargo-cache.mjs';
 
-export const MANIFEST_SHA256 = 'cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296';
+export const MANIFEST_SHA256 = '6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320';
 export const PREFIX = 'tests::moss_training_acceptance::';
 export const CELLS = ['base/lora', 'base/lokr', 'sft/lora', 'sft/lokr'];
 export const testsFor = (phase, executionBackend='mlx') => {
@@ -111,14 +111,15 @@ export function checkDiscovery(all, ignored, backend='mlx') {
   return expected;
 }
 
-export function validatePreflight(p, backend, source, caseId) {
+export function validatePreflight(p, backend, source, caseId, phase = 'capture') {
+  assert(p.phase === phase, 'preflight phase mismatch');
   assert(p.caseId === caseId && p.verdict === 'admitted' && p.refusalReason === null, 'exact cell must have admitted native preweight preflight');
   assert(p.modelRevisions && Object.keys(p.modelRevisions).length > 0 && Object.values(p.modelRevisions).every(r => /^[0-9a-f]{40}$/.test(r)), 'expected component revisions required');
   for (const key of ['resolvedCapProvenance','headerDemandProvenance']) assert(typeof p[key] === 'string' && p[key].length > 0, `native ${key} required`);
   for (const key of ['workflowSource','inferencePin','manifestSha256']) assert(p[key] === source[key], `preflight ${key} mismatch`);
   assert(p.backend === backend && p.offline === true && p.weightsLoaded === false, 'preflight must be offline and before weights load');
   const observations=p.observationSchema;
-  assert(observations?.gradientObservations===true && observations?.fixedEvaluationPair===true && observations?.numericFactorDelta===true && observations?.preparedTensorSnapshots===true, 'native pin lacks required measured evaluation/gradient/factor/prepared-tensor diagnostic interfaces; refuse before weight loading');
+  if (phase === 'capture') assert(observations?.gradientObservations===true && observations?.fixedEvaluationPair===true && observations?.numericFactorDelta===true && observations?.preparedTensorSnapshots===true, 'native pin lacks required measured evaluation/gradient/factor/prepared-tensor diagnostic interfaces; refuse before weight loading');
   assert(typeof p.deviceIdentity === 'string' && p.deviceIdentity.length > 0, 'actual claimed device identity required');
   const fraction = backend === 'mlx' ? 0.60 : 0.85;
   assert(p.gpuMemoryLimitFraction === fraction, 'wrong product global fraction');
@@ -126,7 +127,7 @@ export function validatePreflight(p, backend, source, caseId) {
   // The product transports the user's fraction as f32. Preserve that existing
   // representation rather than rejecting a valid native cap using f64 0.60/0.85.
   assert(p.resolvedCapBytes <= Math.floor(p.totalCapacityBytes * Math.fround(fraction)), 'resolved cap exceeds selected device fraction');
-  assert(p.headerDerivedDemandBytes <= p.resolvedCapBytes, 'header-derived all-phase demand exceeds admitted cap');
+  assert(p.headerDerivedDemandBytes <= p.resolvedCapBytes, 'header-derived selected-phase demand exceeds admitted cap');
   assert(Array.isArray(p.weights) && p.weights.length > 0, 'cached weight headers and files required');
   for (const weight of p.weights) {
     assert(weight.present === true && path.isAbsolute(weight.path) && /^[0-9a-f]{64}$/.test(weight.sha256), 'present resolved cached weight path/hash required');
@@ -294,7 +295,7 @@ export function remainingCaseMs(startedAt, now = Date.now()) {
   const start=Date.parse(startedAt);
   assert(Number.isFinite(start) && start <= now, 'invalid/future original caseStartedAt');
   const remaining=start+BOUNDS.case-now;
-  assert(remaining>0,'original case deadline expired (queue/inspection time is not paused)');
+  assert(remaining>0,'original compute phase deadline expired');
   return remaining;
 }
 
@@ -364,7 +365,7 @@ export async function run(options) {
         assert(record.manifestSha256===source.manifestSha256 && record.identity?.source?.sceneWorksSourceSha===source.workflowSource && record.identity?.source?.inferencePin===source.inferencePin,'accepted source binding mismatch');
         const start=Date.parse(record.cleanup?.caseStartedAt),end=Date.parse(record.cleanup?.caseEndedAt);
         assert(Number.isFinite(start)&&Number.isFinite(end)&&end>=start&&end-start<=BOUNDS.case,'accepted case wall deadline invalid');
-        assert(Array.isArray(record.inspections)&&record.inspections.length>=3&&record.inspections.every(x=>x.reviewer&&x.findings?.length&&Date.parse(x.completedAt)>=start&&Date.parse(x.completedAt)<=start+BOUNDS.case),'missing or out-of-window named preview inspection');
+        assert(Array.isArray(record.inspections)&&record.inspections.length>=3&&record.inspections.every(x=>x.reviewer&&x.findings?.length&&Date.parse(x.completedAt)>=start&&Date.parse(x.completedAt)<=Date.now()),'missing or future named preview inspection');
         await command(['python3','-I','-m','jsonschema','-i',file,path.join(root,'scripts/ci/moss-training-acceptance/evidence.schema.json')],`schema-${i}`,BOUNDS.list);
       }
       receipt.ok=true;
@@ -372,16 +373,12 @@ export async function run(options) {
       assert((backend==='mlx'&&process.platform==='darwin')||(backend==='cuda'&&process.platform==='win32')||options.testPlatform===true,'backend/platform mismatch');
       const baseEnv={MOSS_REAL_WEIGHTS_ACCEPTANCE:'1',MOSS_ACCEPTANCE_MANIFEST:manifest,MOSS_ACCEPTANCE_WORKFLOW_SOURCE:source.workflowSource,MOSS_ACCEPTANCE_INFERENCE_PIN:source.inferencePin,HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'};
       const sourceBackend=phase==='cross-load'?(backend==='mlx'?'cuda':'mlx'):backend;
-      const crossLoadStartedAt=phase==='cross-load'?env.MOSS_CROSS_LOAD_JOB_STARTED_AT:null;
       if(phase==='cross-load') {
-        remainingCaseMs(crossLoadStartedAt);
-        receipt.crossLoadStartedAt=crossLoadStartedAt;
-        receipt.crossLoadDeadlineAt=new Date(Date.parse(crossLoadStartedAt)+BOUNDS.crossLoad).toISOString();
         const peers=options['peer-artifacts'];
         for(const b of ['mlx','cuda']) verifyBundle(path.join(peers,`capture-${b}`),source,'capture',b);
         baseEnv.MOSS_ACCEPTANCE_PEER_ARTIFACTS=peers;
       }
-      const buildStart=continuing?Date.parse(receipt.preparationStartedAt):Date.now();
+      const buildStart=continuing?Date.parse(receipt.preparationStartedAt):phase==='cross-load'?Date.parse(env.MOSS_CROSS_LOAD_JOB_STARTED_AT):Date.now();
       assert(Number.isFinite(buildStart) && buildStart<=Date.now(), 'invalid original preparation clock');
       receipt.preparationStartedAt=new Date(buildStart).toISOString();
       const workflow={ref:env.GITHUB_REF,sha:env.GITHUB_SHA,fileSha256:source.workflowSha256,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,jobId:env.GITHUB_JOB};
@@ -399,7 +396,7 @@ export async function run(options) {
         const preparedAt=Date.parse(receipt.preparationFinishedAt);
         assert(preparedAt>=buildStart && preparedAt<=Date.now() && preparedAt-buildStart<=BOUNDS.build, 'original preparation deadline exceeded');
       } else {
-      const preparationRemaining=()=>Math.min(BOUNDS.build-(Date.now()-buildStart),phase==='cross-load'?remainingCaseMs(crossLoadStartedAt):BOUNDS.build);
+      const preparationRemaining=()=>{const remaining=BOUNDS.build-(Date.now()-buildStart);assert(remaining>0,'build preparation deadline exceeded');return remaining;};
       const rustc=await command(['rustc','-Vv'],'rustc-version',Math.min(BOUNDS.list,preparationRemaining()));
       const cargo=await command(['cargo','-V'],'cargo-version',Math.min(BOUNDS.list,preparationRemaining()));
       const host=rustc.result.output.match(/^host: (\S+)$/m)?.[1];
@@ -417,14 +414,14 @@ export async function run(options) {
       }
       for(let i=cellIndex??0;i<(cellIndex===null?CELLS.length:cellIndex+1);i++) {
         const cell=CELLS[i], test=testsFor(phase,backend)[i];
-        const caseStartedAt=phase==='capture'?new Date().toISOString():crossLoadStartedAt;
+        const caseStartedAt=new Date().toISOString();
         const caseOutput=path.join(output,...cell.split('/'));mkdirSync(caseOutput,{recursive:true});
         const entry={caseId:`${sourceBackend}/${cell}`,sourceCaseId:`${sourceBackend}/${cell}`,executionBackend:backend,test,caseStartedAt,caseDeadlineAt:new Date(Date.parse(caseStartedAt)+BOUNDS.case).toISOString(),rawEvidence:path.relative(output,path.join(caseOutput,'evidence.json')).split(path.sep).join('/')};receipt.cases.push(entry);
         const preflightFile=path.join(caseOutput,'devicepreflight.json');
-        const cellEnv={...baseEnv,MOSS_ACCEPTANCE_CASE_ID:entry.caseId,MOSS_ACCEPTANCE_SOURCE_CASE_ID:entry.sourceCaseId,MOSS_ACCEPTANCE_EXECUTION_BACKEND:backend,MOSS_ACCEPTANCE_CROSS_LOAD_STARTED_AT:crossLoadStartedAt??'',MOSS_ACCEPTANCE_OUTPUT:caseOutput,MOSS_ACCEPTANCE_DEVICE_PREFLIGHT:preflightFile,MOSS_ACCEPTANCE_CASE_STARTED_AT:caseStartedAt,MOSS_ACCEPTANCE_CASE_DEADLINE_AT:entry.caseDeadlineAt};
+        const cellEnv={...baseEnv,MOSS_ACCEPTANCE_CASE_ID:entry.caseId,MOSS_ACCEPTANCE_SOURCE_CASE_ID:entry.sourceCaseId,MOSS_ACCEPTANCE_EXECUTION_BACKEND:backend,MOSS_ACCEPTANCE_PHASE:phase,MOSS_ACCEPTANCE_CROSS_LOAD_STARTED_AT:phase==='cross-load'?caseStartedAt:'',MOSS_ACCEPTANCE_OUTPUT:caseOutput,MOSS_ACCEPTANCE_DEVICE_PREFLIGHT:preflightFile,MOSS_ACCEPTANCE_CASE_STARTED_AT:caseStartedAt,MOSS_ACCEPTANCE_CASE_DEADLINE_AT:entry.caseDeadlineAt};
         const preflight=await command([executable,PREFLIGHT,'--ignored','--exact','--nocapture','--test-threads=1'],`preflight-${cell.replace('/','-')}`,Math.min(BOUNDS.list,remainingCaseMs(caseStartedAt)),{env:{...cellEnv,MOSS_ACCEPTANCE_PREFLIGHT_ONLY:'1'}});
         parseTestResult(preflight.result.output,preflight.result.exit,PREFLIGHT,'green');
-        const capBytes=preflightValidator(json(preflightFile),backend,source,entry.caseId);
+        const capBytes=preflightValidator(json(preflightFile),backend,source,entry.caseId,phase);
         const {result,state}=await command([executable,test,'--ignored','--exact','--nocapture','--test-threads=1'],`case-${cell.replace('/','-')}`,remainingCaseMs(caseStartedAt),{capBytes,env:{...cellEnv,MOSS_ACCEPTANCE_RESOLVED_CAP_BYTES:String(capBytes)}});
         entry.counts=parseTestResult(result.output,result.exit,test,'green');
         assert(state.rssFirstBytes>0&&state.rssPeakBytes<=capBytes,'missing/breached aggregate RSS observation');

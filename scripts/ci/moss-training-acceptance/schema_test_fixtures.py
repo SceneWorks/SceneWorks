@@ -134,7 +134,7 @@ record = {
     "isCampaignEvidence": False,
     "acceptanceDisposition": "not-campaign-evidence",
     "missing": [], "unproven": [], "failureReason": None,
-    "manifestSha256": "cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296",
+    "manifestSha256": "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320",
     "caseId": "mlx/base/lora",
     "identity": {
         "rulebook": "sc-26584/moss-image-training-acceptance/v1",
@@ -221,7 +221,7 @@ record = {
     },
     "crossBackendLoad": {
         "sourceCaseId": "mlx/base/lora", "phase": "cross-load",
-        "phaseTiming": {"jobStartedAt": "2000-01-02T00:00:00Z", "completedAt": "2000-01-02T00:00:02Z", "wallSeconds": 2, "wallLimitSeconds": 3600, "clockSource": "cross-load-job-start"},
+        "phaseTiming": {"phaseStartedAt": "2000-01-02T00:00:00Z", "completedAt": "2000-01-02T00:00:02Z", "wallSeconds": 2, "wallLimitSeconds": 3600, "clockSource": "cross-load-case-start"},
         "resourceGuard": {
             "device": {"class": "nvidia-cuda", "claimedIdentity": "SCHEMA_TEST_ONLY_NOT_A_CUDA_DEVICE", "observedIdentity": "SCHEMA_TEST_ONLY_NOT_A_CUDA_DEVICE", "totalCapacityBytes": 1000, "gpuMemoryLimitFraction": 0.85, "capacityBasis": "actual-claimed-cuda-context-total-vram", "resolvedCeilingBytes": 850, "resolvedBeforeWeightsLoad": True, "projectedDemandBytes": 500, "headerDemandReceipt": artifact("cross-header.json"), "cpuReference": False},
             "ownedProcesses": [{"pid": 1, "birthIdentity": "SCHEMA_TEST_ONLY_NOT_A_CROSS_PROCESS", "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE", "role": "api-worker", "releaseObserved": True}],
@@ -305,7 +305,7 @@ record = {
     "inspections": [
         {"reviewer": "SCHEMA_TEST_ONLY_NOT_AN_INSPECTION", "reviewedArtifact": item["artifact"],
          "findings": ["SCHEMA TEST ONLY: no image exists or was inspected"],
-         "completedAt": "2000-01-01T00:00:01Z", "withinCaseDeadline": True}
+         "completedAt": "2000-01-01T00:00:01Z", "beforeFinalAcceptance": True}
         for item in [before, after, disable]
     ],
 }

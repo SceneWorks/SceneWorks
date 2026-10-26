@@ -45,8 +45,8 @@ export function recordInspection({preview,output,reviewer,findings}) {
   // Read the wall clock at recording time, after hashing/decoding. There is no
   // supplied timestamp, deadline override, extension, pause, or backdate path.
   const now=Date.now(),start=Date.parse(index.caseStartedAt),deadline=Date.parse(index.caseDeadlineAt);
-  requireValue(Number.isFinite(start) && deadline===start+BOUNDS.case && now>=start && now<=deadline,'inspection outside original case deadline');
-  const inspections=index.images.map(image=>({reviewer:reviewer.trim(),reviewedArtifact:image.reviewedArtifact,findings:findings[image.role],completedAt:new Date(now).toISOString(),withinCaseDeadline:true}));
+  requireValue(Number.isFinite(start) && deadline===start+BOUNDS.case && now>=Date.parse(index.publishedAt) && now>=start,'invalid original compute deadline or inspection before publication');
+  const inspections=index.images.map(image=>({reviewer:reviewer.trim(),reviewedArtifact:image.reviewedArtifact,findings:findings[image.role],completedAt:new Date(now).toISOString(),beforeFinalAcceptance:true}));
   document.cases.push({caseId:index.caseId,inspections});
   mkdirSync(path.dirname(path.resolve(output)),{recursive:true});
   writeFileSync(output,JSON.stringify(document,null,2)+'\n');

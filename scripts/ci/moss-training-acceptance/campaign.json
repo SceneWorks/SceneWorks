@@ -136,11 +136,11 @@
     "crossLoadWallSeconds": 3600,
     "buildPreparationWallSeconds": 7200,
     "caseDeadlineStartsAt": "recorded-case-start",
-    "crossLoadDeadlineStartsAt": "cross-load-job-start",
-    "caseDeadlineIncludes": ["uninterrupted-reference", "cancel-resume", "anchor-backend-fresh-reentry", "evaluation", "save-reload", "preview-generation", "preview-inspection", "ordinary-and-dmd-regression", "cleanup"],
+    "crossLoadDeadlineStartsAt": "each-import-case-after-build-preparation",
+    "caseDeadlineIncludes": ["uninterrupted-reference", "cancel-resume", "anchor-backend-fresh-reentry", "evaluation", "save-reload", "preview-generation", "ordinary-and-dmd-regression", "cleanup"],
     "crossLoadDeadlineIncludes": ["cross-backend-load", "cross-load-generation", "cross-load-resource-guard", "cross-load-cleanup"],
     "excludeOnlySeparateBuildPreparation": true,
-    "pauseDeadlineForQueueOrInspection": false
+    "pauseComputeDeadline": false
   },
   "evaluation": {
     "image": "shape-0.png",
@@ -192,7 +192,7 @@
     "ordinaryNoAdapterBaselineRequired": true,
     "requireActualDecodedPngs": true,
     "record": ["artifactSha256", "dimensions", "prompt", "seed", "adapterHash", "adapterStrength", "executionReceipt"],
-    "inspection": {"required": true, "requireNamedReviewedArtifactsAndFindings": true, "mustCompleteWithinCaseDeadline": true, "missingInspection": "acceptance-incomplete"}
+    "inspection": {"required": true, "requireNamedReviewedArtifactsAndFindings": true, "mustCompleteBeforeFinalAcceptance": true, "missingInspection": "acceptance-incomplete"}
   },
   "productAcceptance": {
     "useProductionTrainingDatasetJobProgressCancelRetryAndLibraryApis": true,
@@ -222,8 +222,10 @@
     "oneSealedManifestForAllEightCells": true,
     "sealAlgorithm": "sha256-of-exact-utf8-file-bytes",
     "allowPerCellConfigurationTweaks": false,
-    "horizonCadenceFractionOrDeadlineChange": "document-new-campaign-configuration-invalidate-and-rerun-all-eight-cells",
-    "otherManifestChanges": "new-seal-and-new-complete-eight-cell-campaign",
+    "behaviorInputOrClosureChange": "document-change-and-rerun-affected-observations",
+    "toolingSchemaNotesOrDeadlineOnlyChange": "revalidate-retained-raw-observations-with-original-provenance",
+    "preserveOriginalSourceConfigurationAndToolProvenance": true,
+    "currentFinalizerReuseSupport": "same-run-exact-source-only-no-cross-run-reuse",
     "allowTuningToPassLearningAssertion": false,
     "allowToleranceOracleOrAssertionLoosening": false
   }

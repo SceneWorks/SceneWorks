@@ -7,7 +7,7 @@
   "missing": [],
   "unproven": [],
   "failureReason": null,
-  "manifestSha256": "cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296",
+  "manifestSha256": "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320",
   "caseId": "mlx/base/lora",
   "identity": {
     "rulebook": "sc-26584/moss-image-training-acceptance/v1",
@@ -776,11 +776,11 @@
     "sourceCaseId": "mlx/base/lora",
     "phase": "cross-load",
     "phaseTiming": {
-      "jobStartedAt": "2000-01-02T00:00:00Z",
+      "phaseStartedAt": "2000-01-02T00:00:00Z",
       "completedAt": "2000-01-02T00:00:02Z",
       "wallSeconds": 2,
       "wallLimitSeconds": 3600,
-      "clockSource": "cross-load-job-start"
+      "clockSource": "cross-load-case-start"
     },
     "resourceGuard": {
       "device": {
@@ -1167,7 +1167,7 @@
         "SCHEMA TEST ONLY: no image exists or was inspected"
       ],
       "completedAt": "2000-01-01T00:00:01Z",
-      "withinCaseDeadline": true
+      "beforeFinalAcceptance": true
     },
     {
       "reviewer": "SCHEMA_TEST_ONLY_NOT_AN_INSPECTION",
@@ -1179,7 +1179,7 @@
         "SCHEMA TEST ONLY: no image exists or was inspected"
       ],
       "completedAt": "2000-01-01T00:00:01Z",
-      "withinCaseDeadline": true
+      "beforeFinalAcceptance": true
     },
     {
       "reviewer": "SCHEMA_TEST_ONLY_NOT_AN_INSPECTION",
@@ -1191,7 +1191,7 @@
         "SCHEMA TEST ONLY: no image exists or was inspected"
       ],
       "completedAt": "2000-01-01T00:00:01Z",
-      "withinCaseDeadline": true
+      "beforeFinalAcceptance": true
     }
   ]
 }

@@ -1,5 +1,7 @@
 //! Pure metadata contracts; separate from dispatch-only test discovery.
-use super::moss_training_acceptance::{generation_advanced, selected_weight_files};
+use super::moss_training_acceptance::{
+    generation_advanced, preflight_verdict, selected_weight_files,
+};
 
 #[test]
 fn dmd_regression_payload_omits_cfg_while_ordinary_preview_retains_sealed_guidance() {
@@ -51,7 +53,7 @@ fn manual_cache_startup_uses_production_shared_default_before_isolated_settings(
 #[test]
 fn weight_preflight_uses_complete_production_component_map_without_model_execution() {
     for parent in ["base", "sft"] {
-        let files = selected_weight_files(parent).unwrap();
+        let files = selected_weight_files(parent, false).unwrap();
         let repositories: BTreeSet<_> = files.iter().map(|(repo, _, _)| repo.as_str()).collect();
         println!("{parent}/lora and {parent}/lokr production repository union: {repositories:?}");
         assert!(files
@@ -77,4 +79,71 @@ fn weight_preflight_uses_complete_production_component_map_without_model_executi
                 .any(|(repo, _, _)| repo == gen_core::moss_image::DMD_REPO));
         }
     }
+}
+
+#[test]
+fn cross_load_selects_only_ordinary_generation_components() {
+    for parent in ["base", "sft"] {
+        let ordinary = selected_weight_files(parent, true).unwrap();
+        let capture = selected_weight_files(parent, false).unwrap();
+        assert!(ordinary.is_subset(&capture));
+        assert!(ordinary
+            .iter()
+            .all(|(repo, _, _)| repo != gen_core::moss_image::DMD_REPO));
+        for component in ["text_encoder/", "vae/", "transformer/"] {
+            assert!(ordinary
+                .iter()
+                .any(|(_, _, file)| file.starts_with(component)));
+        }
+        if parent == "sft" {
+            assert!(ordinary.len() < capture.len());
+        }
+    }
+}
+
+#[test]
+fn cross_load_admits_ordinary_demand_without_training_or_dmd_requirements() {
+    let mut metadata = serde_json::json!({"backend":"mlx", "resolvedCapBytes":600});
+    let weights = serde_json::json!([{"present":true,"trustedHashMatches":true}]);
+    let forecasts =
+        serde_json::json!({"off":{"requiredBytes":500,"provenance":"production ordinary headers"}});
+    assert_eq!(
+        preflight_verdict(&metadata, &weights, "mlx", "sft", &forecasts, true).unwrap(),
+        500
+    );
+    assert!(preflight_verdict(&metadata, &weights, "mlx", "sft", &forecasts, false).is_err());
+    metadata["resolvedCapBytes"] = serde_json::json!(499);
+    assert!(preflight_verdict(&metadata, &weights, "mlx", "sft", &forecasts, true).is_err());
+    metadata["resolvedCapBytes"] = serde_json::json!(600);
+    assert!(preflight_verdict(
+        &metadata,
+        &serde_json::json!([{"present":false}]),
+        "mlx",
+        "sft",
+        &forecasts,
+        true
+    )
+    .is_err());
+}
+
+#[test]
+fn cross_load_ignores_unused_dmd_and_training_demand_but_capture_still_refuses() {
+    let metadata = serde_json::json!({"backend":"mlx", "resolvedCapBytes":600,
+        "observationSchema":{"gradientObservations":true,"fixedEvaluationPair":true,"numericFactorDelta":true,"preparedTensorSnapshots":true},
+        "nativePlan":{"tensor_peak_bytes":900,"host_staging_peak_bytes":0,"encoder_only_peak_bytes":100,
+            "load_bytes":0,"cast_bytes":0,"cache_bytes":0,"backward_bytes":0,"preview_bytes":0,"checkpoint_bytes":0}});
+    let weights = serde_json::json!([{"present":true,"trustedHashMatches":true}]);
+    let forecasts = serde_json::json!({
+        "off":{"requiredBytes":500,"provenance":"production ordinary headers"},
+        "unmerged_bf16":{"requiredBytes":700,"provenance":"production BF16 DMD headers"},
+        "full_fp32":{"requiredBytes":800,"provenance":"production FP32 DMD headers"}});
+    assert_eq!(
+        preflight_verdict(&metadata, &weights, "mlx", "sft", &forecasts, true).unwrap(),
+        500
+    );
+    assert!(
+        preflight_verdict(&metadata, &weights, "mlx", "sft", &forecasts, false)
+            .unwrap_err()
+            .contains("demand exceeds")
+    );
 }

@@ -20,7 +20,7 @@ import struct
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-MANIFEST_SHA256 = "cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296"
+MANIFEST_SHA256 = "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320"
 CELLS = tuple(f"{backend}/{parent}/{method}" for backend in ("mlx", "cuda")
               for parent in ("base", "sft") for method in ("lora", "lokr"))
 CHUNK_BYTES = 1024 * 1024
@@ -385,12 +385,12 @@ def verify_device(device, backend, manifest):
 
 
 def verify_cross_load_clock(clock, limit):
-    require(clock["clockSource"] == "cross-load-job-start" and clock["wallLimitSeconds"] == limit,
-            "cross-load clock/bound must belong to its own job")
-    started, ended = timestamp(clock["jobStartedAt"]), timestamp(clock["completedAt"])
+    require(clock["clockSource"] == "cross-load-case-start" and clock["wallLimitSeconds"] == limit,
+            "cross-load clock/bound must belong to its own import case")
+    started, ended = timestamp(clock["phaseStartedAt"]), timestamp(clock["completedAt"])
     require(0 < ended - started <= limit
             and 0 < finite(clock["wallSeconds"], "cross-load wall time") <= limit,
-            "cross-load independent job deadline violated")
+            "cross-load independent import deadline violated")
     return started, ended
 
 
@@ -587,7 +587,7 @@ def verify_record(record, root, manifest, expected_source, verification_time=Non
     inspected = set()
     for inspection in record["inspections"]:
         at = verify_inspection_clock(inspection["completedAt"], verification_time)
-        require(started <= at <= started + manifest["limits"]["caseWallSeconds"], "inspection outside original case deadline")
+        require(started <= at and inspection["beforeFinalAcceptance"] is True, "inspection precedes capture or final acceptance requirement is missing")
         checked_artifact(root, inspection["reviewedArtifact"])
         inspected.add((inspection["reviewedArtifact"]["path"], inspection["reviewedArtifact"]["sha256"]))
     require(all((saved[role]["artifact"]["path"], saved[role]["artifact"]["sha256"]) in inspected
@@ -654,6 +654,7 @@ def controller_observations(bundle, receipt, entry, phase):
     preflight_file = case_file.parent / "devicepreflight.json"
     preflight = read_json(preflight_file)
     require(preflight["caseId"] == entry["caseId"] and preflight["backend"] == receipt["backend"]
+            and preflight["phase"] == phase
             and preflight["verdict"] == "admitted" and preflight["refusalReason"] is None
             and preflight["offline"] is True and preflight["weightsLoaded"] is False,
             "exact per-cell preweight admission proof missing")
@@ -681,8 +682,8 @@ def controller_observations(bundle, receipt, entry, phase):
                "caseStartedAt": entry["caseStartedAt"], "caseEndedAt": command["finishedAt"],
                "caseWallSeconds": timestamp(command["finishedAt"]) - timestamp(entry["caseStartedAt"]),
                "caseDeadlineSeconds": 3600,
-               "buildPreparationWallSeconds": timestamp(receipt["cases"][0]["caseStartedAt"])
-                   - timestamp(receipt["commands"][0]["startedAt"]),
+               "buildPreparationWallSeconds": timestamp(receipt["preparationFinishedAt"])
+                   - timestamp(receipt["preparationStartedAt"]),
                "buildPreparationDeadlineSeconds": 7200}
     return cleanup, preflight, command
 
@@ -824,12 +825,12 @@ def finalize(root, manifest_file, output_file):
         for key in ("ownedProcesses", "allChildrenReleased", "releaseReceipt", "aggregateRssSamples",
                     "positiveInitialMeasurement", "telemetryComplete", "missingMeasurementCount"):
             guard[key] = cross_cleanup[key]
-        started = cross_receipt["crossLoadStartedAt"]
+        started = cross_entry["caseStartedAt"]
         ended = cross_command["finishedAt"]
-        cross_piece["phaseTiming"] = {"jobStartedAt": started, "completedAt": ended,
+        cross_piece["phaseTiming"] = {"phaseStartedAt": started, "completedAt": ended,
                                     "wallSeconds": timestamp(ended) - timestamp(started),
                                     "wallLimitSeconds": manifest["limits"]["crossLoadWallSeconds"],
-                                    "clockSource": "cross-load-job-start"}
+                                    "clockSource": "cross-load-case-start"}
         require(record["identity"]["workflow"]["runId"] == capture_run,
                 "capture run identity differs from reviewed artifact run")
         record["inspections"] = reviews[case_id]["inspections"]

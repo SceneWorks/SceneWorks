@@ -31,7 +31,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 RAW_FORMAT = "moss-native-api-acceptance-candidate/v1"
-SEAL = "cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296"
+SEAL = "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320"
 ENCODING = "logical-row-major-f32-le-v1"
 
 
@@ -680,15 +680,15 @@ def normalize_cross(raw, caseRoot, manifest, driverReceipt, caseEntry):
             == raw["executionBackend"], "cross execution/source backend identity differs")
     application, _ = _application(ctx, raw, "cross-backend-load", transfer["sha256"])
     generation = _image(ctx, raw, "cross-backend-load", transfer["sha256"], 1.0)
-    start = datetime.fromisoformat(local["jobStartedAt"].replace("Z", "+00:00"))
+    start = datetime.fromisoformat(local["phaseStartedAt"].replace("Z", "+00:00"))
     end = datetime.fromisoformat(local["completedAt"].replace("Z", "+00:00"))
     elapsed = (end - start).total_seconds()
     require(start.tzinfo is not None and end.tzinfo is not None and 0 < elapsed <= 3600,
-            "actual cross-load job clock outside its own frozen interval")
+            "actual cross-load import clock outside its own frozen interval")
     result = {"sourceCaseId": local["sourceCaseId"], "phase": "cross-load",
-              "phaseTiming": {"jobStartedAt": local["jobStartedAt"], "completedAt": local["completedAt"],
+              "phaseTiming": {"phaseStartedAt": local["phaseStartedAt"], "completedAt": local["completedAt"],
                               "wallSeconds": elapsed, "wallLimitSeconds": local["wallLimitSeconds"],
-                              "clockSource": "cross-load-job-start"},
+                              "clockSource": "cross-load-case-start"},
               "sourceBackend": local["sourceBackend"], "importedBackend": local["importedBackend"],
               "transferredAdapter": transfer, "receivedSha256": local["receivedSha256"],
               "parent": local["parent"], "method": local["method"], "outcome": "generated",

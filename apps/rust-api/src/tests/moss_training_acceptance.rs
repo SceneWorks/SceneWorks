@@ -23,7 +23,7 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, String>;
-const SEAL: &str = "cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296";
+const SEAL: &str = "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320";
 const PROMPT: &str = "sksmoss red circle centered on a pale background";
 const WALL: u64 = 3600;
 
@@ -168,6 +168,10 @@ impl Case {
         require(
             (source_backend != backend) == cross,
             "cross-load source must be opposite the actual execution backend",
+        )?;
+        require(
+            env("MOSS_ACCEPTANCE_PHASE")? == if cross { "cross-load" } else { "capture" },
+            "explicit phase does not match selected source/backend",
         )?;
         let id = format!("{source_backend}/{parent}/{method}");
         require(
@@ -480,7 +484,10 @@ pub(super) fn generation_advanced(mode: &str) -> Result<Value> {
 // Metadata-only union of the exact production selections exercised by one cell.
 // Parent repository names alone are NOT a component map: Base also selects
 // shared SFT files, and SFT's DMD modes select additional native components.
-pub(super) fn selected_weight_files(parent: &str) -> Result<BTreeSet<(String, String, String)>> {
+pub(super) fn selected_weight_files(
+    parent: &str,
+    cross: bool,
+) -> Result<BTreeSet<(String, String, String)>> {
     use gen_core::moss_image::{MossDmdPrecision, MossImageAcceleration, MossImageOptions};
     let provider = match parent {
         "base" => "moss_image_base",
@@ -501,7 +508,7 @@ pub(super) fn selected_weight_files(parent: &str) -> Result<BTreeSet<(String, St
         .find(|entry| entry["id"] == provider)
         .and_then(Value::as_object)
         .ok_or("MOSS production model entry absent")?;
-    let modes = if parent == "base" {
+    let modes = if parent == "base" || cross {
         vec![MossImageAcceleration::Off]
     } else {
         vec![
@@ -547,10 +554,14 @@ pub(super) fn selected_weight_files(parent: &str) -> Result<BTreeSet<(String, St
 
 /// Authentication uses the linked engine's frozen acquisition manifest, NOT a
 /// directory name, cached ETag alone, fixture namespace or caller-supplied hash.
-fn weight_inventory(settings: &crate::Settings, parent: &str) -> Result<(Value, Value)> {
+fn weight_inventory(
+    settings: &crate::Settings,
+    parent: &str,
+    cross: bool,
+) -> Result<(Value, Value)> {
     let mut weights = Vec::new();
     let mut revisions = BTreeMap::new();
-    let selected = selected_weight_files(parent)?;
+    let selected = selected_weight_files(parent, cross)?;
     for identity in gen_core::moss_image::MOSS_IMAGE_ASSETS {
         if !selected.contains(&(
             identity.repository.to_owned(),
@@ -1721,7 +1732,7 @@ async fn forecast_generation(
     project: &str,
 ) -> Result<Value> {
     let mut forecasts = serde_json::Map::new();
-    for mode in if case.parent == "sft" {
+    for mode in if case.parent == "sft" && !case.cross {
         vec!["off", "unmerged_bf16", "full_fp32"]
     } else {
         vec!["off"]
@@ -1767,48 +1778,54 @@ async fn forecast_generation(
 /// production header routine. Future adapters are NOT synthesized or estimated
 /// here: every real generation repeats this same pre-load check against its
 /// actual exported adapter before dispatch, under the unchanged frozen ceiling.
-fn preflight_verdict(
+pub(super) fn preflight_verdict(
     metadata: &Value,
     weights: &Value,
     backend: &str,
     parent: &str,
     generation_forecasts: &Value,
+    cross: bool,
 ) -> Result<u64> {
     require(weights.as_array().is_some_and(|v|!v.is_empty() && v.iter().all(|w|w["present"]==true && w["trustedHashMatches"]==true)),"official cached MOSS files missing or content hash differs from native frozen acquisition identities; install/repair the exact approved cache offline before admission")?;
-    for field in [
-        "gradientObservations",
-        "fixedEvaluationPair",
-        "numericFactorDelta",
-        "preparedTensorSnapshots",
-    ] {
-        require(metadata["observationSchema"][field]==true,format!("linked native source lacks required diagnostic {field}; merge and pin the native hook before this campaign"))?;
-    }
-    let plan = &metadata["nativePlan"];
-    let mut demand = positive(plan, "tensor_peak_bytes")?
-        .checked_add(
-            plan["host_staging_peak_bytes"]
-                .as_u64()
-                .ok_or("native staging demand missing")?,
-        )
-        .ok_or("native demand overflow")?
-        .max(positive(plan, "encoder_only_peak_bytes")?);
-    for phase in [
-        "load_bytes",
-        "cast_bytes",
-        "cache_bytes",
-        "backward_bytes",
-        "preview_bytes",
-        "checkpoint_bytes",
-    ] {
-        require(
-            plan.get(phase).and_then(Value::as_u64).is_some(),
-            format!("native training phase demand missing: {phase}"),
-        )?;
-    }
+    let mut demand = if cross {
+        0
+    } else {
+        for field in [
+            "gradientObservations",
+            "fixedEvaluationPair",
+            "numericFactorDelta",
+            "preparedTensorSnapshots",
+        ] {
+            require(metadata["observationSchema"][field]==true,format!("linked native source lacks required diagnostic {field}; merge and pin the native hook before this campaign"))?;
+        }
+        let plan = &metadata["nativePlan"];
+        let demand = positive(plan, "tensor_peak_bytes")?
+            .checked_add(
+                plan["host_staging_peak_bytes"]
+                    .as_u64()
+                    .ok_or("native staging demand missing")?,
+            )
+            .ok_or("native demand overflow")?
+            .max(positive(plan, "encoder_only_peak_bytes")?);
+        for phase in [
+            "load_bytes",
+            "cast_bytes",
+            "cache_bytes",
+            "backward_bytes",
+            "preview_bytes",
+            "checkpoint_bytes",
+        ] {
+            require(
+                plan.get(phase).and_then(Value::as_u64).is_some(),
+                format!("native training phase demand missing: {phase}"),
+            )?;
+        }
+        demand
+    };
     let phases = generation_forecasts
         .as_object()
         .ok_or("actual selected generation header forecasts are missing")?;
-    for phase in if parent == "sft" {
+    for phase in if parent == "sft" && !cross {
         vec!["off", "unmerged_bf16", "full_fp32"]
     } else {
         vec!["off"]
@@ -1825,7 +1842,7 @@ fn preflight_verdict(
     )?;
     require(
         demand <= positive(metadata, "resolvedCapBytes")?,
-        "native all-phase demand exceeds the resolved product ceiling",
+        "native selected-phase demand exceeds the resolved product ceiling",
     )?;
     Ok(demand)
 }
@@ -1889,7 +1906,7 @@ async fn body(
     settings: &crate::Settings,
     worker: &sceneworks_worker::Settings,
 ) -> Result<()> {
-    let (weights, revisions) = weight_inventory(settings, &case.parent)?;
+    let (weights, revisions) = weight_inventory(settings, &case.parent, case.cross)?;
     let (status, project) = case
         .api(
             app,
@@ -1914,32 +1931,40 @@ async fn body(
     case.record["raw"]["workerRegistration"] =
         serde_json::to_value(registered).map_err(|e| e.to_string())?;
     case.persist()?;
-    let (dataset, evaluation) = dataset(case, app, &project).await?;
-    let probe_path = case.root.join(if case.preflight_only {
-        "preflight/native-probe.json"
+    let (metadata, training) = if case.cross {
+        (
+            native::moss_generation_acceptance_device(worker).map_err(|e| e.to_string())?,
+            None,
+        )
     } else {
-        "native-probe.json"
-    });
-    let probe = TrainingProbe::new(evaluation).with_artifact_fallback(probe_path);
-    let submitted = submit(case, app, &project, &dataset, "header-preflight").await?;
-    let (_, metadata) = execute(
-        case,
-        app,
-        worker,
-        &submitted,
-        &probe,
-        "header-preflight",
-        Execution::Preflight,
-    )
-    .await?;
+        let (dataset, evaluation) = dataset(case, app, &project).await?;
+        let probe_path = case.root.join(if case.preflight_only {
+            "preflight/native-probe.json"
+        } else {
+            "native-probe.json"
+        });
+        let probe = TrainingProbe::new(evaluation).with_artifact_fallback(probe_path);
+        let submitted = submit(case, app, &project, &dataset, "header-preflight").await?;
+        let (_, metadata) = execute(
+            case,
+            app,
+            worker,
+            &submitted,
+            &probe,
+            "header-preflight",
+            Execution::Preflight,
+        )
+        .await?;
+        (metadata, Some((dataset, probe)))
+    };
     let claimed = claimed_device_identity(worker);
     let generation_forecasts = forecast_generation(case, app, worker, &project).await;
     let verdict=claimed.as_ref().map_err(Clone::clone).and_then(|claimed| {
         let actual=text(&metadata,"deviceIdentity")?;
         require(if case.backend=="mlx" {claimed=="mlx" && actual.starts_with("mlx-default-gpu/stream-")}else{actual.eq_ignore_ascii_case(claimed)},"native allocator-selected CUDA context/MLX device differs from actual production worker claim")?;
-        preflight_verdict(&metadata, &weights, case.backend, &case.parent,generation_forecasts.as_ref().map_err(Clone::clone)?)
+        preflight_verdict(&metadata, &weights, case.backend, &case.parent,generation_forecasts.as_ref().map_err(Clone::clone)?,case.cross)
     });
-    let preflight = json!({"caseId":case.id,"sourceCaseId":case.id,"backend":case.backend,"executionBackend":case.backend,"workflowSource":env("MOSS_ACCEPTANCE_WORKFLOW_SOURCE")?,"inferencePin":source_pin()?,"sourcePin":source_pin()?,"manifestSha256":SEAL,"offline":true,"weightsLoaded":false,"modelRevisions":revisions,"weights":weights,"claimedDeviceIdentity":claimed.as_ref().ok(),"deviceIdentity":metadata["deviceIdentity"],"totalCapacityBytes":metadata["totalCapacityBytes"],"resolvedCapBytes":metadata["resolvedCapBytes"],"gpuMemoryLimitFraction":case.fraction(),"resolvedCapProvenance":metadata["resolvedCapProvenance"],"headerDemandProvenance":"native training test_memory_plan plus production-selected ordinary/DMD prepare_moss_preload; future actual adapters separately rechecked before every real generation under this same frozen cap","generationForecasts":generation_forecasts.as_ref().ok(),"generationForecastError":generation_forecasts.as_ref().err(),"futureAdapterIncluded":false,"adapterSpecificCheckRequiredBeforeEveryActualLoad":true,"headerDerivedDemandBytes":verdict.as_ref().ok(),"observationSchema":metadata["observationSchema"],"nativeMetadata":metadata,"verdict":if verdict.is_ok(){"admitted"}else{"refused"},"refusalReason":verdict.as_ref().err()});
+    let preflight = json!({"caseId":case.id,"sourceCaseId":case.id,"backend":case.backend,"executionBackend":case.backend,"phase":if case.cross {"cross-load"} else {"capture"},"workflowSource":env("MOSS_ACCEPTANCE_WORKFLOW_SOURCE")?,"inferencePin":source_pin()?,"sourcePin":source_pin()?,"manifestSha256":SEAL,"offline":true,"weightsLoaded":false,"modelRevisions":revisions,"weights":weights,"claimedDeviceIdentity":claimed.as_ref().ok(),"deviceIdentity":metadata["deviceIdentity"],"totalCapacityBytes":metadata["totalCapacityBytes"],"resolvedCapBytes":metadata["resolvedCapBytes"],"gpuMemoryLimitFraction":case.fraction(),"resolvedCapProvenance":metadata["resolvedCapProvenance"],"headerDemandProvenance":if case.cross {"production-selected ordinary prepare_moss_preload only; actual transferred adapter rechecked before generation under this same frozen cap"} else {"native training test_memory_plan plus production-selected ordinary/DMD prepare_moss_preload; future actual adapters separately rechecked before every real generation under this same frozen cap"},"generationForecasts":generation_forecasts.as_ref().ok(),"generationForecastError":generation_forecasts.as_ref().err(),"futureAdapterIncluded":false,"adapterSpecificCheckRequiredBeforeEveryActualLoad":true,"headerDerivedDemandBytes":verdict.as_ref().ok(),"observationSchema":metadata["observationSchema"],"nativeMetadata":metadata,"verdict":if verdict.is_ok(){"admitted"}else{"refused"},"refusalReason":verdict.as_ref().err()});
     case.record["raw"]["devicePreflight"] = preflight.clone();
     case.persist()?;
     let preflight_path = PathBuf::from(env("MOSS_ACCEPTANCE_DEVICE_PREFLIGHT")?);
@@ -1961,6 +1986,7 @@ async fn body(
     let approved = json_file(&preflight_path)?;
     require(
         approved["verdict"] == "admitted"
+            && approved["phase"] == preflight["phase"]
             && approved["caseId"] == case.id
             && approved["deviceIdentity"] == preflight["deviceIdentity"]
             && approved["resolvedCapBytes"] == preflight["resolvedCapBytes"]
@@ -1970,6 +1996,7 @@ async fn body(
     if case.cross {
         return cross_load(case, app, worker, &project).await;
     }
+    let (dataset, probe) = training.ok_or("capture training context missing")?;
     // The deliberately infeasible control uses the production global-cap file,
     // never a trainer override. Always restore the frozen cap before assertions.
     let control_cap = positive(&metadata["nativePlan"], "tensor_peak_bytes")?
@@ -2246,7 +2273,7 @@ async fn cross_load(
         "off",
     )
     .await?;
-    case.record["raw"]["crossBackendLoad"] = json!({"sourceCaseId":case.id,"sourceBackend":case.source_backend,"importedBackend":case.backend,"parent":case.parent,"method":case.method,"receivedSha256":file_sha(&source)?,"transferredAdapter":received_adapter,"sourceAdapter":transfer,"generation":image,"jobStartedAt":case.started_at,"completedAt":observed_iso_time()?,"wallLimitSeconds":WALL});
+    case.record["raw"]["crossBackendLoad"] = json!({"sourceCaseId":case.id,"sourceBackend":case.source_backend,"importedBackend":case.backend,"parent":case.parent,"method":case.method,"receivedSha256":file_sha(&source)?,"transferredAdapter":received_adapter,"sourceAdapter":transfer,"generation":image,"phaseStartedAt":case.started_at,"completedAt":observed_iso_time()?,"wallLimitSeconds":WALL});
     case.record["missing"] = json!(["cleanup", "inspections"]);
     case.check_clock()?;
     case.persist()

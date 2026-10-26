@@ -12,7 +12,7 @@ from pathlib import Path
 import struct
 import zlib
 
-MANIFEST_SHA256 = "cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296"
+MANIFEST_SHA256 = "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320"
 RECIPE_SHA256 = "32032a0200ed4d96518d29042e0e8a7604819a396eca0f0866fbcf131aac7941"
 CAPTIONS = (
     "sksmoss red circle centered on a pale background",

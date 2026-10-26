@@ -174,6 +174,149 @@ pub async fn run_training_execution_observing_request(
     .await
 }
 
+/// Device/cap observation without trainer construction or a training memory plan.
+/// Cross-load consumes ordinary generation only; its demand is checked separately
+/// through the production-selected generation headers, including the actual adapter.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub fn moss_generation_acceptance_device(settings: &Settings) -> WorkerResult<serde_json::Value> {
+    let (bytes, fraction) = match settings.requested_gpu_memory_limit()? {
+        sceneworks_core::app_paths::GpuMemoryLimitRequest::Bytes(bytes) => {
+            ((bytes != 0).then_some(bytes), None)
+        }
+        sceneworks_core::app_paths::GpuMemoryLimitRequest::Fraction(fraction) => {
+            (None, Some(fraction))
+        }
+    };
+    moss_acceptance_device(bytes, fraction)
+        .map(|(metadata, _device)| metadata)
+        .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))
+}
+
+#[cfg(target_os = "macos")]
+fn moss_acceptance_device(
+    memory_limit_bytes: Option<u64>,
+    memory_limit_fraction: Option<f32>,
+) -> gen_core::Result<(serde_json::Value, ())> {
+    let unsupported =
+        |error: &dyn std::fmt::Display| gen_core::Error::Unsupported(error.to_string());
+    if !cfg!(target_arch = "aarch64") {
+        return Err(gen_core::Error::Unsupported(
+            "MLX acceptance requires Apple Silicon".into(),
+        ));
+    }
+    let device = mlx_rs::Device::try_default().map_err(|error| unsupported(&error))?;
+    if !matches!(
+        device.get_type().map_err(|error| unsupported(&error))?,
+        mlx_rs::DeviceType::Gpu
+    ) {
+        return Err(gen_core::Error::Unsupported(
+            "MLX acceptance refuses a CPU default device".into(),
+        ));
+    }
+    let stream = mlx_rs::Stream::task_local_or_default()
+        .get_index()
+        .map_err(|error| unsupported(&error))?;
+    let gpu_stream = mlx_rs::Stream::gpu()
+        .get_index()
+        .map_err(|error| unsupported(&error))?;
+    if stream != gpu_stream {
+        return Err(gen_core::Error::Unsupported(
+            "MLX acceptance requires its original default GPU stream".into(),
+        ));
+    }
+    let total = gen_core::moss_image_training::recovery::host::total_bytes()
+        .map_err(|error| unsupported(&error))?;
+    let ceiling = gen_core::train::effective_memory_budget_with_fraction(
+        total,
+        Some(total),
+        memory_limit_bytes,
+        memory_limit_fraction,
+    )
+    .map_err(|error| unsupported(&error))?;
+    let frozen = gen_core::train::effective_memory_budget_with_fraction(
+        total,
+        Some(total),
+        None,
+        Some(0.60),
+    )
+    .map_err(|error| unsupported(&error))?;
+    if ceiling > frozen {
+        return Err(gen_core::Error::Unsupported(
+            "acceptance request exceeds the frozen global MLX fraction".into(),
+        ));
+    }
+    let metadata = serde_json::json!({
+        "backend":"mlx", "deviceIdentity":format!("mlx-default-gpu/stream-{stream}"),
+        "totalCapacityBytes":total, "resolvedCapBytes":ceiling,
+        "resolvedCapProvenance":"product gpuMemoryLimitFraction -> actual unified total via recovery::host::total_bytes -> gen_core::train::effective_memory_budget_with_fraction",
+        "weightsLoaded":false
+    });
+    Ok((metadata, ()))
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn moss_acceptance_device(
+    memory_limit_bytes: Option<u64>,
+    memory_limit_fraction: Option<f32>,
+) -> gen_core::Result<(serde_json::Value, candle_gen::candle_core::Device)> {
+    let unsupported =
+        |error: &dyn std::fmt::Display| gen_core::Error::Unsupported(error.to_string());
+    let device = candle_gen::default_device().map_err(|error| unsupported(&error))?;
+    if !device.is_cuda() {
+        return Err(gen_core::Error::Unsupported(
+            "Candle acceptance refuses a CPU/non-CUDA allocator device".into(),
+        ));
+    }
+    let (total, identity) = {
+        let cuda = device
+            .as_cuda_device()
+            .map_err(|error| unsupported(&error))?;
+        let context = cuda.cuda_stream().context();
+        let (_, total) = context
+            .mem_get_info()
+            .map_err(|error| unsupported(&error))?;
+        let uuid = context.uuid().map_err(|error| unsupported(&error))?;
+        let mut identity = String::from("GPU-");
+        use std::fmt::Write as _;
+        for (index, byte) in uuid.bytes.map(|byte| byte as u8).iter().enumerate() {
+            if matches!(index, 4 | 6 | 8 | 10) {
+                identity.push('-');
+            }
+            write!(identity, "{byte:02x}").map_err(|error| unsupported(&error))?;
+        }
+        (
+            u64::try_from(total).map_err(|error| unsupported(&error))?,
+            identity,
+        )
+    };
+    let ceiling = gen_core::train::effective_memory_budget_with_fraction(
+        total,
+        Some(total),
+        memory_limit_bytes,
+        memory_limit_fraction,
+    )
+    .map_err(|error| unsupported(&error))?;
+    let frozen = gen_core::train::effective_memory_budget_with_fraction(
+        total,
+        Some(total),
+        None,
+        Some(0.85),
+    )
+    .map_err(|error| unsupported(&error))?;
+    if ceiling > frozen {
+        return Err(gen_core::Error::Unsupported(
+            "acceptance request exceeds the frozen global CUDA fraction".into(),
+        ));
+    }
+    let metadata = serde_json::json!({
+        "backend":"cuda", "deviceIdentity":identity,
+        "totalCapacityBytes":total, "resolvedCapBytes":ceiling,
+        "resolvedCapProvenance":"actual allocator-selected CUDA context mem_get_info TOTAL -> product gen_core::train::effective_memory_budget_with_fraction; never host/free/max-across-devices",
+        "weightsLoaded":false
+    });
+    Ok((metadata, device))
+}
+
 /// Official-source, header-only acceptance construction. Call this inside the
 /// existing blocking loader closure: the returned Trainer is intentionally not Send.
 /// This never selects a Fixture, overrides a discovered budget, loads model
@@ -197,117 +340,29 @@ pub fn real_moss_trainer_with_probe(
         |error: &dyn std::fmt::Display| gen_core::Error::Unsupported(error.to_string());
     #[cfg(target_os = "macos")]
     {
-        if !cfg!(target_arch = "aarch64") {
-            return Err(gen_core::Error::Unsupported(
-                "MLX acceptance requires Apple Silicon".into(),
-            ));
-        }
-        let device = mlx_rs::Device::try_default().map_err(|error| unsupported(&error))?;
-        if !matches!(
-            device.get_type().map_err(|error| unsupported(&error))?,
-            mlx_rs::DeviceType::Gpu
-        ) {
-            return Err(gen_core::Error::Unsupported(
-                "MLX acceptance refuses a CPU default device".into(),
-            ));
-        }
-        let stream = mlx_rs::Stream::task_local_or_default()
-            .get_index()
-            .map_err(|error| unsupported(&error))?;
-        let gpu_stream = mlx_rs::Stream::gpu()
-            .get_index()
-            .map_err(|error| unsupported(&error))?;
-        if stream != gpu_stream {
-            return Err(gen_core::Error::Unsupported(
-                "MLX acceptance requires its original default GPU stream".into(),
-            ));
-        }
-        let total = gen_core::moss_image_training::recovery::host::total_bytes()
-            .map_err(|error| unsupported(&error))?;
-        let ceiling = gen_core::train::effective_memory_budget_with_fraction(
-            total,
-            Some(total),
+        let (mut metadata, _device) = moss_acceptance_device(
             request.config.memory_limit_bytes,
             request.config.memory_limit_fraction,
-        )
-        .map_err(|error| unsupported(&error))?;
-        let frozen = gen_core::train::effective_memory_budget_with_fraction(
-            total,
-            Some(total),
-            None,
-            Some(0.60),
-        )
-        .map_err(|error| unsupported(&error))?;
-        if ceiling > frozen {
-            return Err(gen_core::Error::Unsupported(
-                "acceptance request exceeds the frozen global MLX fraction".into(),
-            ));
-        }
+        )?;
         let mut trainer = mlx_gen_moss_image::training::MossImageTrainer::load(variant, spec)
             .map_err(|error| unsupported(&error))?;
         trainer.set_test_probe(Some(probe));
         let plan = trainer
             .test_memory_plan(request)
             .map_err(|error| unsupported(&error))?;
-        let metadata = serde_json::json!({
-            "backend":"mlx", "deviceIdentity":format!("mlx-default-gpu/stream-{stream}"),
-            "totalCapacityBytes":total, "resolvedCapBytes":ceiling,
-            "resolvedCapProvenance":"product gpuMemoryLimitFraction -> actual unified total via recovery::host::total_bytes -> gen_core::train::effective_memory_budget_with_fraction; native test_memory_plan separately intersects normal safety limits",
-            "headerDemandProvenance":"mlx_gen_moss_image::training::MossImageTrainer::test_memory_plan (probe attached before planning)",
-            "nativePlan":plan, "weightsLoaded":false,
-            "observationSchema":moss_acceptance_observation_schema()
-        });
+        metadata["nativePlan"] = serde_json::to_value(plan).map_err(|error| unsupported(&error))?;
+        metadata["headerDemandProvenance"] = serde_json::json!(
+            "mlx MossImageTrainer::test_memory_plan (probe attached before planning)"
+        );
+        metadata["observationSchema"] = moss_acceptance_observation_schema();
         Ok((Box::new(trainer), metadata))
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        let device = candle_gen::default_device().map_err(|error| unsupported(&error))?;
-        if !device.is_cuda() {
-            return Err(gen_core::Error::Unsupported(
-                "Candle acceptance refuses a CPU/non-CUDA allocator device".into(),
-            ));
-        }
-        let (total, identity) = {
-            let cuda = device
-                .as_cuda_device()
-                .map_err(|error| unsupported(&error))?;
-            let context = cuda.cuda_stream().context();
-            let (_, total) = context
-                .mem_get_info()
-                .map_err(|error| unsupported(&error))?;
-            let uuid = context.uuid().map_err(|error| unsupported(&error))?;
-            let mut identity = String::from("GPU-");
-            use std::fmt::Write as _;
-            for (index, byte) in uuid.bytes.map(|byte| byte as u8).iter().enumerate() {
-                if matches!(index, 4 | 6 | 8 | 10) {
-                    identity.push('-');
-                }
-                write!(identity, "{byte:02x}").map_err(|error| unsupported(&error))?;
-            }
-            (
-                u64::try_from(total).map_err(|error| unsupported(&error))?,
-                identity,
-            )
-        };
-        let ceiling = gen_core::train::effective_memory_budget_with_fraction(
-            total,
-            Some(total),
+        let (mut metadata, device) = moss_acceptance_device(
             request.config.memory_limit_bytes,
             request.config.memory_limit_fraction,
-        )
-        .map_err(|error| unsupported(&error))?;
-        let frozen = gen_core::train::effective_memory_budget_with_fraction(
-            total,
-            Some(total),
-            None,
-            Some(0.85),
-        )
-        .map_err(|error| unsupported(&error))?;
-        if ceiling > frozen {
-            return Err(gen_core::Error::Unsupported(
-                "acceptance request exceeds the frozen global CUDA fraction".into(),
-            ));
-        }
+        )?;
         let mut trainer = candle_gen_moss_image::training::MossImageTrainer::load_on_device(
             variant, spec, device,
         )
@@ -316,14 +371,11 @@ pub fn real_moss_trainer_with_probe(
         let plan = trainer
             .test_memory_plan(request)
             .map_err(|error| unsupported(&error))?;
-        let metadata = serde_json::json!({
-            "backend":"cuda", "deviceIdentity":identity,
-            "totalCapacityBytes":total, "resolvedCapBytes":ceiling,
-            "resolvedCapProvenance":"actual allocator-selected CUDA context mem_get_info TOTAL -> product gen_core::train::effective_memory_budget_with_fraction; never host/free/max-across-devices; native test_memory_plan separately intersects normal safety limits",
-            "headerDemandProvenance":"candle_gen_moss_image::training::MossImageTrainer::test_memory_plan (probe attached before planning)",
-            "nativePlan":plan, "weightsLoaded":false,
-            "observationSchema":moss_acceptance_observation_schema()
-        });
+        metadata["nativePlan"] = serde_json::to_value(plan).map_err(|error| unsupported(&error))?;
+        metadata["headerDemandProvenance"] = serde_json::json!(
+            "cuda MossImageTrainer::test_memory_plan (probe attached before planning)"
+        );
+        metadata["observationSchema"] = moss_acceptance_observation_schema();
         Ok((Box::new(trainer), metadata))
     }
     #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]

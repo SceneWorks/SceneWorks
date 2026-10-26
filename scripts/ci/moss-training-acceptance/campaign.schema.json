@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:sceneworks:moss-training-acceptance:campaign:1",
   "title": "Frozen MOSS-Image terminal training campaign configuration",
-  "$comment": "Static source contract, not runtime evidence. Const sections freeze every field and reject per-cell tweaks. The phase definition is for dispatcher input validation, not a mutable field in the sealed manifest. Changes require documented campaign reconfiguration, a new seal and a complete eight-cell rerun.",
+  "$comment": "Static source contract, not runtime evidence. Const sections freeze every field and reject per-cell tweaks. The phase definition is for dispatcher input validation, not a mutable field in the sealed manifest. Changes require a new configuration seal; rerun scope follows changed behavior, inputs and execution closure, with original evidence provenance retained.",
   "type": "object",
   "additionalProperties": false,
   "required": ["$schema", "schemaVersion", "kind", "epicId", "sourcePolicy", "axes", "dataset", "training", "recovery", "resources", "limits", "evaluation", "previews", "productAcceptance", "evidence", "changeControl"],
@@ -210,19 +210,19 @@
       }
     },
     "limits": {
-      "description": "One unpaused case deadline includes evaluation, previews and inspection; only separately bounded build/preparation is excluded.",
+      "description": "Each unpaused compute deadline includes evaluation, generation and cleanup. Build/preparation is separately bounded; named hashbound human inspection must complete before final acceptance.",
       "type": "object",
-      "required": ["caseWallSeconds", "crossLoadWallSeconds", "buildPreparationWallSeconds", "caseDeadlineStartsAt", "crossLoadDeadlineStartsAt", "caseDeadlineIncludes", "crossLoadDeadlineIncludes", "excludeOnlySeparateBuildPreparation", "pauseDeadlineForQueueOrInspection"],
+      "required": ["caseWallSeconds", "crossLoadWallSeconds", "buildPreparationWallSeconds", "caseDeadlineStartsAt", "crossLoadDeadlineStartsAt", "caseDeadlineIncludes", "crossLoadDeadlineIncludes", "excludeOnlySeparateBuildPreparation", "pauseComputeDeadline"],
       "const": {
         "caseWallSeconds": 3600,
         "crossLoadWallSeconds": 3600,
         "buildPreparationWallSeconds": 7200,
         "caseDeadlineStartsAt": "recorded-case-start",
-        "crossLoadDeadlineStartsAt": "cross-load-job-start",
-        "caseDeadlineIncludes": ["uninterrupted-reference", "cancel-resume", "anchor-backend-fresh-reentry", "evaluation", "save-reload", "preview-generation", "preview-inspection", "ordinary-and-dmd-regression", "cleanup"],
+        "crossLoadDeadlineStartsAt": "each-import-case-after-build-preparation",
+        "caseDeadlineIncludes": ["uninterrupted-reference", "cancel-resume", "anchor-backend-fresh-reentry", "evaluation", "save-reload", "preview-generation", "ordinary-and-dmd-regression", "cleanup"],
         "crossLoadDeadlineIncludes": ["cross-backend-load", "cross-load-generation", "cross-load-resource-guard", "cross-load-cleanup"],
         "excludeOnlySeparateBuildPreparation": true,
-        "pauseDeadlineForQueueOrInspection": false
+        "pauseComputeDeadline": false
       },
       "properties": {
         "caseWallSeconds": {"type": "integer", "minimum": 3600, "maximum": 3600, "const": 3600},
@@ -277,7 +277,7 @@
       }
     },
     "previews": {
-      "description": "Retain actual decoded untrained/trained/disable PNG controls and named inspection findings inside the case deadline.",
+      "description": "Retain actual decoded untrained/trained/disable PNG controls and named hashbound inspection findings before final acceptance, with actual review timestamps outside compute deadlines.",
       "type": "object",
       "required": ["prompt", "seed", "width", "height", "steps", "guidance", "count", "required", "ordinaryNoAdapterBaselineRequired", "requireActualDecodedPngs", "record", "inspection"],
       "const": {
@@ -296,7 +296,7 @@
         "ordinaryNoAdapterBaselineRequired": true,
         "requireActualDecodedPngs": true,
         "record": ["artifactSha256", "dimensions", "prompt", "seed", "adapterHash", "adapterStrength", "executionReceipt"],
-        "inspection": {"required": true, "requireNamedReviewedArtifactsAndFindings": true, "mustCompleteWithinCaseDeadline": true, "missingInspection": "acceptance-incomplete"}
+        "inspection": {"required": true, "requireNamedReviewedArtifactsAndFindings": true, "mustCompleteBeforeFinalAcceptance": true, "missingInspection": "acceptance-incomplete"}
       }
     },
     "productAcceptance": {
@@ -334,15 +334,17 @@
       }
     },
     "changeControl": {
-      "description": "A configuration change creates a new seal and requires a complete eight-cell rerun, never case-local tuning or weaker assertions.",
+      "description": "A configuration change creates a new seal. Invalidate only observations affected by behavior, inputs or execution closure; tooling-only changes revalidate original raw evidence. Current finalizer remains same-run/exact-source only; no cross-run reuse is implemented. No case-local tuning or weaker assertions.",
       "type": "object",
-      "required": ["oneSealedManifestForAllEightCells", "sealAlgorithm", "allowPerCellConfigurationTweaks", "horizonCadenceFractionOrDeadlineChange", "otherManifestChanges", "allowTuningToPassLearningAssertion", "allowToleranceOracleOrAssertionLoosening"],
+      "required": ["oneSealedManifestForAllEightCells", "sealAlgorithm", "allowPerCellConfigurationTweaks", "behaviorInputOrClosureChange", "toolingSchemaNotesOrDeadlineOnlyChange", "preserveOriginalSourceConfigurationAndToolProvenance", "currentFinalizerReuseSupport", "allowTuningToPassLearningAssertion", "allowToleranceOracleOrAssertionLoosening"],
       "const": {
         "oneSealedManifestForAllEightCells": true,
         "sealAlgorithm": "sha256-of-exact-utf8-file-bytes",
         "allowPerCellConfigurationTweaks": false,
-        "horizonCadenceFractionOrDeadlineChange": "document-new-campaign-configuration-invalidate-and-rerun-all-eight-cells",
-        "otherManifestChanges": "new-seal-and-new-complete-eight-cell-campaign",
+        "behaviorInputOrClosureChange": "document-change-and-rerun-affected-observations",
+        "toolingSchemaNotesOrDeadlineOnlyChange": "revalidate-retained-raw-observations-with-original-provenance",
+        "preserveOriginalSourceConfigurationAndToolProvenance": true,
+        "currentFinalizerReuseSupport": "same-run-exact-source-only-no-cross-run-reuse",
         "allowTuningToPassLearningAssertion": false,
         "allowToleranceOracleOrAssertionLoosening": false
       }

@@ -156,16 +156,16 @@ class StaticContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(verifier.EvidenceError, "verification future"):
                     verifier.inspection_set(self.root, clock)
 
-    def test_completed_post_execution_inspection_remains_legal_within_original_case_window(self):
+    def test_actual_post_deadline_inspection_remains_legal_before_final_verification(self):
         started = verifier.timestamp("2026-10-25T12:00:00Z")
         ended = verifier.timestamp("2026-10-25T12:01:00Z")
-        clock = verifier.timestamp("2026-10-25T12:03:00Z")
-        at = verifier.verify_inspection_clock("2026-10-25T12:02:00Z", clock)
+        clock = verifier.timestamp("2026-10-25T14:03:00Z")
+        at = verifier.verify_inspection_clock("2026-10-25T14:02:00Z", clock)
         self.assertGreater(at, ended)
-        self.assertTrue(started <= at <= started + 3600)
-        self.assertEqual(verifier.verify_inspection_clock("2026-10-25T12:03:00Z", clock), clock)
+        self.assertGreater(at, started + 3600)
+        self.assertEqual(verifier.verify_inspection_clock("2026-10-25T14:03:00Z", clock), clock)
         with self.assertRaisesRegex(verifier.EvidenceError, "verification future"):
-            verifier.verify_inspection_clock("2026-10-25T12:03:00.001Z", clock)
+            verifier.verify_inspection_clock("2026-10-25T14:03:00.001Z", clock)
 
     def test_optional_diagnostic_complete_keys_validate_with_and_without_mask(self):
         manifest = verifier.read_json(HERE / "campaign.json")
@@ -316,7 +316,7 @@ class StaticContractTests(unittest.TestCase):
         with self.assertRaisesRegex(verifier.EvidenceError, "schema-test/missing/unproven"):
             verifier.verify_record(copy.deepcopy(fixtures.record), self.root, manifest, {})
 
-    def test_cross_load_has_independent_job_clock(self):
+    def test_cross_load_has_independent_import_clock(self):
         clock = copy.deepcopy(fixtures.record["crossBackendLoad"]["phaseTiming"])
         start, end = verifier.verify_cross_load_clock(clock, 3600)
         old_training_start = verifier.timestamp(fixtures.record["cleanup"]["caseStartedAt"])

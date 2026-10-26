@@ -45,8 +45,10 @@ test('absolute deadline charges elapsed and queue time, rejects future and expir
 });
 test('preflight uses selected actual capacity and native provenance, not env asserted cap',t=>{
  const dir=fixture(t),weight=path.join(dir,'cached');writeFileSync(weight,'cached header');
- const p={...source,observationSchema:{gradientObservations:true,fixedEvaluationPair:true,numericFactorDelta:true,preparedTensorSnapshots:true},backend:'mlx',caseId:'mlx/base/lora',verdict:'admitted',refusalReason:null,modelRevisions:{dit:'f'.repeat(40)},resolvedCapProvenance:'native host capacity + product rounding',headerDemandProvenance:'native estimate all phases',offline:true,weightsLoaded:false,deviceIdentity:'claimed device',gpuMemoryLimitFraction:.60,totalCapacityBytes:1000,resolvedCapBytes:600,headerDerivedDemandBytes:500,weights:[{path:weight,present:true,sha256:digest(readFileSync(weight))}]};
+ const p={...source,phase:'capture',observationSchema:{gradientObservations:true,fixedEvaluationPair:true,numericFactorDelta:true,preparedTensorSnapshots:true},backend:'mlx',caseId:'mlx/base/lora',verdict:'admitted',refusalReason:null,modelRevisions:{dit:'f'.repeat(40)},resolvedCapProvenance:'native host capacity + product rounding',headerDemandProvenance:'native estimate all phases',offline:true,weightsLoaded:false,deviceIdentity:'claimed device',gpuMemoryLimitFraction:.60,totalCapacityBytes:1000,resolvedCapBytes:600,headerDerivedDemandBytes:500,weights:[{path:weight,present:true,sha256:digest(readFileSync(weight))}]};
  assert.equal(validatePreflight(p,'mlx',source,p.caseId),600);
+ assert.equal(validatePreflight({...p,phase:'cross-load',observationSchema:null},'mlx',source,p.caseId,'cross-load'),600);
+ assert.throws(()=>validatePreflight({...p,phase:'cross-load'},'mlx',source,p.caseId),/phase/);
  for(const patch of [{resolvedCapBytes:601},{headerDerivedDemandBytes:601},{offline:false},{weightsLoaded:true},{deviceIdentity:''},{caseId:'mlx/sft/lora'},{modelRevisions:{}},{verdict:'refused'},{resolvedCapProvenance:''},{headerDemandProvenance:''},{observationSchema:{}},{observationSchema:{gradientObservations:true,fixedEvaluationPair:true,numericFactorDelta:true,preparedTensorSnapshots:false}}])assert.throws(()=>validatePreflight({...p,...patch},'mlx',source,p.caseId));
  assert.throws(()=>validatePreflight({...p,weights:[{...p.weights[0],present:false}]},'mlx',source,p.caseId));
  writeFileSync(weight,'changed');assert.throws(()=>validatePreflight(p,'mlx',source,p.caseId),/changed/);
@@ -252,13 +254,15 @@ test('preview publication fails closed on missing, changed or undecodable PNGs',
 test('inspection records actual Date.now and finalizer hashes, appending partial JSON during capture',async t=>{
  const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const args=reviewArgs(m),before=Date.now(),document=recordInspection(args),after=Date.now();t.after(()=>rmSync(args.output,{force:true}));
  assert.equal(document.cases.length,1);assert.equal(document.captureRunId,'123');assert.equal(document.attempt,1);assert.equal(m.count(),7);
- for(const inspection of document.cases[0].inspections){assert.ok(Date.parse(inspection.completedAt)>=before && Date.parse(inspection.completedAt)<=after);assert.equal(inspection.withinCaseDeadline,true);assert.equal(digest(readFileSync(path.join(m.options.output,...inspection.reviewedArtifact.path.split('/').slice(1)))),inspection.reviewedArtifact.sha256);}
+ for(const inspection of document.cases[0].inspections){assert.ok(Date.parse(inspection.completedAt)>=before && Date.parse(inspection.completedAt)<=after);assert.equal(inspection.beforeFinalAcceptance,true);assert.equal(digest(readFileSync(path.join(m.options.output,...inspection.reviewedArtifact.path.split('/').slice(1)))),inspection.reviewedArtifact.sha256);}
  await run({...m.options,'capture-cell':CELLS[1]});const appended=recordInspection({...args,preview:reviewArgs(m,'base-lokr').preview});assert.equal(appended.cases.length,2);assert.deepEqual(appended.cases[0],document.cases[0]);assert.throws(()=>recordInspection(args),/already recorded/);
 });
-test('inspection rejects timestamp overrides, expired or extended deadlines, empty findings and cross-run carry',async t=>{
+test('inspection permits actual post-deadline review, rejects forged clocks, empty findings and cross-run carry',async t=>{
  const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const args=reviewArgs(m),original=readFileSync(args.preview),index=JSON.parse(original);t.after(()=>rmSync(args.output,{force:true}));
  assert.throws(()=>parseInspectionArgs(['--timestamp','2026-01-01']),/no timestamp override/);
- writeFileSync(args.preview,JSON.stringify({...index,caseStartedAt:new Date(Date.now()-BOUNDS.case-100).toISOString(),caseDeadlineAt:new Date(Date.now()-100).toISOString()}));assert.throws(()=>recordInspection(args),/deadline/);
+ const oldStart=Date.now()-BOUNDS.case-100;
+ writeFileSync(args.preview,JSON.stringify({...index,caseStartedAt:new Date(oldStart).toISOString(),caseDeadlineAt:new Date(oldStart+BOUNDS.case).toISOString(),publishedAt:new Date(oldStart+100).toISOString()}));assert.equal(recordInspection(args).cases.length,1);rmSync(args.output);
+ writeFileSync(args.preview,JSON.stringify({...index,publishedAt:new Date(Date.now()+10000).toISOString()}));assert.throws(()=>recordInspection(args),/publication/);
  writeFileSync(args.preview,JSON.stringify({...index,caseDeadlineAt:new Date(Date.parse(index.caseDeadlineAt)+1).toISOString()}));assert.throws(()=>recordInspection(args),/deadline/);
  writeFileSync(args.preview,original);assert.throws(()=>recordInspection({...args,findings:{...args.findings,'after-trained':[]}}),/findings/);recordInspection(args);
  await run({...m.options,'capture-cell':CELLS[1]});const second=reviewArgs(m,'base-lokr'),secondIndex=JSON.parse(readFileSync(second.preview));writeFileSync(second.preview,JSON.stringify({...secondIndex,workflow:{...secondIndex.workflow,runId:'999'}}));assert.throws(()=>recordInspection({...args,preview:second.preview}),/another source\/run\/attempt/);
@@ -269,4 +273,37 @@ test('workflow publishes each cell before continuing, retains backend bundle lay
  for(const cell of CELLS){const start=capture.indexOf(`      - name: Capture and publish ${cell} before continuing`);assert.ok(start>previous);previous=start;const step=capture.slice(start).split('\n      - ')[0];assert.match(step,/uses: \.\/sceneworks-source\/\.github\/actions\/moss-capture-cell/);assert.ok(step.includes(`cell: ${cell}\n`));assert.ok(step.includes(`preview-name: ${cell.replace('/','-')}\n`));assert.match(step,/output: .*\/capture-\$\{\{ matrix.backend \}\}/);}
  assert.ok(capture.indexOf('name: Preserve raw logs')>previous);assert.match(capture,/name: capture-\$\{\{ matrix.backend \}\}/);
  const composite=readFileSync(path.join(root,'.github/actions/moss-capture-cell/action.yml'),'utf8');assert.ok(composite.indexOf('node scripts/moss-training-acceptance.mjs')<composite.indexOf('uses: actions/upload-artifact@'));assert.match(composite,/--capture-cell/);assert.match(composite,/steps.preview.outputs.artifact-url/);assert.match(composite,/::notice title=MOSS live preview inspection/);assert.match(composite,/if-no-files-found: error/);assert.doesNotMatch(composite,/continue-on-error|always\(\)|timestamp|deadline.*override/);assert.match(composite,/path: \$\{\{ inputs.output \}\}\/previews\/\$\{\{ inputs.preview-name \}\}\//);
+});
+
+test('cross-load separates pre-checkout preparation from each bounded import phase',async t=>{
+ const peers=fixture(t);
+ for(const backend of ['mlx','cuda']) {
+  const m=mockRun(t,{backend});m.options.output=path.join(peers,`capture-${backend}`);await run(m.options);
+ }
+ const m=mockRun(t),execute=m.options.execute,RealDate=Date;let clock=RealDate.now();
+ m.options.env.MOSS_CROSS_LOAD_JOB_STARTED_AT=new RealDate(clock).toISOString();
+ globalThis.Date=class extends RealDate {constructor(...args){super(...(args.length?args:[clock]));}static now(){return clock;}};
+ try {
+  m.options.execute=async(...args)=>{
+   const command=args[1],environment=args[5].env;
+   if(command[0]==='rustc')clock+=3700_000; // Preparation may exceed the 3600s compute bound.
+   if(command[1]?.endsWith('_cross_backend')) {
+    assert.equal(environment.MOSS_ACCEPTANCE_PHASE,'cross-load');
+    assert.equal(environment.MOSS_ACCEPTANCE_CASE_STARTED_AT,environment.MOSS_ACCEPTANCE_CROSS_LOAD_STARTED_AT);
+    clock+=1000_000; // Four imports together exceed 3600s, each stays bounded.
+   }
+   return execute(...args);
+  };
+  const receipt=await run({...m.options,phase:'cross-load','peer-artifacts':peers});
+  assert.equal(receipt.ok,true,receipt.failures.join());assert.equal(receipt.cases.length,4);
+  assert.equal(Date.parse(receipt.preparationFinishedAt)-Date.parse(receipt.preparationStartedAt),3700_000);
+  assert.ok(receipt.cases.every((entry,i)=>i===0||Date.parse(entry.caseStartedAt)>Date.parse(receipt.cases[i-1].caseStartedAt)));
+ } finally {globalThis.Date=RealDate;}
+});
+test('expired cross-load preparation refuses native execution',async t=>{
+ const peers=fixture(t);
+ for(const backend of ['mlx','cuda']) {const m=mockRun(t,{backend});m.options.output=path.join(peers,`capture-${backend}`);await run(m.options);}
+ const m=mockRun(t);m.options.env.MOSS_CROSS_LOAD_JOB_STARTED_AT=new Date(Date.now()-BOUNDS.build-1).toISOString();
+ const receipt=await run({...m.options,phase:'cross-load','peer-artifacts':peers});
+ assert.equal(receipt.ok,false);assert.match(receipt.failures.join(),/preparation deadline/);assert.equal(m.count(),0);
 });

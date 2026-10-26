@@ -15,7 +15,7 @@
     "missing": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "unproven": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "failureReason": {"type": ["string", "null"]},
-    "manifestSha256": {"const": "cad2d90a22ccda3f69f74103386efa49e9d2c89d76e65d8b92195e201a4c8296"},
+    "manifestSha256": {"const": "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320"},
     "caseId": {"enum": ["mlx/base/lora", "mlx/base/lokr", "mlx/sft/lora", "mlx/sft/lokr", "cuda/base/lora", "cuda/base/lokr", "cuda/sft/lora", "cuda/sft/lokr"]},
     "identity": {"$ref": "#/$defs/identity"},
     "datasetIdentity": {"$ref": "#/$defs/datasetIdentity"},
@@ -149,8 +149,8 @@
     },
     "crossLoadTiming": {
       "type": "object", "additionalProperties": false,
-      "required": ["jobStartedAt", "completedAt", "wallSeconds", "wallLimitSeconds", "clockSource"],
-      "properties": {"jobStartedAt": {"type": "string", "format": "date-time"}, "completedAt": {"type": "string", "format": "date-time"}, "wallSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}, "wallLimitSeconds": {"const": 3600}, "clockSource": {"const": "cross-load-job-start"}}
+      "required": ["phaseStartedAt", "completedAt", "wallSeconds", "wallLimitSeconds", "clockSource"],
+      "properties": {"phaseStartedAt": {"type": "string", "format": "date-time"}, "completedAt": {"type": "string", "format": "date-time"}, "wallSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}, "wallLimitSeconds": {"const": 3600}, "clockSource": {"const": "cross-load-case-start"}}
     },
     "crossLoadGuard": {
       "type": "object", "additionalProperties": false,
@@ -203,8 +203,8 @@
       "properties": {"ordinary": {"type": "object", "additionalProperties": false, "required": ["selectedMode", "executedMode", "beforeNoAdapter", "afterUnload", "sameOutputVerified", "receipt"], "properties": {"selectedMode": {"const": "off"}, "executedMode": {"const": "off"}, "beforeNoAdapter": {"$ref": "#/$defs/artifact"}, "afterUnload": {"$ref": "#/$defs/artifact"}, "sameOutputVerified": {"const": true}, "receipt": {"$ref": "#/$defs/artifact"}}}, "dmdExecutions": {"type": "array", "maxItems": 2, "items": {"$ref": "#/$defs/dmdExecution"}}, "baseDmdRefusals": {"type": "array", "maxItems": 2, "items": {"$ref": "#/$defs/baseDmdRefusal"}}}
     },
     "inspection": {
-      "type": "object", "additionalProperties": false, "required": ["reviewer", "reviewedArtifact", "findings", "completedAt", "withinCaseDeadline"],
-      "properties": {"reviewer": {"$ref": "#/$defs/text"}, "reviewedArtifact": {"$ref": "#/$defs/artifact"}, "findings": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}, "completedAt": {"type": "string", "format": "date-time"}, "withinCaseDeadline": {"const": true}}
+      "type": "object", "additionalProperties": false, "required": ["reviewer", "reviewedArtifact", "findings", "completedAt", "beforeFinalAcceptance"],
+      "properties": {"reviewer": {"$ref": "#/$defs/text"}, "reviewedArtifact": {"$ref": "#/$defs/artifact"}, "findings": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/text"}}, "completedAt": {"type": "string", "format": "date-time"}, "beforeFinalAcceptance": {"const": true}}
     }
   },
   "x-semanticChecks": [
@@ -221,11 +221,11 @@
     "Cross-backend transfer must preserve the adapter artifact hash and exact parent/method. If the format permits loading, require successful generation; an unsupported-format refusal must name the actual incompatibility and must not be relabeled a successful load.",
     "Resolve the product fraction against actual selected-device total before weights load, preserve stricter product safety intersections and reject projected header demand above the ceiling. The low-cap refusal must use a strictly infeasible request and publish no output.",
     "Verify aggregate RSS samples cover the active owned API/worker/descendant window without missing telemetry, stay under the resolved ceiling, and authenticate every process birth/executable before owned-child release. Missing or zero active RSS measurements fail the case.",
-    "Recompute training-case wall time and verify evaluation, previews, recovery, anchor re-entry, inspection and cleanup finish within 3600 seconds; build/preparation alone has a separate 7200-second bound.",
-    "Cross-load has an independent 3600-second phase budget from the cross-load job's actual start, with its own positive fail-closed RSS and release evidence. Never reuse training caseStartedAt; retain original sourceCaseId and consumed artifact hashes for all eight transfers.",
+    "Recompute training-case wall time and verify evaluation, previews, recovery, anchor re-entry and cleanup finish within 3600 seconds; build/preparation alone has a separate 7200-second bound.",
+    "Cross-load has an independent 3600-second phase budget from each import case start after separately bounded preparation, with its own positive fail-closed RSS and release evidence. Never reuse training caseStartedAt; retain original sourceCaseId and consumed artifact hashes for all eight transfers.",
     "The checkpoint-20 stall exists only in test support, has its own bounded timeout and retained token/state evidence, never skips/replays updates, and cannot turn a timeout or unverified child release into success.",
     "Verify real production dataset upload, submit/claim/progress/result, library registration and image execution receipts; no mocked or CPU generated-weight run counts as published-weight GPU evidence.",
     "For accepted SFT DMD executions selected mode must equal executed mode for BOTH modes and neither accelerator nor custom adapter may be dropped; Base+DMD must be refused before execution with executedMode=null.",
-    "Any configuration change invalidates the seal and the entire eight-cell campaign. No missing observation, unproven marker or fabricated/carried evidence may be interpreted as success."
+    "Invalidate observations only when changed behavior, inputs or execution closure affects them; preserve original source/configuration/tool provenance. The current finalizer accepts one exact-source campaign and does not implement cross-run reuse. No missing observation, unproven marker or fabricated/carried evidence may be interpreted as success."
   ]
 }
