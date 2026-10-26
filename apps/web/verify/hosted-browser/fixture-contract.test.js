@@ -4,10 +4,11 @@
 // canonical API contracts (crates/sceneworks-core/src/contracts.rs), because the hosted
 // run proved the real shell crashes behind an ErrorBoundary when a fixture asset lacks
 // `createdAt` (App.jsx sorts assets with sortNewest).
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ASSETS,
+  closeVerifyEventStreams,
   IMAGE_EMPTY_REFS_ASSET,
   IMPORTED_MODEL_REF,
   importedModel,
@@ -186,5 +187,70 @@ describe("closed fixture boundary", () => {
 
   it("keeps MODELS a closed catalog containing the stable repair id", () => {
     expect(MODELS.map((model) => model.id)).toContain("my_h3");
+  });
+});
+
+// The hosted proof opens one event stream per case. A stream that outlives the run holds a
+// keep-alive socket open, so the Vite server's close() waits on it and the job hangs until its
+// own timeout — the run is then reported as cancelled even though the proof itself finished
+// and wrote every artifact. These tests pin the two properties that prevent that: the ping
+// timer can never hold the event loop open, and every open stream is ended explicitly.
+describe("fixture event-stream lifecycle", () => {
+  function eventStreamRequest() {
+    const handlers = new Map();
+    const req = {
+      url: "/api/v1/jobs/events",
+      method: "GET",
+      headers: {},
+      on(event, callback) {
+        if (event === "end") callback();
+        else handlers.set(event, [...(handlers.get(event) ?? []), callback]);
+        return req;
+      },
+    };
+    const res = fakeResponse();
+    res.on = (event, callback) => {
+      handlers.set(`res:${event}`, [...(handlers.get(`res:${event}`) ?? []), callback]);
+      return res;
+    };
+    return { req, res, handlers };
+  }
+
+  function fire(handlers, event) {
+    for (const callback of handlers.get(event) ?? []) callback();
+  }
+
+  it("keeps the ping timer unreferenced so it can never hold the process open", async () => {
+    const timers = [];
+    const spy = vi.spyOn(globalThis, "setInterval").mockImplementation(() => {
+      const timer = { unref: vi.fn() };
+      timers.push(timer);
+      return timer;
+    });
+    try {
+      const { req, res } = eventStreamRequest();
+      await verifyMiddleware()(req, res, () => {});
+      expect(timers).toHaveLength(1);
+      expect(timers[0].unref).toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("ends the stream when the client disconnects", async () => {
+    const { req, res, handlers } = eventStreamRequest();
+    await verifyMiddleware()(req, res, () => {});
+    expect(res.headers["content-type"]).toBe("text/event-stream");
+    expect(res.ended).toBe(false);
+    fire(handlers, "close");
+    expect(res.ended).toBe(true);
+  });
+
+  it("ends every still-open stream when the harness tears down", async () => {
+    const { req, res } = eventStreamRequest();
+    await verifyMiddleware()(req, res, () => {});
+    expect(res.ended).toBe(false);
+    closeVerifyEventStreams();
+    expect(res.ended).toBe(true);
   });
 });

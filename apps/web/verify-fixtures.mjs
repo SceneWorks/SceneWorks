@@ -223,6 +223,18 @@ function reset() {
 }
 reset();
 
+// Open event-stream responses. Each one holds a keep-alive socket open for as long as the
+// stream lives, so a stream that outlives the run makes the Vite server's close() wait on it
+// and the hosted proof job hangs until its own timeout — the proof has finished writing every
+// artifact by then, so the run is reported as cancelled and never green. The ping interval is
+// unref'd so it can never hold the event loop open, and every stream is registered so it can be
+// ended explicitly.
+const openEventStreams = new Set();
+
+export function closeVerifyEventStreams() {
+  for (const entry of [...openEventStreams]) entry.close();
+}
+
 function readBody(req) {
   return new Promise((resolveBody) => {
     let data = "";
@@ -274,7 +286,25 @@ export function verifyMiddleware() {
       res.setHeader("connection", "keep-alive");
       res.write(": connected\n\n");
       const timer = setInterval(() => res.write(": ping\n\n"), 15000);
-      req.on("close", () => clearInterval(timer));
+      // An unreferenced interval cannot keep the process alive: without this, a stream whose
+      // socket closed without the request emitting 'close' leaves the ping running forever and
+      // the proof process never exits.
+      timer.unref?.();
+      const entry = {
+        close: () => {
+          clearInterval(timer);
+          openEventStreams.delete(entry);
+          try {
+            res.end();
+          } catch {
+            // the socket is already gone
+          }
+        },
+      };
+      openEventStreams.add(entry);
+      req.on("close", entry.close);
+      res.on("close", entry.close);
+      res.on("error", entry.close);
       return;
     }
     if (path === "/api/v1/health") return json(200, { status: "ok", authRequired: false });

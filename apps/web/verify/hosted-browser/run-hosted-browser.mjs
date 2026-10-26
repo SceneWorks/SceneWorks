@@ -24,6 +24,7 @@ import {
   buildSummary,
   evaluateEnvironment,
   evaluateSourceIdentity,
+  evaluateCaseFieldSelectors,
   productionWebDigest,
   loadPlaywrightCommonJs,
   resolveArtifactDir,
@@ -38,6 +39,26 @@ const REPO_ROOT = resolve(WEB_ROOT, "../..");
 const CONFIG_PATH = resolve(WEB_ROOT, "vite.verify.config.mjs");
 const FIXTURES_PATH = resolve(WEB_ROOT, "verify-fixtures.mjs");
 const PORT = Number(process.env.SC26687_VERIFY_PORT || 5317);
+
+// Every wait in the proof is BOUNDED. A step that hangs must fail the proof, not hold the hosted
+// job open until the job's own timeout: the run would then be reported as cancelled and a proof
+// that actually ran could never be recorded as green. The bound is generous — the operations
+// bounded here are sub-second in practice — and the timeout rejects, so the caller decides
+// whether the failure is fatal.
+const BOUND_MS = { browser: 15000, context: 15000, server: 10000, request: 10000 };
+async function bounded(label, work, ms) {
+  let timer;
+  try {
+    return await Promise.race([
+      work,
+      new Promise((_, rejectBound) => {
+        timer = setTimeout(() => rejectBound(new Error(`${label} did not complete within ${ms}ms`)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function git(args) {
   return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" }).trim();
@@ -142,6 +163,9 @@ async function main() {
   };
 
   let refusalSource = {};
+  // Where the proof had got to when it failed, so the refusal receipt names the stage instead of
+  // blaming startup for a failure that happened after the browser was already running.
+  let proofStage = "runtime-startup";
   const refuse = (stage, errors) => {
     const summary = buildSummary({
       cases: unexecutedCases(stage),
@@ -191,6 +215,15 @@ async function main() {
   });
   if (!identity.ok) {
     refuse("source-identity", identity.errors);
+    process.exit(2);
+  }
+  // The managed-form case must read the import panel's fields through their label elements.
+  // Checked BEFORE the browser starts: a case whose field selector cannot resolve times out on
+  // the product's MARKUP instead of failing on its BEHAVIOUR, and would spend the whole run's
+  // budget proving nothing about the import panel.
+  const caseSelectors = evaluateCaseFieldSelectors(readFileSync(resolve(HERE, "cases.mjs"), "utf8"));
+  if (!caseSelectors.ok) {
+    refuse("case-field-selectors", caseSelectors.errors);
     process.exit(2);
   }
   if (!expectedHead) {
@@ -257,6 +290,7 @@ async function main() {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ baseURL: baseUrl, viewport: { width: 1440, height: 1000 } });
 
+    proofStage = "cases";
     for (const [index, testCase] of CASES.entries()) {
       const caseStarted = Date.now();
       const logs = { console: [], pageErrors: [], requestFailures: [] };
@@ -300,9 +334,19 @@ async function main() {
       }
     }
 
-    await context.close();
-
-    const serverLog = await fetch(`http://127.0.0.1:${PORT}/api/__verify/requests`).then((response) => response.json());
+    // The context close and the evidence fetch are bounded too, and both run BEFORE the summary is
+    // written — an unbounded hang in either would lose every artifact the proof produced. The
+    // request log is the proof's record of what the UI actually asked the API for, so failing to
+    // collect it fails the proof rather than writing a summary with an empty log.
+    await bounded("browser context close", context.close(), BOUND_MS.context).catch((error) => {
+      console.error(error.message);
+    });
+    proofStage = "request-log";
+    const serverLog = await bounded(
+      "the mock API's request log",
+      fetch(`http://127.0.0.1:${PORT}/api/__verify/requests`).then((response) => response.json()),
+      BOUND_MS.request,
+    );
 
     const summary = buildSummary({
       cases: results,
@@ -366,19 +410,40 @@ async function main() {
       process.exitCode = 1;
     }
   } catch (error) {
-    // A startup failure (Vite or Chromium) must still leave a structured refusal receipt.
-    if (!wroteSummary) refuse("runtime-startup", [error.message]);
+    // A failure at any stage must still leave a structured refusal receipt naming the stage it
+    // happened in, rather than blaming startup for a failure that happened after the browser was
+    // already running.
+    if (!wroteSummary) refuse(proofStage, [error.message]);
     throw error;
   } finally {
+    // Teardown is BOUNDED. By this point the proof's own result, every artifact and the
+    // structured summary are already on disk, so a browser or server that refuses to close must
+    // not be allowed to hold the job open until its timeout: the run would be reported as
+    // cancelled and a proof that actually ran could never be recorded as green.
+    await bounded("browser close", browser ? browser.close() : Promise.resolve(), BOUND_MS.browser).catch((error) => {
+      console.error(error.message);
+    });
+    // Destroy any socket the fixture's event streams still hold. The stream lives in the Vite
+    // server process, so it cannot be closed from here directly; dropping the connections is
+    // what lets the server's own close() complete.
     try {
-      if (browser) await browser.close();
-    } finally {
-      if (server) await server.close();
+      server?.httpServer?.closeAllConnections?.();
+    } catch {
+      // best effort
     }
+    await bounded("server close", server ? server.close() : Promise.resolve(), BOUND_MS.server).catch((error) => {
+      console.error(error.message);
+    });
   }
+  // The proof is over and everything it claims is on disk. Exit explicitly once stdout has
+  // drained, so that no lingering handle can keep the job open.
+  await new Promise((drain) => process.stdout.write("", drain));
+  process.exit(process.exitCode ?? 0);
 }
 
-main().catch((error) => {
+main().catch(async (error) => {
   console.error(error.stack ?? error.message);
+  // stderr is asynchronous when it is a pipe, so an immediate exit can truncate the reason.
+  await new Promise((drain) => process.stderr.write("", drain));
   process.exit(1);
 });
