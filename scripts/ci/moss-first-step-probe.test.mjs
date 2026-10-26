@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
 import {createHash} from 'node:crypto';
 import {envelope,PAYLOAD_SHA} from './moss-upstream-reference.mjs';
-import {verifyProbePayload,verifyPriorBinding,probeBinary,PROBE_SHA,ENCODING_STAGED,ENCODING_SHA,verifyEncodingPayload,encodingEnvelope,encodingPrecisionProfile,cloneEncodingTarget,encodingMetrics} from './moss-first-step-probe.mjs';
+import {verifyProbePayload,verifyPriorBinding,probeBinary,PROBE_SHA,ENCODING_STAGED,ENCODING_SHA,ENCODING_PRECISION_STAGED,ENCODING_PRECISION_PIN,ENCODING_PRECISION_SHA,verifyEncodingPayload,encodingEnvelope,encodingPrecisionProfile,cloneEncodingTarget,encodingMetrics} from './moss-first-step-probe.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex'),ref='a'.repeat(40),pin='857f7a1996e3678a0773c3509ac0087522c19ce6';
 test('probe dispatch is closed, immutable-artifact-only, and cannot select backend/source/commands',()=>{
  for(const phase of ['upload-probe','execute-probe']){const value={phase,artifact_id:phase==='upload-probe'?null:'123456',artifact_run_id:phase==='upload-probe'?null:'1234567'};assert.deepEqual(envelope(JSON.stringify(value),ref,ref,'mlx'),value);for(const bad of [{...value,command:'cargo test'},{...value,payload:'/tmp/x'},{...value,device:'cpu'}])assert.throws(()=>envelope(JSON.stringify(bad),ref,ref,'mlx'));assert.throws(()=>envelope(JSON.stringify(value),ref,ref,'candle'));assert.throws(()=>envelope(JSON.stringify(value),ref,'b'.repeat(40),'mlx'));}
@@ -40,11 +40,13 @@ test('encoding envelope is fixed, source-bound and artifact-only',()=>{
  assert.throws(()=>encodingEnvelope(JSON.stringify(value),ref,ref,'candle'));
  assert.throws(()=>encodingEnvelope(JSON.stringify(value),ref,'b'.repeat(40),'mlx'));
 });
-test('precision encoding stays pending until an exact reviewed native and payload pair is frozen',()=>{
+test('precision encoding is frozen to the reviewed native merge and sealed payload',()=>{
  const upload={phase:'upload-encoding-precision',artifact_id:null,artifact_run_id:null},execute={phase:'execute-encoding-precision',artifact_id:'123456',artifact_run_id:'123457'};
- assert.throws(()=>encodingPrecisionProfile(),/pending/);
- assert.throws(()=>encodingEnvelope(JSON.stringify(upload),ref,ref,'mlx'),/pending/);
- assert.throws(()=>encodingEnvelope(JSON.stringify(execute),ref,ref,'mlx'),/pending/);
+ assert.deepEqual(encodingPrecisionProfile(),{pin:ENCODING_PRECISION_PIN,sha:ENCODING_PRECISION_SHA,kind:'sc-26752-normal-encoding-precision/v1',staged:ENCODING_PRECISION_STAGED,precision:true});
+ assert.equal(ENCODING_PRECISION_PIN,'7275f7c672eecabeba9342e99897ef484e992e14');
+ assert.equal(ENCODING_PRECISION_SHA,'64939983787c060873043ecc2fd0604353bba0d2bc30efc0998dc3ef38d3a59d');
+ assert.deepEqual(encodingEnvelope(JSON.stringify(upload),ref,ref,'mlx'),upload);
+ assert.deepEqual(encodingEnvelope(JSON.stringify(execute),ref,ref,'mlx'),execute);
  const profile=encodingPrecisionProfile('b'.repeat(40),'c'.repeat(64));
  assert.deepEqual(encodingEnvelope(JSON.stringify(upload),ref,ref,'mlx',profile),upload);
  assert.deepEqual(encodingEnvelope(JSON.stringify(execute),ref,ref,'mlx',profile),execute);
@@ -53,6 +55,14 @@ test('precision encoding stays pending until an exact reviewed native and payloa
  assert.throws(()=>encodingEnvelope(JSON.stringify(execute),ref,ref,'candle',profile));
  assert.throws(()=>encodingPrecisionProfile(pin,'c'.repeat(64)),/pending/);
  assert.throws(()=>encodingPrecisionProfile('b'.repeat(40),'not-a-sha'),/pending/);
+});
+test('frozen precision payload retains the historical upstream tensors under the new producer',async t=>{
+ try{await access(resolve(ENCODING_PRECISION_STAGED,'payload-manifest.json'));}catch{t.skip('sealed precision payload unavailable on this host');return;}
+ const manifest=await verifyEncodingPayload(ENCODING_PRECISION_STAGED,encodingPrecisionProfile());
+ assert.equal(manifest.nativePin,ENCODING_PRECISION_PIN);
+ assert.equal(manifest.historicalNativePin,pin);
+ assert.equal(manifest.historicalManifestSha256,ENCODING_SHA);
+ assert.equal(manifest.files.length,13);
 });
 test('precision payload binds the exact historical tensors, request and B image independently of new overlay',async t=>{
  try{await access(resolve(ENCODING_STAGED,'payload-manifest.json'));}catch{t.skip('retained sealed encoding payload unavailable on this host');return;}

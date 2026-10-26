@@ -64,9 +64,9 @@ export async function executeProbe(root,payload,env=process.env){
 export const ENCODING_STAGED='/Users/michael/.codex/epic-runs/sc-26752/encoding-only-prep/payload';
 export const ENCODING_SHA='3004cb310e3e3e98de8ea0901ca848f2b67c81f9aebb7aff6ca974e19230ffd2';
 export const ENCODING_PRECISION_STAGED='/Users/michael/.codex/epic-runs/sc-26752/encoding-precision-prep/payload';
-// Freeze these together after the native precision profile and its cfg(test) overlay are reviewed.
-export const ENCODING_PRECISION_PIN=null;
-export const ENCODING_PRECISION_SHA=null;
+// Reviewed protected native merge and its separately sealed cfg(test) payload.
+export const ENCODING_PRECISION_PIN='7275f7c672eecabeba9342e99897ef484e992e14';
+export const ENCODING_PRECISION_SHA='64939983787c060873043ecc2fd0604353bba0d2bc30efc0998dc3ef38d3a59d';
 const ENCODING_WARM='/Users/michael/actions-runner-sceneworks/_work/SceneWorks/moss-sc-26752/moss-first-step-40195966134-1/target';
 const ENCODING_HUB=BASE+'/moss-execute-40198829729-1-mlx/hf/hub';
 const INPUT_SHA='47b07acccc6491dbc1f4c5c3135fe37d4d65f4afb496d28dafd8ca63a08cd47d';
