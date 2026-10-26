@@ -122,8 +122,9 @@ fn moss_pin_spec(
     entry: &JsonObject,
     settings: &Settings,
     mode: gen_core::moss_image::MossImageAcceleration,
+    on_file: &mut dyn FnMut(usize, usize),
 ) -> WorkerResult<()> {
-    moss_pin_spec_with_adapters(spec, entry, settings, mode, Vec::new(), &mut |_, _| {})
+    moss_pin_spec_with_adapters(spec, entry, settings, mode, Vec::new(), on_file)
 }
 /// Generation and the actual provider receipt are read while the serialized cache transaction
 /// still owns the generator. Failures/cancellation cannot publish a prior successful receipt.
@@ -179,11 +180,13 @@ struct MossPreparedPreload {
 }
 
 // Shared source/spec preparation and the unchanged production header math.
-// This boundary creates neither a generator nor model tensors nor GPU work.
+// This synchronous boundary creates neither a generator nor model tensors nor GPU work.
+// The async job caller owns progress posting; metadata-only forecasts pass a no-op callback.
 fn prepare_moss_preload(
     settings: &Settings,
     payload: &JsonObject,
     request: &ImageRequest,
+    on_file: &mut dyn FnMut(usize, usize),
 ) -> WorkerResult<MossPreparedPreload> {
     use gen_core::moss_image::{MossImageResolved, MossImageVariant};
     let native =
@@ -238,47 +241,14 @@ fn prepare_moss_preload(
     }
     let prepared_adapters = resolve_prepared_adapters(request, settings)?;
     spec = spec.with_adapters(prepared_adapters.specs);
-    // Pinning blocks this runtime thread, so a spawned task posts the per-file progress.
-    let (pin_progress, mut pin_events) = tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
-    let poster = {
-        let api = api.clone();
-        let job_id = job.id.clone();
-        let backend = backend_label(&settings.gpu_id).to_owned();
-        tokio::spawn(async move {
-            while let Some((done, total)) = pin_events.recv().await {
-                let message = format!("Verifying model files ({}/{total}).", done + 1);
-                let payload = image_progress(
-                    JobStatus::Preparing,
-                    ProgressStage::Preparing,
-                    0.05,
-                    &message,
-                    None,
-                    &backend,
-                );
-                if let Err(error) = update_job(&api, &job_id, payload).await {
-                    tracing::debug!(
-                        event = "moss_pin_progress_post_failed",
-                        jobId = %job_id,
-                        error = %error,
-                        "pin progress post failed; the job's next progress post reports the outcome"
-                    );
-                }
-            }
-        })
-    };
-    let pinned = moss_pin_spec_with_adapters(
+    moss_pin_spec_with_adapters(
         &mut spec,
         &entry,
         settings,
         resolved.acceleration,
         prepared_adapters.pins,
-        &mut |done, total| {
-            let _ = pin_progress.send((done, total));
-        },
-    );
-    drop(pin_progress);
-    let _ = poster.await;
-    pinned?;
+        on_file,
+    )?;
     #[cfg(target_os = "macos")]
     let peak = {
         let facts = moss_memory::selected_asset_facts(variant, &spec, resolved.acceleration)
@@ -340,7 +310,7 @@ pub(crate) fn moss_generation_preload_for_test(
     job: &JobSnapshot,
 ) -> WorkerResult<Value> {
     let request = ImageRequest::from_payload(&job.payload);
-    let prepared = prepare_moss_preload(settings, &job.payload, &request)?;
+    let prepared = prepare_moss_preload(settings, &job.payload, &request, &mut |_, _| {})?;
     let provenance = if cfg!(target_os = "macos") {
         "production prepare_moss_preload -> mlx moss_memory::selected_asset_facts.base_bytes + overlay_bytes + request_workspace_bytes (exact selected request/adapter pins)"
     } else {
@@ -380,13 +350,46 @@ async fn generate_moss_stream_using(
         + 'static,
 ) -> WorkerResult<()> {
     let request = &plan.request;
+    // Pinning blocks this runtime thread, so a spawned task posts the per-file progress.
+    let (pin_progress, mut pin_events) = tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
+    let poster = {
+        let api = api.clone();
+        let job_id = job.id.clone();
+        let backend = backend_label(&settings.gpu_id).to_owned();
+        tokio::spawn(async move {
+            while let Some((done, total)) = pin_events.recv().await {
+                let message = format!("Verifying model files ({}/{total}).", done + 1);
+                let payload = image_progress(
+                    JobStatus::Preparing,
+                    ProgressStage::Preparing,
+                    0.05,
+                    &message,
+                    None,
+                    &backend,
+                );
+                if let Err(error) = update_job(&api, &job_id, payload).await {
+                    tracing::debug!(
+                        event = "moss_pin_progress_post_failed",
+                        jobId = %job_id,
+                        error = %error,
+                        "pin progress post failed; the job's next progress post reports the outcome"
+                    );
+                }
+            }
+        })
+    };
+    let prepared = prepare_moss_preload(settings, &job.payload, request, &mut |done, total| {
+        let _ = pin_progress.send((done, total));
+    });
+    drop(pin_progress);
+    let _ = poster.await;
     let MossPreparedPreload {
         mut native,
         variant,
         resolved,
         spec,
         peak,
-    } = prepare_moss_preload(settings, &job.payload, request)?;
+    } = prepared?;
     let settings_owned = settings.clone();
     let cold_settings = settings_owned.clone();
     let job_request = request.clone();
@@ -568,7 +571,7 @@ mod moss_consumer_tests {
             .unwrap()
             .clone();
         let request = ImageRequest::from_payload(&payload);
-        let error = prepare_moss_preload(&settings, &payload, &request)
+        let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
             .err()
             .expect("non-MOSS must fail before snapshot/backend preparation");
         assert!(
@@ -594,7 +597,7 @@ mod moss_consumer_tests {
         for mode in ["unmerged_bf16", "full_fp32"] {
             let payload = preload_payload_for_pure_test(MossImageVariant::Base, mode);
             let request = ImageRequest::from_payload(&payload);
-            let error = prepare_moss_preload(&settings, &payload, &request)
+            let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
                 .err()
                 .expect("Base+DMD must fail before source/backend preparation");
             assert!(
@@ -640,7 +643,7 @@ mod moss_consumer_tests {
             std::fs::create_dir_all(&wrong).unwrap();
             let payload = preload_payload_for_pure_test(variant, mode);
             let request = ImageRequest::from_payload(&payload);
-            let error = prepare_moss_preload(&settings, &payload, &request)
+            let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
                 .err()
                 .expect("absent frozen snapshot must refuse before backend demand pricing");
             let expected = format!(
@@ -1274,15 +1277,14 @@ mod moss_consumer_tests {
                 .as_object()
                 .unwrap()
                 .clone();
-        let error =
-            moss_pin_spec(
-                &mut spec,
-                &entry,
-                &settings,
-                MossImageAcceleration::Off,
-                &mut |_, _| {},
-            )
-            .unwrap_err();
+        let error = moss_pin_spec(
+            &mut spec,
+            &entry,
+            &settings,
+            MossImageAcceleration::Off,
+            &mut |_, _| {},
+        )
+        .unwrap_err();
         assert!(
             error.to_string().contains("MOSS frozen component identity"),
             "{error}"
