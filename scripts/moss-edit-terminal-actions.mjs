@@ -8,12 +8,14 @@ import { promisify } from 'node:util';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt, compareTypedMossEditHistory } from './lib/moss-edit-terminal.mjs';
-import { prepare, freeze, bind, frozen } from './moss-edit-terminal.mjs';
+import { prepare, freeze, bind, frozen, waitJob } from './moss-edit-terminal.mjs';
 import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, stageCompletedMlxHandoffSupplement, validateCompletedMlxHandoffSupplement, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 import { cudaSourceContinuity, validateCudaRebaseRecord } from './lib/moss-edit-cuda-rebase.mjs';
 import {reuseProducers,executionTooling,validateOrdinaryMlx,readOnlyStoppedPackageSource} from './lib/moss-edit-native-reuse.mjs';
+import * as protocolLibrary from './lib/moss-edit-terminal.mjs';
+import {captureControlledCudaQuality} from './lib/moss-controlled-cuda-quality.mjs';
 import {ordinaryExecutionCapture} from './lib/moss-edit-quality-amendment.mjs';
 
 import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
@@ -781,11 +783,20 @@ export async function executeBackend(config) {
       }
       }finally{await mutation.restore();}
     }
+    let controlledQuality=null;
+    if(config.reusedExecution&&config.backend==='cuda') {
+      try {
+        controlledQuality=await captureControlledCudaQuality({api:stack.api,config,state,outputRoot:resolve(state.root,'controlled-quality'),toolingSha:config.executionTooling.head,helpers:{...protocolLibrary,sourceIdentity,nativeDevice,waitJob,retainQualityPairs:originalActions?.retainQualityPairs??retainQualityPairs}});
+      } catch(error) {
+        controlledQuality={execution:'FAILED',renders:0,message:String(error.message).slice(0,4096),acceptance:'AWAITING_FRESH_VISUAL_COMPARISON'};
+        await save(resolve(state.root,'controlled-quality-setup-failure.json'),controlledQuality);
+      }
+    }
     // Stop only the processes this controller spawned. No global census/ownership gate.
     await stack.stop();stopped=true;
     if(config.backend==='mlx')await exportState(config,resolve(config.root,'handoff'));
     if(!continuing)await releasePrivateHf(config);
-    await save(resolve(config.root,continuing?(original.retry?`execution-continuation-${retrySuffix}.json`:'execution-continuation.json'):'execution.json'),{version:VERSION,lockSha256:digest(state.lock),backend:config.backend,renders:25,refusals:29,execution:'COMPLETE',acceptance:'AWAITING_ALL_EXTERNAL_EVIDENCE_AND_VISUAL_REVIEW',...(continuing?{toolingSha:config.continuation.toolingSha,originalRunId:config.continuation.originalRunId}:{} )});
+    await save(resolve(config.root,continuing?(original.retry?`execution-continuation-${retrySuffix}.json`:'execution-continuation.json'):'execution.json'),{version:VERSION,lockSha256:digest(state.lock),backend:config.backend,renders:25,refusals:29,execution:'COMPLETE',acceptance:'AWAITING_ALL_EXTERNAL_EVIDENCE_AND_VISUAL_REVIEW',...(controlledQuality?{controlledQuality}:{}),...(continuing?{toolingSha:config.continuation.toolingSha,originalRunId:config.continuation.originalRunId}:{} )});
   }finally{if(!stopped)await stack.stop();delete process.env.MOSS_EDIT_ACTIONS_TOKEN;}
 }
 export async function finalize(config) {

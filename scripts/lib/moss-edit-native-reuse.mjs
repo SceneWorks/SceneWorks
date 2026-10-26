@@ -13,7 +13,7 @@ export function reuseProducers(env=process.env,{verify=false}={}) {
 export async function executionTooling(root,head) {
   const source=treeIdentity(root);
   requireThat(/^[a-f0-9]{40}$/.test(head)&&source.head===head,'native reuse tooling differs from its clean exact checkout');
-  const files=Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs',qualityAmendment:'lib/moss-edit-quality-amendment.mjs',nativeReuse:'lib/moss-edit-native-reuse.mjs'}).map(([name,path])=>[name,resolve(root,'scripts',path)]));
+  const files=Object.fromEntries(Object.entries({harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs',qualityAmendment:'lib/moss-edit-quality-amendment.mjs',nativeReuse:'lib/moss-edit-native-reuse.mjs',controlledQuality:'lib/moss-controlled-cuda-quality.mjs'}).map(([name,path])=>[name,resolve(root,'scripts',path)]));
   return {sourceRoot:resolve(root),head,source,files,identities:Object.fromEntries(await Promise.all(Object.entries(files).map(async([name,path])=>[name,await fileIdentity(path)])))};
 }
 export async function validateOrdinaryMlx(prior,config,producer) {
