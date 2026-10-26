@@ -9,7 +9,7 @@ import { deflateSync } from 'node:zlib';
 import { recordInspection, parseInspectionArgs } from './moss-preview-inspection.mjs';
 import { digest } from './moss-consumer-assertions.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
-import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, remainingCaseMs, decodePreviewPng, run } from './moss-training-acceptance.mjs';
+import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, remainingCaseMs, decodePreviewPng, run } from './moss-training-acceptance.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const fixture=t=>{const dir=mkdtempSync(path.join(os.tmpdir(),'moss-harness-unit-'));t.after(()=>{rmSync(dir,{recursive:true,force:true});rmSync(`${dir}-selected-artifacts`,{recursive:true,force:true});});return dir;};
 const source={workflowSource:'a'.repeat(40),inferencePin:'b'.repeat(40),manifestSha256:MANIFEST_SHA256,cargoLockSha256:'c'.repeat(64),driverSha256:'d'.repeat(64),workflowSha256:'e'.repeat(64)};
@@ -404,6 +404,32 @@ test('both MLX setup steps match cargo test and fall back only for absent exact 
    assert.equal(result.status,rc<2?0:rc,result.stderr);
    const lines=readFileSync(output,'utf8').trim().split('\n');
    assert.deepEqual(lines.slice(-2),rc===0?['PMETAL_MLX_PREBUILT_DIR=Debug','PMETAL_METALLIB_PATH=Debug.metallib']:rc===1?['PMETAL_MLX_PREBUILT_DIR=','PMETAL_METALLIB_PATH=']:['PMETAL_MLX_PREBUILT_DIR=stale','PMETAL_METALLIB_PATH=stale.metallib']);
+  }
+ }
+});
+
+
+test('every supervised native entry uses the production 8 MiB stack despite ambient overrides',async t=>{
+ assert.equal(NATIVE_TEST_STACK_BYTES,8*1024*1024);
+ const worker=readFileSync(path.join(root,'crates/sceneworks-worker/src/lib.rs'),'utf8');
+ assert.match(worker,/pub const WORKER_ENTRY_STACK_BYTES: usize = 8 \* 1024 \* 1024;/);
+ const peers=fixture(t);
+ // Finish both source captures before testing either opposite-backend import.
+ for(const phase of ['capture','cross-load']) {
+  for(const backend of ['mlx','cuda']) {
+   const m=mockRun(t,{backend}),execute=m.options.execute;let native=0,preparation=0;
+   m.options.env.RUST_MIN_STACK='65536';
+   m.options.execute=async(...args)=>{
+    const command=args[1],env=args[5].env;
+    if(command[1]?.startsWith(PREFIX)) {assert.equal(env.RUST_MIN_STACK,String(NATIVE_TEST_STACK_BYTES));native++;}
+    else {assert.equal(env.RUST_MIN_STACK,'65536');preparation++;}
+    return execute(...args);
+   };
+   if(phase==='capture')m.options.output=path.join(peers,`capture-${backend}-attempt-1`);
+   else {m.options['peer-artifacts']=peers;m.options.env.MOSS_CROSS_LOAD_JOB_STARTED_AT=new Date().toISOString();}
+   const receipt=await run({...m.options,phase});
+   assert.equal(receipt.ok,true,receipt.failures.join());assert.equal(native,8);assert.equal(preparation,5);
+   assert.equal(receipt.toolchain.libtestStackBytes,NATIVE_TEST_STACK_BYTES);
   }
  }
 });

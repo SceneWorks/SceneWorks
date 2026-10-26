@@ -21,6 +21,10 @@ export const testsFor = (phase, executionBackend='mlx') => {
   return CELLS.map(cell => `${PREFIX}moss_real_weights_${sourceBackend}_${cell.replace('/', '_')}_${phase === 'cross-load' ? 'cross_backend' : 'round_trip'}`);
 };
 export const PREFLIGHT = `${PREFIX}moss_real_weights_device_preflight`;
+// Match sceneworks_worker::WORKER_ENTRY_STACK_BYTES and the native API worker
+// harness. The unoptimized shared body poll frame alone exceeds libtest's 2 MiB
+// default on macOS; this applies to exact native tests, never preparation tools.
+export const NATIVE_TEST_STACK_BYTES = 8 * 1024 * 1024;
 export const BOUNDS = Object.freeze({ build: 7200_000, case: 3600_000, crossLoad: 3600_000, list: 300_000, release: 30_000 });
 const fail = message => { throw new Error(`MOSS acceptance: ${message}`); };
 const assert = (value, message) => { if (!value) fail(message); };
@@ -384,7 +388,7 @@ export async function run(options) {
       receipt.ok=true;
     } else {
       assert((backend==='mlx'&&process.platform==='darwin')||(backend==='cuda'&&process.platform==='win32')||options.testPlatform===true,'backend/platform mismatch');
-      const baseEnv={MOSS_REAL_WEIGHTS_ACCEPTANCE:'1',MOSS_ACCEPTANCE_MANIFEST:manifest,MOSS_ACCEPTANCE_WORKFLOW_SOURCE:source.workflowSource,MOSS_ACCEPTANCE_INFERENCE_PIN:source.inferencePin,HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'};
+      const baseEnv={RUST_MIN_STACK:String(NATIVE_TEST_STACK_BYTES),MOSS_REAL_WEIGHTS_ACCEPTANCE:'1',MOSS_ACCEPTANCE_MANIFEST:manifest,MOSS_ACCEPTANCE_WORKFLOW_SOURCE:source.workflowSource,MOSS_ACCEPTANCE_INFERENCE_PIN:source.inferencePin,HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'};
       const sourceBackend=phase==='cross-load'?(backend==='mlx'?'cuda':'mlx'):backend;
       if(phase==='cross-load') {
         for(const b of ['mlx','cuda']) {
@@ -418,7 +422,7 @@ export async function run(options) {
       const cargo=await command(['cargo','-V'],'cargo-version',Math.min(BOUNDS.list,preparationRemaining()));
       const host=rustc.result.output.match(/^host: (\S+)$/m)?.[1];
       assert(host && /^rustc \S+/m.test(rustc.result.output) && /^cargo \S+/m.test(cargo.result.output),'actual Rust/Cargo toolchain observations missing');
-      receipt.toolchain={rustc:rustc.result.output.trim(),cargo:cargo.result.output.trim(),target:env.CARGO_BUILD_TARGET||host,nativeRuntime:`inference-source/${source.inferencePin}`};
+      receipt.toolchain={rustc:rustc.result.output.trim(),cargo:cargo.result.output.trim(),target:env.CARGO_BUILD_TARGET||host,nativeRuntime:`inference-source/${source.inferencePin}`,libtestStackBytes:NATIVE_TEST_STACK_BYTES};
       const compile=await command(['cargo','test','--locked','-p','sceneworks-rust-api','--lib',...(backend==='cuda'?['--features','backend-candle']:[]),'--no-run','--message-format=json'],'compile',preparationRemaining());
       executable=selectLibTestExecutable(compile.result.output,options.statExecutable);
       receipt.executable={path:executable,sha256:options.executableDigest?options.executableDigest(executable):fileDigest(executable)};
