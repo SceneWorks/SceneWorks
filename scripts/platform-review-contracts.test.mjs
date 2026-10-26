@@ -10,6 +10,7 @@ import { proofSelection, requireManualSelection, verifyProofResult, cudaDeviceEv
 import { writeFileSync } from "node:fs";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { historyRequirements } from "./prepare-inference-history.mjs";
 import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 import { bindQwenPersistentCache } from "./ci/memory-catalog/bind-qwen-persistent-cache.mjs";
 
@@ -353,18 +354,22 @@ test("H3 bounded build timeout and interruption retain partial logs without repo
 
 test("RunPod validation provisions the same inference fixtures as PR scaffold checks", async () => {
   const publish = workflowJob(await source(".github/workflows/publish-runpod.yml"), "publish");
-  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-scaffold");
+  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-history");
   const fetchName = "Fetch the pinned inference source for the anchor-closure suite";
   const fetch = workflowStep(publish, fetchName);
-  const shellBody = (step) => step.split("\n").filter((line) => /^ {10}\S|^ {12}/.test(line)).join("\n");
-  assert.equal(shellBody(fetch), shellBody(workflowStep(scaffold, fetchName)));
+  const requirements = historyRequirements(process.cwd());
+  assert.ok(fetch.includes('--anchor-revisions'));
+  assert.ok(fetch.includes('checkout -q "$pin"'));
+  assert.ok(scaffold.includes('node scripts/prepare-inference-history.mjs'));
+  assert.ok(scaffold.includes('node scripts/scaffold-test-selection.mjs --history'));
   const validation = workflowStep(publish, "Validate scaffold and RunPod publication contracts");
   assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
   assert.ok(validation.includes("npm run check"));
   assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
   const terminalFetchName = "Fetch the exact public inference terminal contract";
   const terminalFetch = workflowStep(publish, terminalFetchName);
-  assert.equal(shellBody(terminalFetch), shellBody(workflowStep(scaffold, terminalFetchName)));
+  assert.ok(terminalFetch.includes(`fetch --depth=2 origin ${requirements.terminal}`));
+  assert.ok(terminalFetch.includes(`rev-parse HEAD)" = ${requirements.terminal}`));
   assert.ok(terminalFetch.includes('echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"'));
   assert.ok(publish.indexOf(terminalFetch) < publish.indexOf(validation));
   const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
@@ -417,7 +422,8 @@ function assertAdvisoryGate(workflow) {
 
   const parity = workflowJob(workflow, "parity");
   assert.match(parity, /needs: \[[^\]]*supply-chain[^\]]*\]/);
-  assert.match(parity, /if \[ "\$count" -lt 5 \]; then/);
+  assert.match(parity, /run: node scripts\/check-job-relevance\.mjs --assert-results/);
+  assert.match(parity, /needs: \[[^\]]*changes[^\]]*\]/);
 }
 
 test("required parity fails closed over an unconditional advisory gate", async () => {
@@ -1341,7 +1347,7 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   );
   assert.ok(
     candleWorker.includes(
-      "      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}",
+      "      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda || inputs.run_imported_nvfp4_worker_smoke) && 'real-weights' || github.run_id }}",
     ),
     "real-weight dispatch profiles must share the GPU lock while ordinary runs remain unique",
   );
@@ -1445,9 +1451,13 @@ test("windows-candle runs the imported NVFP4 worker acceptance on the real-weigh
   assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
-  assert.match(job, /github\.event_name == 'push'/);
-  assert.match(job, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
-  assert.doesNotMatch(job, /github\.event_name == 'workflow_dispatch'/);
+  const select = workflowExpression(job);
+  for (const event of ["push", "pull_request", "workflow_dispatch"]) {
+    assert.equal(evaluateWorkflow(select, event), false, `${event} must not run without opt-in`);
+    assert.equal(evaluateWorkflow(select, event, { run_imported_nvfp4_worker_smoke: true }), event === "workflow_dispatch");
+  }
+  assert.equal(evaluateWorkflow(select, "workflow_dispatch", { run_imported_nvfp4_worker_smoke: true, capability_facts_only: true }), false);
+  assert.match(workflow, /run_imported_nvfp4_worker_smoke:\n[\s\S]*?type: boolean\n        default: false/);
   assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
   assert.match(
     job,
@@ -1478,6 +1488,7 @@ test("automatic Windows Candle jobs select physical GPU 1, never the owner's GPU
     assert.equal(evaluateWorkflow(route, event), expected, event);
     assert.equal(evaluateWorkflow(route, event, { capability_facts_only: false }), expected, event);
   }
+  assert.equal(evaluateWorkflow(route, "workflow_dispatch", { run_imported_nvfp4_worker_smoke: true }), "1");
   assert.match(imported, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
   assert.match(imported, /^ {6}CUDA_VISIBLE_DEVICES: "1"$/m);
 
@@ -2043,11 +2054,15 @@ test("the PR-reachable candle lane typechecks the memory adapter's TESTS, not ju
   assert.match(await source("package.json"), /"rust:check:candle": "node scripts\/check-candle-build\.mjs"/);
 });
 
-test("Docker relevance gate paginates and checks for truncated file lists", async () => {
+test("Docker relevance step consumes the exhaustive shared diff and fails safe on missing selection", async () => {
   const workflow = await source(".github/workflows/check.yml");
-  assert.match(workflow, /gh api --paginate/);
-  assert.match(workflow, /docker-smoke-relevance\.mjs --expected-count/);
-  assert.doesNotMatch(workflow, /gh pr view .*--json files/);
+  const gate = workflowStep(workflowJob(workflow, "parity-docker"), "Decide whether to run the Docker runtime smoke");
+  assert.match(gate, /SELECTED: \$\{\{ needs.changes.outputs.docker \}\}/);
+  assert.match(gate, /if \[ "\$SELECTED" = "false" \]; then/);
+  assert.match(gate, /else\n            echo "run=true"/);
+  const selector = await source("scripts/check-job-relevance.mjs");
+  assert.match(selector, /"--name-only", "--no-renames", "-z"/);
+  assert.match(selector, /dockerSmokeDecision\(files.length, files\)/);
 });
 
 test("every release job is confined to refs/tags/v", async () => {
@@ -3048,7 +3063,7 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
 test("Windows facts-only capture rejects mixed profiles and cannot escape through terminal always steps or other GPU jobs", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const worker = workflowJob(workflow, "candle-worker");
-  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke", "run_supra2_worker_smoke"];
+  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke", "run_supra2_worker_smoke", "run_imported_nvfp4_worker_smoke"];
   const validation = workflowStep(worker, "Refuse combined manual measurement profiles");
   const refusal = validation.slice(validation.indexOf("if ($env:CAPABILITY_FACTS_ONLY"), validation.indexOf("if ($env:YUE2_ACCEPTANCE_ONLY"));
   assert.match(refusal, /-contains 'true'/);
@@ -5734,5 +5749,13 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
       mutation.expected,
       `${mutation.name} must be killed by the acceptance contract`,
     );
+  }
+});
+
+
+test("hosted macOS aligns dev/test and proc-macro debug settings", async () => {
+  const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
+  for (const profile of ["DEV", "TEST", "DEV_BUILD_OVERRIDE", "TEST_BUILD_OVERRIDE"]) {
+    assert.ok(hosted.includes(`CARGO_PROFILE_${profile}_DEBUG: line-tables-only`), profile);
   }
 });

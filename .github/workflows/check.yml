@@ -12,10 +12,31 @@ on:
   push:
     branches:
       - main
-      - "codex/**"
+  # PRs own branch validation; do not also rebuild every codex/** push.
+  workflow_dispatch: # Explicit full local-story/epic acceptance; bypasses path selection.
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      web: ${{ steps.select.outputs.web }}
+      rust: ${{ steps.select.outputs.rust }}
+      scaffold: ${{ steps.select.outputs.scaffold }}
+      history: ${{ steps.select.outputs.history }}
+      docker: ${{ steps.select.outputs.docker }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Select dependency-aware Check jobs
+        id: select
+        run: node scripts/check-job-relevance.mjs
+
   web:
+    needs: changes
+    # A broken selector runs the job; parity also rejects missing/failed selection explicitly.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.web != 'false') }}
     runs-on: ubuntu-latest
     # Guardrail so a wedged step fails fast instead of riding GitHub's 6-hour
     # default (sc-10420). Well above the healthy ~5-8 min of ci+lint+test+build.
@@ -37,8 +58,7 @@ jobs:
         run: npm --prefix apps/web run build
 
   # `parity` IS THE REQUIRED STATUS CHECK, and it is an aggregator — the work fans out into
-  # the four `parity-*` jobs below plus the dependency-advisory gate. They are mutually
-  # independent, and running them serially
+  # selected parity jobs below plus the unconditional dependency-advisory gate. Running them serially
   # in one job meant everything queued behind the Rust compile for no reason. Measured
   # 2026-08-11 over 12 runs: rust 6.8m, closure digests 4.0m, scaffold 1.6m, docker smoke
   # 6.8m when it fires (4/12) — a 14.2m median job whose longest single member is 6.8m.
@@ -73,36 +93,22 @@ jobs:
         run: cargo deny --locked check advisories
 
   parity:
-    needs: [parity-rust, parity-digests, parity-scaffold, parity-docker, supply-chain]
-    # FAIL CLOSED. Without `if: always()` this job is SKIPPED whenever any `needs:` job fails
-    # or is skipped — and a skipped job reports **Success** to a required status check, which
-    # is exactly the false-green shape documented at the top of changed-paths.yml. So it runs
-    # unconditionally and asserts the results itself.
+    needs: [changes, web, parity-rust, parity-digests, parity-scaffold, parity-history, parity-docker, candle, supply-chain]
+    # Grade every dependency even when an upstream job failed or was intentionally skipped.
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Assert every parity job succeeded
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Assert selected jobs succeeded and only irrelevant jobs skipped
         env:
           RESULTS: ${{ toJSON(needs) }}
-        # Iterates whatever is in `needs` rather than naming the upstream jobs, so adding a sixth
-        # job cannot silently go ungraded. The count floor is the other half of
-        # that: deleting a `needs:` entry would otherwise shrink the assertion to a green
-        # no-op instead of failing.
-        run: |
-          set -euo pipefail
-          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$RESULTS"
-          count="$(jq -r 'length' <<<"$RESULTS")"
-          if [ "$count" -lt 5 ]; then
-            echo "::error::parity expects at least 5 upstream jobs, saw ${count} — a needs: entry was removed"
-            exit 1
-          fi
-          if [ "$(jq -r '[to_entries[] | select(.value.result != "success")] | length' <<<"$RESULTS")" != "0" ]; then
-            echo "::error::one or more parity jobs did not succeed"
-            exit 1
-          fi
+        run: node scripts/check-job-relevance.mjs --assert-results
 
   parity-rust:
+    needs: changes
+    # A broken selector runs the job; parity also rejects missing/failed selection explicitly.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust != 'false') }}
     runs-on: ubuntu-latest
     env:
       # Fetch the pinned inference source once, then force every build and build.rs process
@@ -170,17 +176,9 @@ jobs:
         # producing 50 frames instead of 48. Without a binary here those tests returned early and
         # reported `ok`, so nothing in CI had ever exercised them — the runner image was the only
         # thing deciding. `SCENEWORKS_REQUIRE_FFMPEG` (job env above) makes that state fail loudly.
-        run: |
-          # The hosted image's mirror+file source prioritizes Azure, whose package payloads
-          # exhausted this lane twice. Keep its distro suites, components and Signed-By;
-          # change only the mirror list to the canonical Ubuntu archives.
-          printf '%s\t%s\n' \
-            'https://archive.ubuntu.com/ubuntu/' 'priority:1' \
-            'https://security.ubuntu.com/ubuntu/' 'priority:2' \
-            | sudo tee /etc/apt/apt-mirrors.txt
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-          ffmpeg -version | head -1
+        # Reuse only a codec-probed binary; otherwise use signed official Ubuntu sources
+        # with bounded downloads, instead of the runner's potentially slow Azure mirror.
+        run: bash scripts/ensure-ci-ffmpeg.sh
       - name: Install contract test dependencies
         # pillow / numpy / opencv were only needed by the retired Python worker's
         # adapter tests, deleted in sc-8863; the surviving suite (Rust-API
@@ -235,20 +233,13 @@ jobs:
   # generate-memory-matrix.mjs) and never invoke cargo, so this needs no Rust toolchain and no
   # rust-cache — which is what lets it run beside the compile instead of in front of it.
   parity-scaffold:
+    needs: changes
+    # A broken selector runs the job; parity also rejects missing/failed selection explicitly.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.scaffold != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Fetch the exact public inference terminal contract
-        run: |
-          set -euo pipefail
-          inference_root="$RUNNER_TEMP/starvector-pinned-inference"
-          echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"
-          git init "$inference_root"
-          git -C "$inference_root" remote add origin https://github.com/SceneWorks/inference.git
-          git -C "$inference_root" fetch --depth=2 origin 0b084cbf46b5b4f4f561305ef116268b57eecf7f
-          git -C "$inference_root" checkout --detach FETCH_HEAD
-          test "$(git -C "$inference_root" rev-parse HEAD)" = 0b084cbf46b5b4f4f561305ef116268b57eecf7f
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "20"
@@ -256,36 +247,8 @@ jobs:
           cache-dependency-path: package-lock.json
       - name: Install pinned scaffold dependencies
         run: npm ci --ignore-scripts
-      # sc-22511: `anchor-loader-closure.test.mjs` derives the memory-anchor currency key over the
-      # REAL pinned inference source, because the claims it makes ("a pin bump leaves the key
-      # unchanged", "a sibling model's edit does not", "an edit on the loader's own path does") are
-      # claims about a repository and a synthetic fixture can agree with a broken walk. Without a
-      # clone here, most of its cases skipped and CI green meant nothing ran.
-      #
-      # SceneWorks/inference is PUBLIC (#2164), so a shallow fetch costs seconds and needs no token.
-      # Two things are fetched: the PIN, and EVERY revision the packaged anchors were measured at —
-      # an anchor's recorded currency key is derived at its own measurement revision, so the suite
-      # needs those trees to re-derive it. The revision list comes from `--anchor-revisions`, which
-      # reads the same store the derivation walks, so CI cannot end up fetching a subset while the
-      # remaining cases skip quietly. Under CI the tests FAIL rather than returning when a tree is
-      # missing.
-      - name: Fetch the pinned inference source for the anchor-closure suite
-        run: |
-          set -euo pipefail
-          pin="$(node -e 'const fs=require("fs");const m=fs.readFileSync("Cargo.toml","utf8").match(/candle-kernels\s*=\s*\{[^}]*?github\.com\/SceneWorks\/inference[^}]*?rev\s*=\s*"([0-9a-f]+)"/);if(!m)throw new Error("no inference pin");process.stdout.write(m[1])')"
-          git init -q "$RUNNER_TEMP/inference"
-          git -C "$RUNNER_TEMP/inference" remote add origin https://github.com/SceneWorks/inference
-          git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$pin"
-          while read -r rev; do
-            [ -n "$rev" ] || continue
-            git -C "$RUNNER_TEMP/inference" fetch -q --depth=1 origin "$rev"
-          done < <(node scripts/anchor-loader-closure.mjs --anchor-revisions)
-          git -C "$RUNNER_TEMP/inference" checkout -q "$pin"
-      - name: Run scaffold and compose checks
-        env:
-          INFERENCE_REPO: ${{ runner.temp }}/inference
-        run: |
-          npm run check
+      - name: Run portable scaffold and compose checks
+        run: node scripts/scaffold-test-selection.mjs --portable
       # DISABLED at PR time (sc-19758). release.yml still scans the BUILT bundle in all three of its
       # jobs, which is where redistributing NC weights would actually happen — this step only
       # re-scanned the source trees on every pull request.
@@ -333,7 +296,48 @@ jobs:
           node scripts/check-license-coverage.mjs --self-test
           npm run check:license-coverage
 
+  # These existing complete suites read actual historical inference source and retain all their
+  # hard CI requirements. Select them for pin/anchor/loader/tooling inputs, or full acceptance.
+  parity-history:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.history != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+      - name: Install pinned scaffold dependencies
+        run: npm ci --ignore-scripts
+      - name: Derive immutable inference history cache key
+        id: history-key
+        run: node scripts/prepare-inference-history.mjs --key
+      - name: Restore immutable inference history
+        id: history-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/inference-history.git
+          key: inference-history-v1-${{ runner.os }}-${{ hashFiles('scripts/prepare-inference-history.mjs', 'scripts/anchor-loader-closure.mjs') }}-${{ steps.history-key.outputs.key }}
+          restore-keys: |
+            inference-history-v1-${{ runner.os }}-${{ hashFiles('scripts/prepare-inference-history.mjs', 'scripts/anchor-loader-closure.mjs') }}-
+      - name: Fetch and verify all immutable inference history
+        run: node scripts/prepare-inference-history.mjs
+      - name: Save immutable inference history on main
+        if: github.ref == 'refs/heads/main' && steps.history-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ runner.temp }}/inference-history.git
+          key: ${{ steps.history-cache.outputs.cache-primary-key }}
+      - name: Run historical source and anchor closure integration
+        run: node scripts/scaffold-test-selection.mjs --history
+
   parity-digests:
+    needs: changes
+    # A broken selector runs the job; parity also rejects missing/failed selection explicitly.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.scaffold != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -392,10 +396,12 @@ jobs:
   # nothing with the host's rust-cache — ~7m that used to land at the END of a 14m serial job,
   # so its cost was fully additive to everything above it.
   #
-  # The `if:` below is a STEP-level skip, so this job still reports success when the gate says
-  # no Docker input changed. That keeps the aggregator honest: it can demand `success` from
-  # every member with no skipped-counts-as-green special case to get wrong later.
+  # Job selection avoids waking this runner for irrelevant inputs. Keep the step gate as well;
+  # parity accepts this job's skip only when successful selection explicitly proved irrelevance.
   parity-docker:
+    needs: changes
+    # A broken selector runs the job; parity also rejects missing/failed selection explicitly.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.docker != 'false') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -406,30 +412,15 @@ jobs:
       - name: Decide whether to run the Docker runtime smoke
         id: docker_smoke_gate
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        # The Docker smoke recompiles the whole ~275-crate workspace from scratch in
-        # the release profile inside BuildKit — its `--mount=type=cache` target dir is
-        # empty on ephemeral runners and isn't exportable to the gha cache, so it shares
-        # nothing with the host's rust-cache-warmed target/ and costs ~5 min every run.
-        # The host contract + e2e steps already exercise the API binary's startup and
-        # /health, so the container smoke only adds packaging coverage. Re-run it only
-        # when an input that can actually regress the image changed; always run off a
-        # pull request (push to main / codex/**) for full coverage (sc-10823).
+          SELECTED: ${{ needs.changes.outputs.docker }}
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "Not a pull request; running the Docker runtime smoke."
+          # The dependency-aware selector covers every Docker build input. Missing selection
+          # still runs the smoke, and the required parity aggregator fails the selector itself.
+          if [ "$SELECTED" = "false" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
             echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
           fi
-          pr="${{ github.event.pull_request.number }}"
-          changed_file_count="$(gh api "repos/${GH_REPO}/pulls/${pr}" --jq '.changed_files')"
-          # The files endpoint pages at 100 and caps very large PRs at 3,000. The helper
-          # compares the returned count with `changed_files`; any truncation runs the
-          # smoke conservatively instead of treating an unseen Docker input as irrelevant.
-          gh api --paginate "repos/${GH_REPO}/pulls/${pr}/files?per_page=100" \
-            --jq '.[].filename' |
-            node scripts/docker-smoke-relevance.mjs --expected-count "$changed_file_count"
       - name: Smoke default Rust API Docker runtime
         if: steps.docker_smoke_gate.outputs.run == 'true'
         run: npm run check:docker:rust-api
@@ -464,6 +455,9 @@ jobs:
   # a cfg-gated symbol gone missing, dead code under `-D warnings` — which is precisely the class a
   # speculative merge introduces and the class that broke `main` today.
   candle:
+    needs: changes
+    # A broken selector runs the job; parity also rejects missing/failed selection explicitly.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust != 'false') }}
     runs-on: ubuntu-latest
     env:
       # Same posture as `parity`: fetch the pinned inference source once, then force every build

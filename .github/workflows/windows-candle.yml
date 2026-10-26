@@ -159,6 +159,11 @@ on:
   # provisioning path; platform-review-contracts.test.mjs enforces the real cap.
   workflow_dispatch:
     inputs:
+      run_imported_nvfp4_worker_smoke:
+        description: "Run the complete imported NVFP4 real-weight worker smoke on physical GPU1 (explicit acceptance only)"
+        required: false
+        type: boolean
+        default: false
       capability_facts_only:
         description: "Build and capture native Candle capability facts without running GPU or runtime tests"
         required: false
@@ -362,7 +367,7 @@ jobs:
     # measure that shared state with the imported-NVFP4 smoke's fixed group; ordinary compile/test
     # runs retain a unique group and therefore the full four-listener pool.
     concurrency:
-      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}
+      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda || inputs.run_imported_nvfp4_worker_smoke) && 'real-weights' || github.run_id }}
       cancel-in-progress: false
     # A provisioning or five-rung dispatch additionally requires `real-weights`; ordinary PR and
     # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which
@@ -382,7 +387,7 @@ jobs:
       # Automatic PR/push tests use physical GPU 1; logical CUDA device 0 maps to it.
       # Preserve the existing manual-dispatch default and its step-local overrides.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && '0' || '1' }}
+      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_worker_smoke && '1' || github.event_name == 'workflow_dispatch' && '0' || '1' }}
       CAPABILITY_FACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only }}
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
@@ -418,6 +423,7 @@ jobs:
           CAPABILITY_FACTS_ONLY: ${{ inputs.capability_facts_only }}
           RUN_IRIS_WORKER_SMOKE: ${{ inputs.run_iris_worker_smoke }}
           RUN_SUPRA2_WORKER_SMOKE: ${{ inputs.run_supra2_worker_smoke }}
+          RUN_IMPORTED_NVFP4_WORKER_SMOKE: ${{ inputs.run_imported_nvfp4_worker_smoke }}
           RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
           RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
@@ -426,7 +432,7 @@ jobs:
           YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
           YUE2_FP8_PROFILE_ONLY: ${{ inputs.yue2_fp8_profile_only }}
         run: |
-          if ($env:CAPABILITY_FACTS_ONLY -eq 'true' -and (@($env:RUN_FIVE_RUNG_REFERENCE, $env:PROVISION_SNAPSHOT, $env:RUN_LTX_EROS_ACCEPTANCE, $env:RUN_EPIC_20738_TERMINAL_CUDA, $env:RUN_YUE2_TERMINAL_CUDA, $env:YUE2_ACCEPTANCE_ONLY, $env:YUE2_FP8_PROFILE_ONLY, $env:RUN_IRIS_WORKER_SMOKE, $env:RUN_SUPRA2_WORKER_SMOKE) -contains 'true')) {
+          if ($env:CAPABILITY_FACTS_ONLY -eq 'true' -and (@($env:RUN_FIVE_RUNG_REFERENCE, $env:PROVISION_SNAPSHOT, $env:RUN_LTX_EROS_ACCEPTANCE, $env:RUN_EPIC_20738_TERMINAL_CUDA, $env:RUN_YUE2_TERMINAL_CUDA, $env:YUE2_ACCEPTANCE_ONLY, $env:YUE2_FP8_PROFILE_ONLY, $env:RUN_IRIS_WORKER_SMOKE, $env:RUN_SUPRA2_WORKER_SMOKE, $env:RUN_IMPORTED_NVFP4_WORKER_SMOKE) -contains 'true')) {
             throw 'capability_facts_only cannot share a dispatch with provisioning or a GPU/runtime profile'
           }
           if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and $env:RUN_YUE2_TERMINAL_CUDA -ne 'true') {
@@ -1500,9 +1506,9 @@ jobs:
   imported-nvfp4-worker-smoke:
     # Real weights are required for this one executable acceptance (sc-21716). Keep it separate
     # from candle-worker so ordinary compile/test traffic retains the full four-runner CUDA pool;
-    # the dependency orders this run, and the fixed group excludes other runs that use real weights.
+    # explicit dispatch orders this after compilation; the fixed group excludes other real-weight runs.
     needs: candle-worker
-    if: ${{ github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_worker_smoke == true && !inputs.capability_facts_only }}
     concurrency:
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
