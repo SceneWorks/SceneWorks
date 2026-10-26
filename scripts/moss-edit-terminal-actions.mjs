@@ -238,7 +238,14 @@ export async function captureEncoderBypass(api,config,payload,outputRoot,{observ
     const image=protocolLibrary.decodeRgbPng(bytes);requireThat(image.width===768&&image.height===512,'encoder bypass output dimensions changed');
     protocolLibrary.checkJob(row,request,job,'mlx');requireThat(job.workerId===config.workerId&&asset.recipe?.rawAdapterSettings?.mossImageSampleIndex===0,'encoder bypass used another worker/sample');validateEncoderBypassReport(request,report,payload);
     const baseline=payload.baselineReport;requireThat(report.references[0].latent_sha256===baseline.references[0].latent_sha256&&report.references[0].resized_pixels_sha256===baseline.references[0].resized_pixels_sha256,'encoder bypass changed reference VAE conditioning');
-    const workflow=await api.request(`/api/v1/projects/${encode(project.id)}/assets/${encode(asset.id)}/workflow`);await save(resolve(outputRoot,'workflow.json'),workflow);protocolLibrary.validateExportedWorkflow(workflow,report,0);
+    // Generated PNGs embed the workflow; asset GET only exposes imported companions.
+    const retained=await readFile(resolve(outputRoot,'output.png'));requireThat(retained.equals(bytes),'encoder bypass retained PNG changed before inspection');
+    const inspectPath='/api/v1/workflows/inspect',inspectionHttp={},form=new FormData();form.append('file',new Blob([retained],{type:'image/png'}),'output.png');
+    await save(resolve(outputRoot,'workflow-inspection-input.json'),{method:'POST',path:inspectPath,file:'output.png',sha256:sha(retained),byteLength:retained.length});
+    let inspection;try{inspection=await api.request(inspectPath,{method:'POST',body:form,observation:inspectionHttp});}finally{await save(resolve(outputRoot,'workflow-inspection-http.json'),inspectionHttp);}
+    await save(resolve(outputRoot,'workflow-inspection.json'),inspection);
+    requireThat(inspectionHttp.status===200&&inspection?.status==='workflow'&&inspection.workflow,'encoder bypass PNG inspection returned no embedded workflow');
+    protocolLibrary.validateExportedWorkflow(inspection.workflow,report,0);await save(resolve(outputRoot,'workflow.json'),inspection.workflow);
     const result={kind:'sc-26752-mlx-encoder-bypass-result/v1',execution:'CAPTURED_DIAGNOSTIC',renders:1,acceptance:'AWAITING_VISUAL_COMPARISON_NOT_CAMPAIGN_ACCEPTANCE',jobId,requestSha256:digest(request),output:await fileIdentity(resolve(outputRoot,'output.png')),providerReport:await fileIdentity(resolve(outputRoot,'provider-report.json')),baseline:control.baseline,upstream:control.upstream,native:control.native};await save(resolve(outputRoot,'result.json'),result);return result;
   }catch(error){await save(resolve(outputRoot,'failure.json'),{execution:'FAILED',jobId,message:String(error.message).slice(0,4096),observation});throw error;}
 }

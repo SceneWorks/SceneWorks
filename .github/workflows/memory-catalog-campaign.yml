@@ -309,7 +309,7 @@ jobs:
         id: reference
         run: node scripts/ci/moss-first-step-probe.mjs route validate
       - name: Upload immutable small reference payload (no model weights or venv)
-        if: steps.reference.outputs.phase == 'upload' || steps.reference.outputs.phase == 'upload-probe' || steps.reference.outputs.phase == 'upload-cases' || steps.reference.outputs.phase == 'upload-encoding' || steps.reference.outputs.phase == 'upload-encoding-precision' || steps.reference.outputs.phase == 'upload-encoding-block-trace' || steps.reference.outputs.phase == 'upload-encoding-block-trace-upstream'
+        if: steps.reference.outputs.phase == 'upload' || steps.reference.outputs.phase == 'upload-probe' || steps.reference.outputs.phase == 'upload-cases' || steps.reference.outputs.phase == 'upload-encoding' || steps.reference.outputs.phase == 'upload-encoding-precision' || steps.reference.outputs.phase == 'upload-encoding-block-trace' || steps.reference.outputs.phase == 'upload-encoding-block-trace-upstream' || steps.reference.outputs.phase == 'upload-encoding-layer3'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: moss-upstream-reference-payload-${{ github.run_id }}-${{ github.run_attempt }}
@@ -317,7 +317,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Download exact immutable reference payload
-        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream'
+        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream' || steps.reference.outputs.phase == 'execute-encoding-layer3'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ steps.reference.outputs.artifact_id }}
@@ -344,7 +344,7 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
       - name: Checkout reviewed native precision source for cfg(test)-only encoding overlay
-        if: steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace'
+        if: steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-layer3'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -353,12 +353,12 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
       - name: Run one reviewed fixed MPS reference after payload, runtime and model authentication
-        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream'
+        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream' || steps.reference.outputs.phase == 'execute-encoding-layer3'
         env:
           MOSS_TRACE_TOKEN: ${{ github.token }}
         run: node scripts/ci/moss-first-step-probe.mjs route execute
       - name: Retain only reference outputs and authentication, separate from native evidence
-        if: always() && (steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream')
+        if: always() && (steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream' || steps.reference.outputs.phase == 'execute-encoding-layer3')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: moss-upstream-reference-result-${{ github.run_id }}-${{ github.run_attempt }}

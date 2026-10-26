@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Api, VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, samplesBracketJob, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
-import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, readCanceledJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure } from './moss-edit-terminal.mjs';
+import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, readCanceledJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure, retainOutputs } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, unlink, open, rm, symlink, rename, truncate, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { sourceIdentity, filesUnder } from './lib/moss-edit-terminal-actions.mjs';
+import { sourceIdentity, filesUnder, rgbPng } from './lib/moss-edit-terminal-actions.mjs';
 import { adapterRefusalState } from './moss-edit-terminal-actions.mjs';
 import { executionTooling } from './lib/moss-edit-native-reuse.mjs';
 import { verifyUiRequestBinding } from './moss-edit-terminal-browser.mjs';
@@ -116,6 +116,51 @@ test('conditioning uses exact FP32 row+mask digest and caller noise has no fabri
   const base = { conditioning, samples }, request = { advanced: { mossImageAdvanced: { positive: {}, negative: {}, noise: {} } } };
   validateAdvancedDigests(base,request,tensors); const mutant = structuredClone(base); mutant.samples[0].seed = 0; assert.throws(() => validateAdvancedDigests(mutant,request,tensors));
   mutant.samples[0].seed = null; mutant.conditioning[0].positive.sha256 = sha('pre-rounded bf16'); assert.throws(() => validateAdvancedDigests(mutant,request,tensors));
+  for(const conditioning of [undefined,base.conditioning.slice(0,1),[...base.conditioning,base.conditioning[0]],[base.conditioning[1],base.conditioning[0]]])assert.throws(()=>validateAdvancedDigests({...base,conditioning},request,tensors));
+  assert.throws(()=>validateAdvancedDigests(base,request,{...tensors,positive:undefined}));
+  const wrongNoise=structuredClone(base);wrongNoise.samples[1].noise_sha256='f'.repeat(64);assert.throws(()=>validateAdvancedDigests(wrongNoise,request,tensors));
+});
+// Actual H45 run40396253038/1 job_5fdb29022c0e52cf2a7f9b4c0b345768.
+// Projection of requestfe557e872d…394b and asset7b4910e9df…277f9; no model output fabricated.
+test('actual H45 Editor output-only metadata preserves ordinary B1 text conditioning and generated noise',()=>{
+ const request={prompt:'Change only the blue bottle body and blue cap to deep red. Keep its silver collar, handle shape, water droplets, exact silhouette and position unchanged. Preserve both orange pieces, pale stone surface, lighting, shadows, background, framing and empty space on the left. Do not add text or objects.',negativePrompt:'',count:1,seed:173,width:768,height:512,advanced:{mossImageAdvanced:{output:'images'}}};
+ const base={conditioning:[{positive:{sequence_length:71,sha256:'3c30c24eb4bb292a41c0645808a54b2adedae8e977d685150f1918c851ee10ca',source:'text',valid_tokens:71},negative:{sequence_length:10,sha256:'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',source:'text',valid_tokens:10}}],samples:[{noise_sha256:'02c6f1b94c7334676fc6df334f9c5b3e3c6e27f6ec3309a32912d871b821edac',seed:173}]};
+ validateAdvancedDigests(base,request,new Proxy({},{get(){throw Error('output-only must not read tiny tensor fixtures');}}));
+ for(const change of [x=>x.conditioning=[],x=>x.conditioning[0].positive.source='embeddings',x=>x.conditioning[0].positive.sha256=sha('different prompt'),x=>x.conditioning[0].negative.sha256=sha('different negative'),x=>x.samples[0].seed=174,x=>x.samples[0].noise_sha256='missing']){const mutant=structuredClone(base);change(mutant);assert.throws(()=>validateAdvancedDigests(mutant,request,{}));}
+});
+test('B2 text negatives stay ordered and noise-only B1 checks actual complete tensor shape and digest',()=>{
+ const request={prompts:['one','two'],seed:173,advanced:{mossImageAdvanced:{output:'images',negativePrompts:['bad one','bad two']}}},base={conditioning:['one','two'].map((prompt,i)=>({positive:{source:'text',sha256:sha(prompt)},negative:{source:'text',sha256:sha(request.advanced.mossImageAdvanced.negativePrompts[i])}})),samples:Array.from({length:4},(_,i)=>({seed:173+i,noise_sha256:'a'.repeat(64)}))};
+ validateAdvancedDigests(base,request,{});for(const branch of ['positive','negative']){const mutant=structuredClone(base);mutant.conditioning[0][branch].sha256=base.conditioning[1][branch].sha256;assert.throws(()=>validateAdvancedDigests(mutant,request,{}));}
+ const noise=makeNpy([1,128,4,4],'float32',i=>i/100),ordinary={prompt:'one',negativePrompt:'',seed:null,width:64,height:64,advanced:{mossImageAdvanced:{output:'images',noise:{assetId:'caller-noise'}}}},single={conditioning:[base.conditioning[0]],samples:[{seed:null,noise_sha256:sha(tensorData(noise))}]};single.conditioning[0]=structuredClone(single.conditioning[0]);single.conditioning[0].negative.sha256=sha('');
+ validateAdvancedDigests(single,ordinary,{noise});assert.throws(()=>validateAdvancedDigests(single,ordinary,{noise:makeNpy([1,128,2,8],'float32',i=>i/100)}));
+ const changed=structuredClone(single);changed.samples[0].noise_sha256='b'.repeat(64);assert.throws(()=>validateAdvancedDigests(changed,ordinary,{noise}));
+});
+test('canonical output retention precedes job and report semantics and never reads unowned media or unused NPY',async()=>{
+ const root=await temporary('retain-output'),image=rgbPng(16,16,Buffer.alloc(16*16*3)),pixelSha='a'.repeat(64);
+ await save(resolve(root,'input-identities.json'),{B:{width:16,height:16,pixelsSha256:pixelSha}}); // Deliberately no five tiny NPY files.
+ for(const mode of ['success','job-failure','report-failure','extra-within-bound','foreign-project','foreign-lineage','unsafe-path']){
+  const dest=resolve(root,mode);await mkdir(dest);
+  const row={backend:'cuda',variant:'sft',refs:['B'],expected:'completed',output:'images',outputCount:1},request={projectId:'project',mode:'edit_image',model:'moss_image_sft',prompt:'one',negativePrompt:'',seed:173,count:1,width:16,height:16,advanced:{steps:30,guidanceScale:4,schedulerShift:5,mossImage:{acceleration:'off',training_shift:1,max_sequence_length:4096},mossImageEdit:{reference_max_edge:512,use_kv_cache:true},mossImageAdvanced:{output:'images'}}};
+  const report={adapter_repository:'chinoll/Moss-Image-Edit',adapter_revision:'3be9c40037e1b89b17aa85ff6f8ee805872aa558',adapter_sha256:'17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf',config_sha256:'b6b471cf7bc77b0874af03be618f8a06b6997d92b35de12c47a06b292ade2669',applied_projections:252,edit_contract:'ref-prefix-only-t0__target-text-original-moss-v1',reference_max_edge:512,use_kv_cache:true,references:[{pixels_sha256:pixelSha,original_dimensions:[16,16],encoded_dimensions:[16,16],resized_pixels_sha256:pixelSha,latent_sha256:pixelSha}],base:{execution_device:'cuda',resolved:{variant:'sft',steps:30,guidance:4,shift:5,training_shift:1,max_sequence_length:4096},output_kind:'images',latent_shape:[1,128,1,1],conditioning:[{positive:{source:'text',sha256:mode==='report-failure'?sha('wrong'):sha('one')},negative:{source:'text',sha256:sha('')}}],samples:[{seed:173,noise_sha256:'b'.repeat(64)}]}};
+  const asset={id:'asset',projectId:mode==='foreign-project'?'foreign':'project',lineage:{jobId:mode==='foreign-lineage'?'foreign-job':'job'},file:{path:mode==='unsafe-path'?'../foreign.png':'images/output.png'},recipe:{rawAdapterSettings:{mossImageSampleIndex:0,mossImageEditExecutionReport:report}}},job={id:'job',projectId:'project',payload:request,status:'completed',backend:mode==='job-failure'?'0':'1',workerId:'owned',startedAt:'2026-10-26T21:00:00Z',completedAt:'2026-10-26T21:01:00Z',result:{assets:[{id:'asset'}]}};
+  if(mode==='extra-within-bound')job.result.assets.push({id:'extra'});
+  await save(resolve(dest,'terminal-job.json'),job);let mediaReads=0;
+  const api={async request(path){if(path.endsWith('/workflow'))return {retained:true};if(path.endsWith('/assets/asset'))return asset;if(path.endsWith('/assets/extra'))return {...asset,id:'extra'};if(path.includes('/files/')){mediaReads++;return image;}throw Error('unexpected inert request');}};
+  const run=()=>retainOutputs(api,row,request,job,dest,root,'1','owned');
+  if(mode==='success')assert.equal((await run())[0].sha256,sha(image));else await assert.rejects(run);
+  assert.deepEqual(await json(resolve(dest,'terminal-job.json')),job);
+  if(['success','job-failure','report-failure','extra-within-bound'].includes(mode)){assert.equal(mediaReads,mode==='extra-within-bound'?2:1);assert.deepEqual(await readFile(resolve(dest,'output-0.png')),image);assert.deepEqual(await json(resolve(dest,'asset-0.json')),asset);assert.deepEqual(await json(resolve(dest,'provider-report-0.json')),report);if(mode==='extra-within-bound')assert.deepEqual(await readFile(resolve(dest,'output-1.png')),image);}else assert.equal(mediaReads,0);
+ }
+});
+test('canonical retention refuses malformed or noncompleted asset sets before any GET',async()=>{
+ const root=await temporary('retain-bound'),request={projectId:'project'},row={backend:'cuda',expected:'completed',outputCount:1},base={id:'job',projectId:'project',payload:request,status:'completed',backend:'1',workerId:'owned',startedAt:'2026-10-26T21:00:00Z',completedAt:'2026-10-26T21:01:00Z',result:{assets:[{id:'asset'}]}};
+ let gets=0;const api={async request(){gets++;throw Error('must refuse before GET');}};
+ for(const assets of [Array.from({length:5},(_,i)=>({id:`asset${i}`})),[{id:'same'},{id:'same'}],'not an array',[{}],[{id:''}],[{id:17}],[{id:'../foreign'}]])await assert.rejects(()=>retainOutputs(api,row,request,{...base,result:{assets}},root,root,'1','owned'),/at most four unique valid/);
+ for(const status of ['failed','canceled','interrupted','running'])await assert.rejects(()=>retainOutputs(api,row,request,{...base,status},root,root,'1','owned'));
+ await assert.rejects(()=>retainOutputs(api,row,request,{...base,result:{...base.result,outputPublication:{state:'pending'}}},root,root,'1','owned'),/publication still pending/);
+ assert.deepEqual(await retainOutputs(api,{...row,expected:'canceled',outputCount:0},request,{...base,status:'canceled',result:null},root,root,'1','owned'),[]);
+ await assert.rejects(()=>retainOutputs(api,{...row,expected:'canceled',outputCount:0},request,{...base,status:'canceled'},root,root,'1','owned'));
+ assert.equal(gets,0);
 });
 test('whole-device sampled peak requires baseline/active/drain and sampler identity', () => {
   const samples = { version: VERSION, jobId: 'j', samplerSha256: 'e'.repeat(64), device: { uuid: 'actual' }, samples: ['baseline','active','drain'].map((phase,i) => ({ at: new Date(i*1000).toISOString(), phase, usedBytes: [10,30,12][i] })) };

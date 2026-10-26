@@ -72,24 +72,32 @@ test('encoder bypass report proves both full supplied branches, exact masks/nois
 });
 test('encoder bypass mock API captures exactly one full image and preserves artifacts on checker failure',async t=>{
  const root=await temporary('bypass-api');t.after(()=>rm(root,{recursive:true,force:true}));
- for(const mode of ['success','report-failure','job-check-failure','workflow-get-failure']){
+ for(const mode of ['success','report-failure','job-check-failure','workflow-inspect-failure','workflow-missing','workflow-flat-envelope','workflow-wrong-sample']){
   const {payload,report}=bypassFixture(),directory=resolve(root,mode);await mkdir(directory);payload.root=directory;await writeFile(resolve(directory,'B.png'),rgbPng(16,16,Buffer.alloc(16*16*3)));await save(resolve(directory,'baseline-report.json'),report);
-  const assets={},posted=[],config={workerId:'owned-mlx'},png=rgbPng(768,512,Buffer.alloc(768*512*3)),actual=structuredClone(report);if(mode==='report-failure')actual.base.conditioning[0].negative.source='text';
+  const assets={},posted=[],inspected=[],config={workerId:'owned-mlx'},png=rgbPng(768,512,Buffer.alloc(768*512*3)),actual=structuredClone(report);if(mode==='report-failure')actual.base.conditioning[0].negative.source='text';
   const output={id:'output',projectId:'project',lineage:{jobId:'job'},recipe:{rawAdapterSettings:{mossImageSampleIndex:0,mossImageEditExecutionReport:actual}},file:{path:'output.png'}};
   const api={async request(path,options={}){
    if(path==='/api/v1/projects')return {id:'project'};
    if(path.endsWith('/assets')&&options.method==='POST'){const file=options.body.get('file'),name=file.name.replace('.npy','').replace('.png',''),bytes=Buffer.from(await file.arrayBuffer()),asset={id:name,projectId:'project',type:name==='B'?'image':'tensor',...(name==='B'?{}:{tensor:{...inspectNpy(bytes),sha256:sha(bytes)}})};assets[name]=asset;return asset;}
    if(path==='/api/v1/image/jobs'){posted.push(options.body);return{id:'job'};}
    if(path==='/api/v1/jobs/job')return {id:'job',projectId:'project',backend:mode==='job-check-failure'?'wrong-backend':'mlx',workerId:config.workerId,status:'completed',startedAt:'2026-10-26T00:00:00Z',completedAt:'2026-10-26T00:01:00Z',payload:posted[0],result:{assets:[output]}};
-   if(path.endsWith('/workflow')){if(mode==='workflow-get-failure')throw Error('exporter unavailable');return {sceneworksWorkflow:true,mode:'edit_image',advanced:{mossImageEditExecutionReport:sanitizedReport(actual),mossImageSampleIndex:0}};}
+   if(path.endsWith('/workflow'))throw Error('generated image workflow GET forbidden');
+   if(path==='/api/v1/workflows/inspect'){
+    assert.equal(options.method,'POST');const file=options.body.get('file'),bytes=Buffer.from(await file.arrayBuffer());assert.equal(file.name,'output.png');assert.equal(file.type,'image/png');assert.deepEqual(bytes,png);inspected.push(sha(bytes));
+    const workflow={sceneworksWorkflow:true,mode:'edit_image',advanced:{mossImageEditExecutionReport:sanitizedReport(actual),mossImageSampleIndex:mode==='workflow-wrong-sample'?1:0}},response=mode==='workflow-missing'?{status:'no_workflow',workflow:null}:mode==='workflow-flat-envelope'?workflow:{status:'workflow',workflow,resolution:{missing:[]}};
+    Object.assign(options.observation,{status:mode==='workflow-inspect-failure'?500:200,body:JSON.stringify(response)});if(mode==='workflow-inspect-failure')throw Error('inspector unavailable');return response;
+   }
    if(path.endsWith('/files/output.png'))return png;
    if(path.endsWith('/assets/output'))return output;
    if(path.includes('/assets/'))return assets[path.split('/').at(-1)];
    throw Error(`unexpected inert API route ${path}`);
   }};
   const call=()=>captureEncoderBypass(api,config,payload,directory,{observeDevice:async()=>({device:{uuid:ENCODER_BYPASS.hostUuid}})});
-  if(mode==='success')assert.equal((await call()).execution,'CAPTURED_DIAGNOSTIC');else await assert.rejects(call,mode==='report-failure'?/consumed exactly/:mode==='job-check-failure'?/backend label/:/exporter unavailable/);
+  if(mode==='success')assert.equal((await call()).execution,'CAPTURED_DIAGNOSTIC');else await assert.rejects(call,mode==='report-failure'?/consumed exactly/:mode==='job-check-failure'?/backend label/:mode==='workflow-inspect-failure'?/inspector unavailable/:mode==='workflow-wrong-sample'?/sample provenance/:/no embedded workflow/);
   assert.equal(posted.length,1);assert.equal(posted[0].prompt,'');assert.equal(posted[0].seed,null);assert.equal(posted[0].advanced.mossImageAdvanced.output,'images');assert.deepEqual(await readFile(resolve(directory,'output.png')),png);assert.equal((await json(resolve(directory,'provider-report.json'))).base.execution_device,'mlx');assert.ok(existsSync(resolve(directory,mode==='success'?'result.json':'failure.json')));
+  assert.equal(inspected.length,['report-failure','job-check-failure'].includes(mode)?0:1);
+  if(inspected.length){const input=await json(resolve(directory,'workflow-inspection-input.json'));assert.equal(input.sha256,sha(png));assert.equal(input.byteLength,png.length);assert.equal(input.path,'/api/v1/workflows/inspect');assert.equal((await json(resolve(directory,'workflow-inspection-http.json'))).status,mode==='workflow-inspect-failure'?500:200);}
+  if(mode==='success'){const response=await json(resolve(directory,'workflow-inspection.json'));assert.equal(response.status,'workflow');assert.deepEqual(await json(resolve(directory,'workflow.json')),response.workflow);}
  }
 });
 test('encoder bypass lifecycle stops its worker before releasing only its private HF, including failed capture',async t=>{

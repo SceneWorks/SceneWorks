@@ -166,6 +166,16 @@ export function pngRgbIdentity(bytes, requireOpaque = false) { const {width,heig
 export function tensorData(bytes) { inspectNpy(bytes); return bytes.subarray(10 + bytes.readUInt16LE(8)); }
 export function validateAdvancedDigests(base, request, tensors) {
   const advanced = request.advanced.mossImageAdvanced; if (!advanced) return;
+  const conditioned=['positive','negative','negativePrompts'].some(key=>Object.hasOwn(advanced,key));
+  if(!conditioned) {
+    // Editor output preferences do not select the separate B2 tensor fixture.
+    const prompts=request.prompts??[request.prompt];
+    requireThat(Array.isArray(prompts)&&prompts.length>0&&prompts.every(prompt=>typeof prompt==='string')&&base.conditioning?.length===prompts.length,'text native conditioning batch mismatch');
+    for(const [index,prompt]of prompts.entries()) {
+      const actual=base.conditioning[index];
+      requireThat(actual.positive?.source==='text'&&actual.positive.sha256===sha(prompt)&&actual.negative?.source==='text'&&actual.negative.sha256===sha(request.negativePrompt??''),'native text prompt/negative conditioning mismatch');
+    }
+  }else{
   requireThat(base.conditioning?.length === 2, 'advanced native conditioning batch mismatch');
   for (let b = 0; b < 2; b++) for (const branch of ['positive', 'negative']) {
     const receipt = base.conditioning[b][branch];
@@ -174,8 +184,10 @@ export function validateAdvancedDigests(base, request, tensors) {
     const values = tensorData(tensors[branch]), mask = tensorData(tensors[branch === 'positive' ? 'mask' : 'negativeMask']).subarray(b*3, (b+1)*3);
     requireThat(receipt?.source === 'embeddings' && receipt.sequence_length === 3 && receipt.valid_tokens === [...mask].reduce((a,n) => a+n, 0) && receipt.sha256 === sha(Buffer.concat([values.subarray(b*3*4096*4,(b+1)*3*4096*4),mask])), 'native supplied FP32 conditioning/mask digest mismatch');
   }
+  }
   if (advanced.noise) {
-    const noise = tensorData(tensors.noise), stride = 128 * 4 * 4 * 4;
+    const shape=conditioned?[base.samples.length,128,4,4]:[base.samples.length,128,request.height/16,request.width/16];inspectNpy(tensors.noise,shape);
+    const noise = tensorData(tensors.noise), stride = shape.slice(1).reduce((a,n)=>a*n,4);
     requireThat(base.samples.every((s,i) => s.seed === null && s.noise_sha256 === sha(noise.subarray(i*stride,(i+1)*stride))), 'actual explicit-noise digest/sample order mismatch');
   } else requireThat(base.samples.every((s,i) => s.seed === request.seed + i && SHA.test(s.noise_sha256 ?? '')), 'seeded text sample seed/noise order mismatch');
 }

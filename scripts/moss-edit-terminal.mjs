@@ -349,33 +349,47 @@ export async function waitJob(api, row, id, dest, timeoutMs, initial = []) {
     throw new Error('AWAITING: job deadline; it may still be running. Reconcile before any next submission.');
   } finally { await save(resolve(dest, 'progress.json'), progress); }
 }
-async function retainOutputs(api, row, request, job, dest, root) {
-  const outputs = [];
-  const identities = await json(resolve(root, 'input-identities.json')), tensors = {};
-  if (request.advanced.mossImageAdvanced) for (const name of ['positive','negative','mask','negativeMask','noise']) tensors[name] = await readFile(safePath(root, identities[name].file));
-  for (const [index, summary] of (job.result.assets ?? []).entries()) {
+export async function retainOutputs(api, row, request, job, dest, root, workerGpuId, workerId) {
+  const outputs = [],retained=[];
+  requireThat(job.id&&job.projectId===request.projectId,'raw job/project identity mismatch');
+  const check=()=>{checkJob(row,request,job,workerGpuId);if(workerId)requireThat(job.workerId===workerId,'job executed on a different bound worker');};
+  const assets=job.result?.assets??[];
+  if(job.status!=='completed'||job.result?.outputPublication?.state==='pending') {
+    check();requireThat(Array.isArray(assets)&&assets.length===0,'noncompleted job cannot retain output assets');return [];
+  }
+  requireThat(Array.isArray(assets)&&assets.length<=4&&assets.every(asset=>typeof asset?.id==='string'&&/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(asset.id))&&new Set(assets.map(asset=>asset.id)).size===assets.length,'canonical output capture requires at most four unique valid asset IDs');
+  // Retain every bounded canonical output before semantic job/report assertions.
+  // Project ownership and confined paths remain mandatory before reading media.
+  for (const [index, summary] of assets.entries()) {
     const asset = await api.request(assetPath(request.projectId, summary.id));
     requireThat(asset.id === summary.id && asset.projectId === request.projectId && asset.lineage?.jobId === job.id, 'asset ownership/job lineage mismatch');
     await save(resolve(dest, `asset-${index}.json`), asset);
-    requireThat(asset.recipe, 'persisted recipe missing');
-    if (request.mode === 'edit_image') requireThat(asset.recipe.rawAdapterSettings?.mossImageSampleIndex === index, 'output artifact is not bound to the matching native sample index');
     const path = asset.file?.path ?? asset.file?.relativePath ?? summary.mediaPath;
     requireThat(typeof path === 'string' && !path.startsWith('/') && !path.includes('..'), 'missing safe actual project asset path');
     const bytes = await api.request(mediaPath(request.projectId, path), { raw: true, max: 512 * 1024 * 1024 + 4108 });
+    const file = `output-${index}.${row.output === 'latents' ? 'npy' : 'png'}`;
+    await writeFile(resolve(dest, file), bytes, { flag: 'wx', mode: 0o600 });
+    const report=request.mode==='edit_image'?findEditReport(asset,job):asset.recipe?.rawAdapterSettings?.mossImageExecutionReport??job.result.mossImageExecutionReport;
+    await save(resolve(dest, `provider-report-${index}.json`), report??null);
+    retained.push({index,asset,bytes,file,report});
+  }
+  check();
+  const identities=await json(resolve(root,'input-identities.json')),tensors={},advanced=request.advanced.mossImageAdvanced;
+  const roles=[...(advanced?.positive?['positive','mask']:[]),...(advanced?.negative?['negative','negativeMask']:[]),...(advanced?.noise?['noise']:[])];
+  for(const name of roles)tensors[name]=await readFile(safePath(root,identities[name].file));
+  for(const {index,asset,bytes,file,report}of retained) {
+    requireThat(asset.recipe, 'persisted recipe missing');
+    if (request.mode === 'edit_image') requireThat(asset.recipe.rawAdapterSettings?.mossImageSampleIndex === index, 'output artifact is not bound to the matching native sample index');
     let tensor;
     if (row.output === 'latents') {
       requireThat(asset.type === 'tensor' && asset.tensor?.dtype === 'float32', 'latent output replaced by image/placeholder');
       tensor = inspectNpy(bytes, [1, 128, request.height / 16, request.width / 16]);
       requireThat(tensor.sha256 === asset.tensor.sha256 && tensor.byteLength === asset.tensor.byteLength, 'tensor artifact bytes disagree with actual published metadata');
     } else requireThat(bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) && bytes.readUInt32BE(16) === request.width && bytes.readUInt32BE(20) === request.height, 'expected full-size actual PNG output');
-    if (request.mode === 'edit_image') { const report = findEditReport(asset, job); const base = validateEditReport(row, request, report, identities); validateAdvancedDigests(base, request, tensors); await save(resolve(dest, `provider-report-${index}.json`), report); }
+    if (request.mode === 'edit_image') { const base = validateEditReport(row, request, report, identities); validateAdvancedDigests(base, request, tensors); }
     else {
-      const report = asset.recipe.rawAdapterSettings?.mossImageExecutionReport ?? job.result.mossImageExecutionReport;
       requireThat(report?.execution_device === row.backend && report.resolved?.variant === row.variant && canonical(report.resolved.acceleration) === canonical(request.advanced.mossImage.acceleration) && report.samples?.length === 1 && report.samples[0].seed === 173 && report.output_kind === 'images' && report.assets?.length, 'ordinary/DMD regression lacks actual matching native execution report');
-      await save(resolve(dest, `provider-report-${index}.json`), report);
     }
-    const file = `output-${index}.${row.output === 'latents' ? 'npy' : 'png'}`;
-    await writeFile(resolve(dest, file), bytes, { flag: 'wx', mode: 0o600 });
     const workflow = await api.request(`${assetPath(request.projectId, asset.id)}/workflow`); await save(resolve(dest, `workflow-${index}.json`), workflow);
     outputs.push({ assetId: asset.id, file, sha256: sha(bytes), ...(tensor ? { tensor } : {}) });
   }
@@ -455,9 +469,8 @@ async function run(configPath, id, admissionPath, uiCapture) {
     requireThat(jobId, 'actual submission returned no job ID');
     if(!submissionSaved)await save(resolve(dest, 'submission.json'), submitted ?? { id: jobId, transport: row.transport });
     job = await waitJob(api, row, jobId, dest, 60 * 60 * 1000, submitted ? [submitted] : []);
-    await save(resolve(dest, 'terminal-job.json'), job); checkJob(row, request, job,config.backends[row.backend].workerGpuId);
-    requireThat(job.workerId === state.binding.endpoint.workerId,'job executed on a different bound worker');
-    const outputs = await retainOutputs(api, row, request, job, dest, root);
+    await save(resolve(dest, 'terminal-job.json'), job);requireThat(job.id===jobId,'canonical job differs from actual submission');
+    const outputs = await retainOutputs(api, row, request, job, dest, root,config.backends[row.backend].workerGpuId,state.binding.endpoint.workerId);
     if (row.output === 'latents' && job.status === 'completed') { mcp ??= await mcpClient(config, row.backend, transcript); await retainMcpResults(mcp, job, outputs, dest, api); }
     await save(resolve(dest, 'metrics.json'), await api.request(`${jobPath(jobId)}/metrics`));
     await verifyFrozenSources(config, lock);
