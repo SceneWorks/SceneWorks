@@ -336,6 +336,12 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
     runs-on: macos-26
     env:
+      # Match inference's hosted Metal build. Keep line tables for useful backtraces while
+      # avoiding full DWARF for this large workspace; apply consistently to proc-macro builds.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only
       # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
       MACOSX_DEPLOYMENT_TARGET: "15.0"
     # Well above the observed warm 6-14 min, sized for a cold MLX-from-source build on a
