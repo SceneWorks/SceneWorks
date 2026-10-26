@@ -40,6 +40,9 @@ const inferenceRepository = inferenceCandidates.find((candidate) => existsSync(c
 const inferenceSkip = inferenceRepository
   ? false
   : `no inference checkout; set STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT (looked in ${inferenceCandidates.join(", ")})`;
+if (!inferenceRepository && process.env.CI) {
+  throw new Error("CI historical integration requires STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT; missing source cannot skip the golden validator tests");
+}
 let inferenceRoot = inferenceRepository;
 const campaignPlan = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8"));
 const sha = (value) => createHash("sha256").update(value).digest("hex");

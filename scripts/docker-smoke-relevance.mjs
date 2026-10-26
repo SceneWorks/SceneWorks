@@ -2,8 +2,10 @@ import { appendFile } from "node:fs/promises";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 
+// Match the build contexts, including Rust include_str! inputs and the web dev image. A UI edit
+// really does affect web.Dockerfile; a native edit really does affect rust.Dockerfile.
 const DOCKER_RELEVANT =
-  /^(?:docker\/|vendor\/|config\/|docker-compose\.yml$|Cargo\.toml$|Cargo\.lock$|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
+  /^(?:docker\/|vendor\/|config\/|crates\/|apps\/(?:rust-api|rust-worker|web)\/|apps\/desktop\/(?:Cargo\.toml|build\.rs)$|docs\/calibration\/|docs\/generated\/(?:memory-calibration-evidence|video-memory-curves|ltx-mlx-[^/]+)\.json$|docker-compose\.yml$|\.dockerignore$|Cargo\.(?:toml|lock)$|rust(?:-toolchain\.toml|fmt\.toml)$|\.cargo\/|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
 
 export function dockerSmokeDecision(changedFileCount, files) {
   if (!Number.isSafeInteger(changedFileCount) || changedFileCount < 0) {
