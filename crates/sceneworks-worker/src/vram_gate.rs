@@ -2962,10 +2962,12 @@ fn video_weights_needed_gb(weight_bytes: u64) -> Option<f64> {
 /// need, and what the card has.
 ///
 /// The levers are WEIGHTS levers, and only those. It deliberately does NOT say "lower the output
-/// resolution" like the image lane's `vram_reject_tail`: resolution has exactly ZERO effect on weight
-/// bytes, so offering it here would send the user to a knob that cannot move the number they were just
-/// shown. Nor does it say Mochi's "shorten the clip" — same reason (there is no decode term in this
-/// floor). The tier IS the lever that moves weights, plus the card itself.
+/// resolution": resolution has exactly ZERO effect on weight bytes, so offering it here would send
+/// the user to a knob that cannot move the number they were just shown. Nor does it say Mochi's
+/// "shorten the clip" — same reason (there is no decode term in this floor). The tier IS the lever
+/// that moves weights, plus the card itself. The image lane's `vram_reject_tail` used to offer the
+/// knob unconditionally against its equally resolution-blind `vramGbByTier` rows; issue #3197 is
+/// what that cost, and it now takes an explicit `ResolutionLever` for the same reason stated here.
 fn video_weights_too_big_error(
     model_label: &str,
     needed_gb: f64,

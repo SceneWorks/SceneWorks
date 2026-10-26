@@ -11479,40 +11479,100 @@ fn candle_adapter_label(model: &str) -> &'static str {
     }
 }
 
+/// Whether the GB figure a candle reject just quoted can move with the output geometry — the
+/// difference between naming a knob and sending the operator round a loop that cannot pass
+/// (issue #3197).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResolutionLever {
+    /// The number is a per-tier manifest ROW read VERBATIM — `candle.vramGbByTier[tier]` or
+    /// `candle.sequentialPeakGb[tier]`, plus [`crate::vram_gate::HEADROOM_GB`], stated once at
+    /// `candle.vramMeasuredPixels`. [`crate::vram_gate::predicted_peak_gb`] and
+    /// [`crate::vram_gate::predicted_sequential_peak_gb`] take no width and no height, so the
+    /// verdict is identical at every output size: a retry at a smaller one re-derives the same GB
+    /// and rejects again. This is the resolution-blind contract `vram_gate`'s own
+    /// `video_peak_too_big_error` already documents (and already declines to print the advice
+    /// against); the image lane kept offering the knob anyway, which is how #3197's reporter spent
+    /// a 1024x1024 and a 768x768 attempt on byte-identical errors.
+    Blind,
+    /// The number came from a geometry-aware selector, so a smaller output can genuinely change the
+    /// verdict — including by bringing an out-of-envelope request back inside the measured hull the
+    /// shared memory-strategy ladder can price at all. Keep offering it.
+    Priced,
+}
+
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+impl ResolutionLever {
+    /// The resolution clause for a reject tail: the knob when it is real, otherwise the sentence
+    /// that stops the retry. Saying it outright beats dropping the clause silently — the estimate
+    /// reads as activation-shaped to anyone looking at it, so silence invites the very retry this
+    /// explains away. The rule is "name a knob only when the gate priced it", never "don't mention
+    /// resolution": the lane that CAN price a smaller geometry (Krea Turbo's calibrated ladder)
+    /// resolves a concrete `krea_turbo_smaller_fit_with_runtime` target and offers that size.
+    fn clause(self) -> &'static str {
+        match self {
+            Self::Blind => {
+                " Lowering the output resolution will not help: this gate prices each tier from a \
+                 fixed per-tier peak that does not scale with the output size."
+            }
+            Self::Priced => "",
+        }
+    }
+
+    /// The lever list that closes a reject tail, in the tail's two historical shapes: `joined`
+    /// follows a comma (a smaller tier was just offered), `leading` opens the clause on its own.
+    fn levers(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Blind => ("or run on a GPU with more VRAM.", "run on a GPU with more VRAM."),
+            Self::Priced => (
+                "lower the output resolution, or run on a GPU with more VRAM.",
+                "lower the output resolution or run on a GPU with more VRAM.",
+            ),
+        }
+    }
+}
+
 /// The actionable tail for a candle VRAM-fit reject (sc-12090). Suggests only the tiers that are
 /// actually INSTALLED and smaller than the rejected one (`installed_smaller`, descending fidelity),
 /// else states that none is installed. Never names the rejected tier itself, and never points at the
 /// quant picker — which is hidden by design when ≤1 tier is installed, exactly the case that produced
-/// the misleading "Pick a lower tier (Q4/Q8)" text on a single-tier install.
+/// the misleading "Pick a lower tier (Q4/Q8)" text on a single-tier install. `lever` decides whether
+/// the resolution knob is offered or explained away ([`ResolutionLever`], issue #3197).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn vram_reject_tail(installed_smaller: &[&str]) -> String {
+fn vram_reject_tail(installed_smaller: &[&str], lever: ResolutionLever) -> String {
+    let (joined, leading) = lever.levers();
     if installed_smaller.is_empty() {
-        return "No smaller tier is installed — lower the output resolution or run on a GPU with more \
-                VRAM."
-            .to_owned();
+        return format!(
+            "No smaller tier is installed — {leading}{note}",
+            note = lever.clause(),
+        );
     }
     format!(
-        "Select a smaller installed tier ({}), lower the output resolution, or run on a GPU with more \
-         VRAM.",
-        installed_smaller
+        "Select a smaller installed tier ({tiers}), {joined}{note}",
+        tiers = installed_smaller
             .iter()
             .map(|tier| tier.to_uppercase())
             .collect::<Vec<_>>()
             .join(" / "),
+        note = lever.clause(),
     )
 }
 
 /// Build the candle reject advice for `rejected_tier` from the tiers the loader can actually resolve.
 /// Kept pure so bespoke candle lanes can share the same truthfulness contract as the main image lane.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn vram_reject_tail_for_tier(installed: Vec<&'static str>, rejected_tier: &str) -> String {
+fn vram_reject_tail_for_tier(
+    installed: Vec<&'static str>,
+    rejected_tier: &str,
+    lever: ResolutionLever,
+) -> String {
     let smaller: Vec<&'static str> = installed
         .into_iter()
         .filter(|candidate| {
             tier_quality_rank(candidate) < tier_quality_rank(rejected_tier)
         })
         .collect();
-    vram_reject_tail(&smaller)
+    vram_reject_tail(&smaller, lever)
 }
 
 /// Candle per-tier capability fit for the downtier chooser (sc-10733): fold the full candle fit decision
@@ -12179,6 +12239,40 @@ fn krea_turbo_capability_reject_message(
          measured constrained-memory rung, but GPU {gpu_id} has {available_gb:.2} GiB available. \
          {options}.",
         options = options.join(", or "),
+    )
+}
+
+/// Truthful capability-clamp rejection for the generic candle lane (sc-10733), reached once every
+/// installed tier in `[floor, default]` has been scored by [`candle_tier_fit`] and none fits.
+///
+/// `smallest_tier` is the least-demanding tier that was evaluated, so a smaller tier is not an
+/// escape — and neither is a smaller output, because `candle_tier_fit` prices a manifest row and
+/// never reads the request geometry ([`ResolutionLever::Blind`]). The card is the only lever left,
+/// and that is all this message offers. Kept pure so the contract is testable without a GPU, exactly
+/// like [`krea_turbo_capability_reject_message`] beside it.
+///
+/// It also says WHAT the number covers, in `video_peak_too_big_error`'s established spelling. #3197's
+/// reporter read a ~14 GB demand against a tier Model Manager lists at 2.5 GiB and concluded the gate
+/// was broken; those are a whole-render peak and an on-disk size, and the SDXL candle lane's own
+/// `config/memory-anchors.json` rows (q4 at 10.87 GiB for 768x768, q8 at 13.78 GiB for 1024x1024,
+/// decode-dominated) say the big one is real. A reject that quotes a number nobody can reconcile with
+/// the model card produces the bug report instead of the answer.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_capability_reject_message(
+    model: &str,
+    smallest_tier: &str,
+    needed_gb: f64,
+    available_gb: f64,
+    gpu_id: &str,
+) -> String {
+    format!(
+        "{model} needs ~{needed} GB of VRAM even at the smallest installed tier it can run \
+         ({smallest_tier}) — the peak of the whole render, the resident weights plus the denoise and \
+         VAE-decode transient, not the tier's on-disk size — but GPU {gpu_id} has ~{available} GB \
+         available. Run on a card with more VRAM.{note}",
+        needed = needed_gb.round() as i64,
+        available = available_gb.round() as i64,
+        note = ResolutionLever::Blind.clause(),
     )
 }
 
@@ -14013,16 +14107,15 @@ async fn generate_candle_registry_stream_using(
                         ),
                     ));
                 }
-                let resolution_option = "Lower the output resolution, or ";
-                return Err(WorkerError::InvalidPayload(format!(
-                    "{model} needs ~{needed} GB of VRAM even at the smallest installed tier it can run \
-                     ({smallest}) but GPU {gpu} has ~{available} GB available. {resolution_option}Run \
-                     on a card with more VRAM.",
-                    model = request.model,
-                    needed = needed_gb.round() as i64,
-                    available = available_gb.round() as i64,
-                    gpu = settings.gpu_id,
-                )));
+                return Err(WorkerError::InvalidPayload(
+                    candle_capability_reject_message(
+                        &request.model,
+                        smallest,
+                        needed_gb,
+                        available_gb,
+                        &settings.gpu_id,
+                    ),
+                ));
             }
         }
     }
@@ -14732,7 +14825,10 @@ async fn generate_candle_registry_stream_using(
                             seq = seq_gb.round() as i64,
                             available = available_gb.round() as i64,
                             gpu = settings.gpu_id,
-                            tail = vram_reject_tail(&installed_smaller),
+                            tail = vram_reject_tail(
+                                &installed_smaller,
+                                ResolutionLever::Blind,
+                            ),
                         )));
                     }
                 }
@@ -14786,7 +14882,7 @@ async fn generate_candle_registry_stream_using(
                     needed = needed_gb.round() as i64,
                     available = available_gb.round() as i64,
                     gpu = settings.gpu_id,
-                    tail = vram_reject_tail(&installed_smaller),
+                    tail = vram_reject_tail(&installed_smaller, ResolutionLever::Blind),
                 )));
             }
             _ => false,
@@ -16478,15 +16574,91 @@ mod candle_label_tests {
     #[test]
     fn vram_reject_tail_names_only_installed_smaller_tiers() {
         // Two smaller tiers installed → both offered, uppercased, highest-fidelity first.
-        let tail = vram_reject_tail(&["q8", "q4"]);
+        let tail = vram_reject_tail(&["q8", "q4"], ResolutionLever::Priced);
         assert!(tail.contains("Q8 / Q4"), "lists installed smaller tiers: {tail}");
         assert!(!tail.contains("picker"), "never points at the picker: {tail}");
         // One smaller tier installed.
-        assert!(vram_reject_tail(&["q4"]).contains("(Q4)"));
+        assert!(vram_reject_tail(&["q4"], ResolutionLever::Priced).contains("(Q4)"));
         // None smaller installed (the single-tier / q4-only case) → says so, no tier list, no picker.
-        let none = vram_reject_tail(&[]);
+        let none = vram_reject_tail(&[], ResolutionLever::Priced);
         assert!(none.contains("No smaller tier is installed"), "{none}");
         assert!(!none.contains("Select a smaller"), "{none}");
+    }
+
+    /// Issue #3197: the tail is printed under numbers `predicted_peak_gb` /
+    /// `predicted_sequential_peak_gb` derive from a manifest row alone, so it must not send the
+    /// operator to the resolution knob — and must say that outright, since the estimate reads as
+    /// though it were activation-shaped.
+    #[test]
+    fn vram_reject_tail_never_offers_the_resolution_knob() {
+        for tail in [
+            vram_reject_tail(&[], ResolutionLever::Blind),
+            vram_reject_tail(&["q4"], ResolutionLever::Blind),
+            vram_reject_tail(&["q8", "q4"], ResolutionLever::Blind),
+        ] {
+            assert!(
+                !tail.contains("lower the output resolution"),
+                "resolution advice is false against a per-tier row: {tail}"
+            );
+            assert!(
+                tail.contains("Lowering the output resolution will not help"),
+                "the retry this costs is worth one sentence: {tail}"
+            );
+            assert!(
+                tail.contains("run on a GPU with more VRAM"),
+                "the card lever survives: {tail}"
+            );
+        }
+        // The lane that DOES price geometry keeps the knob, verbatim as it has always read — the
+        // rule is "name a knob only when the gate priced it", not "never mention resolution".
+        for tail in [
+            vram_reject_tail(&[], ResolutionLever::Priced),
+            vram_reject_tail(&["q8", "q4"], ResolutionLever::Priced),
+        ] {
+            assert!(
+                tail.contains("lower the output resolution"),
+                "a geometry-aware reject still offers the real lever: {tail}"
+            );
+            assert!(
+                !tail.contains("will not help"),
+                "and never explains away a knob it just offered: {tail}"
+            );
+        }
+    }
+
+    /// sc-10733 / issue #3197: the capability clamp rejects on `candle_tier_fit`, which reads
+    /// `candle.vramGbByTier` and never the request geometry. The message may therefore name the
+    /// card, must not name the resolution, and must not offer a smaller tier — `smallest_tier` is
+    /// already the least-demanding tier the clamp scored.
+    #[test]
+    fn capability_reject_offers_only_truthful_escapes() {
+        // SDXL Q4 on the reporter's 8 GB card: the q4 row (12) + HEADROOM_GB (2) against ~6 GB free.
+        let message = candle_capability_reject_message("sdxl", "q4", 14.0, 6.0, "0");
+        assert!(
+            message.starts_with(
+                "sdxl needs ~14 GB of VRAM even at the smallest installed tier it can run (q4)"
+            ),
+            "{message}"
+        );
+        assert!(message.contains("GPU 0 has ~6 GB available."), "{message}");
+        // #3197 read that ~14 GB against Model Manager's 2.5 GiB q4 row: say which number is which.
+        assert!(message.contains("not the tier's on-disk size"), "{message}");
+        assert!(
+            message.contains("Run on a card with more VRAM."),
+            "the one lever that can change the verdict: {message}"
+        );
+        assert!(
+            !message.contains("Lower the output resolution"),
+            "the clamp prices a geometry-blind row, so this retry can never pass: {message}"
+        );
+        assert!(
+            message.contains("does not scale with the output size"),
+            "name the reason, or the operator retries smaller anyway: {message}"
+        );
+        assert!(
+            !message.contains("Select a smaller"),
+            "q4 IS the smallest tier the clamp scored: {message}"
+        );
     }
 }
 
