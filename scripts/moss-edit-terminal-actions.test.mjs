@@ -7,7 +7,6 @@ import { mkdtemp, mkdir, writeFile, readFile, readdir, symlink, link, unlink, rm
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { execFileSync } from 'node:child_process';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
@@ -91,10 +90,29 @@ test('official pin output permits only regenerated closure facts and exact audit
   const originalAudit=after['config/inference-third-party-source.json'];after['config/inference-third-party-source.json']=JSON.stringify({...current,auditDigest:'0'.repeat(64)});assert.throws(validate);after['config/inference-third-party-source.json']=originalAudit;
   assert.throws(()=>validateOfficialPinTransition({oldSourceSha:'f'.repeat(40),oldInferenceSha:old,inferenceSha:next,readOld:name=>before[name],readNew:name=>after[name],treeObjects:new Map([[path,oldBlob]])}),/Git object/);
 });
-test('the eleven official pin outputs retain exact reviewed Git objects',()=>{
-  const objectAt=path=>execFileSync('git',['hash-object',path],{cwd:sourceRoot,encoding:'utf8'}).trim();
-  validateOfficialPinObjects(objectAt);
-  assert.throws(()=>validateOfficialPinObjects(path=>path==='config/inference-provider-closures.json'?'0'.repeat(40):objectAt(path)),/official pin output Git object changed/);
+test('the closed H36 CUDA rebase accepts only its eleven historical reviewed pin objects',()=>{
+  // Captured from SceneWorks ee01085d9517eb565d7dc1aca92aabd174fcc3be.
+  // Current checkout pin outputs belong to a later native candidate and are not this oracle.
+  const historical={
+    'Cargo.lock':'e6feb2d0a6e419a79ff2e589e9144f552780d65a',
+    'Cargo.toml':'6c0d98fc2105f997a3c3ae011a3950af5865d083',
+    'config/anchor-loader-closures.json':'2fd9fb27f8e69f1fbd61d741fcba9bba24fe7e47',
+    'config/inference-provenance-candidates.tsv':'76fbba15a6a29fce37a386a1394daea08816fb21',
+    'config/inference-provider-closures.json':'6665dbb1160d81ff91c5a9f05fb2a244f1c73862',
+    'config/inference-third-party-source.json':'1ca93910c8af60a9b75f74157a87df0fd294a4b5',
+    'crates/sceneworks-core/Cargo.toml':'69e4bf702e5e2cf4139f222d9f5c0e3e464f3854',
+    'crates/sceneworks-memory-adapter/Cargo.toml':'7c2e7712c5c186cd8544cc6be17a251e4bc4b02a',
+    'crates/sceneworks-memory-adapter/src/lib.rs':'614b4133c67ef6aa5b0c7aa700f3fdf015603069',
+    'crates/sceneworks-worker/Cargo.toml':'a54637106a75b4a27d307393107e70bf25031b38',
+    'crates/sceneworks-worker/src/catalog_semantic_jobs.rs':'1310487d4e8c209ad78120e3aa77e772976c0b67',
+  };
+  assert.equal(Object.keys(historical).length,11);
+  validateOfficialPinObjects(path=>historical[path]);
+  assert.throws(()=>validateOfficialPinObjects(path=>path==='config/inference-provider-closures.json'?'0'.repeat(40):historical[path]),/official pin output Git object changed: config\/inference-provider-closures\.json/);
+  // Actual new 7275f7c6 pin output is a separate candidate, never a replacement H36 object.
+  const newPinCargoObject='80bad018cdc4c1937d22b7de404a885653a2f7cb';
+  assert.notEqual(newPinCargoObject,historical['Cargo.toml']);
+  assert.throws(()=>validateOfficialPinObjects(path=>path==='Cargo.toml'?newPinCargoObject:historical[path]),/official pin output Git object changed: Cargo\.toml/);
 });
 const identity={candidateId:'inert-candidate',sourceSha:'a'.repeat(40),inferenceSha:'b'.repeat(40),workerId:'actual-fixture-worker',gpuId:'1',binarySha256:'c'.repeat(64),producerSha256:'d'.repeat(64),coverage};
 const base=Date.parse('2026-10-24T12:00:00Z'),at=offset=>new Date(base+offset).toISOString();
