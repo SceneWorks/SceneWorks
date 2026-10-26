@@ -1970,8 +1970,13 @@ export function VideoStudio() {
         // ambient one when a last frame is picked, but the ambient selection can also arrive
         // afterwards and the mode can change afterwards, so the request is decided HERE, where
         // the payload is built. A first frame the user chose here is theirs and is sent.
+        //
+        // The withdrawal needs a LAST frame to be about: without one this is an ordinary
+        // image-to-video request, and withholding the first frame would leave it with no source
+        // at all — which the API refuses ("Image to Video requires a source image"), while the
+        // studio's own input check still saw the raw id and left Render enabled.
         sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode)
-          ? (importedLastOnly && mode === "image_to_video" && sourceAssetOrigin === "ambient"
+          ? (importedLastOnly && mode === "image_to_video" && sourceAssetOrigin === "ambient" && lastFrameAssetId
             ? null
             : (sourceAssetId || null))
           : null,

@@ -406,6 +406,23 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
   // A snapshot written before the origin was recorded is not proof that the user chose the frame:
   // the studio's ambient seed is the common producer of a saved sourceAssetId. It is therefore read
   // as ambient, and an ambient frame is withheld from an imported last-only request (sc-26687).
+  // The withdrawal is about a LAST-ONLY request, so it needs a last frame to be about. Without
+  // one this is an ordinary image-to-video request, and withholding the first frame would leave it
+  // with no source at all — which the API refuses, while the studio's own input check still saw
+  // the raw id and left Render enabled (sc-26687).
+  it("keeps the ambient first frame when no LAST frame is chosen", async () => {
+    const ambient = asset("other", "image", "Other image");
+    const context = baseContext({ videoModels: [ambientImported], assets: [ambient], selectedAsset: ambient });
+    await render(context);
+    await act(async () => setSelect(selectLabelled("Model"), ambientImported.id));
+    await click(modeTab("Image → Video"));
+
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: "other", lastFrameAssetId: null });
+  });
+
   it("does not send a first frame from a snapshot that records no origin", async () => {
     window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
       mode: "image_to_video",
