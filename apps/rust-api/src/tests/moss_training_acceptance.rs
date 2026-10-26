@@ -809,6 +809,30 @@ fn validate_prepared_request(
     Ok(())
 }
 
+// Submission writes this informational plan snapshot before any worker is
+// claimed. It is not a learned artifact; every other entry remains forbidden.
+pub(super) fn validate_unpublished_training_outputs(
+    outputs: &[PathBuf],
+    submitted_plan: &Value,
+) -> Result<()> {
+    for output in outputs {
+        require(
+            output.file_name() == Some(std::ffi::OsStr::new("training-config.json")),
+            "header-only/low-cap operation published output files",
+        )?;
+        let metadata = std::fs::symlink_metadata(output).map_err(|e| e.to_string())?;
+        require(
+            metadata.file_type().is_file(),
+            "submission config snapshot must be a regular file, never a directory or symlink",
+        )?;
+        require(
+            json_file(output)? == *submitted_plan,
+            "submission config snapshot differs from the actual submitted plan",
+        )?;
+    }
+    require(outputs.len() <= 1, "duplicate submission config snapshots")
+}
+
 enum Execution {
     Preflight,
     Train { cancel_at20: bool },
@@ -1032,10 +1056,12 @@ async fn execute(
         };
         case.record["raw"]["subruns"][label]["publishedOutputInventory"] = json!(outputs);
         case.persist()?;
-        require(
-            outputs.is_empty(),
-            "header-only/low-cap operation published output files",
-        )?;
+        validate_unpublished_training_outputs(&outputs, &submitted["payload"]["plan"])?;
+        if let Some(snapshot) = outputs.first() {
+            case.record["raw"]["subruns"][label]["submissionConfigSnapshot"] =
+                case.retain_file(&format!("runs/{label}/training-config.json"), snapshot)?;
+            case.persist()?;
+        }
         return Ok((None, observed));
     }
     let job = case.get_job(app, &job_id).await?;

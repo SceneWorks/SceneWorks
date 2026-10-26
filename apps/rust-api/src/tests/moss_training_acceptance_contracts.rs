@@ -1,6 +1,7 @@
 //! Pure metadata contracts; separate from dispatch-only test discovery.
 use super::moss_training_acceptance::{
     generation_advanced, preflight_verdict, selected_weight_files,
+    validate_unpublished_training_outputs,
 };
 
 #[test]
@@ -146,4 +147,51 @@ fn cross_load_ignores_unused_dmd_and_training_demand_but_capture_still_refuses()
             .unwrap_err()
             .contains("demand exceeds")
     );
+}
+
+#[tokio::test]
+async fn refused_training_allows_only_the_actual_submission_config_snapshot() {
+    let root = tempfile::tempdir().unwrap();
+    let output = root.path().join("output");
+    let plan = serde_json::json!({"schemaVersion":1,"jobId":"metadata-contract-only","config":{"steps":60},"output":{"fileName":"never-produced.safetensors"}});
+    assert!(validate_unpublished_training_outputs(&[], &plan).is_ok());
+    crate::training::write_training_config_snapshot(&output, &plan).await;
+    let snapshot = output.join("training-config.json");
+    assert!(validate_unpublished_training_outputs(std::slice::from_ref(&snapshot), &plan).is_ok());
+    assert!(
+        validate_unpublished_training_outputs(&[snapshot.clone(), snapshot.clone()], &plan)
+            .is_err()
+    );
+    std::fs::write(&snapshot, b"{}").unwrap();
+    assert!(validate_unpublished_training_outputs(std::slice::from_ref(&snapshot), &plan).is_err());
+    std::fs::write(&snapshot, b"not json").unwrap();
+    assert!(validate_unpublished_training_outputs(std::slice::from_ref(&snapshot), &plan).is_err());
+    crate::training::write_training_config_snapshot(&output, &plan).await;
+    for name in [
+        "adapter.safetensors",
+        "checkpoint",
+        "preview.png",
+        "unknown.json",
+    ] {
+        let extra = output.join(name);
+        std::fs::write(&extra, b"forbidden output").unwrap();
+        assert!(
+            validate_unpublished_training_outputs(&[snapshot.clone(), extra.clone()], &plan)
+                .is_err()
+        );
+        std::fs::remove_file(extra).unwrap();
+    }
+    std::fs::remove_file(&snapshot).unwrap();
+    std::fs::create_dir(&snapshot).unwrap();
+    assert!(validate_unpublished_training_outputs(std::slice::from_ref(&snapshot), &plan).is_err());
+    std::fs::remove_dir(&snapshot).unwrap();
+    #[cfg(unix)]
+    {
+        let target = root.path().join("authentic-plan.json");
+        std::fs::write(&target, serde_json::to_vec(&plan).unwrap()).unwrap();
+        std::os::unix::fs::symlink(&target, &snapshot).unwrap();
+        assert!(
+            validate_unpublished_training_outputs(std::slice::from_ref(&snapshot), &plan).is_err()
+        );
+    }
 }
