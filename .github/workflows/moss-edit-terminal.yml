@@ -32,7 +32,7 @@ on:
         description: Execute once, or verify actual retained evidence after review
         required: true
         type: choice
-        options: [upload, execute, continue, cuda-rebase, verify, verify-rebase]
+        options: [upload, execute, encoder-bypass, continue, cuda-rebase, verify, verify-rebase]
       tooling_sha:
         description: Separate reviewed continuation tooling commit; required for continue and repaired verify
         required: false
@@ -413,8 +413,11 @@ jobs:
           retention-days: 90
   execute-mlx:
     needs: build-native
-    if: inputs.phase == 'execute' && inputs.native_run_id == ''
+    if: ${{ always() && ((inputs.phase == 'execute' && inputs.native_run_id == '' && needs.build-native.result == 'success') || inputs.phase == 'encoder-bypass') }}
     runs-on: [self-hosted, macOS, ARM64, rw-starvector]
+    concurrency:
+      group: memory-catalog-campaign-mlx-nax
+      cancel-in-progress: false
     timeout-minutes: 720
     env:
       MOSS_BACKEND: mlx
@@ -425,6 +428,13 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
           path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.phase == 'encoder-bypass'
+        with:
+          ref: ${{ inputs.tooling_sha }}
+          path: tooling
           fetch-depth: 0
           persist-credentials: false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -450,16 +460,36 @@ jobs:
       - name: Validate immutable bundle and configure owned paths
         run: node source/scripts/moss-edit-terminal-actions.mjs configure-env
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.phase == 'execute'
         with:
           pattern: moss-native-*-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.MOSS_BUILDS }}
           merge-multiple: false
+      - name: Download only the original R19 MLX binary for the diagnostic
+        if: inputs.phase == 'encoder-bypass'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: '12669886106'
+          run-id: '40349954885'
+          github-token: ${{ github.token }}
+          path: ${{ env.MOSS_BUILDS }}/moss-native-mlx-40349954885-1
       - name: Place source-bound backend artifacts at their declared local paths
+        if: inputs.phase == 'execute'
         run: node source/scripts/moss-edit-terminal-actions.mjs arrange-builds "${{ env.MOSS_BUILDS }}"
+      - name: Place only the retained MLX native artifact
+        if: inputs.phase == 'encoder-bypass'
+        run: node tooling/scripts/moss-edit-terminal-actions.mjs arrange-builds "${{ env.MOSS_BUILDS }}" mlx
       - name: Provision exact headless CPU browser into the owned job directory
+        if: inputs.phase == 'execute'
         run: node source/scripts/moss-edit-terminal-actions.mjs provision-browser "${{ env.MOSS_ROOT }}/runtime.json"
       - name: Execute allocated native rows and all refusal probes
+        if: inputs.phase == 'execute'
         run: node source/scripts/moss-edit-terminal-actions.mjs execute "${{ env.MOSS_ROOT }}/runtime.json"
+      - name: Capture one diagnostic image with authenticated HF conditioning
+        if: inputs.phase == 'encoder-bypass'
+        env:
+          MOSS_ENCODER_BYPASS_TOKEN: ${{ github.token }}
+        run: node tooling/scripts/moss-edit-terminal-actions.mjs execute-encoder-bypass "${{ env.MOSS_ROOT }}/runtime.json" "${{ github.workspace }}/tooling" "${{ inputs.tooling_sha }}"
       - name: Retain complete and partial evidence; never upload HF caches, targets or credentials
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0

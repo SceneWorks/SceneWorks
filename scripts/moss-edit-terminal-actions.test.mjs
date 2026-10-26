@@ -16,10 +16,94 @@ import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
 import { validateCudaRebaseRecord, validateOfficialPinTransition, validateOfficialPinObjects, sourceAuditDigest } from './lib/moss-edit-cuda-rebase.mjs';
 import { populationSha256, cratePopulationSha256 } from './scan-inference-provenance.mjs';
+import {ENCODER_BYPASS} from './lib/moss-edit-terminal-actions.mjs';
+import {encoderBypassRow,validateEncoderBypassTensor,validateEncoderBypassPayload,authenticateEncoderBypassArtifacts,validateEncoderBypassReport,captureEncoderBypass,executeEncoderBypass,runEncoderBypassStack} from './moss-edit-terminal-actions.mjs';
+import {makeNpy,tensorData,inspectNpy,sanitizedReport} from './lib/moss-edit-terminal.mjs';
 
 // Pure fixtures and owned CPU subprocesses only. Any accidental network is a test failure.
 globalThis.fetch=async()=>{throw Error('LIVE_NETWORK_FORBIDDEN');};
 const temporary=label=>mkdtemp(resolve(tmpdir(),`moss-actions-${label}-`));
+test('encoder bypass is a closed fixed R19 diagnostic on the existing MLX job',async()=>{
+ const e=ENCODER_BYPASS,tooling='c'.repeat(40),value={phase:e.phase,candidate_id:e.candidateId,bundle_manifest_sha256:e.bundleSha256,bundle_run_id:e.bundleRunId,bundle_artifact_id:e.bundleArtifactId,product_sha:e.sourceSha,tooling_sha:tooling,native_run_id:e.nativeRunId,native_run_attempt:e.nativeAttempt};
+ const validate=v=>validateDispatchEnvelope(JSON.stringify(v),tooling,e.inferenceSha,tooling);assert.equal(validate(value).phase,'encoder-bypass');
+ for(const key of Object.keys(value)){const mutant={...value,[key]:key==='phase'?'unknown':'wrong'};assert.throws(()=>validate(mutant),key);}
+ for(const patch of [{native_run_attempt:'2'},{mlx_artifact_id:'123'},{upload_path:e.staged},{execution_run_id:'123'},{tooling_sha:e.sourceSha},{arbitrary:'command'}])assert.throws(()=>validate({...value,...patch}));
+ assert.throws(()=>validateDispatchEnvelope(JSON.stringify(value),tooling,'f'.repeat(40),tooling));
+ const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),mlx=workflow.match(/^  execute-mlx:\n([\s\S]*?)(?=^  execute-cuda:)/m)[1];
+ assert.match(mlx,/always\(\).*needs\.build-native\.result == 'success'.*inputs\.phase == 'encoder-bypass'/);assert.match(mlx,/group: memory-catalog-campaign-mlx-nax/);
+ assert.match(mlx,/artifact-ids: '12669886106'/);assert.match(mlx,/run-id: '40349954885'/);assert.match(mlx,/execute-encoder-bypass/);assert.match(mlx,/if: inputs\.phase == 'execute'\n\s+run: node source\/scripts\/moss-edit-terminal-actions\.mjs execute/);
+ assert.doesNotMatch(mlx,/cargo |npm run build|build-native:/);
+});
+test('encoder bypass validates actual F32 NPY and U8 mask bytes without rounding or transposition',()=>{
+ for(const [shape,dtype]of [[[1,71,4096],'float32'],[[1,10,4096],'float32'],[[1,71],'uint8'],[[1,10],'uint8'],[[1,128,32,48],'float32']]){
+  const bytes=makeNpy(shape,dtype,i=>dtype==='uint8'?1:(i%71)/128),spec={dtype,shape,byteLength:bytes.length,sha256:sha(bytes),rawSha256:sha(tensorData(bytes))};
+  assert.ok(validateEncoderBypassTensor(bytes,spec).equals(tensorData(bytes)));
+  for(const patch of [{shape:[1,shape[1]+1,...shape.slice(2)]},{dtype:dtype==='uint8'?'float32':'uint8'},{rawSha256:'a'.repeat(64)},{sha256:'b'.repeat(64)}])assert.throws(()=>validateEncoderBypassTensor(bytes,{...spec,...patch}));
+  const changed=Buffer.from(bytes);changed[changed.length-1]^=1;assert.throws(()=>validateEncoderBypassTensor(changed,{...spec,sha256:sha(changed)}));
+ }
+});
+test('encoder bypass sealed manifest, file set and fixed source fail before tensor/model use',async t=>{
+ const root=await temporary('bypass-seal');t.after(()=>rm(root,{recursive:true,force:true}));
+ await save(resolve(root,'control.json'),{sourceSha:'untrusted'});await save(resolve(root,'upstream-trace.json'),{});
+ for(let i=0;i<15;i++)await writeFile(resolve(root,`inert-${String(i).padStart(2,'0')}`),'inert CPU fixture');
+ const manifest={kind:'sc-26752-mlx-encoder-bypass-inputs/v1',files:await filesUnder(root)};await save(resolve(root,'manifest.json'),manifest);const expected=(await fileIdentity(resolve(root,'manifest.json'))).sha256;
+ await assert.rejects(()=>validateEncoderBypassPayload(root,expected),/fixed source/);await assert.rejects(()=>validateEncoderBypassPayload(root,'0'.repeat(64)),/manifest changed/);
+ await writeFile(resolve(root,'inert-00'),'changed');await assert.rejects(()=>validateEncoderBypassPayload(root,expected),/input files changed/);
+ await unlink(resolve(root,'inert-00'));await symlink(resolve(root,'inert-01'),resolve(root,'inert-00'));await assert.rejects(()=>validateEncoderBypassPayload(root,expected),/symlinks/);
+});
+test('encoder bypass authenticates both real producer tuples and refuses stale or substituted artifact metadata',async()=>{
+ const control={sourceSha:ENCODER_BYPASS.sourceSha,native:{runId:ENCODER_BYPASS.nativeRunId,attempt:'1',artifactId:'12669886106',artifactName:'moss-native-mlx-40349954885-1',artifactSha256:'a'.repeat(64)},upstream:{runId:'40393828906',attempt:'1',artifactId:'12686156941',artifactName:'moss-upstream-reference-result-40393828906-1',artifactSha256:'b'.repeat(64),toolingSha:'d6808ab06a2422fe50274aac7332c255eeeb37e9'}};
+ const records={};for(const p of [control.native,control.upstream]){const head=p===control.native?control.sourceSha:p.toolingSha;records[`artifacts/${p.artifactId}`]={id:Number(p.artifactId),name:p.artifactName,digest:`sha256:${p.artifactSha256}`,expired:false,workflow_run:{id:Number(p.runId),head_sha:head}};records[`runs/${p.runId}`]={id:Number(p.runId),run_attempt:1,head_sha:head,status:'completed',conclusion:p===control.native?'failure':'success'};}
+ const api=(mutation)=>async url=>{const key=new URL(url).pathname.split('/actions/')[1],value=structuredClone(records[key]);mutation?.(key,value);return {ok:true,text:async()=>JSON.stringify(value)};};
+ assert.equal(Object.keys(await authenticateEncoderBypassArtifacts(control,'inert-token',api())).length,2);
+ for(const change of [(k,v)=>{if(k.includes('artifacts/'))v.expired=true;},(k,v)=>{if(k.includes('artifacts/'))v.digest='sha256:'+'c'.repeat(64);},(k,v)=>{if(k.includes('artifacts/'))v.workflow_run.head_sha='f'.repeat(40);},(k,v)=>{if(k.includes('runs/'))v.run_attempt=2;},(k,v)=>{if(k.includes('runs/'))v.status='in_progress';}])await assert.rejects(()=>authenticateEncoderBypassArtifacts(control,'inert-token',api(change)),/producer changed/);
+});
+function bypassFixture(){
+ const row=encoderBypassRow(),tensors={positive:makeNpy([1,71,4096],'float32',i=>(i%13)/16),negative:makeNpy([1,10,4096],'float32',i=>-(i%7)/16),mask:makeNpy([1,71],'uint8',()=>1),negativeMask:makeNpy([1,10],'uint8',()=>1),noise:makeNpy([1,128,32,48],'float32',()=>0)};
+ const reference={id:'B',file:'B.png',width:16,height:16,pixelsSha256:'1'.repeat(64)},control={row,reference,hostUuid:ENCODER_BYPASS.hostUuid,tensors:Object.fromEntries(Object.entries(tensors).map(([name,bytes])=>[name,{file:name+'.npy',dtype:inspectNpy(bytes).dtype,shape:inspectNpy(bytes).shape,sha256:sha(bytes),byteLength:bytes.length,rawSha256:sha(tensorData(bytes))}])),native:{},upstream:{},baseline:{}};
+ const report={adapter_repository:'chinoll/Moss-Image-Edit',adapter_revision:'3be9c40037e1b89b17aa85ff6f8ee805872aa558',adapter_sha256:'17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf',config_sha256:'b6b471cf7bc77b0874af03be618f8a06b6997d92b35de12c47a06b292ade2669',applied_projections:252,edit_contract:'ref-prefix-only-t0__target-text-original-moss-v1',reference_max_edge:512,use_kv_cache:true,references:[{pixels_sha256:reference.pixelsSha256,original_dimensions:[16,16],encoded_dimensions:[16,16],resized_pixels_sha256:'2'.repeat(64),latent_sha256:'3'.repeat(64)}],base:{execution_device:'mlx',resolved:{variant:'base',steps:30,guidance:4,shift:5,training_shift:1,max_sequence_length:4096,acceleration:'off',slg:null,uncond_skip_layers:[]},sampling:{kind:'euler',sigmas:[1,0.99,0]},adapter_reports:[],output_kind:'images',latent_shape:[1,128,32,48],samples:[{seed:null,noise_sha256:control.tensors.noise.rawSha256}],conditioning:[Object.fromEntries([['positive','mask',71],['negative','negativeMask',10]].map(([branch,maskName,length])=>[branch,{source:'embeddings',sequence_length:length,valid_tokens:length,sha256:sha(Buffer.concat([tensorData(tensors[branch]),tensorData(tensors[maskName])]))}]))]}};
+ return {payload:{control,tensors,baselineReport:structuredClone(report)},report};
+}
+test('encoder bypass report proves both full supplied branches, exact masks/noise and unchanged native controls',()=>{
+ const {payload,report}=bypassFixture(),request=payload.control.row.request;assert.equal(validateEncoderBypassReport(request,report,payload).execution_device,'mlx');
+ for(const change of [x=>x.base.conditioning[0].positive.source='text',x=>x.base.conditioning[0].negative.sha256='a'.repeat(64),x=>x.base.conditioning[0].positive.sequence_length=70,x=>x.base.conditioning[0].positive.valid_tokens=70,x=>x.base.samples[0].seed=173,x=>x.base.samples[0].noise_sha256='a'.repeat(64),x=>x.base.execution_device='cuda',x=>x.base.resolved.shift=3,x=>x.base.latent_shape=[1,128,48,32]]){const mutant=structuredClone(report);change(mutant);assert.throws(()=>validateEncoderBypassReport(request,mutant,payload));}
+ for(const change of [x=>x.base.resolved.acceleration='sft-8step',x=>x.base.resolved.uncond_skip_layers=[0],x=>x.base.resolved.slg={enabled:true},x=>x.base.sampling.sigmas[1]=0.5,x=>x.base.sampling.kind='other',x=>x.base.adapter_reports=[{adapter_sha256:'f'.repeat(64)}]]){const mutant=structuredClone(report);change(mutant);assert.throws(()=>validateEncoderBypassReport(request,mutant,payload),/frozen effective controls/);}
+ const changed={...payload,tensors:{...payload.tensors,mask:makeNpy([1,71],'uint8',i=>i===0?0:1)}};assert.throws(()=>validateEncoderBypassReport(request,report,changed),/consumed exactly/);
+});
+test('encoder bypass mock API captures exactly one full image and preserves artifacts on checker failure',async t=>{
+ const root=await temporary('bypass-api');t.after(()=>rm(root,{recursive:true,force:true}));
+ for(const mode of ['success','report-failure','job-check-failure','workflow-get-failure']){
+  const {payload,report}=bypassFixture(),directory=resolve(root,mode);await mkdir(directory);payload.root=directory;await writeFile(resolve(directory,'B.png'),rgbPng(16,16,Buffer.alloc(16*16*3)));await save(resolve(directory,'baseline-report.json'),report);
+  const assets={},posted=[],config={workerId:'owned-mlx'},png=rgbPng(768,512,Buffer.alloc(768*512*3)),actual=structuredClone(report);if(mode==='report-failure')actual.base.conditioning[0].negative.source='text';
+  const output={id:'output',projectId:'project',lineage:{jobId:'job'},recipe:{rawAdapterSettings:{mossImageSampleIndex:0,mossImageEditExecutionReport:actual}},file:{path:'output.png'}};
+  const api={async request(path,options={}){
+   if(path==='/api/v1/projects')return {id:'project'};
+   if(path.endsWith('/assets')&&options.method==='POST'){const file=options.body.get('file'),name=file.name.replace('.npy','').replace('.png',''),bytes=Buffer.from(await file.arrayBuffer()),asset={id:name,projectId:'project',type:name==='B'?'image':'tensor',...(name==='B'?{}:{tensor:{...inspectNpy(bytes),sha256:sha(bytes)}})};assets[name]=asset;return asset;}
+   if(path==='/api/v1/image/jobs'){posted.push(options.body);return{id:'job'};}
+   if(path==='/api/v1/jobs/job')return {id:'job',projectId:'project',backend:mode==='job-check-failure'?'wrong-backend':'mlx',workerId:config.workerId,status:'completed',startedAt:'2026-10-26T00:00:00Z',completedAt:'2026-10-26T00:01:00Z',payload:posted[0],result:{assets:[output]}};
+   if(path.endsWith('/workflow')){if(mode==='workflow-get-failure')throw Error('exporter unavailable');return {sceneworksWorkflow:true,mode:'edit_image',advanced:{mossImageEditExecutionReport:sanitizedReport(actual),mossImageSampleIndex:0}};}
+   if(path.endsWith('/files/output.png'))return png;
+   if(path.endsWith('/assets/output'))return output;
+   if(path.includes('/assets/'))return assets[path.split('/').at(-1)];
+   throw Error(`unexpected inert API route ${path}`);
+  }};
+  const call=()=>captureEncoderBypass(api,config,payload,directory,{observeDevice:async()=>({device:{uuid:ENCODER_BYPASS.hostUuid}})});
+  if(mode==='success')assert.equal((await call()).execution,'CAPTURED_DIAGNOSTIC');else await assert.rejects(call,mode==='report-failure'?/consumed exactly/:mode==='job-check-failure'?/backend label/:/exporter unavailable/);
+  assert.equal(posted.length,1);assert.equal(posted[0].prompt,'');assert.equal(posted[0].seed,null);assert.equal(posted[0].advanced.mossImageAdvanced.output,'images');assert.deepEqual(await readFile(resolve(directory,'output.png')),png);assert.equal((await json(resolve(directory,'provider-report.json'))).base.execution_device,'mlx');assert.ok(existsSync(resolve(directory,mode==='success'?'result.json':'failure.json')));
+ }
+});
+test('encoder bypass lifecycle stops its worker before releasing only its private HF, including failed capture',async t=>{
+ const root=await temporary('bypass-life');t.after(()=>rm(root,{recursive:true,force:true}));
+ for(const mode of ['success','capture-failure','stop-failure','startup-failure','capture-and-stop-failure','export-failure']){
+  const directory=resolve(root,mode);await mkdir(directory);const binary=resolve(directory,'inert-native');await writeFile(binary,'not executed');const config={root:directory,apiBinary:binary,packageFiles:[{file:'inert'}],backend:'mlx',hfHome:resolve(directory,'hf')},events=[];
+  const h={isolatePackages:async()=>events.push('copy'),privateHfIntegrity:async()=>[],startStack:async()=>{events.push('start');if(mode==='startup-failure')throw Error('startup stop failed; no positive stop proof');return {api:{},stop:async()=>{events.push('stop');if(mode==='stop-failure'||mode==='capture-and-stop-failure')throw Error('still live');}};},capture:async()=>{events.push('capture');if(mode==='capture-failure'||mode==='capture-and-stop-failure')throw Error('original checker');return {renders:1};},exportState:async()=>{events.push('export');if(mode==='export-failure')throw Error('checkpoint failed');},releasePrivateHf:async()=>events.push('release')};
+  const call=()=>runEncoderBypassStack(config,{},directory,h,{files:{packages:{}}});if(mode==='success')assert.equal((await call()).renders,1);else await assert.rejects(call,mode==='capture-and-stop-failure'?/original checker/:undefined);
+  assert.deepEqual(events,mode==='success'||mode==='capture-failure'?['copy','start','capture','stop','export','release']:mode==='startup-failure'?['copy','start']:mode==='export-failure'?['copy','start','capture','stop','export']:['copy','start','capture','stop']);
+  if(mode==='startup-failure')assert.equal((await json(resolve(directory,'hf-retained.json'))).workersStopped,false);
+  if(mode==='capture-and-stop-failure')assert.equal((await json(resolve(directory,'cleanup-failure.json'))).originalFailure,'original checker');
+ }
+ let calls=0;await assert.rejects(()=>executeEncoderBypass({},'/inert','c'.repeat(40),{env:{},validatePayload:async()=>{calls++;}}),/dedicated Actions/);assert.equal(calls,0);
+});
 const sourceRoot=fileURLToPath(new URL('../',import.meta.url));
 const coverage='moss_image_base+sft; bounded cache-context before bind; cache-dispatch; runtime load before media catalog; actual MOSS generate/edit calls after admission';
 test('CUDA rebase invokes the protocol from its declared source checkout, not the separate tooling checkout',async t=>{

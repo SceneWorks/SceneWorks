@@ -14,10 +14,20 @@ export const H18_RETRY_TOOLING_SHA = '82c534d50b72c1a5984514b90548002da212d735';
 export const H18_RETRY_RUN_ID = 40208210890;
 export const H18_RETRY_ARTIFACT_ID = 12604596938;
 export const H18_RETRY_INVENTORY_SHA256 = 'f849b52f0e7724e13b1f8d5a8c7f2797038e22d0d8dfb1ab8e6e2cfd9af03668';
+export const ENCODER_BYPASS = Object.freeze({
+  phase:'encoder-bypass',sourceSha:'3aa58facf61fb9a2e3b6e139ce4a0a331c9f7685',inferenceSha:'78100568d8e5b9fb5b199872dc57cb28f5b87340',candidateId:'sc-26752-final-r19',
+  nativeRunId:'40349954885',nativeAttempt:'1',bundleRunId:'40349390662',bundleArtifactId:'12663171392',bundleSha256:'4f4adcd82b46bc9c1e57373bff835b59f05bc8846b4b71871bdf9f8f09f0daa5',
+  staged:'/Users/michael/.codex/epic-runs/sc-26752/resume-20261026/encoder-bypass-control-prep/payload',manifestSha256:'752d31cc203d55c69a26b444294acbab0e0104c6febe4d6575bcc09f20bbcf32',hostUuid:'D299B954-4C63-5322-86A5-BD5667051634',
+});
 export function validateDispatchEnvelope(raw,sourceSha,inferenceSha,dispatchSha) {
   requireThat(/^[a-f0-9]{40}$/.test(sourceSha)&&/^[a-f0-9]{40}$/.test(dispatchSha)&&/^[a-f0-9]{40}$/.test(inferenceSha),'MOSS dispatch requires exact product/tooling/inference commits');
   const value=JSON.parse(raw),required=['candidate_id','bundle_manifest_sha256','phase'],optional=['bundle_run_id','bundle_artifact_id','execution_run_id','execution_run_attempt','review_artifact_id','review_run_id','upload_path','upload_kind','tooling_sha','product_sha','original_inventory_path','original_inventory_sha256','native_run_id','native_run_attempt','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id','mlx_run_id','mlx_run_attempt','mlx_artifact_id','mlx_tooling_sha','cuda_hf_run_id','cuda_hf_run_attempt','cuda_hf_artifact_id','mlx_candidate_id','mlx_source_sha','mlx_inference_sha'];
   requireThat(value&&typeof value==='object'&&!Array.isArray(value)&&required.every(key=>typeof value[key]==='string'&&value[key])&&Object.keys(value).every(key=>[...required,...optional].includes(key)&&typeof value[key]==='string'),'MOSS dispatch JSON has missing, unknown or non-string fields');
+  if(value.phase===ENCODER_BYPASS.phase) {
+    const keys=[...required,'bundle_run_id','bundle_artifact_id','tooling_sha','product_sha','native_run_id','native_run_attempt'];
+    requireThat(canonical(Object.keys(value).sort())===canonical(keys.sort())&&sourceSha===dispatchSha&&value.tooling_sha===dispatchSha&&dispatchSha!==ENCODER_BYPASS.sourceSha&&value.product_sha===ENCODER_BYPASS.sourceSha&&inferenceSha===ENCODER_BYPASS.inferenceSha&&value.candidate_id===ENCODER_BYPASS.candidateId&&value.bundle_run_id===ENCODER_BYPASS.bundleRunId&&value.bundle_artifact_id===ENCODER_BYPASS.bundleArtifactId&&value.bundle_manifest_sha256===ENCODER_BYPASS.bundleSha256&&value.native_run_id===ENCODER_BYPASS.nativeRunId&&value.native_run_attempt===ENCODER_BYPASS.nativeAttempt,'encoder bypass requires the fixed R19 product/native/bundle and separate exact tooling, without overrides');
+    return Object.fromEntries([...required,...optional].map(key=>[key,value[key]??'']));
+  }
   requireThat(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value.candidate_id)&&/^[a-f0-9]{64}$/.test(value.bundle_manifest_sha256),'MOSS dispatch candidate or manifest SHA is invalid');
   requireThat(['upload','execute','continue','continue-cuda','cuda-rebase','verify','verify-rebase'].includes(value.phase),'MOSS dispatch phase is unsupported');
   const empty=keys=>keys.every(key=>value[key]===undefined||value[key]==='');

@@ -9,7 +9,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt, compareTypedMossEditHistory } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen, waitJob } from './moss-edit-terminal.mjs';
-import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, stageCompletedMlxHandoffSupplement, validateCompletedMlxHandoffSupplement, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
+import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, stageCompletedMlxHandoffSupplement, validateCompletedMlxHandoffSupplement, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, contained, nativeDevice, sampler, startStack, exportState, importState, retainQualityPairs, delay, CUDA_UUID, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256, ENCODER_BYPASS } from './lib/moss-edit-terminal-actions.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 import { cudaSourceContinuity, validateCudaRebaseRecord } from './lib/moss-edit-cuda-rebase.mjs';
@@ -157,6 +157,127 @@ export async function verifyBuild(config) {
   if(process.platform!=='win32')await chmod(paths.apiBinary,0o700);
   // The binary inventory must be verified before a single native child executes.
   await nativeDevice(config.backend);return inventory;
+}
+// One supplemental image, with the original product binary and independent tooling.
+// This route never freezes, resumes, amends or declares completion of a campaign.
+export function encoderBypassRow() {
+  return {id:'encoder-bypass-mlx-base-single',category:'encoder-bypass',backend:'mlx',variant:'base',refs:['B'],transport:'rest',output:'images',outputCount:1,expected:'completed',request:{model:'moss_image_base',mode:'edit_image',prompt:'',negativePrompt:'',seed:null,width:768,height:512,count:1,advanced:{steps:30,guidanceScale:4,schedulerShift:5,mossImage:{acceleration:'off',max_sequence_length:4096,training_shift:1,uncond_skip_layers:[]},mossImageEdit:{reference_max_edge:512,use_kv_cache:true},mossImageAdvanced:{output:'images',positive:{values:'$positive',mask:'$mask'},negative:{values:'$negative',mask:'$negativeMask'},noise:'$noise'}}}};
+}
+export function validateEncoderBypassTensor(bytes,spec) {
+  const info=protocolLibrary.inspectNpy(bytes),raw=protocolLibrary.tensorData(bytes);
+  requireThat(info.dtype===spec.dtype&&canonical(info.shape)===canonical(spec.shape)&&info.sha256===spec.sha256&&bytes.length===spec.byteLength&&sha(raw)===spec.rawSha256,'encoder bypass NPY dtype/shape/bytes changed');
+  return raw;
+}
+export async function validateEncoderBypassPayload(root=ENCODER_BYPASS.staged,expectedSha=ENCODER_BYPASS.manifestSha256) {
+  requireThat((await fileIdentity(resolve(root,'manifest.json'))).sha256===expectedSha,'encoder bypass sealed manifest changed');
+  const manifest=await json(resolve(root,'manifest.json'));
+  requireThat(manifest.kind==='sc-26752-mlx-encoder-bypass-inputs/v1'&&manifest.files.length===17&&canonical(await filesUnder(root))===canonical([...manifest.files,{file:'manifest.json',...await fileIdentity(resolve(root,'manifest.json'))}].sort((a,b)=>a.file<b.file?-1:a.file>b.file?1:0)),'encoder bypass input files changed');
+  const control=await json(resolve(root,'control.json')),trace=await json(resolve(root,'upstream-trace.json'));
+  requireThat(control.kind==='sc-26752-mlx-encoder-bypass/v1'&&control.scope==='DIAGNOSTIC_ONLY_ONE_BASE_SINGLE_IMAGE'&&control.sourceSha===ENCODER_BYPASS.sourceSha&&control.inferenceSha===ENCODER_BYPASS.inferenceSha&&control.candidateId===ENCODER_BYPASS.candidateId&&control.hostUuid===ENCODER_BYPASS.hostUuid&&canonical(control.row)===canonical(encoderBypassRow()),'encoder bypass fixed source/row/device changed');
+  requireThat(control.native.runId===ENCODER_BYPASS.nativeRunId&&control.native.attempt===ENCODER_BYPASS.nativeAttempt&&control.native.artifactId==='12669886106'&&control.upstream.runId==='40393828906'&&control.upstream.attempt==='1'&&control.upstream.artifactId==='12686156941'&&control.upstream.toolingSha==='d6808ab06a2422fe50274aac7332c255eeeb37e9'&&control.upstream.manifestSha256==='eeb7178ee939249729ad4049accd5f2a6593ada7592c0c27daa609716f658b9a'&&control.bundle.runId===ENCODER_BYPASS.bundleRunId&&control.bundle.artifactId===ENCODER_BYPASS.bundleArtifactId&&control.bundle.sha256===ENCODER_BYPASS.bundleSha256,'encoder bypass historical producer changed');
+  requireThat(trace.actualToolingSha===control.upstream.toolingSha&&trace.runId===control.upstream.runId&&trace.attempt===control.upstream.attempt&&trace.pairedNativePin===control.inferenceSha&&trace.manifestSha256===control.upstream.manifestSha256,'encoder bypass trace producer changed');
+  const tensors={};
+  for(const [name,branch,shape,dtype] of [['positive','positive',[1,71,4096],'float32'],['negative','negative',[1,10,4096],'float32'],['mask','positive',[1,71],'uint8'],['negativeMask','negative',[1,10],'uint8'],['noise',null,[1,128,32,48],'float32']]) {
+    const spec=control.tensors[name];requireThat(spec.file===`${name}.npy`&&spec.dtype===dtype&&canonical(spec.shape)===canonical(shape),'encoder bypass tensor role/shape changed');
+    const bytes=await readFile(safePath(root,spec.file)),raw=validateEncoderBypassTensor(bytes,spec);tensors[name]=bytes;
+    if(name==='noise')requireThat(spec.rawSha256==='92e4addfaab4f8f5738c6a29ab2da1a56e2b204726b83250721edfec09608d82','encoder bypass frozen noise changed');
+    else if(dtype==='uint8')requireThat(raw.equals(Buffer.from(trace.cases[branch].attentionMask))&&raw.every(value=>value===1),'encoder bypass HF mask changed');
+    else {const final=trace.cases[branch].boundaries.at(-1);requireThat(final.file==='boundary-33.f32le'&&canonical(final.shape)===canonical(shape)&&final.sha256===spec.rawSha256&&final.byteLength===raw.length,'encoder bypass did not use actual HF final conditioning');}
+  }
+  const baseline=await json(resolve(root,'baseline-job.json')),report=await json(resolve(root,'baseline-report.json')),receipt=await json(resolve(root,'baseline-receipt.json')),native=await json(resolve(root,'native-inventory.json'));
+  requireThat(control.baseline.runId===control.native.runId&&control.baseline.attempt==='1'&&control.baseline.artifactId==='12676636780'&&baseline.id===control.baseline.jobId&&baseline.id===receipt.jobId&&receipt.execution==='VERIFIED'&&receipt.jobSha256===digest(baseline)&&receipt.outputs[0].sha256===(await fileIdentity(resolve(root,'baseline.png'))).sha256&&report.base.samples[0].noise_sha256===control.tensors.noise.rawSha256,'encoder bypass retained R19 baseline changed');
+  requireThat(canonical(await fileIdentity(resolve(root,'native-inventory.json')))===canonical(control.native.inventory)&&native.sources.sceneworks.head===control.sourceSha&&native.sources.inference.head===control.inferenceSha,'encoder bypass native inventory changed');
+  const bytes=await readFile(resolve(root,'B.png')),image=protocolLibrary.pngRgbIdentity(bytes);
+  requireThat(control.reference.file==='B.png'&&sha(bytes)===control.reference.sha256&&image.width===control.reference.width&&image.height===control.reference.height&&image.pixelsSha256===control.reference.pixelsSha256,'encoder bypass original reference changed');
+  return {control,tensors,baselineReport:report,manifest,manifestSha256:expectedSha,root:resolve(root)};
+}
+export async function authenticateEncoderBypassArtifacts(control,token,request=fetch) {
+  requireThat(typeof token==='string'&&token,'encoder bypass needs read-only Actions artifact authentication');
+  const evidence={};
+  for(const [name,producer,head] of [['native',control.native,control.sourceSha],['upstream',control.upstream,control.upstream.toolingSha]]) {
+    const get=async path=>{const response=await request(`https://api.github.com/repos/SceneWorks/SceneWorks/actions/${path}`,{headers:{Authorization:`Bearer ${token}`,Accept:'application/vnd.github+json'}});requireThat(response.ok,'encoder bypass Actions metadata unavailable');const text=await response.text();requireThat(text.length<=128*1024,'encoder bypass Actions metadata exceeds bound');return JSON.parse(text);};
+    const artifact=await get(`artifacts/${producer.artifactId}`),run=await get(`runs/${producer.runId}`);
+    requireThat(String(artifact.id)===producer.artifactId&&artifact.name===producer.artifactName&&artifact.digest===`sha256:${producer.artifactSha256}`&&artifact.expired===false&&String(artifact.workflow_run?.id)===producer.runId&&artifact.workflow_run.head_sha===head&&String(run.id)===producer.runId&&String(run.run_attempt)===producer.attempt&&run.head_sha===head&&run.status==='completed','encoder bypass actual artifact/run producer changed');
+    evidence[name]={artifact,run:{id:run.id,run_attempt:run.run_attempt,head_sha:run.head_sha,status:run.status,conclusion:run.conclusion}};
+  }return evidence;
+}
+export function validateEncoderBypassReport(request,report,payload) {
+  const {control,tensors}=payload,base=protocolLibrary.validateEditReport(control.row,request,report,{B:control.reference});
+  const baseline=payload.baselineReport.base.data??payload.baselineReport.base;
+  requireThat(canonical(base.resolved)===canonical(baseline.resolved)&&canonical(base.sampling)===canonical(baseline.sampling)&&canonical(base.adapter_reports)===canonical(baseline.adapter_reports),'encoder bypass changed the frozen effective controls, Euler schedule or base adapters');
+  requireThat(base.samples.length===1&&base.samples[0].seed===null&&base.samples[0].noise_sha256===control.tensors.noise.rawSha256&&base.conditioning?.length===1,'encoder bypass sample/noise/conditioning count changed');
+  for(const [branch,maskName,length]of [['positive','mask',71],['negative','negativeMask',10]]) {
+    const actual=base.conditioning[0][branch],values=protocolLibrary.tensorData(tensors[branch]),mask=protocolLibrary.tensorData(tensors[maskName]);
+    requireThat(actual.source==='embeddings'&&actual.sequence_length===length&&actual.valid_tokens===length&&actual.sha256===sha(Buffer.concat([values,mask])),'encoder bypass supplied conditioning was not consumed exactly');
+  }
+  return base;
+}
+export async function captureEncoderBypass(api,config,payload,outputRoot,{observeDevice=nativeDevice}={}) {
+  const {control,tensors}=payload,row=control.row,encode=encodeURIComponent,observation={};let jobId=null;
+  try {
+    const project=await api.request('/api/v1/projects',{method:'POST',body:{name:`MOSS encoder bypass ${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`}});requireThat(project.id,'encoder bypass project identity missing');
+    config.projectId=project.id;await save(resolve(outputRoot,'project.json'),project);const uploaded={};
+    for(const [name,file]of [['B','B.png'],...Object.entries(control.tensors).map(([name,spec])=>[name,spec.file])]) {
+      const bytes=name==='B'?await readFile(resolve(payload.root,file)):tensors[name],form=new FormData();form.append('file',new Blob([bytes],{type:name==='B'?'image/png':'application/x-npy'}),file);
+      const upload=await api.request(`/api/v1/projects/${encode(project.id)}/assets`,{method:'POST',body:form}),asset=await api.request(`/api/v1/projects/${encode(project.id)}/assets/${encode(upload.id)}`);
+      requireThat(asset.id===upload.id&&asset.projectId===project.id,'encoder bypass upload/readback ownership changed');
+      if(name!=='B')requireThat(asset.type==='tensor'&&asset.tensor?.sha256===sha(bytes)&&asset.tensor.dtype===control.tensors[name].dtype&&canonical(asset.tensor.shape)===canonical(control.tensors[name].shape),'encoder bypass uploaded tensor changed');
+      uploaded[name]=asset;await save(resolve(outputRoot,`${name}.asset.json`),{upload,asset,sha256:sha(bytes)});
+    }
+    const device=await observeDevice('mlx');requireThat(device.device.uuid===control.hostUuid,'encoder bypass admitted another Mac');await save(resolve(outputRoot,'admission.json'),device);
+    const request=protocolLibrary.replaceInputs(row,uploaded,project.id);await save(resolve(outputRoot,'request.json'),request);
+    await save(resolve(outputRoot,'attempt.json'),{phase:'POSTING_ONCE',requestSha256:digest(request),at:new Date().toISOString()});
+    const queued=await api.request('/api/v1/image/jobs',{method:'POST',body:request,observation});jobId=queued.id??null;await save(resolve(outputRoot,'submission.json'),{job:queued,observation});requireThat(jobId,'encoder bypass POST returned no job identity');
+    const job=await waitJob(api,row,jobId,outputRoot,120*60*1000,[queued]);await save(resolve(outputRoot,'terminal-job.json'),job);
+    requireThat(job.id===jobId&&job.projectId===project.id&&job.result?.assets?.[0]?.id,'encoder bypass canonical job/project/output identity missing');
+    const summary=job.result.assets[0],asset=await api.request(`/api/v1/projects/${encode(project.id)}/assets/${encode(summary.id)}`);await save(resolve(outputRoot,'asset.json'),asset);
+    requireThat(asset.id===summary.id&&asset.projectId===project.id&&asset.lineage?.jobId===job.id,'encoder bypass output ownership changed');
+    const report=protocolLibrary.findEditReport(asset,job);await save(resolve(outputRoot,'provider-report.json'),report);
+    const path=asset.file?.path??asset.file?.relativePath;requireThat(typeof path==='string'&&!path.startsWith('/')&&!path.split('/').includes('..'),'encoder bypass output escaped project');
+    const bytes=await api.request(`/api/v1/projects/${encode(project.id)}/files/${path.split('/').map(encode).join('/')}`,{raw:true,max:32*1024*1024});await writeFile(resolve(outputRoot,'output.png'),bytes,{flag:'wx',mode:0o600});
+    const image=protocolLibrary.decodeRgbPng(bytes);requireThat(image.width===768&&image.height===512,'encoder bypass output dimensions changed');
+    protocolLibrary.checkJob(row,request,job,'mlx');requireThat(job.workerId===config.workerId&&asset.recipe?.rawAdapterSettings?.mossImageSampleIndex===0,'encoder bypass used another worker/sample');validateEncoderBypassReport(request,report,payload);
+    const baseline=payload.baselineReport;requireThat(report.references[0].latent_sha256===baseline.references[0].latent_sha256&&report.references[0].resized_pixels_sha256===baseline.references[0].resized_pixels_sha256,'encoder bypass changed reference VAE conditioning');
+    const workflow=await api.request(`/api/v1/projects/${encode(project.id)}/assets/${encode(asset.id)}/workflow`);await save(resolve(outputRoot,'workflow.json'),workflow);protocolLibrary.validateExportedWorkflow(workflow,report,0);
+    const result={kind:'sc-26752-mlx-encoder-bypass-result/v1',execution:'CAPTURED_DIAGNOSTIC',renders:1,acceptance:'AWAITING_VISUAL_COMPARISON_NOT_CAMPAIGN_ACCEPTANCE',jobId,requestSha256:digest(request),output:await fileIdentity(resolve(outputRoot,'output.png')),providerReport:await fileIdentity(resolve(outputRoot,'provider-report.json')),baseline:control.baseline,upstream:control.upstream,native:control.native};await save(resolve(outputRoot,'result.json'),result);return result;
+  }catch(error){await save(resolve(outputRoot,'failure.json'),{execution:'FAILED',jobId,message:String(error.message).slice(0,4096),observation});throw error;}
+}
+export async function executeEncoderBypass(config,toolingRoot,toolingSha,services={}) {
+  const env=services.env??process.env;
+  requireThat(env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&env.GITHUB_JOB==='execute-mlx'&&env.GITHUB_SHA===toolingSha&&/^[a-f0-9]{40}$/.test(toolingSha)&&toolingSha!==ENCODER_BYPASS.sourceSha&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT??''),'encoder bypass requires its actual dedicated Actions producer');
+  requireThat(config.backend==='mlx'&&config.sourceSha===ENCODER_BYPASS.sourceSha&&config.inferenceSha===ENCODER_BYPASS.inferenceSha&&config.candidateId===ENCODER_BYPASS.candidateId&&config.root===resolve(MAC_MOSS_BASE,`moss-execute-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-mlx`)&&config.hfHome===resolve(config.root,'hf'),'encoder bypass runtime/source/root changed');
+  const h={validatePayload:validateEncoderBypassPayload,tooling:executionTooling,sourceIdentity,nativeDevice,validateBundle,authenticateArtifacts:authenticateEncoderBypassArtifacts,isolatePackages,privateHfIntegrity,startStack,exportState,releasePrivateHf,capture:captureEncoderBypass,...services};
+  const payload=await h.validatePayload(),{control}=payload,tooling=await h.tooling(toolingRoot,toolingSha),sources=await h.sourceIdentity(config);
+  requireThat(config.packageSource===control.packageSource&&config.packageFiles.length===43,'encoder bypass package source changed');
+  await h.validateBundle(config.bundleRoot,ENCODER_BYPASS.bundleSha256,config.sourceSha,config.inferenceSha,config.candidateId);
+  const paths=buildPaths(config),inventory=validateArtifactInventory(await json(resolve(config.buildRoot,'mlx/inventory.json')),'mlx',sources);
+  requireThat(canonical(await fileIdentity(resolve(config.buildRoot,'mlx/inventory.json')))===canonical(control.native.inventory),'encoder bypass original native artifact inventory changed');
+  for(const name of BACKEND_FILES)requireThat(canonical(await fileIdentity(paths[name]))===canonical(inventory.files[name]),'encoder bypass native artifact bytes changed');
+  const packages=await json(paths.packages);requireThat(canonical(packages.files.map(({file,sha256})=>({file,sha256})))===canonical(config.packageFiles.map(({file,sha256})=>({file,sha256}))),'encoder bypass installed native packages changed');
+  const device=await h.nativeDevice('mlx');requireThat(device.device.uuid===control.hostUuid,'encoder bypass requires its original physical Mac');
+  const artifacts=await h.authenticateArtifacts(control,env.MOSS_ENCODER_BYPASS_TOKEN);
+  const outputRoot=resolve(config.root,'evidence/encoder-bypass');await mkdir(outputRoot,{recursive:true,mode:0o700});await cp(payload.root,resolve(outputRoot,'inputs'),{recursive:true,errorOnExist:true,force:false});
+  await save(resolve(outputRoot,'authentication.json'),{kind:'sc-26752-mlx-encoder-bypass-authentication/v1',manifestSha256:payload.manifestSha256,sources,tooling,nativeInventory:inventory,artifacts,device,producer:{runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,toolingSha,job:env.GITHUB_JOB}});
+  config.apiBinary=paths.apiBinary;
+  return runEncoderBypassStack(config,payload,outputRoot,h,inventory);
+}
+export async function runEncoderBypassStack(config,payload,outputRoot,h,inventory) {
+  let stack,cloned=false,failure;
+  try {
+    await h.isolatePackages(config);const after=await h.privateHfIntegrity(config);
+    await save(resolve(config.root,'hf-transfer.json'),{operation:'read-only-source-private-copy-or-APFS-clone',candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,backend:'mlx',packagesSha256:digest(config.packageFiles),from:config.packageSource,to:config.hfHome,originalPackages:inventory.files.packages,after});cloned=true;
+    await chmod(config.apiBinary,0o700);stack=await h.startStack(config,randomBytes(32).toString('hex'));
+    return await h.capture(stack.api,config,payload,outputRoot);
+  }catch(error){failure=error;throw error;}finally{
+    // A stop failure forbids deleting a private HF tree still usable by owned workers.
+    try {
+      if(stack){await stack.stop();await h.exportState(config,resolve(config.root,'handoff'));if(cloned)await h.releasePrivateHf(config);}
+      else if(cloned)await save(resolve(config.root,'hf-retained.json'),{operation:'retain-private-HF-without-returned-stack-stop-proof',hfHome:config.hfHome,workersStopped:false});
+    }catch(error){
+      try{await save(resolve(config.root,'cleanup-failure.json'),{message:String(error.message).slice(0,4096),originalFailure:failure?String(failure.message).slice(0,4096):null,hfHome:config.hfHome});}catch(receiptError){console.error(`encoder bypass cleanup receipt failed: ${receiptError.message}`);}
+      if(!failure)throw error;
+    }
+  }
 }
 export function resolveGuardAliases(value,bindings) {
   if(typeof value==='string') {
@@ -864,6 +985,7 @@ export async function main(args=process.argv.slice(2)) {
     return configure(resolve(env.MOSS_BUNDLE,'campaign.json'),env.MOSS_SOURCE,env.MOSS_INFERENCE,env.MOSS_ROOT,env.MOSS_BACKEND,env.MOSS_BUILDS);
   }
   if(phase==='configure'&&rest.length===6)return configure(...rest);
+  if(phase==='execute-encoder-bypass'&&rest.length===3)return executeEncoderBypass(await json(rest[0]),rest[1],rest[2]);
   if(['execute-reused-cuda','finalize-reused-cuda'].includes(phase)&&rest.length===3) {
     const [runtime,toolingRoot,toolingSha]=rest,config=await json(runtime),verify=phase==='finalize-reused-cuda';
     config.executionTooling=await executionTooling(toolingRoot,toolingSha);
