@@ -17,6 +17,11 @@ sha2 = "0.10"
 # once in `sceneworks_core::memory_anchor` and read by both the worker's fit gate and this adapter,
 # never restated here. (Previously a dev-dependency for the sc-19115 corpus mutation test.)
 sceneworks-core = { path = "../sceneworks-core" }
+# sc-24217: the Supra2-IMG arms convert the pinned upstream checkpoint into the native bundle the
+# engine loads, in a separate adapter process BEFORE the measured one loads anything. The convert
+# and its pin contract are gen-core's own backend-neutral `supra2` module (the same code the
+# worker's install-time converter calls), so both lanes share one call path in `lib.rs`.
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "b939f3e883b75d3ec5e12263bde914ae5f5b2830" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep every first-party adapter crate on the exact pinned inference revision.

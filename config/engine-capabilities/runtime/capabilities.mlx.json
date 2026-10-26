@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "1755167e90fbc09edad644ba065da423d5a8fe41",
+    "inferenceRevision": "81cff07c13137fea520cec0b1dc9b8f083514601",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -60,6 +60,7 @@
     "sensenova_u1_8b_infographic_v2_fast": "sensenova_u1_8b_fast",
     "sensenova_u1_8b_infographic_v3": "sensenova_u1_8b",
     "sensenova_u1_8b_infographic_v3_fast": "sensenova_u1_8b_fast",
+    "supra2_img": "supra2_img",
     "z_image": "z_image",
     "z_image_edit": "z_image_turbo",
     "z_image_turbo": "z_image_turbo"
@@ -450,6 +451,8 @@
       "flux2_dev",
       "flux2_dev_edit",
       "flux2_dev_control",
+      "flux3_klein",
+      "flux3_klein_base",
       "ideogram_4",
       "ideogram_4_turbo",
       "iris_3b",
@@ -492,6 +495,7 @@
       "seedvr2_7b",
       "sensenova_u1_8b",
       "sensenova_u1_8b_fast",
+      "supra2_img",
       "svd_xt",
       "wan2_2_ti2v_5b",
       "wan2_2_t2v_14b",
@@ -1276,6 +1280,54 @@
           "beta57",
           "flow_match_euler"
         ],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux3_klein",
+        "family": "flux3",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "referenceRgba",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": true,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [],
+        "supported_guidance_methods": []
+      },
+      {
+        "id": "flux3_klein_base",
+        "family": "flux3",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [
+          "reference",
+          "referenceRgba",
+          "multiReference"
+        ],
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supported_quants": [
+          "q4",
+          "q8"
+        ],
+        "supports_preview": false,
+        "supports_prompt_enhancement": true,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [],
         "supported_guidance_methods": []
       },
       {
@@ -2576,6 +2628,27 @@
         "supported_guidance_methods": []
       },
       {
+        "id": "supra2_img",
+        "family": "supra2",
+        "backend": "mlx",
+        "modality": "image",
+        "conditioning": [],
+        "supports_lora": false,
+        "supports_lokr": false,
+        "supported_quants": [],
+        "supports_preview": false,
+        "supports_prompt_enhancement": false,
+        "samplers": [
+          "euler"
+        ],
+        "schedulers": [
+          "supra2_uniform_flow"
+        ],
+        "supported_guidance_methods": [
+          "cfg"
+        ]
+      },
+      {
         "id": "svd_xt",
         "family": "svd",
         "backend": "mlx",
@@ -2916,6 +2989,7 @@
       "anima_base",
       "anima_aesthetic",
       "anima_turbo",
+      "flux3_klein_base",
       "iris_3b",
       "iris_3b_depth",
       "iris_3b_restore",
@@ -3006,6 +3080,30 @@
         "supports_body_shape_loss": true,
         "supports_normal_loss": true,
         "supports_vae_anchor_loss": true,
+        "supports_latent_lpips_loss": false,
+        "supports_training_adapter": false
+      },
+      {
+        "id": "flux3_klein_base",
+        "family": "flux3",
+        "backend": "mlx",
+        "modality": "image",
+        "supports_lora": true,
+        "supports_lokr": false,
+        "supports_control": false,
+        "supports_full_finetune": false,
+        "max_reference_images": 1,
+        "supports_weight_noise": false,
+        "supports_depth_anchoring": false,
+        "supports_gradient_noise": false,
+        "supports_resolution_buckets": false,
+        "supports_subject_mask_loss": false,
+        "supports_identity_loss": false,
+        "supports_face_landmark_loss": false,
+        "supports_body_proportion_loss": false,
+        "supports_body_shape_loss": false,
+        "supports_normal_loss": false,
+        "supports_vae_anchor_loss": false,
         "supports_latent_lpips_loss": false,
         "supports_training_adapter": false
       },

@@ -1,0 +1,330 @@
+{
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "artifact": {
+        "repository": "SupraLabs/Supra2-IMG",
+        "resolvedRevision": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
+        "variant": "bf16"
+      },
+      "backend": "mlx",
+      "calibrationFingerprint": "supra2-img-mlx-resident-v1",
+      "capturedAt": "2026-10-22T03:54:34Z",
+      "diagnostics": {
+        "adapter": "memory-mlx-adapter:supra2-img-resident",
+        "blockers": [
+          "the pinned Supra2-IMG MLX crate exposes no calibration fault-injection site and opens no memory-strategy request scope, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "gated rather than runtime_complete: the pinned provider publishes no calibration identity, so stale-evidence refusal is not demonstrable"
+        ],
+        "execution": "executed",
+        "measurements": [
+          {
+            "name": "preRungActiveAfterClear",
+            "unit": "bytes",
+            "value": 1189937116
+          },
+          {
+            "name": "preRungCacheAfterClear",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "conditioningActivePeak",
+            "unit": "bytes",
+            "value": 1606876808
+          },
+          {
+            "name": "denoiseActivePeak",
+            "unit": "bytes",
+            "value": 1606893192
+          },
+          {
+            "name": "decodeActivePeak",
+            "unit": "bytes",
+            "value": 4276945936
+          },
+          {
+            "name": "overallAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 9324071164
+          },
+          {
+            "name": "bundleConvertedInChildProcess",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "bundleConvertWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 1229
+          },
+          {
+            "name": "loadWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 367
+          },
+          {
+            "name": "conditioningWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 110
+          },
+          {
+            "name": "denoiseWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 302
+          },
+          {
+            "name": "decodeWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 83
+          },
+          {
+            "name": "count1RenderWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 496
+          },
+          {
+            "name": "count1WarmRenderWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 391
+          },
+          {
+            "name": "productMaxCount",
+            "unit": "count",
+            "value": 8
+          },
+          {
+            "name": "productMaxCountActivePeak",
+            "unit": "bytes",
+            "value": 4283359248
+          },
+          {
+            "name": "productMaxCountAllocatorEnvelope",
+            "unit": "bytes",
+            "value": 10693400828
+          },
+          {
+            "name": "productMaxCountRenderWallMilliseconds",
+            "unit": "milliseconds",
+            "value": 1786
+          },
+          {
+            "name": "productMaxCountFirstImageMaxErrorPer255",
+            "unit": "count",
+            "value": 1
+          },
+          {
+            "name": "productMaxCountFirstImageMeanErrorPer255",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "productMaxCountFirstImageRmsErrorPer255",
+            "unit": "count",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanWarmPeak",
+            "unit": "bytes",
+            "value": 4276945936
+          },
+          {
+            "name": "lifecycleCleanPostCleanupActive",
+            "unit": "bytes",
+            "value": 1189937116
+          },
+          {
+            "name": "lifecycleCleanPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "lifecycleCleanupTolerance",
+            "unit": "bytes",
+            "value": 85538918
+          },
+          {
+            "name": "lifecycleWarmRepeatPeak",
+            "unit": "bytes",
+            "value": 4276945936
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupActive",
+            "unit": "bytes",
+            "value": 1189937116
+          },
+          {
+            "name": "lifecycleWarmRepeatPostCleanupCache",
+            "unit": "bytes",
+            "value": 0
+          },
+          {
+            "name": "negativeMutationMaximumErrorPer255",
+            "unit": "count",
+            "value": 192
+          },
+          {
+            "name": "negativeMutationMeanErrorPer255",
+            "unit": "count",
+            "value": 69
+          },
+          {
+            "name": "admittedGeometryWidth",
+            "unit": "count",
+            "value": 256
+          },
+          {
+            "name": "admittedGeometryHeight",
+            "unit": "count",
+            "value": 256
+          }
+        ]
+      },
+      "evidenceScope": "authoritative",
+      "fixture": "supra2-img-mlx-bf16-256-seed0-step50",
+      "hardware": {
+        "chip": "Apple M5 Max",
+        "memoryBytes": 137438953472,
+        "metalDevice": "Apple M5 Max",
+        "mlxMemoryLimitBytes": 130567005798,
+        "model": "Mac17,6",
+        "osVersion": "27.0.1",
+        "probe": "sysctl + sw_vers + system_profiler + mlx_rs::memory::get_memory_limit; wired=mlx_default_memory_limit/1.5",
+        "wiredLimitBytes": 87044670532
+      },
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-130e60e9f989be2191bc",
+      "loadShape": "eager_materialization",
+      "loadability": {
+        "resolvedPathFingerprint": "SupraLabs/Supra2-IMG@10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b:bf16",
+        "result": "passed"
+      },
+      "logicalCaseId": "implan-858c5b040c5e9110ff88",
+      "negativeMutation": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 1606876808,
+          "allocatorBytes": 2121002352,
+          "reclaimableBytes": 514125544
+        },
+        "decode": {
+          "activeBytes": 4276945936,
+          "allocatorBytes": 9324071164,
+          "reclaimableBytes": 5047125228
+        },
+        "denoise": {
+          "activeBytes": 1606893192,
+          "allocatorBytes": 2121039732,
+          "reclaimableBytes": 514146540
+        },
+        "overall": {
+          "activeBytes": 4276945936,
+          "allocatorBytes": 9324071164,
+          "reclaimableBytes": 5047125228
+        }
+      },
+      "predictedPeakBytes": {
+        "conditioning": 2281701376,
+        "decode": 9797894144,
+        "denoise": 2281701376,
+        "overall": 9797894144
+      },
+      "quality": {
+        "contract": "identical artifact, request, geometry, tier, and loaded model; cold measured run versus warm unscoped repeats",
+        "identicalInputs": true,
+        "maximumError": 0,
+        "maximumErrorThreshold": 0.011764705882352941,
+        "meanError": 0,
+        "meanErrorThreshold": 0.00392156862745098,
+        "result": "passed",
+        "rootMeanSquareError": 0,
+        "rootMeanSquareErrorThreshold": 0.0058823529411764705
+      },
+      "repositories": {
+        "inference": {
+          "closureDigest": "7411291719a829bec420f80daca331523ef4fb9c9012d48c3e2ee513de5318af",
+          "dirty": false,
+          "revision": "81cff07c13137fea520cec0b1dc9b8f083514601"
+        },
+        "sceneWorks": {
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:d6b20c0d9c84d8a7b529c49a2e18cd0d528655d9dc31d5b51e071629ac292ced",
+          "revision": "6f03ae483e6be85216cbd72197e9101d29d1bd47"
+        }
+      },
+      "scenarios": [
+        {
+          "effectiveBudgetBytes": 9797894144,
+          "name": "exact_fit",
+          "predictedBytes": 9797894144,
+          "result": "passed"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "passed"
+        },
+        {
+          "name": "stale_evidence",
+          "reason": "the pinned supra2_img provider at inference 81cff07c13137fea520cec0b1dc9b8f083514601 publishes no calibration identity (gen-core compatibility_default contract), so its admission carries no calibration handshake for stale evidence to fail",
+          "result": "not_applicable"
+        },
+        {
+          "name": "warm_repeat",
+          "reason": "the pinned Supra2-IMG MLX crate exposes no calibration fault-injection site and opens no memory-strategy request scope, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "cancel",
+          "reason": "the pinned Supra2-IMG MLX crate exposes no calibration fault-injection site and opens no memory-strategy request scope, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "error",
+          "reason": "the pinned Supra2-IMG MLX crate exposes no calibration fault-injection site and opens no memory-strategy request scope, so the scoped lifecycle scenarios cannot execute; unscoped repeat determinism and allocator cleanup bounds are attested in quality and diagnostics instead",
+          "result": "not_run"
+        },
+        {
+          "name": "loadability",
+          "result": "passed"
+        },
+        {
+          "name": "overlay",
+          "reason": "the calibration target declares overlay \"none\"; the supra2_img resident path executes no overlay, so this record has no second resident network to measure",
+          "result": "not_applicable"
+        }
+      ],
+      "status": "gated",
+      "strategy": {
+        "engagedRungs": [
+          "resident"
+        ],
+        "parameters": {},
+        "rung": "resident"
+      },
+      "sweep": {
+        "axes": [],
+        "cases": [
+          {
+            "parameters": {},
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": true
+      },
+      "target": {
+        "geometry": {
+          "batch": 1,
+          "frames": 1,
+          "height": 256,
+          "width": 256
+        },
+        "mode": "text_to_image",
+        "modelId": "supra2_img",
+        "overlay": "none",
+        "provider": "supra2_img",
+        "tier": "bf16"
+      }
+    }
+  ],
+  "schemaVersion": 6
+}

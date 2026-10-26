@@ -851,6 +851,26 @@ SCENEWORKS_IRIS_3B_RESTORE_ROOT=/abs/path/.../snapshots/<rev>/upscaler  # same t
 # `measure-memory-catalog.mjs` exports all of the above itself; it inventories only the generation
 # root's own two files, because that root is the snapshot root the two task folders also live in.
 
+# BOTH adapters — Supra2-IMG (sc-24217, epic 24212): ONE cell per lane, `supra2_img:bf16:<lane>`
+# (the dense checkpoint at the loaders' only precision), 256x256, seed 0, 50 steps, default CFG 3.0.
+# The runner binds the pinned UPSTREAM snapshot (the install's convert source) plus the two pinned
+# co-requisites; the arm converts the native bundle in a SEPARATE adapter process
+# (`supra2_img_convert`) before the measured process loads anything, or reuses one that passes the
+# provider's pin contract, so conversion is never in a measured window. After the count-1 anchor it
+# renders the product maximum (count 8) once on the same model; that peak and every phase's wall
+# time are in the record's diagnostics. Both contracts implement Resident alone and publish no
+# calibration identity, so the candle row overrides the staged lane default and both records are
+# `gated` with `stale_evidence: not_applicable`.
+SCENEWORKS_SUPRA2_IMG_REPOSITORY=SupraLabs/Supra2-IMG           # fixed; validated against SUPRA2_IMG_REPOSITORY
+SCENEWORKS_SUPRA2_IMG_REVISION=10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b  # the converter's pin; any other is refused
+SCENEWORKS_SUPRA2_IMG_ROOT=/abs/path/.../snapshots/<rev>          # the snapshot ROOT (model_final_ema.pt)
+SCENEWORKS_SUPRA2_IMG_COMPONENT_TEXT_ENCODER=/abs/path/.../models--google--flan-t5-base/snapshots/<pinned rev>
+SCENEWORKS_SUPRA2_IMG_COMPONENT_VAE=/abs/path/.../models--stabilityai--sd-vae-ft-mse/snapshots/<pinned rev>
+SCENEWORKS_SUPRA2_IMG_BUNDLE_ROOT=/abs/path/outside/the/repo     # optional; default <temp>/sceneworks-memory-adapter/supra2_img/<rev>
+# Campaign: memory-catalog-campaign.yml, profile catalog, models=supra2_img, backend mlx with
+# runner_label rw-krea (nax-macos-2) or backend candle (the Windows CUDA box); download_missing
+# fetches the three pinned snapshots if the box lacks them.
+
 # BOTH adapters — the SenseNova-U1 family (sc-22734). SIX catalog ids on TWO engine ids, and SIX
 # env families: each id ships its OWN independently pinned tiered rehost, so the arm resolves the
 # family from `(provider, modelId)` and NOT from the provider alone. Binding an infographic id to

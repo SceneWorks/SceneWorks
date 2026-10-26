@@ -134,7 +134,7 @@ describe("ModelAttribution (sc-17161)", () => {
     // declare an attribution, so this one must cover whatever that set turns out to be. A
     // hardcoded pair would let a newly-declaring entry ship unmirrored while both tests stayed
     // green.
-    const { fallbackModels } = await import("../constants.js");
+    const { fallbackModels } = await import("../modelCatalog.js");
     const declaring = manifestModels.filter((model) => model.ui?.attribution);
     expect(declaring.length).toBeGreaterThan(0);
     for (const entry of declaring) {

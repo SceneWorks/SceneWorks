@@ -412,6 +412,33 @@ fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
         .unwrap_err()
         .to_string()
         .contains("6144x4096"));
+
+    // sc-26644: a model that neither is SDXL nor advertises `ui.img2img` is refused, naming the
+    // model and the missing capability — the same shared gate the API now runs at enqueue.
+    let not_capable = request(json!({
+        "projectId": "p",
+        "model": "z_image_turbo",
+        "modelManifestEntry": { "family": "z-image" },
+        "hiresFix": { "enabled": true }
+    }));
+    let error = validate_hires_fix_request(&not_capable)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("img2img-capable"),
+        "names the missing capability: {error}"
+    );
+    assert!(error.contains("z_image_turbo"), "names the model: {error}");
+
+    // An absent `hiresFix` block is unchanged: disabled, and every other check inert.
+    let no_block = request(json!({
+        "projectId": "p",
+        "model": "z_image_turbo",
+        "modelManifestEntry": { "family": "z-image" },
+        "upscale": { "enabled": true }
+    }));
+    assert!(no_block.hires_fix.is_disabled());
+    validate_hires_fix_request(&no_block).expect("no hiresFix block, no refusal");
 }
 
 #[cfg(any(
@@ -653,6 +680,7 @@ fn hires_memory_context(selection: gen_core::MemorySelection) -> gen_core::Memor
             frames: 1,
             reference_count: hires_fix_reference_count(),
         },
+        reference_resources: None,
         overlay: None,
         budget: gen_core::MemoryBudget {
             total_bytes: 1 << 40,
@@ -9799,11 +9827,22 @@ fn qwen_image_2_1_live_mlx_lane_sends_an_alpha_reference_as_reference_rgba() {
                 (edit_refs[1].width, edit_refs[1].height),
                 "RGB and alpha share the fitted geometry"
             );
-            let alphas: std::collections::BTreeSet<u8> =
-                image.pixels.chunks_exact(4).map(|p| p[3]).collect();
+            let alphas: std::collections::BTreeSet<u8> = image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect();
             assert!(alphas.contains(&0) && alphas.contains(&255), "{alphas:?}");
             // Straight alpha: the transparent half keeps its authored colour, never zeroed.
-            let transparent = image.pixels.chunks_exact(4).find(|p| p[3] == 0).unwrap();
+            let transparent = image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .find(|p| p[3] == 0)
+                .unwrap();
             assert_eq!(&transparent[..3], &[10, 200, 30]);
         }
         other => panic!("the cut-out must travel as ReferenceRgba, got {other:?}"),
@@ -9921,7 +9960,7 @@ fn assert_qwen_image_2_1_native_geometry(emitted: &[Conditioning], lane: &str, f
                  upstream never crops or letterboxes a condition image"
             );
             // The plane is the asset's own, unresampled: columns 0..6 transparent, 6..12 opaque.
-            for (index, pixel) in portrait.pixels.chunks_exact(4).enumerate() {
+            for (index, pixel) in portrait.pixels.as_chunks::<4>().0.iter().enumerate() {
                 let expected = if index % 12 < 6 { 0 } else { 255 };
                 assert_eq!(
                     pixel[3], expected,
@@ -18173,7 +18212,9 @@ fn candle_preprocess_depth_estimates_off_mac() {
     assert!(
         depth
             .pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .all(|p| p[0] == p[1] && p[1] == p[2]),
         "depth control must be grayscale-broadcast"
     );

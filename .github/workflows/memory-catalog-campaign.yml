@@ -105,6 +105,7 @@ on:
           - catalog
           - qwen-image-2-1-app-lifecycle
           - iris-mlx-real-weights
+          - supra2-mlx-real-weights
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -367,6 +368,16 @@ jobs:
     with:
       source_sha: ${{ inputs.ref }}
       filter: ${{ inputs.iris_smoke_filter }}
+  supra2-mlx-real-weights:
+    if: ${{ !inputs.run_moss_training_acceptance && inputs.profile == 'supra2-mlx-real-weights' }}
+    permissions:
+      contents: read
+    # sc-24216 (epic 24212): the Supra2-IMG worker real-weight convert, render and offline lifecycle
+    # tests on nax-macos-2, at the dispatch's exact commit (`ref` must be that 40-hex SHA). Like the
+    # Iris profile above it skips BOTH catalog jobs: no walk, no commit, no push, no PR.
+    uses: ./.github/workflows/supra2-mlx-real-weights.yml
+    with:
+      source_sha: ${{ inputs.ref }}
   mlx:
     if: ${{ !inputs.run_moss_training_acceptance && (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
     name: mlx catalog campaign
@@ -419,7 +430,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
 
       - name: Fetch prebuilt MLX (sc-21382)
         # pmetal-mlx-sys's cmake build of libmlx is ~6 min on every cache miss. Exit 1 means "no
@@ -524,7 +535,7 @@ jobs:
     if: ${{ !inputs.run_moss_training_acceptance && (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle' }}
     name: candle catalog campaign
     # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
-    # choice here: both Windows runners are processes on ONE box.
+    # choice here: all four Windows listeners are processes on ONE box.
     runs-on: [self-hosted, Windows, X64, cuda]
     concurrency:
       group: memory-catalog-campaign-candle-cuda

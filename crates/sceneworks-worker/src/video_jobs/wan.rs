@@ -2638,6 +2638,7 @@ pub(super) fn video_quant_label(quant: Option<Quant>) -> (Option<String>, Option
         Some(Quant::Q4) => (Some("q4".to_owned()), Some(4)),
         Some(Quant::Q8) => (Some("q8".to_owned()), Some(8)),
         Some(Quant::Nvfp4) => (Some("nvfp4".to_owned()), None),
+        Some(Quant::Fp8Rowwise) => (Some("fp8r".to_owned()), None),
         None => (Some("bf16".to_owned()), None),
     }
 }
@@ -3168,8 +3169,13 @@ pub(super) async fn generate_video_using(
                         }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
                         Progress::Loading(_) => {}
+                        Progress::PromptUpsamplingComplete => {}
+                        // FLUX 3 image enhancement is not a Wan sampling/decode boundary.
+                        Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
                     }
                     let (status, stage, fraction, message) = match progress {
+                        Progress::PromptUpsamplingComplete => continue,
+                        Progress::ConditioningComplete | Progress::Upsampling { .. } => continue,
                         Progress::Step { current, total } => (
                             JobStatus::Running,
                             ProgressStage::Generating,

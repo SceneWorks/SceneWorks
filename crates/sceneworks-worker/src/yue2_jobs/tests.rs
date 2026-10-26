@@ -368,13 +368,20 @@ impl Generator for StubYue2 {
                 Self::publish(req, *truncated)
             }
             Behavior::LongAr { steps, millis } => {
-                let pause = Duration::from_micros(millis * 1000 / u64::from(*steps));
+                let started = Instant::now();
+                let duration = Duration::from_millis(*millis);
                 for current in 1..=*steps {
                     on_progress(Progress::Step {
                         current,
                         total: *steps,
                     });
-                    std::thread::sleep(pause);
+                    // Keep all token callbacks across the same real blocking phase, without
+                    // accumulating the OS scheduler's minimum sleep/overshoot 20,000 times.
+                    let deadline =
+                        started + duration.mul_f64(f64::from(current) / f64::from(*steps));
+                    if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+                        std::thread::sleep(remaining);
+                    }
                 }
                 Self::publish(req, (false, false))
             }

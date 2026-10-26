@@ -269,6 +269,9 @@ pub(super) fn flux2_comfyui_quant(request: &ImageRequest) -> WorkerResult<Quant>
         Some(Quant::Nvfp4) => Err(WorkerError::InvalidPayload(
             "ComfyUI FLUX.2 cannot execute the NVFP4 tier; choose q4 or q8.".to_owned(),
         )),
+        Some(Quant::Fp8Rowwise) => Err(WorkerError::InvalidPayload(
+            "ComfyUI FLUX.2 cannot execute the FP8 rowwise tier; choose q4 or q8.".to_owned(),
+        )),
         None if !explicit => Ok(FLUX2_COMFYUI_DEFAULT_QUANT),
         None => Err(WorkerError::InvalidPayload(
             "ComfyUI FLUX.2 requires q4 or q8 load-time packing; dense/bf16 is not executable."
@@ -337,7 +340,7 @@ fn flux2_comfyui_raw_settings(
         match quant {
             Quant::Q4 => json!(4),
             Quant::Q8 => json!(8),
-            Quant::Nvfp4 => Value::Null,
+            Quant::Nvfp4 | Quant::Fp8Rowwise => Value::Null,
         },
     );
     // The explicit tier label. Emitted only for the tier `mlxQuantize` cannot express, so existing

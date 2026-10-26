@@ -901,6 +901,7 @@ pub(crate) async fn finalize_training_dataset_parquet_import(
                 status: None,
                 character_id: None,
                 items: Some(payload.items),
+                preserve_caption_item_ids: Vec::new(),
             },
         )
     })

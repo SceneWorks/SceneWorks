@@ -1862,6 +1862,21 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
     Some(raw_path.to_owned())
 }
 
+/// The confined directory a job's `modelPath` (the request's `advanced.modelPath`, else the entry's
+/// injected one — [`model_path_override`]) names, through the app-managed resolver that refuses a
+/// path outside the data dir. The ONE resolution the load ([`resolve_weights_dir`]) and the
+/// failed-load diagnosis (`converted_install::explain_failed_load`) share, so a diagnosis judges —
+/// and marks — exactly the bundle the load read. `Ok(None)` when the job names no `modelPath`.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn resolve_model_path_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    model_path_override(request)
+        .map(|path| resolve_app_managed_model_dir(settings, &path, "Image modelPath"))
+        .transpose()
+}
+
 /// Typed, actionable preflight for a **convert-at-install** model whose conversion has not produced
 /// a local artifact yet (sc-20529).
 ///
@@ -1953,6 +1968,52 @@ fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
     )))
 }
 
+/// Typed, actionable preflight for an injected converted artifact that would not load (sc-24216).
+///
+/// The twin of [`unconverted_model_preflight`] for the case where the conversion DID run but its
+/// output is no longer what the engine accepts — truncated, edited, or written by an older build.
+/// For a converter with an engine-owned pin contract
+/// ([`sceneworks_core::converted_artifacts::CONTRACT_CONVERTERS`], e.g. `supra2_img`) the engine's
+/// own CHEAP check runs here (manifest, pin contract, file sizes, and a verification failure a
+/// previous failed load recorded), so a damaged bundle is refused before any load with a message
+/// naming the remedy instead of the engine's raw refusal. Same-size corruption is caught by the
+/// engine's own load-time digests and explained by [`crate::converted_install::explain_failed_load`]
+/// — never by hashing here, so a healthy install is hashed once per load. Every other converter
+/// passes untouched.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn converted_artifact_preflight(
+    request: &ImageRequest,
+    dir: &std::path::Path,
+) -> WorkerResult<()> {
+    let Some(mlx) = request.model_manifest_entry.get("mlx") else {
+        return Ok(());
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    let converter = mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let Some(problem) = sceneworks_core::converted_artifacts::converted_artifact_problem(
+        converter,
+        dir,
+        sceneworks_core::converted_artifacts::ArtifactCheck::Sizes,
+    ) else {
+        return Ok(());
+    };
+    Err(WorkerError::InvalidPayload(
+        crate::converted_install::converted_files_message(
+            crate::converted_install::model_display_name(
+                &request.model_manifest_entry,
+                &request.model,
+            ),
+            &problem,
+        ),
+    ))
+}
+
 /// Fail-loud gate for the CANDLE stub fallback (sc-20529) — the off-Mac twin of [`mlx_weights_gap`],
 /// consulted by `run_image_generate_job` immediately before it would call `generate_stub_stream`.
 ///
@@ -1995,8 +2056,8 @@ pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = model_path_override(request) {
-        let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
+    if let Some(dir) = resolve_model_path_dir(request, settings)? {
+        converted_artifact_preflight(request, &dir)?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
         // models (a single flat dir), its injected `modelPath` is the converted ROOT holding `bf16/`,
         // `q8/`, `q4/` tier subdirs (written by `convert_anima_prequant`). Descend into the requested
@@ -4950,7 +5011,14 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
         // The historical 80-step ceiling, raised to the model's own default where that is higher
         // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
         // than silently clamped below what the model ships with.
-        .map(|steps| (steps as u32).clamp(1, max_requested_steps(model.default_steps())))
+        // A declared `limits.hardMaxSteps` (sc-24215) replaces the historical ceiling; the
+        // model's own boundary refuses a request above it before this point.
+        .map(|steps| {
+            let ceiling =
+                sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)
+                    .unwrap_or_else(|| max_requested_steps(model.default_steps()));
+            (steps as u32).clamp(1, ceiling)
+        })
         .unwrap_or(model.default_steps())
 }
 
@@ -4961,7 +5029,7 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn max_requested_steps(default_steps: u32) -> u32 {
-    default_steps.max(80)
+    default_steps.max(sceneworks_core::image_request::BASE_MAX_IMAGE_STEPS)
 }
 
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
@@ -5406,6 +5474,20 @@ fn mlx_raw_settings(
     quant_bits: Option<i64>,
     guidance: Option<f32>,
 ) -> JsonObject {
+    mlx_raw_settings_for_bundle(request, None, repo, steps, quant_bits, guidance)
+}
+
+/// [`mlx_raw_settings`] for a render whose weights LOADED from `bundle` (the generic lane's resolved
+/// `weights_dir`): Supra2's unconditional-context record is read off that bundle's manifest, never
+/// re-resolved from the request (sc-24217 pre-merge review).
+fn mlx_raw_settings_for_bundle(
+    request: &ImageRequest,
+    bundle: Option<&Path>,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: Option<f32>,
+) -> JsonObject {
     let mut raw = request.advanced.clone();
     // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
     // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
@@ -5414,6 +5496,28 @@ fn mlx_raw_settings(
     raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
     raw.remove(sceneworks_core::moss_image::REPORT_KEY);
     raw.remove("moss_image_execution_report");
+    // Worker-owned (sc-24215): the pinned weights Supra2 rendered from, never a replayed copy.
+    // So are the unconditional context CFG steered against and the rendering backend (epic-review
+    // follow-up): the reproducibility record, never a replayed copy.
+    raw.remove(sceneworks_core::supra2::MODEL_REVISIONS_KEY);
+    if sceneworks_core::supra2::is_supra2(&request.model) {
+        raw.insert(
+            sceneworks_core::supra2::MODEL_REVISIONS_KEY.to_owned(),
+            sceneworks_core::supra2::pinned_revisions(&request.model_manifest_entry),
+        );
+        raw.insert(
+            sceneworks_core::supra2::UNCONDITIONAL_KEY.to_owned(),
+            sceneworks_core::supra2::unconditional_source(bundle, guidance),
+        );
+        raw.insert(
+            sceneworks_core::supra2::BACKEND_KEY.to_owned(),
+            Value::from(if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            }),
+        );
+    }
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -5979,6 +6083,7 @@ mod candle_image_load_shape_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: 24,
@@ -7774,8 +7879,12 @@ fn render_on_surface(
         surface.multi_reference_alpha,
         edit_mask,
     );
-    // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it).
+    // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it); a
+    // native count batch (sc-24215, one prompt) is that `prompt` with `count` images.
     let (prompt, prompt_batch, count) = match surface.prompt_batch {
+        Some(batch) if batch.prompts.len() == 1 => {
+            (batch.prompts[0].clone(), Vec::new(), batch.count)
+        }
         Some(batch) => (String::new(), batch.prompts.clone(), batch.count),
         None => (prompt.to_owned(), Vec::new(), 1),
     };
@@ -7877,8 +7986,8 @@ fn resolve_hires_fix_plan(
         .hires_fix
         .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
     Some(HiresFixPlan {
-        width: hires_fix_target_dimension(request.width, upscale_by),
-        height: hires_fix_target_dimension(request.height, upscale_by),
+        width: sceneworks_core::image_request::hires_fix_target_dimension(request.width, upscale_by),
+        height: sceneworks_core::image_request::hires_fix_target_dimension(request.height, upscale_by),
         steps: request.hires_fix.effective_steps(first_pass_steps),
         guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
         true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
@@ -8156,6 +8265,9 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
@@ -8217,6 +8329,9 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
@@ -8830,7 +8945,7 @@ fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImag
         &resized
     };
     let mut pixels = Vec::with_capacity(image.pixels.len() / 3 * 4);
-    for (rgb, a) in image.pixels.chunks_exact(3).zip(plane.as_raw().iter()) {
+    for (rgb, a) in image.pixels.as_chunks::<3>().0.iter().zip(plane.as_raw().iter()) {
         pixels.extend_from_slice(rgb);
         pixels.push(*a);
     }
@@ -8846,7 +8961,7 @@ fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImag
 fn split_rgba_reference(image: &gen_core::RgbaImage) -> WorkerResult<(Image, image::GrayImage)> {
     let mut rgb = Vec::with_capacity(image.pixels.len() / 4 * 3);
     let mut plane = Vec::with_capacity(image.pixels.len() / 4);
-    for pixel in image.pixels.chunks_exact(4) {
+    for pixel in image.pixels.as_chunks::<4>().0 {
         rgb.extend_from_slice(&pixel[..3]);
         plane.push(pixel[3]);
     }
@@ -10596,8 +10711,9 @@ async fn generate_stream_using(
     } else {
         (quant, quant_bits)
     };
-    let raw_settings = mlx_raw_settings(
+    let raw_settings = mlx_raw_settings_for_bundle(
         request,
+        Some(&weights_dir),
         &repo,
         steps,
         quant_bits,
@@ -10914,6 +11030,8 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
         "moss_image_base" => "candle_moss_image_base",
         "moss_image_sft" => "candle_moss_image_sft",
+        // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
+        "supra2_img" => "candle_supra2",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -10940,6 +11058,11 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
         // sibling of the `mlx_anima` label).
         "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
+        // Iris-3B (sc-25680): the off-Mac sibling of the `mlx_iris` label.
+        "iris_3b" => "candle_iris",
+        // Bernini's production stream stamps this via its own route; the request-only fallback
+        // (`adapter_id`) reaches it through here.
+        "bernini_image" => CANDLE_BERNINI_IMAGE_ADAPTER,
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -13302,8 +13425,14 @@ async fn generate_candle_stream_using(
         model.supports_quant(),
         convrot.is_some() || is_anima_model(&request.model),
     );
-    let mut raw_settings =
-        mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    let mut raw_settings = mlx_raw_settings_for_bundle(
+        request,
+        Some(&weights_dir),
+        &repo,
+        steps,
+        quant_bits,
+        guidance.or(true_cfg),
+    );
     // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
     // prompt batch's extra images (sc-25681) and an output above 1024² (sc-25684) — ride every
     // resident/sequential prediction below exactly like resident adapter bytes do:
@@ -14094,6 +14223,7 @@ async fn generate_candle_stream_using(
                 frames: 1,
                 reference_count,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: gb_to_bytes(budget.total_gb),
@@ -14786,6 +14916,7 @@ fn effective_quant_label_gated(
         Quant::Q4 => "q4",
         Quant::Q8 => "q8",
         Quant::Nvfp4 => NVFP4_TIER,
+        Quant::Fp8Rowwise => "fp8r",
     };
     let floors = active
         .iter()
@@ -14794,6 +14925,7 @@ fn effective_quant_label_gated(
                 Quant::Q4 => "q4",
                 Quant::Q8 => "q8",
                 Quant::Nvfp4 => NVFP4_TIER,
+                Quant::Fp8Rowwise => "fp8r",
             };
             format!("{}:{resident}", floor.component.as_str())
         })
@@ -14951,7 +15083,11 @@ async fn consume_gen_events_with_disclosure(
     let total_u32 = total as u32;
     // A native prompt batch (sc-25681) is ONE engine call over all `total` images: its steps
     // (the engine's `steps × count`) span the whole bar, not image 0's slice of it.
-    let one_pass = !plan.request.prompts.is_empty();
+    // So is a native count batch (sc-24215, `image.nativeCountBatch`): one call over `count` images.
+    let one_pass = !plan.request.prompts.is_empty()
+        || sceneworks_core::image_sampling_controls::native_count_batch(
+            &plan.request.model_manifest_entry,
+        );
     let (step_slices, step_label) = if one_pass {
         (1, format!("Batch of {total}"))
     } else {
@@ -15573,8 +15709,26 @@ mod candle_label_tests {
         }
         // Krea 2 Turbo (sc-7581): the candle asset stamp.
         assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
+        // Supra2-IMG (sc-24214): its own stamp, never the `candle_sdxl` fallback.
+        assert_eq!(candle_adapter_label("supra2_img"), "candle_supra2");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
+        assert_eq!(candle_adapter_label("iris_3b"), "candle_iris");
+        assert_eq!(candle_adapter_label("bernini_image"), "candle_bernini");
+        // Only the SDXL-engine ids may fall through to `candle_sdxl`; any other candle-routed model
+        // landing there is missing from the map and would stamp the wrong provenance.
+        const SDXL_ENGINE_IDS: &[&str] = &[
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "realvisxl_lightning",
+        ];
+        for model in sceneworks_core::jobs_store::candle_routed_image_models() {
+            if !SDXL_ENGINE_IDS.contains(model) {
+                assert_ne!(candle_adapter_label(model), CANDLE_ADAPTER, "{model}");
+            }
+        }
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
         for model in [
             "z_image_turbo",

@@ -30,6 +30,7 @@ import {
   datasetReferenceCap,
   datasetSaveValidation,
   imageAssetName,
+  preserveUneditedDatasetCaptions,
   normalizeDatasetAssetIds,
   referenceDraftsDiffer,
   referenceDraftsFromDataset,
@@ -462,7 +463,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // if the draft it started from is still current after its second await.
   const datasetLoadGenerationRef = useRef(0);
   const datasetDraftRevisionRef = useRef(0);
-  const handledParquetImportJobsRef = useRef(new Set());
+  const handledDatasetJobsRef = useRef(new Set());
   // sc-24815: the "attach this trained LoRA to <character>" offer. An answer is recorded
   // twice — per project in localStorage (survives a reload) and in this Map (survives a
   // blocked or quota-limited store) — and every check unions the two through
@@ -639,16 +640,20 @@ export function TrainingStudio({ mode = "training" } = {}) {
   useEffect(() => {
     datasetDraftRevisionRef.current += 1;
   }, [activeDataset?.id, draftName, selectedAssetIds, associatedCharacterId, captionDraftById, referenceDraftById]);
-  const completedParquetImport = useMemo(
+  // Both jobs mutate the saved dataset asynchronously. Refresh captions just like imported
+  // images, rather than leaving the editor's pre-job draft ready to overwrite the results.
+  const completedDatasetJobs = useMemo(
     () =>
-      jobs.find(
+      jobs.filter(
         (job) =>
-          job.type === "dataset_parquet_import" &&
+          ["dataset_parquet_import", "training_caption"].includes(job.type) &&
           job.status === "completed" &&
-          job.payload?.datasetId === activeDataset?.id,
-      ) ?? null,
-    [jobs, activeDataset?.id],
+          job.payload?.datasetId === activeDataset?.id &&
+          (!job.projectId || job.projectId === activeProject?.id),
+      ),
+    [jobs, activeDataset?.id, activeProject?.id],
   );
+  const completedDatasetJob = completedDatasetJobs[0];
   // The newest completed subject-mask job for this dataset (sc-2126): its id keys the mask-report
   // refetch, so the editor picks up masks the moment the worker finishes.
   const completedSubjectMaskJobId = useMemo(
@@ -661,8 +666,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
       )?.id ?? "",
     [jobs, activeDataset?.id],
   );
-  const completedParquetImportId = completedParquetImport?.id ?? "";
-  const completedParquetImportCount = completedParquetImport?.result?.importedItemCount;
+  // One refresh covers all finished writes. Include every id so a job finishing out of
+  // order still invalidates the editor even when the newest-created job was already handled.
+  const completedDatasetJobId = completedDatasetJobs.map((job) => job.id).sort().join(",");
+  const completedDatasetJobType = completedDatasetJob?.type;
+  const completedDatasetJobCount = completedDatasetJobType === "training_caption"
+    ? completedDatasetJob?.result?.captionedItemCount
+    : completedDatasetJob?.result?.importedItemCount;
   // Unsaved work the destructive-transition guards protect (sc-11970): an edited saved
   // dataset (dirty) OR a brand-new dataset the user has started building (name / members /
   // character) but not yet saved. A new draft isn't "dirty" (no baseline), but discarding
@@ -1287,7 +1297,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
 
   async function openDataset(
     datasetId,
-    { preserveCurrentDraft = false, expectedDraftRevision, canCommit } = {},
+    { preserveCurrentDraft = false, expectedDraftRevision, canCommit, onCommit } = {},
   ) {
     // Opening a DIFFERENT dataset re-seeds the whole editor; confirm before discarding an
     // unsaved draft (sc-11970). Re-opening the SAME dataset (internal reloads after a save)
@@ -1329,6 +1339,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       ) {
         return null;
       }
+      onCommit?.();
       setActiveDataset(dataset);
       setDraftName(dataset?.name ?? "");
       setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
@@ -1408,17 +1419,17 @@ export function TrainingStudio({ mode = "training" } = {}) {
   useEffect(() => {
     if (
       !datasetLibraryMode ||
-      !completedParquetImportId ||
+      !completedDatasetJobId ||
       !activeDataset?.id ||
       dirty ||
-      handledParquetImportJobsRef.current.has(completedParquetImportId)
+      handledDatasetJobsRef.current.has(completedDatasetJobId)
     ) {
       return undefined;
     }
-    const jobId = completedParquetImportId;
+    const jobId = completedDatasetJobId;
     const datasetId = activeDataset.id;
     const draftRevision = datasetDraftRevisionRef.current;
-    const handledJobs = handledParquetImportJobsRef.current;
+    const handledJobs = handledDatasetJobsRef.current;
     handledJobs.add(jobId);
     let canceled = false;
     let settled = false;
@@ -1435,20 +1446,28 @@ export function TrainingStudio({ mode = "training" } = {}) {
           preserveCurrentDraft: true,
           expectedDraftRevision: draftRevision,
           canCommit,
+          // Hydration can briefly make the editor dirty before the draft-seeding effect.
+          // Mark the refresh handled before those state updates trigger cleanup.
+          onCommit: () => { settled = true; },
         });
         if (canceled || !dataset) return;
-        const imported = completedParquetImportCount;
+        const count = completedDatasetJobCount;
         setDatasetMessage(
-          Number.isFinite(imported)
-            ? `Parquet import completed with ${imported} image${imported === 1 ? "" : "s"}.`
-            : "Parquet import completed.",
+          completedDatasetJobType === "training_caption"
+            ? Number.isFinite(count)
+              ? `Captioning completed for ${count} image${count === 1 ? "" : "s"}.`
+              : "Captioning completed."
+            : Number.isFinite(count)
+              ? `Parquet import completed with ${count} image${count === 1 ? "" : "s"}.`
+              : "Parquet import completed.",
         );
         setDatasetError("");
         settled = true;
       } catch (err) {
         if (!canceled) {
           handledJobs.delete(jobId);
-          setDatasetError(`Parquet import completed, but the dataset could not be reloaded: ${err.message}`);
+          const label = completedDatasetJobType === "training_caption" ? "Captioning" : "Parquet import";
+          setDatasetError(`${label} completed, but the dataset could not be reloaded: ${err.message}`);
         }
       }
     })();
@@ -1461,8 +1480,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
   }, [
     activeDataset?.id,
     activeProject?.id,
-    completedParquetImportCount,
-    completedParquetImportId,
+    completedDatasetJobCount,
+    completedDatasetJobId,
+    completedDatasetJobType,
     datasetLibraryMode,
     dirty,
     refreshTrainingDatasets,
@@ -1977,8 +1997,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
       name: draftName,
       selectedAssetIds: selectionOverride ?? selectedAssetIds,
     });
+    // Caption jobs can finish while this editor holds an older snapshot (or a dirty draft
+    // that cannot be auto-refreshed). Never re-save its unedited captions over those results.
     const dataset = base
-      ? await updateDataset(base.id, payload)
+      ? await updateDataset(base.id, preserveUneditedDatasetCaptions(payload, activeDataset ?? base))
       : await createDataset(payload);
     if (dataset) {
       setActiveDataset(dataset);

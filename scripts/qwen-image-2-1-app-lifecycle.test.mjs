@@ -147,10 +147,14 @@ function assertDispatcherIsolation(workflow) {
   assert.match(workflow, /profile:[\s\S]*?default: catalog/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/qwen-image-2-1-app-lifecycle.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/iris-mlx-real-weights.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
+  assert.match(workflow, /uses: \.\/\.github\/workflows\/supra2-mlx-real-weights.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
   assert.match(workflow, /inference_sha: \$\{\{ inputs.inference_sha \}\}/);
   assert.match(workflow, /qwen_app_runner_target:[\s\S]*?options:\s*\n\s*- primary\s*\n\s*- secondary[\s\S]*?default: primary/);
   assert.match(workflow, /runner_target: \$\{\{ inputs.qwen_app_runner_target \}\}/);
   const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)].map((match) => match[1]);
+  // Every non-MOSS dispatcher job keeps the exact name and order main requires; the MOSS training
+  // acceptance stages (sc-26589) are the epic's additions and are checked separately below.
+  assert.deepEqual(jobs.filter((job) => !job.startsWith("moss-")), ["qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
   const mossJobs = jobs.filter((job) => job.startsWith("moss-"));
   assert.ok(mossJobs.length > 0, "manual MOSS dispatcher stages must exist");
   const runs = (profile, backend, runMoss = false) => jobs.filter((job) => {
@@ -163,12 +167,13 @@ function assertDispatcherIsolation(workflow) {
   for (const backend of ["mlx", "candle"]) {
     assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
     assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
+    assert.deepEqual(runs("supra2-mlx-real-weights", backend), ["supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
     assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
     assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
     const profiles = new Set(["qwen-image-2-1-app-lifecycle", "iris-mlx-real-weights", "catalog", "", "unknown",
       ...[...workflow.matchAll(/inputs\.profile\s*==\s*'([^']*)'/g)].map((match) => match[1])]);
     for (const profile of profiles) {
-      if (!["qwen-image-2-1-app-lifecycle", "iris-mlx-real-weights", "catalog", ""].includes(profile)) {
+      if (!["qwen-image-2-1-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "catalog", ""].includes(profile)) {
         assert.deepEqual(runs(profile, backend), [], "every unrecognized profile must fail closed");
       }
       assert.deepEqual(runs(profile, backend, true), mossJobs,

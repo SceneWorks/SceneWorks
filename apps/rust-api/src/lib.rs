@@ -23,9 +23,9 @@ use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
     ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, ImageUpscaleRequest, JobCreateRequest, JobSnapshot, JobStatus, JobType,
-    JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary,
-    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    GenerationMetricsRow, HiresFixRequest, ImageUpscaleRequest, JobCreateRequest, JobSnapshot,
+    JobStatus, JobType, JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest,
+    QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
     WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
@@ -37,6 +37,7 @@ use sceneworks_core::jobs_store::{
     model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
+    MAX_LISTED_JOBS,
 };
 use sceneworks_core::lora_family::{
     accepted_lora_families, apply_adapter_metadata_to_manifest_entry,

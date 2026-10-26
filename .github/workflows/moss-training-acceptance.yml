@@ -107,10 +107,10 @@ jobs:
         if: ${{ matrix.backend == 'cuda' }}
         with:
           workspace-directory: sceneworks-source
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         if: ${{ matrix.backend == 'mlx' }}
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Prepare release MLX library (not model weights)
         if: ${{ matrix.backend == 'mlx' }}
         shell: bash
@@ -231,10 +231,10 @@ jobs:
         if: ${{ matrix.backend == 'cuda' }}
         with:
           workspace-directory: sceneworks-source
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         if: ${{ matrix.backend == 'mlx' }}
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Prepare release MLX library (not model weights)
         if: ${{ matrix.backend == 'mlx' }}
         shell: bash

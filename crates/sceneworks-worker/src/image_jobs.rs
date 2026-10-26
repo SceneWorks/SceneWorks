@@ -473,12 +473,37 @@ fn validate_prompt_enhancement_request(
     validate_prompt_enhancement_route(request, settings)
 }
 
+/// Run one image generate/edit job. A failure on a convert-at-install model with an engine pin
+/// contract is explained (and a damaged converted bundle recorded for the catalog) by
+/// [`crate::converted_install::explain_job_result`] — sc-24216: same-size corruption of the bundle
+/// or of a shared co-requisite only surfaces as the engine's own load error.
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    let result = run_image_generate_job_unexplained(api, settings, job).await;
+    crate::converted_install::explain_job_result(settings, &job.payload, result).await
+}
+
+async fn run_image_generate_job_unexplained(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
     sceneworks_core::moss_image::native_request(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    // sc-24215: Supra2-IMG's published interface, re-applied before load (the API refuses the same
+    // request before the job exists), so a replayed or hand-built payload never reaches the engine
+    // with an input the generic lane would silently drop.
+    sceneworks_core::supra2::validate_request(
         &job.payload,
         &job.payload
             .get("modelManifestEntry")
@@ -3553,106 +3578,13 @@ fn resolve_family(request: &ImageRequest) -> String {
     String::new()
 }
 
-fn hires_fix_target_dimension(dimension: u32, upscale_by: f32) -> u32 {
-    (dimension as f64 * upscale_by as f64).round() as u32
-}
-
-/// Reject unsupported Hires.fix request shapes before any model load. Hires.fix is a plain
-/// text-to-image second pass: existing edit/control inputs, PiD, multi-phase sampling, and the
-/// separate post-generation upscaler are intentionally mutually exclusive rather than being
-/// silently dropped by a provider.
+/// Reject unsupported Hires.fix request shapes before any model load. The checks live in
+/// sceneworks-core (`image_request::hires_fix_request_error`, sc-26644) so the API's enqueue gate
+/// and this pre-model-load refusal are the SAME list; only the family resolution is worker-local
+/// (the generators-registry fallback below).
 fn validate_hires_fix_request(request: &ImageRequest) -> WorkerResult<()> {
-    if request.hires_fix.is_disabled() {
-        return Ok(());
-    }
-    if request.mode != "text_to_image" {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix is only available for text-to-image generation.".to_owned(),
-        ));
-    }
-    if request.upscale.enabled {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix and the post-generation Upscale option are mutually exclusive.".to_owned(),
-        ));
-    }
-    let family = resolve_family(request);
-    let advertises_img2img = request
-        .model_manifest_entry
-        .get("ui")
-        .and_then(|ui| ui.get("img2img"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if family != "sdxl" && !advertises_img2img {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Hires.fix requires an img2img-capable model; '{}' does not advertise that capability.",
-            request.model
-        )));
-    }
-    let has_edit_or_control_input = request.source_asset_id.is_some()
-        || request.reference_asset_id.is_some()
-        || !request.reference_asset_ids.is_empty()
-        || request.mask_asset_id.is_some()
-        || request.character_id.is_some()
-        || request.character_look_id.is_some()
-        || request
-            .advanced
-            .get("poses")
-            .and_then(Value::as_array)
-            .is_some_and(|poses| !poses.is_empty())
-        || request
-            .advanced
-            .get("controlImage")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty());
-    if has_edit_or_control_input {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix cannot be combined with image-edit, reference, character, mask, or strict-control inputs."
-                .to_owned(),
-        ));
-    }
-    if request
-        .advanced
-        .get("usePid")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix and PiD super-resolution are mutually exclusive.".to_owned(),
-        ));
-    }
-    if request
-        .advanced
-        .get("phases")
-        .and_then(Value::as_array)
-        .is_some_and(|phases| !phases.is_empty())
-    {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix cannot be combined with multi-phase sampling.".to_owned(),
-        ));
-    }
-    let acceleration_sampler = request
-        .advanced
-        .get("sampler")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|sampler| matches!(sampler.as_str(), "lightning" | "lcm" | "hyper"));
-    if request.model == "realvisxl_lightning" || acceleration_sampler {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix is not supported by Lightning, LCM, or Hyper acceleration samplers because they do not accept the required img2img second pass."
-                .to_owned(),
-        ));
-    }
-    let upscale_by = request.hires_fix.effective_upscale_by();
-    let target_width = hires_fix_target_dimension(request.width, upscale_by);
-    let target_height = hires_fix_target_dimension(request.height, upscale_by);
-    if target_width > 4096 || target_height > 4096 {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Hires.fix target {}x{} exceeds the 4096px image limit; lower the base resolution or Upscale by value.",
-            target_width, target_height
-        )));
-    }
-    Ok(())
+    sceneworks_core::image_request::hires_fix_request_error(request, &resolve_family(request))
+        .map_or(Ok(()), |message| Err(WorkerError::InvalidPayload(message)))
 }
 
 /// Resolve the seed for image `index`, matching the Python worker's `resolve_seed`:
@@ -3794,6 +3726,15 @@ include!("image_jobs/stream.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod iris;
+
+// Supra2-IMG (sc-24213 MLX / sc-24214 Candle): pins the generic image lane's wiring for
+// `supra2_img` (bundle + co-requisite staging) on whichever backend the build links, and carries the
+// real-weight worker renders (the MLX arm on macOS, the production Candle job on CUDA).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod supra2;
 
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine

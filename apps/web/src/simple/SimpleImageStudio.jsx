@@ -5,6 +5,7 @@ import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
+import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { resultGridColumns } from "./breakpoint.js";
@@ -32,7 +33,13 @@ import {
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
-import { maxStepsForModel, negativePromptInertAtGuidance, patchGridHint } from "../samplerOptions.js";
+import {
+  maxStepsForModel,
+  nativeResolutionHint,
+  negativePromptInertAtGuidance,
+  patchGridHint,
+  promptTokenLimitHint,
+} from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
   qwenRewriterAppliesTo,
@@ -184,7 +191,11 @@ export function SimpleImageStudio() {
       return;
     }
     if (resolutions.length && !resolutions.includes(resolution)) {
-      setResolution(preferredResolution(selectedModel, resolutions));
+      const dims = parseResolution(resolution);
+      setResolution(
+        (dims && pickClosestResolution(dims.width, dims.height, resolutions))
+          || preferredResolution(selectedModel, resolutions),
+      );
     }
   }, [resolutions, resolution, selectedModel, setResolution]);
 
@@ -293,6 +304,9 @@ export function SimpleImageStudio() {
   });
   const dimensionError = dimensionConstraintMessage(dimensionEval);
   const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
+  // sc-24215: the same native-size and prompt-token statements Image Studio shows.
+  const nativeResolutionNotice = nativeResolutionHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel);
 
   // The ORDERED list the render conditions on: the armed reference first (it is the one the tile
   // shows), then the extras in the order the user arranged them.
@@ -497,6 +511,11 @@ export function SimpleImageStudio() {
           placeholder="Describe the image you want…"
           value={prompt}
         />
+        {promptTokenNotice ? (
+          <span className="field-hint" role="note">
+            {promptTokenNotice}
+          </span>
+        ) : null}
         {/* Edit tab only: the built-in edit recipes. Text mode has the Style strip for the
             same job; an instruction like "deblur this image" means nothing to text-to-image. */}
         {mode === "edit_image" ? <EditPromptTemplates onApply={setPrompt} variant="simple" /> : null}
@@ -623,6 +642,11 @@ export function SimpleImageStudio() {
           {patchGridNotice ? (
             <span className="field-hint patch-grid-hint" role="note">
               {patchGridNotice}
+            </span>
+          ) : null}
+          {nativeResolutionNotice ? (
+            <span className="field-hint" role="note">
+              {nativeResolutionNotice}
             </span>
           ) : null}
         </div>

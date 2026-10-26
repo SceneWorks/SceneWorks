@@ -2,6 +2,7 @@ import { INFERENCE_REVISION, INFERENCE_SOURCE_REVISION } from "./starvector-term
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -9,10 +10,42 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { claimTupleMarker, consolidateCanonicalArtifacts, inventory, sealReceipt, validateInferencePreflight, verifyInferenceCheckout, verifyInferenceValidatorDiff, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
 
+// The main checkout's root — the directory whose parent holds the sibling `inference` clone.
+// Read through the git common dir rather than `process.cwd()`, because `npm run check` is often
+// run from a git worktree where `../inference` resolves to a completely different directory.
+function mainCheckoutRoot() {
+  try {
+    const gitCommonDir = execFileSync("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" }).trim();
+    return path.dirname(gitCommonDir);
+  } catch {
+    return process.cwd();
+  }
+}
+
+// The exact pinned inference checkout the golden fixture builds against. CI supplies it
+// explicitly: check.yml inits `$RUNNER_TEMP/starvector-pinned-inference` and points
+// STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT at it, so the gate always runs where a merge is
+// decided. Locally we look for the sibling `inference` clone of SceneWorks/inference.
+//
+// With no checkout present the fixtures that build against it SKIP, naming the dependency and
+// every path looked at. Going red there says nothing about the code under test — only that this
+// machine has no inference clone — while a silent pass would hide a gate CI really does run.
+const inferenceCandidates = [
+  process.env.STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT,
+  path.join(mainCheckoutRoot(), "..", "inference"),
+  path.resolve("../inference"),
+  path.resolve("../sc-22261-inference-integration"),
+].filter(Boolean);
+const inferenceRepository = inferenceCandidates.find((candidate) => existsSync(candidate)) ?? null;
+const inferenceSkip = inferenceRepository
+  ? false
+  : `no inference checkout; set STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT (looked in ${inferenceCandidates.join(", ")})`;
+if (!inferenceRepository && process.env.CI) {
+  throw new Error("CI historical integration requires STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT; missing source cannot skip the golden validator tests");
+}
 // CI may supply exact source objects. Local tests may READ an available Cargo
 // checkout, but every fetch/ref/checkout lives in a new, privately owned repository.
 // Never attach a worktree to a developer, peer, or shared Cargo repository.
-const inferenceRepository = process.env.STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT;
 const ownedInferenceCheckouts = new Set();
 let inferenceRoot = inferenceRepository;
 const campaignPlan = JSON.parse(await readFile("release/starvector-terminal-campaign-v1.json", "utf8"));
@@ -50,10 +83,13 @@ async function inferenceObjectSource() {
   }
   return `https://github.com/${campaignPlan.inference_contract.repository}`;
 }
+const fixtureRoots = new Set(), fixtureCheckouts = new Set();
+async function fixtureRoot(prefix) { const root = await mkdtemp(prefix); fixtureRoots.add(root); return root; }
 async function pinnedInferenceCheckout(root) {
   const checkout = path.join(root, "pinned-inference"), source = await inferenceObjectSource();
   await mkdir(checkout);
   ownedInferenceCheckouts.add(checkout);
+  fixtureCheckouts.add(checkout);
   try {
     execFileSync("git", ["init", "-q"], { cwd: checkout });
     execFileSync("git", ["fetch", "--quiet", "--no-tags", "--depth=2", source, permanentPin, preflightRevision], { cwd: checkout });
@@ -67,20 +103,39 @@ async function pinnedInferenceCheckout(root) {
 }
 async function removePinnedInference(checkout) {
   assert.ok(ownedInferenceCheckouts.delete(checkout), "cleanup is confined to this test's owned repository");
+  fixtureCheckouts.delete(checkout);
   await rm(checkout, { recursive: true, force: true });
 }
+async function cleanupFixtures() {
+  inferenceRoot = inferenceRepository;
+  for (const checkout of [...fixtureCheckouts]) if (ownedInferenceCheckouts.has(checkout)) await removePinnedInference(checkout);
+  for (const root of fixtureRoots) { await rm(root, { recursive: true, force: true }); fixtureRoots.delete(root); }
+}
+test.afterEach(cleanupFixtures);
+
+test("failed fixture setup releases its registered inference checkout and scratch files", { skip: inferenceSkip }, async () => {
+  const root = await fixtureRoot(path.join(tmpdir(), "starvector-cleanup-"));
+  const checkout = await pinnedInferenceCheckout(root);
+  await assert.rejects(async () => {
+    try { throw new Error("injected fixture failure"); }
+    finally { await cleanupFixtures(); }
+  }, /injected fixture failure/);
+  await assert.rejects(() => readFile(path.join(checkout, ".git")), { code: "ENOENT" });
+  await cleanupFixtures();
+});
 
 test("required CI fetches the exact terminal inference revision", async () => {
   const workflow = await readFile(".github/workflows/check.yml", "utf8");
-  assert.ok(workflow.includes(`git -C "$inference_root" fetch --depth=2 origin ${permanentPin}`));
-  assert.ok(workflow.includes(`test "$(git -C "$inference_root" rev-parse HEAD)" = ${permanentPin}`));
+  const { historyRequirements } = await import("./prepare-inference-history.mjs");
+  const requirements = historyRequirements(process.cwd());
+  assert.equal(requirements.terminal, permanentPin);
+  assert.ok(requirements.revisions.includes(preflightRevision));
+  assert.match(workflow, /name: Fetch and verify all immutable inference history\n        run: node scripts\/prepare-inference-history\.mjs/);
+  assert.match(workflow, /name: Run historical source and anchor closure integration\n        run: node scripts\/scaffold-test-selection\.mjs --history/);
 });
 
-test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", { skip: process.platform === "win32" ? "canonical evidence sealing runs on macOS; Windows only produces portable tuple artifacts" : false }, async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-terminal-")), checkout = await pinnedInferenceCheckout(root);
-  inferenceRoot = checkout;
-  t.after(async () => { await removePinnedInference(checkout); await rm(root, { recursive: true, force: true }); });
-  const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks")); const evidence = path.join(root, "evidence"), output = path.join(root, "output"); await mkdir(evidence); const { validator, corpus } = await golden(evidence, sceneWorksRoot);
+test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", { skip: process.platform === "win32" ? "canonical evidence sealing runs on macOS; Windows only produces portable tuple artifacts" : inferenceSkip }, async () => {
+  const root = await fixtureRoot(path.join(tmpdir(), "starvector-terminal-")); inferenceRoot = await pinnedInferenceCheckout(root); const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks")); const evidence = path.join(root, "evidence"), output = path.join(root, "output"); await mkdir(evidence); const { validator, corpus } = await golden(evidence, sceneWorksRoot);
   await assert.rejects(() => sealReceipt({ sceneWorksRoot, planPath: path.join(process.cwd(), "release/starvector-terminal-campaign-v1.json"), inferenceRoot, evidenceRoot: evidence, output: path.join(root, "real-output"), campaignRunId: "campaign", permanentPin }), /tuple-controller/);
   const receipt = await sealReceipt({ sceneWorksRoot, planPath: path.join(process.cwd(), "release/starvector-terminal-campaign-v1.json"), inferenceRoot, evidenceRoot: evidence, output, campaignRunId: "campaign", permanentPin, syntheticFixture: true });
   validator.validateReceipt(receipt, validator.validatePlan(corpus), inferenceRevision, receipt.sceneworks_revision, corpus);
@@ -101,7 +156,7 @@ test("exact pinned validator accepts sealed golden receipt and rejects every gat
 });
 
 test("sealer reconstructs exact colon-bearing canonical paths from portable tuple artifacts", { skip: process.platform === "win32" ? "canonical evidence sealing runs on macOS; Windows only produces portable tuple artifacts" : false }, async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-canonical-")), tupleRoot = path.join(root, "tuple"), suiteRoot = path.join(root, "suite"), canonical = path.join(root, "canonical");
+  const root = await fixtureRoot(path.join(tmpdir(), "starvector-canonical-")), tupleRoot = path.join(root, "tuple"), suiteRoot = path.join(root, "suite"), canonical = path.join(root, "canonical");
   const bytes = Buffer.from("bound artifact"), digest = sha(bytes), logical = "runs/candle-cuda:8b/cases/0/preview", portable = logical.replace("candle-cuda:8b", "candle-cuda__colon__8b");
   const source = path.join(tupleRoot, ...portable.split("/")); await mkdir(path.dirname(source), { recursive: true }); await writeFile(source, bytes);
   const validator = { buildArtifactManifest: () => ({ entries: [{ path: logical, sha256: digest }] }) };
@@ -111,18 +166,15 @@ test("sealer reconstructs exact colon-bearing canonical paths from portable tupl
   await assert.rejects(() => consolidateCanonicalArtifacts({}, {}, validator, path.join(root, "bad"), new Map([["candle-cuda:8b", tupleRoot]]), suiteRoot), /source digest drifted/);
 });
 
-test("preflight requires the exact clean inference checkout and current Cargo permanent pin", async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-scene-")), checkout = await pinnedInferenceCheckout(root);
-  inferenceRoot = checkout;
-  t.after(async () => { await removePinnedInference(checkout); await rm(root, { recursive: true, force: true }); });
-  const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks"));
+test("preflight requires the exact clean inference checkout and current Cargo permanent pin", { skip: inferenceSkip }, async () => {
+  const root = await fixtureRoot(path.join(tmpdir(), "starvector-scene-")); inferenceRoot = await pinnedInferenceCheckout(root); const sceneWorksRoot = await fakeSceneWorks(path.join(root, "sceneworks"));
   await verifyInferenceCheckout(inferenceRoot, campaignPlan.inference_contract); await verifyPermanentPin(sceneWorksRoot, permanentPin);
   await assert.rejects(() => verifyPermanentPin(sceneWorksRoot, "0".repeat(40)), /terminal inference source revision/);
   inferenceRoot = inferenceRepository;
 });
 
 test("validator compatibility permits only the exact additive tooling diff from the measured revision", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-validator-source-"));
+  const root = await fixtureRoot(path.join(tmpdir(), "starvector-validator-source-"));
   execFileSync("git", ["init", "-q"], { cwd: root });
   execFileSync("git", ["config", "user.email", "fixture@example.invalid"], { cwd: root });
   execFileSync("git", ["config", "user.name", "fixture"], { cwd: root });
@@ -140,16 +192,16 @@ test("validator compatibility permits only the exact additive tooling diff from 
   await assert.rejects(() => verifyInferenceValidatorDiff(root, { base_revision: revision, revision: deletion, changed_paths: ["README.md"] }), /non-additive tooling change/);
 });
 
-test("inference preflight requires every exact inventory and native-hook artifact", async (t) => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-preflight-")), artifacts = path.join(root, "artifacts"), checkout = await pinnedInferenceCheckout(root);
-  t.after(async () => { await removePinnedInference(checkout); await rm(root, { recursive: true, force: true }); });
-  await mkdir(artifacts);
+test("inference preflight requires every exact inventory and native-hook artifact", { skip: inferenceSkip }, async (t) => {
+  const root = await fixtureRoot(path.join(tmpdir(), "starvector-preflight-")), artifacts = path.join(root, "artifacts"), checkout = await pinnedInferenceCheckout(root); await mkdir(artifacts);
   const file = async (name) => { await writeFile(path.join(artifacts, name), "artifact"); return { path: name, sha256: digest }; };
   const index = { workflow_run_id: "run", workflow_run_attempt: 1, head_sha: preflightRevision, inventory_artifacts: [{ tier: "1b", ...(await file("one")) }, { tier: "8b", ...(await file("eight")) }], hook_logs: [] };
   for (const key of ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"]) { const [backend, tier] = key.split(":"); index.hook_logs.push({ backend, tier, ...(await file(key.replace(":", "-"))) }); }
   const sealed = structuredClone(index);
   const source = path.join(artifacts, "preflight.json"); await writeFile(source, JSON.stringify(index));
-  const previous = process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = source;
+  const previous = process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT;
+  t.after(() => { if (previous === undefined) delete process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; else process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = previous; });
+  process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = source;
   const verified = await validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract); assert.equal(Object.keys(verified.sources).length, 6);
   await writeFile(path.join(artifacts, "mlx-1b"), "drift"); await assert.rejects(() => validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract), /missing or mismatched/);
   await writeFile(path.join(artifacts, "mlx-1b"), "artifact"); await symlink(path.join(artifacts, "mlx-1b"), path.join(artifacts, "linked-hook")); index.hook_logs[0].path = "linked-hook"; await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract), /missing or mismatched/);
@@ -158,12 +210,13 @@ test("inference preflight requires every exact inventory and native-hook artifac
   index.workflow_run_id = sealed.workflow_run_id;
   index.hook_logs.pop(); await writeFile(source, JSON.stringify(index)); await assert.rejects(() => validateInferencePreflight(checkout, permanentPin, sealed, campaignPlan.inference_contract), /identity is invalid/);
   if (previous === undefined) delete process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT; else process.env.STARVECTOR_TERMINAL_INFERENCE_PREFLIGHT = previous;
+  await removePinnedInference(checkout);
 });
 
 
 
 test("tuple marker, bytewise inventory, and symlink policy prevent mixed evidence", async () => {
-  const root = await mkdtemp(path.join(tmpdir(), "starvector-marker-"));
+  const root = await fixtureRoot(path.join(tmpdir(), "starvector-marker-"));
   await claimTupleMarker(root, permanentPin, "campaign", "mlx:1b");
   await assert.rejects(() => claimTupleMarker(root, permanentPin, "campaign", "mlx:1b"), /tuple already/);
   await mkdir(path.join(root, "nested")); await writeFile(path.join(root, "nested", "z"), "z"); await writeFile(path.join(root, "A"), "a");

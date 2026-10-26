@@ -6649,6 +6649,188 @@
       }
     },
     {
+      // Supra2-IMG (epic sc-24212, story sc-24213) — SupraLabs' 104.1M-parameter rectified-flow DiT
+      // at 256x256, conditioned on google/flan-t5-base and decoded by stabilityai/sd-vae-ft-mse,
+      // served natively by inference's `mlx-gen-supra2` on Apple Silicon (sc-24213) and
+      // `candle-gen-supra2` on Windows/Linux (sc-24214; CUDA, or CPU where Candle CPU is allowed) —
+      // ONE engine id `supra2_img`, family `supra2`, loading the same converted bundle and the same
+      // two pinned components on both backends.
+      //
+      // INSTALL (E3). Three upstream components, each pinned to an immutable revision and NOT
+      // re-hosted by SceneWorks:
+      //   * the denoiser checkpoint `model_final_ema.pt` (Apache-2.0) — the primary download, pinned
+      //     by exact size + sha256 (`gen_core::supra2::SUPRA2_SOURCE`);
+      //   * `text_encoder` = google/flan-t5-base (Apache-2.0): config, encoder weights, tokenizer;
+      //   * `vae` = stabilityai/sd-vae-ft-mse (MIT): config + decoder weights.
+      // The upstream checkpoint is a torch `.pt` pickle, so the install is convert-at-install
+      // (`mlx.requiresConversion`): the `supra2_img` converter runs the inference-owned
+      // `gen_core::supra2::convert_pinned_checkpoint` (sha256 + exact 237-tensor validation) into a
+      // local native bundle under <data>/models/mlx/supra2_img (the same backend-neutral bundle on
+      // every OS; the `mlx` block name is historical — `supra2_img` is in CANDLE_NATIVE_CONVERTERS,
+      // so the convert affordance and converted-state probe apply off-Mac too) and re-verifies both component
+      // snapshots against their pinned sizes + sha256 (`FLAN_T5_BASE` / `SD_VAE`). SceneWorks does
+      // not re-implement any of it. Generation then reads only local files: the bundle is the
+      // LoadSpec weights dir and the two co-requisites are staged as `LoadSpec::components`
+      // (`text_encoder`, `vae`) by the generic `attach_required_components` — nothing downloads at
+      // generation time.
+      //
+      // CONTROL SURFACE. The engine renders exactly 256x256, prompt + seed (default 0) + steps
+      // (default 50, uniform Euler flow) + guidance (default 3.0; CFG only above 1) + count; it
+      // refuses negative prompts, other sizes, quantization, adapters and conditioning, so the entry
+      // declares one resolution, no negative prompt, no sampler/scheduler menu, no tier axis and no
+      // LoRA family. sc-24215: the API and the worker refuse anything else before execution
+      // (`sceneworks_core::supra2::validate_request`), and `image.nativeCountBatch` sends `count`
+      // to the engine as one call.
+      "id": "supra2_img",
+      "name": "Supra2-IMG",
+      "family": "supra2",
+      "type": "image",
+      "adapter": "mlx_supra2",
+      // Served on both lanes under the same engine id (sc-24213 MLX / sc-24214 Candle), so the entry
+      // is not platform-scoped and every download below applies on every OS.
+      "macOnly": false,
+      "capabilities": ["text_to_image"],
+      "image": {
+        "supportsNegativePrompt": false,
+        // The Flan-T5 context the engine reads (gen_core::supra2::MAX_PROMPT_TOKENS = the
+        // descriptor's `max_prompt_tokens`); longer prompts are truncated and reported (sc-24216).
+        "maxPromptTokens": 128,
+        // `count` images of the one prompt render in ONE engine call, image k on seed + k — the
+        // published multi-image interface (sc-24215).
+        "nativeCountBatch": true
+      },
+      "license": "Apache-2.0 AND MIT",
+      "licenseUrl": "https://huggingface.co/SupraLabs/Supra2-IMG/blob/10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b/README.md",
+      "licenseNotice": "Supra2-IMG downloads three upstream components, each under its own licence: the Supra2-IMG denoiser (SupraLabs/Supra2-IMG) is Apache-2.0, the Flan-T5-Base text encoder and tokenizer (google/flan-t5-base) are Apache-2.0, and the SD VAE ft-MSE decoder (stabilityai/sd-vae-ft-mse) is MIT. Each licence is declared in its model card; none of the repositories ships a separate LICENSE file.",
+      "downloads": [
+        // The upstream denoiser checkpoint (Apache-2.0), pulled directly and converted on this
+        // machine. EXACT bytes + sha256 of the one pinned file (gen_core::supra2::SUPRA2_SOURCE).
+        {
+          "provider": "huggingface",
+          "repo": "SupraLabs/Supra2-IMG",
+          "revision": "10dec6e4b4b5d1c44fd1d7d3fe5e50137333da5b",
+          "default": true,
+          "license": "Apache-2.0",
+          "files": ["model_final_ema.pt"],
+          "expectedSizeBytes": 416651529,
+          "expectedSha256": "e96aa0537e0fd120af82b3a606dd50c90ae079ac7aa97b38a8da4882daeeee48",
+          "estimatedSizeBytes": 416651529,
+          "footprint": { "diskSizeBytes": 416651529, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        // `text_encoder` (Apache-2.0): exactly the three files the engine reads at the pinned
+        // revision (gen_core::supra2::FLAN_T5_BASE) — 1,404 + 990,345,061 + 2,424,064 bytes.
+        {
+          "provider": "huggingface",
+          "repo": "google/flan-t5-base",
+          "revision": "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2",
+          "coRequisite": true,
+          "componentId": "text_encoder",
+          "license": "Apache-2.0",
+          "files": ["config.json", "model.safetensors", "tokenizer.json"],
+          "estimatedSizeBytes": 992770529
+        },
+        // `vae` (MIT): exactly the two files the engine reads at the pinned revision
+        // (gen_core::supra2::SD_VAE) — 547 + 334,643,276 bytes.
+        {
+          "provider": "huggingface",
+          "repo": "stabilityai/sd-vae-ft-mse",
+          "revision": "31f26fdeee1355a5c34592e401dd41e45d25a493",
+          "coRequisite": true,
+          "componentId": "vae",
+          "license": "MIT",
+          "files": ["config.json", "diffusion_pytorch_model.safetensors"],
+          "estimatedSizeBytes": 334643823
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/SupraLabs/Supra2-IMG"
+      },
+      "gated": false,
+      "defaults": {
+        // gen_core::supra2::{IMAGE_SIZE, DEFAULT_STEPS, DEFAULT_GUIDANCE}; the seed defaults to 0.
+        "resolution": "256x256",
+        "steps": 50,
+        "guidanceScale": 3.0,
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["256x256"],
+        // The engine renders up to 64 images per call (gen_core::supra2::MAX_IMAGES), but a
+        // SceneWorks job is capped at 8 (image_request::MAX_COUNT); the API and the worker refuse
+        // a larger count (`sceneworks_core::supra2::validate_request`) rather than clamp it.
+        "count": [1, 2, 4, 8],
+        "minDimension": 256,
+        "maxDimension": 256,
+        // sc-24215: upstream has no steps cap; this is gen-core's shared sanity cap
+        // (`Capabilities::validate_request`, MAX_STEPS = 100000) — the most the provider accepts.
+        // Above it the API and the worker refuse; the generic 80-step clamp does not apply.
+        "hardMaxSteps": 100000
+      },
+      "loraCompatibility": {
+        "families": [],
+        "types": []
+      },
+      "mlx": {
+        // DECLARED catalog floor; the MEASURED evidence lives in the anchor store, not here. The
+        // sc-24217 campaign measured anchor `imc-130e60e9f989be2191bc`
+        // (config/memory-anchors.json; docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json):
+        // active peak 4.28 GB (the VAE decode phase; conditioning/denoise ~1.61 GB) and an MLX
+        // allocator envelope of 9.32 GB at count 1 (10.69 GB at count 8) — the envelope includes
+        // MLX's reusable buffer cache, which the allocator returns under pressure, so it is not the
+        // working set. 8 GB stays above the measured active peak with headroom, and it is left
+        // declared the way every other anchored MLX row is (their floors sit below their allocator
+        // envelopes too): the anchor is the measured basis, not this scalar.
+        "minMemoryGb": 8,
+        "requiresConversion": true,
+        "converter": "supra2_img",
+        "convertSourceRepo": "SupraLabs/Supra2-IMG",
+        "convertSourceFile": "model_final_ema.pt"
+      },
+      "candle": {
+        // DECLARED floor, the Candle twin of the MLX value above. `measured: false` is this row's
+        // evidence class for a MEASURED `vramGbByTier` ladder, which Supra2 does not carry; the
+        // measured evidence lives in the anchor store instead: the sc-24217 campaign measured
+        // envelope `imc-720c45380d2ce4058aa0` (config/memory-anchors.json `analyticOnly`;
+        // docs/calibration/sc-24217/supra2-img-bf16-candle-evidence.json) is 2.82 GB of VRAM, flat
+        // from count 1 to count 8 because the VAE decodes the batch's images one at a time. The
+        // 4 GB floor stays above that measurement. `candle-gen-supra2` is resident-only (no quantization, sequential
+        // offload or deferred materialization): every tensor is read once and lives on the device
+        // for the generator's lifetime. The resident f32 set is ~1.2 GB (the 416 MB denoiser, the
+        // Flan-T5-Base encoder half of the 990 MB checkpoint, the 335 MB VAE) plus 256x256
+        // activations (a 32x32 latent = 256 tokens; the decoder at 256x256). Like every padded
+        // Candle floor it folds in the 2 GB allocator reserve, because `vram_gate::predicted_peak_gb`
+        // adds no headroom to this scalar: ~1.2 GB + activations + 2.0 GB, rounded up to 4. Without
+        // a floor the fit gate has no prediction and admits a load on any card
+        // (FitDecision::Unknown).
+        // * `imageActivationGbPerMegapixel` — DECLARED from architecture facts. The sc-24217
+        //   measurement above bounds it from above: the envelope does not grow from count 1 to 8,
+        //   so the charge below is conservative, never short. The gate
+        //   (`lane_controls::declared_activation_overlay_bytes`) charges this ×
+        //   (images × max(1, MP) − 1); Supra2 renders only 256² (0.0625 MP, clamped up to 1), so the
+        //   term is charged once per EXTRA image of a native count batch (`image.nativeCountBatch`,
+        //   sc-24215) and is effectively the per-image activation at 256². That activation is small:
+        //   the f32 DiT runs 256 tokens × d_model 576 over 14 blocks (CFG doubles the rows; one 9-head
+        //   256×256 score map is 2.4 MB), and the SD VAE decoder's largest 256² feature map is
+        //   128 ch × 256² × 4 B = 33.5 MB with a handful alive at once — well under 0.25 GB per image.
+        //   Rounded up to 0.5 so a batch is never admitted on the single-image floor.
+        "minMemoryGb": 4,
+        "imageActivationGbPerMegapixel": 0.5,
+        "measured": false
+      },
+      "ui": {
+        "label": "Supra2-IMG",
+        "description": "SupraLabs Supra2-IMG text-to-image: a small 104M-parameter rectified-flow DiT conditioned on Flan-T5-Base and decoded by SD VAE ft-MSE, rendering 256x256 images. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 50 Euler steps at CFG 3.0 by default. Downloads ~417 MB checkpoint (converted on install) + ~993 MB text encoder + ~335 MB VAE.",
+        "recommendedFor": ["text_to_image"],
+        "promptGuide": {
+          "title": "Supra2-IMG Prompt Guide",
+          "path": "/prompt-guides/supra2-img.md",
+          "sources": [
+            { "label": "Supra2-IMG model card", "url": "https://huggingface.co/SupraLabs/Supra2-IMG" }
+          ]
+        }
+      }
+    },
+    {
       // sc-25689 (epic 25678, E4) — the frozen DINOv2-B/14 REPA teacher of Iris 3B generation
       // training (upstream `repa.teacher: dinov2_vitb14`, the Hugging Face mirror of the hub
       // checkpoint at the revision `gen_core::iris::train::repa::DINOV2_BASE_HF_REVISION` pins).

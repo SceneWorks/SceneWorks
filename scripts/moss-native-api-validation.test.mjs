@@ -44,7 +44,7 @@ const evaluate = (expression, event, inputs = {}) =>
 const MLX_JOBS = ["changes", "macos-checks", "browser-fixture-artifact", "nax-worker", "manual-verification", "moss-native-api-mlx"];
 const CANDLE_JOBS = ["candle-worker", "imported-nvfp4-worker-smoke", "yue2-terminal-cuda", "iris-worker-smoke", "moss-native-api-candle"];
 const MLX_SELECTORS = { verification_profile: ["legacy", "facts-and-projections", "consumer-assertions", "browser-fixture-artifact"], run_memory_calibration: true, run_five_rung_reference: true, provision_qwen_snapshot: true, provision_z_image_snapshot: true };
-const CANDLE_SELECTORS = { capability_facts_only: true, run_five_rung_reference: true, provision_snapshot: true, run_ltx_eros_acceptance: true, run_epic_20738_terminal_cuda: true, run_yue2_terminal_cuda: true, run_iris_worker_smoke: true };
+const CANDLE_SELECTORS = { capability_facts_only: true, run_five_rung_reference: true, provision_snapshot: true, run_ltx_eros_acceptance: true, run_epic_20738_terminal_cuda: true, run_yue2_terminal_cuda: true, run_iris_worker_smoke: true, run_supra2_worker_smoke: true };
 const Moss = (value) => ({ run_moss_native_validation: value });
 
 function assertBrowserConflictRejector(workflow) {

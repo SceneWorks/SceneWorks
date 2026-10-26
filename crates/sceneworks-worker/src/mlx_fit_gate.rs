@@ -1150,6 +1150,7 @@ pub(crate) fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
         Some(gen_core::Quant::Q4) => "q4",
         Some(gen_core::Quant::Q8) => "q8",
         Some(gen_core::Quant::Nvfp4) => "nvfp4",
+        Some(gen_core::Quant::Fp8Rowwise) => "fp8r",
         None if tier.precision == gen_core::Precision::Fp32 => "fp32",
         None => "bf16",
     }
@@ -4759,6 +4760,7 @@ fn select_request_with_budget_using_bundle(
             use_pid: inputs.use_pid,
             has_phases: inputs.has_phases,
             geometry,
+            reference_resources: None,
             overlay: inputs.overlay.clone(),
             budget,
             predicted_peak_bytes,
@@ -15319,15 +15321,56 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     fn audit_load_spec(
-        provider_id: &str,
+        provider_id: &'static str,
         tier: &str,
         base_asset_bytes: u64,
         control_bytes: u64,
-    ) -> Result<(tempfile::TempDir, LoadSpec), String> {
+    ) -> Result<(std::sync::Arc<tempfile::TempDir>, LoadSpec), String> {
         use crate::test_fixture_disk::{create_sparse_weights, set_sparse_valid_safetensor};
         use gen_core::Quant;
 
-        let fixture = tempfile::tempdir().map_err(|error| error.to_string())?;
+        type FixtureKey = (String, String, u64, u64);
+        type Fixture = (std::sync::Arc<tempfile::TempDir>, LoadSpec);
+        struct Fixtures {
+            root: tempfile::TempDir,
+            specs: std::sync::Mutex<std::collections::BTreeMap<FixtureKey, Fixture>>,
+        }
+        // Only the read-only source-bound audits use this pool. Reuse the FILES, never a
+        // classified contract or selector result: each walk still calls the production lookup,
+        // including ArtifactSeal. Stable file identities let its ordinary digest memo avoid
+        // hashing the same multi-GiB sparse encoder again for every equivalent walk. A mutation
+        // test must build its own private fixture, rather than write into this shared pool.
+        // Like the Krea memory fixtures, static guards cannot clean themselves up at exit, so
+        // use the existing process-keyed, age-bounded cleanup discipline for this family.
+        const FAMILY: &str = "sceneworks-resident-audit-";
+        static FIXTURES: std::sync::OnceLock<Result<Fixtures, String>> = std::sync::OnceLock::new();
+        let fixtures = FIXTURES
+            .get_or_init(|| {
+                crate::test_fixture_disk::sweep_stale_fixtures(FAMILY);
+                let root = tempfile::Builder::new()
+                    .prefix(&crate::test_fixture_disk::process_keyed_prefix(FAMILY))
+                    .tempdir()
+                    .map_err(|error| error.to_string())?;
+                Ok(Fixtures {
+                    root,
+                    specs: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+                })
+            })
+            .as_ref()
+            .map_err(Clone::clone)?;
+        let key = (
+            provider_id.to_owned(),
+            tier.to_owned(),
+            base_asset_bytes,
+            control_bytes,
+        );
+        let mut specs = fixtures.specs.lock().map_err(|error| error.to_string())?;
+        if let Some(fixture) = specs.get(&key) {
+            return Ok(fixture.clone());
+        }
+        let fixture = std::sync::Arc::new(
+            tempfile::tempdir_in(fixtures.root.path()).map_err(|error| error.to_string())?,
+        );
         let weights = fixture.path().join("weights");
         if provider_id == "lens" && tier == "q4" {
             // The production worker opts this one route into the load-exact deferred contract.
@@ -15405,10 +15448,56 @@ mod tests {
             create_sparse_weights(&control, control_bytes);
             spec.with_control(WeightsSource::File(control))
         };
-        Ok((
+        let fixture = (
             fixture,
             crate::image_jobs::apply_measured_mlx_load_shape(provider_id, spec),
-        ))
+        );
+        // Publish only after the real lookup has sealed this immutable source. Otherwise parallel
+        // tests can race their FIRST pin and redundantly hash the same encoder before the digest
+        // memo is populated. Discard the result: each audit still derives its own contract below.
+        source_bound_contract(provider_id, &fixture.1)?;
+        specs.insert(key, fixture.clone());
+        Ok(fixture)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn resident_only_audit_fixture_reuse_preserves_every_load_coordinate() {
+        let (first, spec) = audit_load_spec("flux1_dev", "q4", 4096, 0).unwrap();
+        let (same, _) = audit_load_spec("flux1_dev", "q4", 4096, 0).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &same));
+        assert_eq!(weights_source_bytes(&spec.weights), 4096);
+        for (provider, tier, base, control) in [
+            ("flux1_schnell", "q4", 4096, 0),
+            ("flux1_dev", "q8", 4096, 0),
+            ("flux1_dev", "q4", 8192, 0),
+        ] {
+            let (distinct, spec) = audit_load_spec(provider, tier, base, control).unwrap();
+            assert_ne!(first.path(), distinct.path());
+            assert_eq!(weights_source_bytes(&spec.weights), base);
+            assert_eq!(
+                spec.control.as_ref().map_or(0, weights_source_bytes),
+                control
+            );
+        }
+        let (control_a, _) = audit_load_spec("flux1_dev_control", "q4", 4096, 1024).unwrap();
+        let (control_b, spec) = audit_load_spec("flux1_dev_control", "q4", 4096, 2048).unwrap();
+        assert_ne!(control_a.path(), control_b.path());
+        assert_eq!(spec.control.as_ref().map_or(0, weights_source_bytes), 2048);
+        // Mutation coverage uses a PRIVATE copy. Sealing a reused source must still compare real
+        // contents, and neither a changed inode's bytes nor its refused old seal may poison the
+        // immutable source borrowed by another audit.
+        let shared_path = first.path().join("weights/model.safetensors");
+        let shared_seal = gen_core::ArtifactSeal::pin(&shared_path).unwrap();
+        let private = tempfile::tempdir().unwrap();
+        let private_path = private.path().join("model.safetensors");
+        std::fs::copy(&shared_path, &private_path).unwrap();
+        let before = gen_core::ArtifactSeal::pin(&private_path).unwrap();
+        std::fs::write(&private_path, vec![1_u8; 4096]).unwrap();
+        assert!(before.verify_unchanged().is_err());
+        let after = gen_core::ArtifactSeal::pin(&private_path).unwrap();
+        assert_ne!(before.content_sha256(), after.content_sha256());
+        shared_seal.verify_unchanged().unwrap();
     }
 
     #[cfg(target_os = "macos")]
@@ -20189,6 +20278,9 @@ mod tests {
         "moss_image_sft",
         "sensenova_u1_8b",
         "sensenova_u1_8b_fast",
+        // sc-24213: Supra2-IMG loads resident and eager; its loader refuses sequential offload and
+        // deferred materialization, so the descriptor advertises neither staging bit.
+        "supra2_img",
     ];
 
     /// An id with no registered generator is never sequential-capable (the safe default: never select a

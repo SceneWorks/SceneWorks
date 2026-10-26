@@ -257,8 +257,10 @@ pub fn decode_npy_f32(bytes: &[u8]) -> Result<DepthArray, String> {
         ));
     }
     let values = data
-        .chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect();
     Ok(DepthArray {
         width: width32,

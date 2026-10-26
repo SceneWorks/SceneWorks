@@ -251,6 +251,28 @@ export const IRIS_GENERATION_COMPONENTS = Object.freeze([
   },
 ]);
 
+/** The pinned Supra2-IMG upstream repository (sc-24217) — `gen_core::supra2::SUPRA2_SOURCE.repo`. */
+export const SUPRA2_REPOSITORY = "SupraLabs/Supra2-IMG";
+/** The one upstream file the install converts — `gen_core::supra2::SUPRA2_SOURCE`'s only file. */
+export const SUPRA2_SOURCE_FILES = Object.freeze(["model_final_ema.pt"]);
+/**
+ * Supra2's two caller-staged co-requisites (`LoadSpec::components["text_encoder"|"vae"]`), in the
+ * `{ env, repo, files }` shape: exactly the files `gen_core::supra2::FLAN_T5_BASE` / `SD_VAE` pin
+ * (and the manifest's co-requisite rows download). Both engines require both, so no `arms`.
+ */
+export const SUPRA2_COMPONENTS = Object.freeze([
+  {
+    env: "SCENEWORKS_SUPRA2_IMG_COMPONENT_TEXT_ENCODER",
+    repo: "google/flan-t5-base",
+    files: ["config.json", "model.safetensors", "tokenizer.json"],
+  },
+  {
+    env: "SCENEWORKS_SUPRA2_IMG_COMPONENT_VAE",
+    repo: "stabilityai/sd-vae-ft-mse",
+    files: ["config.json", "diffusion_pytorch_model.safetensors"],
+  },
+]);
+
 /**
  * The three main tensor files `candle-gen-sdxl` opens inside a staged SDXL tier root, per tier
  * (sc-22738) — its `main_tensor_paths(root, packed)`, which is the ONE place the packed and dense
@@ -659,6 +681,45 @@ function parseMatchArms(armsText, sourcePath) {
  * throws rather than picking one side. Guessing either way would state a rung's support as fact when
  * the source text does not decide it.
  */
+/**
+ * The rung table of a contract built on `MemoryProviderContract::compatibility_default(…)` and
+ * nothing else (sc-24217, Candle Supra2-IMG), or `null`.
+ *
+ * gen-core defines that default as `Resident` -> `Implemented` and every other rung -> `Missing`,
+ * so for a memory-strategy entry point that builds the default and never names `strategies` at all
+ * (no `strategies:` field, no reassignment, no helper) the table is a fact of the source text. Any
+ * other shape — a file that builds the default and then edits its strategies, or one whose contract
+ * is assembled elsewhere — yields `null`, never a guess. This source is consulted ONLY to justify a
+ * plan row's resident override where the capability dump and `parseDeclaredStrategySupport` both
+ * have nothing to say (Candle Supra2 registers a resident-only witness, which the dump does not
+ * enumerate, and declares no `strategies:` field); it can never demand an override of a row.
+ */
+export function compatibilityDefaultSupport(rawSource) {
+  const source = stripRustComments(rawSource);
+  if (!/\bMemoryProviderContract::compatibility_default\s*\(/.test(source)) return null;
+  if (/\bstrategies\b/.test(source)) return null;
+  return (rung) => (strategyVariant(rung) === "Resident" ? "Implemented" : "Missing");
+}
+
+/** [`compatibilityDefaultSupport`] for one `(modelId, backend)`'s memory-strategy entry point. */
+export async function readCompatibilityDefaultSupport(
+  modelId,
+  backend,
+  closures,
+  inferenceRepo = process.env.INFERENCE_REPO,
+) {
+  if (!inferenceRepo) return null;
+  const entryPoints = closures.models?.[`${modelId}:${backend}`]?.entryPoints ?? [];
+  const entry = entryPoints.find((candidate) => STRATEGY_ENTRY_POINT_RE.test(candidate));
+  if (!entry) return null;
+  try {
+    return compatibilityDefaultSupport(await readFile(path.join(inferenceRepo, entry), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
+    throw error;
+  }
+}
+
 export function parseDeclaredStrategySupport(rawSource, sourcePath) {
   const source = stripRustComments(rawSource);
   const field = /\bstrategies:/.exec(source);
@@ -1331,6 +1392,19 @@ export const PROVIDER_FAMILIES = Object.freeze({
   iris_3b_restore: {
     env: "IRIS_3B_RESTORE", repo: IRIS_REPOSITORY, arms: ["mlx", "candle"], subdir: "upscaler",
     requiredTierFiles: IRIS_TASK_EXPORT_FILES,
+  },
+  // Supra2-IMG (sc-24217, epic 24212). The root this row binds is the pinned UPSTREAM snapshot at
+  // its ROOT, holding the one file the install converts (`gen_core::supra2::SUPRA2_SOURCE`). It is
+  // NOT what the engine loads: both adapter arms convert it into the native bundle in a SEPARATE
+  // adapter process before the measured process loads anything (or reuse a bundle that already
+  // passes the provider's pin contract), so conversion never sits inside a measured window. The
+  // two staged co-requisites the engine requires (`LoadSpec::components`) are checked for the
+  // exact files `FLAN_T5_BASE` / `SD_VAE` pin. `inventoryFiles` keeps the artifact identity to the
+  // checkpoint itself: an earlier hub fetch may have left other upstream files beside it.
+  supra2_img: {
+    env: "SUPRA2_IMG", repo: SUPRA2_REPOSITORY, arms: ["mlx", "candle"], layout: "flat",
+    components: SUPRA2_COMPONENTS,
+    requiredTierFiles: SUPRA2_SOURCE_FILES, inventoryFiles: SUPRA2_SOURCE_FILES,
   },
   // The Wan 2.2 family (sc-22736). The FIRST families whose artifact is per (lane, TIER) rather
   // than per lane, which is why `familyArtifact` exists: each route ships a `SceneWorks/…-mlx`

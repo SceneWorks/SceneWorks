@@ -31,6 +31,11 @@ pub enum MemoryRouteTier {
     Q4,
     Q8,
     Nvfp4,
+    /// The publisher FP8 rowwise package (sc-26241, FLUX 3 Image Klein), named by identity so a
+    /// FLUX 3 FP8R load is never read back as another tier. Deliberately NOT in [`Self::ALL`]: no
+    /// deferred route declares it, and `ALL` is the enumeration route witnesses are minted from,
+    /// so listing it there would advertise an FP8R witness for every tier-agnostic declared route.
+    Fp8Rowwise,
 }
 
 impl MemoryRouteTier {
@@ -42,6 +47,7 @@ impl MemoryRouteTier {
             Self::Q4 => "q4",
             Self::Q8 => "q8",
             Self::Nvfp4 => "nvfp4",
+            Self::Fp8Rowwise => "fp8r",
         }
     }
 
@@ -54,6 +60,7 @@ impl MemoryRouteTier {
             Some(Quant::Q4) => Some(Self::Q4),
             Some(Quant::Q8) => Some(Self::Q8),
             Some(Quant::Nvfp4) => Some(Self::Nvfp4),
+            Some(Quant::Fp8Rowwise) => Some(Self::Fp8Rowwise),
         }
     }
 
@@ -63,6 +70,7 @@ impl MemoryRouteTier {
             "q4" => Some(Self::Q4),
             "q8" => Some(Self::Q8),
             "nvfp4" => Some(Self::Nvfp4),
+            "fp8r" => Some(Self::Fp8Rowwise),
             _ => None,
         }
     }
@@ -3978,6 +3986,7 @@ mod tests {
             MemoryRouteTier::Q4 => base.with_quant(Quant::Q4),
             MemoryRouteTier::Q8 => base.with_quant(Quant::Q8),
             MemoryRouteTier::Nvfp4 => base.with_quant(Quant::Nvfp4),
+            MemoryRouteTier::Fp8Rowwise => base.with_quant(Quant::Fp8Rowwise),
         };
         match profile {
             MemoryRouteLoadProfile::Plain => base,

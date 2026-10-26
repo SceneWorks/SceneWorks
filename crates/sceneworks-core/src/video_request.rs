@@ -753,6 +753,21 @@ pub fn hard_min_steps(model_manifest_entry: &JsonObject) -> Option<u32> {
         .and_then(|floor| u32::try_from(floor).ok())
 }
 
+/// `limits.hardMaxSteps` — the model's hard CEILING on `advanced.steps`, or `None` for **no
+/// declared ceiling** (sc-24215). The floor's sibling: a request above it is REFUSED (API enqueue
+/// and, through each model's own boundary, the worker) rather than clamped. Absent ⇒ every model
+/// keeps exactly its old behaviour (the image lane's historical clamp). Same typo tolerance as
+/// [`hard_min_steps`]: a zero or non-integer ceiling is not a constraint and reads as `None`.
+pub fn hard_max_steps(model_manifest_entry: &JsonObject) -> Option<u32> {
+    model_manifest_entry
+        .get("limits")
+        .and_then(Value::as_object)
+        .and_then(|limits| limits.get("hardMaxSteps"))
+        .and_then(Value::as_u64)
+        .filter(|ceiling| *ceiling > 0)
+        .and_then(|ceiling| u32::try_from(ceiling).ok())
+}
+
 /// `limits.maxReferenceAssets` on an IMAGE model — the ordered reference list's ceiling — or
 /// `None` for **no declared cap** (sc-24113, epic 24107).
 ///
@@ -1043,12 +1058,20 @@ pub fn steps_limit_error(
         }
         return None;
     }
-    let floor = hard_min_steps(model_manifest_entry)?;
-    (steps < floor).then(|| {
+    if let Some(floor) = hard_min_steps(model_manifest_entry) {
+        if steps < floor {
+            return Some(format!(
+                "{model} renders with at least {floor} sampling steps, but this request asks for \
+                 {steps}. Raise the step count to {floor} or more, or choose a model that renders \
+                 in fewer steps."
+            ));
+        }
+    }
+    let ceiling = hard_max_steps(model_manifest_entry)?;
+    (steps > ceiling).then(|| {
         format!(
-            "{model} renders with at least {floor} sampling steps, but this request asks for \
-             {steps}. Raise the step count to {floor} or more, or choose a model that renders in \
-             fewer steps."
+            "{model} renders with at most {ceiling} sampling steps, but this request asks for \
+             {steps}. Lower the step count to {ceiling} or fewer."
         )
     })
 }
@@ -4458,6 +4481,35 @@ mod tests {
         assert_eq!(hard_min_duration(&steps_only), None);
         assert_eq!(duration_limit_error("steps_only", 0.5, &steps_only), None);
         assert!(steps_limit_error("steps_only", 1, &steps_only).is_some());
+    }
+
+    /// sc-24215 — the declared step CEILING refuses above it (never clamps), admits the ceiling
+    /// itself, composes with a floor, and is absent for every entry that declares nothing.
+    #[test]
+    fn a_declared_hard_max_steps_refuses_above_the_ceiling_only() {
+        let capped = payload(json!({ "limits": { "hardMaxSteps": 300 } }));
+        assert_eq!(hard_max_steps(&capped), Some(300));
+        assert_eq!(steps_limit_error("capped", 300, &capped), None);
+        let message = steps_limit_error("capped", 301, &capped).expect("301 is above 300");
+        assert!(
+            message.contains("capped")
+                && message.contains("at most 300")
+                && message.contains("301"),
+            "{message}"
+        );
+        let both = payload(json!({ "limits": { "hardMinSteps": 4, "hardMaxSteps": 300 } }));
+        assert!(steps_limit_error("both", 3, &both).is_some());
+        assert_eq!(steps_limit_error("both", 4, &both), None);
+        assert!(steps_limit_error("both", 301, &both).is_some());
+        for bad in [json!(0), json!(2.5), json!("300"), json!(null)] {
+            let entry = payload(json!({ "limits": { "hardMaxSteps": bad } }));
+            assert_eq!(hard_max_steps(&entry), None, "{bad}");
+        }
+        assert_eq!(hard_max_steps(&payload(json!({}))), None);
+        assert_eq!(
+            steps_limit_error("bare", 100_000, &payload(json!({}))),
+            None
+        );
     }
 
     /// sc-19502 — the step MENU's message, held to the same house convention: name the model, what

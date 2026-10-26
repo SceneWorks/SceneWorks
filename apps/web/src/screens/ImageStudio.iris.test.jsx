@@ -321,6 +321,18 @@ describe("ImageStudio — Iris-3B (sc-25679)", () => {
     expect(requests[2]).toMatchObject({ width: 512, height: 512 });
   });
 
+  it("packs equivalent ratios together and separates different resolved sizes", async () => {
+    const createImageJob = vi.fn(async () => ({ id: `job-${createImageJob.mock.calls.length}` }));
+    await render(baseContext({ createImageJob }));
+    await runBatch("[4:3] a red fox\n[8:6] a blue whale\n[3:4] a green frog\n[1:1] a gold bird");
+    const requests = createImageJob.mock.calls.map(([request]) => request);
+    expect(requests.map(({ prompt, prompts, width, height }) => [prompt, prompts, width, height])).toEqual([
+      ["a red fox", ["a red fox", "a blue whale"], 1152, 896],
+      ["a green frog", undefined, 896, 1152],
+      ["a gold bird", undefined, 1024, 1024],
+    ]);
+  });
+
   // Mutation that reds this: drop the `promptBatch` branch of the recipe effect.
   it("reopens a native batch image as the whole prompt batch", async () => {
     await render(

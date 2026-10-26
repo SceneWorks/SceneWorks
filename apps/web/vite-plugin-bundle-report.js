@@ -1,5 +1,20 @@
 import { brotliCompressSync, constants, gzipSync } from "node:zlib";
 
+// Bundle budget policy (sc-24217; approved by Michael 2026-10-21). Limits live in
+// bundle-budgets.json; every size is measured raw, gzip (level 9) and brotli (q11).
+//
+// Gates (the build fails when exceeded):
+//   - `initial`: every entry chunk, its recursive static imports, and the emitted *.js
+//     assets index.html fetches (theme-init.js). This is what first paint downloads.
+//   - `lazyChunk`: EACH non-initial dynamic-entry chunk (a React.lazy screen, an
+//     `await import()` target) together with its static closure minus the initial chunks,
+//     i.e. what one lazy load actually fetches. Checked per chunk, not summed.
+//   - `largestRoute`: the heaviest route family in `routeFamilies`, same closure rule.
+//   - `initialExclusions`: named heavy domains must never appear in the initial graph.
+// Telemetry (reported in dist/bundle-report.json, never a gate):
+//   - `total`: every emitted JS chunk/asset. Growing the app with more lazy screens is
+//     not a user-facing cost, so the aggregate is tracked but no longer fails the build.
+
 export const routeFamilies = Object.freeze({
   "Image Studio": ["/src/screens/ImageStudio.jsx"],
   "Video Studio": ["/src/screens/VideoStudio.jsx"],
@@ -58,6 +73,7 @@ export const initialExclusions = Object.freeze({
   "Setup Wizard": ["/src/screens/SetupWizard.jsx"],
   "Batch operations": ["/src/components/BatchOperationsPanel.jsx"],
   "Workflow replay offer": ["/src/components/WorkflowDropPanel.jsx"],
+  "Offline model catalog": ["/src/modelCatalog.js", "/src/data/previewSupport.json"],
 });
 
 function normalize(value) {
@@ -202,26 +218,61 @@ export function buildBundleReport(bundle, budgets) {
     chunks: [...allNames].sort(),
     ...summarize(allNames, chunkSizes),
   };
+  // Per-lazy-chunk budget: each dynamic entry that is not already part of the initial
+  // graph, measured with its static closure minus initial chunks (the largestRoute rule).
+  const lazyChunks = {};
+  for (const lazy of chunks.values()) {
+    if (!lazy.isDynamicEntry || initialNames.has(lazy.fileName)) continue;
+    const loaded = collectStaticChunks([lazy.fileName], chunks);
+    for (const initialName of initialNames) loaded.delete(initialName);
+    lazyChunks[lazy.fileName] = {
+      chunks: [...loaded].sort(),
+      ...summarize(loaded, chunkSizes),
+    };
+  }
+  const largestLazyChunk = Object.entries(lazyChunks).reduce(
+    (largest, [fileName, values]) =>
+      values.gzipBytes > largest.gzipBytes ? { fileName, ...values } : largest,
+    { fileName: null, rawBytes: 0, gzipBytes: 0, brotliBytes: 0, chunks: [] },
+  );
+
   const largestRoute = Object.entries(routeChunks).reduce(
     (largest, [route, values]) =>
       values.gzipBytes > largest.gzipBytes ? { route, ...values } : largest,
     { route: null, rawBytes: 0, gzipBytes: 0, brotliBytes: 0, chunks: [] },
   );
 
-  violations.push(...budgetViolations("Initial JavaScript", initial, budgets.initial));
-  violations.push(...budgetViolations("Total JavaScript", total, budgets.total));
-  violations.push(
-    ...budgetViolations(
-      `Largest route (${largestRoute.route ?? "none"})`,
-      largestRoute,
-      budgets.largestRoute,
-    ),
-  );
+  // Every gated budget must be present; a missing one fails closed with a named violation.
+  // `total` is telemetry only (see the policy note at the top of this file).
+  for (const name of ["initial", "lazyChunk", "largestRoute"]) {
+    if (!budgets[name]) violations.push(`bundle-budgets.json is missing the ${name} budget`);
+  }
+  if (budgets.initial) {
+    violations.push(...budgetViolations("Initial JavaScript", initial, budgets.initial));
+  }
+  if (budgets.lazyChunk) {
+    for (const [fileName, values] of Object.entries(lazyChunks)) {
+      violations.push(
+        ...budgetViolations(`Lazy chunk (${fileName})`, values, budgets.lazyChunk),
+      );
+    }
+  }
+  if (budgets.largestRoute) {
+    violations.push(
+      ...budgetViolations(
+        `Largest route (${largestRoute.route ?? "none"})`,
+        largestRoute,
+        budgets.largestRoute,
+      ),
+    );
+  }
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     initial,
     routes: routeChunks,
+    lazyChunks,
+    largestLazyChunk,
     total,
     largestRoute,
     chunks: [...allNames]

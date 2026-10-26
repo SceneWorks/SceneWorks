@@ -1107,7 +1107,19 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     Changing a count is legitimate; changing it SILENTLY is not. Update the fixture in the same
     commit that changes the declaration, and say in the commit body which lanes moved and why.
 
-    Last moved: sc-25907 (epic 25899) adds the `qwen_image_2_1_turbo` catalog entry, the distilled
+    Last moved: sc-24214 (epic 24212) routes `supra2_img` to Candle under the same engine id. It
+    adds exactly five NEW lanes (`supra2_img:candle:*`) and moves nothing else; the profile is the
+    MLX one: `resident` [2,0,0] (`candle-gen-supra2` is resident-only and the entry now declares a
+    `candle` floor), every other rung [0,0,2] — the provider publishes a resident-only contract, so
+    no staged residency, bounded decode, attention or transformer residency.
+
+    Previously: sc-24213 (epic 24212) adds the MLX-only `supra2_img` catalog entry (one untagged
+    artifact, so a single tier; 2 coordinates per lane). It contributes exactly five NEW lanes and
+    moves nothing else: `resident` [2,0,0] (the engine loads resident and eager); every other rung
+    [0,0,2] — its descriptor advertises no staged residency, and the provider implements no bounded
+    decode, attention or transformer residency.
+
+    Previously: sc-25907 (epic 25899) adds the `qwen_image_2_1_turbo` catalog entry, the distilled
     sibling of `qwen_image_2_1`, routed on BOTH lanes. It adds exactly ten NEW lanes
     (`qwen_image_2_1_turbo:<backend>:<rung>`, 18 coordinates each = 3 tiers x 3 catalog modes x
     {none, lora}) and moves NOTHING else. Each is base's lane profile verbatim — including

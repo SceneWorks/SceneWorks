@@ -51,6 +51,15 @@ const IRIS_PROVIDER: &str = "iris_3b";
 const IRIS_DEPTH_PROVIDER: &str = "iris_3b_depth";
 const IRIS_RESTORE_PROVIDER: &str = "iris_3b_restore";
 
+#[path = "mlx_supra2.rs"]
+mod mlx_supra2;
+
+/// Supra2-IMG (sc-24217, epic 24212), served by `mlx_supra2`: `mlx-gen-supra2`'s registry id
+/// (`gen_core::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
+/// because `scripts/stale-lane-report.mjs::adapterCapturableProviders` reads the dispatch arms off
+/// this file; `mlx_supra2`'s tests bind it to the engine constant through `protocol`.
+const SUPRA2_PROVIDER: &str = "supra2_img";
+
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
 const MEAN_THRESHOLD: f64 = 3e-3;
@@ -3044,6 +3053,7 @@ fn krea_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some("control:1".to_owned()),
         budget: MemoryBudget {
             total_bytes: u64::MAX,
@@ -3972,6 +3982,7 @@ fn run_z_image_reference_loaded(
             frames: 1,
             reference_count: u32::from(arm.edit),
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -4739,6 +4750,7 @@ fn flux_one_context(
             frames: 1,
             reference_count: u32::from(arm.identity),
         },
+        reference_resources: None,
         overlay: arm.identity.then(|| "identity".to_owned()),
         budget: MemoryBudget {
             total_bytes,
@@ -5617,6 +5629,7 @@ fn turnkey_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -6359,6 +6372,7 @@ fn sana_chroma_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -7396,6 +7410,7 @@ fn flux2_admission_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -8228,6 +8243,7 @@ fn krea_base_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -9102,6 +9118,7 @@ fn sdxl_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -9513,6 +9530,7 @@ fn instantid_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some(overlay),
         budget: MemoryBudget {
             total_bytes,
@@ -10553,6 +10571,7 @@ fn qwen_provider_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -12171,6 +12190,7 @@ fn mage_run_context(
             frames: 1,
             reference_count: u32::from(arm.edit),
         },
+        reference_resources: None,
         overlay: None,
         // The generator is already loaded when this context is built, so its resident bytes are
         // charged to the snapshot and `predicted_peak_bytes` is the request's INCREMENTAL demand
@@ -15319,6 +15339,7 @@ fn ltx_context(
             frames: geometry.frames,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -18408,6 +18429,7 @@ fn minimax_context(
             frames: geometry.frames,
             reference_count: member.reference_count,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -20375,6 +20397,7 @@ fn sensenova_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -20557,6 +20580,8 @@ impl SenseNovaPhases {
             }
             Progress::Loading(_) => self.other_loading_boundaries += 1,
             Progress::Step { .. } => {}
+            Progress::PromptUpsamplingComplete => {}
+            Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
         }
     }
 }
@@ -21218,6 +21243,7 @@ fn sd3_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -22681,6 +22707,9 @@ fn run_with(
         IRIS_PROVIDER => mlx_iris::run(request),
         IRIS_DEPTH_PROVIDER => mlx_iris::run(request),
         IRIS_RESTORE_PROVIDER => mlx_iris::run(request),
+        // sc-24217: Supra2-IMG's total pipeline (text encoder + DiT + VAE, resident) at the
+        // published request, over a bundle converted in a separate adapter process beforehand.
+        SUPRA2_PROVIDER => mlx_supra2::run(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -22698,6 +22727,8 @@ fn main() {
         LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof(&request),
         LTX_BOUNDED_CAMPAIGN_ACTION => run_ltx_bounded_campaign_entry(&request),
         "assess_batch" => assess_z_image_batch(&request),
+        // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
+        protocol::SUPRA2_IMG_CONVERT_ACTION => protocol::supra2_convert(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));
@@ -31492,6 +31523,7 @@ mod bernini_tests {
                 frames: V2V_FRAMES,
                 reference_count: V2V_REFERENCE_COUNT,
             },
+            reference_resources: None,
             overlay: overlay.map(str::to_owned),
             budget: MemoryBudget {
                 total_bytes: 137_438_953_472,

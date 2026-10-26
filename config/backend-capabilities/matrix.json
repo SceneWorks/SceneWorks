@@ -2,9 +2,9 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 139,
+    "modelCount": 140,
     "importedFamilyCount": 4,
-    "cellCount": 1082,
+    "cellCount": 1083,
     "mlxOnlyCellCount": 44,
     "candleOnlyCellCount": 82,
     "exceptionCount": 10
@@ -15,23 +15,23 @@
     "apiGeneration": "b6831e3ce130e686249f98256a15bc35ad3071dc1250ac3890c40a60d51b0542",
     "apiValidation": "998566adb33839ec37c08950170f3140ad57a4c7d06074e7da8875eb0eabc017",
     "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "d9bda6f24be84829ff33ce643a93b1b93ef5a1925023ee7ce5113b4437aedd40",
-    "descriptorCandleFacts": "96f98655ef8d8e8ecd78e90152ff8c5348a9dc3e7d5eb4748dff2c934202d51b",
-    "descriptorCandleRuntime": "10b113d5a725f816c25ac46c11b281f58d70cb4b381b40466b4c38790d7b4121",
-    "descriptorMlxFacts": "0874675b65582cb87eac40184249ac2ae6aecd2a0b66e90cb4f06721e410c8ac",
-    "descriptorMlxRuntime": "df843ac9808c1b3cdbe9ca9f4db79be892da6a4d5bf5291edb246126c7548791",
-    "descriptorPreviewFacts": "cba6d3e9e9f4b9d5aa9935227ee32bdaad2745d0a1e8ee081574b39d31d6fc1d",
+    "descriptorAudioFacts": "266b74befb28664b357e63b434b9bec40c1d0e409cc6c4455888aabde914be24",
+    "descriptorCandleFacts": "f7ee4c251284a7274fa58bf6c1810329b08f05d8b3c9c89d0299b60969ef987c",
+    "descriptorCandleRuntime": "d3d0c8972c26a8dc7811d4053bddc645690b23a7086abf60c8be7f1a3bb2f616",
+    "descriptorMlxFacts": "55f6669329dddac663e6b8cb404b53b24b660ff518474503cda48632e2b86b6c",
+    "descriptorMlxRuntime": "f7e5c87b2ba14c7c6a0524b2b55d859beadefa8fa4997d97aec828bc14401862",
+    "descriptorPreviewFacts": "0ff333a69065d1ae63a6dfbed74930f774d4d3a86579dfbcad4e2c2e79aca3e4",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "dcfbb92b5d51346f9d0229497550d14d297bbd3afda04b898871704257f2f21f",
-    "modelImportDefaults": "57da46d39740f65681568d298e1c5acbbc1cdfc43a4e79fe2c0c39f2b7196df2",
-    "routerCandle": "c7d7f2061fa0d4c7a47e953d6cf28f7e4dee43c0440626fb4f6574c4c7312fa4",
-    "routerCatalog": "0dacfde9632ab57897fc47a9fc6a3eaa0c44571c1839d231da0498150c9be8b1",
-    "routerGaps": "e553137bed2fb2880a66f8a9df72b326247708ab7e4d94776d4be68de8bdd6ad",
-    "routerMlx": "dd533ef5670172cb32301307fd0b06d869ea54a2cef933e9f146348ebae50760",
+    "manifest": "5a2291261850a46e6f2685c60e71f1669beefc53c3957804c916a4420aee3187",
+    "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
+    "routerCandle": "85bf9d1148f34da6339806d5ee1da1da90974ea8817f156aecb9f3ad681cc239",
+    "routerCatalog": "5ebff015a799e2efb3ebac0876967d388e5e2d636bc50f9fb9fb87519bda7882",
+    "routerGaps": "79ec643f4e36df95c3294b1a2ca8b8f75a0919fbbef13126c527e325e4e80bfe",
+    "routerMlx": "6613d4174c44ff70cf611bb399d8d4c6c6571f2e2d48342a465ea7e5a7333069",
     "scheduler": "442f0bbb09be1b8ff25b9438fb8a4bf0fbffa4cb788ed45c80385af81f15ba83",
     "trainingCatalog": "9753b5b0a9308b3981e161abc8b37b2a9a9ce16b73527548791d04d53fc36be6",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
-    "webFallbackCatalog": "b4a88e74e5d8205d6e40d3178ca97b5e273dc639b972f18d74ed9d5c37d7cf7a",
+    "webFallbackCatalog": "a8d3849a7f9766683ec223e26d1ad470695cecc20f3eda44f85f5ddfa5c0963d",
     "webImageAdvanced": "c99975b860ed59b20e1ec7a039f7a44c602efd65350bd8fbc250cddff1fbf9a1",
     "webImageRequest": "4b9eb564dec18a44de0f3ec272457f6b1b8c9639a7104d73a203f09fb89de74a",
     "webMacGating": "edd5caead44b6cd56f0306fbcf2078e2a6b391fcb130ad1f859cda6cc3aa9ae3",
@@ -44,12 +44,12 @@
     "webVideoStudio": "9e53fef095f4066aac8a5174179b438e99d6682acf800383eb7c526a54abd09c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
-    "workerAudioDispatch": "b085c397c6032fd4efe1b85fd0566cfacae32fa9ba26b6240bbce21db3251091",
-    "workerDispatch": "78a5d0c1e3c365af4ff521c7d35a19836fd87f9deab6e915ba0b8091423fada3",
-    "workerEngineTable": "f8a32d610f5f6a54e7f9e1745a5da38a4714e59b461ea794f2b85e15b814855b",
+    "workerAudioDispatch": "fc18db4e29212d32d240e3b76f08f3d38f194034a44cd911bc6e6b7c3da69544",
+    "workerDispatch": "435338620d3d0db4850a2ac4c017971c12f12396fadf0e3b0eae468a626e1946",
+    "workerEngineTable": "14de886ba30b7e908be1f96cd9a04449d51ff01b963aa16bd933a787182388f9",
     "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "3b71abc3af987165956a36ce44af1e06eaf5b94a9654ab252ebe7c4cbef5421d",
-    "workerImageKreaImported": "badaa28f1889864095e9f14b6af34f0040ee7aaa101f464345aab99774646b79",
+    "workerImageDispatch": "fdb4f604e83e7446db2e232f6666b031c0ea02b2d50d0f962b99383472c65a38",
+    "workerImageKreaImported": "52ab0f4bbba5eaedc5dfd8eb23de9d7bb1d973c9a7278d8669e110f763dd0bfe",
     "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
     "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
@@ -67,7 +67,7 @@
     "workerVideoSeedvr2": "ec9292459ebc7c2d95a9b8eb9b5575a1e706978bd99d4997211c7d8d1cdf1717",
     "workerVideoSvd": "eb2a97a5cd66c7459394ff75e53624154f754932ed1d8b6e1011a3bfdb3a0250",
     "workerVideoVace": "3108da227bf977e4f1a1554cc67ca893df879ac17b203cb68544c5243d7a0bbe",
-    "workerVideoWan": "dbd3edacbfff16154b010fe7be463c7b118e7ceccb5a3b09365a7529124ade25"
+    "workerVideoWan": "e78ce3f8010d5d8e39dc109bdc5de1480a2ab07d0033a29a8726bf2f6b70750f"
   },
   "models": [
     {
@@ -6421,6 +6421,50 @@
         "capability": "live_preview",
         "mlx": null,
         "candle": null
+      }
+    },
+    {
+      "id": "supra2_img",
+      "family": "supra2",
+      "modelType": "image",
+      "manifestOperations": [
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": false,
+          "candle": false
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
       }
     },
     {

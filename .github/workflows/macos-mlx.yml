@@ -361,6 +361,12 @@ jobs:
     if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.verification_profile == 'legacy' && !inputs.run_moss_native_validation)) && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
     runs-on: macos-26
     env:
+      # Match inference's hosted Metal build. Keep line tables for useful backtraces while
+      # avoiding full DWARF for this large workspace; apply consistently to proc-macro builds.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only
       # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
       MACOSX_DEPLOYMENT_TARGET: "15.0"
     # Run 39800004883 exhausted 90 minutes after about 72 minutes of cold native build,
@@ -371,7 +377,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
           components: clippy
       # Keyed by job + rustc version + lockfile by default, which is what we want: the MLX pin
       # moves with `Cargo.lock`, so a pin bump invalidates the native build rather than
@@ -544,7 +550,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Initialize private browser fixture paths
         run: |
           set -euo pipefail
@@ -791,7 +797,7 @@ jobs:
           fi
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Initialize private MOSS validation paths
         run: |
           set -euo pipefail
@@ -927,7 +933,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
           components: clippy
       - name: Fetch prebuilt MLX (sc-21382)
         # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on every cache miss; this self-hosted runner keeps the extracted tarball in ~/.cache/pmetal/prebuilt across runs
@@ -1401,7 +1407,7 @@ jobs:
           echo "$shim" >> "$GITHUB_PATH"
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
           components: clippy,rustfmt
       - name: Fetch exact prebuilt MLX or build its exact source
         working-directory: ${{ env.VERIFICATION_CANDIDATE_PATH }}

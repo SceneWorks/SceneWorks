@@ -1,3 +1,5 @@
+import { parseResolution } from "./resolutionMatch.js";
+
 // Prompt-batch template engine (sc-9953 / sc-9958, epic 9952 — Batch Prompt Processing).
 // Pure, mode-agnostic logic: parse a prompt line into text + {{placeholder}} tokens and
 // expand a batch to its concrete prompts. React/DOM/network-free so the fan-out math is
@@ -246,16 +248,53 @@ export function firstResolvedPrompt(prompts, variables) {
   ).prompt;
 }
 
-// A prompt line may start with a `[WxH]` directive to render that prompt at its own size,
-// overriding the studio Aspect (sc-10063): `[832x1216] a full-body portrait`. Only a numeric
-// `[W x H]` at the very start counts — `[cinematic] …` stays part of the prompt. Returns the
-// stripped `prompt` and the parsed `{width,height}` (or null when absent). Range is NOT checked
-// here (the caller validates against the backend 256–4096 bounds).
+// A leading `[WxH]` renders a prompt at an exact size, overriding the Studio Aspect
+// (sc-10063); `[W:H]` instead selects the largest available size near the requested
+// aspect ratio. Non-numeric brackets stay literal. Returns the stripped prompt and {width,height}
+// (or null for no directive / no numeric options). The caller validates exact dimensions
+// against the selected model's range and stride.
 const RESOLUTION_DIRECTIVE = /^\s*\[\s*(\d{2,5})\s*[x×X]\s*(\d{2,5})\s*\]\s*/;
-export function parsePromptResolution(text) {
+const RATIO_DIRECTIVE = /^\s*\[\s*([1-9]\d{0,4})\s*:\s*([1-9]\d{0,4})\s*\]\s*/;
+
+// Prefer the largest bucket within a 10% multiplicative aspect-ratio tolerance.
+// Log distance treats portrait and landscape symmetrically. If no bucket is close
+// enough, use the closest aspect, preferring more pixels on ties. Use the Studio's
+// effective options so model and device limits remain authoritative.
+const RATIO_ASPECT_TOLERANCE = Math.log(1.1);
+
+function resolutionForRatio(width, height, options) {
+  const target = Math.log(width / height);
+  let best = null;
+  let distance = Infinity;
+  let pixels = 0;
+  for (const option of options) {
+    const dims = parseResolution(option);
+    if (!dims) continue;
+    const aspectDistance = Math.abs(Math.log(dims.width / dims.height) - target);
+    // All close-enough aspects share rank zero, so pixel count decides among them.
+    const nextDistance = Math.max(0, aspectDistance - RATIO_ASPECT_TOLERANCE);
+    const nextPixels = dims.width * dims.height;
+    if (nextDistance < distance - 1e-12 ||
+        (Math.abs(nextDistance - distance) <= 1e-12 && nextPixels > pixels)) {
+      best = dims;
+      distance = nextDistance;
+      pixels = nextPixels;
+    }
+  }
+  return best;
+}
+
+export function parsePromptResolution(text, resolutionOptions = []) {
   if (typeof text !== "string") return { prompt: "", resolution: null };
   const match = RESOLUTION_DIRECTIVE.exec(text);
-  if (!match) return { prompt: text, resolution: null };
+  if (!match) {
+    const ratio = RATIO_DIRECTIVE.exec(text);
+    if (!ratio) return { prompt: text, resolution: null };
+    return {
+      prompt: text.slice(ratio[0].length),
+      resolution: resolutionForRatio(Number(ratio[1]), Number(ratio[2]), resolutionOptions),
+    };
+  }
   return {
     prompt: text.slice(match[0].length),
     resolution: { width: Number(match[1]), height: Number(match[2]) },

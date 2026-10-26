@@ -57,14 +57,20 @@ fn moss_owned_weight_bytes(generator: &dyn Generator, measured_load_delta: u64) 
     // census describes only this serialized cache entry's actually retained weights.
     measured_load_delta.max(generator.moss_image_owned_weight_bytes().unwrap_or(0))
 }
+/// Pins every selected MOSS weight file. `on_file(done, total)` fires before each pin so a cold
+/// seal (a full SHA-256 of a multi-GB file, sc-26610) is visible as progress, not a static stage.
+/// `adapter_pins` (sc-26587) chains the LoRA/LoKR adapter files the training lane resolved into the
+/// same load spec, so a resumed or freshly-trained adapter is identity-checked exactly like a model
+/// component instead of loading unverified.
 fn moss_pin_spec_with_adapters(
     spec: &mut LoadSpec,
     entry: &JsonObject,
     settings: &Settings,
     mode: gen_core::moss_image::MossImageAcceleration,
     adapter_pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
+    on_file: &mut dyn FnMut(usize, usize),
 ) -> WorkerResult<()> {
-    let mut pins = Vec::new();
+    let mut targets = Vec::new();
     for download in entry
         .get("downloads")
         .and_then(Value::as_array)
@@ -91,13 +97,18 @@ fn moss_pin_spec_with_adapters(
             if !moss_execution_asset_selected(mode, repo, relative) {
                 continue;
             }
-            let path = safe_join(&root, relative)?;
-            let pin = gen_core::PinnedWeightsFile::pin(&path).map_err(|error| crate::classify_engine_error(&format!("MOSS component {relative} missing/incomplete; install or repair the selected package"), error))?;
-            gen_core::moss_image::verify_moss_image_asset(&pin, repo, revision, relative).map_err(
-                |error| crate::classify_engine_error("MOSS frozen component identity", error),
-            )?;
-            pins.push(pin);
+            targets.push((repo, revision, relative, safe_join(&root, relative)?));
         }
+    }
+    let total = targets.len();
+    let mut pins = Vec::with_capacity(total);
+    for (done, (repo, revision, relative, path)) in targets.into_iter().enumerate() {
+        on_file(done, total);
+        let pin = gen_core::PinnedWeightsFile::pin(&path).map_err(|error| crate::classify_engine_error(&format!("MOSS component {relative} missing/incomplete; install or repair the selected package"), error))?;
+        gen_core::moss_image::verify_moss_image_asset(&pin, repo, revision, relative).map_err(
+            |error| crate::classify_engine_error("MOSS frozen component identity", error),
+        )?;
+        pins.push(pin);
     }
     crate::paths::prepare_load_spec_with_file_pins(
         spec,
@@ -112,7 +123,7 @@ fn moss_pin_spec(
     settings: &Settings,
     mode: gen_core::moss_image::MossImageAcceleration,
 ) -> WorkerResult<()> {
-    moss_pin_spec_with_adapters(spec, entry, settings, mode, Vec::new())
+    moss_pin_spec_with_adapters(spec, entry, settings, mode, Vec::new(), &mut |_, _| {})
 }
 /// Generation and the actual provider receipt are read while the serialized cache transaction
 /// still owns the generator. Failures/cancellation cannot publish a prior successful receipt.
@@ -227,13 +238,47 @@ fn prepare_moss_preload(
     }
     let prepared_adapters = resolve_prepared_adapters(request, settings)?;
     spec = spec.with_adapters(prepared_adapters.specs);
-    moss_pin_spec_with_adapters(
+    // Pinning blocks this runtime thread, so a spawned task posts the per-file progress.
+    let (pin_progress, mut pin_events) = tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
+    let poster = {
+        let api = api.clone();
+        let job_id = job.id.clone();
+        let backend = backend_label(&settings.gpu_id).to_owned();
+        tokio::spawn(async move {
+            while let Some((done, total)) = pin_events.recv().await {
+                let message = format!("Verifying model files ({}/{total}).", done + 1);
+                let payload = image_progress(
+                    JobStatus::Preparing,
+                    ProgressStage::Preparing,
+                    0.05,
+                    &message,
+                    None,
+                    &backend,
+                );
+                if let Err(error) = update_job(&api, &job_id, payload).await {
+                    tracing::debug!(
+                        event = "moss_pin_progress_post_failed",
+                        jobId = %job_id,
+                        error = %error,
+                        "pin progress post failed; the job's next progress post reports the outcome"
+                    );
+                }
+            }
+        })
+    };
+    let pinned = moss_pin_spec_with_adapters(
         &mut spec,
         &entry,
         settings,
         resolved.acceleration,
         prepared_adapters.pins,
-    )?;
+        &mut |done, total| {
+            let _ = pin_progress.send((done, total));
+        },
+    );
+    drop(pin_progress);
+    let _ = poster.await;
+    pinned?;
     #[cfg(target_os = "macos")]
     let peak = {
         let facts = moss_memory::selected_asset_facts(variant, &spec, resolved.acceleration)
@@ -656,14 +701,18 @@ mod moss_consumer_tests {
         .as_object()
         .unwrap()
         .clone();
+        let mut pin_progress = Vec::new();
         moss_pin_spec(
             &mut spec,
             &entry,
             &Settings::for_test(temp.path().join("data")),
             mode,
+            &mut |done, total| pin_progress.push((done, total)),
         )
         .unwrap();
         assert_eq!(spec.prepared_file_pins().len(), 1);
+        // sc-26610: one progress tick per selected file, before its (possibly cold) seal.
+        assert_eq!(pin_progress, vec![(0, 1)]);
         #[cfg(target_os = "macos")]
         let error = moss_memory::selected_asset_facts(MossImageVariant::Sft, &spec, mode)
             .unwrap_err()
@@ -1226,7 +1275,14 @@ mod moss_consumer_tests {
                 .unwrap()
                 .clone();
         let error =
-            moss_pin_spec(&mut spec, &entry, &settings, MossImageAcceleration::Off).unwrap_err();
+            moss_pin_spec(
+                &mut spec,
+                &entry,
+                &settings,
+                MossImageAcceleration::Off,
+                &mut |_, _| {},
+            )
+            .unwrap_err();
         assert!(
             error.to_string().contains("MOSS frozen component identity"),
             "{error}"

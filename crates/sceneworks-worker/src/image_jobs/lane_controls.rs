@@ -128,11 +128,32 @@ pub(crate) fn resolve_native_prompt_batch(
     caps: &Capabilities,
     per_image: &[(&str, bool)],
 ) -> WorkerResult<Option<NativePromptBatch>> {
-    if request.prompts.is_empty() {
-        return Ok(None);
-    }
     let refuse =
         |message: String| WorkerError::InvalidPayload(format!("{}: {message}", request.model));
+    if request.prompts.is_empty() {
+        // A native COUNT batch (sc-24215, `image.nativeCountBatch`): the engine renders `count`
+        // images of the one prompt in a single call (`GenerationRequest::count`), image `k` on
+        // seed `seed + k` — Supra2-IMG's published `num_images`. Every other model keeps one
+        // engine call per image.
+        if !controls::native_count_batch(&request.model_manifest_entry) {
+            return Ok(None);
+        }
+        if request.count > caps.max_count {
+            return Err(refuse(format!(
+                "{} images exceed the {} the engine renders per request",
+                request.count, caps.max_count
+            )));
+        }
+        if let Some((feature, _)) = per_image.iter().find(|(_, in_use)| *in_use) {
+            return Err(refuse(format!(
+                "{feature} renders per image and is not supported by this model"
+            )));
+        }
+        return Ok(Some(NativePromptBatch {
+            prompts: vec![request.prompt.clone()],
+            count: request.count,
+        }));
+    }
     if !caps.supports_prompt_batch {
         return Err(refuse(
             "the engine does not render a prompt batch in one pass; send one job per prompt"
@@ -428,6 +449,43 @@ mod tests {
             error.to_string().contains("imageActivationGbPerMegapixel"),
             "{error}"
         );
+    }
+
+    /// sc-24215: a model declaring `image.nativeCountBatch` renders `count` images of its one
+    /// prompt in ONE engine call; the engine's `max_count` bounds it and a per-image lane feature is
+    /// refused rather than silently skipped. Undeclared ⇒ the per-image path, unchanged.
+    #[test]
+    fn a_declared_native_count_batch_is_one_call_over_the_one_prompt() {
+        let with = |image: Value, count: u32| {
+            let payload = json!({
+                "projectId": "p", "model": "supra2_img", "prompt": "a fox", "count": count,
+                "modelManifestEntry": { "id": "supra2_img", "image": image },
+            });
+            ImageRequest::from_payload(payload.as_object().unwrap())
+        };
+        let caps = |max_count: u32| Capabilities {
+            max_count,
+            ..Default::default()
+        };
+        let declared = json!({ "nativeCountBatch": true });
+        let batch = resolve_native_prompt_batch(&with(declared.clone(), 4), &caps(64), &[])
+            .unwrap()
+            .expect("declared ⇒ one call");
+        assert_eq!(batch.prompts, vec!["a fox".to_owned()]);
+        assert_eq!((batch.count, batch.images()), (4, 4));
+        assert_eq!(
+            resolve_native_prompt_batch(&with(json!({}), 4), &caps(64), &[]).unwrap(),
+            None
+        );
+        let over = resolve_native_prompt_batch(&with(declared.clone(), 4), &caps(2), &[])
+            .unwrap_err()
+            .to_string();
+        assert!(over.contains("4 images exceed the 2"), "{over}");
+        let per_image =
+            resolve_native_prompt_batch(&with(declared, 2), &caps(64), &[("hires fix", true)])
+                .unwrap_err()
+                .to_string();
+        assert!(per_image.contains("hires fix"), "{per_image}");
     }
 
     fn honouring() -> Capabilities {

@@ -179,6 +179,7 @@ import { suggestTier } from "../tierSuggestion.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import {
+  MAX_LISTED_JOBS,
   PROMPT_REFINE_MODEL_ID,
   qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
@@ -222,6 +223,8 @@ import {
   negativePromptInertAtGuidance,
   guidanceIsOff,
   patchGridHint,
+  nativeResolutionHint,
+  promptTokenLimitHint,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -255,11 +258,18 @@ const REFERENCE_TUNING_PRESET_KEYS = [
 
 // Above this many resolved images a batch run needs explicit confirmation, so a stray
 // value or an over-eager cross-product can't silently queue a huge job (sc-9957).
+// This is a CONFIRMATION threshold only: it never caps how many images a run may
+// resolve — an over-cap run just gets one "N images?" gate before it starts.
 const BATCH_RENDER_CAP = 100;
-// Keep high-cardinality batch state bounded without changing the eager behavior of
-// ordinary (at-or-under-cap) runs. The worker remains serial; this is client-side
-// backpressure for confirmed large runs only.
-const BATCH_ACTIVE_JOB_LIMIT = BATCH_RENDER_CAP;
+// How many of a confirmed run's jobs may be in flight at once — the submit window
+// `waitForBatchSlot` holds the fan-out behind. Distinct from BATCH_RENDER_CAP: when the
+// two were one constant, confirming a 250-image run queued 100 jobs and then held the
+// remaining 150 until the first 100 finished, because the window could only refill as
+// jobs settled. The window only bounds the client's in-flight id set (the worker stays
+// serial either way), so it is the queue depth the app can hold and show — a run at or
+// under it queues in full the moment it is confirmed, and a larger run feeds in windows
+// of that size.
+const BATCH_ACTIVE_JOB_LIMIT = MAX_LISTED_JOBS;
 // A styled Cartesian batch can be enormous even though its queue state remains bounded.
 // Yield after this many preflight prompts so the run state commits and Stop can interrupt
 // a clean (no-overage) stream before we ever reach its Cartesian suffix.
@@ -1603,7 +1613,6 @@ export function ImageStudio() {
     setGuidanceMethod(
       preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
     );
-    setResolution(preferredResolution(selectedModel, resolutionOptions));
     setStepsOverride("");
     setGuidanceOverride("");
   }, [
@@ -1660,9 +1669,8 @@ export function ImageStudio() {
       setEnhancePrompt(false);
     }
   }, [enhancePrompt, promptEnhance]);
-  // Keep the selected resolution valid for the current model's buckets. Switching
-  // to a model whose options exclude the current value snaps to its default (or
-  // 1024x1024, then the first option) rather than leaving a stale, unselectable value.
+  // Preserve resolution across models; if unavailable, choose the closest supported
+  // aspect ratio and size instead of resetting the composition to the model default.
   // Guard on a resolved model (sc-11962): before the catalog loads `resolutionOptions`
   // falls back to DEFAULT_RESOLUTION_OPTIONS, so an un-guarded snap would revert a
   // restored model-specific resolution (e.g. 1536x1536) during restart-restore.
@@ -1673,7 +1681,11 @@ export function ImageStudio() {
     if (resolutionOptions.includes(resolution)) {
       return;
     }
-    setResolution(preferredResolution(selectedModel, resolutionOptions));
+    const dims = parseResolution(resolution);
+    setResolution(
+      (dims && pickClosestResolution(dims.width, dims.height, resolutionOptions))
+        || preferredResolution(selectedModel, resolutionOptions),
+    );
   }, [resolutionOptions, resolution, selectedModel]);
   // Keep the selected quant tier valid for the active model (sc-8515). When the current tier is
   // still installed for this model, leave it; otherwise snap to the model's default selection
@@ -2079,6 +2091,10 @@ export function ImageStudio() {
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
   // whenever the effective width or height is under it.
   const patchGridNotice = patchGridHint(selectedModel, width, height);
+  // sc-24215: a fixed native size and a declared prompt-token budget (Supra2-IMG: 256×256, 128
+  // Flan-T5 tokens) are stated where the user picks the size and writes the prompt.
+  const nativeResolutionNotice = nativeResolutionHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel);
   const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
@@ -2758,7 +2774,7 @@ export function ImageStudio() {
     }
     const styledBatchPrompts = () => (function* composedBatchPrompts() {
       for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
         yield composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
       }
     })();
@@ -2798,7 +2814,7 @@ export function ImageStudio() {
           if (current) replaceBatchRun({ ...current, submitting: false });
           return;
         }
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
         const promptBudgetOverages = batchPromptBudgetOverages(
           [composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt],
           1,
@@ -2825,7 +2841,7 @@ export function ImageStudio() {
       for (const entry of iterateBatch(batchPrompts, batchVariables)) {
         // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
         // gets that per-prompt resolution.
-        const item = parsePromptResolution(entry.prompt);
+        const item = parsePromptResolution(entry.prompt, resolutionOptions);
         if (chunk.length >= size || (chunk[0] && JSON.stringify(chunk[0].resolution) !== JSON.stringify(item.resolution))) {
           yield chunk;
           chunk = [];
@@ -2941,9 +2957,9 @@ export function ImageStudio() {
       restorePlanBodyForRenders({
         width,
         height,
-        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line).resolution) : [],
+        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line, resolutionOptions).resolution) : [],
       }),
-    [batchMode, batchPrompts, height, width],
+    [batchMode, batchPrompts, height, width, resolutionOptions],
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
@@ -2953,7 +2969,7 @@ export function ImageStudio() {
   // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
   // so the batch and single paths cannot drift.
   const batchResolutionIssues = batchPrompts
-    .map((line) => parsePromptResolution(line).resolution)
+    .map((line) => parsePromptResolution(line, resolutionOptions).resolution)
     .filter(
       (res) =>
         res &&
@@ -3159,6 +3175,7 @@ export function ImageStudio() {
             <div className="prompt-input-row batch">
               <BatchPromptPanel
                 promptsText={batchPromptsText}
+                resolutionOptions={resolutionOptions}
                 onPromptsTextChange={setBatchPromptsText}
                 variableValues={batchVariableValues}
                 onVariableValuesChange={setBatchVariableValues}
@@ -3301,6 +3318,11 @@ export function ImageStudio() {
               `ui.promptHint`, so the studio nudges toward the quality prefix + tag-style prompting the model
               was trained on (a bare sentence renders low-effort art). Opens the existing prompt-guide modal.
               Free-text models only. */}
+          {!structuredPromptModel && promptTokenNotice ? (
+            <p className="prompt-hint" role="note">
+              {promptTokenNotice}
+            </p>
+          ) : null}
           {!structuredPromptModel && promptHint ? (
             <p className="prompt-hint">
               {promptHint}{" "}
@@ -3917,6 +3939,11 @@ export function ImageStudio() {
                 {patchGridNotice ? (
                   <span className="field-hint" role="note">
                     {patchGridNotice}
+                  </span>
+                ) : null}
+                {nativeResolutionNotice ? (
+                  <span className="field-hint" role="note">
+                    {nativeResolutionNotice}
                   </span>
                 ) : null}
               </label>
