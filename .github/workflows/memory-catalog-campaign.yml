@@ -79,7 +79,7 @@ on:
         description: "MOSS only: explicitly choose a Mac with cached MOSS snapshots; unspecified is rejected."
         required: true
         type: choice
-        options: [unspecified, rw-llm, rw-mage, rw-krea]
+        options: [unspecified, real-weights, rw-llm, rw-mage, rw-krea]
         default: unspecified
       moss_phase:
         description: "MOSS capture runs eight training cells and eight cross-loads; finalize verifies that run plus actual preview inspections without GPU execution."
@@ -289,7 +289,7 @@ jobs:
           const bad = [];
           if (process.env.DISPATCH_EVENT !== 'workflow_dispatch' || process.env.DISPATCH_REPOSITORY !== 'SceneWorks/SceneWorks') bad.push('MOSS requires an explicit dispatch in SceneWorks/SceneWorks');
           if (!/^[0-9a-f]{40}$/.test(i.workflowSource) || i.workflowSource !== process.env.DISPATCH_SHA) bad.push('workflowSource must equal the exact dispatched GitHub SHA');
-          if (!['rw-llm','rw-mage','rw-krea'].includes(i.moss_runner_label)) bad.push('explicitly choose moss_runner_label=rw-llm|rw-mage|rw-krea with cached MOSS snapshots');
+          if (!['real-weights','rw-llm','rw-mage','rw-krea'].includes(i.moss_runner_label)) bad.push('explicitly choose moss_runner_label=real-weights|rw-llm|rw-mage|rw-krea with cached MOSS snapshots');
           if (i.profile && i.profile !== 'catalog') bad.push('profile must remain catalog (MOSS replaces it)');
           if (i.anchors || i.models || (i.iris_smoke_filter && i.iris_smoke_filter !== 'all')) bad.push('clear anchors/models/iris_smoke_filter overrides');
           if (i.download_missing || i.qwen_persistent_weights) bad.push('disable download_missing and qwen_persistent_weights; MOSS is cached/offline only');

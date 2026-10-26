@@ -121,17 +121,175 @@ class StaticContractTests(unittest.TestCase):
         record["identity"]["weightSources"] = []
         self.assertFalse(Draft202012Validator(schema).is_valid(record))
 
-    def test_workflow_provenance_refuses_mixed_run_attempt_or_source(self):
+    def test_workflow_provenance_preserves_same_run_attempts_and_refuses_other_run_or_source(self):
         receipt = {"fixtureLabel": "SCHEMA TEST ONLY - NOT CAMPAIGN EVIDENCE",
                    "source": {"workflowSource": "a" * 40, "workflowSha256": "b" * 64},
                    "workflow": {"runId": "123", "attempt": 1, "sha": "a" * 40,
                                 "fileSha256": "b" * 64, "ref": "refs/heads/SCHEMA_TEST_ONLY", "jobId": "synthetic"}}
         self.assertEqual(verifier.verify_workflow_provenance(receipt, "123"), 1)
-        for field, value in (("runId", "124"), ("attempt", 2), ("attempt", "1"), ("sha", "c" * 40), ("fileSha256", "c" * 64)):
+        retry = copy.deepcopy(receipt)
+        retry["workflow"]["attempt"] = 2
+        self.assertEqual(verifier.verify_workflow_provenance(retry, "123"), 2)
+        for field, value in (("runId", "124"), ("attempt", 0), ("attempt", "1"), ("sha", "c" * 40), ("fileSha256", "c" * 64)):
             broken = copy.deepcopy(receipt)
             broken["workflow"][field] = value
             with self.assertRaises(verifier.EvidenceError):
-                verifier.verify_workflow_provenance(broken, "123", 1)
+                verifier.verify_workflow_provenance(broken, "123")
+
+    def retry_bundle_fixture(self):
+        bundles, jobs = {}, []
+        for index, (phase, backend, attempt) in enumerate([
+                ("capture", "mlx", 1), ("capture", "cuda", 2),
+                ("cross-load", "mlx", 2), ("cross-load", "cuda", 2)]):
+            directory = self.root / f"{phase}-{backend}"
+            directory.mkdir(exist_ok=True)
+            receipt = {"source": {"workflowSource": "a" * 40, "workflowSha256": "b" * 64},
+                       "workflow": {"runId": "123", "attempt": attempt, "sha": "a" * 40,
+                                    "fileSha256": "b" * 64, "ref": "refs/heads/SCHEMA_TEST_ONLY", "jobId": phase},
+                       "runnerName": f"SCHEMA_TEST_ONLY-{backend}"}
+            (directory / "driver.json").write_text(json.dumps(receipt))
+            bundles[(phase, backend)] = (directory, receipt)
+            jobs.append({"id": 100 + index, "run_id": 123, "run_attempt": attempt,
+                         "head_sha": "a" * 40, "name": f"known caller / MOSS {phase} {backend}",
+                         "status": "completed", "conclusion": "success", "runner_name": receipt["runnerName"]})
+        inventory = {"repository": "SceneWorks/SceneWorks", "runId": "123", "attempts": [
+            {"attempt": attempt, "jobs": [row for row in jobs if row["run_attempt"] == attempt]}
+            for attempt in [1, 2]]}
+        for backend in ["mlx", "cuda"]:
+            opposite = "cuda" if backend == "mlx" else "mlx"
+            bundles[("cross-load", backend)][1]["sourceCapture"] = {
+                "backend": opposite, "driverSha256": verifier.digest(bundles[("capture", opposite)][0] / "driver.json")}
+        return bundles, inventory
+
+    def test_same_run_mixed_attempts_authenticate_and_preserve_each_actual_job(self):
+        bundles, inventory = self.retry_bundle_fixture()
+        jobs = verifier.authenticate_bundle_jobs(bundles, "123", inventory)
+        self.assertEqual([item["attempt"] for item in jobs], [1, 2, 2, 2])
+        self.assertEqual([item["jobId"] for item in jobs], [100, 101, 102, 103])
+        verifier.verify_capture_dependencies(bundles)
+        for _, receipt in bundles.values():
+            verifier.verify_inspection_capture_binding({"captureWorkflow": copy.deepcopy(receipt["workflow"])}, receipt)
+
+    def test_job_authentication_rejects_wrong_attempt_job_head_failure_and_runner(self):
+        bundles, inventory = self.retry_bundle_fixture()
+        for field, value in [("run_id", 124), ("run_attempt", 2), ("head_sha", "c" * 40),
+                             ("name", "arbitrary MOSS capture mlx suffix"), ("conclusion", "failure"),
+                             ("status", "in_progress"), ("runner_name", "other"), ("id", 0)]:
+            with self.subTest(field=field):
+                broken = copy.deepcopy(inventory)
+                broken["attempts"][0]["jobs"][0][field] = value
+                with self.assertRaises(verifier.EvidenceError):
+                    verifier.authenticate_bundle_jobs(bundles, "123", broken)
+        duplicate = copy.deepcopy(inventory)
+        duplicate["attempts"][0]["jobs"].append(copy.deepcopy(duplicate["attempts"][0]["jobs"][0]))
+        with self.assertRaisesRegex(verifier.EvidenceError, "ambiguous"):
+            verifier.authenticate_bundle_jobs(bundles, "123", duplicate)
+        for field, value in [("attempt", 3), ("jobId", "other")]:
+            broken = copy.deepcopy(bundles)
+            broken[("capture", "mlx")][1]["workflow"][field] = value
+            with self.assertRaises(verifier.EvidenceError):
+                verifier.authenticate_bundle_jobs(broken, "123", inventory)
+
+    def test_cross_load_rejects_replaced_capture_even_if_adapter_bytes_were_reused(self):
+        bundles, _ = self.retry_bundle_fixture()
+        verifier.verify_capture_dependencies(bundles)
+        driver = bundles[("capture", "mlx")][0] / "driver.json"
+        driver.write_text(driver.read_text() + "\n")
+        with self.assertRaisesRegex(verifier.EvidenceError, "replaced capture"):
+            verifier.verify_capture_dependencies(bundles)
+        # The opposite transfer only consumed the unchanged CUDA capture.
+        verifier.verify_capture_dependencies({key: value for key, value in bundles.items() if key != ("cross-load", "cuda")})
+
+    def test_inspection_must_name_exact_capture_attempt_job_and_source(self):
+        bundles, _ = self.retry_bundle_fixture()
+        capture = bundles[("capture", "mlx")][1]
+        for field, value in [("attempt", 2), ("jobId", "cross-load"), ("runId", "124"), ("sha", "c" * 40)]:
+            review = {"captureWorkflow": copy.deepcopy(capture["workflow"])}
+            review["captureWorkflow"][field] = value
+            with self.assertRaises(verifier.EvidenceError):
+                verifier.verify_inspection_capture_binding(review, capture)
+        with self.assertRaises(verifier.EvidenceError):
+            verifier.verify_inspection_capture_binding({"attempt": 1}, capture)
+
+    def test_job_retrieval_paginates_all_attempts_and_retains_artifact_metadata(self):
+        calls = []
+        def request(url):
+            calls.append(url)
+            if "/artifacts?" in url:
+                return {"total_count": 0, "artifacts": []}
+            page = int(url.rsplit("=", 1)[1])
+            rows = [{"id": index, "run_attempt": 1 + index % 2} for index in range(100)] if page == 1 else []
+            return {"total_count": 100, "jobs": rows}
+        inventory = verifier.retrieve_workflow_jobs("123", request)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual([item["attempt"] for item in inventory["attempts"]], [1, 2])
+        self.assertTrue(all("filter=all&" in url for url in calls if "/jobs?" in url))
+        with self.assertRaisesRegex(verifier.EvidenceError, "incomplete"):
+            verifier.retrieve_workflow_jobs("123", lambda _: {"total_count": 1, "jobs": []})
+        with self.assertRaisesRegex(verifier.EvidenceError, "ten-page"):
+            verifier.retrieve_workflow_jobs("123", lambda _: {"total_count": 1001, "jobs": [{"id": i} for i in range(100)]})
+
+    def test_later_actual_producer_failure_without_artifact_rejects_old_good_bundle(self):
+        bundles, inventory = self.retry_bundle_fixture()
+        newer = copy.deepcopy(inventory["attempts"][0]["jobs"][0])
+        newer.update({"id": 999, "run_attempt": 2, "conclusion": "failure"})
+        inventory["attempts"][1]["jobs"].append(newer)
+        with self.assertRaisesRegex(verifier.EvidenceError, "newer actual"):
+            verifier.authenticate_bundle_jobs(bundles, "123", inventory)
+        newer["conclusion"] = "skipped"  # A skipped backend did not replace its successful execution.
+        self.assertEqual(len(verifier.authenticate_bundle_jobs(bundles, "123", inventory)), 4)
+
+    def test_selected_artifact_metadata_binds_name_run_head_attempt_and_driver_hash(self):
+        bundles, inventory = self.retry_bundle_fixture()
+        selection = {"runId": "123", "bundles": []}
+        inventory["artifacts"] = []
+        for index, ((phase, backend), (directory, receipt)) in enumerate(bundles.items()):
+            attempt = receipt["workflow"]["attempt"]
+            name = f"{phase}-{backend}-attempt-{attempt}"
+            selection["bundles"].append({"bundle": f"{phase}-{backend}", "artifactName": name,
+                "attempt": attempt, "driverSha256": verifier.digest(directory / "driver.json")})
+            inventory["artifacts"].append({"id": index + 1000, "name": name, "expired": False,
+                "digest": "sha256:" + "d" * 64, "workflow_run": {"id": 123, "head_sha": "a" * 40}})
+        verified = verifier.authenticate_bundle_artifacts(bundles, "123", inventory, selection)
+        self.assertEqual(len(verified), 4)
+        self.assertEqual(verified[0]["artifactId"], 1000)
+        self.assertEqual(verified[0]["digest"], "sha256:" + "d" * 64)
+        for field, value in [("artifactName", "capture-mlx-attempt-2"), ("attempt", 2), ("driverSha256", "0" * 64)]:
+            broken = copy.deepcopy(selection)
+            broken["bundles"][0][field] = value
+            with self.assertRaises(verifier.EvidenceError):
+                verifier.authenticate_bundle_artifacts(bundles, "123", inventory, broken)
+        for changes in [{"expired": True}, {"workflow_run": {"id": 124, "head_sha": "a" * 40}},
+                        {"workflow_run": {"id": 123, "head_sha": "b" * 40}}]:
+            broken = copy.deepcopy(inventory)
+            broken["artifacts"][0].update(changes)
+            with self.assertRaises(verifier.EvidenceError):
+                verifier.authenticate_bundle_artifacts(bundles, "123", broken, selection)
+
+    def test_bundle_checks_complete_cases_exact_source_and_member_hashes_before_retry_reuse(self):
+        directory = self.root / "capture-mlx"
+        directory.mkdir()
+        raw = directory / "raw.json"
+        raw.write_text("SCHEMA TEST ONLY")
+        source = {"manifestSha256": verifier.MANIFEST_SHA256, "finalMergedSource": True,
+                  "inferencePin": "a" * 40}
+        receipt = {"ok": True, "phase": "capture", "backend": "mlx", "source": source,
+                   "cases": [{"caseId": case, "executionPassed": True} for case in verifier.CELLS if case.startswith("mlx/")],
+                   "members": [{"path": "raw.json", "sha256": verifier.digest(raw)}]}
+        driver = directory / "driver.json"
+        driver.write_text(json.dumps(receipt))
+        verifier.verify_bundle(self.root, "capture", "mlx", source)
+        with self.assertRaisesRegex(verifier.EvidenceError, "source binding"):
+            verifier.verify_bundle(self.root, "capture", "mlx", {**source, "inferencePin": "b" * 40})
+        receipt["cases"][0]["executionPassed"] = False
+        driver.write_text(json.dumps(receipt))
+        with self.assertRaisesRegex(verifier.EvidenceError, "completed"):
+            verifier.verify_bundle(self.root, "capture", "mlx", source)
+        receipt["cases"][0]["executionPassed"] = True
+        driver.write_text(json.dumps(receipt))
+        raw.write_text("changed")
+        with self.assertRaisesRegex(verifier.EvidenceError, "hash mismatch"):
+            verifier.verify_bundle(self.root, "capture", "mlx", source)
 
     def test_native_consumer_uses_optional_mapping_not_phantom_vector(self):
         source = (HERE / "verify_evidence.py").read_text()

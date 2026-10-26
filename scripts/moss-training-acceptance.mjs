@@ -9,6 +9,8 @@ import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { digest, parseTestResult, executeCpuCommand } from './moss-consumer-assertions.mjs';
 import { defaultInspect, parseTestList, selectLibTestExecutable, queryWindowsProcesses, executeOwnedChild } from './moss-native-api-validation.mjs';
+import { stageLatestMossArtifacts } from './moss-training-artifacts.mjs';
+import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
 import { lockedInferenceRevision } from './select-windows-cargo-cache.mjs';
 
 export const MANIFEST_SHA256 = '6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320';
@@ -312,7 +314,7 @@ export async function executeCommand(root, args, log, limitMs, state, supervisio
 }
 
 export async function run(options) {
-  const { root,output,backend,phase,manifest,env=process.env,execute=executeCommand,inspect=defaultInspect,preflightValidator=validatePreflight,sourceProvider=sourceFacts }=options;
+  const { root,output,backend,phase,manifest,env=process.env,execute=executeCommand,inspect=defaultInspect,preflightValidator=validatePreflight,sourceProvider=sourceFacts,cacheInventory=inventoryMossTrainingCache }=options;
   const cellIndex=options['capture-cell'] === undefined ? null : CELLS.indexOf(options['capture-cell']);
   assert(cellIndex === null || (phase === 'capture' && cellIndex >= 0), 'invalid capture-cell selector');
   const continuing=cellIndex !== null && cellIndex > 0;
@@ -344,13 +346,24 @@ export async function run(options) {
     const currentSource=sourceProvider(root,manifest,env,inspect);
     if(continuing) assert(JSON.stringify(receipt.source)===JSON.stringify(currentSource), 'continuation source proof changed');
     receipt.source=currentSource;
+    if(phase!=='finalize') {
+      receipt.cacheInventory=cacheInventory({root,phase,env});
+      assert(receipt.cacheInventory.ready,'required cached MOSS snapshots/files missing before compilation: '+receipt.cacheInventory.missing.map(x=>x.path).join(', '));
+    }
     const source=receipt.source;
+    let peers=options['peer-artifacts'];
+    if(phase!=='capture') {
+      const selectedRoot=`${output}-selected-artifacts`;
+      receipt.artifactSelection=stageLatestMossArtifacts(peers,selectedRoot,{phases:phase==='cross-load'?['capture']:['capture','cross-load'],source,runId:phase==='cross-load'?env.GITHUB_RUN_ID:env.MOSS_CAPTURE_RUN_ID});
+      store(path.join(output,'selected-artifacts.json'),receipt.artifactSelection);
+      if(phase==='finalize'&&!env.MOSS_INSPECTION_JSON&&existsSync(path.join(peers,'inspections.json'))) copyFileSync(path.join(peers,'inspections.json'),path.join(selectedRoot,'inspections.json'),2);
+      peers=selectedRoot;
+    }
     if(phase==='finalize') {
-      const peers=options['peer-artifacts'];
       for(const b of ['mlx','cuda']) for(const p of ['capture','cross-load']) verifyBundle(path.join(peers,`${p}-${b}`),source,p,b);
       // Only the semantic validator may call an acceptance record accepted. It must
       // inspect native receipts, loss values, tensors, artifacts and inspections.
-      await command(['python3','-I',path.join(root,'scripts/ci/moss-training-acceptance/verify_evidence.py'),'--root',peers,'--manifest',manifest,'--output',path.join(output,'verification.json')],'finalize',BOUNDS.list);
+      await command(['python3','-I',path.join(root,'scripts/ci/moss-training-acceptance/verify_evidence.py'),'--root',peers,'--manifest',manifest,'--selection',path.join(output,'selected-artifacts.json'),'--output',path.join(output,'verification.json')],'finalize',BOUNDS.list);
       const verified=json(path.join(output,'verification.json'));
       assert(verified.accepted===true && verified.acceptedCaseCount===8,'final validator did not accept all eight native evidence records');
       assert(Array.isArray(verified.records) && verified.records.length===8 && new Set(verified.records).size===8,'validator must name eight complete accepted record files');
@@ -374,8 +387,11 @@ export async function run(options) {
       const baseEnv={MOSS_REAL_WEIGHTS_ACCEPTANCE:'1',MOSS_ACCEPTANCE_MANIFEST:manifest,MOSS_ACCEPTANCE_WORKFLOW_SOURCE:source.workflowSource,MOSS_ACCEPTANCE_INFERENCE_PIN:source.inferencePin,HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'};
       const sourceBackend=phase==='cross-load'?(backend==='mlx'?'cuda':'mlx'):backend;
       if(phase==='cross-load') {
-        const peers=options['peer-artifacts'];
-        for(const b of ['mlx','cuda']) verifyBundle(path.join(peers,`capture-${b}`),source,'capture',b);
+        for(const b of ['mlx','cuda']) {
+          const capture=verifyBundle(path.join(peers,`capture-${b}`),source,'capture',b);
+          assert(capture.workflow?.runId===env.GITHUB_RUN_ID,'cross-load capture belongs to another workflow run');
+        }
+        receipt.sourceCapture={backend:sourceBackend,driverSha256:fileDigest(path.join(peers,`capture-${sourceBackend}`,'driver.json'))};
         baseEnv.MOSS_ACCEPTANCE_PEER_ARTIFACTS=peers;
       }
       const buildStart=continuing?Date.parse(receipt.preparationStartedAt):phase==='cross-load'?Date.parse(env.MOSS_CROSS_LOAD_JOB_STARTED_AT):Date.now();
@@ -388,6 +404,7 @@ export async function run(options) {
       assert(Number.isSafeInteger(workflow.attempt),'workflow attempt exceeds integer range');
       if(continuing) assert(JSON.stringify(receipt.workflow)===JSON.stringify(workflow), 'continuation run/attempt/job changed');
       receipt.workflow=workflow;
+      receipt.runnerName=env.RUNNER_NAME??null;
       let executable;
       if(continuing) {
         executable=receipt.executable.path;

@@ -17,6 +17,8 @@ import math
 import os
 import shutil
 import struct
+import time
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
@@ -612,6 +614,12 @@ def verify_bundle(root, phase, backend, expected_source=None):
             "bundle manifest/final merged source proof mismatch")
     if expected_source is not None:
         require(source == expected_source, "source binding differs across backend/phase bundles")
+    source_backend = ("cuda" if backend == "mlx" else "mlx") if phase == "cross-load" else backend
+    expected = [case for case in CELLS if case.startswith(source_backend + "/")]
+    require(isinstance(receipt.get("cases"), list)
+            and [case.get("caseId") for case in receipt["cases"]] == expected
+            and all(case.get("executionPassed") is True for case in receipt["cases"]),
+            "all four exact completed bundle cases required")
     listed = receipt["members"]
     require(isinstance(listed, list) and len({x["path"] for x in listed}) == len(listed), "duplicate/missing bundle members")
     actual = set()
@@ -688,20 +696,138 @@ def controller_observations(bundle, receipt, entry, phase):
     return cleanup, preflight, command
 
 
-def verify_workflow_provenance(receipt, capture_run, expected_attempt=None):
-    """Never assemble accepted evidence from different runs or retry attempts."""
+def verify_workflow_provenance(receipt, capture_run):
+    """Same-run retries preserve each producing bundle's actual attempt/job."""
     workflow = receipt.get("workflow")
     require(isinstance(workflow, dict), "actual driver workflow provenance missing")
     require(workflow.get("runId") == capture_run, "bundle belongs to a different capture workflow run")
     attempt = workflow.get("attempt")
     require(type(attempt) is int and attempt > 0, "actual workflow attempt missing/invalid")
-    require(expected_attempt is None or attempt == expected_attempt, "mixed capture retry attempts")
     require(workflow.get("sha") == receipt["source"]["workflowSource"]
             and workflow.get("fileSha256") == receipt["source"]["workflowSha256"]
             and isinstance(workflow.get("ref"), str) and workflow["ref"]
             and isinstance(workflow.get("jobId"), str) and workflow["jobId"],
             "workflow source/ref/file/job identity mismatch")
     return attempt
+
+
+def retrieve_workflow_jobs(capture_run, request_json=None):
+    """Actions-read metadata only: all attempts, at most ten pages per resource."""
+    require(isinstance(capture_run, str) and capture_run.isdecimal() and int(capture_run) > 0,
+            "invalid capture run for job retrieval")
+    if request_json is None:
+        token = os.environ.get("MOSS_ACTIONS_READ_TOKEN")
+        require(token, "Actions-read token required to authenticate capture job attempts")
+
+        def request_json(url):
+            request = urllib.request.Request(url, headers={
+                "Accept": "application/vnd.github+json", "Authorization": f"Bearer {token}",
+                "X-GitHub-Api-Version": "2022-11-28"})
+            with urllib.request.urlopen(request, timeout=15) as response:
+                body = response.read(16 * 1024 * 1024 + 1)
+            require(len(body) <= 16 * 1024 * 1024, "GitHub jobs response exceeds metadata bound")
+            return json.loads(body, parse_constant=_invalid_constant, object_pairs_hook=_unique_object)
+
+    started = time.monotonic()
+    result = {"repository": "SceneWorks/SceneWorks", "runId": capture_run,
+              "retrievedAt": datetime.now(timezone.utc).isoformat(), "attempts": []}
+    def pages(resource, query):
+        rows = []
+        for page in range(1, 11):
+            require(time.monotonic() - started < 120, "GitHub provenance authentication deadline exceeded")
+            url = (f"https://api.github.com/repos/SceneWorks/SceneWorks/actions/runs/{capture_run}"
+                   f"/{resource}?{query}per_page=100&page={page}")
+            response = request_json(url)
+            require(time.monotonic() - started < 120, "GitHub provenance authentication deadline exceeded")
+            current = response.get(resource)
+            require(isinstance(current, list) and len(current) <= 100, "invalid GitHub provenance page")
+            rows.extend(current)
+            if len(current) < 100:
+                require(response.get("total_count") == len(rows), "incomplete GitHub provenance inventory")
+                break
+        else:
+            raise EvidenceError("GitHub provenance inventory exceeds ten-page bound")
+        require(len({row["id"] for row in rows}) == len(rows), "duplicate GitHub provenance identities")
+        return rows
+    jobs = pages("jobs", "filter=all&")
+    attempts = {job.get("run_attempt") for job in jobs}
+    require(all(type(attempt) is int and attempt > 0 for attempt in attempts), "GitHub job attempt missing")
+    result["attempts"] = [{"attempt": attempt, "jobs": [job for job in jobs if job["run_attempt"] == attempt]}
+                          for attempt in sorted(attempts)]
+    result["artifacts"] = pages("artifacts", "")
+    return result
+
+
+def authenticate_bundle_jobs(bundles, capture_run, inventory):
+    require(inventory.get("repository") == "SceneWorks/SceneWorks" and inventory.get("runId") == capture_run,
+            "GitHub job inventory belongs to another repository/run")
+    authenticated = []
+    for (phase, backend), (_, receipt) in bundles.items():
+        attempt = verify_workflow_provenance(receipt, capture_run)
+        require(receipt["workflow"]["jobId"] == phase, "bundle logical job identity differs from its phase")
+        selected = [item for item in inventory["attempts"] if item["attempt"] == attempt]
+        require(len(selected) == 1, "actual bundle attempt missing/duplicated in GitHub jobs")
+        suffix = f"MOSS {phase} {backend}"
+        executions = [job for item in inventory["attempts"] for job in item["jobs"]
+                      if (job.get("name") == suffix or job.get("name", "").endswith(" / " + suffix))
+                      and job.get("conclusion") != "skipped"]
+        require(executions and attempt == max(job["run_attempt"] for job in executions),
+                "newer actual backend execution invalidates this older artifact")
+        jobs = [job for job in selected[0]["jobs"]
+                if job.get("name") == suffix or job.get("name", "").endswith(" / " + suffix)]
+        require(len(jobs) == 1, "exact backend job name missing/ambiguous in GitHub attempt")
+        job = jobs[0]
+        require(type(job.get("id")) is int and job["id"] > 0
+                and str(job.get("run_id")) == capture_run and job.get("run_attempt") == attempt
+                and job.get("head_sha") == receipt["source"]["workflowSource"]
+                and job.get("status") == "completed" and job.get("conclusion") == "success",
+                "GitHub job run/attempt/head/completed-success identity mismatch")
+        if receipt.get("runnerName"):
+            require(job.get("runner_name") == receipt["runnerName"], "GitHub job runner identity differs")
+        authenticated.append({"bundle": f"{phase}-{backend}", "attempt": attempt, "jobId": job["id"]})
+    return authenticated
+
+
+def authenticate_bundle_artifacts(bundles, capture_run, inventory, selection):
+    require(selection.get("runId") == capture_run, "artifact selection belongs to another run")
+    listed = selection.get("bundles", [])
+    require(len(listed) == len(bundles) and len({item["bundle"] for item in listed}) == len(bundles),
+            "missing/duplicate selected artifact bindings")
+    authenticated = []
+    for (phase, backend), (directory, receipt) in bundles.items():
+        name = f"{phase}-{backend}-attempt-{receipt['workflow']['attempt']}"
+        selected = [item for item in listed if item["bundle"] == f"{phase}-{backend}"]
+        require(len(selected) == 1 and selected[0]["artifactName"] == name
+                and selected[0]["attempt"] == receipt["workflow"]["attempt"]
+                and selected[0]["driverSha256"] == digest(directory / "driver.json"),
+                "selected artifact name/attempt/driver hash differs from consumed bundle")
+        rows = [row for row in inventory["artifacts"] if row.get("name") == name]
+        require(len(rows) == 1, "selected GitHub artifact missing/ambiguous")
+        artifact = rows[0]
+        require(type(artifact.get("id")) is int and artifact["id"] > 0 and artifact.get("expired") is False
+                and str(artifact.get("workflow_run", {}).get("id")) == capture_run
+                and artifact["workflow_run"].get("head_sha") == receipt["source"]["workflowSource"],
+                "GitHub artifact run/head/availability mismatch")
+        authenticated.append({"bundle": f"{phase}-{backend}", "artifactId": artifact["id"],
+                              "artifactName": name, "attempt": receipt["workflow"]["attempt"],
+                              "driverSha256": selected[0]["driverSha256"], "digest": artifact.get("digest")})
+    return authenticated
+
+
+def verify_capture_dependencies(bundles):
+    for (phase, backend), (_, receipt) in bundles.items():
+        if phase != "cross-load":
+            continue
+        source_backend = "cuda" if backend == "mlx" else "mlx"
+        source_bundle, _ = bundles[("capture", source_backend)]
+        require(receipt.get("sourceCapture") == {"backend": source_backend,
+                "driverSha256": digest(source_bundle / "driver.json")},
+                "cross-load consumed a different/replaced capture bundle")
+
+
+def verify_inspection_capture_binding(review, capture):
+    require(review.get("captureWorkflow") == capture["workflow"],
+            "inspection belongs to a different capture attempt/job/source")
 
 
 def inspection_set(root, verification_time=None):
@@ -734,7 +860,7 @@ def inspection_set(root, verification_time=None):
     return capture_run, by_id
 
 
-def finalize(root, manifest_file, output_file):
+def finalize(root, manifest_file, output_file, selection_file):
     from jsonschema import Draft202012Validator
     # One actual clock for the whole verification, before copying/hash work can
     # let a future-dated declaration become current during a slow finalization.
@@ -765,15 +891,22 @@ def finalize(root, manifest_file, output_file):
             shutil.copytree(root / f"{phase}-{backend}", destination / f"{phase}-{backend}")
             verify_bundle(destination, phase, backend, source)
     capture_run, reviews = inspection_set(root, verification_time)
-    attempt = None
     for _, receipt in bundles.values():
-        attempt = verify_workflow_provenance(receipt, capture_run, attempt)
+        verify_workflow_provenance(receipt, capture_run)
+    inventory = retrieve_workflow_jobs(capture_run)
+    jobs_file = destination / "github-jobs.json"
+    require(not jobs_file.exists(), "never replace job authentication provenance")
+    jobs_file.write_text(json.dumps(inventory, indent=2, allow_nan=False) + "\n")
+    authenticated_jobs = authenticate_bundle_jobs(bundles, capture_run, inventory)
+    authenticated_artifacts = authenticate_bundle_artifacts(bundles, capture_run, inventory, read_json(selection_file))
+    verify_capture_dependencies(bundles)
     records, summaries, accepted_payloads = [], [], []
     common_evaluation = common_dataset = None
     reentries = {}
     for case_id in CELLS:
         backend, parent, method = case_id.split("/")
         _, capture = bundles[("capture", backend)]
+        verify_inspection_capture_binding(reviews[case_id], capture)
         captured_bundle = destination / f"capture-{backend}"
         imported_backend = "cuda" if backend == "mlx" else "mlx"
         _, cross_receipt = bundles[("cross-load", imported_backend)]
@@ -871,7 +1004,9 @@ def finalize(root, manifest_file, output_file):
     for file, record in accepted_payloads:
         file.write_text(json.dumps(record, indent=2, allow_nan=False) + "\n")
     result = {"accepted": True, "acceptedCaseCount": len(records), "manifestSha256": MANIFEST_SHA256,
-              "records": records, "source": source, "semanticChecks": summaries}
+              "records": records, "source": source, "semanticChecks": summaries,
+              "authenticatedBundleJobs": authenticated_jobs, "authenticatedBundleArtifacts": authenticated_artifacts,
+              "githubJobs": {"path": jobs_file.name, "sha256": digest(jobs_file)}}
     output_file.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
     return result
 
@@ -881,10 +1016,11 @@ def main():
     parser.add_argument("--root", required=True)
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--selection", required=True)
     options = parser.parse_args()
     output = Path(options.output)
     try:
-        finalize(options.root, options.manifest, output)
+        finalize(options.root, options.manifest, output, options.selection)
     except Exception as error:
         output.parent.mkdir(parents=True, exist_ok=True)
         if not output.exists():
