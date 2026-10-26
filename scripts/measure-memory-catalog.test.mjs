@@ -2033,12 +2033,16 @@ test("appending to PACKAGED_MEMORY_ANCHOR_SOURCES is idempotent and keeps the ru
   );
 });
 
-/** A throwaway checkout carrying just what `writePackagedSource` reads: the file and rustfmt's config. */
+/** A throwaway checkout carrying the source module tree and rustfmt's config. */
 async function packagedSourceFixture() {
   const root = await mkdtemp(path.join(tmpdir(), "catalog-packaged-fmt-"));
   await mkdir(path.join(root, path.dirname(PACKAGED_SOURCES_PATH)), { recursive: true });
   const source = await readFile(path.join(ROOT, PACKAGED_SOURCES_PATH), "utf8");
   await writeFile(path.join(root, PACKAGED_SOURCES_PATH), source);
+  // CI_IMPACT: preserve the three existing formatter checks now that memory_anchor has a child
+  // module. This copies source only; it adds no build, test cases or model execution.
+  const endpointModule = "crates/sceneworks-core/src/sdxl_cuda_memory_endpoints.rs";
+  await writeFile(path.join(root, endpointModule), await readFile(path.join(ROOT, endpointModule)));
   await writeFile(
     path.join(root, "rustfmt.toml"),
     await readFile(path.join(ROOT, "rustfmt.toml"), "utf8"),
