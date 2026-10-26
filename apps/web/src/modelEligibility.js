@@ -315,7 +315,7 @@ export function poseModelUsable(model, caps) {
 }
 
 // Strict-control modes the selected backbone advertises (sc-8245). The single source of truth is the
-// model's `ui.controlModes` — mirrored into constants.js from the manifest (the worker's
+// model's `ui.controlModes` — mirrored into modelCatalog.js from the manifest (the worker's
 // STRICT_CONTROL_ENGINES `supported_kinds`). Canonical-ordered (pose, canny, depth) and de-duplicated so
 // the picker renders deterministically regardless of manifest ordering; unknown modes are dropped (the
 // worker only admits pose/canny/depth). Empty array ⇒ the backbone supports no strict control and the

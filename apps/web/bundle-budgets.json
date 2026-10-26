@@ -1,13 +1,14 @@
 {
+  "$comment": "Gated by vite-plugin-bundle-report.js (policy note at its top; sc-24217, approved by Michael 2026-10-21). initial = entry chunks + static imports + theme-init.js (first paint). lazyChunk = EACH non-initial dynamic-entry chunk plus its static closure minus initial chunks, checked per chunk. largestRoute = heaviest route family, same closure rule. Aggregate total JS is telemetry only (dist/bundle-report.json), not a gate. initial was tightened in sc-24217 to the measured 429481 raw / 134710 gzip / 115236 brotli plus ~3% headroom after the model catalog left the eager graph; never raise initial without approval. lazyChunk was seeded from the largestRoute limits.",
   "initial": {
-    "rawBytes": 500000,
-    "gzipBytes": 150000,
-    "brotliBytes": 125000
+    "rawBytes": 442000,
+    "gzipBytes": 139000,
+    "brotliBytes": 119000
   },
-  "total": {
-    "rawBytes": 3200000,
-    "gzipBytes": 860000,
-    "brotliBytes": 735000
+  "lazyChunk": {
+    "rawBytes": 1100000,
+    "gzipBytes": 260000,
+    "brotliBytes": 200000
   },
   "largestRoute": {
     "rawBytes": 1100000,

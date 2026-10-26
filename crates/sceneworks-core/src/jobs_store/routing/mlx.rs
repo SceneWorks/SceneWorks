@@ -66,7 +66,8 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "z_image" => z_image_base_mlx_eligible(payload),
         "flux_schnell" | "flux_dev" => flux_mlx_eligible(payload),
         "qwen_image" => qwen_mlx_eligible(payload),
-        "qwen_image_2_1" => qwen_image_2_1_mlx_eligible(payload),
+        // Turbo (sc-25907): the distilled checkpoint under its own engine id, same request shape.
+        "qwen_image_2_1" | "qwen_image_2_1_turbo" => qwen_image_2_1_mlx_eligible(payload),
         "qwen_image_edit"
         | "qwen_image_edit_2509"
         | "qwen_image_edit_2511"
@@ -96,7 +97,16 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         "mage_flow_edit_base" | "mage_flow_edit" | "mage_flow_edit_turbo" => {
             mage_flow_edit_mlx_eligible(payload)
         }
+        "moss_image_base" | "moss_image_sft" => {
+            let entry = payload
+                .get("modelManifestEntry")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            crate::moss_image::native_request(payload, &entry).is_ok()
+        }
         "iris_3b" => iris_mlx_eligible(payload),
+        "supra2_img" => supra2_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -508,6 +518,26 @@ fn iris_quantize_is_a_tier(payload: &Map<String, Value>) -> bool {
             Some(0 | 4 | 8)
         ),
     }
+}
+
+/// Supra2-IMG (sc-24213) is plain text-to-image at 256x256: the `supra2_img` engine takes no source,
+/// reference, mask, control or pose, and refuses adapters, quantization and conditioning by name.
+/// So `loras`, an `mlxQuantize`/`quantTier` carrier or an enabled hires fix (an img2img second pass)
+/// keeps the job off MLX — an `mlx_unsupported` affordance — instead of reaching an engine that
+/// would refuse it after load.
+pub(crate) fn supra2_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let hires_fix_enabled = payload
+        .get("hiresFix")
+        .and_then(Value::as_object)
+        .and_then(|hires| hires.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !hires_fix_enabled
+        && mage_flow_mlx_eligible(payload)
+        && !has_nonempty_array(payload, "loras")
+        && !["mlxQuantize", "quantTier"]
+            .iter()
+            .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that

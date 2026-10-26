@@ -33,7 +33,7 @@ jobs:
             apps/desktop/package-lock.json
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       # DELIBERATELY NOT `save-if: main`, unlike the PR and release lanes (see the note on the
       # `parity-rust` cache step in check.yml). This workflow is `workflow_dispatch:` only, so its
       # runs are manual packaging iterations on whatever branch the operator is working from —
@@ -64,6 +64,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libxdo-dev \
             patchelf \
+            squashfs-tools \
             wget
 
       - name: Fetch the pinned inference release
@@ -101,6 +102,12 @@ jobs:
       # its multi-architecture CUDA fatbin, and stages it before packaging.
       - name: Build Linux candle packages (AppImage + deb)
         run: npm --prefix apps/desktop run build:linux
+
+      - name: Reject host NVIDIA drivers in finished AppImages
+        run: |
+          for appimage in "$GITHUB_WORKSPACE"/target/release/bundle/appimage/*.AppImage; do
+            npm --prefix apps/desktop run check:linux-drivers -- --appimage "$appimage"
+          done
 
       - name: Upload Linux desktop packages
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

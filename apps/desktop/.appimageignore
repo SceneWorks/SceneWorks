@@ -1,0 +1,10 @@
+# appimagetool reads this from the packaging working directory (apps/desktop).
+# NVIDIA's driver belongs to the host; CUDA toolkit libraries stay bundled.
+... libcuda.so*
+... libcudadebugger.so*
+... libnvcuvid.so*
+... libnvoptix.so*
+... libnvidia-*.so*
+... libEGL_nvidia.so*
+... libGLX_nvidia.so*
+... libGLESv[12]_nvidia.so*

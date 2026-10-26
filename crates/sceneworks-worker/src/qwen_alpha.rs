@@ -14,7 +14,8 @@
 //! (inference sc-24111, PR #1009) turns on:
 //!
 //! * [`DESCRIPTOR_ALPHA_CAPABILITY`] — `Capabilities::supports_alpha_output`, false by default and
-//!   true only on `qwen_image_2_1`, on both backends.
+//!   true only on the Qwen-Image 2.1 family (`qwen_image_2_1`, `qwen_image_2_1_turbo`), on both
+//!   backends.
 //! * [`REQUEST_OUTPUT_CHANNELS`] — `GenerationRequest::output_channels`, a
 //!   `gen_core::OutputChannels { Rgb (default), Rgba }`. It is an ENUM, not a channel count: the
 //!   default is byte-identical to every pre-S4 render.
@@ -419,6 +420,11 @@ mod tests {
         assert!(
             capable.contains(&"qwen_image_2_1"),
             "the pinned 2.1 provider advertises alpha output: {capable:?}"
+        );
+        // sc-25907: the Turbo id is the base descriptor under a second id, RGBA decode included.
+        assert!(
+            capable.contains(&"qwen_image_2_1_turbo"),
+            "the pinned 2.1 Turbo provider advertises alpha output: {capable:?}"
         );
         assert!(!engine_advertises_alpha_output("no_such_model_xyz"));
 

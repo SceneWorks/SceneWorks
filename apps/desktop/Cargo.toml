@@ -63,7 +63,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 # First-run CUDA/onnxruntime redist downloader (cuda_provision.rs): the heavy GPU
 # runtime DLLs are no longer bundled (NSIS ~2 GB limit) — they're fetched on first run
 # from pinned PyPI wheels (zips), sha256-verified, and unzipped into %APPDATA%. Feature
-# Keep ZIP on the security-fixed major; older majors have unsafe extraction behavior.
+# sets preserve the existing downloader; zip 9 fixes unsafe archive extraction upstream.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
@@ -80,6 +80,12 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 # next launch (sc-11946). Already in the workspace lock (pulled transitively by tauri),
 # so no new locked version is added.
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+# Recover the UI when WebView2 kills its render process (webview_resilience.rs;
+# 2026-10-22 incident). Pinned to the exact version wry 0.55 builds against so the
+# ICoreWebView2Controller handed out by tauri's PlatformWebview and our handler
+# types are the same crate; both entries already sit in the workspace lock.
+webview2-com = "0.38.2"
+windows-core = "0.61"
 
 [lints.rust]
 # Tauri's generate_context!/Builder can emit unsafe at the webview FFI boundary,

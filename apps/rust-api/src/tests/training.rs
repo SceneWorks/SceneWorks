@@ -7721,3 +7721,95 @@ async fn training_retry_resume_is_refused_when_there_is_nothing_to_resume() {
         "{refused}"
     );
 }
+
+/// sc-25907 (epic 25899 E9): Qwen-Image 2.1 Turbo is not a training base. A hand-built plan naming
+/// it is a 400 on the raw route that names the reason and the base to train on instead — even with
+/// the licence acknowledged, so the refusal is about the base, not the licence — while the same
+/// plan on the base model still clears this gate.
+///
+/// *Mutation that reds this:* dropping the `raw_training_payload_base_error` call from the raw
+/// route (the Turbo plan is then answered by the licence gate or queued), or emptying
+/// `untrainable_base_model_reason`.
+/// sc-25907, the typed `create_training_job` route's gate: a registry target whose base is the
+/// distilled Turbo is a 400 naming the reason and the base to train on, and every built-in target
+/// passes it. (No user-target registry exists to POST such a target through the typed route; the
+/// gate is the handler's first check after the target lookup.)
+///
+/// *Mutations that red this:* returning `None` from `untrainable_target_base_error`; emptying
+/// `untrainable_base_model_reason`.
+#[test]
+fn typed_training_route_refuses_a_target_based_on_qwen_image_2_1_turbo() {
+    let registry = crate::training::effective_training_targets_for_candle(false);
+    for target in &registry.targets {
+        assert!(
+            crate::training::untrainable_target_base_error(target).is_none(),
+            "built-in target {} trains",
+            target.id
+        );
+    }
+    let mut turbo = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "qwen_image_2_1_lora")
+        .expect("the built-in Qwen-Image 2.1 LoRA target")
+        .clone();
+    turbo.base_model = "qwen_image_2_1_turbo".to_owned();
+    let error = crate::training::untrainable_target_base_error(&turbo)
+        .expect("a Turbo-based target is refused");
+    assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    assert!(
+        error.detail.contains("qwen_image_2_1_turbo")
+            && error.detail.contains("no trainer")
+            && error.detail.contains("Train the LoRA on qwen_image_2_1"),
+        "the refusal names the reason and the base to train on: {}",
+        error.detail
+    );
+}
+
+#[tokio::test]
+async fn raw_jobs_route_refuses_qwen_image_2_1_turbo_as_a_training_base() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let raw = |base_model: &str, acknowledged: bool| {
+        json!({ "type": "lora_train", "requestedGpu": "auto", "payload": {
+            "dryRun": false,
+            "licenseAcknowledged": acknowledged,
+            "plan": { "target": {
+                "targetId": "qwen_image_2_1_lora",
+                "kernel": "qwen_image_2_1_lora",
+                "baseModel": base_model
+            } }
+        } })
+    };
+    for acknowledged in [false, true] {
+        let body = raw("qwen_image_2_1_turbo", acknowledged);
+        let (status, response) = request(app.clone(), "POST", "/api/v1/jobs", body.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {response}");
+        let detail = response["detail"].as_str().unwrap_or_default();
+        assert!(
+            detail.contains("qwen_image_2_1_turbo")
+                && detail.contains("no trainer")
+                && detail.contains("Train the LoRA on qwen_image_2_1"),
+            "the refusal names the reason and the base to train on: {detail}"
+        );
+    }
+    let (_, response) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        raw("qwen_image_2_1", true),
+    )
+    .await;
+    assert!(
+        !response["detail"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no trainer"),
+        "the base model is still a training base: {response}"
+    );
+    assert!(
+        sceneworks_core::training::untrainable_base_model_reason("qwen_image_2_1").is_none(),
+        "base 2.1 trains"
+    );
+}

@@ -566,6 +566,7 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "imageGuidanceScale",
       "lightning",
       "ltxPipeline",
+      "mossImageExecutionReport",
       "motion",
       "structuredPrompt",
       "systemMessage",
@@ -920,4 +921,15 @@ describe("recipeFromWorkflowShare — the user's own answers", () => {
       workflowNotRestored(structured, report()).some((entry) => entry.key === "structuredPrompt"),
     ).toBe(true);
   });
+});
+
+
+describe("MOSS exported workflow replay", () => {
+ it.each(["off","unmerged_bf16","full_fp32"])("restores requested %s author options and never replays an outcome receipt",(acceleration)=>{
+  const options={acceleration,max_sequence_length:1024,uncond_skip_layers:[],slg:{layers:[],scale:0.5,start:0,stop:1}};
+  const workflow=share({model:"moss_image_sft",prompt:'日本語 <tag> {"items":[]}',advanced:{mossImage:options,mossImageExecutionReport:{forged:"display-only"},steps:6}});
+  const recipe=recipeFromWorkflowShare(workflow,report());
+  expect(recipe.rawAdapterSettings.mossImage).toEqual(options);expect(recipe.rawAdapterSettings).not.toHaveProperty("mossImageExecutionReport");expect(recipe.prompt).toBe(workflow.prompt);
+  expect(workflowSettingRows(workflow).find(row=>row.key==="mossImage").restored).toBe(true);expect(workflowSettingRows(workflow).find(row=>row.key==="mossImageExecutionReport").restored).toBe(false);
+ });
 });

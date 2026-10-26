@@ -31,7 +31,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.8.12"
+version = "0.10.2"
 edition = "2021"
 rust-version = "1.88"
 license-file = "LICENSE"
@@ -150,16 +150,16 @@ all = "warn"
 #
 # Candle-core is also vendored at the final inference pin: its CUDA graph upload API is needed by
 # candle-llm. Cargo ignores dependency-workspace patches. The kernel overrides retain the direct
-# inference revision; candle-core is an explicit exact-revision leaf security backport, recorded in
-# vendor/zip9-source-overrides.json. The source guard refuses missing, upstream or skewed sources.
+# inference revision. Retired exact-revision security ports remain historical source evidence
+# in vendor/zip9-source-overrides.json; they are no longer effective Cargo overrides.
 #
 # candle-metal-kernels is vendored for the upstream rank > 4 strided-reduce out-of-bounds fix
 # (inference sc-25909; see its VENDORED.md). The macOS runtime compiles it through candle-core's
 # Metal backend, so without this patch SceneWorks would build the unfixed upstream kernels.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { path = "vendor/zip9-candle-core" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
-candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "91ffb4a819aa2990c652db2d881ba0b9b10126ce" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "81cff07c13137fea520cec0b1dc9b8f083514601" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "81cff07c13137fea520cec0b1dc9b8f083514601" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "81cff07c13137fea520cec0b1dc9b8f083514601" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #
@@ -189,11 +189,7 @@ opt-level = 3
 # Provenance and removal criteria: vendor/glib-0.18.5/VENDORED.md.
 [patch.crates-io]
 glib = { path = "vendor/glib-0.18.5" }
-tauri-plugin-updater = { path = "vendor/zip9-tauri-plugin-updater" }
 
-# Exact 91ff leaf source with ZIP9 security ports, not an inference-pin advance.
-# Complete upstream/final byte identities and the small port diff live alongside the leaves.
-[patch."https://github.com/SceneWorks/inference"]
-candle-core = { path = "vendor/zip9-candle-core" }
-candle-audio-kokoro = { path = "vendor/zip9-candle-audio-kokoro" }
-mlx-gen = { path = "vendor/zip9-mlx-gen" }
+# Keep the published updater API while moving its Windows archive reader to zip 9.
+# Provenance and removal criteria: vendor/tauri-plugin-updater-2.11.0/VENDORED.md.
+tauri-plugin-updater = { path = "vendor/tauri-plugin-updater-2.11.0" }

@@ -14,7 +14,7 @@ pub(crate) async fn list_jobs(
         let jobs = store.list_jobs(
             query.project_id.as_deref(),
             query.status.as_deref(),
-            query.limit.unwrap_or(100),
+            query.limit.unwrap_or(MAX_LISTED_JOBS),
         );
         Ok((sweep, jobs))
     })
@@ -867,6 +867,34 @@ async fn validate_and_canonicalize_merged_generation_payload(
     } else {
         validate_raw_job_payload(state, &job_type, &mut merged).await?;
     }
+    // A replay model switch resets inherited MOSS controls. Explicit new advanced controls still
+    // reach validation, so headless clients cannot silently drop a conflicting authored setting.
+    if merged.get("model") != persisted.get("model")
+        && (persisted
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+            || merged
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::moss_image::is_moss))
+        && !payload_changes.contains_key("advanced")
+    {
+        if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
+            for key in [
+                "mossImage",
+                "sampler",
+                "scheduler",
+                "schedulerShift",
+                "guidanceScale",
+                "guidanceMethod",
+                "cfgInterval",
+                "steps",
+            ] {
+                advanced.remove(key);
+            }
+        }
+    }
     let canonical_model_entry =
         canonicalize_image_model_payload(state, &job_type, &mut merged).await?;
     // The store SHALLOW-merges this object over the persisted payload, so a recorded checkpoint
@@ -958,6 +986,25 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 &manifest_entry,
             )?;
             merged.insert("modelManifestEntry".to_owned(), manifest_entry);
+            // Hires.fix (sc-26644): the same shared core gate `create_image_job` runs, applied to
+            // the merged object the queue transaction will persist — a retry/duplicate's
+            // `payload_changes` (a shallow merge) could otherwise carry a `hiresFix` block to a
+            // model that refuses it, or switch the model out from under a stored block, and only
+            // fail at the worker instead of being refused at this creation boundary.
+            {
+                let request = sceneworks_core::image_request::ImageRequest::from_payload(&merged);
+                let family = merged
+                    .get("modelManifestEntry")
+                    .and_then(|entry| entry.get("family"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if let Some(message) =
+                    sceneworks_core::image_request::hires_fix_request_error(&request, family)
+                {
+                    return Err(ApiError::bad_request(message));
+                }
+            }
             validate_merged_job_loras(
                 state,
                 project_id.as_deref(),
@@ -1132,6 +1179,54 @@ pub(crate) async fn canonicalize_image_model_payload(
         return Err(ApiError::bad_request(format!(
             "image_detail model '{model_id}' was not found in the model catalog"
         )));
+    }
+
+    // Every image entry point reaches this post-expansion/post-merge seam.
+    sceneworks_core::moss_image::scrub_reports(payload);
+    if let Some(entry) = model_manifest_entry.as_object() {
+        // sc-24215: Supra2-IMG's published interface (text-to-image, 256x256, prompt / seed /
+        // guidance / steps / count) — anything else is a 400 here, before a job exists.
+        sceneworks_core::supra2::validate_request(payload, entry).map_err(ApiError::bad_request)?;
+        if let Some(request) = sceneworks_core::moss_image::native_request(payload, entry)
+            .map_err(ApiError::bad_request)?
+        {
+            let options = request
+                .moss_image
+                .as_ref()
+                .expect("MOSS request carries options");
+            if matches!(job_type, JobType::ImageDetail) {
+                return Err(ApiError::bad_request(
+                    "MOSS-Image supports text-to-image generation, not image_detail",
+                ));
+            }
+            payload
+                .entry("advanced".to_owned())
+                .or_insert_with(|| json!({}))
+                .as_object_mut()
+                .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?
+                .insert(
+                    "mossImage".to_owned(),
+                    serde_json::to_value(options).map_err(|e| ApiError::internal(e.to_string()))?,
+                );
+
+            if let Some(purpose) = sceneworks_core::moss_image::purpose(options) {
+                let rows = sceneworks_core::model_usage_policy::conditional_component_downloads(
+                    &model_manifest_entry,
+                    purpose,
+                )
+                .map_err(|e| ApiError::bad_request(e.to_string()))?;
+                for row in rows {
+                    if crate::models::pinned_component_presence(&state.settings.data_dir, &row) != sceneworks_core::model_artifacts::artifact_selection::CoRequisitePresence::Installed {
+                        let component = row.get("componentId").and_then(Value::as_str).unwrap_or("selected component");
+                        return Err(ApiError::bad_request(format!("MOSS-Image {component} missing or incomplete at its frozen revision; install via /api/v1/models/{model_id}/conditional-components/{purpose}/download")));
+                    }
+                }
+            }
+            model_manifest_entry = Value::Object(
+                sceneworks_core::moss_image::selected_components(entry, options)
+                    .map_err(ApiError::bad_request)?,
+            );
+        }
     }
 
     // Overwrite rather than merge. The selected id was path-confined above; imported/custom
@@ -1385,6 +1480,11 @@ async fn validate_raw_job_payload(
     // sc-24159: the training twin — a hand-built `lora_train`/`control_training` plan naming a
     // licence-bound target (Qwen Image 2.1) must not reach the queue around the typed route's gate.
     if matches!(job_type, JobType::LoraTrain | JobType::ControlTraining) {
+        // sc-25907: a base that is deliberately not trainable (the distilled Qwen-Image 2.1 Turbo)
+        // is a 400 that says to train on base, before any licence question is asked about it.
+        if let Some(error) = crate::training::raw_training_payload_base_error(payload) {
+            return Err(error);
+        }
         if let Some(error) = crate::training::raw_training_payload_license_error(payload) {
             return Err(error);
         }

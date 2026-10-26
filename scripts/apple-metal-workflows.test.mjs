@@ -52,7 +52,7 @@ test("self-hosted Metal kernel step is leased; hosted isolated macOS job remains
   assert.throws(() => assert.match(workflow.replace("metal_execution_lock.py", "unguarded.py"), guard));
 });
 test("Iris and app lifecycle retain every ready request and never upload staged executables/shaders", async () => {
-  for (const name of ["iris-mlx-real-weights", "qwen-image-2-1-app-lifecycle"]) {
+  for (const name of ["iris-mlx-real-weights", "qwen-image-2-1-app-lifecycle", "supra2-mlx-real-weights"]) {
     const workflow = await source(`../.github/workflows/${name}.yml`);
     assert.ok(workflow.includes(`group: ${name}-\${{ github.run_id }}-\${{ github.run_attempt }}`));
     assert.doesNotMatch(workflow, /path:.*memory-catalog-metallib-/);
@@ -66,6 +66,17 @@ test("Iris and app lifecycle retain every ready request and never upload staged 
   const service = await source("./starvector-terminal-product-service.mjs");
   assert.match(service, /serviceEnv\.PMETAL_METALLIB_PATH = nativeMetallib/);
   assert.match(service, /serviceEnv\.PMETAL_METALLIB_PATH = await readBoundAppMetallib/);
+});
+
+test("merged Supra2 model invocations lease Metal before memory admission and keep their selected native artifact", async () => {
+  const script = await source('./ci/supra2-mlx-real-weights/run.sh');
+  assert.match(script, /--supra2-test --print-path/);
+  assert.match(script, /bin="\$\(dirname "\$PMETAL_METALLIB_PATH"\)\/sceneworks_worker"/);
+  assert.match(script, /export SCENEWORKS_METAL_ENTRY_SCRIPT out mem_gib bin guard_py hub bundle/);
+  assert.match(script, /metal_execution_lock\.py/);
+  const held = script.indexOf('metal_execution_entry "$limit_s" true');
+  assert.ok(held >= 0 && held < script.indexOf('local log="$out/$name.log"'));
+  assert.doesNotMatch(script, /-mindepth 1 -maxdepth 1 -type d ! -name/);
 });
 
 test("the newly wrapped campaign walk cannot invoke the broad-kill preflight", async () => {

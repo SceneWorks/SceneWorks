@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "6bfe5f364dd2fe5727dc46e029888fe8ea4ac0b5",
+    "inferenceRevision": "81cff07c13137fea520cec0b1dc9b8f083514601",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -435,6 +435,16 @@
           "identity": "flux2-batchnorm-v1"
         }
       }
+    },
+    {
+      "id": "flux3_klein",
+      "modality": "image",
+      "supportsPreview": false
+    },
+    {
+      "id": "flux3_klein_base",
+      "modality": "image",
+      "supportsPreview": false
     },
     {
       "id": "ideogram_4",
@@ -907,6 +917,50 @@
       }
     },
     {
+      "id": "moss_image_base",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
+    },
+    {
+      "id": "moss_image_sft",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 128,
+        "spatialCompression": {
+          "height": 16,
+          "width": 16
+        },
+        "patchLayout": {
+          "kind": "packed",
+          "patchHeight": 2,
+          "patchWidth": 2
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "learnedPerChannel",
+          "identity": "flux2-batchnorm-v1"
+        }
+      }
+    },
+    {
       "id": "pulid_flux",
       "modality": "image",
       "supportsPreview": true,
@@ -1284,6 +1338,27 @@
       "id": "sensenova_u1_8b_fast",
       "modality": "image",
       "supportsPreview": false
+    },
+    {
+      "id": "supra2_img",
+      "modality": "image",
+      "supportsPreview": false,
+      "denoiserOutputLatentSpace": {
+        "channels": 4,
+        "spatialCompression": {
+          "height": 8,
+          "width": 8
+        },
+        "patchLayout": {
+          "kind": "unpacked"
+        },
+        "temporalLaw": "none",
+        "normalization": {
+          "kind": "affine",
+          "scaleBits": 1044022664,
+          "shiftBits": 0
+        }
+      }
     },
     {
       "id": "svd_xt",
@@ -4741,6 +4816,176 @@
           "implementedRungs": [
             "bounded_attention",
             "bounded_decode",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "flux3_klein",
+      "composed": false,
+      "selectorDigest": "sha256:8e2eca8fbda2bf0033fab926a0608e281bd95c19cc0af69b76c5152b79c4028d",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "flux3_klein_base",
+      "composed": false,
+      "selectorDigest": "sha256:8e2eca8fbda2bf0033fab926a0608e281bd95c19cc0af69b76c5152b79c4028d",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
             "resident",
             "staged_residency"
           ],
@@ -8447,6 +8692,44 @@
       ]
     },
     {
+      "id": "moss_image_base",
+      "composed": false,
+      "selectorDigest": "sha256:17829e176653ac18d8743c94ae37b4e3ca8fcb4dd462484bfe20af2cd326d1ee",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "moss_image_sft",
+      "composed": false,
+      "selectorDigest": "sha256:17829e176653ac18d8743c94ae37b4e3ca8fcb4dd462484bfe20af2cd326d1ee",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
       "id": "pulid_flux",
       "composed": false,
       "selectorDigest": "sha256:212c9a64152cfc0c25edb8aedb1a0838f04dd622d2e903ac20011f3394a3e8a3",
@@ -11132,6 +11415,25 @@
             "bounded_decode",
             "staged_residency"
           ],
+          "deferredMaterializationRungs": []
+        }
+      ]
+    },
+    {
+      "id": "supra2_img",
+      "composed": false,
+      "selectorDigest": "sha256:17829e176653ac18d8743c94ae37b4e3ca8fcb4dd462484bfe20af2cd326d1ee",
+      "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [],
           "deferredMaterializationRungs": []
         }
       ]
@@ -15996,6 +16298,174 @@
     },
     {
       "provider": "qwen_image_2_1",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "bf16",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q4",
+      "mode": "character_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "text_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "edit_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "image_to_image",
+      "overlay": "lora",
+      "loadProfile": "lora"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
+      "tier": "q8",
+      "mode": "character_image",
+      "overlay": "none",
+      "loadProfile": "plain"
+    },
+    {
+      "provider": "qwen_image_2_1_turbo",
       "tier": "q8",
       "mode": "character_image",
       "overlay": "lora",

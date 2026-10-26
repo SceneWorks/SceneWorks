@@ -1862,6 +1862,21 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
     Some(raw_path.to_owned())
 }
 
+/// The confined directory a job's `modelPath` (the request's `advanced.modelPath`, else the entry's
+/// injected one — [`model_path_override`]) names, through the app-managed resolver that refuses a
+/// path outside the data dir. The ONE resolution the load ([`resolve_weights_dir`]) and the
+/// failed-load diagnosis (`converted_install::explain_failed_load`) share, so a diagnosis judges —
+/// and marks — exactly the bundle the load read. `Ok(None)` when the job names no `modelPath`.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn resolve_model_path_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    model_path_override(request)
+        .map(|path| resolve_app_managed_model_dir(settings, &path, "Image modelPath"))
+        .transpose()
+}
+
 /// Typed, actionable preflight for a **convert-at-install** model whose conversion has not produced
 /// a local artifact yet (sc-20529).
 ///
@@ -1953,6 +1968,52 @@ fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
     )))
 }
 
+/// Typed, actionable preflight for an injected converted artifact that would not load (sc-24216).
+///
+/// The twin of [`unconverted_model_preflight`] for the case where the conversion DID run but its
+/// output is no longer what the engine accepts — truncated, edited, or written by an older build.
+/// For a converter with an engine-owned pin contract
+/// ([`sceneworks_core::converted_artifacts::CONTRACT_CONVERTERS`], e.g. `supra2_img`) the engine's
+/// own CHEAP check runs here (manifest, pin contract, file sizes, and a verification failure a
+/// previous failed load recorded), so a damaged bundle is refused before any load with a message
+/// naming the remedy instead of the engine's raw refusal. Same-size corruption is caught by the
+/// engine's own load-time digests and explained by [`crate::converted_install::explain_failed_load`]
+/// — never by hashing here, so a healthy install is hashed once per load. Every other converter
+/// passes untouched.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn converted_artifact_preflight(
+    request: &ImageRequest,
+    dir: &std::path::Path,
+) -> WorkerResult<()> {
+    let Some(mlx) = request.model_manifest_entry.get("mlx") else {
+        return Ok(());
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    let converter = mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let Some(problem) = sceneworks_core::converted_artifacts::converted_artifact_problem(
+        converter,
+        dir,
+        sceneworks_core::converted_artifacts::ArtifactCheck::Sizes,
+    ) else {
+        return Ok(());
+    };
+    Err(WorkerError::InvalidPayload(
+        crate::converted_install::converted_files_message(
+            crate::converted_install::model_display_name(
+                &request.model_manifest_entry,
+                &request.model,
+            ),
+            &problem,
+        ),
+    ))
+}
+
 /// Fail-loud gate for the CANDLE stub fallback (sc-20529) — the off-Mac twin of [`mlx_weights_gap`],
 /// consulted by `run_image_generate_job` immediately before it would call `generate_stub_stream`.
 ///
@@ -1995,8 +2056,8 @@ pub(crate) fn resolve_weights_dir(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<Option<PathBuf>> {
-    if let Some(path) = model_path_override(request) {
-        let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
+    if let Some(dir) = resolve_model_path_dir(request, settings)? {
+        converted_artifact_preflight(request, &dir)?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
         // models (a single flat dir), its injected `modelPath` is the converted ROOT holding `bf16/`,
         // `q8/`, `q4/` tier subdirs (written by `convert_anima_prequant`). Descend into the requested
@@ -2200,7 +2261,9 @@ pub(crate) fn resolve_weights_dir(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    if request.model == "qwen_image_2_1" {
+    // Both 2.1 ids (base and its distilled Turbo sibling, sc-25907) are split-repo tier families:
+    // the upstream snapshot is bf16 and the SceneWorks re-host carries q8/q4.
+    if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         if let Some((tier_dir, _tier)) = qwen_image_2_1_tier_dir(settings, request)? {
             return Ok(Some(tier_dir));
         }
@@ -2365,7 +2428,7 @@ pub(crate) fn tier_key_for_resolved_dir(
 
 /// Catalog ids whose tiers span repositories with a tier that is a whole snapshot root.
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-const SPLIT_REPO_TIER_MODELS: &[&str] = &["qwen_image_2_1"];
+const SPLIT_REPO_TIER_MODELS: &[&str] = sceneworks_core::jobs_store::QWEN_IMAGE_2_1_MODEL_IDS;
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn split_repo_root_tier_key(manifest_entry: &JsonObject, dir: &Path) -> Option<&'static str> {
@@ -2427,12 +2490,28 @@ fn qwen_image_2_1_declared_tier_dir(
     }
     let repo = download.get("repo").and_then(Value::as_str)?;
     let revision = download.get("revision").and_then(Value::as_str)?;
-    let root = crate::model_jobs::huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision)?;
-    let subdir = download
+    let files: Vec<String> = download
         .get("files")
         .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(Value::as_str)
+        .map(|files| {
+            files
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    // An install made at a revision the pin has since SUPERSEDED (sc-25909: the q8/q4 re-host
+    // republished to add each tier's NOTICE) is carried forward cache-only before the exact lookup.
+    let root = crate::model_jobs::huggingface_pinned_tier_snapshot_dir(
+        &settings.data_dir,
+        repo,
+        revision,
+        &files,
+    )?;
+    let subdir = files
+        .first()
+        .map(String::as_str)
         .and_then(|pattern| pattern.split('/').next())
         // Confined to a single plain directory name. The value is a checked-in catalog string
         // rather than user input, but a glob is still a string a future edit could widen, and a
@@ -4932,7 +5011,14 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
         // The historical 80-step ceiling, raised to the model's own default where that is higher
         // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
         // than silently clamped below what the model ships with.
-        .map(|steps| (steps as u32).clamp(1, max_requested_steps(model.default_steps())))
+        // A declared `limits.hardMaxSteps` (sc-24215) replaces the historical ceiling; the
+        // model's own boundary refuses a request above it before this point.
+        .map(|steps| {
+            let ceiling =
+                sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)
+                    .unwrap_or_else(|| max_requested_steps(model.default_steps()));
+            (steps as u32).clamp(1, ceiling)
+        })
         .unwrap_or(model.default_steps())
 }
 
@@ -4943,7 +5029,7 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn max_requested_steps(default_steps: u32) -> u32 {
-    default_steps.max(80)
+    default_steps.max(sceneworks_core::image_request::BASE_MAX_IMAGE_STEPS)
 }
 
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
@@ -5388,10 +5474,50 @@ fn mlx_raw_settings(
     quant_bits: Option<i64>,
     guidance: Option<f32>,
 ) -> JsonObject {
+    mlx_raw_settings_for_bundle(request, None, repo, steps, quant_bits, guidance)
+}
+
+/// [`mlx_raw_settings`] for a render whose weights LOADED from `bundle` (the generic lane's resolved
+/// `weights_dir`): Supra2's unconditional-context record is read off that bundle's manifest, never
+/// re-resolved from the request (sc-24217 pre-merge review).
+fn mlx_raw_settings_for_bundle(
+    request: &ImageRequest,
+    bundle: Option<&Path>,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: Option<f32>,
+) -> JsonObject {
     let mut raw = request.advanced.clone();
     // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
     // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
+    // Worker-owned too (epic 25899): only the image's own render report adds the record back.
+    raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+    raw.remove(sceneworks_core::moss_image::REPORT_KEY);
+    raw.remove("moss_image_execution_report");
+    // Worker-owned (sc-24215): the pinned weights Supra2 rendered from, never a replayed copy.
+    // So are the unconditional context CFG steered against and the rendering backend (epic-review
+    // follow-up): the reproducibility record, never a replayed copy.
+    raw.remove(sceneworks_core::supra2::MODEL_REVISIONS_KEY);
+    if sceneworks_core::supra2::is_supra2(&request.model) {
+        raw.insert(
+            sceneworks_core::supra2::MODEL_REVISIONS_KEY.to_owned(),
+            sceneworks_core::supra2::pinned_revisions(&request.model_manifest_entry),
+        );
+        raw.insert(
+            sceneworks_core::supra2::UNCONDITIONAL_KEY.to_owned(),
+            sceneworks_core::supra2::unconditional_source(bundle, guidance),
+        );
+        raw.insert(
+            sceneworks_core::supra2::BACKEND_KEY.to_owned(),
+            Value::from(if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            }),
+        );
+    }
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -5634,6 +5760,71 @@ fn apply_candle_qwen_load_shape(
         spec,
         false,
     )
+}
+
+/// The Candle shared lane's prefix-KV-cache surcharge for one request (epic 25899): priced from the
+/// LINKED provider's descriptor and pricing function, or `None` for every provider without a cache
+/// and for a request whose admitted block is not handed to ONE render at exactly this geometry and
+/// reference set (`single_pass == false`: hires fix, native prompt batch).
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_prefix_kv_cache_surcharge(
+    engine_id: &str,
+    width: u32,
+    height: u32,
+    reference_count: u32,
+    negative_branch: bool,
+    single_pass: bool,
+) -> Option<u64> {
+    if !single_pass {
+        return None;
+    }
+    crate::inference_runtime::media_descriptor(engine_id).and_then(|descriptor| {
+        crate::execution_planner::prefix_kv_cache_surcharge_bytes(
+            engine_id,
+            &descriptor.capabilities.execution,
+            None,
+            width,
+            height,
+            reference_count,
+            negative_branch,
+        )
+    })
+}
+
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod candle_prefix_kv_cache_pricing_tests {
+    use super::*;
+
+    /// The production Candle pricing site, against the LINKED registry: a single-pass 2.1 request
+    /// is priced at exactly the provider's own `prefix_kv_cache_demand_bytes`, a multi-pass one and
+    /// a provider with no cache at nothing.
+    ///
+    /// *Mutations that red this:* returning `None` from the site (no surcharge for Turbo); dropping
+    /// the single-pass gate (the hires request is priced); passing another geometry, reference
+    /// count or branch flag through (the byte equality).
+    #[test]
+    fn the_candle_lane_prices_the_linked_turbo_cache_only_for_a_single_pass_request() {
+        let expected = runtime_cuda::providers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
+            1024, 768, 2, true,
+        );
+        for engine_id in ["qwen_image_2_1", "qwen_image_2_1_turbo"] {
+            assert_eq!(
+                candle_prefix_kv_cache_surcharge(engine_id, 1024, 768, 2, true, true),
+                Some(expected),
+                "{engine_id}"
+            );
+            assert_eq!(
+                candle_prefix_kv_cache_surcharge(engine_id, 1024, 768, 2, true, false),
+                None,
+                "{engine_id}: a multi-pass request is priced no cache"
+            );
+        }
+        assert_eq!(
+            candle_prefix_kv_cache_surcharge("qwen_image", 1024, 768, 2, true, true),
+            None,
+            "a provider with no cache is priced nothing"
+        );
+    }
 }
 
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
@@ -5892,6 +6083,7 @@ mod candle_image_load_shape_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: 24,
@@ -7578,6 +7770,11 @@ pub(crate) struct LaneRgbaSurface<'a> {
     /// `caption_truncated`) are collected for the image's provenance. `None` discards them, as
     /// the lane always has for providers that report none.
     pub(crate) warnings: Option<&'a std::cell::RefCell<Vec<gen_core::GenerationWarning>>>,
+    /// Where the render's `GenerationReport::prefix_kv_cache` — the prefix-KV-cache path that
+    /// actually RAN, its cache bytes and any shed-over-priced-bound overflow (epic 25899) — is
+    /// collected for the image's provenance and the job record. `None` discards it; a provider
+    /// with no cache reports none.
+    pub(crate) prefix_kv_cache: Option<&'a std::cell::RefCell<Option<gen_core::PrefixKvCacheReport>>>,
     /// A native prompt batch (sc-25681): the request carries `prompt_batch` + `count` instead of
     /// one prompt, and the engine returns every image of the batch. `None` everywhere else.
     pub(crate) prompt_batch: Option<&'a lane_controls::NativePromptBatch>,
@@ -7682,8 +7879,12 @@ fn render_on_surface(
         surface.multi_reference_alpha,
         edit_mask,
     );
-    // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it).
+    // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it); a
+    // native count batch (sc-24215, one prompt) is that `prompt` with `count` images.
     let (prompt, prompt_batch, count) = match surface.prompt_batch {
+        Some(batch) if batch.prompts.len() == 1 => {
+            (batch.prompts[0].clone(), Vec::new(), batch.count)
+        }
         Some(batch) => (String::new(), batch.prompts.clone(), batch.count),
         None => (prompt.to_owned(), Vec::new(), 1),
     };
@@ -7726,6 +7927,9 @@ fn render_on_surface(
     .map_err(|error| WorkerError::Engine(format!("generation failed: {error}")))?;
     if let Some(sink) = surface.warnings {
         sink.borrow_mut().extend(report.warnings);
+    }
+    if let Some(sink) = surface.prefix_kv_cache {
+        *sink.borrow_mut() = report.prefix_kv_cache;
     }
     let output = report
         .output
@@ -7782,8 +7986,8 @@ fn resolve_hires_fix_plan(
         .hires_fix
         .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
     Some(HiresFixPlan {
-        width: hires_fix_target_dimension(request.width, upscale_by),
-        height: hires_fix_target_dimension(request.height, upscale_by),
+        width: sceneworks_core::image_request::hires_fix_target_dimension(request.width, upscale_by),
+        height: sceneworks_core::image_request::hires_fix_target_dimension(request.height, upscale_by),
         steps: request.hires_fix.effective_steps(first_pass_steps),
         guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
         true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
@@ -8061,6 +8265,9 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
@@ -8069,6 +8276,7 @@ fn generate_one_with_hires_on_surface(
         output_channels: gen_core::OutputChannels::Rgb,
         controls: surface.controls,
         warnings: surface.warnings,
+        prefix_kv_cache: surface.prefix_kv_cache,
     // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
     };
@@ -8121,12 +8329,16 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
         output_channels: surface.output_channels,
         controls: surface.controls,
         warnings: surface.warnings,
+        prefix_kv_cache: surface.prefix_kv_cache,
     // A hires-fix render is per image; the arms refuse a prompt batch with it.
         prompt_batch: None,
     };
@@ -8733,7 +8945,7 @@ fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImag
         &resized
     };
     let mut pixels = Vec::with_capacity(image.pixels.len() / 3 * 4);
-    for (rgb, a) in image.pixels.chunks_exact(3).zip(plane.as_raw().iter()) {
+    for (rgb, a) in image.pixels.as_chunks::<3>().0.iter().zip(plane.as_raw().iter()) {
         pixels.extend_from_slice(rgb);
         pixels.push(*a);
     }
@@ -8749,7 +8961,7 @@ fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImag
 fn split_rgba_reference(image: &gen_core::RgbaImage) -> WorkerResult<(Image, image::GrayImage)> {
     let mut rgb = Vec::with_capacity(image.pixels.len() / 4 * 3);
     let mut plane = Vec::with_capacity(image.pixels.len() / 4);
-    for pixel in image.pixels.chunks_exact(4) {
+    for pixel in image.pixels.as_chunks::<4>().0 {
         rgb.extend_from_slice(&pixel[..3]);
         plane.push(pixel[3]);
     }
@@ -8850,15 +9062,17 @@ pub(crate) struct QwenImage21Reference {
 
 /// Is this the model whose edit route is ONE ordered conditioning list (sc-24110)?
 ///
-/// Deliberately a single id rather than a family predicate: the 2512-weights `qwen_image_edit*` ids
-/// are a different engine, a different latent space and a different edit contract, and they keep
-/// the `ImageRoute::QwenEdit` / `CandleImageRoute::QwenEdit` lanes they have always had.
+/// Deliberately the two 2.1 engine ids (base and Turbo, sc-25907 — one request contract) rather
+/// than a family predicate: the 2512-weights `qwen_image_edit*` ids are a different engine, a
+/// different latent space and a different edit contract, and they keep the `ImageRoute::QwenEdit`
+/// / `CandleImageRoute::QwenEdit` lanes they have always had.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
-    request.model == "qwen_image_2_1" && !qwen_image_2_1_reference_ids(request).is_empty()
+    sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model)
+        && !qwen_image_2_1_reference_ids(request).is_empty()
 }
 
 /// The ORDERED condition-image asset ids of a Qwen-Image 2.1 edit, in the order the engine numbers
@@ -8892,7 +9106,7 @@ fn is_qwen_image_2_1_edit(request: &ImageRequest) -> bool {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn qwen_image_2_1_reference_ids(request: &ImageRequest) -> Vec<String> {
-    if request.model != "qwen_image_2_1" {
+    if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Vec::new();
     }
     let scalar = |value: &Option<String>| -> Option<String> {
@@ -9159,7 +9373,7 @@ fn guard_qwen_image_2_1_lane_slots(
     identity_init: Option<&(Image, f32)>,
     edit_mask: Option<&Image>,
 ) -> WorkerResult<()> {
-    if request.model != "qwen_image_2_1" {
+    if !sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return Ok(());
     }
     if edit_mask.is_some() {
@@ -9940,6 +10154,11 @@ async fn generate_stream_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
+    if sceneworks_core::moss_image::is_moss(&plan.request.model) {
+        return generate_moss_stream_using(
+            api, settings, job, plan, project_path, asset_writes, load_generator,
+        ).await;
+    }
     let request = &plan.request;
     let model = mlx_model(&request.model)
         .ok_or_else(|| WorkerError::InvalidPayload("not an MLX-backed model".to_owned()))?;
@@ -10323,6 +10542,17 @@ async fn generate_stream_using(
                 engine_id, &spec, &request.prompt,
                 &request.negative_prompt,
             )),
+            // The prompt branches the engine will evaluate (epic 25899): a prefix-KV-cache provider
+            // holds one cache per branch, so its surcharge doubles under true CFG.
+            negative_branch: crate::execution_planner::evaluates_negative_branch(
+                negative_prompt.as_deref().unwrap_or_default(),
+                true_cfg,
+                guidance,
+            ),
+            // A hires refinement hands this block to a first pass at the base size with the caller's
+            // own references and re-resolved CFG, and a native prompt batch renders one prefix per
+            // prompt in one pass: the cache is priced for neither render.
+            prefix_kv_cache_eligible: hires_fix.is_none() && native_batch.is_none(),
         };
         Ok(PreparedMlxImageTier {
             weights_dir,
@@ -10481,8 +10711,9 @@ async fn generate_stream_using(
     } else {
         (quant, quant_bits)
     };
-    let raw_settings = mlx_raw_settings(
+    let raw_settings = mlx_raw_settings_for_bundle(
         request,
+        Some(&weights_dir),
         &repo,
         steps,
         quant_bits,
@@ -10581,6 +10812,7 @@ async fn generate_stream_using(
                             .process_limit_bytes
                             .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                         let warnings = std::cell::RefCell::new(Vec::new());
+                        let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -10610,6 +10842,7 @@ async fn generate_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: Some(batch),
                             },
                             &cancel,
@@ -10619,6 +10852,10 @@ async fn generate_stream_using(
                             &warnings.take(),
                             &adapter_identities,
                             &generator.adapter_apply_reports(),
+                            crate::execution_planner::prefix_kv_cache_record(
+                                memory_evaluation.prefix_kv_cache,
+                                prefix_kv_cache_report.take().as_ref(),
+                            ),
                         );
                         Ok((images, facts))
                     },
@@ -10645,6 +10882,8 @@ async fn generate_stream_using(
                         .and_then(crate::generator_cache::apply_request_gpu_memory_limit);
                     // This image's non-fatal engine warnings (sc-25681), reported with its asset.
                     let warnings = std::cell::RefCell::new(Vec::new());
+                    // ...and the prefix-KV-cache path its render reports (epic 25899).
+                    let prefix_kv_cache_report = std::cell::RefCell::new(None);
                     let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                         generate_one_with_hires_on_surface(
                             generator,
@@ -10678,6 +10917,7 @@ async fn generate_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: None,
                             },
                             &cancel,
@@ -10718,6 +10958,10 @@ async fn generate_stream_using(
                         &warnings.take(),
                         &adapter_identities,
                         &generator.adapter_apply_reports(),
+                        crate::execution_planner::prefix_kv_cache_record(
+                            memory_evaluation.prefix_kv_cache,
+                            prefix_kv_cache_report.take().as_ref(),
+                        ),
                     ) {
                         prompt_enhancement.send_image_facts(facts);
                     }
@@ -10782,6 +11026,12 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // `sceneworks_core::contracts::RecipeAdapter::QwenImage21` ("qwen_image_2_1"). Both exist
         // for the same reason, and neither is derived from the other.
         "qwen_image_2_1" => "candle_qwen_2_1",
+        // Turbo (sc-25907): the distilled weights stamp their own label for the same reason.
+        "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
+        "moss_image_base" => "candle_moss_image_base",
+        "moss_image_sft" => "candle_moss_image_sft",
+        // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
+        "supra2_img" => "candle_supra2",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -10808,6 +11058,11 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
         // sibling of the `mlx_anima` label).
         "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
+        // Iris-3B (sc-25680): the off-Mac sibling of the `mlx_iris` label.
+        "iris_3b" => "candle_iris",
+        // Bernini's production stream stamps this via its own route; the request-only fallback
+        // (`adapter_id`) reaches it through here.
+        "bernini_image" => CANDLE_BERNINI_IMAGE_ADAPTER,
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -12563,6 +12818,11 @@ async fn generate_candle_stream_using(
         + Send
         + 'static,
 ) -> WorkerResult<()> {
+    if sceneworks_core::moss_image::is_moss(&plan.request.model) {
+        return generate_moss_stream_using(
+            api, settings, job, plan, project_path, asset_writes, load_generator,
+        ).await;
+    }
     let request = &plan.request;
     let adapter_label = candle_adapter_label(&request.model);
     // Join the MODEL_TABLE row with the linked candle descriptor (same resolver the MLX path uses).
@@ -13165,8 +13425,14 @@ async fn generate_candle_stream_using(
         model.supports_quant(),
         convrot.is_some() || is_anima_model(&request.model),
     );
-    let mut raw_settings =
-        mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    let mut raw_settings = mlx_raw_settings_for_bundle(
+        request,
+        Some(&weights_dir),
+        &repo,
+        steps,
+        quant_bits,
+        guidance.or(true_cfg),
+    );
     // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
     // prompt batch's extra images (sc-25681) and an output above 1024² (sc-25684) — ride every
     // resident/sequential prediction below exactly like resident adapter bytes do:
@@ -13324,7 +13590,25 @@ async fn generate_candle_stream_using(
     );
     seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
-    let shared_memory = crate::candle_memory_strategy::evaluate_shared_image(
+    // Epic 25899: the provider's prefix KV cache, priced from the linked provider for THIS request
+    // (`None` for every provider without one — its admission is unchanged). The Candle surcharge
+    // follows the build's production device width, not the tier.
+    let prefix_kv_cache_surcharge = candle_prefix_kv_cache_surcharge(
+        engine_id,
+        memory_width,
+        memory_height,
+        reference_count,
+        crate::execution_planner::evaluates_negative_branch(
+            negative_prompt.as_deref().unwrap_or_default(),
+            true_cfg,
+            guidance,
+        ),
+        // A hires refinement is a second, differently shaped pass, and a native prompt batch holds
+        // one prefix per prompt: the cache is priced for neither (the MLX lane's same rule,
+        // `MlxRequestInputs::prefix_kv_cache_eligible`).
+        hires_fix.is_none() && native_batch.is_none(),
+    );
+    let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(
         engine_id,
         &request.model,
         &shared_contract_spec,
@@ -13361,6 +13645,7 @@ async fn generate_candle_stream_using(
         } else {
             gen_core::MemoryCacheState::Cold
         },
+        prefix_kv_cache_surcharge,
     )?;
     let first_pass_shared_memory = if hires_fix.is_some()
         && matches!(
@@ -13410,7 +13695,10 @@ async fn generate_candle_stream_using(
     // answer "did the receipt price this request?" — and that is exactly the question the executed
     // load policy has to agree with.
     let mut receipt_priced_selection: Option<gen_core::MemoryStrategy> = None;
+    // What the admission decided about the prefix KV cache, recorded with each image (epic 25899).
+    let mut prefix_kv_cache_plan: Option<crate::execution_planner::PrefixKvCachePlan> = None;
     if let Some(evaluation) = shared_memory {
+        prefix_kv_cache_plan = evaluation.prefix_kv_cache;
         if receipt_priced_route {
             receipt_priced_selection = Some(evaluation.context.selection.strategy);
         } else {
@@ -13935,6 +14223,7 @@ async fn generate_candle_stream_using(
                 frames: 1,
                 reference_count,
             },
+            reference_resources: None,
             overlay: None,
             budget: gen_core::MemoryBudget {
                 total_bytes: gb_to_bytes(budget.total_gb),
@@ -14260,6 +14549,7 @@ async fn generate_candle_stream_using(
                     batch.images() as usize,
                     |preview, on_progress| {
                         let warnings = std::cell::RefCell::new(Vec::new());
+                        let prefix_kv_cache_report = std::cell::RefCell::new(None);
                         let images = render_on_surface(
                             generator,
                             "",
@@ -14289,6 +14579,7 @@ async fn generate_candle_stream_using(
                                 output_channels: rgba_output_channels,
                                 controls: lane_controls,
                                 warnings: Some(&warnings),
+                                prefix_kv_cache: Some(&prefix_kv_cache_report),
                                 prompt_batch: Some(batch),
                             },
                             &cancel,
@@ -14298,6 +14589,10 @@ async fn generate_candle_stream_using(
                             &warnings.take(),
                             &adapter_identities,
                             &generator.adapter_apply_reports(),
+                            crate::execution_planner::prefix_kv_cache_record(
+                                prefix_kv_cache_plan,
+                                prefix_kv_cache_report.take().as_ref(),
+                            ),
                         );
                         Ok((images, facts))
                     },
@@ -14309,6 +14604,8 @@ async fn generate_candle_stream_using(
                 move |_index, (seed, prompt), preview, prompt_enhancement, on_progress| {
                 // This image's non-fatal engine warnings (sc-25681), reported with its asset.
                 let warnings = std::cell::RefCell::new(Vec::new());
+                // ...and the prefix-KV-cache path its render reports (epic 25899).
+                let prefix_kv_cache_report = std::cell::RefCell::new(None);
                 let render = |seed: i64, on_progress: &mut dyn FnMut(Progress)| {
                     generate_one_with_hires_on_surface(
                         generator,
@@ -14356,6 +14653,7 @@ async fn generate_candle_stream_using(
                             output_channels: rgba_output_channels,
                             controls: lane_controls,
                             warnings: Some(&warnings),
+                            prefix_kv_cache: Some(&prefix_kv_cache_report),
                             prompt_batch: None,
                         },
                         &cancel,
@@ -14394,6 +14692,10 @@ async fn generate_candle_stream_using(
                     &warnings.take(),
                     &adapter_identities,
                     &generator.adapter_apply_reports(),
+                    crate::execution_planner::prefix_kv_cache_record(
+                        prefix_kv_cache_plan,
+                        prefix_kv_cache_report.take().as_ref(),
+                    ),
                 ) {
                     prompt_enhancement.send_image_facts(facts);
                 }
@@ -14614,6 +14916,7 @@ fn effective_quant_label_gated(
         Quant::Q4 => "q4",
         Quant::Q8 => "q8",
         Quant::Nvfp4 => NVFP4_TIER,
+        Quant::Fp8Rowwise => "fp8r",
     };
     let floors = active
         .iter()
@@ -14622,6 +14925,7 @@ fn effective_quant_label_gated(
                 Quant::Q4 => "q4",
                 Quant::Q8 => "q8",
                 Quant::Nvfp4 => NVFP4_TIER,
+                Quant::Fp8Rowwise => "fp8r",
             };
             format!("{}:{resident}", floor.component.as_str())
         })
@@ -14779,7 +15083,11 @@ async fn consume_gen_events_with_disclosure(
     let total_u32 = total as u32;
     // A native prompt batch (sc-25681) is ONE engine call over all `total` images: its steps
     // (the engine's `steps × count`) span the whole bar, not image 0's slice of it.
-    let one_pass = !plan.request.prompts.is_empty();
+    // So is a native count batch (sc-24215, `image.nativeCountBatch`): one call over `count` images.
+    let one_pass = !plan.request.prompts.is_empty()
+        || sceneworks_core::image_sampling_controls::native_count_batch(
+            &plan.request.model_manifest_entry,
+        );
     let (step_slices, step_label) = if one_pass {
         (1, format!("Batch of {total}"))
     } else {
@@ -15036,9 +15344,12 @@ async fn consume_gen_events_with_disclosure(
                     );
                 }
                 // Worker-owned like the keys above: a replayed `advanced` block can never forge
-                // them, and only this image's own reported facts add them back (sc-25681).
+                // them, and only this image's own reported facts add them back (sc-25681). The
+                // prefix-KV-cache record (epic 25899) is the same: it says which path RAN, so only
+                // this image's own report may carry it onto the asset and the job result.
                 image_raw_settings.remove(lane_controls::GENERATION_WARNINGS_KEY);
                 image_raw_settings.remove(lane_controls::ADAPTER_APPLY_KEY);
+                image_raw_settings.remove(lane_controls::PREFIX_KV_CACHE_KEY);
                 if let Some(facts) = pending_image_facts.remove(&index) {
                     image_raw_settings.extend(facts);
                 }
@@ -15398,8 +15709,26 @@ mod candle_label_tests {
         }
         // Krea 2 Turbo (sc-7581): the candle asset stamp.
         assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
+        // Supra2-IMG (sc-24214): its own stamp, never the `candle_sdxl` fallback.
+        assert_eq!(candle_adapter_label("supra2_img"), "candle_supra2");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
+        assert_eq!(candle_adapter_label("iris_3b"), "candle_iris");
+        assert_eq!(candle_adapter_label("bernini_image"), "candle_bernini");
+        // Only the SDXL-engine ids may fall through to `candle_sdxl`; any other candle-routed model
+        // landing there is missing from the map and would stamp the wrong provenance.
+        const SDXL_ENGINE_IDS: &[&str] = &[
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "realvisxl_lightning",
+        ];
+        for model in sceneworks_core::jobs_store::candle_routed_image_models() {
+            if !SDXL_ENGINE_IDS.contains(model) {
+                assert_ne!(candle_adapter_label(model), CANDLE_ADAPTER, "{model}");
+            }
+        }
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
         for model in [
             "z_image_turbo",
@@ -18613,3 +18942,5 @@ mod declared_sequential_resident_tests {
         assert!(!admission_needs_no_staging(&rejected));
     }
 }
+
+include!("moss.rs");

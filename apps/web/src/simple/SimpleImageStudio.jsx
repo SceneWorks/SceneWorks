@@ -32,10 +32,16 @@ import {
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
-import { maxStepsForModel, negativePromptInertAtGuidance, patchGridHint } from "../samplerOptions.js";
+import {
+  maxStepsForModel,
+  nativeResolutionHint,
+  negativePromptInertAtGuidance,
+  patchGridHint,
+  promptTokenLimitHint,
+} from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
-  QWEN_IMAGE_2_1_MODEL_ID,
+  qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
   QWEN_REWRITE_T2I_MODEL_ID,
 } from "../constants.js";
@@ -73,6 +79,9 @@ const TIER_SCREEN = "image";
 export function SimpleImageStudio() {
   const {
     imageModels = [],
+    // The whole catalog (sc-25908): the Qwen rewriters are `type: "utility"` entries, which
+    // `imageModels` (generation pickers only) never contains.
+    models: catalogModels = [],
     macCapabilities,
     createImageJob,
     rememberLocalGenerationJob,
@@ -290,6 +299,9 @@ export function SimpleImageStudio() {
   });
   const dimensionError = dimensionConstraintMessage(dimensionEval);
   const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
+  // sc-24215: the same native-size and prompt-token statements Image Studio shows.
+  const nativeResolutionNotice = nativeResolutionHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel);
 
   // The ORDERED list the render conditions on: the armed reference first (it is the one the tile
   // shows), then the extras in the order the user arranged them.
@@ -308,12 +320,12 @@ export function SimpleImageStudio() {
     [supportsOrderedReferences, orderedReferenceIds, referenceAssetId],
   );
   const qwenRewriteModel = useMemo(() => {
-    if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return null;
+    if (!qwenRewriterAppliesTo(selectedModel)) return null;
     const id = qwenRewriteReferenceIds.length
       ? QWEN_REWRITE_I2I_MODEL_ID
       : QWEN_REWRITE_T2I_MODEL_ID;
-    return imageModels.find((entry) => entry.id === id) ?? null;
-  }, [imageModels, selectedModel?.id, qwenRewriteReferenceIds.length]);
+    return catalogModels.find((entry) => entry.id === id) ?? null;
+  }, [catalogModels, selectedModel, qwenRewriteReferenceIds.length]);
   const qwenRewriteAvailable =
     Boolean(qwenRewriteModel) &&
     qwenRewriteModel.installState !== "missing" &&
@@ -494,6 +506,11 @@ export function SimpleImageStudio() {
           placeholder="Describe the image you want…"
           value={prompt}
         />
+        {promptTokenNotice ? (
+          <span className="field-hint" role="note">
+            {promptTokenNotice}
+          </span>
+        ) : null}
         {/* Edit tab only: the built-in edit recipes. Text mode has the Style strip for the
             same job; an instruction like "deblur this image" means nothing to text-to-image. */}
         {mode === "edit_image" ? <EditPromptTemplates onApply={setPrompt} variant="simple" /> : null}
@@ -620,6 +637,11 @@ export function SimpleImageStudio() {
           {patchGridNotice ? (
             <span className="field-hint patch-grid-hint" role="note">
               {patchGridNotice}
+            </span>
+          ) : null}
+          {nativeResolutionNotice ? (
+            <span className="field-hint" role="note">
+              {nativeResolutionNotice}
             </span>
           ) : null}
         </div>

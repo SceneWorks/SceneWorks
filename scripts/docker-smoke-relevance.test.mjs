@@ -24,6 +24,11 @@ test("a paginated result mismatch runs conservatively instead of skipping", () =
   assert.match(decision.reason, /pagination returned 3000/);
 });
 
-test("vendored GTK dependency changes rebuild the Docker Cargo graph", () => {
-  assert.equal(dockerSmokeDecision(1, ["vendor/glib-0.18.5/src/variant_iter.rs"]).run, true);
+test("vendored dependency changes rebuild the Docker Cargo graph", () => {
+  for (const file of [
+    "vendor/glib-0.18.5/src/variant_iter.rs",
+    "vendor/tauri-plugin-updater-2.11.0/src/updater.rs",
+  ]) {
+    assert.equal(dockerSmokeDecision(1, [file]).run, true, file);
+  }
 });

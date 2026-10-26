@@ -348,7 +348,7 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
 });
 
 test("the ownership tables scope every story to exactly one backend", () => {
-  // One scope entry per (story, backend) across both tables, all distinct.
+  // One scope entry per distinct story, with exact multi-owner claims only where declared.
   //
   // sc-22512 replaced the pinned `146` with that relation, derived from the tables themselves: the
   // number was 2*(53+20) and reddened on any catalog growth, while the claim worth keeping is that
@@ -360,7 +360,7 @@ test("the ownership tables scope every story to exactly one backend", () => {
   ].flatMap((stories) => Object.values(stories));
   assert.equal(
     scope.size,
-    scopedStoryIds.length,
+    new Set(scopedStoryIds).size,
     "every declared (story, backend) pair resolves to exactly one scope entry",
   );
   assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
@@ -2709,4 +2709,27 @@ test("every planned anchor of a matrix model names a tier its lane publishes", a
   }
   assert.ok(checked > 0, "the plan names matrix models");
   assert.deepEqual(offAxis, []);
+});
+
+
+test("approved MOSS composite ownership stays exact to both models, family and backend", () => {
+ const models={moss_image_base:{mlx:26323,candle:26324},moss_image_sft:{mlx:26323,candle:26324}};
+ const families={26323:{mlx:26323,candle:26324}};
+ const scope=buildStoryBackendScope(models,families);
+ assert.equal(scope.size,2);
+ const catalog=["moss_image_base","moss_image_sft"].map(id=>({id,modality:"image",backends:["mlx","candle"]}));
+ assert.deepEqual(assertTwinCoverage(catalog,models,families),{dualModels:2,dualFamilies:1});
+ for(const backend of ["mlx","candle"]) {
+  const story=backend==="mlx"?26323:26324;
+  for(const modelId of ["moss_image_base","moss_image_sft"]) assertCellOwnershipIsBackendScoped([{id:`${modelId}:${backend}`,modelId,backend,owningModelStory:story,owningFamilyStory:story}],scope);
+ }
+ const wrongBackend=structuredClone(models);wrongBackend.moss_image_base.mlx=26324;
+ assert.throws(()=>buildStoryBackendScope(wrongBackend,families),/outside its declared composite scope/);
+ const wrongModel=structuredClone(models);wrongModel.other={mlx:26323};
+ assert.throws(()=>buildStoryBackendScope(wrongModel,families),/outside its declared composite scope/);
+ const wrongFamily={...families,999:{mlx:26323}};
+ assert.throws(()=>buildStoryBackendScope(models,wrongFamily),/outside its declared composite scope/);
+ assert.throws(()=>buildStoryBackendScope({moss_image_base:{mlx:26323}},{26323:{mlx:26323}}),/incomplete declared composite scope/);
+ assert.throws(()=>buildStoryBackendScope({moss_image_base:{mlx:7},moss_image_sft:{mlx:7}},{26323:{mlx:7}}),/exactly one owner and one backend/);
+ assert.throws(()=>assertCellOwnershipIsBackendScoped([{id:"sibling",modelId:"boogu_image",backend:"mlx",owningModelStory:26323,owningFamilyStory:26323}],scope),/this cell needs/);
 });

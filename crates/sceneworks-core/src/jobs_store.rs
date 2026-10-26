@@ -62,8 +62,9 @@ pub use routing::matrix::{backend_capability_matrix, BackendCapabilityMatrix};
 // target's x0 decoder (`limits.x0Decoder`) through it (epic 2123).
 pub(crate) use routing::matrix::expected_backend_local_trainer_id;
 pub use routing::{
-    canonical_video_route_probe, qwen_image_2_1_reference_ids, video_backend_mode_supported,
-    video_mode_conditioning_requirements, video_ui_modes,
+    canonical_video_route_probe, is_qwen_image_2_1_model, qwen_image_2_1_reference_ids,
+    video_backend_mode_supported, video_mode_conditioning_requirements, video_ui_modes,
+    QWEN_IMAGE_2_1_MODEL_IDS,
 };
 
 pub const ACTIVE_STATUSES: &[&str] = &[
@@ -83,6 +84,16 @@ pub const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "int
 /// the bulk [`JobsStore::cancel_pending_jobs`] — flip straight to terminal `canceled`.
 /// Kept in lockstep with that fast-path branch and the web `pendingStatuses` set.
 pub const PENDING_STATUSES: &[&str] = &["queued", "pending_caption", "pending_workflow"];
+/// Ceiling on one jobs listing: `JobsStore::list_jobs` and
+/// `JobsStore::list_jobs_recently_updated` both clamp their caller's `limit` to this.
+///
+/// `GET /api/v1/jobs` takes no offset (and the SSE reconnect snapshot has no paging
+/// either), so a listing is a whole page — this clamp is the only bound on how many
+/// full job snapshots a single read will materialize, deserialize and ship. 1000 is
+/// the shared depth of every queue surface (the API's default page, the reconnect
+/// snapshot and the web client's retained-terminal cap) so a fresh load, a reconnect
+/// and a long-lived Queue screen all see the same history.
+pub const MAX_LISTED_JOBS: u32 = 1000;
 pub const JOB_STATUSES: &[&str] = &[
     "queued",
     // Accepted-but-not-yet-claimable: awaiting the API-side async payload rewrite (Ideogram 4
@@ -1445,7 +1456,7 @@ impl JobsStore {
         // pointlessly stall list/get/summary traffic behind every claim or
         // progress update. All mutating methods still hold the mutex.
         let connection = self.open_connection()?;
-        let limit = limit.clamp(1, 500);
+        let limit = limit.clamp(1, MAX_LISTED_JOBS);
         // A cleared job (sc-12231, issue #1556) is soft-hidden from every queue
         // list surface — the operator asked for it gone, so it never comes back
         // via a status filter either. The row still exists for Generation Stats.
@@ -1495,7 +1506,7 @@ impl JobsStore {
     /// does not depend on a terminal transition remaining inside this cap.
     pub fn list_jobs_recently_updated(&self, limit: u32) -> JobsStoreResult<Vec<JobSnapshot>> {
         let connection = self.open_connection()?;
-        let limit = limit.clamp(1, 500);
+        let limit = limit.clamp(1, MAX_LISTED_JOBS);
         let mut statement = connection.prepare(
             "select * from jobs
               where cleared_at is null

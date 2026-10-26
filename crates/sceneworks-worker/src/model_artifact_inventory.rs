@@ -68,6 +68,7 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
             "crates/sceneworks-worker/src/image_jobs/krea_control_candle.rs",
             "crates/sceneworks-worker/src/image_jobs/krea_imported.rs",
             "crates/sceneworks-worker/src/image_jobs/mage_finetuned.rs",
+            "crates/sceneworks-worker/src/image_jobs/moss.rs",
             "crates/sceneworks-worker/src/image_jobs/pid.rs",
             "crates/sceneworks-worker/src/image_jobs/pulid.rs",
             "crates/sceneworks-worker/src/image_jobs/pulid_candle.rs",
@@ -474,6 +475,10 @@ mod tests {
     ];
 
     const INFRASTRUCTURE_SURFACES: &[(&str, &str)] = &[
+        (
+            "crates/sceneworks-worker/src/converted_install.rs",
+            "post-failure verification of an installed convert-at-install model (sc-24216), not a model loader",
+        ),
         (
             "crates/sceneworks-worker/src/downloads.rs",
             "source-library transfer implementation",

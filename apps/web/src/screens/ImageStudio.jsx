@@ -1,3 +1,5 @@
+import { apiFetch } from "../api.js";
+import { isMossImage, mossDefaults, mossWireOptions, mossAccelerated, mossComponentState, mossPresetWithOrdinarySettings } from "../mossImage.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AssetPickerField, ImageEditSourcePickerField } from "../components/AssetPicker.jsx";
 import { AssetCard } from "../components/assetPanels.jsx";
@@ -40,6 +42,7 @@ import {
 } from "../qwenAlpha.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
+import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
 import { batchItemStatus, settlePromptBatchRun, summarizeBatchRun } from "../batchOps.js";
@@ -176,8 +179,9 @@ import { suggestTier } from "../tierSuggestion.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import {
+  MAX_LISTED_JOBS,
   PROMPT_REFINE_MODEL_ID,
-  QWEN_IMAGE_2_1_MODEL_ID,
+  qwenRewriterAppliesTo,
   QWEN_REWRITE_I2I_MODEL_ID,
   QWEN_REWRITE_T2I_MODEL_ID,
   terminalStatuses,
@@ -219,6 +223,8 @@ import {
   negativePromptInertAtGuidance,
   guidanceIsOff,
   patchGridHint,
+  nativeResolutionHint,
+  promptTokenLimitHint,
   samplerDefaultFromModel,
   samplerOptionsFromModel,
   schedulerDefaultFromModel,
@@ -252,11 +258,18 @@ const REFERENCE_TUNING_PRESET_KEYS = [
 
 // Above this many resolved images a batch run needs explicit confirmation, so a stray
 // value or an over-eager cross-product can't silently queue a huge job (sc-9957).
+// This is a CONFIRMATION threshold only: it never caps how many images a run may
+// resolve — an over-cap run just gets one "N images?" gate before it starts.
 const BATCH_RENDER_CAP = 100;
-// Keep high-cardinality batch state bounded without changing the eager behavior of
-// ordinary (at-or-under-cap) runs. The worker remains serial; this is client-side
-// backpressure for confirmed large runs only.
-const BATCH_ACTIVE_JOB_LIMIT = BATCH_RENDER_CAP;
+// How many of a confirmed run's jobs may be in flight at once — the submit window
+// `waitForBatchSlot` holds the fan-out behind. Distinct from BATCH_RENDER_CAP: when the
+// two were one constant, confirming a 250-image run queued 100 jobs and then held the
+// remaining 150 until the first 100 finished, because the window could only refill as
+// jobs settled. The window only bounds the client's in-flight id set (the worker stays
+// serial either way), so it is the queue depth the app can hold and show — a run at or
+// under it queues in full the moment it is confirmed, and a larger run feeds in windows
+// of that size.
+const BATCH_ACTIVE_JOB_LIMIT = MAX_LISTED_JOBS;
 // A styled Cartesian batch can be enormous even though its queue state remains bounded.
 // Yield after this many preflight prompts so the run state commits and Stop can interrupt
 // a clean (no-overage) stream before we ever reach its Cartesian suffix.
@@ -511,6 +524,26 @@ export function ImageStudio() {
         id: typeof next === "function" ? next(currentId) : next,
       };
     });
+  const [mossImage, setMossImage] = useState(() => saved.mossImage ?? mossDefaults());
+  const [mossDmdSteps, setMossDmdSteps] = useState(saved.mossDmdSteps ?? 8);
+  const [mossDownload, setMossDownload] = useState({ busy: false, error: "", jobs: [] });
+  const moss = isMossImage(model);
+  const mossDmd = moss && mossAccelerated(mossImage);
+  const mossComponents = mossComponentState(imageModels.find((item) => item.id === model), moss ? mossImage : null);
+  const mossDownloadJobs = mossDownload.jobs.map((queued) => jobs.find((job) => job.id === queued.id) ?? queued);
+  const mossDownloadProgress = mossDownloadJobs.map((job) => `${job.payload?.files?.join(", ") ?? "component"}: ${job.status ?? "queued"}${Number.isFinite(job.progress) ? ` ${Math.round(job.progress * 100)}%` : ""}`).join("; ");
+  const setMossField = (key, value) => setMossImage((current) => ({ ...current, [key]: value }));
+  async function downloadMossAcceleration() {
+    setMossDownload({ busy: true, error: "", jobs: [] });
+    try {
+      const result = await apiFetch(`/api/v1/models/${model}/conditional-components/${mossComponents.purpose}/download`, token, {
+        method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
+      });
+      setMossDownload({ busy: false, error: "", jobs: result.jobs ?? [] });
+    } catch (error) {
+      setMossDownload({ busy: false, error: error.message, jobs: [] });
+    }
+  }
   const [seed, setSeed] = useState(saved.seed ?? "");
   const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
   const [resolution, setResolution] = useState(saved.resolution ?? "1024x1024");
@@ -900,12 +933,12 @@ export function ImageStudio() {
     return single ? [single] : [];
   }, [mode, referenceAssetIds, referenceAssetId, sourceAssetId]);
   const qwenRewriteModel = useMemo(() => {
-    if (selectedModel?.id !== QWEN_IMAGE_2_1_MODEL_ID) return undefined;
+    if (!qwenRewriterAppliesTo(selectedModel)) return undefined;
     const id = qwenRewriteReferenceIds.length
       ? QWEN_REWRITE_I2I_MODEL_ID
       : QWEN_REWRITE_T2I_MODEL_ID;
     return models.find((entry) => entry.id === id);
-  }, [models, selectedModel?.id, qwenRewriteReferenceIds.length]);
+  }, [models, selectedModel, qwenRewriteReferenceIds.length]);
   // The tile renders ONLY when the matching rewriter is already installed. This is the acceptance
   // criterion "direct prompting works with neither rewriter installed — no download, no prompt to
   // install, no degraded path": with nothing installed there is no affordance at all, not a
@@ -1142,6 +1175,21 @@ export function ImageStudio() {
   // Mage Edit keeps its required source distinct from its optional ordered reference set. Unlike
   // `multiReference`, this never replaces `sourceAssetId`; it adds `referenceAssetIds` alongside it.
   const sourceWithMultiReference = Boolean(selectedModel?.ui?.sourceWithMultiReference);
+  // sc-25908: the model's declared reference cap (`limits.maxReferenceAssets` — 10 for the Qwen
+  // Image 2.1 family) on the multi-reference picker, which replaces the source, so the count is
+  // exactly the list sent. Null for a model that declares none (FLUX.2-dev): no cap is shown and
+  // the enqueue gate stays the only bound, as before.
+  // Counted over DISTINCT ids, as the enqueue gate counts them (`qwen_image_2_1_reference_ids`
+  // de-duplicates, first occurrence kept) — a restored recipe can carry a repeated id, and blocking a
+  // request the API accepts would be a client stricter than the gate.
+  const maxStudioReferences = multiReference ? maxReferencesForModel(selectedModel, null) : null;
+  const distinctReferenceCount = new Set(referenceAssetIds).size;
+  const referenceOverflowError =
+    mode === "edit_image" && maxStudioReferences != null && distinctReferenceCount > maxStudioReferences
+      ? `${selectedModel?.name ?? "This model"} takes up to ${maxStudioReferences} reference images — remove ${
+          distinctReferenceCount - maxStudioReferences
+        }.`
+      : null;
   // Krea-style two-reference edit (epic 10871 P1.3): a model whose `ui.editReferences` adds an optional
   // SECOND source to the single-source edit — any two images, image 1 (required) + image 2 (optional),
   // fixed order. Only in single-source edit mode (never alongside the flat `multiReference`
@@ -1555,6 +1603,8 @@ export function ImageStudio() {
       skipAdvancedDefaultsReset.current = false;
       return;
     }
+    setMossImage(mossDefaults());
+    setMossDmdSteps(8);
     setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
     setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
     setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
@@ -1884,8 +1934,8 @@ export function ImageStudio() {
     setNegativePrompt(String(recipe.negativePrompt ?? ""));
     // Recipe replay leaves Seed random by default so "Use this recipe" makes a close
     // variation instead of a byte-for-byte rerun. When the launcher passes a replaySeed
-    // (viewer "Keep seed" toggle), it is already resolved to THIS image's own seed —
-    // replay it verbatim for an exact reproduction. Guard with `!= null` so seed 0 is honored.
+    // (viewer "Keep seed" toggle), the launcher resolves this image's own seed or
+    // the original base when replaying its whole MOSS batch. Seed 0 is valid.
     const replaySeed = launchRequest.replaySeed;
     setSeed(replaySeed != null && replaySeed !== "" ? String(replaySeed) : "");
     const countValue = finiteRecipeNumber(settings.count);
@@ -1897,7 +1947,9 @@ export function ImageStudio() {
     }
     setSelectedLoraIds(loraIds);
     setLoraWeights(loraWeightMap);
-    setStepsOverride(rawSettings.steps ?? rawSettings.numInferenceSteps ?? "");
+    setMossImage(rawSettings.mossImage ?? mossDefaults());
+    setMossDmdSteps(rawSettings.mossImage?.acceleration && rawSettings.mossImage.acceleration !== "off" ? rawSettings.steps ?? 8 : 8);
+    setStepsOverride(rawSettings.mossImage?.acceleration && rawSettings.mossImage.acceleration !== "off" ? "" : rawSettings.steps ?? rawSettings.numInferenceSteps ?? "");
     setGuidanceOverride(rawSettings.guidanceScale ?? "");
     setSampler(rawSettings.sampler ?? "default");
     setScheduler(rawSettings.scheduler ?? "default");
@@ -1907,11 +1959,17 @@ export function ImageStudio() {
     setCaptionOverflow(rawSettings.captionOverflow ?? "default");
     // sc-25681: an image of a native prompt batch reopens the whole batch.
     const batch = rawSettings.promptBatch;
-    if (Array.isArray(batch) && batch.length > 1) {
-      setBatchMode(true);
+    const replayBatch = Array.isArray(batch) && batch.length > 1;
+    setBatchMode(replayBatch);
+    if (replayBatch) {
       setBatchPromptsText(batch.join(batch.some((p) => p.includes("\n")) ? "\n---\n" : "\n"));
     }
     setGuidanceMethod(rawSettings.guidanceMethod ?? "cfg");
+    if (rawSettings.mossOrdinarySettings) {
+      const ordinary = rawSettings.mossOrdinarySettings;
+      setMossImage({ ...ordinary.options, acceleration: rawSettings.mossImage?.acceleration ?? "off" });
+      setStepsOverride(ordinary.steps ?? ""); setGuidanceOverride(ordinary.guidanceScale ?? ""); setNegativePrompt(ordinary.negativePrompt ?? ""); setSchedulerShift(ordinary.schedulerShift ?? null);
+    }
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
     setReferenceAssetId(rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
@@ -2031,6 +2089,10 @@ export function ImageStudio() {
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
   // whenever the effective width or height is under it.
   const patchGridNotice = patchGridHint(selectedModel, width, height);
+  // sc-24215: a fixed native size and a declared prompt-token budget (Supra2-IMG: 256×256, 128
+  // Flan-T5 tokens) are stated where the user picks the size and writes the prompt.
+  const nativeResolutionNotice = nativeResolutionHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel);
   const hiresFixTargetWidth = Math.round(width * hiresFixUpscaleBy);
   const hiresFixTargetHeight = Math.round(height * hiresFixUpscaleBy);
   const hiresFixTargetInvalid =
@@ -2157,7 +2219,8 @@ export function ImageStudio() {
     handleSaveAsPreset,
   } = useSavePreset({
     saved,
-    selectedPreset,
+    selectedPreset: moss ? mossPresetWithOrdinarySettings(selectedPreset) : selectedPreset,
+    presetApplicationId: isMossImage(launchRequest?.presetModel) && launchRequest?.presetId ? launchRequest.id : null,
     setSelectedPresetId,
     presets,
     mode,
@@ -2168,6 +2231,8 @@ export function ImageStudio() {
     activeProject,
     setMode,
     presetDefaultFields: [
+      ["mossImage", setMossImage],
+      ["mossDmdSteps", setMossDmdSteps],
       ["prompt", setPrompt],
       ["negativePrompt", setNegativePrompt],
       ["resolution", setResolution],
@@ -2222,6 +2287,8 @@ export function ImageStudio() {
       }
     },
     buildDefaults: () => ({
+      ...(moss ? { mossImage: mossWireOptions(mossImage), mossDmdSteps,
+        mossOrdinarySettings: { options: { ...mossImage, acceleration: "off" }, steps: stepsOverride, guidanceScale: guidanceOverride, negativePrompt, schedulerShift } } : {}),
       prompt,
       // Same axis gate as the job payload (sc-15299): a preset saved on an engine with no
       // negative-prompt / guidance axis must not bank a value the studio never showed and the
@@ -2231,11 +2298,11 @@ export function ImageStudio() {
       resolution,
       count,
       mode,
-      guidanceScale: supportsGuidance ? finiteNumberOrUndefined(guidanceOverride) : undefined,
-      steps: finiteNumberOrUndefined(stepsOverride),
+      guidanceScale: supportsGuidance && !mossDmd ? finiteNumberOrUndefined(guidanceOverride) : undefined,
+      steps: mossDmd ? Number(mossDmdSteps) : finiteNumberOrUndefined(stepsOverride),
       sampler,
       scheduler,
-      schedulerShift: effectiveSchedulerShift,
+      schedulerShift: mossDmd ? undefined : effectiveSchedulerShift,
       ...(resolvedCfgInterval ? { cfgInterval: resolvedCfgInterval } : {}),
       ...(outgoingCaptionOverflow !== "default" ? { captionOverflow: outgoingCaptionOverflow } : {}),
       guidanceMethod,
@@ -2264,6 +2331,8 @@ export function ImageStudio() {
   useStudioSettingsWriter("image", activeProject?.id ?? null, {
     mode,
     prompt,
+    mossImage,
+    mossDmdSteps,
     styleId,
     structuredCaption: caption,
     promptMode,
@@ -2351,6 +2420,7 @@ export function ImageStudio() {
   );
 
   async function submit(event) {
+    if (!mossComponents.ready) { event.preventDefault(); setSubmitError("Install the selected MOSS 8-step components before generating."); return; }
     event.preventDefault();
     // Batch mode runs through its own "Run batch" action (sc-9956), never the single
     // Generate submit — guard so a stray Enter in a batch field can't queue one image.
@@ -2509,13 +2579,16 @@ export function ImageStudio() {
       // A per-prompt [WxH] batch directive wins; otherwise the stack's aspect drives resolution.
       resolutionOverride: overrides.resolutionOverride ?? stackResolution,
       // Shared studio settings (identical for both paths).
+      mossImage,
+      mossDmdSteps,
+      mossOrdinarySettings: mossDmd ? { options: { ...mossImage, acceleration: "off" }, steps: stepsOverride, guidanceScale: guidanceOverride, negativePrompt, schedulerShift } : undefined,
       resolution,
       mode,
       // An engine with no negative-prompt axis (sc-15299) gets an empty one rather than whatever a
       // preset stack composed or a replayed recipe restored — the field is hidden for it, so
       // sending text the user cannot see or edit (and the worker's `resolve_negative_prompt`
       // discards anyway) would be a ghost input recorded on this job's recipe.
-      negativePrompt: supportsNegativePrompt && !negativePromptCfgOff
+      negativePrompt: supportsNegativePrompt && !negativePromptCfgOff && !mossDmd
         ? stackActive
           ? composedStack.negativePrompt
           : negativePrompt
@@ -2664,6 +2737,7 @@ export function ImageStudio() {
   // posts independently so the worker runs them serially with its between-image cache
   // release, and progress/cancel read the live jobs feed.
   async function runBatch(confirmed = false) {
+    if (!mossComponents.ready) { setBatchError("Install the selected MOSS 8-step components before generating."); return; }
     if (batchRun?.submitting || !activeProject) {
       return;
     }
@@ -2698,7 +2772,7 @@ export function ImageStudio() {
     }
     const styledBatchPrompts = () => (function* composedBatchPrompts() {
       for (const { prompt: resolvedPrompt } of iterateBatch(batchPrompts, batchVariables)) {
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
         yield composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt;
       }
     })();
@@ -2738,7 +2812,7 @@ export function ImageStudio() {
           if (current) replaceBatchRun({ ...current, submitting: false });
           return;
         }
-        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt);
+        const { prompt: cleanPrompt } = parsePromptResolution(resolvedPrompt, resolutionOptions);
         const promptBudgetOverages = batchPromptBudgetOverages(
           [composeJobPrompt({ promptToSend: cleanPrompt }).composedPrompt],
           1,
@@ -2765,7 +2839,7 @@ export function ImageStudio() {
       for (const entry of iterateBatch(batchPrompts, batchVariables)) {
         // Strip a leading [WxH] directive (sc-10063): the model gets the clean prompt, the job
         // gets that per-prompt resolution.
-        const item = parsePromptResolution(entry.prompt);
+        const item = parsePromptResolution(entry.prompt, resolutionOptions);
         if (chunk.length >= size || (chunk[0] && JSON.stringify(chunk[0].resolution) !== JSON.stringify(item.resolution))) {
           yield chunk;
           chunk = [];
@@ -2881,9 +2955,9 @@ export function ImageStudio() {
       restorePlanBodyForRenders({
         width,
         height,
-        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line).resolution) : [],
+        resolutions: batchMode ? batchPrompts.map((line) => parsePromptResolution(line, resolutionOptions).resolution) : [],
       }),
-    [batchMode, batchPrompts, height, width],
+    [batchMode, batchPrompts, height, width, resolutionOptions],
   );
   const batchMissingKeys = missingKeys(batchPrompts, batchVariables);
   const batchGroupIssues = linkedGroupIssues(batchPrompts);
@@ -2893,7 +2967,7 @@ export function ImageStudio() {
   // Run; every other model keeps the global 256–4096 / no-stride check. Reuses evaluateModelDimensions
   // so the batch and single paths cannot drift.
   const batchResolutionIssues = batchPrompts
-    .map((line) => parsePromptResolution(line).resolution)
+    .map((line) => parsePromptResolution(line, resolutionOptions).resolution)
     .filter(
       (res) =>
         res &&
@@ -2999,6 +3073,7 @@ export function ImageStudio() {
       // ERROR message (not a raw requirement) so the dead Generate button states its reason pre-emptively,
       // not only on click. null when the dimensions are valid.
       dimensionError,
+      referenceOverflowError,
       decoderCapabilitiesPending,
       restorePlan: irisUpscale ? restorePlanStatus : null,
     }),
@@ -3022,6 +3097,7 @@ export function ImageStudio() {
       selectedModel,
       multiPhaseValidationIssues,
       dimensionError,
+      referenceOverflowError,
       decoderCapabilitiesPending,
       irisUpscale,
       restorePlanStatus,
@@ -3032,11 +3108,12 @@ export function ImageStudio() {
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || !selectedModelServesMode || Boolean(batchRun?.submitting);
+    !batchValidity.ready || !selectedModelServesMode || !mossComponents.ready || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const generateDisabled =
     submitting ||
+    !mossComponents.ready ||
     !selectedModelServesMode ||
     !generateValidity.ready ||
     (structuredActive && !captionValidation?.ok) ||
@@ -3096,6 +3173,7 @@ export function ImageStudio() {
             <div className="prompt-input-row batch">
               <BatchPromptPanel
                 promptsText={batchPromptsText}
+                resolutionOptions={resolutionOptions}
                 onPromptsTextChange={setBatchPromptsText}
                 variableValues={batchVariableValues}
                 onVariableValuesChange={setBatchVariableValues}
@@ -3238,6 +3316,11 @@ export function ImageStudio() {
               `ui.promptHint`, so the studio nudges toward the quality prefix + tag-style prompting the model
               was trained on (a bare sentence renders low-effort art). Opens the existing prompt-guide modal.
               Free-text models only. */}
+          {!structuredPromptModel && promptTokenNotice ? (
+            <p className="prompt-hint" role="note">
+              {promptTokenNotice}
+            </p>
+          ) : null}
           {!structuredPromptModel && promptHint ? (
             <p className="prompt-hint">
               {promptHint}{" "}
@@ -3516,7 +3599,11 @@ export function ImageStudio() {
                     buttonLabel="Select images"
                     changeLabel="Edit references"
                     emptyLabel="No reference images selected"
-                    label="Reference images"
+                    label={
+                      maxStudioReferences != null
+                        ? `Reference images (up to ${maxStudioReferences}, in order)`
+                        : "Reference images"
+                    }
                     multiple
                     onChange={setReferenceAssetIds}
                     values={referenceAssetIds}
@@ -3828,7 +3915,17 @@ export function ImageStudio() {
                   </span>
                 ) : null}
                 <StudioUpdateNotice item={selectedModel} onUpdate={createModelDownloadJob} />
+
               </label>
+                  {model === "moss_image_sft" ? <label className="checkline">
+                    <input type="checkbox" checked={Boolean(mossDmd)} onChange={(event) => setMossField("acceleration", event.target.checked ? "unmerged_bf16" : "off")} />
+                    8-step acceleration
+                  </label> : null}
+                    {mossDmd && !mossComponents.ready ? <div role="status">
+                      <p>8-step package: {mossDownload.busy ? "queueing" : mossComponents.state}. {mossDownloadProgress || "Install the selected acceleration components before generating."}</p>
+                      <button type="button" disabled={mossDownload.busy} onClick={downloadMossAcceleration}>Download 8-step components</button>
+                    </div> : null}
+                    {mossDownload.error ? <p role="alert">{mossDownload.error}</p> : null}
               <label className="settings-field settings-field-aspect">
                 Aspect
                 <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
@@ -3840,6 +3937,11 @@ export function ImageStudio() {
                 {patchGridNotice ? (
                   <span className="field-hint" role="note">
                     {patchGridNotice}
+                  </span>
+                ) : null}
+                {nativeResolutionNotice ? (
+                  <span className="field-hint" role="note">
+                    {nativeResolutionNotice}
                   </span>
                 ) : null}
               </label>
@@ -4056,7 +4158,19 @@ export function ImageStudio() {
                   value={heightOverride}
                 />
               </label>
-              {showSamplerPicker ? (
+              {moss ? (
+                <>
+                  {mossDmd ? <>
+                    <label>Acceleration precision<select value={mossImage.acceleration} onChange={(event) => setMossField("acceleration", event.target.value)}>
+                      <option value="unmerged_bf16">Standard precision · less memory</option>
+                      <option value="full_fp32">Full precision · more memory</option>
+                    </select></label>
+                  </> : null}
+                  <label>Context limit<input type="number" min="1" max="4096" value={mossImage.max_sequence_length ?? 4096} onChange={(event) => setMossField("max_sequence_length", Number(event.target.value))} /></label>
+                  <MossOrdinaryControls options={mossImage} disabled={Boolean(mossDmd)} onChange={setMossField} />
+                </>
+              ) : null}
+              {showSamplerPicker && !mossDmd ? (
                 <label>
                   Sampler
                   <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
@@ -4068,7 +4182,7 @@ export function ImageStudio() {
                   </select>
                 </label>
               ) : null}
-              {showSchedulerPicker ? (
+              {showSchedulerPicker && !mossDmd ? (
                 <label>
                   Scheduler
                   <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
@@ -4084,10 +4198,11 @@ export function ImageStudio() {
                 <label>
                   Schedule shift
                   <input
-                    max="10"
-                    min="0.1"
+                    disabled={mossDmd}
+                    max={moss ? undefined : "10"}
+                    min={moss ? "0" : "0.1"}
                     onChange={(event) => setSchedulerShift(Number(event.target.value))}
-                    step="0.1"
+                    step={moss ? "any" : "0.1"}
                     type="number"
                     value={effectiveSchedulerShift}
                   />
@@ -4102,26 +4217,27 @@ export function ImageStudio() {
                     returns 1 for every model that declares nothing, so every other model's control
                     is byte-identical. Mirrors VideoStudio, which has read this key since sc-19426. */}
                 <input
-                  min={String(minStepsForModel(selectedModel))}
-                  max={String(maxStepsForModel(selectedModel))}
-                  onChange={(event) => setStepsOverride(event.target.value)}
-                  placeholder={String(stepsDefaultFromModel(selectedModel) ?? "")}
+                  min={String(mossDmd ? 1 : minStepsForModel(selectedModel))}
+                  max={mossDmd ? "8" : moss ? undefined : String(maxStepsForModel(selectedModel))}
+                  onChange={(event) => mossDmd ? setMossDmdSteps(event.target.value) : setStepsOverride(event.target.value)}
+                  placeholder={String(mossDmd ? 8 : stepsDefaultFromModel(selectedModel) ?? "")}
                   type="number"
-                  value={stepsOverride}
+                  value={mossDmd ? mossDmdSteps : stepsOverride}
                 />
               </label>
               {supportsGuidance ? (
                 <label>
                   Guidance
                   <input
+                    disabled={mossDmd}
                     min="0"
-                    max="30"
+                    max={moss ? undefined : "30"}
                     onChange={(event) => setGuidanceOverride(event.target.value)}
                     placeholder={(() => {
                       const value = guidanceDefaultFromModel(selectedModel);
                       return value == null ? "" : String(value);
                     })()}
-                    step="0.1"
+                    step={moss ? "any" : "0.1"}
                     type="number"
                     value={guidanceOverride}
                   />
@@ -4229,6 +4345,7 @@ export function ImageStudio() {
                   ) : null}
                 </label>
               ) : null}
+              {!moss ? <>
               <label
                 className="checkline flash-attn-toggle"
                 title="Fused flash-attention on the candle (Windows/CUDA) SDXL backend — faster and lower VRAM. Ignored on other backends."
@@ -4240,6 +4357,7 @@ export function ImageStudio() {
                 />
                 Flash attention
               </label>
+              </> : null}
               {promptEnhance ? (
                 <label
                   className="checkline prompt-enhance-toggle"
@@ -4539,7 +4657,7 @@ export function ImageStudio() {
                 <label className="prompt-field">
                   Negative prompt
                   <textarea
-                    disabled={negativePromptCfgOff}
+                    disabled={negativePromptCfgOff || mossDmd}
                     onChange={(event) => setNegativePrompt(event.target.value)}
                     value={negativePrompt}
                   />
@@ -4636,4 +4754,28 @@ export function ImageStudio() {
     </section>
     </ModelAvailabilityGate>
   );
+}
+
+function MossOrdinaryControls({ options, disabled, onChange }) {
+  return <>
+    <label>Training shift<input disabled={disabled} type="number" min="0" step="any" value={options.training_shift ?? 1} onChange={(event) => onChange("training_shift", Number(event.target.value))} /></label>
+    <label>Unconditional skip layers<MossLayerInput disabled={disabled} value={options.uncond_skip_layers} placeholder="[22] (author default); [] disables" onChange={(value) => onChange("uncond_skip_layers", value)} /></label>
+    <label className="checkline"><input disabled={disabled} type="checkbox" checked={Boolean(options.slg)} onChange={(event) => onChange("slg", event.target.checked ? { layers: [22], scale: 1, start: 0, stop: 1 } : null)} />Skip-layer guidance</label>
+    {options.slg ? <>
+      <label>SLG layers<MossLayerInput disabled={disabled} value={options.slg.layers} emptyValue={[]} onChange={(value) => onChange("slg", { ...options.slg, layers: value })} /></label>
+      {["scale", "start", "stop"].map((key) => <label key={key}>SLG {key}<input disabled={disabled} type="number" min="0" max={key === "scale" ? undefined : 1} step="any" value={options.slg[key]} onChange={(event) => onChange("slg", { ...options.slg, [key]: Number(event.target.value) })} /></label>)}
+    </> : null}
+  </>;
+}
+
+const mossLayerText = (value) => value == null ? "" : typeof value === "string" ? value : JSON.stringify(value);
+
+function MossLayerInput({ value, onChange, emptyValue = null, ...props }) {
+  return <input {...props} value={mossLayerText(value)} onChange={(event) => {
+    const text = event.target.value;
+    let next = text;
+    try { next = text.trim() === "" ? emptyValue : JSON.parse(text) ?? emptyValue; }
+    catch { /* Keep incomplete JSON editable until it becomes a valid layer list. */ }
+    onChange(next);
+  }} />;
 }

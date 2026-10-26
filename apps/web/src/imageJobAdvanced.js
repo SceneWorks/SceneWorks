@@ -1,3 +1,4 @@
+import { isMossImage, mossWireOptions, mossAccelerated } from "./mossImage.js";
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
 import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
@@ -103,7 +104,12 @@ export function buildImageJobAdvanced(state) {
     phases,
   } = state;
 
+  const moss = isMossImage(state.model ?? selectedModel?.id);
+  const dmd = moss && mossAccelerated(state.mossImage);
+  const effectiveSteps = dmd ? state.mossDmdSteps ?? 8 : stepsOverride;
   return {
+    ...(moss ? { mossImage: mossWireOptions(state.mossImage) } : {}),
+    ...(dmd && state.mossOrdinarySettings ? { mossOrdinarySettings: state.mossOrdinarySettings } : {}),
     resolution,
     // Structured-prompt recipe round-trip (sc-6147): persist the full caption +
     // original intent + magic-prompt backend alongside the job so "Use this recipe"
@@ -123,37 +129,37 @@ export function buildImageJobAdvanced(state) {
     // Configurable sampler / scheduler (epic 1753). Worker registry
     // falls back to model-native when given "default", so emitting the
     // values unconditionally is safe — invalid values are ignored.
-    ...(sampler && sampler !== "default" ? { sampler } : {}),
-    ...(scheduler && scheduler !== "default" ? { scheduler } : {}),
+    ...(!dmd && sampler && sampler !== "default" ? { sampler } : {}),
+    ...(!dmd && scheduler && scheduler !== "default" ? { scheduler } : {}),
     // Guidance method (epic 7434). "cfg" is the engine-standard no-op, so it is
     // omitted — keeping existing recipes byte-identical; only a non-default
     // method (CFG++) rides the payload. The worker N3-falls an unadvertised
     // method back to the default, so an invalid value is harmless.
-    ...(guidanceMethod && guidanceMethod !== "cfg" ? { guidanceMethod } : {}),
+    ...(!dmd && guidanceMethod && guidanceMethod !== "cfg" ? { guidanceMethod } : {}),
     // The schedule shift (time-shift mu) is only honored when a curated
     // (non-default) scheduler is active — it shapes that curated schedule;
     // the default scheduler keeps the engine's resolution-native shift, so
     // emitting it there would override the no-op default (epic 7114).
     // sc-25681: a model that declares the shift axis without a scheduler menu (Iris-3B) sends
     // its shift regardless — there is no scheduler picker to gate it on.
-    ...(((scheduler && scheduler !== "default") || supportsSchedulerShift) &&
+    ...(!dmd && ((scheduler && scheduler !== "default") || supportsSchedulerShift) &&
     Number.isFinite(Number(schedulerShift))
       ? { schedulerShift: Number(schedulerShift) }
       : {}),
     // CFG interval (sc-25681): emitted only for a non-default interval on a model that offers
     // one, with CFG on — the studio resolves all three into `cfgInterval` (null otherwise), so a
     // default recipe stays byte-identical and an interval the engine would refuse never rides.
-    ...(Array.isArray(cfgInterval) && cfgInterval.length === 2
+    ...(!dmd && Array.isArray(cfgInterval) && cfgInterval.length === 2
       ? { cfgInterval: [Number(cfgInterval[0]), Number(cfgInterval[1])] }
       : {}),
     // Caption-overflow policy (sc-25681): "default" (the checkpoint's own) is omitted.
     ...(captionOverflow && captionOverflow !== "default" ? { captionOverflow } : {}),
     // Step / guidance overrides — empty string means "use the model
     // default", which the worker reads off MODEL_TARGETS.
-    ...(stepsOverride !== "" && Number.isFinite(Number(stepsOverride))
-      ? { steps: Number(stepsOverride) }
+    ...(effectiveSteps !== "" && Number.isFinite(Number(effectiveSteps))
+      ? { steps: Number(effectiveSteps) }
       : {}),
-    ...(guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
+    ...(!dmd && guidanceOverride !== "" && Number.isFinite(Number(guidanceOverride))
       ? { guidanceScale: Number(guidanceOverride) }
       : {}),
     // The bundled/paired encoder is the byte-identical default. Only an explicit non-default
@@ -167,7 +173,7 @@ export function buildImageJobAdvanced(state) {
     // Flash attention (sc-3674): only emitted when toggled OFF — the worker defaults to ON
     // when `advanced.flashAttn` is absent, so the default-on case adds nothing to the payload.
     // Only the candle (Windows/CUDA) SDXL backend reads it; every other backend ignores it.
-    ...(flashAttn ? {} : { flashAttn: false }),
+    ...(moss || flashAttn ? {} : { flashAttn: false }),
     // FLUX.2-dev caption upsampling (sc-6135): emitted only when the model declares the
     // toggle AND it's on (off-by-default; the worker/engine ignore it for other models).
     ...(promptEnhance && enhancePrompt ? { enhancePrompt: true } : {}),

@@ -2543,12 +2543,12 @@ test("the runner binds the pinned toolchain and private same-volume artifact clo
       "immutable\n",
     );
 
-    assert.equal(await repositoryToolchain(), "1.97.1");
+    assert.equal(await repositoryToolchain(), "1.98.0");
     if (process.platform === "darwin") {
       const scratch = path.join(root, "toolchain");
       await mkdir(scratch);
       const toolchain = await exactToolchain(scratch);
-      assert.equal(toolchain.channel, "1.97.1");
+      assert.equal(toolchain.channel, "1.98.0");
       assert.equal(toolchain.env.RUSTUP_TOOLCHAIN, toolchain.channel);
       assert.equal(toolchain.env.RUSTUP_HOME,
         path.resolve(process.env.RUSTUP_HOME ?? path.join(process.env.HOME, ".rustup")));

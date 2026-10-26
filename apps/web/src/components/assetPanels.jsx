@@ -4,7 +4,7 @@ import { isAbortError } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { assetCanCarryWorkflow, saveAssetAs, revealAsset } from "../assetActions.js";
-import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbed.js";
+import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
 import {
   AssetMedia,
@@ -926,6 +926,7 @@ function FullscreenPreviewComponent({
   onEditImage,
   onEditInStudio,
   onPreviewAsset,
+  onRegenerate,
   onUseRecipe,
   onUseImportedRecipe,
   previousAsset,
@@ -941,6 +942,21 @@ function FullscreenPreviewComponent({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [asset.id, asset.variants?.upscaled?.id]);
   const displayedAsset = hasUpscaleVariants ? asset.variants[variantMode] : asset;
+  const regeneratingRef = React.useRef(false);
+  const [regeneration, setRegeneration] = React.useState(null);
+  const regenerate = async () => {
+    if (regeneratingRef.current) return;
+    regeneratingRef.current = true;
+    setRegeneration({ assetId: asset.id, pending: true });
+    try {
+      await onRegenerate(asset);
+      setRegeneration(null);
+    } catch (error) {
+      setRegeneration({ assetId: asset.id, error: error.message || "Could not re-generate this image." });
+    } finally {
+      regeneratingRef.current = false;
+    }
+  };
 
   // Each generated image has its OWN seed on its per-asset recipe (asset.recipe.seed).
   // The generation-set recipe only carries the batch's base seed — shared across every
@@ -1419,6 +1435,24 @@ function FullscreenPreviewComponent({
                   Use this recipe
                 </button>
               </>
+            ) : null}
+            {/* Re-generate (image only): like "Use this recipe" but skips the studio and
+                enqueues the recipe straight to the queue with a FRESH random seed. The
+                always-new seed is the point — a one-click close variation. Image-only: the
+                queue behind this button is the image lane; video/vector re-runs have studios,
+                not a direct image queue. */}
+            {onRegenerate && asset.type === "image" && hasRecordedRecipe ? (
+              <button
+                disabled={Boolean(regeneration?.pending)}
+                onClick={regenerate}
+                title="Add a new variation to the queue without leaving this image"
+                type="button"
+              >
+                Re-Generate
+              </button>
+            ) : null}
+            {regeneration?.assetId === asset.id && regeneration.error ? (
+              <span role="alert">{regeneration.error}</span>
             ) : null}
             {/* An image someone else made, imported here, carrying the recipe that made it in its
                 own bytes (sc-15949 → sc-15952). It has no recorded recipe of its own — nothing on

@@ -2206,6 +2206,96 @@
       "calibrationFingerprint": "qwen-image-2-1-mlx-derived-2026-09-22-v1",
       "fixture": "qwen-image-2-1-mlx-q8-2048-seed22732-step2"
     },
+    "qwen_image_2_1_turbo:bf16:candle": {
+      "provider": "qwen_image_2_1_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1",
+      "fixture": "fresh-five-rung-qwen-image-2-1-turbo-bf16-2048-seed16402-step2"
+    },
+    "qwen_image_2_1_turbo:bf16:mlx": {
+      "provider": "qwen_image_2_1_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1",
+      "fixture": "qwen-image-2-1-turbo-mlx-bf16-2048-seed22732-step2"
+    },
+    "qwen_image_2_1_turbo:q4:candle": {
+      "provider": "qwen_image_2_1_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1",
+      "fixture": "fresh-five-rung-qwen-image-2-1-turbo-q4-2048-seed16402-step2"
+    },
+    "qwen_image_2_1_turbo:q4:mlx": {
+      "provider": "qwen_image_2_1_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1",
+      "fixture": "qwen-image-2-1-turbo-mlx-q4-2048-seed22732-step2"
+    },
+    "qwen_image_2_1_turbo:q8:candle": {
+      "provider": "qwen_image_2_1_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1",
+      "fixture": "fresh-five-rung-qwen-image-2-1-turbo-q8-2048-seed16402-step2"
+    },
+    "qwen_image_2_1_turbo:q8:mlx": {
+      "provider": "qwen_image_2_1_turbo",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1",
+      "fixture": "qwen-image-2-1-turbo-mlx-q8-2048-seed22732-step2"
+    },
     "qwen_image_edit_2511:bf16:candle": {
       "provider": "qwen_image_edit",
       "mode": "edit_image",
@@ -5438,6 +5528,42 @@
       "loadShape": "eager_materialization",
       "calibrationFingerprint": "minimax-h3-q8-mlx-staged-joint-av-eager-abi3-v1",
       "fixture": "minimax-h3-ref-mlx-q8-576x320-f124-fps24-seed17137"
+    },
+    "supra2_img:bf16:candle": {
+      "provider": "supra2_img",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 256,
+        "height": 256,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "supra2-img-candle-resident-v1",
+      "fixture": "supra2-img-candle-bf16-256-seed0-step50",
+      "strategy": {
+        "rung": "resident",
+        "engagedRungs": [
+          "resident"
+        ]
+      }
+    },
+    "supra2_img:bf16:mlx": {
+      "provider": "supra2_img",
+      "mode": "text_to_image",
+      "overlay": "none",
+      "geometry": {
+        "width": 256,
+        "height": 256,
+        "batch": 1,
+        "frames": 1
+      },
+      "evidenceScope": "authoritative",
+      "loadShape": "eager_materialization",
+      "calibrationFingerprint": "supra2-img-mlx-resident-v1",
+      "fixture": "supra2-img-mlx-bf16-256-seed0-step50"
     }
   }
 }

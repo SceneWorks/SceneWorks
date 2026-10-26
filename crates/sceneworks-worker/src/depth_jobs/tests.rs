@@ -447,7 +447,9 @@ enum Behavior {
 /// identifies the pixel at position `i`, and a map equal to `pixel_depth(upright)` proves the
 /// estimator was handed exactly the upright pixels in upright order.
 fn pixel_depth(rgb: &[u8]) -> Vec<f32> {
-    rgb.chunks_exact(3)
+    rgb.as_chunks::<3>()
+        .0
+        .iter()
         .map(|p| p[0] as f32 / 255.0 + p[1] as f32 * 7.0 / 255.0 - 1.3)
         .collect()
 }

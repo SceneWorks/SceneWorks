@@ -201,6 +201,34 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 1.0,
         adapter_label: "mlx_qwen_2_1",
     },
+    // Qwen-Image 2.1 Turbo (sc-25907, epic 25899) — the distilled checkpoint under its OWN engine id;
+    // the same `mlx-gen-qwen-image-2-1` crate registers it beside the base id. 8 steps is the
+    // snapshot's saved distilled schedule (its 8 `sample_sigmas`); guidance 1.0 is true-CFG off,
+    // as on base. `default_repo` is the upstream Turbo repo, public and ungated, for base's reason.
+    ModelRow {
+        sceneworks_id: "qwen_image_2_1_turbo",
+        engine_id: "qwen_image_2_1_turbo",
+        default_repo: "Qwen/Qwen-Image-2.1-Turbo",
+        default_steps: 8,
+        default_guidance: 1.0,
+        adapter_label: "mlx_qwen_2_1_turbo",
+    },
+    ModelRow {
+        sceneworks_id: "moss_image_base",
+        engine_id: "moss_image_base",
+        default_repo: "OpenMOSS-Team/MOSS-Image-Base",
+        default_steps: 50,
+        default_guidance: 3.0,
+        adapter_label: "mlx_moss_image_base",
+    },
+    ModelRow {
+        sceneworks_id: "moss_image_sft",
+        engine_id: "moss_image_sft",
+        default_repo: "OpenMOSS-Team/MOSS-Image-SFT",
+        default_steps: 50,
+        default_guidance: 3.0,
+        adapter_label: "mlx_moss_image_sft",
+    },
     // Iris-3B generation task (sc-25679, epic 25678) — `mlx-gen-iris` registers `iris_3b`. The
     // backbone is the upstream `speridlabs/iris-3b` root; the Qwen3-VL text encoder is a separate
     // catalog co-requisite the descriptor declares (`required_components: ["text_encoder"]`), staged
@@ -213,6 +241,19 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_steps: 100,
         default_guidance: 3.0,
         adapter_label: "mlx_iris",
+    },
+    // Supra2-IMG (sc-24213, epic 24212) — `mlx-gen-supra2` registers `supra2_img`. The weights dir
+    // is the locally converted bundle (convert-at-install, injected `modelPath`); Flan-T5-Base and
+    // SD VAE ft-MSE are catalog co-requisites the descriptor declares (`text_encoder`, `vae`), staged
+    // by the generic `attach_required_components`. Defaults are the release's own
+    // (`gen_core::supra2::DEFAULT_STEPS` / `DEFAULT_GUIDANCE`).
+    ModelRow {
+        sceneworks_id: "supra2_img",
+        engine_id: "supra2_img",
+        default_repo: "SupraLabs/Supra2-IMG",
+        default_steps: 50,
+        default_guidance: 3.0,
+        adapter_label: "mlx_supra2",
     },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
@@ -1537,6 +1578,7 @@ mod tests {
                         gen_core::Quant::Q4 => "q4",
                         gen_core::Quant::Q8 => "q8",
                         gen_core::Quant::Nvfp4 => "nvfp4",
+                        gen_core::Quant::Fp8Rowwise => "fp8r",
                     };
                     (
                         floor.component.as_str(),
@@ -1765,6 +1807,9 @@ mod tests {
     ))]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
         "iris_3b",
+        "supra2_img",
+        "moss_image_base",
+        "moss_image_sft",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
@@ -1776,6 +1821,7 @@ mod tests {
         "z_image_edit",
         "qwen_image",
         "qwen_image_2_1",
+        "qwen_image_2_1_turbo",
         "qwen_image_edit_2511",
         "qwen_image_edit_2511_lightning",
         "lens",
@@ -1895,9 +1941,13 @@ mod tests {
             // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
-            "qwen_image_2_1" => 32,
+            "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
+            "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
+            // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
+            "supra2_img" => 256,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -1943,9 +1993,13 @@ mod tests {
             // `shipped_image_geometry_is_within_the_pinned_engine_envelope`, which on the lane that
             // LINKS the provider reads `Capabilities::size_floor` and asserts the advertised grid
             // equals this value — live for this id since the pin carries the provider.
-            "qwen_image_2_1" => 32,
+            "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
+            "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
+            // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
+            "supra2_img" => 256,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2208,7 +2262,9 @@ mod tests {
             ("qwen_image", 16),
             // sc-24108: 2.1 is ÷32, not ÷16 like 2512 — the contrast is the point of pinning it.
             ("qwen_image_2_1", 32),
+            ("qwen_image_2_1_turbo", 32),
             ("iris_3b", 16),
+            ("supra2_img", 256),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];

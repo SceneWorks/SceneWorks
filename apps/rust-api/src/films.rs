@@ -119,6 +119,7 @@ pub(crate) async fn get_film_draft(
 /// PUT body has an author who can edit it, while a v1/v2 plan already STORED in a draft is state
 /// with no author and is upgraded on read by `ProjectStore::carry_film_draft_forward`. A stored v2
 /// draft therefore still opens, and what the client then PUTs back is already current.
+#[allow(clippy::result_large_err)]
 pub(crate) async fn update_film_draft(
     State(state): State<AppState>,
     Path((project_id, draft_id)): Path<(String, String)>,

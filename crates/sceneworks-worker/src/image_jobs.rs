@@ -335,10 +335,10 @@ fn prompt_enhancement_has_reference_input(request: &ImageRequest) -> bool {
 
 /// How many CONDITION IMAGES this request carries, for the declared admission envelope (sc-24112).
 ///
-/// `qwen_image_2_1` — the one route that declares an envelope — is priced off the EXACT ordered
-/// list its lane renders ([`qwen_image_2_1_reference_ids`]): the working image, the mask (an
-/// ORDINARY reference to this engine — it has no mask tensor), the plural list and the singular
-/// reference, deduped by asset id. Every entry is one reference block of the joint attention
+/// The Qwen-Image 2.1 family (`qwen_image_2_1`, `qwen_image_2_1_turbo`) — the routes that declare an
+/// envelope — is priced off the EXACT ordered list its lane renders
+/// ([`qwen_image_2_1_reference_ids`]): the working image, the mask (an ORDINARY reference to this
+/// engine — it has no mask tensor), the plural list and the singular reference, deduped by asset id. Every entry is one reference block of the joint attention
 /// sequence, so counting anything else prices a different request than the one that runs: a
 /// `max` over the carriers priced source + mask + 8 references as 8.
 ///
@@ -350,7 +350,7 @@ fn reference_image_count(request: &ImageRequest) -> u32 {
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    if request.model == "qwen_image_2_1" {
+    if sceneworks_core::jobs_store::is_qwen_image_2_1_model(&request.model) {
         return u32::try_from(qwen_image_2_1_reference_ids(request).len()).unwrap_or(u32::MAX);
     }
     let plural = request
@@ -473,11 +473,45 @@ fn validate_prompt_enhancement_request(
     validate_prompt_enhancement_route(request, settings)
 }
 
+/// Run one image generate/edit job. A failure on a convert-at-install model with an engine pin
+/// contract is explained (and a damaged converted bundle recorded for the catalog) by
+/// [`crate::converted_install::explain_job_result`] — sc-24216: same-size corruption of the bundle
+/// or of a shared co-requisite only surfaces as the engine's own load error.
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    let result = run_image_generate_job_unexplained(api, settings, job).await;
+    crate::converted_install::explain_job_result(settings, &job.payload, result).await
+}
+
+async fn run_image_generate_job_unexplained(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
+    sceneworks_core::moss_image::native_request(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    // sc-24215: Supra2-IMG's published interface, re-applied before load (the API refuses the same
+    // request before the job exists), so a replayed or hand-built payload never reaches the engine
+    // with an input the generic lane would silently drop.
+    sceneworks_core::supra2::validate_request(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
     let request = ImageRequest::from_payload(&job.payload);
     if request.project_id.trim().is_empty() {
         return Err(WorkerError::InvalidPayload(
@@ -2907,6 +2941,20 @@ pub(crate) fn write_image_asset(
         if let Some(sampler) = resolved_sampler_for_share(adapter, &raw_settings) {
             share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
+        if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(report) = raw_settings
+                .get(sceneworks_core::moss_image::REPORT_KEY)
+                .and_then(sceneworks_core::workflow_share::sanitize_moss_execution_report)
+            {
+                // Preserve requested steps separately from the provider's deduplicated actual grid.
+                if let Some(steps) = report.pointer("/resolved/steps") {
+                    share.advanced.insert("steps".to_owned(), steps.clone());
+                }
+                share
+                    .advanced
+                    .insert(sceneworks_core::moss_image::REPORT_KEY.to_owned(), report);
+            }
+        }
         share.model_hash = plan.model_hash.clone();
         // Replace request-derived hints with the exact adapter stack the worker resolved. This is
         // the only seam that can attach hashes, so client-supplied attribution fields never win.
@@ -2963,7 +3011,9 @@ pub(crate) fn write_image_asset(
         "height": height,
         "normalizedWidth": request.width,
         "normalizedHeight": request.height,
-        "count": plan.image_count,
+        // MOSS records the whole native prompt batch in the recipe. Its replay count is
+        // images per prompt; the generation set and expectedCount retain the total.
+        "count": if sceneworks_core::moss_image::is_moss(&request.model) { request.count } else { plan.image_count },
         "family": plan.family,
         "seed": seed,
         "index": index,
@@ -3417,7 +3467,7 @@ fn write_upscaled_asset(
 /// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
 /// `Decoding` events (where the fact set actually changes) rather than on every step.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
-    json!({
+    let mut result = json!({
         "generationSetId": plan.genset_id,
         "expectedCount": plan.image_count,
         "adapter": plan.adapter,
@@ -3427,7 +3477,35 @@ fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     })
     .as_object()
     .cloned()
-    .expect("json! object literal")
+    .expect("json! object literal");
+    let prefix_kv_cache = job_prefix_kv_cache_records(asset_writes);
+    if !prefix_kv_cache.is_empty() {
+        result.insert(
+            PREFIX_KV_CACHE_RESULT_KEY.to_owned(),
+            Value::Array(prefix_kv_cache),
+        );
+    }
+    result
+}
+
+/// The job result's prefix-KV-cache summary (epic 25899): each written image's
+/// `rawAdapterSettings.prefixKvCache` record — what the admission selected and priced, the path
+/// the render REPORTS it ran, its cache bytes and any shed-over-priced-bound overflow — in asset
+/// order, so a finished job says which path ran without opening an asset. Absent (not empty) for a
+/// job whose provider prices no cache.
+pub(crate) const PREFIX_KV_CACHE_RESULT_KEY: &str = "prefixKvCache";
+
+fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
+    asset_writes
+        .iter()
+        .filter_map(|write| {
+            write
+                .get("rawAdapterSettings")
+                .and_then(|settings| settings.get(PREFIX_KV_CACHE_RESULT_KEY))
+                .filter(|record| record.is_object())
+                .cloned()
+        })
+        .collect()
 }
 
 /// Request-only fallback used by test plans and the backend-less stub plan. Production MLX/candle
@@ -3452,6 +3530,9 @@ fn adapter_id(request: &ImageRequest) -> &'static str {
 
 fn stub_raw_settings(request: &ImageRequest) -> JsonObject {
     let mut raw = request.advanced.clone();
+    // Worker-owned (epic 25899): the stub renders no prefix cache, so a replayed record must not
+    // reach the asset or the job result's `prefixKvCache` summary.
+    raw.remove(PREFIX_KV_CACHE_RESULT_KEY);
     raw.insert("realModelInference".to_owned(), Value::Bool(false));
     raw
 }
@@ -3480,106 +3561,13 @@ fn resolve_family(request: &ImageRequest) -> String {
     String::new()
 }
 
-fn hires_fix_target_dimension(dimension: u32, upscale_by: f32) -> u32 {
-    (dimension as f64 * upscale_by as f64).round() as u32
-}
-
-/// Reject unsupported Hires.fix request shapes before any model load. Hires.fix is a plain
-/// text-to-image second pass: existing edit/control inputs, PiD, multi-phase sampling, and the
-/// separate post-generation upscaler are intentionally mutually exclusive rather than being
-/// silently dropped by a provider.
+/// Reject unsupported Hires.fix request shapes before any model load. The checks live in
+/// sceneworks-core (`image_request::hires_fix_request_error`, sc-26644) so the API's enqueue gate
+/// and this pre-model-load refusal are the SAME list; only the family resolution is worker-local
+/// (the generators-registry fallback below).
 fn validate_hires_fix_request(request: &ImageRequest) -> WorkerResult<()> {
-    if request.hires_fix.is_disabled() {
-        return Ok(());
-    }
-    if request.mode != "text_to_image" {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix is only available for text-to-image generation.".to_owned(),
-        ));
-    }
-    if request.upscale.enabled {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix and the post-generation Upscale option are mutually exclusive.".to_owned(),
-        ));
-    }
-    let family = resolve_family(request);
-    let advertises_img2img = request
-        .model_manifest_entry
-        .get("ui")
-        .and_then(|ui| ui.get("img2img"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if family != "sdxl" && !advertises_img2img {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Hires.fix requires an img2img-capable model; '{}' does not advertise that capability.",
-            request.model
-        )));
-    }
-    let has_edit_or_control_input = request.source_asset_id.is_some()
-        || request.reference_asset_id.is_some()
-        || !request.reference_asset_ids.is_empty()
-        || request.mask_asset_id.is_some()
-        || request.character_id.is_some()
-        || request.character_look_id.is_some()
-        || request
-            .advanced
-            .get("poses")
-            .and_then(Value::as_array)
-            .is_some_and(|poses| !poses.is_empty())
-        || request
-            .advanced
-            .get("controlImage")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty());
-    if has_edit_or_control_input {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix cannot be combined with image-edit, reference, character, mask, or strict-control inputs."
-                .to_owned(),
-        ));
-    }
-    if request
-        .advanced
-        .get("usePid")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix and PiD super-resolution are mutually exclusive.".to_owned(),
-        ));
-    }
-    if request
-        .advanced
-        .get("phases")
-        .and_then(Value::as_array)
-        .is_some_and(|phases| !phases.is_empty())
-    {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix cannot be combined with multi-phase sampling.".to_owned(),
-        ));
-    }
-    let acceleration_sampler = request
-        .advanced
-        .get("sampler")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|sampler| matches!(sampler.as_str(), "lightning" | "lcm" | "hyper"));
-    if request.model == "realvisxl_lightning" || acceleration_sampler {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix is not supported by Lightning, LCM, or Hyper acceleration samplers because they do not accept the required img2img second pass."
-                .to_owned(),
-        ));
-    }
-    let upscale_by = request.hires_fix.effective_upscale_by();
-    let target_width = hires_fix_target_dimension(request.width, upscale_by);
-    let target_height = hires_fix_target_dimension(request.height, upscale_by);
-    if target_width > 4096 || target_height > 4096 {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Hires.fix target {}x{} exceeds the 4096px image limit; lower the base resolution or Upscale by value.",
-            target_width, target_height
-        )));
-    }
-    Ok(())
+    sceneworks_core::image_request::hires_fix_request_error(request, &resolve_family(request))
+        .map_or(Ok(()), |message| Err(WorkerError::InvalidPayload(message)))
 }
 
 /// Resolve the seed for image `index`, matching the Python worker's `resolve_seed`:
@@ -3721,6 +3709,15 @@ include!("image_jobs/stream.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod iris;
+
+// Supra2-IMG (sc-24213 MLX / sc-24214 Candle): pins the generic image lane's wiring for
+// `supra2_img` (bundle + co-requisite staging) on whichever backend the build links, and carries the
+// real-weight worker renders (the MLX arm on macOS, the production Candle job on CUDA).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod supra2;
 
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine

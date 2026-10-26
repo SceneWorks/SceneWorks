@@ -13,7 +13,7 @@ async function nonemptyFile(file) {
   if (!info.isFile() || info.size <= 0) throw new Error(`selected native artifact is not a nonempty file: ${file}`);
 }
 export async function bindMetallib({ messages, lockFile, targetRoot, temporaryRoot, explicitOverride = "", explicitNativeDirectory = "", profile = "release", consumer = profile === "debug" ? "worker" : "adapter", copy = copyFile }) {
-  const consumers = { adapter: ["release", "memory-mlx-adapter", false], worker: ["debug", "dump-engine-capabilities", false], app: ["release", "sceneworks-rust-api", false], iris: ["release", "sceneworks_worker", true] };
+  const consumers = { adapter: ["release", "memory-mlx-adapter", false], worker: ["debug", "dump-engine-capabilities", false], app: ["release", "sceneworks-rust-api", false], iris: ["release", "sceneworks_worker", true], supra2: ["release", "sceneworks_worker", true] };
   if (!consumers[consumer] || consumers[consumer][0] !== profile) throw new Error("matching explicit consumer/profile required");
   const [, artifactName, testArtifact] = consumers[consumer];
   const buildType = profile === "release" ? "Release" : "Debug";
@@ -99,9 +99,9 @@ export async function readBoundAppMetallib({ receipt, lockFile, executable, exec
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [messages, ...flags] = process.argv.slice(2);
-  if (flags.some((flag) => !["--print-path", "--debug-worker", "--iris-test"].includes(flag)) || (flags.includes("--debug-worker") && flags.includes("--iris-test"))) throw new Error("expected one supported native consumer and optional --print-path");
+  if (flags.some((flag) => !["--print-path", "--debug-worker", "--iris-test", "--supra2-test"].includes(flag)) || (["--debug-worker", "--iris-test", "--supra2-test"].filter((flag) => flags.includes(flag)).length > 1)) throw new Error("expected one supported native consumer and optional --print-path");
   const profile = flags.includes("--debug-worker") ? "debug" : "release";
-  const consumer = flags.includes("--iris-test") ? "iris" : profile === "debug" ? "worker" : "adapter";
+  const consumer = flags.includes("--iris-test") ? "iris" : flags.includes("--supra2-test") ? "supra2" : profile === "debug" ? "worker" : "adapter";
   bindMetallib({ messages, lockFile: "Cargo.lock", targetRoot: process.env.CARGO_TARGET_DIR, temporaryRoot: process.env.RUNNER_TEMP,
     explicitOverride: process.env.PMETAL_METALLIB_PATH ?? "", explicitNativeDirectory: process.env.PMETAL_MLX_PREBUILT_DIR ?? "", profile, consumer })
     .then(async (binding) => {

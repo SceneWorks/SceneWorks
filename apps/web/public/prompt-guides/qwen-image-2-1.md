@@ -102,8 +102,9 @@ attaching it, then name the marking in the prompt ("the red outline", "the green
 not a special input here — it is another picture you describe.
 
 Each reference keeps its own shape — it is never cropped to your output's aspect — and is scaled to
-about 1024 px and re-encoded on **every step**, so ten references cost
-noticeably more than two. Attach what the instruction actually refers to.
+about 1024 px. On the prefill path they are re-encoded on **every step**; when the prompt cache
+runs (the job card in the Queue shows **cached**) they are encoded once. Either way ten references
+cost noticeably more than two, so attach what the instruction actually refers to.
 
 ## Transparent backgrounds
 

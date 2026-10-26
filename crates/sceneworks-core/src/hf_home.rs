@@ -65,11 +65,55 @@ fn default_huggingface_home_from_env() -> Option<PathBuf> {
     Some(chosen)
 }
 
+/// CPU integration-fixture cache roots, keyed by the exact app data directory. Unlike an
+/// environment guard, this remains isolated across runtime threads and nested app fixtures.
+/// Absent this opt-in test feature, cache resolution has no override branch or registry.
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn roots() -> &'static parking_lot::Mutex<HashMap<PathBuf, PathBuf>> {
+        static ROOTS: OnceLock<parking_lot::Mutex<HashMap<PathBuf, PathBuf>>> = OnceLock::new();
+        ROOTS.get_or_init(Default::default)
+    }
+
+    #[must_use = "retain the guard for the fixture lifetime"]
+    pub struct CacheRootGuard(PathBuf);
+
+    impl CacheRootGuard {
+        pub fn new(data_dir: PathBuf, hub: PathBuf) -> Self {
+            assert!(data_dir.is_absolute() && hub.is_absolute());
+            let mut roots = roots().lock();
+            assert!(
+                !roots.contains_key(&data_dir),
+                "fixture data directory already registered"
+            );
+            roots.insert(data_dir.clone(), hub);
+            Self(data_dir)
+        }
+    }
+
+    impl Drop for CacheRootGuard {
+        fn drop(&mut self) {
+            roots().lock().remove(&self.0);
+        }
+    }
+
+    pub(super) fn root(data_dir: &Path) -> Option<PathBuf> {
+        roots().lock().get(data_dir).cloned()
+    }
+}
+
 /// The Hugging Face hub cache directory: `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE`
 /// if set, else `<HF_HOME>/hub`, else `<data_dir>/cache/huggingface/hub`. Shared
 /// by the rust-api and rust-worker so cache-path resolution can't drift between
 /// them (sc-4279 / F-MLXW-15).
 pub fn huggingface_hub_cache_dir(data_dir: &Path) -> PathBuf {
+    #[cfg(feature = "test-support")]
+    if let Some(root) = test_support::root(data_dir) {
+        return root;
+    }
     if let Some(path) = std::env::var("HF_HUB_CACHE")
         .ok()
         .map(|value| value.trim().to_owned())

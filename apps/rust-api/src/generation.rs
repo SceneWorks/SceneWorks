@@ -239,6 +239,27 @@ pub(crate) async fn create_image_job(
                 return Err(ApiError::bad_request(message));
             }
         }
+        // Hires.fix (sc-26644): the shared core gate the worker re-applies before any model load
+        // (`image_request::hires_fix_request_error`). The typed DTO used to silently drop the web's
+        // top-level `hiresFix`, so the second pass never ran AND the worker's refusals never fired —
+        // a POST for a model that should refuse it returned 201 and failed later (or rendered
+        // without the pass). Judged against the FINAL payload (post-preset, with the resolved
+        // dimensions above) and the server-owned manifest entry, and off `from_payload` so the API
+        // and the worker parse the request exactly the same way. Read after the width/height/count
+        // defaults because the 4096-target check needs the resolved geometry.
+        {
+            let request = sceneworks_core::image_request::ImageRequest::from_payload(&job_payload);
+            let family = entry
+                .get("family")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if let Some(message) =
+                sceneworks_core::image_request::hires_fix_request_error(&request, family)
+            {
+                return Err(ApiError::bad_request(message));
+            }
+        }
         // The declared sampler / scheduler MENU (sc-24114): a name no lane advertises is one the
         // worker silently falls back from, so it is refused here, naming the menu.
         if let Some(advanced) = job_payload.get("advanced").and_then(Value::as_object) {
@@ -443,7 +464,27 @@ pub(crate) async fn create_image_job(
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
             .unwrap_or_else(|| payload.count.unwrap_or_else(default_image_count));
-        job_payload.insert("seeds".to_owned(), random_image_seeds(count));
+        let mut seeds = random_image_seeds(count);
+        // sc-24215: a native count batch (`image.nativeCountBatch`, Supra2-IMG) renders image k on
+        // seed `seeds[0] + k` in one engine call, so the recorded batch must be that run, not
+        // independent draws the engine never used.
+        if model_manifest_entry
+            .as_object()
+            .is_some_and(sceneworks_core::image_sampling_controls::native_count_batch)
+        {
+            if let Some(base) = seeds
+                .as_array()
+                .and_then(|seeds| seeds.first())
+                .and_then(Value::as_i64)
+            {
+                seeds = Value::Array(
+                    (0..i64::from(count))
+                        .map(|k| Value::from(base + k))
+                        .collect(),
+                );
+            }
+        }
+        job_payload.insert("seeds".to_owned(), seeds);
     }
     // Create in `pending_caption` when an async caption is pending, else the default `queued`. The
     // POST returns 201 immediately either way — it never waits on the expansion (sc-9120).
@@ -1889,6 +1930,32 @@ pub(crate) async fn apply_recipe_preset_to_image_payload(
             .filter(|value| !value.is_empty())
         {
             job_payload.insert("model".to_owned(), Value::String(model.to_owned()));
+        }
+    }
+    // MOSS's model-specific controls survive headless preset expansion. Presence wins, including
+    // explicit OFF; never inherit an enabled preset over a caller's deliberate ordinary request.
+    if let Some(moss) = preset.get("defaults").and_then(|d| d.get("mossImage")) {
+        let advanced = job_payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+        if !advanced.contains_key("mossImage") {
+            advanced.insert("mossImage".to_owned(), moss.clone());
+            if moss
+                .get("acceleration")
+                .and_then(Value::as_str)
+                .is_some_and(|v| v != "off")
+            {
+                if let Some(steps) = preset
+                    .get("defaults")
+                    .and_then(|d| d.get("mossDmdSteps").or_else(|| d.get("steps")))
+                {
+                    advanced
+                        .entry("steps".to_owned())
+                        .or_insert_with(|| steps.clone());
+                }
+            }
         }
     }
     // Render defaults (count/resolution/negativePrompt) are intentionally NOT

@@ -278,6 +278,19 @@ pub(super) fn has_nonempty_string_array(payload: &Map<String, Value>, key: &str)
         })
 }
 
+/// The builtin catalog ids served by the Qwen-Image 2.1 engines (epic 24107; Turbo, epic 25899):
+/// the base checkpoint and its distilled Turbo sibling. They are two engine ids over ONE request
+/// contract — the same ordered 1-10 reference list, the same ÷32 envelope, the same RGBA decode,
+/// the same LoRA family — so every route, guard and resolver that keys on the 2.1 request shape
+/// keys on this list rather than on the base id alone. Where the two ids genuinely differ (the
+/// trainer, the defaults, the memory figures, the recipe stamp) the code names the id it means.
+pub const QWEN_IMAGE_2_1_MODEL_IDS: &[&str] = &["qwen_image_2_1", "qwen_image_2_1_turbo"];
+
+/// Whether `model` is one of [`QWEN_IMAGE_2_1_MODEL_IDS`].
+pub fn is_qwen_image_2_1_model(model: &str) -> bool {
+    QWEN_IMAGE_2_1_MODEL_IDS.contains(&model)
+}
+
 /// The ORDERED condition-image asset ids a Qwen-Image 2.1 request carries, or `None` when a carrier
 /// is malformed (fail closed, never "not supplied").
 ///

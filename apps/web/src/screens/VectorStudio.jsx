@@ -2,10 +2,9 @@ import React, { useEffect, useMemo, useState } from "react";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
-import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
+import { AssetMedia, assetCanRenderAsImage, assetUrl } from "../components/assetMedia.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { downloadOffersFor, vectorModelAvailability, vectorModelServesMode } from "../modelEligibility.js";
-import { terminalStatuses } from "../constants.js";
 
 export const VECTOR_DETAIL_PRESETS = Object.freeze({
   draft: { label: "Draft", maxNewTokens: 2048, maxSvgBytes: 131072, maxWallTimeMs: 60000 },
@@ -83,10 +82,45 @@ export function vectorSourceAssets(assets, projectId) {
   return (assets ?? []).filter((asset) => asset?.projectId === projectId && assetCanRenderAsImage(asset) && !asset.status?.trashed && !asset.status?.rejected);
 }
 
+function vectorResultAsset(job, assets, projectId) {
+  const resultEntries = [
+    job?.result?.asset,
+    ...(Array.isArray(job?.result?.assets) ? job.result.assets : []),
+    ...(Array.isArray(job?.result?.assetWrites) ? job.result.assetWrites : []),
+  ];
+  const resultIds = new Set(resultEntries.map((entry) => typeof entry === "string" ? entry : entry?.id).filter(Boolean));
+  return (assets ?? []).find((asset) => asset?.projectId === projectId && asset?.type === "vector" && resultIds.has(asset.id));
+}
+
+function selectedBudgetLabel(budget) {
+  if (![budget?.maxNewTokens, budget?.maxWallTimeMs].every((value) => Number.isSafeInteger(value) && value > 0)) return "Invalid recorded budget";
+  return `${budget.maxNewTokens.toLocaleString()} tokens · ${Math.round(budget.maxWallTimeMs / 1000)}s`;
+}
+
+function VectorJobOutcome({ asset, assetsLoading, job, onCancel, onViewAssets }) {
+  if (job.status !== "completed") {
+    return <WorkerProgressCard job={job} onCancel={onCancel} />;
+  }
+  if (!asset) {
+    return <article className="work-panel" aria-label="Vector job outcome"><p role="status">{assetsLoading ? "Loading the saved SVG result…" : "SVG result unavailable. No published vector asset was found in this project; it may have been removed."}</p></article>;
+  }
+  return (
+    <article className="work-panel" aria-label="Vector job outcome">
+      <p role="status"><strong>Saved {asset.displayName ?? "SVG result"}</strong></p>
+      <AssetMedia asset={asset} className="vector-studio__result-preview" />
+      <div className="worker-progress-card__actions">
+        <button className="secondary-action" onClick={() => onViewAssets(asset)} type="button">View in Assets</button>
+        <a className="secondary-action" download href={assetUrl(asset)}>Export SVG</a>
+      </div>
+    </article>
+  );
+}
+
 export function VectorStudio() {
   const {
     activeProject,
     assets = [],
+    assetsLoading = false,
     jobs = [],
     models = [],
     macCapabilities,
@@ -96,11 +130,13 @@ export function VectorStudio() {
     createModelDownloadJob,
     jobAction,
     setActiveView,
+    setSelectedAssetId,
     studioLaunch,
   } = useAppContext();
   const [mode, setMode] = useState("convert_image");
   const [sourceAssetId, setSourceAssetId] = useState("");
-  const [detail, setDetail] = useState("standard");
+  const [detail, setDetail] = useState("detailed");
+  const [submissionError, setSubmissionError] = useState("");
   const [prompt, setPrompt] = useState("");
   const [negativePrompt, setNegativePrompt] = useState("");
   const [rasterModelId, setRasterModelId] = useState("");
@@ -146,7 +182,7 @@ export function VectorStudio() {
       rasterRevision: composed ? workflow.rasterStage?.revision : undefined,
       vectorRevision: composed ? workflow.vectorStage?.revision : undefined,
     } : null);
-    setDetail(budget ? "recipe" : "standard");
+    setDetail(budget ? "recipe" : "detailed");
     setMode(composed ? "create_from_prompt" : "convert_image");
     setSourceAssetId(studioLaunch.assetId ?? "");
     setPrompt(composed ? workflow.rasterStage?.prompt ?? "" : recipe?.prompt ?? "");
@@ -163,37 +199,42 @@ export function VectorStudio() {
   const detailBudget = detail === "recipe" ? replay?.budget : vectorDetailBudget(VECTOR_DETAIL_PRESETS[detail], selectedModel);
   const validBudget = budgetFitsModel(detailBudget, selectedModel);
   const detailOptions = <>{detail === "recipe" ? <option value="recipe">Recorded recipe</option> : null}{Object.entries(VECTOR_DETAIL_PRESETS).map(([key, preset]) => <option key={key} value={key}>{preset.label}</option>)}</>;
-  const vectorJobs = jobs.filter((job) => job.type === "vector_generate" && !terminalStatuses.has(job.status));
+  const vectorJobs = jobs.filter((job) => job.type === "vector_generate" && job.projectId === activeProject?.id);
   const canConvert = Boolean(sources.some((asset) => asset.id === sourceAssetId) && validBudget && (!replay?.mode || replay.mode === "image_to_svg") && conversionAvailability.available && typeof createVectorJob === "function");
   const canCreateFromPrompt = Boolean(prompt.trim() && validBudget && promptWorkflowAvailable && rasterWorkflowModel && vectorWorkflowModel && typeof createVectorPromptWorkflow === "function");
   const submit = async (event) => {
     event.preventDefault();
-    if (mode === "create_from_prompt") {
-      if (!canCreateFromPrompt) return;
-      await createVectorPromptWorkflow({
-        prompt: prompt.trim(),
-        negativePrompt: negativePrompt.trim() || undefined,
-        rasterModel: rasterWorkflowModel.id,
-        vectorModel: vectorWorkflowModel.id,
+    setSubmissionError("");
+    try {
+      if (mode === "create_from_prompt") {
+        if (!canCreateFromPrompt) return;
+        await createVectorPromptWorkflow({
+          prompt: prompt.trim(),
+          negativePrompt: negativePrompt.trim() || undefined,
+          rasterModel: rasterWorkflowModel.id,
+          vectorModel: vectorWorkflowModel.id,
+          detailBudget,
+          sampling: replay?.sampling,
+          seed: replay?.seed,
+          width: replay?.width,
+          height: replay?.height,
+          expectedRasterRevision: replay?.rasterRevision,
+          expectedVectorRevision: replay?.vectorRevision,
+        });
+        return;
+      }
+      if (!canConvert) return;
+      await createVectorJob({
+        mode: "image_to_svg",
+        sourceAssetId,
+        model: conversionModel.id,
+        prompt: conversionModel?.vector?.acceptsTextGuidance === true ? prompt.trim() : "",
         detailBudget,
         sampling: replay?.sampling,
-        seed: replay?.seed,
-        width: replay?.width,
-        height: replay?.height,
-        expectedRasterRevision: replay?.rasterRevision,
-        expectedVectorRevision: replay?.vectorRevision,
       });
-      return;
+    } catch (error) {
+      setSubmissionError(error instanceof Error ? error.message : "Unable to create the vector job.");
     }
-    if (!canConvert) return;
-    await createVectorJob({
-      mode: "image_to_svg",
-      sourceAssetId,
-      model: conversionModel.id,
-      prompt: conversionModel?.vector?.acceptsTextGuidance === true ? prompt.trim() : "",
-      detailBudget,
-      sampling: replay?.sampling,
-    });
   };
   const unavailableCopy = conversionAvailability.reason === "pending_terminal_inference_pin"
     ? "StarVector is installed, but this machine is waiting for the terminal inference pin. Conversion will become available automatically when it is claimable."
@@ -208,6 +249,10 @@ export function VectorStudio() {
     setVectorModelId(event.target.value);
     setReplay((current) => current && { ...current, vectorRevision: undefined });
   };
+  const viewInAssets = (asset) => {
+    setSelectedAssetId?.(asset.id);
+    setActiveView("Library");
+  };
 
   return (
     <section className="page-frame vector-studio" aria-labelledby="vector-studio-title">
@@ -220,9 +265,10 @@ export function VectorStudio() {
         setReplay((current) => current && { ...current, mode: "image_to_svg", rasterRevision: undefined, vectorRevision: undefined });
       }}>Use available models and Standard detail</button></p> : null}
       <div aria-label="Vector workflow" className="mode-tabs" role="tablist">
-        <button aria-selected={mode === "convert_image"} onClick={() => setMode("convert_image")} role="tab" type="button">Convert Image</button>
-        {promptWorkflowAvailable ? <button aria-selected={mode === "create_from_prompt"} onClick={() => setMode("create_from_prompt")} role="tab" type="button">Create from Prompt</button> : null}
+        <button aria-selected={mode === "convert_image"} onClick={() => { setSubmissionError(""); setMode("convert_image"); }} role="tab" type="button">Convert Image</button>
+        {promptWorkflowAvailable ? <button aria-selected={mode === "create_from_prompt"} onClick={() => { setSubmissionError(""); setMode("create_from_prompt"); }} role="tab" type="button">Create from Prompt</button> : null}
       </div>
+      {submissionError ? <p role="alert">Unable to create SVG job: {submissionError}</p> : null}
       {mode === "create_from_prompt" && rasterWorkflowModel && vectorWorkflowModel ? (
         <form className="work-panel" onSubmit={submit}>
           <p role="note">This is a disclosed two-stage workflow, not direct text-to-SVG: {rasterWorkflowModel.name ?? rasterWorkflowModel.id} at {authoritativeModelRevision(rasterWorkflowModel)} creates a hidden retained raster, then {vectorWorkflowModel.name ?? vectorWorkflowModel.id} at {authoritativeModelRevision(vectorWorkflowModel)} vectorizes it.</p>
@@ -231,6 +277,7 @@ export function VectorStudio() {
           <label>Raster model<select aria-label="Raster model" onChange={chooseRasterModel} value={rasterWorkflowModel.id}>{rasterWorkflowModels.map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}</option>)}</select></label>
           <label>Vector model<select aria-label="Vector model" onChange={chooseVectorModel} value={vectorWorkflowModel.id}>{vectorWorkflowModels.map((model) => <option key={model.id} value={model.id}>{model.name ?? model.id}</option>)}</select></label>
           <label>Detail<select aria-label="Vector detail" onChange={(event) => setDetail(event.target.value)} value={detail}>{detailOptions}</select></label>
+          <p role="status">Selected vector budget: {selectedBudgetLabel(detailBudget)}</p>
           <button disabled={!canCreateFromPrompt} type="submit">Create SVG</button>
         </form>
       ) : (
@@ -240,11 +287,19 @@ export function VectorStudio() {
             <AssetPickerField assets={sources} label="Project raster image" onChange={setSourceAssetId} value={sourceAssetId} />
             {conversionModel?.vector?.acceptsTextGuidance === true ? <label>Optional guidance<input aria-label="Optional vector guidance" onChange={(event) => setPrompt(event.target.value)} placeholder="Preserve bold silhouettes" value={prompt} /></label> : null}
             <label>Detail<select aria-label="Vector detail" onChange={(event) => setDetail(event.target.value)} value={detail}>{detailOptions}</select></label>
+            <p role="status">Selected vector budget: {selectedBudgetLabel(detailBudget)}</p>
             <button disabled={!canConvert} type="submit">Convert to SVG</button>
           </form>
         </ModelAvailabilityGate>
       )}
-      {vectorJobs.map((job) => <WorkerProgressCard job={job} key={job.id} onCancel={jobAction ? (item) => jobAction(item, "cancel") : undefined} />)}
+      {vectorJobs.map((job) => <VectorJobOutcome
+        asset={vectorResultAsset(job, assets, activeProject?.id)}
+        assetsLoading={assetsLoading}
+        job={job}
+        key={job.id}
+        onCancel={jobAction ? (item) => jobAction(item, "cancel") : undefined}
+        onViewAssets={viewInAssets}
+      />)}
     </section>
   );
 }

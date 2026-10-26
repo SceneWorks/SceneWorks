@@ -7122,6 +7122,276 @@
       "overallAllocatorEnvelopeBytes": 31892449748
     },
     {
+      "id": "qwen_image_2_1_turbo:candle:bf16:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-c7d704ad8f171b58e07a",
+      "modelId": "qwen_image_2_1_turbo",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1_turbo",
+      "provider": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-25909/qwen-image-2-1-turbo-bf16-candle-evidence.json",
+        "sha256": "b6eeb8be364fb541817d20c1cd8b0923adf82dbed41079e027cf9f7931a5ca94",
+        "recordId": "imc-c7d704ad8f171b58e07a",
+        "calibrationFingerprint": "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1",
+        "loaderClosureDigest": "1375273fecabd5d5561a2dd8a4bf5bc68d82d2a009d759d39ce2039c4475b098"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 19260243968,
+        "denoise": 23353884672,
+        "decode": 40233861120
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 19260243968,
+        "denoise": 23353884672,
+        "decode": 40233861120
+      },
+      "overallAllocatorEnvelopeBytes": 40233861120
+    },
+    {
+      "id": "qwen_image_2_1_turbo:candle:q4:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-215411a72c14d4062c37",
+      "modelId": "qwen_image_2_1_turbo",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1_turbo",
+      "provider": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q4-candle-evidence.json",
+        "sha256": "4540abe5067e09c4ef82c16d7f2d9232d2b02b615ae523620b5a0bde7544df02",
+        "recordId": "imc-215411a72c14d4062c37",
+        "calibrationFingerprint": "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1",
+        "loaderClosureDigest": "1375273fecabd5d5561a2dd8a4bf5bc68d82d2a009d759d39ce2039c4475b098"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 9725542400,
+        "denoise": 13641973760,
+        "decode": 30506221568
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 9725542400,
+        "denoise": 13641973760,
+        "decode": 30506221568
+      },
+      "overallAllocatorEnvelopeBytes": 30506221568
+    },
+    {
+      "id": "qwen_image_2_1_turbo:candle:q8:base:base:qwen-image-2-1-turbo-candle-derived-2026-10-13-v1:imc-fedbaa630ec38cbef226",
+      "modelId": "qwen_image_2_1_turbo",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1_turbo",
+      "provider": "qwen_image_2_1_turbo",
+      "backend": "candle",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q8-candle-evidence.json",
+        "sha256": "144ab8b0a13398e229b00af71eb7b2bf28df1317f6f5f8d58a514311c91b5a35",
+        "recordId": "imc-fedbaa630ec38cbef226",
+        "calibrationFingerprint": "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1",
+        "loaderClosureDigest": "1375273fecabd5d5561a2dd8a4bf5bc68d82d2a009d759d39ce2039c4475b098"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 13096714240,
+        "denoise": 17991467008,
+        "decode": 37320916992
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 13096714240,
+        "denoise": 17991467008,
+        "decode": 37320916992
+      },
+      "overallAllocatorEnvelopeBytes": 37320916992
+    },
+    {
+      "id": "qwen_image_2_1_turbo:mlx:bf16:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-c6b508ce5832fb4975ff",
+      "modelId": "qwen_image_2_1_turbo",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1_turbo",
+      "provider": "qwen_image_2_1_turbo",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-25909/qwen-image-2-1-turbo-bf16-mlx-evidence.json",
+        "sha256": "8443b4e4ffa68f3cc2f46acbb3803d0bf72e4c641798f87e1f6b81cbedca22eb",
+        "recordId": "imc-c6b508ce5832fb4975ff",
+        "calibrationFingerprint": "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1",
+        "loaderClosureDigest": "aa270ec7fb0faa9e6dc3790be8b680767fd0b0bccf4efa1b1a93d059cfe85451"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 32957262540,
+        "denoise": 34421379492,
+        "decode": 34396538284
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 34731485704,
+        "denoise": 41065606058,
+        "decode": 34401306028
+      },
+      "overallAllocatorEnvelopeBytes": 41065606058
+    },
+    {
+      "id": "qwen_image_2_1_turbo:mlx:q4:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-9d33c53c03362408b0dc",
+      "modelId": "qwen_image_2_1_turbo",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1_turbo",
+      "provider": "qwen_image_2_1_turbo",
+      "backend": "mlx",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q4-mlx-evidence.json",
+        "sha256": "ecc639fcc549f654e702da50acfebfe23d86ac1d7cd23222a1ccebdceb1908ba",
+        "recordId": "imc-9d33c53c03362408b0dc",
+        "calibrationFingerprint": "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1",
+        "loaderClosureDigest": "aa270ec7fb0faa9e6dc3790be8b680767fd0b0bccf4efa1b1a93d059cfe85451"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 11425942732,
+        "denoise": 16642609820,
+        "decode": 14184039852
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 11884130312,
+        "denoise": 24200124108,
+        "decode": 14188823980
+      },
+      "overallAllocatorEnvelopeBytes": 24200124108
+    },
+    {
+      "id": "qwen_image_2_1_turbo:mlx:q8:base:base:qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1:imc-128c3aa0f2224ab6c72e",
+      "modelId": "qwen_image_2_1_turbo",
+      "modelFamily": "qwen-image-2-1",
+      "route": "qwen_image_2_1_turbo",
+      "provider": "qwen_image_2_1_turbo",
+      "backend": "mlx",
+      "tier": "q8",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-25909/qwen-image-2-1-turbo-q8-mlx-evidence.json",
+        "sha256": "1c2e85c2fe6d88071ed59108470bb791bfa2e069cc8d5e2f0390e43a256ae9ce",
+        "recordId": "imc-128c3aa0f2224ab6c72e",
+        "calibrationFingerprint": "qwen-image-2-1-turbo-mlx-derived-2026-10-13-v1",
+        "loaderClosureDigest": "aa270ec7fb0faa9e6dc3790be8b680767fd0b0bccf4efa1b1a93d059cfe85451"
+      },
+      "geometry": {
+        "width": 2048,
+        "height": 2048,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 18377098956,
+        "denoise": 23673049756,
+        "decode": 21214479788
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 18753233416,
+        "denoise": 31230564044,
+        "decode": 21219263916
+      },
+      "overallAllocatorEnvelopeBytes": 31230564044
+    },
+    {
       "id": "qwen_image_edit_2511:candle:bf16:base:base:qwen-image-cuda-staged-tiled-decode-bounded-attention-device-format-blocks-v2:imc-5478897bb3fa0e0761d4",
       "modelId": "qwen_image_edit_2511",
       "modelFamily": "qwen-image",
@@ -10718,6 +10988,51 @@
       "stagedResidencyStructurallyNotApplicable": true
     },
     {
+      "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
+      "modelId": "supra2_img",
+      "modelFamily": "supra2",
+      "route": "supra2_img",
+      "provider": "supra2_img",
+      "backend": "mlx",
+      "tier": "bf16",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "source": {
+        "path": "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
+        "sha256": "4e5dbb30ad68ed201e6c84cfd0b8348df7ba819dc97d8f6623729fd76b0f95a3",
+        "recordId": "imc-130e60e9f989be2191bc",
+        "calibrationFingerprint": "supra2-img-mlx-resident-v1",
+        "loaderClosureDigest": "79805375a0434636b88b7768723f1b015e8deba4e9b2226a25dba82cd34eb10b"
+      },
+      "geometry": {
+        "width": 256,
+        "height": 256,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 1606876808,
+        "denoise": 1606893192,
+        "decode": 4276945936
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2121002352,
+        "denoise": 2121039732,
+        "decode": 9324071164
+      },
+      "overallAllocatorEnvelopeBytes": 9324071164
+    },
+    {
       "id": "wan_2_2:candle:bf16:base:base:sc-19223-wan2-2-ti2v-5b-candle-sequential-load-v1:imc-db5cb0e04263aef07197",
       "modelId": "wan_2_2",
       "modelFamily": "wan-video",
@@ -12409,6 +12724,50 @@
       "evidence": null
     },
     {
+      "id": "analytic:moss_image_base:candle:default",
+      "modelId": "moss_image_base",
+      "modelFamily": "moss_image",
+      "route": "moss_image_base",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:moss_image_base:mlx:default",
+      "modelId": "moss_image_base",
+      "modelFamily": "moss_image",
+      "route": "moss_image_base",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:moss_image_sft:candle:default",
+      "modelId": "moss_image_sft",
+      "modelFamily": "moss_image",
+      "route": "moss_image_sft",
+      "backend": "candle",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
+      "id": "analytic:moss_image_sft:mlx:default",
+      "modelId": "moss_image_sft",
+      "modelFamily": "moss_image",
+      "route": "moss_image_sft",
+      "backend": "mlx",
+      "tier": "default",
+      "basis": "no_retained_evidence",
+      "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
+      "evidence": null
+    },
+    {
       "id": "analytic:pulid_flux_dev:candle:bf16",
       "modelId": "pulid_flux_dev",
       "modelFamily": "flux",
@@ -12791,6 +13150,27 @@
       "basis": "no_retained_evidence",
       "reason": "no retained render, provider constant or measured manifest declaration covers this cell; its peak is derived analytically from architecture facts alone",
       "evidence": null
+    },
+    {
+      "id": "analytic:supra2_img:candle:bf16",
+      "modelId": "supra2_img",
+      "modelFamily": "supra2",
+      "route": "supra2_img",
+      "backend": "candle",
+      "tier": "bf16",
+      "basis": "measured_envelope",
+      "reason": "the retained corpus measures this cell's overall allocator envelope but carries no per-phase decomposition, so it bounds admission without anchoring the derivation",
+      "evidence": {
+        "repo": null,
+        "revision": null,
+        "path": "docs/calibration/sc-24217/supra2-img-bf16-candle-evidence.json",
+        "sha256": "a94aaa1a4834d6d6fc377408dd8596e03f38b9bc45e1293d0a3addca4644eae5",
+        "recordId": "imc-720c45380d2ce4058aa0",
+        "envelopeBytes": 2821718016,
+        "values": {
+          "provider": "supra2_img"
+        }
+      }
     },
     {
       "id": "analytic:svd:candle:default",

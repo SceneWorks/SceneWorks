@@ -49,7 +49,7 @@ test("two concurrent exact-pin source preparations preserve cache and both captu
   await assert.rejects(cleanupSourceWorktree(cache));
 });
 async function nativeFixture(t, prebuilt = false, profile = "release", consumer) {
-  const artifactName = consumer === "app" ? "sceneworks-rust-api" : consumer === "iris" ? "sceneworks_worker" : profile === "release" ? "memory-mlx-adapter" : "dump-engine-capabilities";
+  const artifactName = consumer === "app" ? "sceneworks-rust-api" : ["iris", "supra2"].includes(consumer) ? "sceneworks_worker" : profile === "release" ? "memory-mlx-adapter" : "dump-engine-capabilities";
   const directory = await temporary(t), target = path.join(directory, "target"), output = path.join(target, profile, "build", "pmetal-mlx-sys-fixture", "out");
   await mkdir(output, { recursive: true });
   const library = prebuilt ? path.join(directory, "pinned-prebuilt", "Release-metal") : path.join(output, "lib");
@@ -60,11 +60,11 @@ async function nativeFixture(t, prebuilt = false, profile = "release", consumer)
   await writeFile(path.join(library, "pmetal-mlx-prebuilt.txt"), `schema=1\nbuild_type=${profile === "release" ? "Release" : "Debug"}\ntarget=aarch64-apple-darwin\nfeatures=accelerate,metal\ndeployment_target=15.0\nfingerprint=${"a".repeat(64)}\n`);
   await writeFile(path.join(path.dirname(output), "output"), `cargo:metallib=${source}\n`);
   await writeFile(lockFile, `name = "pmetal-mlx-sys"\nversion = "0.2.4"\nsource = "git+https://github.com/michaeltrefry/mlx-rs?rev=${pin}#${pin}"\n`);
-  const adapter = consumer === "iris" ? path.join(target, profile, "deps", `${artifactName}-aabbccdd`) : path.join(target, profile, artifactName);
+  const adapter = ["iris", "supra2"].includes(consumer) ? path.join(target, profile, "deps", `${artifactName}-aabbccdd`) : path.join(target, profile, artifactName);
   await mkdir(path.dirname(adapter), { recursive: true }); await writeFile(adapter, "CPU text fixture, never executed");
   const records = [
     { reason: "build-script-executed", package_id: `git+https://github.com/michaeltrefry/mlx-rs?rev=${pin}#pmetal-mlx-sys@0.2.4`, out_dir: output, linked_paths: [`native=${library}`] },
-    { reason: "compiler-artifact", target: { name: artifactName }, executable: adapter, profile: { debug_assertions: profile === "debug", test: consumer === "iris" } },
+    { reason: "compiler-artifact", target: { name: artifactName }, executable: adapter, profile: { debug_assertions: profile === "debug", test: ["iris", "supra2"].includes(consumer) } },
     { reason: "build-finished", success: true },
   ];
   await writeFile(messages, records.map(JSON.stringify).join("\n"));
@@ -130,8 +130,8 @@ test("stale other-ref, ambiguous outputs, wrong profile and mismatching explicit
   await rm(path.join(path.dirname(fixture.source), "pmetal-mlx-prebuilt.txt"));
   await assert.rejects(bindMetallib(fixture), /ENOENT/);
 });
-test("selected Iris no-run executable and shader stage privately; other-SHA cache survives and substitutions refuse", async (t) => {
-  const fixture = await nativeFixture(t, false, "release", "iris");
+for (const consumer of ["iris", "supra2"]) test(`selected ${consumer} no-run executable and shader stage privately; other-SHA cache survives and substitutions refuse`, async (t) => {
+  const fixture = await nativeFixture(t, false, "release", consumer);
   const old = path.join(fixture.temporaryRoot, "other-source-sha", "active-binary");
   await mkdir(path.dirname(old)); await writeFile(old, "another active source cache");
   const native = await bindMetallib(fixture);
@@ -147,9 +147,9 @@ test("selected Iris no-run executable and shader stage privately; other-SHA cach
     await copyFile(from, to, flags);
     if (from === fixture.source) await writeFile(from, "concurrent shader replacement");
   } }), /metallib changed during binding/);
-  const iris = await readFile(path.join(root, "scripts/ci/iris-mlx-real-weights/run.sh"), "utf8");
+  const iris = await readFile(path.join(root, `scripts/ci/${consumer}-mlx-real-weights/run.sh`), "utf8");
   assert.doesNotMatch(iris, /-mindepth 1 -maxdepth 1 -type d ! -name/);
-  assert.match(iris, /--iris-test --print-path/);
+  assert.ok(iris.includes(`--${consumer}-test --print-path`));
   assert.match(iris, /bin="\$\(dirname "\$PMETAL_METALLIB_PATH"\)\/sceneworks_worker"/);
 });
 test("app start/reload uses the same binary-bound private shader without changing service-state schema", async (t) => {

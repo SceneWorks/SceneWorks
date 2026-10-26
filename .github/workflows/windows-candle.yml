@@ -164,6 +164,11 @@ on:
         required: false
         type: boolean
         default: false
+      capability_facts_only:
+        description: "Build and capture native Candle capability facts without running GPU or runtime tests"
+        required: false
+        type: boolean
+        default: false
       run_five_rung_reference:
         description: "Capture the Candle Krea q4 anchor (krea_2_turbo:q4:candle in the anchor plan)"
         required: false
@@ -244,6 +249,11 @@ on:
           - "1"
           - "0,1"
         default: "1"
+      run_supra2_worker_smoke:
+        description: "Run the Supra2-IMG Candle worker real-weight tests (sc-24214/24216/24217): install-time convert, one default 256² image_generate job, the offline cancel/recover/unload lifecycle, and the epic acceptance matrix; the three pinned snapshots must already be in E:\\huggingface\\hub"
+        required: false
+        type: boolean
+        default: false
 
 # Cancel superseded PR runs, but never cancel a main-push run: this lane is the
 # ONLY thing that compiles the candle-gated worker code, so a main commit whose
@@ -352,7 +362,7 @@ jobs:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner. A YuE2 terminal
     # dispatch (sc-23002) runs only its own job below: every `cuda` listener is the same physical
     # box, so this lane's compile/test would share the GPU the terminal job measures with nvidia-smi.
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda) && !(github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && !inputs.capability_facts_only) }}
     # Actions keys retain each guarded execution request; they are not GPU mutexes.
     # Actual GPU execution takes the shared host-global UUID lease and owned Windows Job.
     # Pure file provisioning retains its existing compatibility group.
@@ -365,8 +375,8 @@ jobs:
     # this lane was missing -- the asymmetry epic 17137 recorded as "no weights label and no HF
     # provisioning input, unlike the Mac lane".
     #
-    # It matters because the `cuda` pool is FOUR runners across TWO registration levels: org-level
-    # `cuda-windows` / `cuda-windows-2` carry `real-weights`, repo-level `cuda-windows-3` /
+    # All four CUDA listeners are organization runners in `self-hosted-gpu` (2026-10-24).
+    # `cuda-windows` / `cuda-windows-2` carry `real-weights`; `cuda-windows-3` /
     # `cuda-windows-4` do NOT. All four happen to be listener processes on the same physical box
     # today, so this narrowing changes nothing observable right now. It is what keeps a weights job
     # correct the day a `cuda` runner is added on a second machine: without it the job lands on a
@@ -378,7 +388,8 @@ jobs:
       # Automatic PR/push tests use physical GPU 1; logical CUDA device 0 maps to it.
       # Preserve the existing manual-dispatch default and its step-local overrides.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && '0' || '1' }}
+      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && '0' || '1' }}
+      CAPABILITY_FACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only }}
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
       CUDA_COMPUTE_CAP: "120"
@@ -410,6 +421,10 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: powershell
         env:
+          CAPABILITY_FACTS_ONLY: ${{ inputs.capability_facts_only }}
+          RUN_IRIS_WORKER_SMOKE: ${{ inputs.run_iris_worker_smoke }}
+          RUN_SUPRA2_WORKER_SMOKE: ${{ inputs.run_supra2_worker_smoke }}
+          RUN_IMPORTED_NVFP4_PROOF: ${{ inputs.run_imported_nvfp4_proof }}
           RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
           RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
@@ -418,6 +433,9 @@ jobs:
           YUE2_ACCEPTANCE_ONLY: ${{ inputs.yue2_acceptance_only }}
           YUE2_FP8_PROFILE_ONLY: ${{ inputs.yue2_fp8_profile_only }}
         run: |
+          if ($env:CAPABILITY_FACTS_ONLY -eq 'true' -and (@($env:RUN_FIVE_RUNG_REFERENCE, $env:PROVISION_SNAPSHOT, $env:RUN_LTX_EROS_ACCEPTANCE, $env:RUN_EPIC_20738_TERMINAL_CUDA, $env:RUN_YUE2_TERMINAL_CUDA, $env:YUE2_ACCEPTANCE_ONLY, $env:YUE2_FP8_PROFILE_ONLY, $env:RUN_IRIS_WORKER_SMOKE, $env:RUN_SUPRA2_WORKER_SMOKE, $env:RUN_IMPORTED_NVFP4_PROOF) -contains 'true')) {
+            throw 'capability_facts_only cannot share a dispatch with provisioning or a GPU/runtime profile'
+          }
           if ($env:YUE2_ACCEPTANCE_ONLY -eq 'true' -and $env:RUN_YUE2_TERMINAL_CUDA -ne 'true') {
             throw 'yue2_acceptance_only requires run_yue2_terminal_cuda=true'
           }
@@ -833,6 +851,7 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --no-run
           if errorlevel 1 exit /b 1
+          if "%CAPABILITY_FACTS_ONLY%"=="true" exit /b 0
           python -I scripts/ci/windows_cuda_execution.py --actor ordinary-worker-tests --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 -- cargo test -p sceneworks-worker --features backend-candle
           if errorlevel 1 exit /b 1
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
@@ -876,7 +895,9 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
-          cargo test -p sceneworks-memory-adapter --features candle
+          set "capability_facts_test_args="
+          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"
+          cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%
       - name: Check out the exact inference reference source
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1024,12 +1045,12 @@ jobs:
           echo ::error::config/engine-capabilities/runtime/capabilities.candle.json does not match inference's fresh runtime capability snapshot. Download the backend-capability-facts-candle artifact from this run; never hand-author descriptor facts.
           exit /b 1
       - name: Upload fresh Candle capability facts after a verification failure
-        if: ${{ always() && steps.verify_candle_capabilities.outcome == 'failure' }}
+        if: ${{ always() && (steps.verify_candle_capabilities.outcome == 'failure' || (github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && steps.verify_candle_capabilities.outcome == 'success')) }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: backend-capability-facts-candle
           path: ${{ runner.temp }}/engine-capability-facts-verify
-          if-no-files-found: warn
+          if-no-files-found: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && 'error' || 'warn' }}
       # SC-18902's product decision required an actual Eros render, not source inference. These
       # dispatch-only steps are retained only to reproduce that rejected historical baseline; they
       # do not restore an Eros Candle product route. A candidate is intentionally absent: the
@@ -1289,7 +1310,7 @@ jobs:
         id: terminal_node
         continue-on-error: true
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         with:
           node-version: 22
           cache: npm
@@ -1297,19 +1318,19 @@ jobs:
       - name: Install the pinned terminal Node dependencies
         id: terminal_npm
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' }}
         run: npm ci --ignore-scripts
       - name: Run the targeted cross-platform terminal harness tests
         id: terminal_tests
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' }}
         run: |
           node --test scripts/epic-20738-terminal-cuda-harness.test.mjs scripts/hash-artifact-inventory.test.mjs
           python -m unittest scripts/provision_epic_20738_terminal_artifact_test.py
       - name: Validate the frozen epic-20738 terminal dispatch
         id: terminal_validation
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' }}
         shell: powershell
         env:
           SCENEWORKS_TERMINAL_CACHE_ROOT: 'E:\huggingface\hub'
@@ -1336,7 +1357,7 @@ jobs:
       - name: Discover the exact audited 19-PASS OpenPose recovery source
         id: terminal_prefix
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' }}
         shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
@@ -1380,7 +1401,7 @@ jobs:
       - name: Validate the pinned terminal artifact Python runtime
         id: terminal_python
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
         shell: powershell
         run: |
           $venv = Join-Path $env:RUNNER_TEMP "sc-20974-python-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
@@ -1395,7 +1416,7 @@ jobs:
       - name: Check out the exact terminal inference source
         id: terminal_inference
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: SceneWorks/inference
@@ -1405,7 +1426,7 @@ jobs:
       - name: Run the exact sparse epic-20738 terminal CUDA recovery
         id: terminal_campaign
         continue-on-error: true
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' && steps.terminal_python.outcome == 'success' && steps.terminal_inference.outcome == 'success' }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && steps.terminal_node.outcome == 'success' && steps.terminal_npm.outcome == 'success' && steps.terminal_tests.outcome == 'success' && steps.terminal_validation.outcome == 'success' && steps.terminal_prefix.outcome == 'success' && steps.terminal_python.outcome == 'success' && steps.terminal_inference.outcome == 'success' }}
         shell: cmd
         env:
           SCENEWORKS_ENABLE_EPIC_20738_TERMINAL_CUDA: "1"
@@ -1421,7 +1442,7 @@ jobs:
           python -I scripts/ci/windows_cuda_execution.py --actor epic-20738-terminal --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 -- node scripts\epic-20738-terminal-cuda-harness.mjs run --profile config\terminal-evidence\epic-20738-cuda.json --sceneworks-repo "%GITHUB_WORKSPACE%" --inference-repo "%GITHUB_WORKSPACE%\.terminal\inference" --sceneworks-revision "%SCENEWORKS_REVISION%" --inference-revision "%INFERENCE_REVISION%" --output "%RUNNER_TEMP%\sc-20945-epic-20738-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --scratch "%RUNNER_TEMP%\sc-20945-epic-20738-scratch-%GITHUB_RUN_ID%-%GITHUB_RUN_ATTEMPT%" --python "%SCENEWORKS_TERMINAL_PYTHON%" --cache-root "%SCENEWORKS_TERMINAL_CACHE_ROOT%" --prefix-candidates "%SCENEWORKS_TERMINAL_PREFIX_CANDIDATES%"
           if errorlevel 1 exit /b 1
       - name: Upload every epic-20738 terminal receipt
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sc-20945-epic-20738-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1429,7 +1450,7 @@ jobs:
           if-no-files-found: error
       - name: Enforce the epic-20738 terminal verdict after receipt upload
         id: terminal_verdict
-        if: ${{ always() && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
+        if: ${{ always() && !inputs.capability_facts_only && github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda }}
         shell: powershell
         env:
           NODE_OUTCOME: ${{ steps.terminal_node.outcome }}
@@ -1457,7 +1478,7 @@ jobs:
           if-no-files-found: warn
 
   imported-nvfp4-worker-smoke:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && inputs.run_imported_nvfp4_proof }}
     # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
       group: imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1488,8 +1509,10 @@ jobs:
           YUE2_ACCEPTANCE: ${{ inputs.yue2_acceptance_only }}
           YUE2_FP8: ${{ inputs.yue2_fp8_profile_only }}
           IRIS: ${{ inputs.run_iris_worker_smoke }}
+          SUPRA2: ${{ inputs.run_supra2_worker_smoke }}
+          FACTS: ${{ inputs.capability_facts_only }}
         run: |
-          $otherProfiles = @($env:FIVE_RUNG, $env:PROVISION, $env:LTX_EROS, $env:EPIC_20738, $env:YUE2, $env:YUE2_ACCEPTANCE, $env:YUE2_FP8, $env:IRIS)
+          $otherProfiles = @($env:FIVE_RUNG, $env:PROVISION, $env:LTX_EROS, $env:EPIC_20738, $env:YUE2, $env:YUE2_ACCEPTANCE, $env:YUE2_FP8, $env:IRIS, $env:SUPRA2, $env:FACTS)
           if ($otherProfiles -contains 'true') { throw 'run_imported_nvfp4_proof cannot be combined with another manual measurement profile' }
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the imported NVFP4 smoke
@@ -1540,7 +1563,7 @@ jobs:
   # path exits non-zero and fails this job; the AT2 transcription path is now an executable case.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.run_imported_nvfp4_proof }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof }}
     concurrency:
       group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-yue2-terminal-cuda
       cancel-in-progress: false
@@ -1757,7 +1780,7 @@ jobs:
 
   iris-worker-smoke:
     needs: candle-worker
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && !inputs.run_imported_nvfp4_proof }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof }}
     concurrency:
       group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-iris-worker-smoke
       cancel-in-progress: false
@@ -1859,4 +1882,90 @@ jobs:
         with:
           name: cuda-execution-iris-worker-smoke-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-*/resource-receipt.json
+          if-no-files-found: warn
+
+  # SC-24214 (epic 24212): one real-weight Supra2-IMG `image_generate` job through the production
+  # Candle worker dispatch, on the real-weights card. Dispatch only — never on PR/push — and bounded
+  # (the install-time `.pt` -> bundle convert, ONE default 256², 50-step image, the sc-24216
+  # lifecycle, and the sc-24217 epic acceptance matrix — about a dozen 256² images on a bundle the
+  # convert step wrote; PNGs + supra2_matrix_candle.json are uploaded as evidence). Offline: the
+  # pinned SupraLabs/Supra2-IMG, google/flan-t5-base and stabilityai/sd-vae-ft-mse snapshots must
+  # already be in E:\huggingface\hub (inference's `candle-supra2` real-weight job materializes them
+  # there); a missing snapshot fails the job rather than downloading.
+  #   gh workflow run windows-candle.yml --ref <branch> -f run_supra2_worker_smoke=true
+  supra2-worker-smoke:
+    needs: candle-worker
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_supra2_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof }}
+    concurrency:
+      group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-supra2-worker-smoke
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 120
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      CUDA_COMPUTE_CAP: "120"
+      CARGO_NET_OFFLINE: "true"
+      HF_HUB_CACHE: 'E:\huggingface\hub'
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper for the Supra2 worker smoke
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Set up Node for Cargo cache selection
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Isolate Cargo dependency checkout for the Supra2 worker smoke
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Fetch the pinned inference revision for the Supra2 worker smoke
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Run the Supra2-IMG Candle worker smoke, lifecycle and acceptance matrix
+        shell: cmd
+        env:
+          # The installed layout: the worker admits a modelPath only inside its own data dir,
+          # which the acceptance matrix takes from this path.
+          SUPRA2_DATA_ROOT: ${{ runner.temp }}\supra2-data
+          SUPRA2_BUNDLE_OUT: ${{ runner.temp }}\supra2-data\models\mlx\supra2_img
+          SUPRA2_BUNDLE_DIR: ${{ runner.temp }}\supra2-data\models\mlx\supra2_img
+          SUPRA2_RENDER_OUT: ${{ runner.temp }}\supra2-worker-evidence
+          # The acceptance matrix folds the lifecycle test's real result (this log, written by the
+          # lifecycle invocation below) into cell 7 of supra2_matrix_candle.json.
+          SUPRA2_LIFECYCLE_LOG: ${{ runner.temp }}\supra2-worker-evidence\lifecycle.log
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test -p sceneworks-worker --features backend-candle --release --lib --no-run
+          if errorlevel 1 exit /b 1
+          if exist "%SUPRA2_DATA_ROOT%" rmdir /s /q "%SUPRA2_DATA_ROOT%"
+          if not exist "%SUPRA2_RENDER_OUT%" mkdir "%SUPRA2_RENDER_OUT%"
+          rem Each invocation runs EXACTLY one passing test (run-one.cmd). The convert test writes the
+          rem bundle to SUPRA2_BUNDLE_OUT in its own process; the acceptance matrix loads it later.
+          python -I scripts/ci/windows_cuda_execution.py --actor supra2-convert --budget-minutes 120 --cuda-ordinals 0 -- cmd /c scripts\ci\supra2-candle-real-weights\run-one.cmd model_jobs::supra2_convert_tests::supra2_real_weight_convert_writes_a_loadable_bundle "%SUPRA2_RENDER_OUT%\convert.log"
+          if errorlevel 1 exit /b 1
+          python -I scripts/ci/windows_cuda_execution.py --actor supra2-smoke --budget-minutes 120 --cuda-ordinals 0 -- cmd /c scripts\ci\supra2-candle-real-weights\run-one.cmd image_jobs::supra2::tests::candle_real_weights::supra2_worker_gpu_smoke "%SUPRA2_RENDER_OUT%\smoke.log"
+          if errorlevel 1 exit /b 1
+          rem sc-24216: the offline installed-model lifecycle (cancel at the first progress event,
+          rem recovery, generator unload + reload) on the same card, same build.
+          python -I scripts/ci/windows_cuda_execution.py --actor supra2-lifecycle --budget-minutes 120 --cuda-ordinals 0 -- cmd /c scripts\ci\supra2-candle-real-weights\run-one.cmd image_jobs::supra2::tests::candle_real_weights::supra2_worker_gpu_lifecycle "%SUPRA2_RENDER_OUT%\lifecycle.log"
+          if errorlevel 1 exit /b 1
+          rem Epic 24212 acceptance matrix (sc-24217): short / truncated prompt, CFG 3 vs 1, seed
+          rem repeat, count 4 vs single renders on seed + k, offline; cell 7 folds lifecycle.log.
+          python -I scripts/ci/windows_cuda_execution.py --actor supra2-matrix --budget-minutes 120 --cuda-ordinals 0 -- cmd /c scripts\ci\supra2-candle-real-weights\run-one.cmd image_jobs::supra2::tests::candle_real_weights::supra2_worker_gpu_acceptance_matrix "%SUPRA2_RENDER_OUT%\matrix.log"
+      - name: Upload the Supra2-IMG Candle worker evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: supra2-candle-worker-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\supra2-worker-evidence
           if-no-files-found: warn

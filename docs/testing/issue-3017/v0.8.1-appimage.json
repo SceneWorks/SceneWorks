@@ -1,0 +1,17 @@
+{
+  "platform": "Linux-6.6.114.1-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "appdir": "/home/sceneworks/sc3017/v081/squashfs-root",
+  "api_sha256": "05d3d0ae3d376e28d3800cdc8c154bdba376feb0202825ba072e085521d76574",
+  "bundled_host_driver_libraries": [
+    {
+      "path": "usr/lib/libcuda.so.1",
+      "sha256": "8552d5fc7dca25809692d2127950d42b99a19d4a59fb49f9addc4f068d15c81e"
+    }
+  ],
+  "packaging_passed": false,
+  "scope": "AppImage packaging and one-shot CUDA probe; not a Bazzite desktop or model-generation test",
+  "artifact": {
+    "name": "SceneWorks_0.8.1_amd64.AppImage",
+    "sha256": "fec3bb373b3fc230d6d2a33db0b1c6de58b40262358fe6d9b6c51b282747606b"
+  }
+}

@@ -271,6 +271,8 @@ pub(crate) fn inputs(width: u32, height: u32) -> MlxRequestInputs {
         use_pid: false,
         has_phases: false,
         conditioning_windows: None,
+        negative_branch: false,
+        prefix_kv_cache_eligible: false,
     }
 }
 

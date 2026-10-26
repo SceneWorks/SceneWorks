@@ -38,6 +38,15 @@ const IRIS_ID: &str = "iris_3b";
 const IRIS_DEPTH_ID: &str = "iris_3b_depth";
 const IRIS_RESTORE_ID: &str = "iris_3b_restore";
 
+#[path = "candle_supra2.rs"]
+mod candle_supra2;
+
+/// Supra2-IMG (sc-24217, epic 24212), served by `candle_supra2`: `candle-gen-supra2`'s registry id
+/// (`gen_core::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
+/// for the reason the Iris ids above are: `adapterCapturableProviders` reads the pre-gate off this
+/// file.
+const SUPRA2_ID: &str = "supra2_img";
+
 /// Engine registry ids, not catalog ids: `wan_2_2` is the SceneWorks name for the TI2V-5B route
 /// (worker `engines.rs` `video_engine_ids`), and SCAIL-2's two names coincide.
 const WAN_TI2V_5B_ID: &str = "wan2_2_ti2v_5b";
@@ -463,6 +472,14 @@ const QWEN_IMAGE_2_1_ID: &str = "qwen_image_2_1";
 const QWEN_IMAGE_2_1_PLAIN_EXECUTION_PATH: &str =
     "the Candle Qwen-Image 2.1 base-only text-to-image path";
 const QWEN_IMAGE_2_1_STILL_CALIBRATION: &str = "Candle Qwen-Image 2.1 calibration";
+/// Qwen-Image 2.1 Turbo (sc-25907, epic 25899): the distilled sibling's OWN registry id, served by
+/// the same `candle-gen-qwen-image-2-1` crate (`TURBO_MODEL_ID`) and equal to its catalog model id.
+/// Same five-rung shape as base over its OWN two repositories — see
+/// [`qwen_image_2_1_turbo_five_rung_family`].
+const QWEN_IMAGE_2_1_TURBO_ID: &str = "qwen_image_2_1_turbo";
+const QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH: &str =
+    "the Candle Qwen-Image 2.1 Turbo base-only text-to-image path";
+const QWEN_IMAGE_2_1_TURBO_STILL_CALIBRATION: &str = "Candle Qwen-Image 2.1 Turbo calibration";
 /// The two SANA routes (sc-22731). Registry ids of `candle-gen-sana`'s registered generators
 /// (`candle_gen_sana::MODEL_ID` / `SPRINT_MODEL_ID`), which are also the catalog model ids.
 ///
@@ -1347,6 +1364,8 @@ fn plain_execution_path(request: &Value) -> Result<&'static str, String> {
         LENS_TURBO_ID => Ok(LENS_TURBO_PLAIN_EXECUTION_PATH),
         // sc-24112: Qwen-Image 2.1 rides the same five-rung reference path as the turnkey family.
         QWEN_IMAGE_2_1_ID => Ok(QWEN_IMAGE_2_1_PLAIN_EXECUTION_PATH),
+        // sc-25907: and its distilled Turbo sibling, under its own sentence.
+        QWEN_IMAGE_2_1_TURBO_ID => Ok(QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH),
         // sc-22734: six catalog models over these two ids, so the execution path is a property of
         // the MEMBER, not the engine — resolved from `(provider, modelId)`.
         SENSENOVA_ID | SENSENOVA_FAST_ID => Ok(sensenova_candle_arm(request)?.execution_path),
@@ -1437,6 +1456,7 @@ fn still_calibration_label(request: &Value) -> Result<&'static str, String> {
         LENS_ID => Ok(LENS_STILL_CALIBRATION),
         LENS_TURBO_ID => Ok(LENS_TURBO_STILL_CALIBRATION),
         QWEN_IMAGE_2_1_ID => Ok(QWEN_IMAGE_2_1_STILL_CALIBRATION),
+        QWEN_IMAGE_2_1_TURBO_ID => Ok(QWEN_IMAGE_2_1_TURBO_STILL_CALIBRATION),
         // sc-22734: per-member label, so a refusal names the exact route it refused.
         SENSENOVA_ID | SENSENOVA_FAST_ID => Ok(sensenova_candle_arm(request)?.still_calibration),
         provider => Err(format!(
@@ -1484,7 +1504,7 @@ fn planned_tier(request: &Value) -> Result<&str, String> {
 /// `<snapshot>/<tier>` subdirs of the SceneWorks re-host.
 fn five_rung_root_is_tiered(provider_id: &str, tier: &str) -> bool {
     !matches!(provider_id, SANA_ID | SANA_SPRINT_ID)
-        && !(provider_id == QWEN_IMAGE_2_1_ID && tier == "bf16")
+        && !(matches!(provider_id, QWEN_IMAGE_2_1_ID | QWEN_IMAGE_2_1_TURBO_ID) && tier == "bf16")
 }
 
 /// Refuse a planned tier this LANE cannot open, by name, before any environment is read.
@@ -1764,7 +1784,7 @@ struct TurnkeyCandleMember {
     tier_quant_reaches_the_loader: bool,
 }
 
-const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 6] = [
+const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 7] = [
     TurnkeyCandleMember {
         provider_id: KOLORS_ID,
         tier_quant_reaches_the_loader: true,
@@ -1790,6 +1810,11 @@ const TURNKEY_CANDLE_MEMBERS: [TurnkeyCandleMember; 6] = [
     // it (including `None`), and the worker forwards the resolved tier's quant on this lane.
     TurnkeyCandleMember {
         provider_id: QWEN_IMAGE_2_1_ID,
+        tier_quant_reaches_the_loader: true,
+    },
+    // sc-25907: the Turbo id is the same crate's `resolve_requested_tier`, so the same rule.
+    TurnkeyCandleMember {
+        provider_id: QWEN_IMAGE_2_1_TURBO_ID,
         tier_quant_reaches_the_loader: true,
     },
 ];
@@ -1843,6 +1868,9 @@ fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> Option<Stri
         // sc-24112: `candle-gen-qwen-image-2-1`'s `memory_strategy::MEMORY_CALIBRATION_FINGERPRINT`,
         // ONE derived identity for every tier (the load shape is its separate typed axis).
         (QWEN_IMAGE_2_1_ID, _) => QWEN_IMAGE_2_1_CANDLE_FINGERPRINT.to_owned(),
+        // sc-25907: the Turbo id's OWN single identity — it prices a different checkpoint, so a
+        // base record can never satisfy a Turbo cell's handshake (E10).
+        (QWEN_IMAGE_2_1_TURBO_ID, _) => QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT.to_owned(),
         _ => return None,
     };
     Some(identity)
@@ -1853,6 +1881,12 @@ fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> Option<Stri
 /// capture still refuses a loaded contract whose identity differs, and
 /// `the_qwen_image_2_1_candle_identity_is_the_engine_constant` binds it on a CUDA host.
 const QWEN_IMAGE_2_1_CANDLE_FINGERPRINT: &str = "qwen-image-2-1-candle-derived-2026-09-22-v1";
+
+/// `candle-gen-qwen-image-2-1`'s `memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT` at the pin,
+/// a literal for the same reason; `the_qwen_image_2_1_candle_identity_is_the_engine_constant` binds
+/// it to the engine constant on a CUDA host.
+const QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT: &str =
+    "qwen-image-2-1-turbo-candle-derived-2026-10-13-v1";
 
 /// The weights-free conformance identities the three engines publish for a registry-behaviour
 /// contract that loaded no weights (`kolors-candle-registry-behavior-v1` and
@@ -1901,6 +1935,7 @@ fn turnkey_fixture_slug(provider: &str) -> Option<&'static str> {
         LENS_ID => Some("lens"),
         LENS_TURBO_ID => Some("lens-turbo"),
         QWEN_IMAGE_2_1_ID => Some("qwen-image-2-1"),
+        QWEN_IMAGE_2_1_TURBO_ID => Some("qwen-image-2-1-turbo"),
         _ => None,
     }
 }
@@ -2217,6 +2252,7 @@ fn missing_contract_reason(generator: &dyn Generator, request: &Value) -> String
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: 0,
@@ -2408,6 +2444,40 @@ fn qwen_image_2_1_five_rung_family(
     }
 }
 
+/// The Qwen-Image 2.1 Turbo twin of [`qwen_image_2_1_five_rung_family`] (sc-25907): the same split
+/// over the distilled checkpoint's OWN repositories and `SCENEWORKS_QWEN_IMAGE_2_1_TURBO_*` env
+/// families, so a Turbo plan can never be satisfied by base weights.
+fn qwen_image_2_1_turbo_five_rung_family(
+    tier: &str,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+) {
+    if tier == "bf16" {
+        (
+            QWEN_IMAGE_2_1_TURBO_ID,
+            QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_ROOT",
+            protocol::QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY,
+        )
+    } else {
+        (
+            QWEN_IMAGE_2_1_TURBO_ID,
+            QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH,
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REPOSITORY",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REVISION",
+            "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_ROOT",
+            protocol::QWEN_IMAGE_2_1_TURBO_REPOSITORY,
+        )
+    }
+}
+
 type LoadedFiveRungGenerator = (
     &'static str,
     &'static str,
@@ -2495,8 +2565,13 @@ fn five_rung_load_spec(
         // off the packed safetensors headers instead, so the quant never reaches that loader.
         // bf16 is the dense base and carries no quant on any member.
         (
-            KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID
-            | QWEN_IMAGE_2_1_ID,
+            KOLORS_ID
+            | IDEOGRAM_ID
+            | IDEOGRAM_TURBO_ID
+            | LENS_ID
+            | LENS_TURBO_ID
+            | QWEN_IMAGE_2_1_ID
+            | QWEN_IMAGE_2_1_TURBO_ID,
             Some(quant),
         ) => {
             if turnkey_candle_member(provider_id)
@@ -2509,8 +2584,13 @@ fn five_rung_load_spec(
             }
         }
         (
-            KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID
-            | QWEN_IMAGE_2_1_ID,
+            KOLORS_ID
+            | IDEOGRAM_ID
+            | IDEOGRAM_TURBO_ID
+            | LENS_ID
+            | LENS_TURBO_ID
+            | QWEN_IMAGE_2_1_ID
+            | QWEN_IMAGE_2_1_TURBO_ID,
             None,
         ) => spec,
         // Qwen, Z-Image-Turbo and the Z-Image base packed Diffusers snapshots declare their
@@ -2562,7 +2642,8 @@ fn five_rung_load_spec(
     // gen-core default — `EagerMaterialization` — in place, and `candle-gen-qwen-image-2-1` has no
     // block-streaming loader to defer into. The anchor is measured under the shape production loads
     // and the calibration identity it publishes, exactly as Bernini's still leg is.
-    let spec = if provider_id == QWEN_IMAGE_2_1_ID {
+    // sc-25907: the Turbo id is the same crate under the same worker rule.
+    let spec = if matches!(provider_id, QWEN_IMAGE_2_1_ID | QWEN_IMAGE_2_1_TURBO_ID) {
         spec.with_load_shape(LoadShape::EagerMaterialization)
     } else {
         spec
@@ -2905,6 +2986,8 @@ fn load_five_rung_generator(request: &Value) -> Result<LoadedFiveRungGenerator, 
             // sc-24112: Qwen-Image 2.1 binds the re-host for q4/q8 and the upstream snapshot for
             // bf16, each through its own env family.
             QWEN_IMAGE_2_1_ID => qwen_image_2_1_five_rung_family(tier),
+            // sc-25907: Turbo binds its OWN re-host and upstream snapshot the same way.
+            QWEN_IMAGE_2_1_TURBO_ID => qwen_image_2_1_turbo_five_rung_family(tier),
             provider => {
                 return Err(format!(
                     "Candle five-rung calibration does not implement provider {provider:?}"
@@ -3089,6 +3172,7 @@ fn run_five_rung_reference_loaded(
             frames: 1,
             reference_count: u32::from(edit),
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -3982,6 +4066,7 @@ fn pulid_flux_context(
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some("identity".to_owned()),
         budget: MemoryBudget {
             total_bytes,
@@ -4482,6 +4567,7 @@ fn sensenova_candle_context(
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -4786,6 +4872,7 @@ fn five_rung_evidence_story(provider_id: &str) -> &'static str {
         FLUX1_DEV_ID | FLUX1_SCHNELL_ID => "sc-22726",
         KOLORS_ID | IDEOGRAM_ID | IDEOGRAM_TURBO_ID | LENS_ID | LENS_TURBO_ID => "sc-22732",
         QWEN_IMAGE_2_1_ID => "sc-24112",
+        QWEN_IMAGE_2_1_TURBO_ID => "sc-25907",
         SD3_5_LARGE_ID | SD3_5_LARGE_TURBO_ID | SD3_5_MEDIUM_ID => "sc-22730",
         BERNINI_CANDLE_ID => "sc-22737",
         _ => "sc-16402",
@@ -5205,6 +5292,7 @@ fn run_ltx25_capture(request: &Value) -> Result<Value, String> {
             frames: target.frames,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: adapter_stack_identity(&adapters),
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -6328,6 +6416,7 @@ fn run_sc22737_video_capture(request: &Value, arm: Sc22737VideoArm) -> Result<Va
             frames: target.frames,
             reference_count: arm.reference_count,
         },
+        reference_resources: None,
         overlay: sc22737_conditioning_overlay(arm, &generation, contract)?,
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -6627,8 +6716,9 @@ fn routes_to_five_rung_reference(request: &Value) -> Result<bool, String> {
         || provider == IDEOGRAM_TURBO_ID
         || provider == LENS_ID
         || provider == LENS_TURBO_ID
-        // sc-24112: nor does Qwen-Image 2.1.
+        // sc-24112: nor does Qwen-Image 2.1, and sc-25907: nor its Turbo sibling.
         || provider == QWEN_IMAGE_2_1_ID
+        || provider == QWEN_IMAGE_2_1_TURBO_ID
         || MAGE_ARMS.iter().any(|arm| arm.provider == provider)
         || provider == SD3_5_LARGE_ID
         || provider == SD3_5_LARGE_TURBO_ID
@@ -6843,6 +6933,7 @@ fn run_instantid_candle(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 1,
         },
+        reference_resources: None,
         overlay: Some(overlay.clone()),
         budget: MemoryBudget {
             total_bytes: budget_bytes,
@@ -7435,6 +7526,7 @@ fn run_qwen_edit(request: &Value) -> Result<Value, String> {
         },
         // `validate_edit_route` requires this to be exactly `Some("lora")` when the load carries
         // adapters and `None` when it does not — so it is derived from the spec's own stack.
+        reference_resources: None,
         overlay: (loaded_adapters > 0).then(|| "lora".to_owned()),
         budget: MemoryBudget {
             total_bytes: hardware_bytes,
@@ -7619,6 +7711,13 @@ fn run(request: &Value) -> Result<Value, String> {
     // the plain overlay itself (`protocol::validate_iris_plan`) before any env var or weight is read.
     if matches!(provider, IRIS_ID | IRIS_DEPTH_ID | IRIS_RESTORE_ID) {
         return candle_iris::run(request);
+    }
+    // sc-24217: Supra2-IMG dispatches above the shared gates too. Its arm validates the native
+    // single still, the plain overlay and its resident override itself
+    // (`protocol::validate_supra2_plan`) before any env var or weight is read, and converts the
+    // bundle in a child process before the measured process loads anything.
+    if provider == SUPRA2_ID {
+        return candle_supra2::run(request);
     }
     // sc-22736: the Wan 2.2 family and SCAIL-2 dispatch ABOVE the shared still gate, like LTX-2.5 —
     // they are VIDEO arms, and `validate_still_geometry` would refuse the multi-frame geometry they
@@ -7819,6 +7918,7 @@ fn run(request: &Value) -> Result<Value, String> {
             frames: 1,
             reference_count: 0,
         },
+        reference_resources: None,
         overlay: None,
         budget: MemoryBudget {
             total_bytes,
@@ -8256,6 +8356,8 @@ fn main() {
         "probe" => probe(),
         "run" => run(&request),
         "run_batch" => run_five_rung_batch(&request),
+        // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
+        protocol::SUPRA2_IMG_CONVERT_ACTION => protocol::supra2_convert(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));
@@ -10865,13 +10967,14 @@ mod tests {
     // artifact family (including Ideogram's split bf16 repository) and quant rule.
     // ------------------------------------------------------------------------------------------
 
-    const TURNKEY_MEMBERS: [(&str, &str); 6] = [
+    const TURNKEY_MEMBERS: [(&str, &str); 7] = [
         (KOLORS_ID, "kolors"),
         (IDEOGRAM_ID, "ideogram-4"),
         (IDEOGRAM_TURBO_ID, "ideogram-4-turbo"),
         (LENS_ID, "lens"),
         (LENS_TURBO_ID, "lens-turbo"),
         (QWEN_IMAGE_2_1_ID, "qwen-image-2-1"),
+        (QWEN_IMAGE_2_1_TURBO_ID, "qwen-image-2-1-turbo"),
     ];
 
     fn turnkey_request(provider: &str, tier: &str, fixture: &str) -> Value {
@@ -10979,6 +11082,45 @@ mod tests {
             (dense.0, dense.1),
             (QWEN_IMAGE_2_1_ID, QWEN_IMAGE_2_1_PLAIN_EXECUTION_PATH)
         );
+        // sc-25907: Turbo has the same split over its OWN two repositories and env families, and
+        // shares no binding with base at any tier.
+        for tier in ["q4", "q8"] {
+            let bound = qwen_image_2_1_turbo_five_rung_family(tier);
+            assert_eq!(
+                bound.2, "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REPOSITORY",
+                "{tier}"
+            );
+            assert_eq!(
+                bound.3, "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_REVISION",
+                "{tier}"
+            );
+            assert_eq!(bound.4, "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_ROOT", "{tier}");
+            assert_eq!(bound.5, protocol::QWEN_IMAGE_2_1_TURBO_REPOSITORY, "{tier}");
+            assert!(
+                five_rung_root_is_tiered(QWEN_IMAGE_2_1_TURBO_ID, tier),
+                "{tier}"
+            );
+        }
+        let dense = qwen_image_2_1_turbo_five_rung_family("bf16");
+        assert_eq!(dense.2, "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY");
+        assert_eq!(dense.3, "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_REVISION");
+        assert_eq!(dense.4, "SCENEWORKS_QWEN_IMAGE_2_1_TURBO_BF16_ROOT");
+        assert_eq!(dense.5, protocol::QWEN_IMAGE_2_1_TURBO_BF16_REPOSITORY);
+        assert!(!five_rung_root_is_tiered(QWEN_IMAGE_2_1_TURBO_ID, "bf16"));
+        assert_eq!(
+            (dense.0, dense.1),
+            (
+                QWEN_IMAGE_2_1_TURBO_ID,
+                QWEN_IMAGE_2_1_TURBO_PLAIN_EXECUTION_PATH
+            )
+        );
+        for tier in ["bf16", "q4", "q8"] {
+            let base = qwen_image_2_1_five_rung_family(tier);
+            let turbo = qwen_image_2_1_turbo_five_rung_family(tier);
+            assert_ne!(base.5, turbo.5, "{tier}");
+            assert_ne!(base.2, turbo.2, "{tier}");
+            assert_ne!(base.4, turbo.4, "{tier}");
+        }
     }
 
     /// The literal identity this lane binds Qwen-Image 2.1's plan rows to IS the pinned engine's
@@ -10993,6 +11135,22 @@ mod tests {
             assert_eq!(
                 turnkey_calibration_fingerprint(QWEN_IMAGE_2_1_ID, tier).as_deref(),
                 Some(QWEN_IMAGE_2_1_CANDLE_FINGERPRINT),
+                "{tier}"
+            );
+        }
+        // sc-25907: and Turbo's literal IS the engine's Turbo constant, distinct from base's.
+        assert_eq!(
+            QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT,
+            runtime_cuda::providers::qwen_image_2_1::memory_strategy::TURBO_MEMORY_CALIBRATION_FINGERPRINT
+        );
+        assert_ne!(
+            QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT,
+            QWEN_IMAGE_2_1_CANDLE_FINGERPRINT
+        );
+        for tier in ["bf16", "q4", "q8"] {
+            assert_eq!(
+                turnkey_calibration_fingerprint(QWEN_IMAGE_2_1_TURBO_ID, tier).as_deref(),
+                Some(QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT),
                 "{tier}"
             );
         }
@@ -11031,6 +11189,19 @@ mod tests {
             LENS_ID,
             "q4",
             "fresh-five-rung-lens-turbo-q4-1024-seed16402-step2"
+        ))
+        .is_err());
+        // sc-25907: nor does either Qwen-Image 2.1 checkpoint's fixture satisfy the other's plan.
+        assert!(validate_fixture_binds_tier_and_geometry(&turnkey_request(
+            QWEN_IMAGE_2_1_ID,
+            "q4",
+            "fresh-five-rung-qwen-image-2-1-turbo-q4-1024-seed16402-step2"
+        ))
+        .is_err());
+        assert!(validate_fixture_binds_tier_and_geometry(&turnkey_request(
+            QWEN_IMAGE_2_1_TURBO_ID,
+            "q4",
+            "fresh-five-rung-qwen-image-2-1-q4-1024-seed16402-step2"
         ))
         .is_err());
     }
@@ -11094,6 +11265,7 @@ mod tests {
             "lens",
             "lens_turbo",
             "qwen_image_2_1",
+            "qwen_image_2_1_turbo",
         ]
         .iter()
         .flat_map(|model| {
@@ -11121,6 +11293,7 @@ mod tests {
             LENS_ID,
             LENS_TURBO_ID,
             QWEN_IMAGE_2_1_ID,
+            QWEN_IMAGE_2_1_TURBO_ID,
         ] {
             for tier in ["bf16", "q4", "q8"] {
                 assert!(
@@ -11139,6 +11312,7 @@ mod tests {
                 LENS_ID,
                 LENS_TURBO_ID,
                 QWEN_IMAGE_2_1_ID,
+                QWEN_IMAGE_2_1_TURBO_ID,
             ] {
                 assert_eq!(
                     turnkey_calibration_fingerprint(provider, tier),
@@ -11187,6 +11361,7 @@ mod tests {
         .expect("the anchor plan parses");
         let mut identities = std::collections::BTreeMap::new();
         let mut qwen_image_2_1 = Vec::new();
+        let mut qwen_image_2_1_turbo = Vec::new();
         for (key, entry) in plan["anchors"].as_object().expect("anchors object") {
             let provider = entry["provider"].as_str().unwrap();
             if !key.ends_with(":candle") || turnkey_candle_member(provider).is_none() {
@@ -11194,8 +11369,14 @@ mod tests {
             }
             // sc-24112: `candle-gen-qwen-image-2-1` publishes ONE identity for every tier, so its
             // three cells share it by construction and are held to the engine constant instead.
-            if provider == QWEN_IMAGE_2_1_ID {
-                qwen_image_2_1.push((
+            // sc-25907: the same per checkpoint — Turbo's three cells share Turbo's OWN literal.
+            if provider == QWEN_IMAGE_2_1_ID || provider == QWEN_IMAGE_2_1_TURBO_ID {
+                let bucket = if provider == QWEN_IMAGE_2_1_ID {
+                    &mut qwen_image_2_1
+                } else {
+                    &mut qwen_image_2_1_turbo
+                };
+                bucket.push((
                     key.clone(),
                     entry["calibrationFingerprint"].as_str().unwrap().to_owned(),
                 ));
@@ -11232,6 +11413,15 @@ mod tests {
         );
         for (key, planned) in &qwen_image_2_1 {
             assert_eq!(planned, QWEN_IMAGE_2_1_CANDLE_FINGERPRINT, "{key}");
+            assert!(!identities.contains_key(planned.as_str()), "{key}");
+        }
+        assert_eq!(
+            qwen_image_2_1_turbo.len(),
+            3,
+            "one Qwen-Image 2.1 Turbo Candle cell per tier"
+        );
+        for (key, planned) in &qwen_image_2_1_turbo {
+            assert_eq!(planned, QWEN_IMAGE_2_1_TURBO_CANDLE_FINGERPRINT, "{key}");
             assert!(!identities.contains_key(planned.as_str()), "{key}");
         }
         // The preserved measured key, at exactly the cell `candle-gen-lens` documents as measured.
@@ -11363,6 +11553,7 @@ mod tests {
                 (LENS_ID, true),
                 (LENS_TURBO_ID, true),
                 (QWEN_IMAGE_2_1_ID, true),
+                (QWEN_IMAGE_2_1_TURBO_ID, true),
             ]
         );
         assert_eq!(turnkey_candle_member("candle_kolors_ipadapter"), None);
@@ -11426,7 +11617,7 @@ mod tests {
                 // leaves in place; the rest keep the five-rung deferred shape.
                 assert_eq!(
                     spec.load_shape,
-                    if provider == QWEN_IMAGE_2_1_ID {
+                    if provider == QWEN_IMAGE_2_1_ID || provider == QWEN_IMAGE_2_1_TURBO_ID {
                         LoadShape::EagerMaterialization
                     } else {
                         LoadShape::DeferredMaterialization
@@ -11459,6 +11650,9 @@ mod tests {
                 (QWEN_IMAGE_2_1_ID, "bf16", None),
                 (QWEN_IMAGE_2_1_ID, "q4", Some(Quant::Q4)),
                 (QWEN_IMAGE_2_1_ID, "q8", Some(Quant::Q8)),
+                (QWEN_IMAGE_2_1_TURBO_ID, "bf16", None),
+                (QWEN_IMAGE_2_1_TURBO_ID, "q4", Some(Quant::Q4)),
+                (QWEN_IMAGE_2_1_TURBO_ID, "q8", Some(Quant::Q8)),
             ]
         );
     }
@@ -11640,6 +11834,10 @@ mod sana_chroma_candle_tests {
         assert!(!five_rung_root_is_tiered(QWEN_IMAGE_2_1_ID, "bf16"));
         assert!(five_rung_root_is_tiered(QWEN_IMAGE_2_1_ID, "q4"));
         assert!(five_rung_root_is_tiered(QWEN_IMAGE_2_1_ID, "q8"));
+        // sc-25907: Turbo has base's shape.
+        assert!(!five_rung_root_is_tiered(QWEN_IMAGE_2_1_TURBO_ID, "bf16"));
+        assert!(five_rung_root_is_tiered(QWEN_IMAGE_2_1_TURBO_ID, "q4"));
+        assert!(five_rung_root_is_tiered(QWEN_IMAGE_2_1_TURBO_ID, "q8"));
     }
 
     /// Every one of the five routes is named by BOTH shared dispatch tables, so neither the plain
@@ -12064,6 +12262,7 @@ mod sc22738_arm_tests {
                 frames: 1,
                 reference_count: 0,
             },
+            reference_resources: None,
             overlay: None,
             budget: MemoryBudget {
                 total_bytes: 1 << 34,

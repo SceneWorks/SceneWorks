@@ -1,13 +1,14 @@
 {
   "name": "@sceneworks/desktop",
   "private": true,
-  "version": "0.8.12",
+  "version": "0.10.2",
   "description": "SceneWorks desktop shell (Tauri).",
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
     "build:linux": "tauri build --bundles appimage,deb",
-    "test": "node --test scripts/build-sidecar-platform.test.mjs scripts/build-update-manifest.test.mjs scripts/sign-windows.test.mjs scripts/linux-bundle-config.test.mjs scripts/checkpoint-import-schema.test.mjs",
+    "test": "node --test scripts/build-sidecar-platform.test.mjs scripts/build-update-manifest.test.mjs scripts/sign-windows.test.mjs scripts/linux-bundle-config.test.mjs scripts/checkpoint-import-schema.test.mjs scripts/check-linux-driver-libraries.test.mjs",
+    "check:linux-drivers": "node scripts/check-linux-driver-libraries.mjs",
     "release:mac": "tauri build && node scripts/staple-dmg.mjs"
   },
   "devDependencies": {

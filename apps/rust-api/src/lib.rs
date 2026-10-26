@@ -23,9 +23,9 @@ use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
     ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, ImageUpscaleRequest, JobCreateRequest, JobSnapshot, JobStatus, JobType,
-    JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary,
-    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    GenerationMetricsRow, HiresFixRequest, ImageUpscaleRequest, JobCreateRequest, JobSnapshot,
+    JobStatus, JobType, JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest,
+    QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
     WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
@@ -37,6 +37,7 @@ use sceneworks_core::jobs_store::{
     model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
+    MAX_LISTED_JOBS,
 };
 use sceneworks_core::lora_family::{
     accepted_lora_families, apply_adapter_metadata_to_manifest_entry,
@@ -6049,10 +6050,10 @@ const MAX_IMAGE_DIMENSION: u32 = 4096;
 
 /// Payload-sanity FLOOR for a named image width/height, before the model is known (sc-24113).
 ///
-/// 32, not 256, because Qwen-Image 2.1's envelope really starts at 32 px per side and this check
-/// runs with no model in hand. It is the outer bound only — see
+/// 16 because MOSS-Image accepts 16 px per side (Qwen-Image 2.1 starts at 32) and this
+/// check runs before preset/model resolution. It is the outer bound only — see
 /// [`HISTORICAL_MIN_IMAGE_DIMENSION`] for the per-model floor that still applies.
-const SHAPE_MIN_IMAGE_DIMENSION: u32 = 32;
+const SHAPE_MIN_IMAGE_DIMENSION: u32 = 16;
 
 /// The per-model fallback floor applied in `create_image_job` to any image model that declares no
 /// `limits.minDimension` (sc-24113).

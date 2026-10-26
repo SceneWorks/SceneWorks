@@ -1074,6 +1074,73 @@ fn convert_anima_prequant(
     )
 }
 
+/// The one upstream file the Supra2-IMG convert reads (`gen_core::supra2::SUPRA2_SOURCE`); the
+/// manifest's `mlx.convertSourceFile` and its primary `downloads[].files` name exactly this file.
+const SUPRA2_SOURCE_FILE: &str = "model_final_ema.pt";
+
+/// Diffusers-style marker written beside the Supra2 bundle so `mlx_catalog_status` (which looks for a
+/// top-level `config.json` / `model_index.json`) reports the converted artifact as installed and
+/// injects its `modelPath`. Same mechanism as the Anima converter's marker; the engine itself reads
+/// only `supra2_bundle.json` and the files it lists.
+const SUPRA2_MARKER: &str = "{\n  \"_class_name\": \"Supra2ImgBundle\"\n}\n";
+
+/// Supra2-IMG convert-at-install (sc-24213, epic 24212). Everything substantive is inference-owned
+/// and backend-neutral (`gen_core::supra2`): the two co-requisite snapshots are re-verified against
+/// their pinned sizes + SHA-256 (`FLAN_T5_BASE` / `SD_VAE`), then `convert_pinned_checkpoint`
+/// verifies the pinned `model_final_ema.pt` SHA-256, validates the exact state dict and writes the
+/// native bundle (`denoiser.safetensors`, optional `conditioning.safetensors`, and
+/// `supra2_bundle.json` last), and `read_pinned_bundle` re-reads it under the provider's pin
+/// contract (pinned denoiser + conditioning digests). SceneWorks re-implements none of it; it only
+/// surfaces the failure.
+/// The marker goes in after the bundle, so a failed convert never leaves a dir the catalog reads as
+/// installed (the caller also converts into a temp sibling and promotes it atomically).
+pub(crate) fn convert_supra2_bundle(
+    source_file: &Path,
+    text_encoder_dir: &Path,
+    vae_dir: &Path,
+    out_dir: &Path,
+) -> Result<(), String> {
+    use gen_core::supra2::{
+        convert_pinned_checkpoint, read_pinned_bundle, BundleCheck, FLAN_T5_BASE, SD_VAE,
+    };
+    FLAN_T5_BASE
+        .verify(text_encoder_dir)
+        .map_err(|error| format!("Flan-T5-Base text encoder failed verification: {error}"))?;
+    SD_VAE
+        .verify(vae_dir)
+        .map_err(|error| format!("SD VAE ft-MSE failed verification: {error}"))?;
+    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    convert_pinned_checkpoint(source_file, out_dir)
+        .map_err(|error| format!("Supra2-IMG checkpoint conversion failed: {error}"))?;
+    // Hold the written bundle to the provider's own pin contract (source identity, geometry,
+    // component revisions and the pinned denoiser/conditioning digests) before marking it
+    // installed, so a bundle the engine would refuse at load never reads as installed.
+    read_pinned_bundle(out_dir, BundleCheck::Digests)
+        .map_err(|error| format!("Supra2-IMG bundle failed its pin contract: {error}"))?;
+    std::fs::write(out_dir.join("model_index.json"), SUPRA2_MARKER)
+        .map_err(|error| error.to_string())
+}
+
+/// The pinned co-requisite snapshot a Supra2 convert verifies: the exact `snapshots/<revision>/`
+/// the catalog row pins (never `refs/main`), or a typed refusal naming the install to make.
+fn supra2_component_snapshot(
+    settings: &Settings,
+    model_id: &str,
+    label: &str,
+    repo: &str,
+    revision: &str,
+) -> Result<PathBuf, ConvertPlanError> {
+    huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision).ok_or_else(|| {
+        ConvertPlanError {
+            message: "Supra2-IMG components are not installed.",
+            detail: format!(
+                "The {label} ({repo}@{revision}) is not in the local cache. Install {model_id} from \
+                 the Model Manager (it downloads this component) before converting."
+            ),
+        }
+    })
+}
+
 /// The base `Lightricks/LTX-2.3` latent upsampler the LTX loader hard-requires (emitted as
 /// `upsampler.safetensors` in the converted dir). Neither the eros nor the base single-file
 /// checkpoint bundles it, so the converter merges it from the base repo at convert time.
@@ -1145,6 +1212,13 @@ enum ConvertPlan {
         vae_source: PathBuf,
         dit_filename: String,
         group_size: i32,
+    },
+    /// Supra2-IMG `model_final_ema.pt` -> the native bundle (sc-24213), after re-verifying the two
+    /// pinned co-requisite snapshots it is loaded beside (`text_encoder`, `vae`).
+    Supra2 {
+        source_file: PathBuf,
+        text_encoder_dir: PathBuf,
+        vae_dir: PathBuf,
     },
 }
 
@@ -1377,6 +1451,55 @@ async fn resolve_convert_plan(
                 vae_source,
                 dit_filename,
                 group_size,
+            }
+        }
+        // Supra2-IMG (epic 24212, sc-24213) — the pinned upstream `.pt` is the only source file;
+        // the Flan-T5-Base and SD VAE ft-MSE co-requisites are the exact pinned snapshots the
+        // engine loads beside the bundle, verified here at install time so generation stays offline.
+        "supra2_img" => {
+            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+            if source_file_name != SUPRA2_SOURCE_FILE {
+                return Ok(Err(ConvertPlanError {
+                    message: "Unknown Supra2-IMG source checkpoint.",
+                    detail: format!(
+                        "sourceFile '{source_file_name}' is not the pinned Supra2-IMG checkpoint \
+                         ({SUPRA2_SOURCE_FILE})."
+                    ),
+                }));
+            }
+            let source_file = checkpoint_dir.join(SUPRA2_SOURCE_FILE);
+            if !source_file.is_file() {
+                return Ok(Err(ConvertPlanError {
+                    message: "Supra2-IMG source checkpoint is missing.",
+                    detail: format!("Expected {SUPRA2_SOURCE_FILE} in {source_repo}."),
+                }));
+            }
+            let text_encoder = gen_core::supra2::FLAN_T5_BASE;
+            let vae = gen_core::supra2::SD_VAE;
+            let text_encoder_dir = match supra2_component_snapshot(
+                settings,
+                model_id,
+                "Flan-T5-Base text encoder",
+                text_encoder.repo,
+                text_encoder.revision,
+            ) {
+                Ok(dir) => dir,
+                Err(error) => return Ok(Err(error)),
+            };
+            let vae_dir = match supra2_component_snapshot(
+                settings,
+                model_id,
+                "SD VAE ft-MSE decoder",
+                vae.repo,
+                vae.revision,
+            ) {
+                Ok(dir) => dir,
+                Err(error) => return Ok(Err(error)),
+            };
+            ConvertPlan::Supra2 {
+                source_file,
+                text_encoder_dir,
+                vae_dir,
             }
         }
         "" => {
@@ -1662,6 +1785,18 @@ pub(crate) async fn run_model_convert_job(
                 .map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
+            })
+        }
+        ConvertPlan::Supra2 {
+            source_file,
+            text_encoder_dir,
+            vae_dir,
+        } => {
+            let backend = backend.clone();
+            tokio::task::spawn_blocking(move || {
+                convert_supra2_bundle(&source_file, &text_encoder_dir, &vae_dir, &temp).map_err(
+                    |detail| WorkerError::Engine(format!("{backend} conversion failed. {detail}")),
+                )
             })
         }
     };
@@ -2064,6 +2199,272 @@ fn confined_renamed_hf_single_file(
         [source] => Some(source.to_path_buf()),
         _ => None,
     })
+}
+
+/// Resolve the exact pinned snapshot for a tier row, first materializing it cache-only from an
+/// exact SUPERSEDED revision when the shared core declares one for this row
+/// ([`sceneworks_core::hf_revision_supersessions`]).
+///
+/// The tier loaders read ONLY `snapshots/<pinned sha>/`, so bumping a re-host pin to a commit that
+/// merely adds a small file (sc-25909: Qwen-Image 2.1's q8/q4 republished to add each tier's
+/// NOTICE) would otherwise strand every install made at the previous commit — the Model Manager
+/// still sees the tier on disk while a render fails "not installed". Rows without a declaration
+/// resolve exactly as [`huggingface_pinned_snapshot_dir`] always has.
+#[cfg_attr(
+    not(any(target_os = "macos", feature = "backend-candle")),
+    allow(dead_code)
+)]
+pub(crate) fn huggingface_pinned_tier_snapshot_dir(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    files: &[String],
+) -> Option<PathBuf> {
+    if let Some(supersession) =
+        sceneworks_core::hf_revision_supersessions::exact_huggingface_revision_supersession(
+            repo, revision, files,
+        )
+    {
+        // The result is advisory: on success the pinned snapshot below now holds the tier; on a
+        // refusal the cache is untouched and the ordinary pinned lookup decides, as before.
+        let _ = materialize_superseded_hf_revision(data_dir, supersession);
+    }
+    huggingface_pinned_snapshot_dir(data_dir, repo, revision)
+}
+
+/// Build the superseding revision's tier inside the HF cache from the exact legacy snapshot, the
+/// cache-only sibling of [`resolve_renamed_hf_single_file`]. Every carried entry is linked to the
+/// legacy snapshot's own validated blob (a relative `../../blobs/<etag>` symlink — the layout HF
+/// and our downloader write — on Unix, a hardlink on Windows or for a non-blob plain entry), so no
+/// weight byte is copied or fetched. Each added file's declared content is written once as its
+/// own blob, named by its Hub git oid, and linked the same way. Nothing is written unless the
+/// legacy snapshot first proves every carried file at its exact size; a partial legacy tier is
+/// refused and left alone. Idempotent: a complete superseding tier returns at once, and an
+/// interrupted run only fills the entries that are still missing. Returns the canonical current
+/// snapshot when it holds the complete tier.
+fn materialize_superseded_hf_revision(
+    data_dir: &Path,
+    supersession: &sceneworks_core::hf_revision_supersessions::HuggingFaceRevisionSupersession,
+) -> Option<PathBuf> {
+    use sceneworks_core::hf_revision_supersessions::{
+        validate_superseded_legacy_snapshot, validate_superseding_current_snapshot,
+    };
+    let hub_cache_root = huggingface_hub_cache_dir(data_dir);
+    let repo_root = huggingface_repo_cache_path(data_dir, supersession.repo)?;
+    let snapshots = repo_root.join("snapshots");
+    let current_snapshot = safe_join(&snapshots, supersession.current_revision).ok()?;
+    if let Some(snapshot) = validate_superseding_current_snapshot(
+        &hub_cache_root,
+        &repo_root,
+        &current_snapshot,
+        supersession,
+    ) {
+        return Some(snapshot);
+    }
+    let legacy_snapshot = safe_join(&snapshots, supersession.legacy_revision).ok()?;
+    if !legacy_snapshot.is_dir() {
+        return None;
+    }
+    let Some((_, sources)) = validate_superseded_legacy_snapshot(
+        &hub_cache_root,
+        &repo_root,
+        &legacy_snapshot,
+        supersession,
+    ) else {
+        tracing::info!(
+            event = "hf_superseded_revision_cache_refused",
+            repo = supersession.repo,
+            legacy_revision = supersession.legacy_revision,
+            revision = supersession.current_revision,
+            files = ?supersession.files,
+            "the superseded snapshot does not hold the complete carried tier; leaving the cache untouched"
+        );
+        return None;
+    };
+
+    let materialized = (|| {
+        let canonical_hub_root = std::fs::canonicalize(&hub_cache_root).ok()?;
+        let canonical_root = std::fs::canonicalize(&repo_root).ok()?;
+        if !canonical_root.starts_with(&canonical_hub_root) {
+            return None;
+        }
+        let current = ensure_confined_subdirectory(
+            &canonical_root,
+            &Path::new("snapshots").join(supersession.current_revision),
+        )?;
+        for (file, source) in supersession.carried.iter().zip(&sources) {
+            link_superseded_snapshot_entry(&canonical_root, &current, file.path, source)?;
+        }
+        for added in supersession.added {
+            let blobs = ensure_confined_subdirectory(&canonical_root, Path::new("blobs"))?;
+            let blob = write_declared_blob(&blobs, added)?;
+            link_superseded_snapshot_entry(&canonical_root, &current, added.path, &blob)?;
+        }
+        validate_superseding_current_snapshot(
+            &hub_cache_root,
+            &repo_root,
+            &current_snapshot,
+            supersession,
+        )
+    })();
+    match &materialized {
+        Some(snapshot) => tracing::info!(
+            event = "hf_superseded_revision_cache_relinked",
+            repo = supersession.repo,
+            legacy_revision = supersession.legacy_revision,
+            revision = supersession.current_revision,
+            files = ?supersession.files,
+            snapshot = %snapshot.display(),
+            "materialized a superseding Hugging Face revision from the existing cache"
+        ),
+        None => tracing::info!(
+            event = "hf_superseded_revision_cache_unavailable",
+            repo = supersession.repo,
+            legacy_revision = supersession.legacy_revision,
+            revision = supersession.current_revision,
+            files = ?supersession.files,
+            "could not materialize the superseding Hugging Face revision from the existing cache"
+        ),
+    }
+    materialized
+}
+
+/// Link one superseding snapshot entry to an already-validated, repo-confined source. A
+/// pre-existing entry is left for the final whole-tier validation to accept or reject; it is never
+/// traversed or replaced here.
+fn link_superseded_snapshot_entry(
+    canonical_root: &Path,
+    snapshot: &Path,
+    relative: &str,
+    source: &Path,
+) -> Option<()> {
+    let relative = Path::new(relative);
+    let parent = ensure_confined_subdirectory(snapshot, relative.parent()?)?;
+    let destination = parent.join(relative.file_name()?);
+    match std::fs::symlink_metadata(&destination) {
+        Ok(_) => return Some(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let linked = match source.strip_prefix(canonical_root.join("blobs")) {
+        #[cfg(unix)]
+        Ok(blob) => {
+            // `snapshots/<rev>/q8/processor/x` → `../../../../blobs/<etag>`: one `..` per component
+            // between the repository root and the entry's parent, exactly as the downloader writes.
+            let depth = parent
+                .strip_prefix(canonical_root)
+                .ok()?
+                .components()
+                .count();
+            let mut target = PathBuf::new();
+            for _ in 0..depth {
+                target.push("..");
+            }
+            target.push("blobs");
+            target.push(blob);
+            std::os::unix::fs::symlink(&target, &destination)
+        }
+        _ => std::fs::hard_link(source, &destination),
+    };
+    match linked {
+        Ok(()) => Some(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Some(()),
+        Err(_) => None,
+    }
+}
+
+/// Write a declared added file's content as its repo-local blob (once), returning the blob path.
+/// An existing blob of that name is accepted only when it holds exactly the declared bytes.
+fn write_declared_blob(
+    blobs: &Path,
+    added: &sceneworks_core::hf_revision_supersessions::AddedRevisionFile,
+) -> Option<PathBuf> {
+    if format!("{:x}", Sha256::digest(added.contents)) != added.sha256 {
+        return None;
+    }
+    let blob = safe_join(blobs, added.blob).ok()?;
+    match std::fs::symlink_metadata(&blob) {
+        Ok(metadata) => {
+            return (metadata.is_file() && std::fs::read(&blob).ok()? == added.contents)
+                .then_some(blob);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+    let temporary = blobs.join(format!(
+        "{}.sceneworks-{}.incomplete",
+        added.blob,
+        std::process::id()
+    ));
+    std::fs::write(&temporary, added.contents).ok()?;
+    if std::fs::rename(&temporary, &blob).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+        return (std::fs::read(&blob).ok()? == added.contents).then_some(blob);
+    }
+    Some(blob)
+}
+
+/// Stage a superseded legacy tier in the Hugging Face cache layout: every carried file at its
+/// exact declared size (sparse, so multi-GB weights cost no disk), either as `../blobs/<id>`
+/// symlinks (`symlinked`) or as plain snapshot files. `contents` overrides the leading bytes of
+/// named files (padded with spaces to the declared size) so a loader probe can read them.
+#[cfg(all(test, unix))]
+pub(crate) fn stage_superseded_legacy_tier_for_test(
+    data_dir: &Path,
+    supersession: &sceneworks_core::hf_revision_supersessions::HuggingFaceRevisionSupersession,
+    symlinked: bool,
+    contents: &[(&str, &[u8])],
+) -> PathBuf {
+    let repo_root = huggingface_repo_cache_path(data_dir, supersession.repo).expect("repo cache");
+    let snapshot = repo_root
+        .join("snapshots")
+        .join(supersession.legacy_revision);
+    let blobs = repo_root.join("blobs");
+    std::fs::create_dir_all(&blobs).expect("blobs dir");
+    for (index, file) in supersession.carried.iter().enumerate() {
+        let entry = snapshot.join(file.path);
+        let parent = entry.parent().expect("entry parent");
+        std::fs::create_dir_all(parent).expect("snapshot dirs");
+        let blob_name = format!("legacy-blob-{index:02}-{}", file.path.replace('/', "-"));
+        let target = if symlinked {
+            blobs.join(&blob_name)
+        } else {
+            entry.clone()
+        };
+        let mut bytes = contents
+            .iter()
+            .find(|(path, _)| *path == file.path)
+            .map(|(_, bytes)| bytes.to_vec())
+            .unwrap_or_default();
+        assert!(
+            bytes.len() as u64 <= file.size,
+            "{} override too large",
+            file.path
+        );
+        if file.size <= 1 << 20 {
+            bytes.resize(file.size as usize, b' ');
+        }
+        std::fs::write(&target, &bytes).expect("write staged blob");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .and_then(|handle| handle.set_len(file.size))
+            .expect("size staged blob");
+        if symlinked {
+            let depth = parent
+                .strip_prefix(&repo_root)
+                .expect("under repo")
+                .components()
+                .count();
+            let mut relative = PathBuf::new();
+            for _ in 0..depth {
+                relative.push("..");
+            }
+            std::os::unix::fs::symlink(relative.join("blobs").join(&blob_name), &entry)
+                .expect("snapshot symlink");
+        }
+    }
+    snapshot
 }
 
 /// Resolve a model's **caller-provisioned components** (epic 13657, sc-13679) — the generic worker
@@ -6487,6 +6888,317 @@ mod flux2_convert_tests {
 }
 
 #[cfg(test)]
+mod supra2_convert_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn settings_at(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:0".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "sc-24213".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: 0,
+            max_model_url_bytes: 0,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    fn isolate_hf_cache() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    /// The payload `POST /models/supra2_img/convert` builds from the shipped catalog row.
+    fn supra2_job(source_file: &str) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job-supra2-convert",
+            "type": "model_convert",
+            "status": "running",
+            "projectId": null,
+            "projectName": null,
+            "payload": {
+                "modelId": "supra2_img",
+                "sourceRepo": "SupraLabs/Supra2-IMG",
+                "converter": "supra2_img",
+                "sourceFile": source_file,
+                "outputDir": "/unused"
+            },
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": null,
+            "progress": 0.0,
+            "stage": "queued",
+            "message": "",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 0,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-10-20T00:00:00Z",
+            "updatedAt": "2026-10-20T00:00:00Z",
+            "startedAt": null,
+            "finishedAt": null
+        }))
+        .expect("valid convert job snapshot")
+    }
+
+    /// Stage `files` (placeholder bytes) in `repo`'s cached snapshot at exactly `revision`.
+    fn stage_snapshot(data_dir: &Path, repo: &str, revision: &str, files: &[&str]) -> PathBuf {
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+        for file in files {
+            std::fs::write(snapshot.join(file), b"weights").expect("write staged file");
+        }
+        snapshot
+    }
+
+    async fn plan(
+        settings: &Settings,
+        checkpoint_dir: &Path,
+        source_file: &str,
+    ) -> Result<ConvertPlan, ConvertPlanError> {
+        let api = ApiClient::new(settings);
+        resolve_convert_plan(
+            &api,
+            settings,
+            &supra2_job(source_file),
+            checkpoint_dir,
+            None,
+        )
+        .await
+        .expect("resolver runs without an infra error")
+    }
+
+    /// The shipped catalog row and the converter agree on the one pinned source file, and the
+    /// component pins the converter verifies are the exact co-requisite rows the install downloads
+    /// (a drift here would verify one revision and load another).
+    #[test]
+    fn shipped_catalog_row_matches_the_converter_and_component_pins() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin manifest parses");
+        let entry = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "supra2_img")
+            .expect("supra2_img is in the shipped catalog");
+        let mlx = &entry["mlx"];
+        assert_eq!(mlx["requiresConversion"], true);
+        assert_eq!(mlx["converter"], "supra2_img");
+        assert_eq!(mlx["convertSourceFile"], SUPRA2_SOURCE_FILE);
+        let source = gen_core::supra2::SUPRA2_SOURCE;
+        assert_eq!(mlx["convertSourceRepo"], source.repo);
+        let downloads = entry["downloads"].as_array().expect("downloads");
+        let primary = downloads
+            .iter()
+            .find(|download| download["coRequisite"] != true)
+            .expect("primary download");
+        assert_eq!(primary["repo"], source.repo);
+        assert_eq!(primary["revision"], source.revision);
+        assert_eq!(primary["files"], json!([SUPRA2_SOURCE_FILE]));
+        assert_eq!(primary["expectedSizeBytes"], source.files[0].bytes);
+        assert_eq!(primary["expectedSha256"], source.files[0].sha256);
+        // sc-24216: the per-component licence the Model Manager lists is the engine pin's own, and
+        // the prompt limit it states is the engine's Flan-T5 context.
+        assert_eq!(primary["license"], source.license);
+        assert_eq!(
+            entry["image"]["maxPromptTokens"],
+            gen_core::supra2::MAX_PROMPT_TOKENS
+        );
+        for (component, pin) in [
+            ("text_encoder", gen_core::supra2::FLAN_T5_BASE),
+            ("vae", gen_core::supra2::SD_VAE),
+        ] {
+            let row = downloads
+                .iter()
+                .find(|download| download["componentId"] == component)
+                .unwrap_or_else(|| panic!("{component} co-requisite row"));
+            assert_eq!(row["license"], pin.license, "{component}");
+        }
+        for (component, pin) in [
+            ("text_encoder", gen_core::supra2::FLAN_T5_BASE),
+            ("vae", gen_core::supra2::SD_VAE),
+        ] {
+            let row = downloads
+                .iter()
+                .find(|download| download["componentId"] == component)
+                .unwrap_or_else(|| panic!("{component} co-requisite row"));
+            assert_eq!(row["coRequisite"], true, "{component}");
+            assert_eq!(row["repo"], pin.repo, "{component}");
+            assert_eq!(row["revision"], pin.revision, "{component}");
+            let files: Vec<&str> = pin.files.iter().map(|file| file.path).collect();
+            assert_eq!(row["files"], json!(files), "{component}");
+            assert_eq!(
+                row["estimatedSizeBytes"],
+                pin.download_bytes(),
+                "{component}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn supra2_plan_refuses_a_foreign_source_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = settings_at(tmp.path().join("data"));
+        let error = plan(&settings, tmp.path(), "model.safetensors")
+            .await
+            .err()
+            .expect("a foreign source file is refused");
+        assert_eq!(error.message, "Unknown Supra2-IMG source checkpoint.");
+    }
+
+    #[tokio::test]
+    async fn supra2_plan_refuses_a_missing_checkpoint() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = settings_at(tmp.path().join("data"));
+        let error = plan(&settings, tmp.path(), SUPRA2_SOURCE_FILE)
+            .await
+            .err()
+            .expect("a missing checkpoint is refused");
+        assert_eq!(error.message, "Supra2-IMG source checkpoint is missing.");
+    }
+
+    /// The co-requisites are resolved at their exact pinned revision, never `refs/main`: a snapshot
+    /// of another revision does not satisfy the convert, and the refusal names the install to make.
+    #[tokio::test]
+    async fn supra2_plan_resolves_only_the_pinned_component_snapshots() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let data_dir = tmp.path().join("data");
+        let settings = settings_at(data_dir.clone());
+        let checkpoint = tmp.path().join("checkpoint");
+        std::fs::create_dir_all(&checkpoint).expect("checkpoint dir");
+        std::fs::write(checkpoint.join(SUPRA2_SOURCE_FILE), b"pt").expect("checkpoint");
+        let t5 = gen_core::supra2::FLAN_T5_BASE;
+        let vae = gen_core::supra2::SD_VAE;
+
+        // Neither component installed.
+        let error = plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE)
+            .await
+            .err()
+            .expect("missing components are refused");
+        assert_eq!(error.message, "Supra2-IMG components are not installed.");
+        assert!(error.detail.contains(t5.repo), "{}", error.detail);
+
+        // The text encoder at a DIFFERENT revision does not count.
+        stage_snapshot(
+            &data_dir,
+            t5.repo,
+            "0000000000000000000000000000000000000000",
+            &["config.json"],
+        );
+        let error = plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE)
+            .await
+            .err()
+            .expect("an unpinned text encoder snapshot is refused");
+        assert!(error.detail.contains(t5.revision), "{}", error.detail);
+
+        let t5_dir = stage_snapshot(&data_dir, t5.repo, t5.revision, &["config.json"]);
+        let error = plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE)
+            .await
+            .err()
+            .expect("a missing VAE is refused");
+        assert!(error.detail.contains(vae.repo), "{}", error.detail);
+
+        let vae_dir = stage_snapshot(&data_dir, vae.repo, vae.revision, &["config.json"]);
+        match plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE).await {
+            Ok(ConvertPlan::Supra2 {
+                source_file,
+                text_encoder_dir,
+                vae_dir: resolved_vae_dir,
+            }) => {
+                assert_eq!(source_file, checkpoint.join(SUPRA2_SOURCE_FILE));
+                assert_eq!(text_encoder_dir, t5_dir);
+                assert_eq!(resolved_vae_dir, vae_dir);
+            }
+            Ok(_) => panic!("supra2_img must resolve the Supra2 plan"),
+            Err(error) => panic!("unexpected refusal: {} {}", error.message, error.detail),
+        }
+    }
+
+    /// A component that fails its pinned size/SHA-256 check stops the convert before the bundle is
+    /// written, with the inference verifier's reason surfaced, and leaves no install marker.
+    #[test]
+    fn supra2_convert_surfaces_component_verification_failure_and_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let t5 = tmp.path().join("t5");
+        let vae = tmp.path().join("vae");
+        for dir in [&t5, &vae] {
+            std::fs::create_dir_all(dir).expect("component dir");
+            std::fs::write(dir.join("config.json"), b"{}").expect("config");
+        }
+        let out = tmp.path().join("out");
+        let error = convert_supra2_bundle(&tmp.path().join("missing.pt"), &t5, &vae, &out)
+            .expect_err("unverified components are refused");
+        assert!(
+            error.starts_with("Flan-T5-Base text encoder failed verification:"),
+            "{error}"
+        );
+        assert!(
+            !out.exists(),
+            "nothing is written before the components verify"
+        );
+    }
+
+    /// Real-weight install-time conversion from the local HF cache (CPU only: SHA-256 + tensor
+    /// validation + safetensors write). `HF_HUB_CACHE=~/.cache/huggingface/hub cargo test -p
+    /// sceneworks-worker supra2_real_weight_convert -- --ignored` with the three pinned snapshots in
+    /// that hub (the resolver reads the env-selected hub, else the data dir's library).
+    #[test]
+    #[ignore = "needs HF_HUB_CACHE holding the pinned Supra2-IMG, Flan-T5-Base and SD VAE snapshots"]
+    fn supra2_real_weight_convert_writes_a_loadable_bundle() {
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            huggingface_pinned_snapshot_dir(data_dir.path(), pin.repo, pin.revision)
+                .unwrap_or_else(|| panic!("{}@{} is not cached", pin.repo, pin.revision))
+        };
+        let source = snapshot(gen_core::supra2::SUPRA2_SOURCE).join(SUPRA2_SOURCE_FILE);
+        let t5 = snapshot(gen_core::supra2::FLAN_T5_BASE);
+        let vae = snapshot(gen_core::supra2::SD_VAE);
+        // `SUPRA2_BUNDLE_OUT` keeps the bundle for the acceptance matrix, which a LATER process
+        // loads as `SUPRA2_BUNDLE_DIR` (the real-weight lanes convert once, in this separate step).
+        let out = std::env::var_os("SUPRA2_BUNDLE_OUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.path().join("bundle"));
+        convert_supra2_bundle(&source, &t5, &vae, &out).expect("real conversion succeeds");
+        let bundle =
+            gen_core::supra2::read_pinned_bundle(&out, gen_core::supra2::BundleCheck::Digests)
+                .expect("the bundle reads back under the pin contract");
+        assert_eq!(bundle.manifest.provider_id, "supra2_img");
+        assert!(
+            out.join("model_index.json").is_file(),
+            "install marker written"
+        );
+    }
+}
+
+#[cfg(test)]
 mod anima_convert_tests {
     use super::*;
 
@@ -8637,6 +9349,209 @@ mod co_requisite_tests {
                  load, got: {message}"
             );
         }
+    }
+
+    /// sc-25909 — a v0.9.0 install of the Qwen-Image 2.1 re-host (pinned at the superseded
+    /// `1691de01…`) is carried to the republished `ef03535e…` cache-only: every carried entry is a
+    /// relative link to the SAME legacy blob (no copy, no fetch), the added NOTICE is written from
+    /// its declared bytes as its own git-oid blob, and only the requested tier is touched.
+    ///
+    /// *Mutation that reds this:* `huggingface_pinned_tier_snapshot_dir` skipping
+    /// `materialize_superseded_hf_revision` (the tier stays stranded at the old revision).
+    #[cfg(unix)]
+    #[test]
+    fn superseded_revision_migration_builds_the_new_snapshot_from_the_legacy_cache() {
+        use std::os::unix::fs::MetadataExt as _;
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
+        let legacy = stage_superseded_legacy_tier_for_test(data.path(), &supersession, true, &[]);
+        let files = vec!["q8/*".to_owned()];
+        assert!(
+            huggingface_pinned_snapshot_dir(
+                data.path(),
+                supersession.repo,
+                supersession.current_revision
+            )
+            .is_none(),
+            "precondition: nothing is cached at the current pin"
+        );
+
+        let snapshot = huggingface_pinned_tier_snapshot_dir(
+            data.path(),
+            supersession.repo,
+            supersession.current_revision,
+            &files,
+        )
+        .expect("the superseded install is carried to the current pin");
+        assert!(snapshot.ends_with(supersession.current_revision));
+        for file in supersession.carried {
+            let entry = snapshot.join(file.path);
+            assert_eq!(
+                std::fs::read_link(&entry).expect("carried entry is a snapshot symlink"),
+                std::fs::read_link(legacy.join(file.path)).expect("legacy symlink"),
+                "{}: links the same relative blob the legacy snapshot does",
+                file.path
+            );
+            assert_eq!(
+                std::fs::metadata(&entry).unwrap().ino(),
+                std::fs::metadata(legacy.join(file.path)).unwrap().ino(),
+                "{}: no copy",
+                file.path
+            );
+        }
+        let notice = snapshot.join("q8/NOTICE");
+        assert_eq!(
+            std::fs::read(&notice).unwrap(),
+            supersession.added[0].contents
+        );
+        assert_eq!(
+            std::fs::read_link(&notice).unwrap(),
+            Path::new("../../../blobs").join(supersession.added[0].blob)
+        );
+        assert!(
+            !snapshot.join("q4").exists(),
+            "only the requested tier is materialized"
+        );
+        assert!(
+            legacy.join("q8/model_index.json").is_file(),
+            "the legacy snapshot is intact"
+        );
+    }
+
+    /// Re-running is a no-op on a complete tier, and an interrupted run (entries missing from the
+    /// new snapshot) is completed rather than duplicated.
+    ///
+    /// *Mutation that reds this:* `link_superseded_snapshot_entry` replacing an existing entry, or
+    /// `write_declared_blob` rejecting the blob it already wrote.
+    #[cfg(unix)]
+    #[test]
+    fn superseded_revision_migration_is_idempotent_and_completes_an_interrupted_run() {
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q4_NOTICE_SUPERSESSION;
+        stage_superseded_legacy_tier_for_test(data.path(), &supersession, true, &[]);
+        let files = vec!["q4/*".to_owned()];
+        let resolve = || {
+            huggingface_pinned_tier_snapshot_dir(
+                data.path(),
+                supersession.repo,
+                supersession.current_revision,
+                &files,
+            )
+            .expect("resolves")
+        };
+        let first = resolve();
+        let blobs = huggingface_repo_cache_path(data.path(), supersession.repo)
+            .unwrap()
+            .join("blobs");
+        let blob_count = || std::fs::read_dir(&blobs).unwrap().count();
+        let before = blob_count();
+        let link_before = std::fs::read_link(first.join("q4/vae/config.json")).unwrap();
+        assert_eq!(resolve(), first);
+        assert_eq!(
+            blob_count(),
+            before,
+            "no second NOTICE blob, no temp left behind"
+        );
+        assert_eq!(
+            std::fs::read_link(first.join("q4/vae/config.json")).unwrap(),
+            link_before
+        );
+
+        std::fs::remove_file(first.join("q4/NOTICE")).unwrap();
+        std::fs::remove_file(first.join("q4/transformer/model.safetensors")).unwrap();
+        assert_eq!(resolve(), first);
+        assert!(
+            sceneworks_core::hf_revision_supersessions::validate_superseding_current_snapshot(
+                &huggingface_hub_cache_dir(data.path()),
+                &huggingface_repo_cache_path(data.path(), supersession.repo).unwrap(),
+                &first,
+                &supersession,
+            )
+            .is_some()
+        );
+        assert_eq!(blob_count(), before);
+    }
+
+    /// A legacy tier missing any carried file — or holding one at the wrong size (a torn blob) — is
+    /// refused, and nothing is written at the current pin.
+    ///
+    /// *Mutation that reds this:* `validate_superseded_legacy_snapshot` accepting a subset (or
+    /// dropping the size check).
+    #[cfg(unix)]
+    #[test]
+    fn superseded_revision_migration_refuses_a_partial_legacy_snapshot() {
+        let _env = isolate_hf_cache();
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
+        let files = vec!["q8/*".to_owned()];
+        for damage in ["missing", "truncated"] {
+            let data = tempfile::tempdir().expect("temp data dir");
+            let legacy =
+                stage_superseded_legacy_tier_for_test(data.path(), &supersession, true, &[]);
+            let victim = legacy.join("q8/processor/vocab.json");
+            match damage {
+                "missing" => std::fs::remove_file(&victim).unwrap(),
+                _ => std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&victim)
+                    .unwrap()
+                    .set_len(10)
+                    .unwrap(),
+            }
+            assert!(
+                huggingface_pinned_tier_snapshot_dir(
+                    data.path(),
+                    supersession.repo,
+                    supersession.current_revision,
+                    &files,
+                )
+                .is_none(),
+                "{damage}: a partial legacy tier is not carried forward"
+            );
+            assert!(
+                !huggingface_repo_cache_path(data.path(), supersession.repo)
+                    .unwrap()
+                    .join("snapshots")
+                    .join(supersession.current_revision)
+                    .exists(),
+                "{damage}: nothing is written at the current pin"
+            );
+        }
+    }
+
+    /// A legacy cache whose entries are plain files (the Windows hardlink layout our downloader
+    /// writes) is carried by hard link, never by copy.
+    #[cfg(unix)]
+    #[test]
+    fn superseded_revision_migration_hard_links_plain_legacy_entries() {
+        use std::os::unix::fs::MetadataExt as _;
+        let _env = isolate_hf_cache();
+        let data = tempfile::tempdir().expect("temp data dir");
+        let supersession =
+            sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q8_NOTICE_SUPERSESSION;
+        let legacy = stage_superseded_legacy_tier_for_test(data.path(), &supersession, false, &[]);
+        let snapshot = huggingface_pinned_tier_snapshot_dir(
+            data.path(),
+            supersession.repo,
+            supersession.current_revision,
+            &["q8/*".to_owned()],
+        )
+        .expect("resolves");
+        let entry = snapshot.join("q8/text_encoder/model.safetensors");
+        assert!(!std::fs::symlink_metadata(&entry)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&entry).unwrap().ino(),
+            std::fs::metadata(legacy.join("q8/text_encoder/model.safetensors"))
+                .unwrap()
+                .ino()
+        );
     }
 }
 

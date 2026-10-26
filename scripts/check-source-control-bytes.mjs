@@ -88,6 +88,7 @@ export const SOURCE_EXTENSIONS = new Set([
 ]);
 
 export const SOURCE_BASENAMES = new Set([
+  ".appimageignore",
   ".dockerignore",
   ".env",
   ".gitattributes",

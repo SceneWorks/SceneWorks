@@ -44,7 +44,7 @@ pub(crate) const BG_WHITE: [u8; 3] = [255, 255, 255];
 /// Fill an RGB pixel buffer with a solid background color.
 fn filled(width: usize, height: usize, bg: [u8; 3]) -> Vec<u8> {
     let mut px = vec![0u8; width * height * 3];
-    for chunk in px.chunks_exact_mut(3) {
+    for chunk in px.as_chunks_mut::<3>().0 {
         chunk.copy_from_slice(&bg);
     }
     px

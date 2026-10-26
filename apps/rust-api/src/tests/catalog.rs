@@ -8301,13 +8301,141 @@ async fn model_import_accepts_a_linked_library_root_and_refuses_unconfined_ones(
     );
 }
 
+/// Stage a superseded Qwen-Image 2.1 re-host tier the way a v0.9.0 download left it: every carried
+/// file at its exact declared size (sparse) under `snapshots/<legacy>/`, plus the install receipt
+/// that download wrote. Returns the legacy snapshot.
+/// Only caller is the cfg(unix) supersession-health test below, so gate it the same way —
+/// ungated it is dead code on win32 clippy, which fails the pre-push 'neither' build for
+/// every Windows push even though Linux CI (which compiles the caller) stays green.
+#[cfg(unix)]
+fn stage_superseded_qwen_image_2_1_tier(
+    data_dir: &std::path::Path,
+    supersession: &sceneworks_core::hf_revision_supersessions::HuggingFaceRevisionSupersession,
+) -> std::path::PathBuf {
+    let snapshot = huggingface_repo_cache_path(data_dir, supersession.repo)
+        .unwrap()
+        .join("snapshots")
+        .join(supersession.legacy_revision);
+    for file in supersession.carried {
+        let path = snapshot.join(file.path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut bytes = Vec::new();
+        if file.path.ends_with("/model_index.json") {
+            bytes.extend_from_slice(br#"{"_class_name":"QwenImagePipeline"}"#);
+        } else if file.path.ends_with("config.json") {
+            bytes.extend_from_slice(b"{}");
+        }
+        if file.size <= 1 << 20 {
+            bytes.resize(file.size as usize, b' ');
+        }
+        std::fs::write(&path, &bytes).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(file.size)
+            .unwrap();
+    }
+    let marker = data_dir
+        .join("models")
+        .join(crate::safe_download_dir(supersession.repo));
+    std::fs::create_dir_all(&marker).unwrap();
+    let resolved: Vec<&str> = supersession.carried.iter().map(|file| file.path).collect();
+    std::fs::write(
+        marker.join(".sceneworks-download-complete.json"),
+        serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "repo": supersession.repo,
+            "modelId": "qwen_image_2_1",
+            "variant": sceneworks_core::hf_revision_supersessions::supersession_tier(supersession),
+            "snapshotRevision": supersession.legacy_revision,
+            "resolvedFiles": resolved,
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    snapshot
+}
+
+/// sc-25909 — after the re-host pin moved from `1691de01…` to `ef03535e…` (which only adds each
+/// tier's NOTICE), the Model Manager reports a v0.9.0 tier exactly as the worker will resolve it: a
+/// legacy tier holding every carried file is installed (the worker carries it to the new pin
+/// cache-only, so no update or repair is offered), while a PARTIAL legacy tier — which the worker
+/// refuses to carry — is a repairable incomplete install rather than a green badge over a render
+/// that fails "not installed".
+///
+/// *Mutation that reds this:* dropping `superseded_revision_tier_cache_health` from
+/// `model_variant_states` (the revision-agnostic probe calls the partial tier installed).
+#[cfg(unix)]
+#[tokio::test]
+async fn qwen_image_2_1_tier_at_the_superseded_rehost_revision_reads_as_the_worker_resolves_it() {
+    let _env = isolate_hf_cache();
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let supersession =
+        sceneworks_core::hf_revision_supersessions::QWEN_IMAGE_2_1_Q4_NOTICE_SUPERSESSION;
+    for partial in [false, true] {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let settings = test_settings(&temp_dir);
+        sceneworks_core::builtin_manifests::seed_builtin_manifests(
+            &settings.config_dir,
+            sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+        )
+        .expect("builtin manifests seed");
+        let legacy = stage_superseded_qwen_image_2_1_tier(&settings.data_dir, &supersession);
+        if partial {
+            std::fs::remove_file(legacy.join("q4/processor/vocab.json")).unwrap();
+        }
+        let app = create_app(settings).expect("app creates");
+        let (status, models) = request(app, "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let model = models
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "qwen_image_2_1")
+            .expect("qwen_image_2_1 is cataloged");
+        let q4 = model["variants"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|variant| variant["variant"] == "q4")
+            .expect("q4 variant");
+        if partial {
+            assert_eq!(q4["installed"], false, "{q4}");
+            assert_ne!(model["installState"], "installed", "{model}");
+            assert_eq!(model["repairAvailable"], true, "{model}");
+            assert!(
+                model["missingRequiredFiles"]
+                    .as_array()
+                    .is_some_and(|missing| missing.contains(&json!("q4/processor/vocab.json"))),
+                "{model}"
+            );
+        } else {
+            assert_eq!(q4["installed"], true, "{q4}");
+            assert_eq!(model["installState"], "installed", "{model}");
+            assert_eq!(model["repairAvailable"], false, "{model}");
+            assert_eq!(model["updateAvailable"], false, "{model}");
+            assert!(
+                !huggingface_repo_cache_path(&temp_dir.path().join("data"), supersession.repo)
+                    .unwrap()
+                    .join("snapshots")
+                    .join(supersession.current_revision)
+                    .exists(),
+                "serving the catalog never writes the cache"
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn managed_predictor_raw_queue_stamps_digest_and_refuses_retry_overrides() {
     let temp = tempfile::tempdir().unwrap();
     let app = create_app(test_settings(&temp)).unwrap();
+    // The H3 Veda predictor by repo, not "the first" managed pin (sc-24213 adds Supra2-IMG's).
     let pin = sceneworks_core::managed_file::builtin_identities()
         .unwrap()
-        .first()
+        .iter()
+        .find(|identity| identity.repo == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview")
         .unwrap();
     let payload = json!({"repo":pin.repo,"revision":pin.revision,"files":[pin.file],"licenseAcknowledged":true});
     let (status, job) = request(

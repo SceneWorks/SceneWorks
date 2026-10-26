@@ -1,0 +1,11 @@
+{
+  "mode": "text_to_image",
+  "model": "moss_image_sft",
+  "prompt": "日本語 <tag>",
+  "negativePrompt": "",
+  "normalizedSettings": { "width": 16, "height": 16, "count": 2 },
+  "rawAdapterSettings": {
+    "mossImage": { "acceleration": "off" },
+    "promptBatch": ["日本語 <tag>", "{\"items\":[]}"]
+  }
+}

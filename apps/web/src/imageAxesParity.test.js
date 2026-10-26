@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
-import { fallbackModels } from "./constants.js";
+import { fallbackModels } from "./modelCatalog.js";
 
 // Manifest ↔ constants parity for the `image` capability sub-block (sc-15299).
 //

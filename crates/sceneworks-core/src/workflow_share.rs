@@ -495,6 +495,8 @@ pub enum AdvancedDisposition {
 pub enum AdvancedKeySource {
     /// `buildImageJobAdvanced` — the Image Studio's ~30-knob builder.
     StudioBuilder,
+    /// `imageRecipeRequest` — replays persisted adapter settings without authoring new controls.
+    ImageRecipeReplayBuilder,
     /// `buildEditJobBody` — the Image Editor's prompt-edit body (sc-15948 follow-up: it emits
     /// `advanced.guidanceScale` and feeds an embedding lane, so it is registered even though
     /// every key it emits was already classified).
@@ -553,6 +555,7 @@ impl AdvancedKeySource {
     /// nobody registered fails [`ADVANCED_BUILDERS`]'s round-trip test.
     pub const ALL: &'static [Self] = &[
         Self::StudioBuilder,
+        Self::ImageRecipeReplayBuilder,
         Self::EditBuilder,
         Self::DetailBuilder,
         Self::CharacterBuilder,
@@ -631,8 +634,8 @@ pub struct AdvancedBuilder {
     /// Set well under the real count; it is a floor, not a census.
     pub minimum_keys: usize,
     /// Identifiers spread into an [`AdvancedBuilderShape::AssignedObject`] initializer, whose keys
-    /// are accounted for by another registry entry. Declared so a NEW spread of something nobody
-    /// classified fails the lint instead of vanishing into it.
+    /// are accounted for by another registry entry, or by those producers before persistence for
+    /// a recipe replay. Declared so a NEW spread fails the lint instead of vanishing into it.
     pub spread_of: &'static [&'static str],
 }
 
@@ -658,6 +661,19 @@ pub const ADVANCED_BUILDERS: &[AdvancedBuilder] = &[
         anchors: &["resolution", "sampler", "steps", "styleId", "poses"],
         minimum_keys: 25,
         spread_of: &[],
+    },
+    AdvancedBuilder {
+        source: AdvancedKeySource::ImageRecipeReplayBuilder,
+        path: "apps/web/src/regenerateImage.js",
+        function: "imageRecipeRequest",
+        shape: AdvancedBuilderShape::AssignedObject,
+        lane: "POST /api/v1/image/jobs — replay persisted image recipe inputs when the original \
+               job is unavailable, written by `write_image_asset`",
+        // The persisted map's producers own its key classifications. This builder only removes
+        // receipts; any new explicit key still has to pass the same classification check.
+        anchors: &[],
+        minimum_keys: 0,
+        spread_of: &["raw"],
     },
     AdvancedBuilder {
         source: AdvancedKeySource::EditBuilder,
@@ -1195,6 +1211,10 @@ const GENERATE_JOB_BUILDERS: &[WebBuilderRef] = &[
         function: "buildImageJobAdvanced",
     },
     WebBuilderRef {
+        path: "apps/web/src/regenerateImage.js",
+        function: "imageRecipeRequest",
+    },
+    WebBuilderRef {
         path: "apps/web/src/imageJobs.js",
         function: "buildEditJobBody",
     },
@@ -1220,6 +1240,10 @@ const IMAGE_JOB_BUILDERS: &[WebBuilderRef] = &[
     WebBuilderRef {
         path: "apps/web/src/imageJobAdvanced.js",
         function: "buildImageJobAdvanced",
+    },
+    WebBuilderRef {
+        path: "apps/web/src/regenerateImage.js",
+        function: "imageRecipeRequest",
     },
     WebBuilderRef {
         path: "apps/web/src/imageJobs.js",
@@ -1261,6 +1285,10 @@ pub enum AdvancedShape {
     /// MiniMax-H3 Veda request controls, kept as the exact five-field wire object after the shared
     /// H3 validator refuses malformed values or unknown fields.
     H3VedaSettings,
+    /// Canonical MOSS request options, validated by gen-core.
+    MossImageOptions,
+    /// Provider receipt with local adapter paths reduced to their frozen relative filename.
+    MossImageReport,
     /// The Krea multi-phase denoise list, reduced to `{ steps, guidance, loras:[{index, weight}] }`.
     Phases,
     /// A `[start, end]` pair of finite numbers (the CFG interval, sc-25681). Anything else —
@@ -1349,6 +1377,9 @@ const fn deny_server(key: &'static str, reason: &'static str) -> AdvancedKeyRule
 /// The rule of thumb when classifying a new key: does it describe **what to make** (travels)
 /// or **what this machine can afford to make it with** (does not)?
 pub const ADVANCED_KEY_RULES: &[AdvancedKeyRule] = &[
+    allow("mossImage", AdvancedShape::MossImageOptions, "Requested MOSS mode and author controls; canonical native wire object."),
+    deny("mossOrdinarySettings", "Inactive ordinary UI choices are local restore metadata, not the accelerated image's requested generation settings."),
+    allow_from("mossImageExecutionReport", AdvancedShape::MossImageReport, AdvancedKeySource::Server, "Actual completed provider receipt; local adapter location is removed before sharing. Imported reports are display only and scrubbed before a new execution."),
     allow(
         "resolution",
         AdvancedShape::Scalar,
@@ -2976,6 +3007,8 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
             AdvancedShape::Poses => sanitize_poses(value),
             AdvancedShape::Phases => sanitize_phases(value),
             AdvancedShape::H3VedaSettings => sanitize_h3_veda_settings(value),
+            AdvancedShape::MossImageOptions => sanitize_moss_options(value),
+            AdvancedShape::MossImageReport => sanitize_moss_execution_report(value),
             AdvancedShape::NumberPair => sanitize_number_pair(value),
         };
         if let Some(sanitized) = sanitized {
@@ -2983,6 +3016,31 @@ pub fn sanitize_advanced(advanced: &JsonObject) -> JsonObject {
         }
     }
     out
+}
+
+fn sanitize_moss_options(value: &Value) -> Option<Value> {
+    use gen_core::moss_image::{MossImageOptions, MossImageResolved, MossImageVariant};
+    let options: MossImageOptions = serde_json::from_value(value.clone()).ok()?;
+    MossImageResolved::resolve(
+        MossImageVariant::Sft,
+        &gen_core::GenerationRequest {
+            moss_image: Some(options.clone()),
+            ..Default::default()
+        },
+    )
+    .ok()?;
+    serde_json::to_value(options).ok()
+}
+/// Keep the native validated receipt while excluding this machine's optional adapter location.
+/// The source receipt still identifies the exact upstream adapter bytes by repository/revision/hash.
+pub fn sanitize_moss_execution_report(value: &Value) -> Option<Value> {
+    use gen_core::moss_image::MossImageExecutionReport;
+    let report: MossImageExecutionReport = serde_json::from_value(value.clone()).ok()?;
+    let mut data = report.into_data();
+    for adapter in &mut data.adapter_reports {
+        adapter.adapter_path = std::path::PathBuf::from("lora.safetensors");
+    }
+    serde_json::to_value(MossImageExecutionReport::new(data).ok()?).ok()
 }
 
 /// Preserve a complete, valid Veda control object. The API's shared H3 validator owns the wire

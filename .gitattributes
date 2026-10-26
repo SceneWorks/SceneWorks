@@ -77,6 +77,7 @@
 .env            text diff
 .gitattributes  text diff
 .gitignore      text diff
+.appimageignore text diff
 .gitkeep        text diff
 Containerfile   text diff
 COPYRIGHT       text diff
@@ -88,6 +89,7 @@ LICENSE-CEPHES  text diff
 LICENSE_APACHE-2.0 text diff
 LICENSE_MIT     text diff
 NOTICE          text diff
+*.spdx          text diff
 Makefile        text diff
 pre-commit      text diff
 pre-push        text diff

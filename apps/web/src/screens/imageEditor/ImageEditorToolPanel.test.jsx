@@ -14,6 +14,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import JSON5 from "json5";
 import { maxReferencesForModel } from "../../imageReferenceLimits.js";
+import { editCapableModels } from "../../imageJobs.js";
 
 let container;
 let root;
@@ -398,6 +399,37 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     const nine = Array.from({ length: 9 }, (_, index) => `ref_${index}`);
     await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine)} />));
     expect(addButton().disabled, "nine references + the working image is the cap of ten").toBe(true);
+  });
+
+  // sc-25908: Turbo serves the editor exactly as base does — it is an edit model, the rail opens
+  // at ITS declared cap, and the transparency toggle follows ITS `supportsAlphaOutput`. Every value
+  // is read from the shipped Turbo entry, derived the way ImageEditor.jsx derives it.
+  // *Mutation that reds this:* dropping `edit_image`, `ui.multiReference` or `supportsAlphaOutput`
+  // from the Turbo manifest entry.
+  it("opens the reference rail and the transparency toggle for Qwen Image 2.1 Turbo", async () => {
+    const manifest = JSON5.parse(
+      readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../../../config/manifests/builtin.models.jsonc"), "utf8"),
+    );
+    const turbo = manifest.models.find((entry) => entry.id === "qwen_image_2_1_turbo");
+    expect(editCapableModels(manifest.models).map((entry) => entry.id)).toContain("qwen_image_2_1_turbo");
+    const scopeFor = (refAssetIds) =>
+      editScope({
+        editModel: turbo.id,
+        editModels: [turbo],
+        selectedEditModel: turbo,
+        multiRefCapable: Boolean(turbo.ui?.multiReference),
+        maxEditReferences: maxReferencesForModel(turbo, 4),
+        refAssetIds,
+        editPrompt: "isolate the cyclist",
+        editTransparent: true,
+      });
+    const nine = Array.from({ length: 9 }, (_, index) => `ref_${index}`);
+    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine.slice(0, 8))} />));
+    expect(container.querySelector(".ie-ref-add")?.disabled).toBe(false);
+    expect(container.querySelector(".transparency-toggle input")?.checked).toBe(true);
+    expect(container.querySelector(".transparency-prompt-hint button")).not.toBeNull();
+    await act(async () => root.render(<ImageEditorEditPanel scope={scopeFor(nine)} />));
+    expect(container.querySelector(".ie-ref-add").disabled, "nine + the working image is ten").toBe(true);
   });
 });
 

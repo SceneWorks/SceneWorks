@@ -141,6 +141,8 @@ import insightfaceModelNotice from "../../../desktop/licenses/insightface/Insigh
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?url&no-inline";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?url&no-inline";
 import iris3bApache20 from "../../../desktop/licenses/iris-3b/Apache-2.0.txt?url&no-inline";
+import supra2ImgApache20 from "../../../desktop/licenses/supra2-img/Apache-2.0.txt?url&no-inline";
+import supra2ImgSdVaeMit from "../../../desktop/licenses/supra2-img/SD-VAE-FT-MSE-MIT-DECLARATION.txt?url&no-inline";
 import irisRepaTeacherApache20 from "../../../desktop/licenses/iris-repa-teacher/Apache-2.0.txt?url&no-inline";
 // Iris restoration TRAINING-only resources (sc-25688): VGG16 / LPIPS / OpenCLIP critic trunk.
 import irisRestoreTrainingTorchvisionBsd3 from "../../../desktop/licenses/iris-restore-training/torchvision-BSD-3-Clause.txt?url&no-inline";
@@ -179,10 +181,20 @@ import yue2SourceNotices from "../../../desktop/licenses/yue2-source/THIRD_PARTY
 import yue2SourceSnakeBetaMit from "../../../desktop/licenses/yue2-source/SnakeBeta-NVIDIA-MIT.txt?url&no-inline";
 import yue2SourceStableAudioToolsMit from "../../../desktop/licenses/yue2-source/stable-audio-tools-MIT.txt?url&no-inline";
 
+// MOSS official Apache snapshots and optional DMD's published model-card declaration.
+import mossImageBaseApache from "../../../desktop/licenses/moss-image-base/Apache-2.0.txt?url&no-inline";
+import mossImageSftApache from "../../../desktop/licenses/moss-image-sft/Apache-2.0.txt?url&no-inline";
+import mossImageProvenance from "../../../desktop/licenses/moss-image-base/PROVENANCE.txt?url&no-inline";
+import mossImageDmdDeclaration from "../../../desktop/licenses/moss-image-sft-8-steps-dmd/DMD-LICENSE-DECLARATION.txt?url&no-inline";
+
 // Maps each manifest document key to its bundled text asset URL. New components: add the
 // files under apps/desktop/licenses/<id>/, list them in manifest.json, and wire
 // their keys here. Vite emits these with the app instead of embedding the full corpus in JavaScript.
 const DOCUMENT_URL = {
+  "moss-image-base-apache": mossImageBaseApache,
+  "moss-image-sft-apache": mossImageSftApache,
+  "moss-image-provenance": mossImageProvenance,
+  "moss-image-dmd-declaration": mossImageDmdDeclaration,
   "ffmpeg-notice": ffmpegNotice,
   "ffmpeg-gpl": ffmpegGpl,
   "onnxruntime-notice": onnxruntimeNotice,
@@ -265,6 +277,8 @@ const DOCUMENT_URL = {
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
   "iris-3b-apache": iris3bApache20,
+  "supra2-img-apache": supra2ImgApache20,
+  "supra2-img-sd-vae-mit": supra2ImgSdVaeMit,
   "iris-repa-teacher-apache": irisRepaTeacherApache20,
   "iris-restore-training-torchvision-bsd-3-clause": irisRestoreTrainingTorchvisionBsd3,
   "iris-restore-training-lpips-bsd-2-clause": irisRestoreTrainingLpipsBsd2,
