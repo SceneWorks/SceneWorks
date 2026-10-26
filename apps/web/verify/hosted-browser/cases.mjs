@@ -86,6 +86,24 @@ async function openImportedSurface(page, name) {
   return card;
 }
 
+// A rendered form field is a <label> that wraps its own control. Playwright's getByLabel matches a
+// label's FULL text, and a label that wraps a <select> also carries that select's OPTION text
+// ("Family" + "Auto-detect" + every family name), so an anchored label regex can never resolve a
+// select field: it resolves nothing, and the case times out on the product's markup instead of
+// failing on it. Read the field through its label element — the field name is the label's own
+// leading text and the control is the label's own element — which is the same lookup the panel's
+// own unit tests use.
+function labelledField(scope, name) {
+  // The field name is interpolated into a RegExp, so it is escaped: a name carrying regex
+  // metacharacters must match itself rather than a pattern.
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return scope
+    .locator("label")
+    .filter({ hasText: new RegExp(`^${escaped}`) })
+    .locator("input, select")
+    .first();
+}
+
 async function pickAsset(page, fieldLabel, assetName) {
   const field = page
     .locator(".asset-picker-field")
@@ -156,18 +174,18 @@ async function caseModelManagerReimport(page, recorder) {
   await form.waitFor({ state: "visible", timeout: LONG });
   // Wait for the managed repair seeding effect, not just the panel container.
   await waitForCondition(
-    async () => (await form.getByLabel(/^Family$/).inputValue()) === "minimax-h3",
+    async () => (await labelledField(form, "Family").inputValue()) === "minimax-h3",
     { label: "the reimport declaration to be seeded" },
   );
 
   const ownership = page.locator('[role="radio"][aria-checked="true"]').first();
   assert(((await ownership.textContent()) ?? "").includes("Add to SceneWorks"), "managed ownership must stay selected");
 
-  const typeValue = await form.getByLabel(/^Type$/).inputValue();
-  const familyValue = await form.getByLabel(/^Family$/).inputValue();
-  const baseValue = await form.getByLabel(/^Compatible base model$/).inputValue();
-  const partitionValue = await form.getByLabel(/^MiniMax-H3 partition$/).inputValue();
-  const seededName = await form.getByLabel(/^Name$/).inputValue();
+  const typeValue = await labelledField(form, "Type").inputValue();
+  const familyValue = await labelledField(form, "Family").inputValue();
+  const baseValue = await labelledField(form, "Compatible base model").inputValue();
+  const partitionValue = await labelledField(form, "MiniMax-H3 partition").inputValue();
+  const seededName = await labelledField(form, "Name").inputValue();
   equal({ typeValue, familyValue, baseValue, partitionValue }, {
     typeValue: "video",
     familyValue: "minimax-h3",
@@ -176,12 +194,12 @@ async function caseModelManagerReimport(page, recorder) {
   }, "reimport must preserve the imported model's declaration metadata");
   equal(seededName, "My H3", "reimport must seed the imported model's name");
 
-  await form.getByLabel(/^Name$/).fill("Edited name");
+  await labelledField(form, "Name").fill("Edited name");
   await form
     .locator('[aria-label="Where the checkpoint comes from"]')
     .getByRole("radio", { name: "URL", exact: true })
     .click();
-  await form.getByLabel(/^Source URL$/).fill("https://example.test/new.safetensors");
+  await labelledField(form, "Source URL").fill("https://example.test/new.safetensors");
 
   await toggle.click();
   await waitForCondition(
@@ -201,8 +219,8 @@ async function caseModelManagerReimport(page, recorder) {
     { label: "reopening the repair must show the panel again" },
   );
   assert((await toggle.getAttribute("aria-expanded")) === "true", "reopening the repair must show the panel again");
-  const reopenedName = await form.getByLabel(/^Name$/).inputValue();
-  const reopenedUrl = await form.getByLabel(/^Source URL$/).inputValue();
+  const reopenedName = await labelledField(form, "Name").inputValue();
+  const reopenedUrl = await labelledField(form, "Source URL").inputValue();
   equal(reopenedName, "Edited name", "the edited import draft name must survive dismiss/reopen");
   equal(reopenedUrl, "https://example.test/new.safetensors", "the edited import draft URL must survive dismiss/reopen");
   // Interact with a real rendered control over explicitly SYNTHETIC fixture terms.

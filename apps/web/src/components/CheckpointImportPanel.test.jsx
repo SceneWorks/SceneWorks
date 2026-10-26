@@ -177,6 +177,29 @@ describe("CheckpointImportPanel", () => {
     ]);
   });
 
+  it("keeps every managed field addressable by its own leading label text", async () => {
+    // The hosted browser case reads these fields through their label element, because a <label>
+    // that wraps a <select> also carries the select's option text ("Family" + "Auto-detect" +
+    // every family name) and an anchored label lookup therefore resolves nothing. The contract
+    // this test holds: the field name stays the label's OWN leading text, and the control stays
+    // inside that label.
+    await render({ models: h3Models });
+    await click(byRole("radio", "Add to SceneWorks"));
+    await setSelect(labelled("Family"), "minimax-h3");
+    const form = container.querySelector('form[aria-label="Add to SceneWorks"]');
+    expect(form).toBeTruthy();
+    const labelledOnce = (name) => {
+      const matches = [...form.querySelectorAll("label")].filter((node) => node.textContent.trim().startsWith(name));
+      expect(matches, `exactly one label for ${name}`).toHaveLength(1);
+      return matches[0];
+    };
+    for (const field of ["Type", "Family", "Compatible base model", "MiniMax-H3 partition", "Name"]) {
+      expect(labelledOnce(field).querySelectorAll("input, select"), `${field} carries its own control`).toHaveLength(1);
+    }
+    await click(buttonNamed("URL"));
+    expect(labelledOnce("Source URL").querySelectorAll("input, select")).toHaveLength(1);
+  });
+
   it("runs both ownerships through the same import submission", async () => {
     const onImportModel = vi.fn(async () => ({ payload: { modelId: "m" } }));
     await render({ onImportModel });

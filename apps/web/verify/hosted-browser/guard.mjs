@@ -206,6 +206,59 @@ export const REQUIRED_CASES = [
   "video-replay-expected-ref",
 ];
 
+// The managed-form fields the hosted reimport case reads. Each is a <label> that wraps its own
+// control, so the case resolves it through the label element (see `labelledField` in cases.mjs).
+export const MANAGED_FORM_FIELDS = [
+  "Type",
+  "Family",
+  "Compatible base model",
+  "MiniMax-H3 partition",
+  "Name",
+  "Source URL",
+];
+
+// The managed-form case that reads the import panel's fields.
+const MANAGED_FORM_CASE = "caseModelManagerReimport";
+
+/**
+ * The hosted managed-form case must not address a managed-form field with an anchored
+ * `getByLabel` regex.
+ *
+ * Playwright matches a <label>'s FULL text, and a label that wraps a <select> carries that
+ * select's option text as well ("Family" + "Auto-detect" + every family name). An anchored regex
+ * therefore resolves NOTHING for a select field: the case times out on the product's MARKUP
+ * instead of failing on the product's BEHAVIOUR, which proves nothing about the import panel and
+ * burns the whole run's budget. Every managed field goes through the label element instead.
+ *
+ * The ban is scoped to the managed-form case, because that is where the defect is: an anchored
+ * `getByLabel` against an element's own `aria-label` elsewhere is legitimate and stays allowed.
+ *
+ * @param {string} source the hosted case source
+ * @returns {{ok: boolean, errors: string[]}}
+ */
+export function evaluateCaseFieldSelectors(source) {
+  const errors = [];
+  const text = String(source ?? "");
+  const start = text.indexOf(`function ${MANAGED_FORM_CASE}`);
+  const end = start < 0 ? -1 : text.indexOf("\n}", start);
+  const scoped = start < 0 || end < 0 ? null : text.slice(start, end + 2);
+  if (scoped === null) {
+    errors.push(`the managed reimport case (${MANAGED_FORM_CASE}) was not found in the case source`);
+    return { ok: false, errors };
+  }
+  const anchored = scoped.match(/getByLabel\(\s*\/\^/g) ?? [];
+  if (anchored.length) {
+    errors.push(`the managed reimport case must not use anchored getByLabel regexes (${anchored.length} found)`);
+  }
+  for (const field of MANAGED_FORM_FIELDS) {
+    const escaped = field.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (!new RegExp(`labelledField\\(form,\\s*"${escaped}"\\)`).test(scoped)) {
+      errors.push(`managed-form field "${field}" must be read through labelledField()`);
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
 // macOS developer machines and scratch temp trees. A hosted Linux runner uses
 // /home/runner/... which is legitimate and is validated by GITHUB_WORKSPACE equality.
 const LOCAL_ROOTS = ["/Users", "/private/var/folders", "/var/folders"];

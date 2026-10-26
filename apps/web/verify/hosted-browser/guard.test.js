@@ -1,17 +1,19 @@
 // Pure unit tests for the sc-26687 hosted-browser driver contract.
 // These run locally with Node/jsdom-less environment and start NO server and NO browser.
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  MANAGED_FORM_FIELDS,
   PLAYWRIGHT_VERSION,
   REQUIRED_CASES,
   S8_MERGE_COMMIT,
   assertPlaywrightVersion,
   assertSummaryPassed,
   buildSummary,
+  evaluateCaseFieldSelectors,
   evaluateEnvironment,
   evaluateSourceIdentity,
   productionWebDigest,
@@ -235,6 +237,72 @@ describe("case manifest", () => {
       expect(entry.skipped).toBeUndefined();
       expect(typeof entry.run).toBe("function");
     }
+  });
+});
+
+describe("managed-form field selectors", () => {
+  // The case source is read from disk: `import.meta.url` is not a file URL under the jsdom
+  // environment, so the path is resolved from the working directory instead.
+  function hostedCaseSource() {
+    const candidates = [
+      resolve(process.cwd(), "verify/hosted-browser/cases.mjs"),
+      resolve(process.cwd(), "apps/web/verify/hosted-browser/cases.mjs"),
+    ];
+    for (const candidate of candidates) {
+      if (existsSync(candidate)) return readFileSync(candidate, "utf8");
+    }
+    throw new Error("cannot locate the hosted case source");
+  }
+  // The hosted run at 03cdc056c failed `model-manager-reimport` with a 30s timeout on
+  // `getByLabel(/^Family$/)` — not because the panel was wrong (the captured DOM carries the
+  // Family/Type/Compatible base model/MiniMax-H3 partition selects) but because Playwright matches
+  // a <label>'s FULL text, and a label that wraps a <select> also carries the select's option text.
+  // The anchored regex resolved nothing and the run proved nothing about the product.
+  it("reads every managed-form field through its label element", () => {
+    const source = hostedCaseSource();
+    const result = evaluateCaseFieldSelectors(source);
+    expect(result.errors).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  // The guard is scoped to the managed-form case, because that is where the defect is: an
+  // anchored label lookup elsewhere — against an element's own aria-label — is legitimate.
+  function managedCase(body) {
+    return `async function caseModelManagerReimport(page, recorder) {\n${body}\n}`;
+  }
+
+  it("refuses an anchored label regex, whatever the field", () => {
+    const result = evaluateCaseFieldSelectors(
+      managedCase('  const value = await form.getByLabel(/^Family$/).inputValue();'),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/anchored getByLabel/);
+  });
+
+  it("refuses a managed field read outside the label lookup", () => {
+    const body = MANAGED_FORM_FIELDS.map((field) => `  labelledField(form, "${field}")`).join("\n")
+      .replace('labelledField(form, "Name")', '  form.getByLabel(/^Name$/)');
+    const result = evaluateCaseFieldSelectors(managedCase(body));
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/"Name" must be read through labelledField/);
+  });
+
+  it("allows an anchored label lookup outside the managed-form case", () => {
+    const source = [
+      managedCase(MANAGED_FORM_FIELDS.map((field) => `  labelledField(form, "${field}")`).join("\n")),
+      "async function caseSomethingElse(page) {",
+      "  const value = await page.getByLabel(/^Something else$/).inputValue();",
+      "}",
+    ].join("\n");
+    const result = evaluateCaseFieldSelectors(source);
+    expect(result.errors).toEqual([]);
+    expect(result.ok).toBe(true);
+  });
+
+  it("refuses a source with no managed reimport case", () => {
+    const result = evaluateCaseFieldSelectors("export const CASES = [];");
+    expect(result.ok).toBe(false);
+    expect(result.errors.join(" ")).toMatch(/was not found/);
   });
 });
 
