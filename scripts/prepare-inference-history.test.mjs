@@ -28,8 +28,16 @@ test("cold and warm history keep all requested refs; a new set fetches only miss
     }
     const cache = path.join(root, "cache.git");
     const options = { cache, origin: pathToFileURL(origin).href, requirements: { pin: revisions[3], terminal: revisions[1], revisions: [revisions[0], revisions[1], revisions[3]] } };
+    // Force pack-based fetches and aggressive detached maintenance. Real Git trace events expose
+    // actual housekeeping children, rather than merely asserting that a flag was constructed.
+    git(["init", "--bare", "-q", cache]);
+    for (const [key, value] of [["fetch.unpackLimit", "1"], ["gc.autoPackLimit", "1"], ["gc.auto", "1"], ["gc.autoDetach", "true"], ["maintenance.auto", "true"]]) git(["-C", cache, "config", key, value]);
+    const trace = path.join(root, "git-trace.jsonl");
     let fetches = 0;
-    const run = (command, args, rest) => { if (args.includes("fetch")) fetches++; return execFileSync(command, args, rest); };
+    const run = (command, args, rest) => {
+      if (args.includes("fetch")) fetches++;
+      return execFileSync(command, args, { ...rest, env: { ...process.env, GIT_TRACE2_EVENT: trace } });
+    };
     function prepare(label, requirements = options.requirements) {
       const inference = path.join(root, `inference-${label}`), terminal = path.join(root, `terminal-${label}`);
       prepareHistory({ ...options, requirements, inference, terminal, run });
@@ -40,12 +48,25 @@ test("cold and warm history keep all requested refs; a new set fetches only miss
         git(["-C", inference, "show", `${revision}:source`]);
       }
     }
-    prepare("cold"); assert.equal(fetches, 3);
-    prepare("warm"); assert.equal(fetches, 3, "valid cache must do no network fetch");
+    prepare("cold"); assert.equal(fetches, 1, "fetch all missing exact refs in one operation");
+    prepare("warm"); assert.equal(fetches, 1, "valid cache must do no network fetch");
     const expanded = { ...options.requirements, revisions: [...revisions] };
-    prepare("expanded", expanded); assert.equal(fetches, 4);
+    prepare("expanded", expanded); assert.equal(fetches, 2);
     // A stale/wrong ref cannot be trusted just because the cache key matched.
     git(["-C", cache, "update-ref", `refs/ci-history/${revisions[0]}`, revisions[1]]);
-    prepare("repaired", expanded); assert.equal(fetches, 5);
+    prepare("repaired", expanded); assert.equal(fetches, 3);
+    const housekeeping = readFileSync(trace, "utf8").trim().split("\n").map((line) => JSON.parse(line))
+      .filter((event) => event.event === "child_start" && event.argv.some((arg) => arg === "maintenance" || arg === "gc"));
+    assert.deepEqual(housekeeping, [], "history preparation must not launch a shallow-file maintenance writer");
+    // Positive control: the trace must detect Git's actual default post-fetch maintenance. Keep
+    // its GC threshold disabled so this control has no detached process to race fixture cleanup.
+    const control = path.join(root, "control.git"), controlTrace = path.join(root, "control-trace.jsonl");
+    git(["init", "--bare", "-q", control]);
+    execFileSync("git", ["-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0", "-c", "maintenance.auto=true", "-C", control,
+      "fetch", "--no-tags", "--depth=2", options.origin, revisions[3]],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, GIT_TRACE2_EVENT: controlTrace } });
+    const controlChildren = readFileSync(controlTrace, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(controlChildren.some((event) => event.event === "child_start" && event.argv.some((arg) => arg === "maintenance" || arg === "gc")),
+      "the real Git trace control must observe default post-fetch housekeeping");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

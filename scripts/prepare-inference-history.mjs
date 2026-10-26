@@ -27,10 +27,18 @@ export function prepareHistory({ requirements, cache, inference, terminal, origi
   if (git(["-C", cache, "rev-parse", "--is-bare-repository"]) !== "true") throw new Error("history cache must be a bare repository");
   // Never execute hooks or resolve a URL/config inherited from an older cache entry.
   const cachedGit = (args) => git(["-c", "core.hooksPath=/dev/null", "-c", "transfer.fsckObjects=true", "-C", cache, ...args]);
+  const missing = requirements.revisions.filter((revision) => {
+    try { return cachedGit(["rev-parse", "--verify", `refs/ci-history/${revision}^{commit}`]) !== revision; }
+    catch { return true; }
+  });
+  if (missing.length) {
+    // Each fetch may start detached auto-GC, whose shallow pruning can race the next fetch's
+    // shallow-file stat check (Git 2.55). One atomic fetch owns all boundary/ref updates; disable
+    // its automatic maintenance so no background writer races verification or checkout creation.
+    cachedGit(["fetch", "--no-tags", "--no-auto-maintenance", "--atomic", "--depth=2", origin,
+      ...missing.map((revision) => `+${revision}:refs/ci-history/${revision}`)]);
+  }
   for (const revision of requirements.revisions) {
-    let present = false;
-    try { present = cachedGit(["rev-parse", "--verify", `refs/ci-history/${revision}^{commit}`]) === revision; } catch { /* cache miss */ }
-    if (!present) cachedGit(["fetch", "--no-tags", "--depth=2", origin, `+${revision}:refs/ci-history/${revision}`]);
     if (cachedGit(["rev-parse", "--verify", `refs/ci-history/${revision}^{commit}`]) !== revision) throw new Error(`history ref mismatch: ${revision}`);
     cachedGit(["cat-file", "-e", `${revision}^{tree}`]);
   }
