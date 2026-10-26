@@ -40,7 +40,7 @@ export function prepareHistory({ requirements, cache, inference, terminal, origi
     // clone --shared cannot preserve arbitrary retained refs from a shallow bare source. Create
     // a clean local checkout explicitly, sharing only its object database and shallow boundaries.
     git(["init", "-q", destination]);
-    writeFileSync(path.join(destination, ".git/objects/info/alternates"), `${path.join(cache, "objects")}\n`);
+    writeFileSync(path.join(destination, ".git/objects/info/alternates"), `${path.resolve(cache, "objects").replaceAll("\\", "/")}\n`);
     if (existsSync(path.join(cache, "shallow"))) copyFileSync(path.join(cache, "shallow"), path.join(destination, ".git/shallow"));
     for (const required of requirements.revisions) git(["-C", destination, "update-ref", `refs/ci-history/${required}`, required]);
     git(["-c", "core.hooksPath=/dev/null", "-C", destination, "checkout", "--detach", revision]);

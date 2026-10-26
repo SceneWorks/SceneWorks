@@ -3,6 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { historyKey, historyRequirements, prepareHistory } from "./prepare-inference-history.mjs";
 
@@ -26,7 +27,7 @@ test("cold and warm history keep all requested refs; a new set fetches only miss
       writeFileSync(path.join(origin, "source"), value); git(["-C", origin, "add", "source"]); git(["-C", origin, "commit", "-qm", value]); revisions.push(git(["-C", origin, "rev-parse", "HEAD"]));
     }
     const cache = path.join(root, "cache.git");
-    const options = { cache, origin: `file://${origin}`, requirements: { pin: revisions[3], terminal: revisions[1], revisions: [revisions[0], revisions[1], revisions[3]] } };
+    const options = { cache, origin: pathToFileURL(origin).href, requirements: { pin: revisions[3], terminal: revisions[1], revisions: [revisions[0], revisions[1], revisions[3]] } };
     let fetches = 0;
     const run = (command, args, rest) => { if (args.includes("fetch")) fetches++; return execFileSync(command, args, rest); };
     function prepare(label, requirements = options.requirements) {
