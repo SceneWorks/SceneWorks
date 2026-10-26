@@ -67,6 +67,7 @@ export function compareRgb(reference, selected) {
 
 export async function main(argv = process.argv.slice(2)) {
   const args = parseArgs(argv);
+  if (args.dryRun || args.list) throw new Error("endpoint capture is explicit execution only; use measure-memory-catalog.mjs --dry-run or --list for metadata");
   if (!args.adapter || !args.inferenceRepo || !args.workDir) throw new Error("--adapter, --inference-repo and --work-dir are required");
   if (args.backend && args.backend !== "candle") throw new Error("SDXL endpoints are CUDA only");
   if (process.env.CUDA_VISIBLE_DEVICES !== "1" || process.env.SCENEWORKS_GPU_ID !== "1") {
