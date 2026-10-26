@@ -63,11 +63,11 @@ export async function executeProbe(root,payload,env=process.env){
 // Separate fixed diagnostic: reuse already encoded upstream inputs, never execute Python/models upstream.
 export const ENCODING_STAGED='/Users/michael/.codex/epic-runs/sc-26752/encoding-only-prep/payload';
 export const ENCODING_SHA='3004cb310e3e3e98de8ea0901ca848f2b67c81f9aebb7aff6ca974e19230ffd2';
-export const ENCODING_PRECISION_STAGED='/Users/michael/.codex/epic-runs/sc-26752/encoding-precision-prep/payload';
+export const ENCODING_PRECISION_STAGED='/Users/michael/.codex/epic-runs/sc-26752/resume-20261026/encoding-gated-norm-prep/candidate-main-78100568/payload';
 // Reviewed protected native merge and its separately sealed cfg(test) payload.
-export const ENCODING_PRECISION_PIN='7275f7c672eecabeba9342e99897ef484e992e14';
-export const ENCODING_PRECISION_SHA='f819d901ce8caa815dc9bdd06cc781dee881f30ba1672a8f91cd4f3ab910cd5f';
-const ENCODING_WARM='/Users/michael/actions-runner-sceneworks/_work/SceneWorks/moss-sc-26752/moss-first-step-40195966134-1/target';
+export const ENCODING_PRECISION_PIN='78100568d8e5b9fb5b199872dc57cb28f5b87340';
+export const ENCODING_PRECISION_SHA='0dda6b031fa20f73059094d703e022620a9514cd14d828a347252d2309e30b9f';
+const ENCODING_WARM='/Users/michael/actions-runner-sceneworks/_work/SceneWorks/moss-sc-26752/moss-encoding-40327571347-1/target';
 const ENCODING_HUB=BASE+'/moss-execute-40198829729-1-mlx/hf/hub';
 const INPUT_SHA='47b07acccc6491dbc1f4c5c3135fe37d4d65f4afb496d28dafd8ca63a08cd47d';
 const UPSTREAM_SHA='ade384909936c7b55326ce3bf7a804e827c9b6b1ffbdc9232e7e36b5016b9b57';

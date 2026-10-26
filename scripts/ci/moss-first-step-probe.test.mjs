@@ -43,8 +43,8 @@ test('encoding envelope is fixed, source-bound and artifact-only',()=>{
 test('precision encoding is frozen to the reviewed native merge and sealed payload',()=>{
  const upload={phase:'upload-encoding-precision',artifact_id:null,artifact_run_id:null},execute={phase:'execute-encoding-precision',artifact_id:'123456',artifact_run_id:'123457'};
  assert.deepEqual(encodingPrecisionProfile(),{pin:ENCODING_PRECISION_PIN,sha:ENCODING_PRECISION_SHA,kind:'sc-26752-normal-encoding-precision/v1',staged:ENCODING_PRECISION_STAGED,precision:true});
- assert.equal(ENCODING_PRECISION_PIN,'7275f7c672eecabeba9342e99897ef484e992e14');
- assert.equal(ENCODING_PRECISION_SHA,'f819d901ce8caa815dc9bdd06cc781dee881f30ba1672a8f91cd4f3ab910cd5f');
+ assert.equal(ENCODING_PRECISION_PIN,'78100568d8e5b9fb5b199872dc57cb28f5b87340');
+ assert.equal(ENCODING_PRECISION_SHA,'0dda6b031fa20f73059094d703e022620a9514cd14d828a347252d2309e30b9f');
  assert.deepEqual(encodingEnvelope(JSON.stringify(upload),ref,ref,'mlx'),upload);
  assert.deepEqual(encodingEnvelope(JSON.stringify(execute),ref,ref,'mlx'),execute);
  const profile=encodingPrecisionProfile('b'.repeat(40),'c'.repeat(64));

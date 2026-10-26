@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference main 7275f7c6 for epic sc-26752: 786 provenance candidates and 117 production-Rust crate prefixes from the current rescan. Protected PR1348 adds the independently reviewed MOSS-only text-encoder precision profile and its CPU fixtures, with F32 intermediate norm storage included in admission. Shared model defaults remain unchanged. Earlier protected PR1347 contains the MOSS Candle component drop-before-synchronization correction and its host regression tests. Provider and anchor closures, provenance candidates, crate coverage and audit digest are derived from this pin; existing source-area dispositions and advisory licensing work remain preserved. Historical injected-conditioning numerical receipts retain their original revisions and do not establish normal text-encoding parity for the new profile. New runtime quality, timing and memory evidence is gathered separately. MOSS edit-adapter weights still have no declared license; linked code and parent-weight licenses do not establish adapter-weight terms. This summary is a provenance review, not a claim that existing advisory compliance items are closed.",
-  "inferenceRevision": "7275f7c672eecabeba9342e99897ef484e992e14",
-  "auditDigest": "b85426a2591976471cf7107c96da0f0e5bdede68b1296aabd2481c67add4be66",
+  "_comment": "Audit inventory reviewed at inference main 78100568 for epic sc-26752: 786 provenance candidates and 117 production-Rust crate prefixes from the current rescan. PR1350 adds the independently reviewed MOSS-only gated normalization, depthwise-convolution accumulation and fused-SiLU precision boundaries, with discriminating CPU fixtures and passing required native CI. Standard Native arithmetic and cache traces remain unchanged. The earlier PR1348 precision profile and PR1347 Candle component-release correction remain included. Provider and anchor closures, provenance candidates, crate coverage and audit digest are derived from this pin; existing source-area dispositions and advisory licensing work remain preserved. Historical injected-conditioning numerical receipts retain their original revisions and do not establish normal text-encoding parity for this profile. New tensor, runtime quality, timing and memory evidence is gathered separately; CPU/source correctness is not visual acceptance. MOSS edit-adapter weights still have no declared license; linked code and parent-weight licenses do not establish adapter-weight terms. This summary is a provenance review and does not close existing advisory compliance items.",
+  "inferenceRevision": "78100568d8e5b9fb5b199872dc57cb28f5b87340",
+  "auditDigest": "e2a2580d1510962ae449a5750d545b144ab843e3ff44705a46f6e38eaa07dec1",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "7275f7c672eecabeba9342e99897ef484e992e14",
+    "revision": "78100568d8e5b9fb5b199872dc57cb28f5b87340",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 786,
-    "populationSha256": "51ae2f0c3c6184716e46238d2d64a5b491d34de72262e6af7a5b3f49470e6b1a"
+    "populationSha256": "7a5b746495d0561b9bfb97c074b3917e3350660e3885fab07ab03875b52627fb"
   },
   "portedSourceAreas": [
     {
@@ -994,7 +994,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "7275f7c672eecabeba9342e99897ef484e992e14",
+    "revision": "78100568d8e5b9fb5b199872dc57cb28f5b87340",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 117,
     "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"
