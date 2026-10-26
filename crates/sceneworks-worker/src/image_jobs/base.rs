@@ -4091,6 +4091,234 @@ pub(super) fn candle_certified_load_spec(
         })
 }
 
+/// Bind the endpoint price to the complete ordinary SDXL assembly, including the shared VAE and
+/// tokenizers actually opened by Candle. ArtifactSeal's existing stat-identity memo avoids repeated
+/// multi-GB hashing; these exact tokens then participate in cache identity and guard registry load.
+/// Different base-tier members or consumed component bytes lose endpoint authority. Unused files in
+/// a shared tokenizer/VAE snapshot do not affect the price of the same loaded assembly.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn seal_sdxl_endpoint_load_spec(
+    spec: &mut LoadSpec,
+    expected: &[sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::EndpointArtifactFile],
+) -> WorkerResult<bool> {
+    use std::collections::BTreeMap;
+
+    const COMPONENTS: [(&str, &str); 3] = [
+        ("tokenizer_clip_l", "tokenizer.json"),
+        ("tokenizer_clip_bigg", "tokenizer.json"),
+        ("vae_fp16_fix", "diffusion_pytorch_model.safetensors"),
+    ];
+    // The measured assembly has only these four directory sources. Extra encoders, controls,
+    // adapters, or file-shaped imports cannot inherit the plain stock endpoint.
+    if !spec.file_source_paths().is_empty()
+        || spec.directory_source_paths().len() != 4
+        || spec.components.len() != COMPONENTS.len()
+        || COMPONENTS
+            .iter()
+            .any(|(id, _)| !spec.components.contains_key(*id))
+    {
+        return Ok(false);
+    }
+    let WeightsSource::Dir(base) = &spec.weights else {
+        return Ok(false);
+    };
+    let mut components = Vec::new();
+    for (id, file) in COMPONENTS {
+        let Some(WeightsSource::Dir(root)) = spec.components.get(id) else {
+            return Ok(false);
+        };
+        components.push((format!("components/{id}/{file}"), root.join(file)));
+    }
+
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        prefix: &str,
+        files: &mut BTreeMap<String, PathBuf>,
+    ) -> WorkerResult<()> {
+        for entry in std::fs::read_dir(directory).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "SDXL endpoint inventory cannot read {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!("SDXL endpoint inventory failed: {error}"))
+                })?
+                .path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "SDXL endpoint member cannot be inspected: {error}"
+                ))
+            })?;
+            if metadata.is_dir() {
+                visit(root, &path, prefix, files)?;
+                continue;
+            }
+            // HF snapshot links to blob files are normal; directory links are not inventory roots.
+            if !std::fs::metadata(&path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "SDXL endpoint member target cannot be inspected: {error}"
+                    ))
+                })?
+                .is_file()
+            {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "SDXL endpoint member must be a file: {}",
+                    path.display()
+                )));
+            }
+            let relative = path
+                .strip_prefix(root)
+                .expect("inventory child stays below root");
+            let relative = relative
+                .iter()
+                .map(|part| part.to_str())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "SDXL endpoint member has a non-UTF-8 path".to_owned(),
+                    )
+                })?
+                .join("/");
+            files.insert(format!("{prefix}/{relative}"), path);
+        }
+        Ok(())
+    }
+
+    let mut actual = BTreeMap::new();
+    let base = std::path::absolute(base).map_err(|error| {
+        WorkerError::InvalidPayload(format!("SDXL endpoint root cannot be absolutized: {error}"))
+    })?;
+    visit(&base, &base, "base", &mut actual)?;
+    // These are the exact joins used by SDXL's resolve_tokenizer_file/resolve_vae_file. The same HF
+    // shared snapshot may contain additional CLIP weights installed for an unrelated model.
+    for (name, path) in components {
+        if !path.is_file() {
+            return Ok(false);
+        }
+        actual.insert(name, path);
+    }
+    if expected.is_empty()
+        || expected.len() != actual.len()
+        || expected.iter().any(|file| !actual.contains_key(&file.path))
+    {
+        return Ok(false);
+    }
+    let mut pins = Vec::with_capacity(expected.len());
+    for file in expected {
+        let pin = gen_core::PinnedWeightsFile::pin(&actual[&file.path])
+            .map_err(|error| crate::classify_engine_error("SDXL endpoint load pin", error))?;
+        let digest = pin
+            .content_sha256()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if pin.target_fingerprint().size != file.bytes || digest != file.sha256 {
+            return Ok(false);
+        }
+        pins.push(pin);
+    }
+    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "SDXL endpoint load preparation")?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod sdxl_endpoint_inventory_tests {
+    use super::*;
+    use sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::EndpointArtifactFile;
+    use sha2::{Digest, Sha256};
+
+    fn fixture() -> (tempfile::TempDir, LoadSpec, Vec<EndpointArtifactFile>) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for path in [
+            "base/unet/model.safetensors",
+            "base/vae/model.safetensors",
+            "components/tokenizer_clip_l/tokenizer.json",
+            "components/tokenizer_clip_bigg/tokenizer.json",
+            "components/vae_fp16_fix/diffusion_pytorch_model.safetensors",
+        ] {
+            let file = temp.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"fixture-a").unwrap();
+            files.push(EndpointArtifactFile {
+                path: path.to_owned(),
+                bytes: 9,
+                sha256: format!("{:x}", Sha256::digest(b"fixture-a")),
+            });
+        }
+        let mut spec = LoadSpec::new(WeightsSource::Dir(temp.path().join("base")));
+        for id in ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"] {
+            spec = spec.with_component(
+                id,
+                WeightsSource::Dir(temp.path().join("components").join(id)),
+            );
+        }
+        (temp, spec, files)
+    }
+
+    // CI_IMPACT: tiny filesystem fixtures and SHA-256 only; no model, learned layer, or device.
+    #[test]
+    fn sdxl_endpoint_inventory_pins_the_actual_shared_vae_and_both_tokenizers() {
+        let (_temp, mut spec, expected) = fixture();
+        assert!(seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        assert_eq!(spec.prepared_file_pins().len(), expected.len());
+        spec.validate_prepared_file_pins().unwrap();
+        let shared_vae = match &spec.components["vae_fp16_fix"] {
+            WeightsSource::Dir(root) => root.join("diffusion_pytorch_model.safetensors"),
+            _ => unreachable!(),
+        };
+        assert!(spec.prepared_file_pins().get(&shared_vae).is_some());
+        std::fs::write(shared_vae, b"fixture-b").unwrap();
+        assert!(spec.validate_prepared_file_pins().is_err());
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_rejects_changed_missing_and_extra_members() {
+        // Equal-size changes in every source must lose the measured price, including shared VAE
+        // changes which a tier-root-only inventory would miss.
+        for index in 0..5 {
+            let (temp, mut spec, expected) = fixture();
+            std::fs::write(temp.path().join(&expected[index].path), b"fixture-b").unwrap();
+            assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+            assert!(!spec.prepared_file_pins().is_prepared());
+        }
+        let (temp, mut spec, expected) = fixture();
+        std::fs::remove_file(temp.path().join(&expected[0].path)).unwrap();
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+
+        let (temp, mut spec, expected) = fixture();
+        std::fs::write(temp.path().join("base/added.safetensors"), b"fixture-a").unwrap();
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+
+        let (temp, spec, expected) = fixture();
+        let mut spec =
+            spec.with_component("unexpected", WeightsSource::Dir(temp.path().join("base")));
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_ignores_unused_shared_snapshot_members() {
+        let (temp, mut spec, expected) = fixture();
+        std::fs::write(
+            temp.path()
+                .join("components/tokenizer_clip_l/model.safetensors"),
+            b"unused",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("components/vae_fp16_fix/config.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        assert_eq!(spec.prepared_file_pins().len(), expected.len());
+    }
+}
+
 /// Seal every file recursively-inventoried receipt provider can read before selector evaluation.
 /// The same finalized `LoadSpec` reaches the generator cache, so cold/warm execution cannot
 /// silently re-resolve a pathname after admission.
@@ -13331,7 +13559,7 @@ async fn generate_candle_stream_using(
                             let spec =
                                 attach_manifest_text_encoder(spec, engine_id, request, settings)?
                                     .into_load_spec();
-                            let spec = apply_declared_candle_image_load_shape(
+                            let mut spec = apply_declared_candle_image_load_shape(
                                 engine_id,
                                 Some(candidate),
                                 &request.mode,
@@ -13346,6 +13574,13 @@ async fn generate_candle_stream_using(
                                 &request.model_manifest_entry,
                                 candidate,
                             );
+                            let candidate_endpoints = match sdxl_endpoints {
+                                Some(endpoints) if certified && candidate == "q4" => {
+                                    seal_sdxl_endpoint_load_spec(&mut spec, &endpoints.artifact.files)?
+                                        .then_some(endpoints)
+                                }
+                                _ => None,
+                            };
                             let overlay_bytes = candidate_adapter_bytes.saturating_add(
                                 lane_controls::declared_activation_overlay_bytes(
                                     request,
@@ -13388,7 +13623,7 @@ async fn generate_candle_stream_using(
                                     gen_core::MemoryCacheState::Cold
                                 },
                                 None,
-                                sdxl_endpoints,
+                                candidate_endpoints,
                             )?
                         } else {
                             None
@@ -13734,6 +13969,13 @@ async fn generate_candle_stream_using(
     );
     seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
+    let sdxl_endpoints = match sdxl_endpoints {
+        Some(endpoints) if artifact_is_certified && shared_tier == "q4" => {
+            seal_sdxl_endpoint_load_spec(&mut shared_contract_spec, &endpoints.artifact.files)?
+                .then_some(endpoints)
+        }
+        _ => None,
+    };
     // Epic 25899: the provider's prefix KV cache, priced from the linked provider for THIS request
     // (`None` for every provider without one — its admission is unchanged). The Candle surcharge
     // follows the build's production device width, not the tier.
