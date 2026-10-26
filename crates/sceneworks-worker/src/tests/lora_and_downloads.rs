@@ -3442,7 +3442,17 @@ fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_succe
                     assert!(!published["downloads"].as_array().unwrap().iter().any(|row| row["componentId"] == "import_transformer_config"));
                     let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
                     let resolved = store.resolve(published["importPlan"]["checkpointId"].as_str().unwrap()).unwrap();
-                    assert_eq!(resolved.plan.context["transformerConfig"]["provenance"]["revision"], config_row["revision"]);
+                    // This retry source embeds h3_config: the pinned fallback must not replace
+                    // its exact source-owned config, digest, or provenance. Weight-only fallback
+                    // is covered separately by the public-transport config-binding test.
+                    assert_eq!(
+                        resolved.plan.context["transformerConfig"],
+                        sceneworks_core::minimax_h3_import::config_binding(
+                            crate::minimax_h3_import_fixture::h3_fixture_config(),
+                            json!({"kind":"source"}),
+                        ),
+                        "retry must retain the exact embedded source configuration, not selected-base authority"
+                    );
                     assert_eq!(std::fs::read(&config_cache).unwrap(), config_bytes, "repair never changes the pinned configuration source");
                     assert_eq!(
                         std::fs::read(fixture.install_dir.join("community.safetensors")).unwrap(),
