@@ -492,6 +492,10 @@ mod tests {
             "worker dispatch and module wiring",
         ),
         (
+            "crates/sceneworks-worker/src/minimax_h3_import_fixture.rs",
+            "synthetic H3 import fixtures behind cfg(test) or test-support, not a production model loader",
+        ),
+        (
             "crates/sceneworks-worker/src/model_artifact_inventory.rs",
             "this self-auditing inventory",
         ),
