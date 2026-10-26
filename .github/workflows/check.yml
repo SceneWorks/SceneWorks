@@ -176,10 +176,9 @@ jobs:
         # producing 50 frames instead of 48. Without a binary here those tests returned early and
         # reported `ok`, so nothing in CI had ever exercised them — the runner image was the only
         # thing deciding. `SCENEWORKS_REQUIRE_FFMPEG` (job env above) makes that state fail loudly.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
-          ffmpeg -version | head -1
+        # Reuse only a codec-probed binary; otherwise use signed official Ubuntu sources
+        # with bounded downloads, instead of the runner's potentially slow Azure mirror.
+        run: bash scripts/ensure-ci-ffmpeg.sh
       - name: Install contract test dependencies
         # pillow / numpy / opencv were only needed by the retired Python worker's
         # adapter tests, deleted in sc-8863; the surviving suite (Rust-API
