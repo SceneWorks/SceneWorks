@@ -8444,6 +8444,22 @@ fn run(request: &Value) -> Result<Value, String> {
     Ok(fragment)
 }
 
+fn inspect_sdxl_output(request: &Value) -> Result<Value, String> {
+    let input = request
+        .get("inputPath")
+        .and_then(Value::as_str)
+        .ok_or("PNG inputPath is required")?;
+    let rgb = image::open(input)
+        .map_err(|error| format!("decode served SDXL PNG: {error}"))?
+        .into_rgb8();
+    let output = Image {
+        width: rgb.width(),
+        height: rgb.height(),
+        pixels: rgb.into_raw(),
+    };
+    Ok(json!({ "output": retain_sdxl_endpoint_output(request, &output)? }))
+}
+
 fn probe_sdxl_endpoint() -> Result<Value, String> {
     let mut response = probe()?;
     let uuid = NvidiaSmi::resolve()?.query("uuid")?;
@@ -8621,6 +8637,7 @@ fn main() {
         "probe" => probe(),
         "sdxl_endpoint" => run_sdxl_endpoint(&request),
         "sdxl_endpoint_probe" => probe_sdxl_endpoint(),
+        "sdxl_inspect_output" => inspect_sdxl_output(&request),
         "run" => run(&request),
         "run_batch" => run_five_rung_batch(&request),
         // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.

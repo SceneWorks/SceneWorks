@@ -16,5 +16,9 @@ args=(--backend candle --adapter "$ADAPTER" --inference-repo "$INFERENCE_REPO"
 while IFS= read -r root; do
   [[ -n "$root" ]] && args+=(--hf-cache "$root")
 done < <(hf_cache_roots)
-[[ "${DOWNLOAD_MISSING:-false}" == true ]] && args+=(--download-missing)
+if [[ "${MEMORY_CAMPAIGN_PROFILE:-}" == "sdxl-cuda-admitted-replay" ]]; then
+  args+=(--admitted-replay)
+else
+  [[ "${DOWNLOAD_MISSING:-false}" == true ]] && args+=(--download-missing)
+fi
 node scripts/measure-sdxl-cuda-endpoints.mjs "${args[@]}"

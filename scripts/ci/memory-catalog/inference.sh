@@ -86,7 +86,7 @@ fi
 # The pin first, then every revision the packaged anchors cite. `--anchor-revisions` reads only
 # checked-in JSON, so it runs against THIS checkout and needs no clone of its own.
 WANTED=("$PIN")
-if [[ "${MEMORY_CAMPAIGN_PROFILE:-catalog}" == "sdxl-cuda-endpoints" ]]; then
+if [[ "${MEMORY_CAMPAIGN_PROFILE:-catalog}" == "sdxl-cuda-endpoints" || "${MEMORY_CAMPAIGN_PROFILE:-catalog}" == "sdxl-cuda-admitted-replay" ]]; then
   echo "SDXL endpoint capture needs the current pin only; no historical anchor ingestion"
 else
   while IFS= read -r rev; do

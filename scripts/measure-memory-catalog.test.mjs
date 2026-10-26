@@ -6169,7 +6169,7 @@ test("HF_TOKEN reaches only catalog walks and the bounded SDXL endpoint step tha
       assert.match(endpoint, /^        env:\n          HF_TOKEN: \$\{\{ secrets\.HF_TOKEN \}\}$/m);
     } else assert.equal(endpoint, undefined);
     assert.equal((job.match(/secrets\.HF_TOKEN/g) ?? []).length, name === "candle" ? 2 : 1, `${name} has no other token exposure`);
-    assert.match(job, /      - name: Plan the walk\n(?:        if: \$\{\{ inputs\.profile != 'sdxl-cuda-endpoints' \}\}\n)?        run: bash scripts\/ci\/memory-catalog\/plan\.sh/);
+    assert.match(job, /      - name: Plan the walk\n(?:        if: \$\{\{ !startsWith\(inputs\.profile, 'sdxl-cuda-'\) \}\}\n)?        run: bash scripts\/ci\/memory-catalog\/plan\.sh/);
   }
 });
 

@@ -3,8 +3,11 @@
 // and calibration capture protocol. Dispatch-only; never imported by a normal-CI inference test.
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { readFile, writeFile, mkdir, realpath } from "node:fs/promises";
+import { readFile, writeFile, mkdir, realpath, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
+import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { ROOT, parseArgs, planRun, providerCommand, run } from "./measure-memory-catalog.mjs";
 import { capturePlannedCase, logicalCaseId, planAnchor } from "./memory-calibration-harness.mjs";
 import { hashArtifactInventory, artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
@@ -116,8 +119,185 @@ export function compareRgb(reference, selected) {
     changedChannels: changed, identical: changed === 0 };
 }
 
+export function admittedReplayRequest(projectId) {
+  // Only the installed precision is explicit. API/worker resolve their ordinary sampler/settings;
+  // the request contains no strategy, memory recipe, model path or manifest override.
+  return { projectId, model: "sdxl", mode: "text_to_image", prompt: "a photorealistic red apple on a wooden table, studio lighting",
+    width: 1024, height: 1024, count: 1, seed: 16402, loras: [], advanced: { mlxQuantize: 4 } };
+}
+
+export function assertAdmittedReplaySelection(selection) {
+  const parameters = selection?.parameters;
+  if (selection?.backend !== "candle" || selection.route !== "sdxl" || selection.actualTier !== "q4"
+      || selection.mode !== "text_to_image" || selection.strategy !== "bounded_attention"
+      || selection.basis !== "measured_endpoint" || selection.geometry?.width !== 1024
+      || selection.geometry?.height !== 1024 || selection.geometry?.batch !== 1
+      || parameters?.stageResidency !== true || parameters.decodeTileEdge !== 512
+      || parameters.decodeOverlap !== 64 || parameters.attentionChunkSize !== 67_108_864
+      || !Number.isSafeInteger(selection.predictedPeakBytes) || selection.predictedPeakBytes <= 0
+      || !Number.isFinite(selection.reserveGb) || selection.reserveGb <= 0
+      || !Number.isFinite(selection.availableGb) || selection.availableGb > 6) {
+    throw new Error("ordinary worker did not admit the measured SDXL q4 optimized recipe under the guarded six-GiB budget");
+  }
+}
+
+export function admittedReplayEnv(env, { state, hub, workerId, port, parentPid }) {
+  const child = Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith("SCENEWORKS_")
+    && !/TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/.test(key)));
+  return { ...child, CUDA_VISIBLE_DEVICES: "1", SCENEWORKS_GPU_ID: "1", SCENEWORKS_WORKER_CHILD: "1",
+    SCENEWORKS_PARENT_PID: String(parentPid), SCENEWORKS_WORKER_ID: workerId,
+    SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"),
+    SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"),
+    SCENEWORKS_CREDENTIALS_DIR: path.join(state, "credentials"), SCENEWORKS_API_HOST: "127.0.0.1",
+    SCENEWORKS_API_PORT: String(port), SCENEWORKS_API_URL: `http://127.0.0.1:${port}`,
+    SCENEWORKS_TRUST_LOOPBACK: "1", SCENEWORKS_POLL_SECONDS: "1", SCENEWORKS_HEARTBEAT_SECONDS: "1",
+    SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS: "30", SCENEWORKS_BACKEND_MLX_ENABLED: "false",
+    SCENEWORKS_BACKEND_CANDLE_ENABLED: "true", SCENEWORKS_LOG_FORMAT: "json",
+    SCENEWORKS_CUDA_VRAM_CAP_GB: "6", HF_HOME: path.dirname(hub), HF_HUB_CACHE: hub,
+    HUGGINGFACE_HUB_CACHE: hub, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
+}
+
+async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, row }) {
+  if (process.platform !== "win32") throw new Error("admitted replay requires the native Windows CUDA lane");
+  const apiBinary = process.env.SDXL_REPLAY_API;
+  if (!apiBinary || !path.isAbsolute(apiBinary)) throw new Error("SDXL_REPLAY_API must name the built native API/worker executable");
+  const configBytes = await readFile(path.join(ROOT, "config/sdxl-cuda-memory-endpoints.json"));
+  const packageConfig = JSON.parse(configBytes);
+  const summarySource = packageConfig.pair?.summary;
+  if (!summarySource?.path?.startsWith("docs/calibration/") || summarySource.path.includes("..")) throw new Error("replay requires the packaged measured endpoint pair");
+  const summaryBytes = await readFile(path.join(ROOT, summarySource.path));
+  if (createHash("sha256").update(summaryBytes).digest("hex") !== summarySource.sha256) throw new Error("packaged endpoint summary digest mismatch");
+  const captured = JSON.parse(summaryBytes);
+  if (captured.inferencePin !== pin || captured.artifactInventory?.sha256 !== inventory.sha256) throw new Error("replay source pin or actual assembly differs from the packaged measurement");
+  const hub = path.dirname(path.dirname(path.dirname(path.dirname(row.tierRoot))));
+  for (const key of ["SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L", "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG", "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX"]) {
+    if (path.dirname(path.dirname(path.dirname(row.env[key]))) !== hub) throw new Error("ordinary worker replay requires all staged inputs in the same existing HF hub");
+  }
+  const state = path.join(workDir, "owned-app-state"); await mkdir(state, { recursive: true });
+  const port = await new Promise((resolve, reject) => { const server = createServer(); server.once("error", reject); server.listen(0, "127.0.0.1", () => { const value = server.address().port; server.close((error) => error ? reject(error) : resolve(value)); }); });
+  const workerId = `sdxl-replay-${process.env.GITHUB_RUN_ID ?? process.pid}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`;
+  const hashFile = async (file) => { const digest = createHash("sha256"); for await (const bytes of createReadStream(file)) digest.update(bytes); return digest.digest("hex"); };
+  const receipt = { schemaVersion: 1, profile: "sdxl-cuda-admitted-replay", status: "running", inferencePin: pin,
+    apiBinary: { path: apiBinary, sha256: await hashFile(apiBinary) },
+    adapterBinary: { path: command[0], sha256: await hashFile(command[0]) },
+    sourceRevision: (await run("git", ["rev-parse", "HEAD"])).stdout.trim(),
+    packagedEndpointSummary: summarySource, artifactInventory: inventory, workerId,
+    guardedAvailableGiB: 6, physicalEightGiBDeviceValidated: false,
+    budgetSemantics: "SCENEWORKS_CUDA_VRAM_CAP_GB=6 caps available and total to six GiB on a larger physical GPU; this is not exact eight-total/six-free emulation",
+    telemetry: "sampled physical-GPU1 memory.used growth above a stable pre-request baseline; not a per-process allocator peak", cleanup: [] };
+  const save = () => writeFile(path.join(workDir, "sdxl-cuda-admitted-replay.json"), JSON.stringify(receipt, null, 2) + "\n");
+  const handles = [], children = []; let api, worker, sentinel, jobId, sampling = false, sampler;
+  let interrupted = null; const abort = () => { interrupted = new Error("owned admitted replay interrupted"); };
+  process.once("SIGTERM", abort); process.once("SIGINT", abort);
+  const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const exitWithin = async (child, ms) => {
+    let timer;
+    try { return await Promise.race([child.done, new Promise((resolve) => { timer = setTimeout(() => resolve(null), ms); })]); }
+    finally { clearTimeout(timer); }
+  };
+  const launch = async (program, programArgs, childEnv, name) => {
+    const handle = await open(path.join(workDir, `${name}.log`), "wx"); handles.push(handle);
+    const child = spawn(program, programArgs, { cwd: ROOT, env: childEnv, stdio: ["pipe", handle.fd, handle.fd] });
+    child.done = new Promise((resolve) => { child.once("error", (error) => { child.spawnError = error; resolve({ error: error.message }); }); child.once("exit", (code, signal) => resolve({ code, signal })); });
+    children.push(child); return child;
+  };
+  const alive = () => { if (interrupted) throw interrupted; for (const child of [api, worker].filter(Boolean)) if (child.spawnError || child.exitCode !== null || child.signalCode !== null) throw new Error("owned API/worker exited before replay completion"); };
+  const apiCall = async (method, route, body) => {
+    const response = await fetch(`http://127.0.0.1:${port}${route}`, { method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) throw new Error(`${method} ${route} returned ${response.status}: ${(await response.text()).slice(0, 1500)}`);
+    return response.json();
+  };
+  const wait = async (probe, seconds, label) => { const deadline = Date.now() + seconds * 1000; while (Date.now() < deadline) { alive(); const value = await probe(); if (value) return value; await delay(1000); } throw new Error(`${label} exceeded ${seconds}s`); };
+  const smi = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe");
+  const gpuSample = async () => {
+    const fields = (await run(smi, ["-i", "1", "--query-gpu=uuid,memory.used,memory.free,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"], { timeoutMs: 10_000 })).stdout.trim().split(",").map((value) => value.trim());
+    const numbers = fields.slice(1).map(Number);
+    if (fields[0] !== "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" || numbers.some((value) => !Number.isFinite(value) || value < 0)) throw new Error("physical GPU1 replay telemetry identity or counters unavailable");
+    return { at: new Date().toISOString(), uuid: fields[0], usedBytes: numbers[0] * 1024 ** 2, freeBytes: numbers[1] * 1024 ** 2, gpuUtilization: numbers[2], memoryUtilization: numbers[3] };
+  };
+  const stableBaseline = async () => { const samples = []; for (let index = 0; index < 5; index++) { const sample = await gpuSample(); if (sample.gpuUtilization || sample.memoryUtilization || sample.freeBytes < 16 * 1024 ** 3) throw new Error("physical GPU1 must be idle with real headroom for guarded replay"); samples.push(sample); await delay(200); } if (Math.max(...samples.map((item) => item.usedBytes)) - Math.min(...samples.map((item) => item.usedBytes)) > 64 * 1024 ** 2) throw new Error("GPU1 replay baseline is unstable"); return samples; };
+  try {
+    receipt.preflightBaseline = await stableBaseline(); await save();
+    // This task-owned sentinel supplies the API's existing desktop parent-death graceful shutdown.
+    sentinel = await launch(process.execPath, ["-e", 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));'], env, "api-parent");
+    const childEnv = admittedReplayEnv(env, { state, hub, workerId, port, parentPid: sentinel.pid });
+    api = await launch(apiBinary, [], { ...childEnv, SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu" }, "api");
+    receipt.health = await wait(async () => { try { const health = await apiCall("GET", "/api/v1/health"); return health.status === "ok" && health.readiness?.status === "ready" && health; } catch { return false; } }, 180, "API readiness");
+    worker = await launch(apiBinary, [], { ...childEnv, SCENEWORKS_WORKER_ONLY: "1" }, "worker");
+    receipt.worker = await wait(async () => { const value = (await apiCall("GET", "/api/v1/workers")).find((item) => item.id === workerId); return value?.status === "idle" && value; }, 180, "owned CUDA worker registration");
+    if (receipt.worker.gpuId !== "1" || !receipt.worker.capabilities?.includes("image_generate")) throw new Error("owned worker did not register GPU1 image generation");
+    receipt.modelLibrary = await apiCall("GET", "/api/v1/model-library");
+    const project = await apiCall("POST", "/api/v1/projects", { name: `SDXL issue 3197 admitted replay ${workerId}` }); receipt.project = project;
+    const projectPath = await realpath(project.path); const relativeProject = path.relative(await realpath(state), projectPath);
+    if (!relativeProject || relativeProject.startsWith("..") || path.isAbsolute(relativeProject)) throw new Error("API project escaped owned replay state");
+    receipt.request = admittedReplayRequest(project.id);
+    receipt.requestBaseline = await stableBaseline();
+    const baseline = Math.max(...receipt.requestBaseline.map((item) => item.usedBytes));
+    receipt.samples = []; let samplerError;
+    sampling = true; sampler = (async () => { try { while (sampling) { receipt.samples.push(await gpuSample()); await delay(200); } } catch (error) { samplerError = error; } })();
+    const accepted = await apiCall("POST", "/api/v1/image/jobs", receipt.request); jobId = accepted.id; receipt.acceptedJob = accepted; await save();
+    receipt.completedJob = await wait(async () => { const job = await apiCall("GET", `/api/v1/jobs/${jobId}`); if (["failed", "canceled"].includes(job.status)) throw new Error(`ordinary worker job ${job.status}: ${job.error ?? job.message}`); return job.status === "completed" && job; }, 3600, "ordinary admitted image render");
+    sampling = false; await sampler; if (samplerError) throw samplerError;
+    if (receipt.completedJob.workerId !== workerId || receipt.completedJob.backend !== "candle") throw new Error("completed image was not rendered by the owned CUDA worker");
+    const events = (await readFile(path.join(workDir, "worker.log"), "utf8")).split(/\r?\n/).flatMap((line) => { try { return [JSON.parse(line)]; } catch { return []; } });
+    const selections = events.filter((event) => event.event === "image_memory_strategy_selected" && event.route === "sdxl");
+    if (selections.length !== 1) throw new Error(`expected one real worker memory selection, saw ${selections.length}`);
+    receipt.selection = selections[0]; assertAdmittedReplaySelection(receipt.selection);
+    if (!receipt.samples.some((sample) => sample.gpuUtilization > 0)) throw new Error("no physical GPU1 activity was sampled during the actual render");
+    const peak = Math.max(...receipt.samples.map((sample) => sample.usedBytes));
+    const observed = Math.max(0, peak - baseline);
+    receipt.prediction = { predictedPeakBytes: receipt.selection.predictedPeakBytes, observedSampledGrowthBytes: observed,
+      rawDifferenceBytes: observed - receipt.selection.predictedPeakBytes, reserveBytes: Math.round(receipt.selection.reserveGb * 1024 ** 3),
+      baselineBytes: baseline, absoluteSampledPeakBytes: peak };
+    if (observed <= 0 || observed > receipt.prediction.predictedPeakBytes + receipt.prediction.reserveBytes) throw new Error("observed worker GPU growth exceeded the selected prediction plus its explicit reserve");
+    const writes = receipt.completedJob.result?.assetWrites ?? [];
+    const image = writes.find((item) => typeof item.mediaPath === "string" && item.mediaPath.endsWith(".png"));
+    if (writes.length !== 1 || !image) throw new Error("ordinary job did not publish exactly one PNG asset");
+    const sourcePath = path.resolve(projectPath, image.mediaPath); const relative = path.relative(projectPath, sourcePath);
+    if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("served image escaped owned project");
+    const response = await fetch(`http://127.0.0.1:${port}/api/v1/projects/${project.id}/files/${relative.split(path.sep).map(encodeURIComponent).join("/")}`, { signal: AbortSignal.timeout(30_000) });
+    if (!response.ok) throw new Error(`product PNG serving failed: ${response.status}`);
+    const served = Buffer.from(await response.arrayBuffer()); const outputPath = path.join(workDir, "replay.png"); await writeFile(outputPath, served);
+    const inspected = JSON.parse((await run(command[0], command.slice(1), { env, input: JSON.stringify({ action: "sdxl_inspect_output", inputPath: outputPath, outputPath,
+      planned: { target: { geometry: { width: 1024, height: 1024 } } } }), timeoutMs: 30_000 })).stdout);
+    receipt.output = { ...inspected.output, servedPngSha256: createHash("sha256").update(served).digest("hex"), servedPngBytes: served.length, asset: image, apiStatus: response.status };
+    await wait(async () => { const value = (await apiCall("GET", "/api/v1/workers")).find((item) => item.id === workerId); return value?.status === "idle" && value.currentJobId == null; }, 60, "worker drain");
+    receipt.status = "passed";
+  } catch (error) { receipt.status = "failed"; receipt.error = error.message; throw error; }
+  finally {
+    sampling = false; if (sampler) await sampler;
+    if (jobId && receipt.status !== "passed") await apiCall("POST", `/api/v1/jobs/${jobId}/cancel`, {}).catch(() => {});
+    for (const [name, child] of [["worker", worker], ["api-parent", sentinel], ["api", api]]) {
+      if (!child?.pid) continue;
+      child.stdin.end();
+      let result = await exitWithin(child, 40_000);
+      const natural = result !== null && !result.error && result.code === 0;
+      if (!natural) {
+        receipt.status = "failed"; receipt.error ??= `${name} failed natural cleanup`;
+        await run("taskkill", ["/PID", String(child.pid), "/T", "/F"], { timeoutMs: 10_000 }).catch(() => {});
+        result = await exitWithin(child, 10_000);
+      }
+      receipt.cleanup.push({ name, pid: child.pid, natural, result });
+    }
+    await Promise.all(handles.map((handle) => handle.close()));
+    try {
+      receipt.postExitBaseline = await stableBaseline();
+      const before = Math.max(...(receipt.preflightBaseline ?? []).map((sample) => sample.usedBytes));
+      const after = Math.max(...receipt.postExitBaseline.map((sample) => sample.usedBytes));
+      if (Number.isFinite(before) && after > before + 64 * 1024 ** 2) throw new Error("owned replay processes retained physical GPU1 residency after exit");
+    } catch (error) { receipt.status = "failed"; receipt.error ??= error.message; }
+    if ((await run("git", ["status", "--porcelain"])).stdout.trim()) { receipt.status = "failed"; receipt.error ??= "replay modified the source checkout"; }
+    receipt.finishedAt = new Date().toISOString(); await save();
+    process.removeListener("SIGTERM", abort); process.removeListener("SIGINT", abort);
+  }
+  if (receipt.status !== "passed") throw new Error(receipt.error ?? "replay cleanup failed");
+  process.stdout.write(JSON.stringify(receipt, null, 2) + "\n");
+}
+
+
 export async function main(argv = process.argv.slice(2)) {
-  const args = parseArgs(argv);
+  const admittedReplay = argv.includes("--admitted-replay");
+  const args = parseArgs(argv.filter((item) => item !== "--admitted-replay"));
   if (args.dryRun || args.list) throw new Error("endpoint capture is explicit execution only; use measure-memory-catalog.mjs --dry-run or --list for metadata");
   if (!args.adapter || !args.inferenceRepo || !args.workDir) throw new Error("--adapter, --inference-repo and --work-dir are required");
   if (args.backend && args.backend !== "candle") throw new Error("SDXL endpoints are CUDA only");
@@ -134,7 +314,7 @@ export async function main(argv = process.argv.slice(2)) {
   const pin = /INFERENCE_PIN: &str = "([a-f0-9]{40})"/.exec(await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8"))?.[1];
   const inferenceHead = (await run("git", ["rev-parse", "HEAD"], { cwd: args.inferenceRepo })).stdout.trim();
   if (pin !== inferenceHead) throw new Error(`inference checkout ${inferenceHead} differs from compiled adapter pin ${pin}`);
-  const { plan, rows } = await planRun({ ...args, backend: "candle", anchors: ["sdxl:q4:candle"], models: ["sdxl"], skipCurrent: false });
+  const { plan, rows } = await planRun({ ...args, ...(admittedReplay ? { campaign: `${args.campaign ?? "gi-3197"}-replay` } : {}), backend: "candle", anchors: ["sdxl:q4:candle"], models: ["sdxl"], skipCurrent: false });
   const row = rows[0];
   if (row?.status !== "runnable") throw new Error(`SDXL q4 cannot be captured: ${row?.status}: ${row?.reason}`);
   const inventory = await sdxlAssemblyInventory(row);
@@ -154,6 +334,10 @@ export async function main(argv = process.argv.slice(2)) {
     sampler: /const DEFAULT_SAMPLER: &str = "([^"]+)";/.exec(pipelineSource)?.[1],
   };
   if (resolvedDefaults.steps !== 30 || resolvedDefaults.guidance !== 7 || !resolvedDefaults.sampler) throw new Error("cannot bind SDXL provider defaults at the pin");
+  if (admittedReplay) {
+    await runAdmittedReplay({ args, workDir, env, pin, command, inventory, row });
+    return;
+  }
   const summary = { schemaVersion: 1, profile: "sdxl-cuda-endpoints", inferencePin: pin,
     artifactInventory: inventory, stagedArtifacts: row.env, resolvedDefaults, physicalEightGiBDeviceValidated: false,
     reserveBytes: 2 * 1024 ** 3, reserveIncludedInMeasuredPeaks: false,
