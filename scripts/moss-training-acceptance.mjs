@@ -310,7 +310,7 @@ export function remainingCaseMs(startedAt, now = Date.now()) {
 export async function executeCommand(root, args, log, limitMs, state, supervision) {
   const preparation=args[0]==='cargo'||args[0]==='rustc'||args[0]==='python3'||args.includes('--list');
   if(!preparation) return executeSupervised(root,args,log,limitMs,state,supervision);
-  const result=await (process.platform==='win32'?executeOwnedChild:executeCpuCommand)(root,args,log,limitMs,state);
+  const result=await (process.platform==='win32'?executeOwnedChild:executeCpuCommand)(root,args,log,limitMs,state,{holdPreparation:true});
   const c=state.cleanup;
   const released=Boolean(c)&&!state.unsafe&&!state.unsafeToRestore&&!(c.remaining?.length||c.unproven?.length||c.errors?.length);
   state.cleanup={...c,released};

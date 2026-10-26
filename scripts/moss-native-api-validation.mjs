@@ -252,12 +252,26 @@ export function planAuthenticatedCleanup(rows, identity, knownDescendants, rootA
 }
 
 export async function executeOwnedChild(root, args, log, limitMs, state, supervision = {}) {
-  const { query = queryWindowsProcesses, kill = killWindowsPid, spawnChild = spawn, sampleMs = 1000, graceMs = 10_000 } = supervision;
+  const { query = queryWindowsProcesses, kill = killWindowsPid, spawnChild = spawn, sampleMs = 1000, graceMs = 10_000, holdPreparation = false } = supervision;
   const { openSync, closeSync, writeSync } = await import("node:fs");
   const fd = openSync(log, "w");
   const started = performance.now();
-  const child = spawnChild(args[0], args.slice(1), { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  // Like the existing watchdog launch sentinel, preparation stays blocked until
+  // its persistent launcher has an authenticated identity. Fast version/list
+  // commands can then exit without racing the initial CIM census. Native model
+  // execution keeps the direct launch and its existing identity/RSS contract.
+  const child = holdPreparation
+    ? spawnChild(process.execPath, [fileURLToPath(import.meta.url), "--windows-preparation-sentinel", JSON.stringify(args)], { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true })
+    : spawnChild(args[0], args.slice(1), { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let closed = false, exit = null, failure = null, logOpen = true;
+  let preparationResult = null, releasedPreparation = false;
+  if (holdPreparation) child.on("message", (message) => {
+    if (preparationResult || message?.kind !== "preparation-complete" || !Number.isInteger(message.exit) || message.exit < 0 || message.exit > 255) {
+      failure ??= "invalid/duplicate preparation completion";
+      return;
+    }
+    preparationResult = message;
+  });
   const completion = new Promise((resolve) => {
     child.on("error", (error) => { failure ??= error.message; });
     child.on("close", (code, signal) => { closed = true; exit = code ?? (signal ? 1 : 0); resolve(); });
@@ -266,8 +280,9 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
   state.child = Number.isInteger(child.pid) ? child : null;
   let identity = null;
   try {
-    const row = query()?.get(child.pid);
+    const rows = query(), row = rows?.get(child.pid);
     if (!row) throw new Error("spawned child is absent from the process table");
+    if (holdPreparation && (row.ppid !== process.pid || row.path !== process.execPath.toLowerCase() || !Number.isSafeInteger(rows.get(process.pid)?.birthMs) || row.birthMs < rows.get(process.pid).birthMs)) throw new Error("preparation launcher identity differs from the owned Node child");
     identity = { pid: row.pid, birthMs: row.birthMs, path: row.path };
   } catch (error) {
     failure ??= `owned child identity unavailable: ${error.message}`;
@@ -276,22 +291,41 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
   const known = new Map();
   let sampled = 0;
   const observe = () => {
-    const tree = ownedWindowsTree(query(), identity);
+    const rows = query(), tree = ownedWindowsTree(rows, identity);
     if (tree.authenticated) for (const entry of tree.owned) if (entry.pid !== identity.pid) known.set(entry.pid, entry.birthMs);
+    if (holdPreparation && !tree.authenticated) throw new Error("preparation launcher identity/telemetry unavailable");
+    const retained = [...known].some(([pid, birth]) => rows?.get(pid)?.birthMs === birth);
+    if (holdPreparation && preparationResult && !releasedPreparation && tree.owned.length === 1 && !retained) {
+      releasedPreparation = true;
+      child.send({ kind: "release-preparation" });
+    }
   };
   try {
+    if (!identity) throw new Error(failure);
+    if (state.cancelled || performance.now() >= started + limitMs) throw new Error("managed deadline/cancellation before preparation release");
+    if (holdPreparation) child.send({ kind: "run-preparation" });
     while (!closed) {
+      if (failure) break;
       if (performance.now() - sampled >= sampleMs) { sampled = performance.now(); observe(); }
       if (state.cancelled || performance.now() >= started + limitMs) { failure ??= "managed deadline/cancellation"; break; }
       await Promise.race([completion, delay(100)]);
     }
+    if (holdPreparation && (!preparationResult || !releasedPreparation || preparationResult.exit !== exit)) failure ??= "preparation result/release handshake incomplete";
+  } catch (error) {
+    failure ??= error.message;
   } finally {
     // Root only through Node's own child handle; descendants only by re-authenticated pid+birth.
     const killed = [], unproven = [];
     try {
+      // Node's own handle remains ours even if CIM cannot authenticate a birth.
+      // Kill/reap that handle before reporting the still-unproven tree cleanup.
+      if (!identity && !closed) {
+        try { child.kill("SIGKILL"); killed.push(`${child.pid} (own handle)`); } catch { unproven.push(child.pid); }
+        await Promise.race([completion, delay(graceMs)]);
+      }
       if (!identity) throw new Error("owned child identity unavailable for cleanup");
-      const plan = planAuthenticatedCleanup(query(), identity, known, !closed);
       if (!closed) { try { child.kill("SIGKILL"); killed.push(`${child.pid} (own handle)`); } catch { unproven.push(child.pid); } }
+      const plan = planAuthenticatedCleanup(query(), identity, known, !closed);
       for (const pid of plan.targets) {
         if (pid === identity.pid) continue; // The root is terminated only through its own child handle.
         const status = kill(pid);
@@ -306,19 +340,44 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
         if (row && row.birthMs === birth) unproven.push(pid);
       }
       if (unproven.length) { state.unsafe = true; failure = `${failure ?? "owned child cleanup failed"}; unproven cleanup: ${JSON.stringify(unproven)}`; }
-      if (!closed) await Promise.race([completion, delay(graceMs)]);
-      if (!closed) { state.unsafe = true; failure = `${failure ?? "owned child cleanup failed"}; owned child outlived the managed bound`; }
     } catch (error) {
       state.unsafe = true;
       unproven.push(error.message);
       failure = `${failure ?? "owned child cleanup failed"}; unproven cleanup: ${error.message}`;
     }
+    if (!closed) await Promise.race([completion, delay(graceMs)]);
+    if (!closed) { state.unsafe = true; failure = `${failure ?? "owned child cleanup failed"}; owned child outlived the managed bound`; }
     state.cleanup = { supervisor: "authenticated per-pid termination (own-handle root, pid+birth re-authenticated descendants; never bare taskkill /T)", killed, unproven, released: !state.unsafe };
     logOpen = false;
     closeSync(fd);
   }
   if (failure) fail(failure);
   return { exit, output: readFileSync(log, "utf8") };
+}
+
+// Internal CPU-preparation launcher only: wait for authenticated GO, retain the
+// launcher through command close and the parent's final descendant census, then
+// propagate the real exit status. It never invokes a shell or runs model cases.
+export function preparationSentinel(args, channel = process, spawnCommand = spawn) {
+  if (!Array.isArray(args) || !args.length || args.some((arg) => typeof arg !== "string") || typeof channel.send !== "function") throw new Error("invalid preparation sentinel invocation");
+  let child = null, result = null, launched = false;
+  channel.on("message", (message) => {
+    if (message?.kind === "run-preparation" && !launched) {
+      launched = true;
+      child = spawnCommand(args[0], args.slice(1), { stdio: ["ignore", "inherit", "inherit"], windowsHide: true });
+      child.on("error", () => { /* close supplies the failed spawn's nonzero status */ });
+      child.on("close", (code, signal) => {
+        result = { kind: "preparation-complete", exit: Number.isInteger(code) && code >= 0 && code <= 255 ? code : 1, signal: signal ?? null };
+        if (channel.connected) channel.send(result);
+      });
+    } else if (message?.kind === "release-preparation" && result) {
+      channel.exit(result.exit);
+    } else channel.exit(1);
+  });
+  channel.on("disconnect", () => {
+    if (child && !result) child.kill("SIGKILL");
+    channel.exit(1);
+  });
 }
 
 // ---- external RSS guard (macOS and Windows) ----------------------------------------------------
@@ -391,7 +450,7 @@ const defaultGuardSample = (state) =>
 
 const noGuard = () => () => undefined;
 const defaultExecute = (root, args, log, limitMs, state) =>
-  process.platform === "win32" ? executeOwnedChild(root, args, log, limitMs, state) : executeCpuCommand(root, args, log, limitMs, state);
+  process.platform === "win32" ? executeOwnedChild(root, args, log, limitMs, state, { holdPreparation: args[0] === "cargo" || args.includes("--list") }) : executeCpuCommand(root, args, log, limitMs, state);
 
 function store(file, value) {
   mkdirSync(path.dirname(file), { recursive: true });
@@ -601,10 +660,13 @@ export async function runValidation(options) {
 const runningAsScript = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (runningAsScript) {
   try {
-    const options = parseArgs(process.argv.slice(2));
-    const probe = spawnSync("rustc", ["-vV"], { encoding: "utf8" });
-    const result = await runValidation({ ...options, toolchain: probe.status === 0 ? probe.stdout.trim() : "rustc -vV unavailable" });
-    process.exitCode = result.ok ? 0 : 1;
+    if (process.argv[2] === "--windows-preparation-sentinel") preparationSentinel(JSON.parse(process.argv[3]));
+    else {
+      const options = parseArgs(process.argv.slice(2));
+      const probe = spawnSync("rustc", ["-vV"], { encoding: "utf8" });
+      const result = await runValidation({ ...options, toolchain: probe.status === 0 ? probe.stdout.trim() : "rustc -vV unavailable" });
+      process.exitCode = result.ok ? 0 : 1;
+    }
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;
