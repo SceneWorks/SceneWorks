@@ -112,7 +112,7 @@ jobs:
         if: ${{ matrix.backend == 'cuda' }}
         timeout-minutes: 3
         shell: cmd
-        run: node --test --test-name-pattern="^Windows real preparation sentinel" scripts/moss-native-api-validation.test.mjs
+        run: node --test --test-name-pattern="^Windows real CPU preparation" scripts/moss-native-api-validation.test.mjs
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         if: ${{ matrix.backend == 'mlx' }}
         with:

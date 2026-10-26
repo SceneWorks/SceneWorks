@@ -175,6 +175,71 @@ export function selectLibTestExecutable(jsonl, statExecutable = defaultStatExecu
   return candidates[0];
 }
 
+// Only source-owned compile, metadata and schema commands may use preparation
+// completion. Exact native test execution always retains its model supervisor.
+export function isPreparationCommand(root, args) {
+  if (!Array.isArray(args) || args.some(arg => typeof arg !== "string")) return false;
+  if (args.length === 2 && ((args[0] === "rustc" && ["-Vv", "-vV"].includes(args[1])) || (args[0] === "cargo" && args[1] === "-V"))) return true;
+  if (args[0] === "cargo" && args[1] === "test" && args.includes("--no-run") && !args.includes("--")) return true;
+  if ((args.length === 2 && args[1] === "--list") || (args.length === 3 && args[1] === "--ignored" && args[2] === "--list")) return true;
+  if (args.length === 7 && args.slice(0, 5).join(" ") === "python3 -I -m jsonschema -i"
+      && path.resolve(args[6]) === path.join(root, "scripts/ci/moss-training-acceptance/evidence.schema.json")) return true;
+  return args.length === 11 && args[0] === "python3" && args[1] === "-I"
+    && path.resolve(args[2]) === path.join(root, "scripts/ci/moss-training-acceptance/verify_evidence.py")
+    && [args[3], args[5], args[7], args[9]].join(" ") === "--root --manifest --selection --output";
+}
+
+// CPU preparation proves completion of the child handle and captured stdio.
+// It neither censuses nor claims release of descendants. Cancellation/failure
+// aborts preparation; only this invocation's own handle may be terminated.
+export async function executePreparation(root, args, log, limitMs, state, { env = process.env, spawnChild = spawn, graceMs = 10_000, writeLog = null, now = () => performance.now() } = {}) {
+  const { openSync, closeSync, writeSync } = await import("node:fs");
+  if (state.cancelled) fail("preparation cancelled before launch");
+  if (!Number.isFinite(limitMs) || limitMs <= 0) fail("invalid preparation deadline");
+  const fd = openSync(log, "w"), started = now();
+  let child, closed = false, rootExited = false, exit = null, signal = null, failure = null, logOpen = true;
+  const wait = ms => new Promise(resolve => {
+    const done = () => { clearTimeout(timer); child?.off("close", done); resolve(); };
+    const timer = setTimeout(done, ms);
+    if (closed) done(); else child?.once("close", done);
+  });
+  try {
+    child = spawnChild(args[0], args.slice(1), { cwd: root, env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    child.on("error", error => { failure ??= `preparation spawn failed: ${error.message}`; });
+    child.on("exit", () => { rootExited = true; });
+    child.on("close", (code, childSignal) => { closed = true; exit = code; signal = childSignal; });
+    for (const [name, stream] of [["stdout", child.stdout], ["stderr", child.stderr]]) {
+      if (!stream) { failure ??= `preparation ${name} unavailable`; continue; }
+      stream.on("error", () => { failure ??= `preparation ${name} read failed`; });
+      stream.on("data", bytes => {
+        if (!logOpen) return;
+        try { (writeLog ?? writeSync)(fd, bytes); process.stdout.write(bytes); } catch { failure ??= "preparation log write failed"; }
+      });
+    }
+    while (!closed && !failure) {
+      if (state.cancelled || now() - started >= limitMs) { failure = "preparation deadline/cancellation"; break; }
+      await wait(25);
+    }
+    if (state.cancelled || now() - started >= limitMs) failure ??= "preparation deadline/cancellation";
+  } catch (error) { failure ??= error.message; }
+  finally {
+    if (child && !closed) {
+      if (child.exitCode === null) { try { child.kill("SIGKILL"); } catch { /* bounded close below decides completion */ } }
+      await wait(graceMs);
+      if (!closed) {
+        state.unsafe = true;
+        child.stdout?.destroy(); child.stderr?.destroy();
+        failure ??= "preparation root/stdio did not close within the reap bound";
+      }
+    }
+    state.completion = { scope: "root-and-stdio", completed: closed && rootExited && !state.unsafe && !failure && !state.cancelled, rootExited, stdioClosed: closed, exitCode: exit, signal };
+    logOpen = false; closeSync(fd);
+  }
+  if (failure) fail(failure);
+  if (!closed || !rootExited || signal !== null || !Number.isInteger(exit)) fail("preparation completion unavailable");
+  return { exit, output: readFileSync(log, "utf8") };
+}
+
 // ---- Windows owned-process supervision -------------------------------------------------------
 // Identities come from Win32_Process (the same CreationDate/ExecutablePath
 // technique scripts/lib/yue2-windows-owned-gpu.mjs validates GPU captures
@@ -252,26 +317,12 @@ export function planAuthenticatedCleanup(rows, identity, knownDescendants, rootA
 }
 
 export async function executeOwnedChild(root, args, log, limitMs, state, supervision = {}) {
-  const { query = queryWindowsProcesses, kill = killWindowsPid, spawnChild = spawn, sampleMs = 1000, graceMs = 10_000, holdPreparation = false } = supervision;
+  const { query = queryWindowsProcesses, kill = killWindowsPid, spawnChild = spawn, sampleMs = 1000, graceMs = 10_000 } = supervision;
   const { openSync, closeSync, writeSync } = await import("node:fs");
   const fd = openSync(log, "w");
   const started = performance.now();
-  // Like the existing watchdog launch sentinel, preparation stays blocked until
-  // its persistent launcher has an authenticated identity. Fast version/list
-  // commands can then exit without racing the initial CIM census. Native model
-  // execution keeps the direct launch and its existing identity/RSS contract.
-  const child = holdPreparation
-    ? spawnChild(process.execPath, [fileURLToPath(import.meta.url), "--windows-preparation-sentinel", JSON.stringify(args)], { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe", "ipc"], windowsHide: true })
-    : spawnChild(args[0], args.slice(1), { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  const child = spawnChild(args[0], args.slice(1), { cwd: root, env: process.env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
   let closed = false, exit = null, failure = null, logOpen = true;
-  let preparationResult = null, releasedPreparation = false;
-  if (holdPreparation) child.on("message", (message) => {
-    if (preparationResult || message?.kind !== "preparation-complete" || !Number.isInteger(message.exit) || message.exit < 0 || message.exit > 255) {
-      failure ??= "invalid/duplicate preparation completion";
-      return;
-    }
-    preparationResult = message;
-  });
   const completion = new Promise((resolve) => {
     child.on("error", (error) => { failure ??= error.message; });
     child.on("close", (code, signal) => { closed = true; exit = code ?? (signal ? 1 : 0); resolve(); });
@@ -282,7 +333,6 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
   try {
     const rows = query(), row = rows?.get(child.pid);
     if (!row) throw new Error("spawned child is absent from the process table");
-    if (holdPreparation && (row.ppid !== process.pid || row.path !== process.execPath.toLowerCase() || !Number.isSafeInteger(rows.get(process.pid)?.birthMs) || row.birthMs < rows.get(process.pid).birthMs)) throw new Error("preparation launcher identity differs from the owned Node child");
     identity = { pid: row.pid, birthMs: row.birthMs, path: row.path };
   } catch (error) {
     failure ??= `owned child identity unavailable: ${error.message}`;
@@ -293,24 +343,17 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
   const observe = () => {
     const rows = query(), tree = ownedWindowsTree(rows, identity);
     if (tree.authenticated) for (const entry of tree.owned) if (entry.pid !== identity.pid) known.set(entry.pid, entry.birthMs);
-    if (holdPreparation && !tree.authenticated) throw new Error("preparation launcher identity/telemetry unavailable");
-    const retained = [...known].some(([pid, birth]) => rows?.get(pid)?.birthMs === birth);
-    if (holdPreparation && preparationResult && !releasedPreparation && tree.owned.length === 1 && !retained) {
-      releasedPreparation = true;
-      child.send({ kind: "release-preparation" });
-    }
+
   };
   try {
     if (!identity) throw new Error(failure);
     if (state.cancelled || performance.now() >= started + limitMs) throw new Error("managed deadline/cancellation before preparation release");
-    if (holdPreparation) child.send({ kind: "run-preparation" });
     while (!closed) {
       if (failure) break;
       if (performance.now() - sampled >= sampleMs) { sampled = performance.now(); observe(); }
       if (state.cancelled || performance.now() >= started + limitMs) { failure ??= "managed deadline/cancellation"; break; }
       await Promise.race([completion, delay(100)]);
     }
-    if (holdPreparation && (!preparationResult || !releasedPreparation || preparationResult.exit !== exit)) failure ??= "preparation result/release handshake incomplete";
   } catch (error) {
     failure ??= error.message;
   } finally {
@@ -353,31 +396,6 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
   }
   if (failure) fail(failure);
   return { exit, output: readFileSync(log, "utf8") };
-}
-
-// Internal CPU-preparation launcher only: wait for authenticated GO, retain the
-// launcher through command close and the parent's final descendant census, then
-// propagate the real exit status. It never invokes a shell or runs model cases.
-export function preparationSentinel(args, channel = process, spawnCommand = spawn) {
-  if (!Array.isArray(args) || !args.length || args.some((arg) => typeof arg !== "string") || typeof channel.send !== "function") throw new Error("invalid preparation sentinel invocation");
-  let child = null, result = null, launched = false;
-  channel.on("message", (message) => {
-    if (message?.kind === "run-preparation" && !launched) {
-      launched = true;
-      child = spawnCommand(args[0], args.slice(1), { stdio: ["ignore", "inherit", "inherit"], windowsHide: true });
-      child.on("error", () => { /* close supplies the failed spawn's nonzero status */ });
-      child.on("close", (code, signal) => {
-        result = { kind: "preparation-complete", exit: Number.isInteger(code) && code >= 0 && code <= 255 ? code : 1, signal: signal ?? null };
-        if (channel.connected) channel.send(result);
-      });
-    } else if (message?.kind === "release-preparation" && result) {
-      channel.exit(result.exit);
-    } else channel.exit(1);
-  });
-  channel.on("disconnect", () => {
-    if (child && !result) child.kill("SIGKILL");
-    channel.exit(1);
-  });
 }
 
 // ---- external RSS guard (macOS and Windows) ----------------------------------------------------
@@ -450,7 +468,8 @@ const defaultGuardSample = (state) =>
 
 const noGuard = () => () => undefined;
 const defaultExecute = (root, args, log, limitMs, state) =>
-  process.platform === "win32" ? executeOwnedChild(root, args, log, limitMs, state, { holdPreparation: args[0] === "cargo" || args.includes("--list") }) : executeCpuCommand(root, args, log, limitMs, state);
+  isPreparationCommand(root, args) ? executePreparation(root, args, log, limitMs, state)
+    : process.platform === "win32" ? executeOwnedChild(root, args, log, limitMs, state) : executeCpuCommand(root, args, log, limitMs, state);
 
 function store(file, value) {
   mkdirSync(path.dirname(file), { recursive: true });
@@ -484,6 +503,7 @@ export async function runValidation(options) {
     toolchain,
     supervisor: {
       mode: platform === "win32" ? "authenticated owned-pid termination" : "ownedCpuTree (reauthenticated owned pids; never process groups or broad pkill)",
+      preparationScope: "root-and-stdio completion only; no descendant release claim",
       ownership: "only processes this driver spawned and their observed descendants",
       caseBoundMs: bounds.caseMs,
       rssGuardBytes: null,
@@ -556,6 +576,7 @@ export async function runValidation(options) {
         receipt.compile.rawOutput = existsSync(compileLog) ? readFileSync(compileLog, "utf8").slice(0, 200_000) : null;
         record(`compilation failed: ${error.message}`);
       } finally {
+        receipt.compile.completion = state.completion ?? null;
         active.state = null;
       }
     }
@@ -568,12 +589,11 @@ export async function runValidation(options) {
       const listLog = path.join(output, "test-list.txt");
       const ignoredListLog = path.join(output, "ignored-list.txt");
       receipt.lists = { unfiltered: path.basename(listLog), ignoredOnly: path.basename(ignoredListLog), boundMs: bounds.listMs };
+      const unfilteredState = { cancelled: false }, ignoredOnlyState = { cancelled: false };
       try {
-        const unfilteredState = { cancelled: false };
         active.state = unfilteredState;
         const unfiltered = await execute(root, [executable, "--list"], listLog, bounds.listMs, unfilteredState);
         if (unfiltered.exit !== 0) fail(`unfiltered --list exited ${unfiltered.exit}, not 0`);
-        const ignoredOnlyState = { cancelled: false };
         active.state = ignoredOnlyState;
         const ignoredOnly = await execute(root, [executable, "--ignored", "--list"], ignoredListLog, bounds.listMs, ignoredOnlyState);
         if (ignoredOnly.exit !== 0) fail(`--ignored --list exited ${ignoredOnly.exit}, not 0`);
@@ -586,6 +606,8 @@ export async function runValidation(options) {
           if (existsSync(log)) receipt.lists[key] = readFileSync(log, "utf8").slice(0, 200_000);
         record(`discovery failed: ${error.message}`);
       } finally {
+        receipt.lists.unfilteredCompletion = unfilteredState.completion ?? null;
+        receipt.lists.ignoredOnlyCompletion = ignoredOnlyState.completion ?? null;
         active.state = null;
       }
     }
@@ -649,7 +671,7 @@ export async function runValidation(options) {
     record(error.message);
   } finally {
     removeSignals();
-    if (control.interrupted) receipt.cancellation = { requested: true, source: "signal", releasedAfterCleanup: true };
+    if (control.interrupted) receipt.cancellation = { requested: true, source: "signal" };
     receipt.ok = !receipt.failures.length && (receipt.cases?.length ?? 0) === EXPECTED_TESTS.length && receipt.cases.every((entry) => entry.ok);
     receipt.status = receipt.ok ? "passed" : "failed";
     store(path.join(output, "receipt.json"), receipt);
@@ -660,13 +682,10 @@ export async function runValidation(options) {
 const runningAsScript = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (runningAsScript) {
   try {
-    if (process.argv[2] === "--windows-preparation-sentinel") preparationSentinel(JSON.parse(process.argv[3]));
-    else {
-      const options = parseArgs(process.argv.slice(2));
-      const probe = spawnSync("rustc", ["-vV"], { encoding: "utf8" });
-      const result = await runValidation({ ...options, toolchain: probe.status === 0 ? probe.stdout.trim() : "rustc -vV unavailable" });
-      process.exitCode = result.ok ? 0 : 1;
-    }
+    const options = parseArgs(process.argv.slice(2));
+    const probe = spawnSync("rustc", ["-vV"], { encoding: "utf8" });
+    const result = await runValidation({ ...options, toolchain: probe.status === 0 ? probe.stdout.trim() : "rustc -vV unavailable" });
+    process.exitCode = result.ok ? 0 : 1;
   } catch (error) {
     console.error(error.message);
     process.exitCode = 1;

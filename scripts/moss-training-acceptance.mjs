@@ -7,8 +7,8 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
-import { digest, parseTestResult, executeCpuCommand } from './moss-consumer-assertions.mjs';
-import { defaultInspect, parseTestList, selectLibTestExecutable, queryWindowsProcesses, executeOwnedChild } from './moss-native-api-validation.mjs';
+import { digest, parseTestResult } from './moss-consumer-assertions.mjs';
+import { defaultInspect, parseTestList, selectLibTestExecutable, queryWindowsProcesses, executePreparation, isPreparationCommand } from './moss-native-api-validation.mjs';
 import { stageLatestMossArtifacts } from './moss-training-artifacts.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
 import { lockedInferenceRevision } from './select-windows-cargo-cache.mjs';
@@ -305,17 +305,16 @@ export function remainingCaseMs(startedAt, now = Date.now()) {
   return remaining;
 }
 
-// Compilation/discovery/schema checks are CPU-only preparation, so reuse the
-// existing authenticated CPU cleanup. Native cases NEVER enter this path.
+// CPU preparation proves only root/stdio completion. Native cases retain their
+// separate authenticated descendant/RSS/release contract.
 export async function executeCommand(root, args, log, limitMs, state, supervision) {
-  const preparation=args[0]==='cargo'||args[0]==='rustc'||args[0]==='python3'||args.includes('--list');
-  if(!preparation) return executeSupervised(root,args,log,limitMs,state,supervision);
-  const result=await (process.platform==='win32'?executeOwnedChild:executeCpuCommand)(root,args,log,limitMs,state,{holdPreparation:true});
-  const c=state.cleanup;
-  const released=Boolean(c)&&!state.unsafe&&!state.unsafeToRestore&&!(c.remaining?.length||c.unproven?.length||c.errors?.length);
-  state.cleanup={...c,released};
-  return result;
+  return isPreparationCommand(root,args) ? executePreparation(root,args,log,limitMs,state,supervision)
+    : executeSupervised(root,args,log,limitMs,state,supervision);
 }
+
+const commandComplete=(root,args,state)=>state && !state.unsafe&&!state.cancelled && (isPreparationCommand(root,args)
+  ? state.completion?.scope==='root-and-stdio' && state.completion.completed===true
+  : state.cleanup?.released===true);
 
 export async function run(options) {
   const { root,output,backend,phase,manifest,env=process.env,execute=executeCommand,inspect=defaultInspect,preflightValidator=validatePreflight,sourceProvider=sourceFacts,cacheInventory=inventoryMossTrainingCache }=options;
@@ -327,7 +326,7 @@ export async function run(options) {
     receipt=json(path.join(output,'driver.json'));
     assert(receipt.phase===phase && receipt.backend===backend && !receipt.ok && receipt.cellComplete===true && receipt.failures.length===0, 'prior capture not cleanly closed');
     assert(receipt.cases.length===cellIndex && receipt.cases.every((c,i)=>c.executionPassed && c.caseId===`${backend}/${CELLS[i]}` && c.test===testsFor('capture',backend)[i] && c.rawEvidence===`${CELLS[i]}/evidence.json`), 'continuation requires exact closed case prefix');
-    assert(receipt.commands.length===5+2*cellIndex && receipt.commands.every(c=>c.exitCode===0 && c.supervision?.cleanup?.released && !c.supervision.cancelled && !c.supervision.unsafe), 'prior capture commands not cleanly closed');
+    assert(receipt.commands.length===5+2*cellIndex && receipt.commands.every(c=>c.exitCode===0 && commandComplete(root,c.command,c.supervision)), 'prior capture commands not cleanly closed');
     assert(JSON.stringify(artifactMembers(output).filter(m=>m.path!=='driver.json'))===JSON.stringify(receipt.members), 'prior capture members changed, missing or added');
   } else {
     assert(!existsSync(output) || readdirSync(output).length===0,'output must be new/empty; never carry prior campaign evidence');
@@ -343,7 +342,7 @@ export async function run(options) {
     assert(!interrupted,'interrupted; refusing next command');
     const state={cancelled:false}; active=state;
     const entry={command:args,log:`${name}.log`,startedAt:new Date().toISOString(),boundMs:limitMs};receipt.commands.push(entry);
-    try { const r=await execute(root,args,path.join(output,entry.log),limitMs,state,{env:{...env,...extra.env},capBytes:extra.capBytes??null});entry.exitCode=r.exit;assert(r.exit===0,`${name} exited ${r.exit}`);assert(!state.unsafe&&!state.cancelled&&state.cleanup?.released,`${name} cleanup not proven`);return {result:r,state}; }
+    try { const r=await execute(root,args,path.join(output,entry.log),limitMs,state,{env:{...env,...extra.env},capBytes:extra.capBytes??null});entry.exitCode=r.exit;assert(r.exit===0,`${name} exited ${r.exit}`);assert(commandComplete(root,args,state),`${name} completion/cleanup not proven`);return {result:r,state}; }
     finally {entry.finishedAt=new Date().toISOString();entry.supervision=state;active=null;}
   };
   try {

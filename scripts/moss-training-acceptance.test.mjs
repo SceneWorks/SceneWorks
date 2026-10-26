@@ -1,3 +1,4 @@
+import {isPreparationCommand} from "./moss-native-api-validation.mjs";
 import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
@@ -80,7 +81,7 @@ test('bundle binds every member, rejects changed/additional bytes and source mis
 function mockRun(t, {badCounts=false,missingEvidence=false,missingRss=false,unsafe=false,previews=false,backend='mlx'}={}) {
  const output=fixture(t);let executions=0;
  const execute=async(_root,command,log,_limit,state,{env})=>{
-  executions++;state.cleanup={released:!unsafe};
+  executions++;if(isPreparationCommand(root,command))state.completion={scope:"root-and-stdio",completed:!unsafe};else state.cleanup={released:!unsafe};
   let text='';
   if(command[0]==='rustc')text='rustc 1.97.1 (SCHEMA_TEST_ONLY)\nhost: aarch64-apple-darwin\n';
   else if(command[0]==='cargo' && command[1]==='-V')text='cargo 1.97.1 (SCHEMA_TEST_ONLY)\n';
@@ -97,8 +98,25 @@ function mockRun(t, {badCounts=false,missingEvidence=false,missingRss=false,unsa
 }
 test('mock capture performs sequential exact native tests and stores raw evidence without asserting learning',async t=>{
  const m=mockRun(t);const r=await run(m.options);assert.equal(r.ok,true);assert.equal(r.cases.length,4);assert.ok(r.cases.every(c=>c.executionPassed));assert.equal(m.count(),13);assert.equal(r.toolchain.binarySha256,'f'.repeat(64));assert.match(r.toolchain.rustc,/SCHEMA_TEST_ONLY/);assert.equal(r.workflow.runId,'123');
+ for(const command of r.commands.slice(0,5)){assert.equal(command.supervision.completion.scope,'root-and-stdio');assert.equal(command.supervision.cleanup,undefined);}
  assert.equal(r.accepted,undefined);assert.ok(r.members.some(m=>m.path.endsWith('evidence.json')));
  for(const command of r.commands.filter(c=>c.command[1]?.startsWith(PREFIX)))assert.ok(command.command.includes('--exact')&&command.command.includes('--ignored'));
+});
+test('native case rejects a CPU-only completion claim and never starts the next case',async t=>{
+ const m=mockRun(t),execute=m.options.execute;
+ m.options.execute=async(...args)=>{const r=await execute(...args);if(args[1][1]===testsFor('capture','mlx')[0]){delete args[4].cleanup;args[4].completion={scope:'root-and-stdio',completed:true};}return r;};
+ const r=await run(m.options);assert.equal(r.ok,false);assert.equal(m.count(),7);assert.match(r.failures.join(),/completion\/cleanup/);
+});
+test('nonzero CPU preparation exit aborts before discovery or native execution',async t=>{
+ const m=mockRun(t),execute=m.options.execute;
+ m.options.execute=async(...args)=>({...await execute(...args),exit:7});
+ const r=await run(m.options);assert.equal(r.ok,false);assert.equal(m.count(),1);assert.equal(r.cases.length,0);assert.match(r.failures.join(),/rustc-version exited 7/);
+});
+test('continuation rejects a preparation receipt that claims only generic whole-tree release',async t=>{
+ const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const before=m.count();
+ const file=path.join(m.options.output,'driver.json'),receipt=JSON.parse(readFileSync(file));
+ delete receipt.commands[0].supervision.completion;receipt.commands[0].supervision.cleanup={released:true};writeFileSync(file,JSON.stringify(receipt));
+ await assert.rejects(run({...m.options,'capture-cell':CELLS[1]}),/prior capture commands not cleanly closed/);assert.equal(m.count(),before);
 });
 test('mock test-count success without raw evidence fails and retains logs',async t=>{
  const m=mockRun(t,{missingEvidence:true});const r=await run(m.options);assert.equal(r.ok,false);assert.match(r.failures.join(),/evidence missing/);assert.equal(r.cases.length,1);assert.ok(r.members.some(m=>m.path.endsWith('.log')));

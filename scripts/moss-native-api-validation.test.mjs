@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   BOUNDS, checkDiscovery, ENVIRONMENT_WHITELIST, executeOwnedChild, EXPECTED_TESTS, ignoredSourceFacts,
   MOSS_PREFIX, ownedWindowsTree, parseArgs, parseTestList, planAuthenticatedCleanup,
-  preparationSentinel, queryWindowsProcesses, requireManualContext, RSS_CAP_GB, runValidation, startRssGuard,
+  executePreparation, isPreparationCommand, requireManualContext, RSS_CAP_GB, runValidation, startRssGuard,
   statedRssCapBytes, sumOwnedRss, sumWindowsOwnedRss,
 } from "./moss-native-api-validation.mjs";
 import { TESTS as CLOSED_SELECTOR_TESTS, digest as sha256 } from "./moss-consumer-assertions.mjs";
@@ -617,132 +617,76 @@ test("Windows supervisor never adopts or kills stale-edge survivors or reused de
   }
 });
 
-test("preparation sentinel starts only after GO and retains the actual status until RELEASE", () => {
-  const channel = new EventEmitter(), command = new EventEmitter(), sent = [], exits = [], kills = [];
-  Object.assign(channel, { connected: true, send: value => sent.push(value), exit: code => exits.push(code) });
-  command.kill = signal => kills.push(signal);
-  let launches = 0;
-  preparationSentinel(["metadata-only", "--list"], channel, (file, args) => {
-    launches++; assert.equal(file, "metadata-only"); assert.deepEqual(args, ["--list"]); return command;
+test("preparation allowlist excludes actual native execution and learned Cargo tests", () => {
+  for (const command of [["rustc","-Vv"],["cargo","-V"],["cargo","test","--locked","--no-run"],["/compiled/api","--list"],["/compiled/api","--ignored","--list"],
+    ["python3","-I","-m","jsonschema","-i","/record",path.join(ROOT,"scripts/ci/moss-training-acceptance/evidence.schema.json")],
+    ["python3","-I",path.join(ROOT,"scripts/ci/moss-training-acceptance/verify_evidence.py"),"--root","/peers","--manifest","/manifest","--selection","/selection","--output","/out"]]) assert.equal(isPreparationCommand(ROOT,command),true,command.join(" "));
+  for (const command of [["cargo","test","--ignored"],["cargo","run"],["rustc","model.rs"],["/compiled/api",EXPECTED_TESTS[0],"--ignored","--exact"],["/compiled/api","--list",EXPECTED_TESTS[0]],["python3","arbitrary.py"],["python3","-I","-m","jsonschema","-i","/record","/another.schema.json"]]) assert.equal(isPreparationCommand(ROOT,command),false,command.join(" "));
+});
+
+test("CPU preparation captures real fast zero/nonzero Node exits with root-and-stdio scope only", async t => {
+  const root=mkdtempSync(path.join(os.tmpdir(),"moss-cpu-preparation-"));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  for(const code of [0,7]) {
+    const state={};
+    const result=await executePreparation(ROOT,[process.execPath,"-e",`console.log('metadata only');process.exit(${code})`],path.join(root,`${code}.log`),5000,state);
+    assert.equal(result.exit,code);assert.match(result.output,/metadata only/);
+    assert.deepEqual(state.completion,{scope:"root-and-stdio",completed:true,rootExited:true,stdioClosed:true,exitCode:code,signal:null});
+    assert.equal(state.cleanup,undefined,"CPU preparation must never claim whole-tree release");
+  }
+});
+
+test("CPU preparation spawn failure aborts without a completion claim",async t=>{
+  const root=mkdtempSync(path.join(os.tmpdir(),"moss-cpu-spawn-"));t.after(()=>rmSync(root,{recursive:true,force:true}));const state={};
+  await assert.rejects(executePreparation(ROOT,[path.join(root,"missing-executable")],path.join(root,"spawn.log"),1000,state),/spawn failed/);
+  assert.equal(state.completion.completed,false);assert.equal(state.cleanup,undefined);
+});
+
+for(const mode of ["timeout","cancel","read","write"])test(`CPU preparation ${mode} aborts and reaps only its real owned handle`,async t=>{
+  const root=mkdtempSync(path.join(os.tmpdir(),"moss-cpu-abort-"));t.after(()=>rmSync(root,{recursive:true,force:true}));let child;const state={};const kills=[];
+  const result=executePreparation(ROOT,[process.execPath,"-e","console.log('ready');setInterval(()=>{},1000)"],path.join(root,"command.log"),mode==="timeout"?150:5000,state,{
+    spawnChild:(...args)=>{child=spawn(...args);const kill=child.kill.bind(child);child.kill=signal=>{kills.push(signal);return kill(signal);};
+      if(mode==="cancel")child.stdout.once("data",()=>{state.cancelled=true;});
+      if(mode==="read")child.stdout.once("data",()=>{child.stdout.emit("error",new Error("simulated read failure"));});return child;},
+    ...(mode==="write"?{writeLog:()=>{throw new Error("simulated full log device");}}:{}),
   });
-  assert.equal(launches, 0);
-  channel.emit("message", { kind: "run-preparation" });
-  assert.equal(launches, 1);
-  command.emit("close", 7, null);
-  assert.deepEqual(sent, [{ kind: "preparation-complete", exit: 7, signal: null }]);
-  assert.deepEqual(exits, []);
-  channel.emit("message", { kind: "release-preparation" });
-  assert.deepEqual(exits, [7]); assert.deepEqual(kills, []);
+  await assert.rejects(result,/deadline\/cancellation|read failed|log write failed/);
+  assert.deepEqual(kills,["SIGKILL"]);assert.ok(child.exitCode!==null||child.signalCode!==null);
+  assert.equal(state.completion.scope,"root-and-stdio");assert.equal(state.completion.stdioClosed,true);assert.equal(state.cleanup,undefined);
 });
 
-function preparationSupervisor({ code = 0, missingInitial = false, lostLiveTelemetry = false, wrongParent = false, survivor = false, reused = false } = {}) {
-  const root = { ...WINDOWS_ROOT, ppid: wrongParent ? 999 : process.pid, path: process.execPath.toLowerCase() };
-  const parent = { pid: process.pid, ppid: 1, birthMs: 1000, path: process.execPath.toLowerCase(), rssBytes: 100 };
-  let child, queries = 0, done = false, descendantReleased = false;
-  const messages = [], killed = [], foreignKills = [];
-  return { messages, killed, foreignKills, supervision: {
-    holdPreparation: true, sampleMs: 0, graceMs: 100,
-    spawnChild: (file, args, options) => {
-      assert.equal(file, process.execPath); assert.equal(args[1], "--windows-preparation-sentinel");
-      assert.equal(options.stdio[3], "ipc");
-      child = new EventEmitter();
-      Object.assign(child, { pid: root.pid, stdout: new PassThrough(), stderr: new PassThrough(),
-        kill: signal => { killed.push(signal); done = true; setImmediate(() => child.emit("close", 1, null)); return true; },
-        send: message => {
-          messages.push(message.kind);
-          if (message.kind === "run-preparation") {
-            assert.equal(queries, 1, "GO follows successful initial identity authentication");
-            if (!lostLiveTelemetry) child.emit("message", { kind: "preparation-complete", exit: code, signal: null });
-          } else if (message.kind === "release-preparation") { done = true; child.emit("close", code, null); }
-        } });
-      return child;
-    },
-    query: () => {
-      queries++;
-      if ((queries === 1 && missingInitial) || (queries > 1 && lostLiveTelemetry)) return null;
-      return windowsRows(parent, ...(!done ? [root] : []),
-        ...(survivor && queries >= 2 && !descendantReleased ? [{ pid: 300, ppid: queries === 2 ? root.pid : 901, birthMs: reused && queries >= 3 ? 40_000 : 20_000, path: "metadata-child.exe", rssBytes: 100 }] : []),
-        ...(survivor ? [{ pid: 901, ppid: 1, birthMs: 5000, path: "foreign.exe", rssBytes: 100 }] : []));
-    },
-    kill: pid => { foreignKills.push(pid); if (pid === 300) descendantReleased = true; return 0; },
-  } };
-}
-
-test("Windows preparation authenticates a persistent launcher before fast zero/nonzero commands and release", async t => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "moss-preparation-")); t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const code of [0, 7]) {
-    const mock = preparationSupervisor({ code }), state = {};
-    const result = await executeOwnedChild(ROOT, ["metadata-only", "--list"], path.join(root, `${code}.log`), 1000, state, mock.supervision);
-    assert.equal(result.exit, code);
-    assert.deepEqual(mock.messages, ["run-preparation", "release-preparation"]);
-    assert.equal(state.cleanup.released, true); assert.deepEqual(mock.killed, []); assert.deepEqual(mock.foreignKills, []);
-  }
+test("CPU preparation cannot claim completion when stdio remains unclosed after its reap bound",async t=>{
+  const root=mkdtempSync(path.join(os.tmpdir(),"moss-cpu-unclosed-"));t.after(()=>rmSync(root,{recursive:true,force:true}));const state={};let child;
+  await assert.rejects(executePreparation(ROOT,["metadata-only"],path.join(root,"command.log"),10,state,{graceMs:10,spawnChild:()=>{
+    child=new EventEmitter();Object.assign(child,{pid:100,exitCode:0,stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>assert.fail("an exited own handle is never signalled by PID")});
+    setImmediate(()=>child.emit("exit",0,null));return child;
+  }}),/deadline\/cancellation/);
+  assert.equal(state.unsafe,true);assert.equal(state.completion.completed,false);assert.equal(state.completion.stdioClosed,false);
+  assert.equal(child.stdout.destroyed,true);assert.equal(child.stderr.destroyed,true);assert.equal(state.cleanup,undefined);
 });
 
-test("preparation sentinel IPC propagates real Node metadata exits with synthetic identity rows", async t => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "moss-preparation-ipc-")); t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const code of [0, 7]) {
-    let child;
-    const state = {};
-    const result = await executeOwnedChild(ROOT, [process.execPath, "-e", `console.log('metadata only');process.exit(${code})`], path.join(root, `${code}.log`), 10_000, state, {
-      holdPreparation: true, sampleMs: 10,
-      spawnChild: (...args) => { child = spawn(...args); return child; },
-      query: () => windowsRows(
-        { pid: process.pid, ppid: 1, birthMs: 1000, path: process.execPath.toLowerCase(), rssBytes: 100 },
-        ...(child.exitCode === null ? [{ pid: child.pid, ppid: process.pid, birthMs: 2000, path: process.execPath.toLowerCase(), rssBytes: 100 }] : [])),
-      kill: () => assert.fail("metadata child has no retained synthetic descendants"),
-    });
-    assert.equal(result.exit, code); assert.match(result.output, /metadata only/);
-    assert.equal(state.cleanup.released, true);
-  }
+test("CPU preparation refuses an observed close after its deadline before the next poll",async t=>{
+  const root=mkdtempSync(path.join(os.tmpdir(),"moss-cpu-late-close-"));t.after(()=>rmSync(root,{recursive:true,force:true}));const state={};let clock=0,kills=0;
+  await assert.rejects(executePreparation(ROOT,["metadata-only"],path.join(root,"command.log"),5,state,{now:()=>clock,spawnChild:()=>{
+    const child=new EventEmitter();Object.assign(child,{pid:100,exitCode:null,stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>{kills++;}});
+    setImmediate(()=>{clock=6;child.exitCode=0;child.emit("exit",0,null);child.emit("close",0,null);});
+    return child;
+  }}),/deadline\/cancellation/);
+  assert.equal(state.completion.stdioClosed,true);assert.equal(state.completion.completed,false);assert.equal(kills,0);
 });
 
-test("Windows preparation retains known reparented descendants and never kills a reused identity", async t => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "moss-preparation-survivor-")); t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const reused of [false, true]) {
-    const mock = preparationSupervisor({ survivor: true, reused }), state = {};
-    const command = executeOwnedChild(ROOT, ["metadata-only"], path.join(root, `${reused}.log`), reused ? 1000 : 100, state, mock.supervision);
-    if (reused) {
-      assert.equal((await command).exit, 0);
-      assert.deepEqual(mock.messages, ["run-preparation", "release-preparation"]);
-      assert.deepEqual(mock.foreignKills, [], "a reused PID is foreign and must not be signalled");
-    } else {
-      await assert.rejects(command, /managed deadline/);
-      assert.deepEqual(mock.messages, ["run-preparation"], "a known reparented survivor blocks RELEASE");
-      assert.deepEqual(mock.foreignKills, [300], "only the previously observed matching birth is signalled");
-      assert.deepEqual(mock.killed, ["SIGKILL"]);
-    }
-    assert.equal(state.cleanup.released, true);
-  }
-});
-
-for (const condition of ["missingInitial", "lostLiveTelemetry", "wrongParent"]) test(`Windows preparation ${condition} refuses and reaps its own handle without foreign kills`, async t => {
-  const root = mkdtempSync(path.join(os.tmpdir(), "moss-preparation-failure-")); t.after(() => rmSync(root, { recursive: true, force: true }));
-  const mock = preparationSupervisor({ [condition]: true }), state = {};
-  await assert.rejects(executeOwnedChild(ROOT, ["metadata-only"], path.join(root, "command.log"), 1000, state, mock.supervision), /identity|telemetry/);
-  assert.equal(state.unsafe, true); assert.equal(state.cleanup.released, false);
-  assert.deepEqual(mock.killed, ["SIGKILL"]); assert.deepEqual(mock.foreignKills, []);
-  assert.deepEqual(mock.messages, condition === "lostLiveTelemetry" ? ["run-preparation"] : []);
-});
-
-test("Windows real preparation sentinel observes valid CIM and handles fast metadata before compilation", { skip: process.platform !== "win32", timeout: 120_000 }, async t => {
-  const rows = queryWindowsProcesses();
-  assert.ok(rows instanceof Map && rows.has(process.pid), "valid CIM telemetry must include this live Node process");
-  const self = rows.get(process.pid);
-  assert.ok(self.birthMs > 0 && self.path === process.execPath.toLowerCase(), "CIM must parse this actual Node executable/birth correctly");
-  t.diagnostic(JSON.stringify({ kind: "CIM-self", rowCount: rows.size, identity: self }));
-  const root = mkdtempSync(path.join(os.tmpdir(), "moss-real-preparation-")); t.after(() => rmSync(root, { recursive: true, force: true }));
-  for (const [name, command, code, output] of [
-    ["rustc", ["rustc", "-Vv"], 0, /^host: \S+$/m],
-    ["cargo", ["cargo", "-V"], 0, /^cargo \S+/m],
-    ["list", [process.execPath, "-e", "console.log('metadata_only: test')"], 0, /metadata_only: test/],
-    ["nonzero", [process.execPath, "-e", "process.exit(7)"], 7, /^$/],
+test("Windows real CPU preparation handles fast metadata before compilation",{skip:process.platform!=="win32",timeout:120_000},async t=>{
+  const root=mkdtempSync(path.join(os.tmpdir(),"moss-real-preparation-"));t.after(()=>rmSync(root,{recursive:true,force:true}));
+  for(const [name,command,code,output] of [
+    ["rustc",["rustc","-Vv"],0,/^host: \S+$/m],
+    ["cargo",["cargo","-V"],0,/^cargo \S+/m],
+    ["list",[process.execPath,"-e","console.log('metadata_only: test')"],0,/metadata_only: test/],
+    ["nonzero",[process.execPath,"-e","process.exit(7)"],7,/^$/],
   ]) {
-    const state = {};
-    const result = await executeOwnedChild(ROOT, command, path.join(root, `${name}.log`), 30_000, state, { holdPreparation: true });
-    assert.equal(result.exit, code); assert.match(result.output, output);
-    assert.equal(state.cleanup.released, true); assert.notEqual(state.unsafe, true);
-    t.diagnostic(JSON.stringify({ name, exit: result.exit, identity: state.identity, cleanup: state.cleanup }));
+    const state={};let result;
+    try{result=await executePreparation(ROOT,command,path.join(root,`${name}.log`),30_000,state);}
+    catch(error){t.diagnostic(JSON.stringify({kind:"preparation-failure",name,completion:state.completion??null,unsafe:state.unsafe??null}));throw error;}
+    assert.equal(result.exit,code);assert.match(result.output,output);assert.equal(state.completion.completed,true);assert.equal(state.cleanup,undefined);
+    t.diagnostic(JSON.stringify({name,completion:state.completion}));
   }
 });
 
@@ -752,7 +696,7 @@ test("manual Windows capture checks actual preparation supervision before its fi
   assert.ok(check > 0 && check < capture.indexOf("- name: Capture and publish base/lora before continuing"));
   const step = capture.slice(check, capture.indexOf("      - ", check + 1));
   assert.match(step, /if: \$\{\{ matrix\.backend == 'cuda' \}\}/);
-  assert.match(step, /node --test --test-name-pattern="\^Windows real preparation sentinel" scripts\/moss-native-api-validation\.test\.mjs/);
+  assert.match(step, /node --test --test-name-pattern="\^Windows real CPU preparation" scripts\/moss-native-api-validation\.test\.mjs/);
 });
 
 for (const phase of ["planning", "post-termination"]) {
