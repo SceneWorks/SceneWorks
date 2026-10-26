@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c5a025690b9989c0bcad88a7f2d60ba4897bc45959133556364b9a4d3f42a05b",
+    "sceneWorksRevision": "source-tree:067481f6d20f5298a341106d3fe1496bf443c824e4687933a4cd74c86466947d",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "c03769813826ceec1fca4e2a24f69a8d3b5e30f7851ec09d16f77cf04cc62a7d"
+        "sha256": "9d8372b05570f624510ad26e7c15657815ae938802c02f23a4f01ceea67fd99d"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "a18e3a741a1beb4f0b2eb03f4b814bd47e8682c3d3fb672eafaa73218998f873"
+        "sha256": "ec78b9004bfdabcda8d6111b46194ea1b324c8b5f94336d7baf1fd03f424d1e2"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -177,7 +177,7 @@
     "anchors": 259,
     "analyticOnlyCells": 104,
     "anchoredCells": 3988,
-    "staleAnchors": 258,
+    "staleAnchors": 259,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -9377,7 +9377,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 2
     },
@@ -229576,7 +229576,7 @@
         "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
         "tier": "bf16",
         "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -229620,7 +229620,7 @@
         "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
         "tier": "bf16",
         "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
