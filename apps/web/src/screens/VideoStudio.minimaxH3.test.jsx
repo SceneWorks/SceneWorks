@@ -379,6 +379,51 @@ describe("MiniMax-H3 in the Video Studio (sc-17161)", () => {
     expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: "first", lastFrameAssetId: "last" });
   });
 
+  // The snapshot carries the first frame AND how it was chosen (sc-26687). An ambient frame
+  // captured before a reload returns as ambient, so it cannot ride along in an imported last-only
+  // request — the guard has to survive the studio being remounted, not just the session.
+  it("does not send an ambient first frame restored from the snapshot", async () => {
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
+      mode: "image_to_video",
+      model: ambientImported.id,
+      prompt: "A cyclist rides",
+      sourceAssetId: "other",
+      sourceAssetOrigin: "ambient",
+      lastFrameAssetId: "last",
+    }));
+    const context = baseContext({
+      videoModels: [ambientImported],
+      assets: [asset("other", "image", "other"), asset("last", "image", "last")],
+      selectedAsset: asset("other", "image", "other"),
+    });
+    await render(context);
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: null, lastFrameAssetId: "last" });
+  });
+
+  it("sends a first frame the snapshot records as the user's own pick", async () => {
+    window.localStorage.setItem("sceneworks-studio-video-project_1", JSON.stringify({
+      mode: "image_to_video",
+      model: ambientImported.id,
+      prompt: "A cyclist rides",
+      sourceAssetId: "other",
+      sourceAssetOrigin: "explicit",
+      lastFrameAssetId: "last",
+    }));
+    const context = baseContext({
+      videoModels: [ambientImported],
+      assets: [asset("other", "image", "other"), asset("last", "image", "last")],
+      selectedAsset: asset("other", "image", "other"),
+    });
+    await render(context);
+    const button = [...container.querySelectorAll("button")].find((b) => b.textContent.includes("Render clip"));
+    expect(button.disabled).toBe(false);
+    await click(button);
+    expect(context.createVideoJob.mock.calls[0][0]).toMatchObject({ model: ambientImported.id, mode: "image_to_video", sourceAssetId: "other", lastFrameAssetId: "last" });
+  });
+
   for (const partition of ["fl2va", "hybrid"]) {
     const imported = { ...MINIMAX, id: `imported_${partition}`, family: "minimax-h3", baseModel: "minimax_h3", importSourceShape: "transformer_directory", importPlan: { checkpointId: "checkpoint", planId: "plan", assembly: { schemaVersion: 1, partition } }, minimaxH3Partition: partition };
     it(`restores imported ${partition} last-only without seeding the selected first frame`, async () => {
