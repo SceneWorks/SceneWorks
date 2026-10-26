@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { CHECK_JOBS, assertCheckResults, checkDecision, embeddedWebInputs, selectCheckJobs } from "./check-job-relevance.mjs";
+import { CHECK_JOBS, assertCheckResults, checkDecision, embeddedRustInputs, selectCheckJobs } from "./check-job-relevance.mjs";
 
 const root = process.cwd();
-const embeddedWeb = embeddedWebInputs(root);
-const decision = (...files) => checkDecision(files, { embeddedWeb });
+const embeddedRust = embeddedRustInputs(root);
+const decision = (...files) => checkDecision(files, { embeddedRust });
 const full = (value) => Object.keys(value).filter((key) => key !== "reason").every((key) => value[key] === true);
 
 test("ordinary web-only changes skip native and historical jobs; embedded web source does not", () => {
@@ -14,8 +14,8 @@ test("ordinary web-only changes skip native and historical jobs; embedded web so
   assert.equal(ui.scaffold, true);
   assert.equal(ui.rust, false);
   assert.equal(ui.history, false);
-  assert.ok(embeddedWeb.size > 10, "read the real Rust include_str! inputs");
-  for (const file of embeddedWeb) assert.equal(decision(file).rust, true, file);
+  assert.ok(embeddedRust.size > 10, "read the real Rust include_str! inputs");
+  for (const file of embeddedRust) assert.equal(decision(file).rust, true, file);
 });
 
 test("unconsumed docs-only changes skip build/test jobs", () => {
@@ -37,6 +37,10 @@ test("cross-boundary inputs read by real web tests/builds remain reachable", () 
     assert.equal(decision(file).web, true, file);
   }
   assert.equal(decision("docs/calibration-runbook.md").history, true);
+  for (const file of ["docs/workflow-share-envelope.md", "docs/sc-17139-minimax-h3-hosting-layout.md"]) {
+    assert.equal(decision(file).rust, true, file);
+  }
+  assert.equal(decision("docker/rust.Dockerfile").history, true);
   assert.equal(decision("docs/epic-20738-terminal-cuda.md").scaffold, true);
 });
 

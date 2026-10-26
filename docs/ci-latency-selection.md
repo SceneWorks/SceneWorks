@@ -15,8 +15,9 @@ three-dot diff with NUL-delimited names and rename detection disabled, so both
 sides of a rename count. Failed/missing/empty diffs, unclassified inputs, and
 shared build/controller changes select every job. Native/data/tooling roots
 remain conservative because Node, Python, Rust and web contracts read across
-those boundaries. Rust's literal `include_str!`/`include_bytes!` references to
-web files are also selected for native compilation. Web tests' external Rust,
+those boundaries. Rust's literal `include_str!`/`include_bytes!` inputs are also selected for
+native compilation, including embedded web and documentation files. Runtime doc
+readers include the workflow-share contract and MiniMax hosting decision. Web tests' external Rust,
 manifest, fixture, schema, license and bundled-document inputs remain selected.
 Ordinary contributor prose skips the expensive jobs; actual consumed docs and
 calibration evidence still select their readers.

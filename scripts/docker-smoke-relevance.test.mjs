@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync, statSync } from "node:fs";
 
 import { dockerSmokeDecision } from "./docker-smoke-relevance.mjs";
 
@@ -38,4 +39,24 @@ test("Docker source, toolchain and embedded-data inputs cannot be skipped", () =
   for (const file of ["crates/sceneworks-core/src/lib.rs", "apps/rust-api/src/main.rs", "apps/rust-worker/src/main.rs", "apps/web/src/App.jsx", "apps/web/package-lock.json", "apps/desktop/Cargo.toml", "apps/desktop/build.rs", "rust-toolchain.toml", ".cargo/config.toml", ".dockerignore", "docs/calibration/sc-22738/anchor.json", "docs/generated/video-memory-curves.json"]) {
     assert.equal(dockerSmokeDecision(1, [file]).run, true, file);
   }
+});
+
+
+test("every existing local Docker COPY input reaches the smoke selector", () => {
+  const inputs = new Set();
+  for (const dockerfile of ["docker/rust.Dockerfile", "docker/web.Dockerfile"]) {
+    for (const match of readFileSync(dockerfile, "utf8").matchAll(/^COPY (.+)$/gm)) {
+      if (match[1].includes("--from=")) continue; // stage output, not a repository input
+      const tokens = match[1].split(/\s+/).filter((token) => !token.startsWith("--"));
+      assert.ok(tokens.length >= 2 && !tokens[0].startsWith("["), "review new COPY syntax before narrowing its inputs");
+      for (const source of tokens.slice(0, -1)) {
+        const directory = statSync(source, { throwIfNoEntry: false })?.isDirectory();
+        inputs.add(directory ? `${source.replace(/\/$/, "")}/selector-probe` : source);
+      }
+    }
+  }
+  for (const file of ["docs/generated/krea-candle-five-rung-sc-11045.json", "docs/generated/qwen-candle-five-rung-sc-15817.json", "docs/film-script-writing.md", "docs/film-editor.md", "apps/desktop/licenses/selector-probe"]) {
+    assert.ok(inputs.has(file), `audit must see the actual COPY input ${file}`);
+  }
+  for (const input of inputs) assert.equal(dockerSmokeDecision(1, [input]).run, true, input);
 });

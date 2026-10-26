@@ -18,10 +18,10 @@ export const CHECK_JOBS = {
 const OUTPUTS = [...new Set(Object.values(CHECK_JOBS))];
 const all = (reason) => ({ ...Object.fromEntries(OUTPUTS.map((key) => [key, true])), reason });
 
-// Rust's routing contracts include selected web source as data. Discover those actual literal
-// includes instead of assuming a web-only edit cannot change native tests. Other external Rust
-// inputs live under the broad native/data roots below (including concat!-based config includes).
-export function embeddedWebInputs(root) {
+// Discover Rust's actual literal include inputs across source and integration tests. Embedded
+// web files and documentation are native inputs too. Runtime document reads are named below;
+// concat!-based config includes remain covered by the conservative native/data roots.
+export function embeddedRustInputs(root) {
   const inputs = new Set();
   function walk(directory) {
     for (const item of readdirSync(path.join(root, directory), { withFileTypes: true })) {
@@ -31,7 +31,7 @@ export function embeddedWebInputs(root) {
         const source = readFileSync(path.join(root, file), "utf8");
         for (const match of source.matchAll(/include_(?:str|bytes)!\s*\(\s*"([^"\n]+)"/g)) {
           const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), match[1]));
-          if (target.startsWith("apps/web/")) inputs.add(target);
+          if (!target.startsWith("../") && !path.posix.isAbsolute(target)) inputs.add(target);
         }
       }
     }
@@ -40,7 +40,7 @@ export function embeddedWebInputs(root) {
   return inputs;
 }
 
-export function checkDecision(files, { embeddedWeb = new Set(), uncertain = false, full = false } = {}) {
+export function checkDecision(files, { embeddedRust = new Set(), uncertain = false, full = false } = {}) {
   if (full || uncertain || !files.length) return all("Explicit full check or uncertain/empty diff.");
   const result = Object.fromEntries(OUTPUTS.map((key) => [key, false]));
   for (const file of files) {
@@ -50,6 +50,7 @@ export function checkDecision(files, { embeddedWeb = new Set(), uncertain = fals
     if (/^(?:\.github\/|\.cargo\/|Cargo\.(?:toml|lock)$|rust(?:-toolchain\.toml|fmt\.toml)$|package(?:-lock)?\.json$)/.test(file)) {
       return all(`Shared build/control input: ${file}`);
     }
+    if (embeddedRust.has(file)) result.rust = true;
     // These roots contain native code, embedded data, and fixtures read across the Node/web/Rust
     // boundaries. Keep them conservative: a filename extension does not prove independence.
     if (/^(?:crates\/|apps\/(?:rust-api|rust-worker|desktop)\/|vendor\/|config\/|packages\/|tests\/|release\/)/.test(file)) {
@@ -60,18 +61,20 @@ export function checkDecision(files, { embeddedWeb = new Set(), uncertain = fals
       result.rust = true;
     } else if (file.startsWith("apps/web/")) {
       result.web = result.scaffold = true;
-      if (embeddedWeb.has(file)) result.rust = true;
     } else if (/^docs\/(?:calibration\/|generated\/)/.test(file)) {
       result.rust = result.scaffold = result.history = true;
     } else if (file.startsWith("docs/") && file.endsWith(".md")) {
       // Real source/build readers, not all Markdown. New non-documentation roots fail open below.
       if (/^docs\/(?:film-script-writing|film-editor|workflow-share-envelope)\.md$/.test(file)) result.web = true;
+      // fs::read_to_string and pytest runtime reads are not include macros.
+      if (["docs/workflow-share-envelope.md", "docs/sc-17139-minimax-h3-hosting-layout.md"].includes(file)) result.rust = true;
       if (file === "docs/epic-20738-terminal-cuda.md") result.scaffold = true;
       if (file === "docs/calibration-runbook.md") result.history = true;
     } else if (/^(?:README|AGENTS|CODEGRAPH|CONTRIBUTING|FEATURE_DEVELOPMENT|RELEASING|CHANGELOG|LICENSE)(?:\.[^/]+)?$/.test(file)) {
       // Contributor prose has no production/test reader in these jobs.
     } else if (/^(?:docker\/|docker-compose\.yml$|\.dockerignore$)/.test(file)) {
       result.scaffold = true;
+      if (file === "docker/rust.Dockerfile") result.history = true;
     } else {
       return all(`Unclassified input: ${file}`);
     }
@@ -90,7 +93,7 @@ export function selectCheckJobs({ eventName, event, root, git = execFileSync }) 
     const output = git("git", ["diff", "--name-only", "--no-renames", "-z", `${base}...${head}`], { cwd: root, encoding: "utf8" });
     if (output && !output.endsWith("\0")) throw new Error("incomplete NUL-delimited diff");
     const files = output.split("\0").filter(Boolean);
-    return checkDecision(files, { embeddedWeb: embeddedWebInputs(root) });
+    return checkDecision(files, { embeddedRust: embeddedRustInputs(root) });
   } catch (error) {
     return all(`Could not prove relevance (${error.message}); running conservatively.`);
   }
