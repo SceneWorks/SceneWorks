@@ -890,19 +890,14 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
   // probe while another gained a second, still green. Naming the owner closes both. The only probe
   // that does not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves
   // idleness on its own rendered baseline instead because that arm renders first.
-  const owners = [];
-  let owner = null;
-  for (const line of adapter.split("\n")) {
-    const fn = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z_0-9]+)/.exec(line);
-    if (fn) owner = fn[1];
-    const probe = /let mut vram\s*=\s*([^;]+);/.exec(line);
-    if (probe) owners.push([owner, probe[1].trim()]);
-  }
+  const nameAt = enclosingFunctions(adapter);
+  const owners = [...adapter.matchAll(/let mut vram\s*=\s*([^;]+);/g)]
+    .map((match) => [nameAt(match.index), match[1].trim().replace(/\s+/g, " ")]);
   assert.deepEqual(
     owners.sort(([a], [b]) => a.localeCompare(b)),
     [
       // Krea five-rung reference (and the registry-loaded providers that ride it).
-      ["load_five_rung_generator", "certifying_vram_probe()"],
+      ["load_five_rung_generator", 'if request.get("sdxlEndpoint").is_some() { endpoint_vram_probe()? } else { certifying_vram_probe() }'],
       // The Mage-Flow loader (sc-22733 — its own loader because a Mage load binds two artifact triples).
       ["load_mage_generator", "certifying_vram_probe()"],
       // The inline Krea arm.
@@ -949,6 +944,49 @@ function enclosingFunctions(source) {
   return (index) => starts.filter((entry) => entry.at <= index).at(-1)?.name ?? "(top level)";
 }
 
+// CI_IMPACT: pure source-contract checks for one dispatch-only probe; no CUDA or model execution.
+function assertSdxlEndpointProbeGuards(adapter) {
+  const body = (name) => {
+    const at = adapter.indexOf(`fn ${name}(`);
+    assert.ok(at >= 0, `${name} exists`);
+    const next = adapter.slice(at + 1).search(/^fn /m);
+    return adapter.slice(at, next < 0 ? undefined : at + 1 + next);
+  };
+  const probe = body("endpoint_vram_probe");
+  assert.match(probe, /for _ in 0\.\.5/);
+  assert.match(probe, /memory\.used,memory\.free,utilization\.gpu,utilization\.memory/);
+  assert.match(probe, /values\[1\] < 16 \* 1024 \|\| values\[2\] != 0 \|\| values\[3\] != 0/);
+  assert.match(probe, /used\.iter\(\)\.max\(\)\.unwrap\(\) - used\.iter\(\)\.min\(\)\.unwrap\(\) > 64/);
+  assert.match(probe, /sdxl_endpoint_context_uuid\(\)\?/);
+  assert.match(probe, /uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"/);
+  assert.doesNotMatch(probe, /pure_compute|assert_idle|assert_stable_idle/, "unused contexts remain part of the measured baseline");
+  const context = body("sdxl_endpoint_context_uuid");
+  assert.match(context, /candle_gen::default_device\(\)/);
+  assert.match(context, /\.as_cuda_device\(\)/);
+  assert.match(context, /\.cuda_stream\(\)[\s\S]*?\.context\(\)[\s\S]*?\.uuid\(\)/);
+  const endpoint = body("run_sdxl_endpoint");
+  for (const variable of ["CUDA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID"]) {
+    assert.match(endpoint, new RegExp(`std::env::var\\("${variable}"\\)\\.as_deref\\(\\) != Ok\\("1"\\)`));
+  }
+  assert.match(endpoint, /let uuid = smi\.query\("uuid"\)\?/);
+  assert.match(endpoint, /uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"/);
+  assert.match(endpoint, /planned_provider\(request\)\? != SDXL_ID/);
+  assert.match(endpoint, /planned_tier\(request\)\? != "q4"/);
+}
+
+test("manual SDXL probe exception rejects missing activity, headroom, stability or actual-device guards", async () => {
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  assertSdxlEndpointProbeGuards(adapter);
+  for (const [from, to] of [
+    ["for _ in 0..5", "for _ in 0..1"],
+    ["values[1] < 16 * 1024", "values[1] < 1"],
+    ["values[2] != 0", "values[2] > 100"],
+    ["values[3] != 0", "values[3] > 100"],
+    ['sdxl_endpoint_context_uuid()?', 'String::from("unverified")'],
+    ['std::env::var("SCENEWORKS_GPU_ID").as_deref() != Ok("1")', 'false'],
+  ]) assert.throws(() => assertSdxlEndpointProbeGuards(adapter.replace(from, to)), from);
+});
+
 function assertEveryVramProbeIsCertifying(adapter) {
   const nameAt = enclosingFunctions(adapter);
   // Every probe CONSTRUCTION in the file, whichever spelling it uses.
@@ -961,6 +999,11 @@ function assertEveryVramProbeIsCertifying(adapter) {
     // The certifying constructor's own definition is the one place `start_rendered` may appear
     // without being a capture arm's ad-hoc probe.
     if (site.fn === "certifying_vram_probe") continue;
+    if (site.fn === "endpoint_vram_probe") {
+      assert.equal(site.text, "VramProbe::start_rendered()", "manual endpoint probe construction changed");
+      assertSdxlEndpointProbeGuards(adapter);
+      continue;
+    }
     if (site.text.startsWith("certifying_vram_probe")) {
       certifying.add(site.fn);
       continue;
