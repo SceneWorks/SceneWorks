@@ -3,15 +3,16 @@ import assert from 'node:assert/strict';
 import { Api, VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, samplesBracketJob, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, readCanceledJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
-import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, unlink, open, rm, symlink, rename, truncate } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, unlink, open, rm, symlink, rename, truncate, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { deflateSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { sourceIdentity, filesUnder } from './lib/moss-edit-terminal-actions.mjs';
 import { adapterRefusalState } from './moss-edit-terminal-actions.mjs';
+import { executionTooling } from './lib/moss-edit-native-reuse.mjs';
 import { verifyUiRequestBinding } from './moss-edit-terminal-browser.mjs';
 
 globalThis.fetch = async () => { throw new Error('LIVE_API_FORBIDDEN_IN_PURE_TESTS'); };
@@ -340,7 +341,7 @@ test('bounded API-free prepare to actual clean-source freeze writes a valid lock
   const library=fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url));p.cacheComparisonPolicy={metric:'rgb8-mae/v1',tolerance:0.01,implementationSha256:(await fileIdentity(library)).sha256};await writeFile(resolve(output,'cases.json'),JSON.stringify(p));
   const inference=resolve(directory,'inference'),product=resolve(directory,'product');const inferenceHead=await gitFixture(inference,'[package]\nname="fixture-inference"\n');
   const manifestPin=`[dependencies]\ninference={git="https://github.com/SceneWorks/inference",rev="${inferenceHead}"}\n`,lockPin=`source = "git+https://github.com/SceneWorks/inference?rev=${inferenceHead}#${inferenceHead}"\n`;
-  await gitFixture(product,manifestPin,{'crates/sceneworks-worker/Cargo.toml':manifestPin,'crates/sceneworks-memory-adapter/Cargo.toml':manifestPin,'Cargo.lock':lockPin});
+  await gitFixture(product,manifestPin,{'crates/sceneworks-worker/Cargo.toml':manifestPin,'crates/sceneworks-memory-adapter/Cargo.toml':manifestPin,'Cargo.lock':lockPin,'scripts/moss-edit-terminal.mjs':await readFile(fileURLToPath(new URL('./moss-edit-terminal.mjs',import.meta.url)),'utf8'),'scripts/lib/moss-edit-terminal.mjs':await readFile(library,'utf8')});
   const launcher=await json(resolve(output,'launch.example.json')),artifact=resolve(directory,'fixture-inventory.json');await save(artifact,{fixture:true});
   Object.assign(launcher,{sources:{sceneworks:product,inference},approvedBy:'PURE_FIXTURE_ONLY',approvalEvidenceSha256:'f'.repeat(64),phase18ReviewSha256:'f'.repeat(64),inferencePreMergeReviewSha256:'f'.repeat(64)});
   for(const key of ['apiBinary','workerBinary','webPackage','packages','toolchain','numericalCarryForward'])launcher.files[key]=artifact;
@@ -363,6 +364,17 @@ test('bounded API-free prepare to actual clean-source freeze writes a valid lock
   const localPath=resolve(second,'launch.json');await save(localPath,local);await bind(localPath);const relocatedState=await frozen(localPath);
   assert.equal(digest(relocatedState.lock),digest(lock));assert.equal(relocatedState.binding.backend,'cuda');assert.notEqual(relocatedState.binding.paths.sources.sceneworks,launcher.sources.sceneworks);
   assert.equal(await readFile(resolve(second,'protocol.lock.json'),'utf8'),await readFile(resolve(output,'protocol.lock.json'),'utf8'));await assert.rejects(()=>bind(localPath),/EEXIST/);
+  // Run the actual bind/frozen entrypoints from a separate clean tooling checkout.
+  // Product source, lock, plan and frozen protocol bytes remain those above.
+  const toolingRoot=await realpath(await (async()=>{const path=resolve(directory,'tooling');await cp(fileURLToPath(new URL('./',import.meta.url)),resolve(path,'scripts'),{recursive:true});return path;})());
+  const git=(...args)=>execFileSync('git',['-C',toolingRoot,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim();
+  git('init');git('add','.');git('-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-m','inert tooling');
+  const tooling=await executionTooling(toolingRoot,git('rev-parse','HEAD')),protocol=await import(pathToFileURL(resolve(toolingRoot,'scripts/moss-edit-terminal.mjs')).href);
+  const reused=structuredClone(local),reusedRoot=resolve(directory,'reused-cuda');await cp(second,reusedRoot,{recursive:true});await rm(resolve(reusedRoot,'bindings'),{recursive:true});
+  reused.executionTooling=tooling;reused.evidenceRoot=reusedRoot;reused.plan=resolve(reusedRoot,'cases.json');reused.files.harness=resolve(reused.sources.sceneworks,'scripts/moss-edit-terminal.mjs');reused.files.harnessLibrary=resolve(reused.sources.sceneworks,'scripts/lib/moss-edit-terminal.mjs');
+  const reusedPath=resolve(reusedRoot,'launch.json');await writeFile(reusedPath,JSON.stringify(reused));await protocol.bind(reusedPath);const reusedState=await protocol.frozen(reusedPath);
+  assert.equal(digest(reusedState.lock),digest(lock));assert.equal(reusedState.binding.backend,'cuda');assert.equal(reusedState.config.executionTooling.head,tooling.head);assert.notEqual(tooling.head,lock.sources.sceneworks.head);
+  assert.equal(await readFile(resolve(reusedRoot,'protocol.lock.json'),'utf8'),await readFile(resolve(output,'protocol.lock.json'),'utf8'));
   const detached=structuredClone(local),detachedPath=resolve(second,'detached-launch.json'),detachedArtifact=resolve(relocated,'detached-artifact.json');await cp(artifact,detachedArtifact);
   for(const name of [...BACKEND_FILES,'numericalCarryForward'])detached.files[name]=detachedArtifact;await save(detachedPath,detached);
   await assert.rejects(()=>frozen(detachedPath),/binding changed/);assert.equal(digest((await frozen(detachedPath,{retained:true})).lock),digest(lock));

@@ -81,7 +81,15 @@ export async function prepare(inputPath, out) {
 async function load(configPath) {
   const config = await json(configPath), root = resolve(config.evidenceRoot);
   requireThat(config.version === VERSION, 'wrong launcher version');
-  if (config.repair) {
+  if (config.executionTooling) {
+    const tooling=config.executionTooling;
+    requireThat(/^[a-f0-9]{40}$/.test(tooling.head)&&canonical(treeIdentity(tooling.sourceRoot))===canonical(tooling.source)&&tooling.head===tooling.source.head,'execution tooling checkout changed');
+    const expected={harness:'moss-edit-terminal.mjs',harnessLibrary:'lib/moss-edit-terminal.mjs',actionController:'moss-edit-terminal-actions.mjs',actionLibrary:'lib/moss-edit-terminal-actions.mjs',browserDriver:'moss-edit-terminal-browser.mjs',browserControls:'lib/moss-edit-terminal-controls.mjs',qualityAmendment:'lib/moss-edit-quality-amendment.mjs',nativeReuse:'lib/moss-edit-native-reuse.mjs'};
+    requireThat(canonical(Object.keys(tooling.files).sort())===canonical(Object.keys(expected).sort())&&canonical(Object.keys(tooling.identities).sort())===canonical(Object.keys(expected).sort()),'execution tooling file set changed');
+    for(const [name,path] of Object.entries(tooling.files))requireThat(resolve(path)===resolve(tooling.sourceRoot,'scripts',expected[name])&&canonical(await fileIdentity(path))===canonical(tooling.identities[name]),`execution tooling ${name} changed`);
+    requireThat(resolve(tooling.files.harness)===fileURLToPath(import.meta.url)&&resolve(tooling.files.harnessLibrary)===fileURLToPath(new URL('./lib/moss-edit-terminal.mjs',import.meta.url))&&resolve(tooling.files.browserDriver)===fileURLToPath(new URL('./moss-edit-terminal-browser.mjs',import.meta.url)),'execution must use its declared tooling files');
+    requireThat(resolve(config.files.harness)===resolve(config.sources.sceneworks,'scripts/moss-edit-terminal.mjs')&&resolve(config.files.harnessLibrary)===resolve(config.sources.sceneworks,'scripts/lib/moss-edit-terminal.mjs'),'execution tooling displaced frozen product protocol');
+  } else if (config.repair) {
     requireThat(config.repair.name==='r16-checker-recovery'&&/^[a-f0-9]{64}$/.test(config.repair.inventorySha256??''),'only the original bounded R16 checker repair may relax relocated execution paths');
     const tooling = config.repair.tooling;
     requireThat(tooling?.sourceRoot && /^[a-f0-9]{40}$/.test(tooling.head ?? '') && canonical(treeIdentity(tooling.sourceRoot)) === canonical(tooling.source) && tooling.head === tooling.source.head, 'continuation tooling checkout changed');

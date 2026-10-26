@@ -36,9 +36,23 @@ test('CUDA rebase invokes the protocol from its declared source checkout, not th
  await import(pathToFileURL(invokedController).href);
  assert.equal(globalThis.__mossProtocolOrigin,'source','the controller loaded the protocol from the runtime-declared source checkout');
  delete globalThis.__mossProtocolOrigin;
- await import(pathToFileURL(resolve(root,'tooling/scripts/moss-edit-terminal-actions.mjs')).href);
+ const reuseStep=workflow.match(/- name: Execute fresh CUDA rows using retained native builds and ordinary Mac handoff\n\s+if: inputs\.native_run_id != ''\n\s+run: node (source|tooling)\/scripts\/moss-edit-terminal-actions\.mjs execute-reused-cuda/);
+ assert.ok(reuseStep,'retained-native execution must explicitly select its tooling checkout');
+ await import(pathToFileURL(resolve(root,reuseStep[1],'scripts/moss-edit-terminal-actions.mjs')).href);
  assert.equal(globalThis.__mossProtocolOrigin,'tooling','the wrong checkout would load a different protocol before freeze');
  delete globalThis.__mossProtocolOrigin;
+});
+test('ordinary CUDA reuse separates product and tooling and rejects incomplete or historical producers',()=>{
+ const product='a'.repeat(40),tooling='c'.repeat(40),pin='b'.repeat(40);
+ const input={candidate_id:'ordinary-fixture',bundle_run_id:'11',bundle_artifact_id:'12',bundle_manifest_sha256:'f'.repeat(64),phase:'execute',tooling_sha:tooling,product_sha:product,native_run_id:'21',native_run_attempt:'1',mlx_run_id:'21',mlx_run_attempt:'1',mlx_artifact_id:'23',mlx_tooling_sha:product,cuda_hf_run_id:'21',cuda_hf_run_attempt:'1',cuda_hf_artifact_id:'24'};
+ const validate=value=>validateDispatchEnvelope(JSON.stringify(value),tooling,pin,tooling);
+ assert.equal(validate(input).product_sha,product);
+ for(const key of ['native_run_id','native_run_attempt','mlx_run_id','mlx_run_attempt','mlx_artifact_id','mlx_tooling_sha','cuda_hf_run_id','cuda_hf_run_attempt','cuda_hf_artifact_id']){const value={...input};delete value[key];assert.throws(()=>validate(value),key);}
+ for(const patch of [{product_sha:tooling},{mlx_tooling_sha:tooling},{original_inventory_path:'/tmp/old'},{execution_run_id:'31'},{review_artifact_id:'32'},{native_run_attempt:'0'}])assert.throws(()=>validate({...input,...patch}));
+ const verify={...input,phase:'verify',execution_run_id:'31',execution_run_attempt:'1',review_run_id:'32',review_artifact_id:'33'};
+ for(const key of ['cuda_hf_run_id','cuda_hf_run_attempt','cuda_hf_artifact_id'])delete verify[key];
+ assert.equal(validate(verify).execution_run_id,'31');
+ assert.throws(()=>validate({...verify,cuda_hf_run_id:'21'}));
 });
 test('ordinary MLX and CUDA artifacts retain hidden handoff metadata on the owned evidence paths',async t=>{
  const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8');

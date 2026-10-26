@@ -38,13 +38,13 @@ export function validateExecutionToolingCapture(capture,executionToolingSha,veri
   return true;
 }
 
-export function ordinaryExecutionCapture(lock,binding,env=process.env){
+export function ordinaryExecutionCapture(lock,binding,env=process.env,toolingSha=null){
   validateBinding(binding,lock,binding.backend);
-  requireThat(env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&env.GITHUB_SHA===lock.sources.sceneworks.head&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT??''),'ordinary quality capture requires actual paired Actions execution');
-  return {version:VERSION,candidateId:lock.candidateId,backend:binding.backend,lockSha256:digest(lock),bindingSha256:digest(binding),sources:lock.sources,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,artifactName:`moss-execution-${binding.backend}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`};
+  requireThat((toolingSha===null||toolingSha===undefined||/^[a-f0-9]{40}$/.test(toolingSha))&&env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&env.GITHUB_SHA===(toolingSha??lock.sources.sceneworks.head)&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT??''),'ordinary quality capture requires actual paired Actions execution');
+  return {version:VERSION,candidateId:lock.candidateId,backend:binding.backend,lockSha256:digest(lock),bindingSha256:digest(binding),sources:lock.sources,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,artifactName:`moss-execution-${binding.backend}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`,...(toolingSha?{toolingSha}: {})};
 }
-async function ordinaryQualityContext(root,lock,comparison,{bundleRoot,executionRunId,executionRunAttempt}){
-  requireThat(lock.qualityPolicy?.amendmentSha256===AMENDMENT_SHA256&&bundleRoot&&/^[1-9][0-9]*$/.test(executionRunId??'')&&/^[1-9][0-9]*$/.test(executionRunAttempt??''),'ordinary quality requires frozen policy and actual execution artifact run');
+async function ordinaryQualityContext(root,lock,comparison,{bundleRoot,executionRunId,executionRunAttempt,backendExecutions}){
+  requireThat(lock.qualityPolicy?.amendmentSha256===AMENDMENT_SHA256&&bundleRoot&&(backendExecutions||/^[1-9][0-9]*$/.test(executionRunId??'')&&/^[1-9][0-9]*$/.test(executionRunAttempt??'')),'ordinary quality requires frozen policy and actual execution artifact run');
   const inventoryPath=resolve(bundleRoot,'bundle-inventory.json');
   requireThat(canonical(await fileIdentity(inventoryPath))===canonical(lock.files.qualityBundleInventory),'historical quality bundle inventory changed');
   const inventory=await json(inventoryPath);
@@ -61,16 +61,18 @@ async function ordinaryQualityContext(root,lock,comparison,{bundleRoot,execution
     requireThat(entry[role]?.sha256===record.sha256&&entry[role]?.sha256===old[role]?.sha256&&entry[role]?.byteLength===old[role]?.byteLength&&String(entry.runId)===String(record.runId)&&String(entry.artifactId)===String(record.artifactId)&&entry.toolingSha===record.toolingSha&&entry.attempt===old.attempt,'historical upstream bytes or producer substituted');
   }
   requireThat(comparison.suiteSummary?.sha256===historical.suiteSummary?.sha256&&comparison.suiteSummary?.byteLength===historical.suiteSummary?.byteLength,'historical suite summary substituted');
-  await validateOrdinaryExecutionCaptures(root,lock,comparison,{executionRunId,executionRunAttempt});
+  await validateOrdinaryExecutionCaptures(root,lock,comparison,{executionRunId,executionRunAttempt,backendExecutions});
   return historical;
 }
-export async function validateOrdinaryExecutionCaptures(root,lock,comparison,{executionRunId,executionRunAttempt}){
+export async function validateOrdinaryExecutionCaptures(root,lock,comparison,{executionRunId,executionRunAttempt,backendExecutions}){
   requireThat(canonical(Object.keys(comparison.nativeExecutions??{}).sort())===canonical(['cuda','mlx']),'ordinary comparison needs both actual native captures');
   for(const backend of ['mlx','cuda']){
     const file=`external/ordinary-execution-${backend}.json`,entry=comparison.nativeExecutions[backend];
     requireThat(entry?.file===file,'ordinary execution capture path changed');
     const capture=await json(await identity(root,entry)),binding=validateBinding(await json(resolve(root,'bindings',`${backend}.json`)),lock,backend);
-    const expected=ordinaryExecutionCapture(lock,binding,{GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'SceneWorks/SceneWorks',GITHUB_SHA:lock.sources.sceneworks.head,GITHUB_RUN_ID:executionRunId,GITHUB_RUN_ATTEMPT:executionRunAttempt});
+    const producer=backendExecutions?.[backend]??{runId:executionRunId,attempt:executionRunAttempt};
+    requireThat(producer&&/^[1-9][0-9]*$/.test(producer.runId??'')&&/^[1-9][0-9]*$/.test(producer.attempt??'')&&(!producer.toolingSha||/^[a-f0-9]{40}$/.test(producer.toolingSha)),'missing actual backend execution producer');
+    const expected=ordinaryExecutionCapture(lock,binding,{GITHUB_ACTIONS:'true',GITHUB_REPOSITORY:'SceneWorks/SceneWorks',GITHUB_SHA:producer.toolingSha??lock.sources.sceneworks.head,GITHUB_RUN_ID:producer.runId,GITHUB_RUN_ATTEMPT:producer.attempt},producer.toolingSha);
     requireThat(canonical(capture)===canonical(expected),'ordinary capture differs from actual execution artifact, lock or binding');
   }
 }

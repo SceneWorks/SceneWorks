@@ -220,6 +220,16 @@ concurrency:
   cancel-in-progress: false
 env:
   MOSS_SOURCE_SHA: ${{ inputs.source_sha }}
+  MOSS_NATIVE_RUN_ID: ${{ inputs.native_run_id }}
+  MOSS_NATIVE_RUN_ATTEMPT: ${{ inputs.native_run_attempt }}
+  MOSS_MLX_RUN_ID: ${{ inputs.mlx_run_id }}
+  MOSS_MLX_RUN_ATTEMPT: ${{ inputs.mlx_run_attempt }}
+  MOSS_MLX_ARTIFACT_ID: ${{ inputs.mlx_artifact_id }}
+  MOSS_CUDA_HF_RUN_ID: ${{ inputs.cuda_hf_run_id }}
+  MOSS_CUDA_HF_RUN_ATTEMPT: ${{ inputs.cuda_hf_run_attempt }}
+  MOSS_CUDA_HF_ARTIFACT_ID: ${{ inputs.cuda_hf_artifact_id }}
+  MOSS_EXECUTION_RUN_ID: ${{ inputs.execution_run_id }}
+  MOSS_EXECUTION_RUN_ATTEMPT: ${{ inputs.execution_run_attempt }}
   MOSS_INFERENCE_SHA: ${{ inputs.inference_sha }}
   MOSS_CANDIDATE: ${{ inputs.candidate_id }}
   MOSS_BUNDLE_SHA: ${{ inputs.bundle_manifest_sha256 }}
@@ -259,7 +269,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
   windows-maintenance:
-    if: inputs.phase == 'execute' || inputs.phase == 'cuda-rebase'
+    if: (inputs.phase == 'execute' && inputs.native_run_id == '') || inputs.phase == 'cuda-rebase'
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 15
     env:
@@ -286,7 +296,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Guarded stopped-run disk recovery failed' }
   build-native:
     needs: windows-maintenance
-    if: inputs.phase == 'execute' || inputs.phase == 'cuda-rebase'
+    if: (inputs.phase == 'execute' && inputs.native_run_id == '') || inputs.phase == 'cuda-rebase'
     strategy:
       fail-fast: false
       matrix:
@@ -403,7 +413,7 @@ jobs:
           retention-days: 90
   execute-mlx:
     needs: build-native
-    if: inputs.phase == 'execute'
+    if: inputs.phase == 'execute' && inputs.native_run_id == ''
     runs-on: [self-hosted, macOS, ARM64, rw-starvector]
     timeout-minutes: 720
     env:
@@ -471,7 +481,7 @@ jobs:
           retention-days: 90
   execute-cuda:
     needs: execute-mlx
-    if: inputs.phase == 'execute'
+    if: ${{ always() && inputs.phase == 'execute' && (needs.execute-mlx.result == 'success' || (inputs.native_run_id != '' && inputs.mlx_artifact_id != '')) }}
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
     timeout-minutes: 720
     env:
@@ -493,6 +503,13 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.native_run_id != ''
+        with:
+          ref: ${{ inputs.tooling_sha }}
+          path: tooling
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
@@ -509,19 +526,42 @@ jobs:
         run: node source/scripts/moss-edit-terminal-actions.mjs configure-env
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          pattern: moss-native-*-${{ github.run_id }}-${{ github.run_attempt }}
+          pattern: moss-native-*-${{ inputs.native_run_id || github.run_id }}-${{ inputs.native_run_attempt || github.run_attempt }}
+          run-id: ${{ inputs.native_run_id || github.run_id }}
+          github-token: ${{ github.token }}
           path: ${{ env.MOSS_BUILDS }}
           merge-multiple: false
       - name: Place source-bound backend artifacts at their declared local paths
         run: node source/scripts/moss-edit-terminal-actions.mjs arrange-builds "${{ env.MOSS_BUILDS }}"
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.native_run_id == ''
         with:
           name: moss-execution-mlx-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.MOSS_ROOT }}/prior
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.native_run_id != ''
+        with:
+          artifact-ids: ${{ inputs.mlx_artifact_id }}
+          run-id: ${{ inputs.mlx_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ env.MOSS_ROOT }}/prior
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: inputs.native_run_id != ''
+        with:
+          artifact-ids: ${{ inputs.cuda_hf_artifact_id }}
+          run-id: ${{ inputs.cuda_hf_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ env.MOSS_ROOT }}/prior-cuda
       - name: Provision exact headless CPU browser into the owned job directory
         run: node source/scripts/moss-edit-terminal-actions.mjs provision-browser "${{ env.MOSS_ROOT }}/runtime.json"
       - name: Execute allocated native rows and all refusal probes
+        if: inputs.native_run_id == ''
         run: node source/scripts/moss-edit-terminal-actions.mjs execute "${{ env.MOSS_ROOT }}/runtime.json"
+      - name: Execute fresh CUDA rows using retained native builds and ordinary Mac handoff
+        if: inputs.native_run_id != ''
+        run: node tooling/scripts/moss-edit-terminal-actions.mjs execute-reused-cuda "${{ env.MOSS_ROOT }}/runtime.json" "${{ github.workspace }}/tooling" "${{ inputs.tooling_sha }}"
       - name: Retain complete and partial evidence; never upload HF caches, targets or credentials
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
@@ -925,8 +965,11 @@ jobs:
           MOSS_EXECUTION_RUN_ATTEMPT: ${{ inputs.execution_run_attempt }}
         run: node source/scripts/moss-edit-terminal-actions.mjs finalize "${{ env.MOSS_ROOT }}/runtime.json"
       - name: Verify original H17 product with separately identified repair tooling
-        if: inputs.phase == 'verify' && inputs.tooling_sha != ''
+        if: inputs.phase == 'verify' && inputs.tooling_sha != '' && inputs.mlx_artifact_id == ''
         run: node tooling/scripts/moss-edit-terminal-actions.mjs finalize-repair "${{ env.MOSS_ROOT }}/runtime.json" "${{ github.workspace }}/tooling" "${{ inputs.tooling_sha }}"
+      - name: Verify ordinary per-backend producers with retained native builds
+        if: inputs.phase == 'verify' && inputs.tooling_sha != '' && inputs.mlx_artifact_id != ''
+        run: node tooling/scripts/moss-edit-terminal-actions.mjs finalize-reused-cuda "${{ env.MOSS_ROOT }}/runtime.json" "${{ github.workspace }}/tooling" "${{ inputs.tooling_sha }}"
       - name: Fully validate historical Mac and corrected CUDA under separate locks
         if: inputs.phase == 'verify-rebase'
         run: node source/scripts/moss-edit-terminal-actions.mjs finalize-cuda-rebase "${{ env.MOSS_ROOT }}/runtime.json" "${{ github.workspace }}/historical-source" "${{ github.workspace }}/historical-inference" "${{ env.MOSS_OLD_BUILDS }}/mlx"

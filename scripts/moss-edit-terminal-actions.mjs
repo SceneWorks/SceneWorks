@@ -13,6 +13,7 @@ import { command, sourceIdentity, filesUnder, assertOriginalEvidence, assertH18C
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { stripJsoncComments } from './lib/jsonc.mjs';
 import { cudaSourceContinuity, validateCudaRebaseRecord } from './lib/moss-edit-cuda-rebase.mjs';
+import {reuseProducers,executionTooling,validateOrdinaryMlx,readOnlyStoppedPackageSource} from './lib/moss-edit-native-reuse.mjs';
 import {ordinaryExecutionCapture} from './lib/moss-edit-quality-amendment.mjs';
 
 import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
@@ -426,7 +427,7 @@ export async function historicalMlxLaunchForCudaRebase(config,macRoot,oldSourceR
 }
 async function harness(config,args,label) {
   const prefix=config.continuation?.retry?`continuation-retry${config.continuation.retry.ordinal>1?`-${config.continuation.retry.ordinal}`:''}-`:config.toolingRoot||config.continuation?'continuation-':'';
-  await command(process.execPath,[resolve(config.toolingRoot??config.continuation?.toolingRoot??config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${prefix}${label}.log`)});
+  await command(process.execPath,[resolve(config.executionTooling?.sourceRoot??config.toolingRoot??config.continuation?.toolingRoot??config.sourceRoot,'scripts/moss-edit-terminal.mjs'),...args],{cwd:config.sourceRoot,env:process.env,log:resolve(config.root,'commands',`${prefix}${label}.log`)});
 }
 export function compareCrossBackendHistoryJob(origin,actual) {
   const jobIdentityEqual=actual.id===origin.id&&actual.projectId===origin.projectId&&actual.type===origin.type&&actual.status===origin.status;
@@ -481,6 +482,7 @@ async function launcher(config,projectId) {
   if(policy&&!config.cudaRebase&&!config.toolingRoot&&!config.continuation)files.qualityBundleInventory=resolve(config.bundleRoot,'bundle-inventory.json');
   return {version:VERSION,candidateId:config.candidateId,localBackend:config.backend,plan:resolve(root,'cases.json'),evidenceRoot:root,
     ...(files.qualityBundleInventory?{qualityBundleRoot:config.bundleRoot}:{}),
+    ...(config.executionTooling?{executionTooling:config.executionTooling}:{}),
     sources:{sceneworks:config.sourceRoot,inference:config.inferenceRoot},inferenceMainRef:'origin/main',files,
     artifactInventories:Object.fromEntries(['mlx','cuda'].map(backend=>[backend,resolve(config.buildRoot,backend,'inventory.json')])),
     backends:{[config.backend]:{apiUrl:`http://127.0.0.1:${config.port}`,projectId,workerId:config.workerId,workerGpuId:config.backend==='cuda'?'1':'mlx',tokenEnv:'MOSS_EDIT_ACTIONS_TOKEN'}},
@@ -674,16 +676,17 @@ export async function executeBackend(config) {
     if(config.completedMlx)launch.repair.completedMlx=config.completedMlx;
     if(cudaRebase){launch.cudaRebase={...cudaRebase,auditPath:safePath(config.bundleRoot,config.sourceContinuityAudit.file)};launch.stoppedCuda=config.stoppedCuda;}
     const launchPath=resolve(config.root,continuing?(config.continuation.retry?`continuation-${retrySuffix}-launch.json`:'continuation-launch.json'):'launch.json');await save(launchPath,launch);
+    if(config.reusedExecution)await save(resolve(config.root,'evidence/external/native-reuse.json'),{...config.reusedExecution,tooling:config.executionTooling});
     if(config.backend==='cuda'&&repairTooling)await cp(launchPath,resolve(config.root,'evidence/external/cuda-execution-tooling-capture.json'),{errorOnExist:true,force:false});
     if(!continuing) {if(config.backend==='mlx'||cudaRebase)await freeze(launchPath);else await bind(launchPath);}
     const state=await frozen(launchPath),toolchain=await json(paths.toolchain),expectedJournal={candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,workerId:config.workerId,
       gpuId:state.binding.endpoint.workerGpuId,
       binarySha256:state.lock.artifacts[config.backend].files.workerBinary.sha256,producerSha256:toolchain.observationProducerSha256};
-    if(state.lock.qualityPolicy&&!repairTooling&&!continuing&&!cudaRebase)await save(resolve(state.root,'external',`ordinary-execution-${config.backend}.json`),ordinaryExecutionCapture(state.lock,state.binding));
+    if(state.lock.qualityPolicy&&!repairTooling&&!continuing&&!cudaRebase)await save(resolve(state.root,'external',`ordinary-execution-${config.backend}.json`),ordinaryExecutionCapture(state.lock,state.binding,process.env,config.executionTooling?.head));
     await actualJournal(config,expectedJournal);
     if(!continuing)await harness(config,['upload',launchPath,config.backend,await deviceReceipt(config,state,'upload')],'upload');
     const samplerSha256=(await fileIdentity(resolve(config.sourceRoot,'scripts/lib/moss-edit-terminal-actions.mjs'))).sha256;
-    const originalActions=repairTooling?await import(pathToFileURL(resolve(config.sourceRoot,'scripts/lib/moss-edit-terminal-actions.mjs')).href):null;
+    const originalActions=repairTooling||config.executionTooling?await import(pathToFileURL(resolve(config.sourceRoot,'scripts/lib/moss-edit-terminal-actions.mjs')).href):null;
     if(continuing&&!original.retry) {
       await harness(config,['recover-completed',launchPath,'advanced-mlx-sft'],'recover-completed');
       const id='advanced-mlx-sft',root=state.root,job=await json(resolve(root,'rows',id,'recovery-job-readback.json'));
@@ -721,7 +724,7 @@ export async function executeBackend(config) {
         const admission=await deviceReceipt(config,state,`${row.id}${suffix}`);
         if(row.transport.startsWith('ui-')) {
           if(!reusingUiIntent)await harness(config,['ui-task',launchPath,row.id],`${row.id}-intent`);
-          const {captureUi}=repairTooling?await import(pathToFileURL(resolve(toolingRoot,'scripts/moss-edit-terminal-browser.mjs')).href):await import('./moss-edit-terminal-browser.mjs');
+          const {captureUi}=config.executionTooling?await import(pathToFileURL(resolve(config.executionTooling.sourceRoot,'scripts/moss-edit-terminal-browser.mjs')).href):repairTooling?await import(pathToFileURL(resolve(toolingRoot,'scripts/moss-edit-terminal-browser.mjs')).href):await import('./moss-edit-terminal-browser.mjs');
           capture=await captureUi({launchPath,rowId:row.id,captureRoot:resolve(config.root,'captures',`${row.id}${suffix}`),playwrightModule:config.playwrightModule,token});
         }
         await harness(config,['run',launchPath,row.id,admission,...(capture?[capture]:[])],`${row.id}-run`);
@@ -800,7 +803,14 @@ export async function finalize(config) {
   const root=resolve(config.root,'evidence'),binding=await json(resolve(root,'bindings',`${config.backend}.json`));
   config.guardRequests=await json(resolve(root,'resolved-guards.json'));
   const launch=await launcher(config,binding.endpoint.projectId),launchPath=resolve(config.root,'review-launch.json');
-  if(!config.toolingRoot&&!config.cudaRebaseReview)launch.qualityExecution={executionRunId:process.env.MOSS_EXECUTION_RUN_ID,executionRunAttempt:process.env.MOSS_EXECUTION_RUN_ATTEMPT};
+  if(config.reusedExecution) {
+    const saved=await json(resolve(root,'external/native-reuse.json')),capture=await json(resolve(root,'external/ordinary-execution-cuda.json'));
+    requireThat(canonical(saved.native)===canonical(config.reusedExecution.native)&&canonical(saved.mlx)===canonical(config.reusedExecution.mlx)&&saved.sourceSha===config.sourceSha&&saved.inferenceSha===config.inferenceSha&&saved.candidateId===config.candidateId&&capture.runId===config.reusedExecution.cuda.runId&&capture.attempt===config.reusedExecution.cuda.attempt&&capture.toolingSha===saved.tooling.head,'native reuse producer changed before final verification');
+    requireThat(saved.tooling.source?.head===saved.tooling.head&&saved.tooling.source.tree===(await execFile('git',['-C',config.executionTooling.sourceRoot,'rev-parse',`${saved.tooling.head}^{tree}`])).stdout.trim()&&canonical(Object.keys(saved.tooling.files).sort())===canonical(Object.keys(config.executionTooling.files).sort())&&canonical(Object.keys(saved.tooling.identities).sort())===canonical(Object.keys(config.executionTooling.identities).sort()),'retained CUDA tooling tree or file set changed');
+    await execFile('git',['-C',config.executionTooling.sourceRoot,'merge-base','--is-ancestor',saved.tooling.head,config.executionTooling.head]);
+    for(const [name,path] of Object.entries(saved.tooling.files)){const relative=path.replaceAll('\\','/').split('/scripts/').at(-1);requireThat(relative===config.executionTooling.files[name].replaceAll('\\','/').split('/scripts/').at(-1),'retained CUDA execution tooling path changed');requireThat(sha((await execFile('git',['-C',config.executionTooling.sourceRoot,'show',`${saved.tooling.head}:scripts/${relative}`],{encoding:'buffer',maxBuffer:1024*1024})).stdout)===saved.tooling.identities[name].sha256,'retained CUDA execution tooling changed');}
+    launch.qualityExecution={backendExecutions:{mlx:config.reusedExecution.mlx,cuda:{...config.reusedExecution.cuda,toolingSha:capture.toolingSha}}};
+  } else if(!config.toolingRoot&&!config.cudaRebaseReview)launch.qualityExecution={executionRunId:process.env.MOSS_EXECUTION_RUN_ID,executionRunAttempt:process.env.MOSS_EXECUTION_RUN_ATTEMPT};
   if(config.cudaRebaseReview) {
     const {oldSourceRoot,oldInferenceRoot,oldMlxBuildRoot}=config.cudaRebaseReview;
     launch.cudaRebase={...config.cudaRebase,historicalLaunchPath:await historicalMlxLaunchForCudaRebase(config,resolve(config.root,'prior'),oldSourceRoot,oldInferenceRoot,oldMlxBuildRoot,config.sourceRoot)};launch.stoppedCuda=config.stoppedCuda;
@@ -836,6 +846,25 @@ export async function main(args=process.argv.slice(2)) {
     return configure(resolve(env.MOSS_BUNDLE,'campaign.json'),env.MOSS_SOURCE,env.MOSS_INFERENCE,env.MOSS_ROOT,env.MOSS_BACKEND,env.MOSS_BUILDS);
   }
   if(phase==='configure'&&rest.length===6)return configure(...rest);
+  if(['execute-reused-cuda','finalize-reused-cuda'].includes(phase)&&rest.length===3) {
+    const [runtime,toolingRoot,toolingSha]=rest,config=await json(runtime),verify=phase==='finalize-reused-cuda';
+    config.executionTooling=await executionTooling(toolingRoot,toolingSha);
+    requireThat(config.backend==='cuda'&&toolingSha!==config.sourceSha,'native reuse requires separate exact CUDA tooling and product');
+    const producers=reuseProducers(process.env,{verify});
+    config.reusedExecution={...producers,candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha};
+    if(verify)return finalize(config);
+    requireThat(process.env.GITHUB_SHA===toolingSha,'native reuse dispatch differs from actual workflow commit');
+    config.reusedExecution.completedMlx=await validateOrdinaryMlx(resolve(config.root,'prior'),config,producers.mlx);
+    const source=await readOnlyStoppedPackageSource(config,resolve(config.root,'prior-cuda'),producers);
+    const buildRoot=resolve(dirname(config.root),basename(config.root).replace('moss-execute-','moss-build-'));
+    const rehydratePath=await configure(resolve(config.bundleRoot,'campaign.json'),config.sourceRoot,config.inferenceRoot,buildRoot,'cuda',config.buildRoot),rehydrate=await json(rehydratePath);
+    rehydrate.packageSource=source;await writeFile(rehydratePath,`${JSON.stringify(rehydrate,null,2)}\n`,{mode:0o600});
+    await rehydrateCudaPackages(rehydrate);
+    const inventory=await json(resolve(config.buildRoot,'cuda/inventory.json'));
+    await transferPrivateHf(config,await json(resolve(buildRoot,'packages.json')),inventory.files.packages);
+    await save(resolve(config.root,'cuda-package-preparation.json'),{version:VERSION,mode:'rehydrated-exact-packages',candidateId:config.candidateId,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,originalRunId:producers.native.runId,originalAttempt:producers.native.attempt,originalNativePackages:inventory.files.packages,transfer:await fileIdentity(resolve(config.root,'hf-transfer.json')),readOnlySource:source});
+    config.preparedCudaPackages=true;return executeBackend(config);
+  }
   if(phase==='continue-mlx'&&rest.length===12) {
     const [runtime,toolingRoot,toolingSha,runId,attempt,inventoryPath,inventorySha256,retryPath,retrySha,retryRun,retryArtifact,retryArtifactRoot]=rest,config=await json(runtime);
     requireThat(Boolean(retryPath)===Boolean(retrySha),'H18 retry inventory path and SHA must be supplied together');
