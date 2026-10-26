@@ -516,20 +516,22 @@ fn validate_inventory(value: &Value) -> Result<Vec<EndpointArtifactFile>, String
             .checked_add(file.bytes)
             .ok_or("SDXL endpoints: inventory byte overflow")?;
     }
-    let roots = [
-        "base/",
-        "components/tokenizer_clip_l/",
-        "components/tokenizer_clip_bigg/",
-        "components/vae_fp16_fix/",
+    // Shared snapshots can contain unrelated cached files. The provider consumes exactly these
+    // three shared files; only the base tier is a complete directory source in its artifact seal.
+    let shared_files = [
+        "components/tokenizer_clip_l/tokenizer.json",
+        "components/tokenizer_clip_bigg/tokenizer.json",
+        "components/vae_fp16_fix/diffusion_pytorch_model.safetensors",
     ];
     require(
-        roots
-            .iter()
-            .all(|root| files.iter().any(|file| file.path.starts_with(root)))
-            && files
+        files.iter().any(|file| file.path.starts_with("base/"))
+            && shared_files
                 .iter()
-                .all(|file| roots.iter().any(|root| file.path.starts_with(root))),
-        "inventory must bind the complete stock SDXL source assembly",
+                .all(|path| files.iter().any(|file| file.path == *path))
+            && files.iter().all(|file| {
+                file.path.starts_with("base/") || shared_files.contains(&file.path.as_str())
+            }),
+        "inventory must bind the full base tier and exactly the consumed shared files",
     )?;
     require(total == number(value, "/bytes")?, "inventory byte total")?;
     require(
@@ -651,7 +653,7 @@ mod tests {
             "base/weights.safetensors",
             "components/tokenizer_clip_l/tokenizer.json",
             "components/tokenizer_clip_bigg/tokenizer.json",
-            "components/vae_fp16_fix/vae.safetensors",
+            "components/vae_fp16_fix/diffusion_pytorch_model.safetensors",
         ]
         .into_iter()
         .map(|path| EndpointArtifactFile {
@@ -914,6 +916,18 @@ mod tests {
             *changed.pointer_mut(pointer).unwrap() = replacement;
             assert!(validate_inventory(&changed).is_err(), "accepted {pointer}");
         }
+        let mut extra = inventory.clone();
+        extra["entries"].as_array_mut().unwrap().push(json!({
+            "path":"components/tokenizer_clip_l/config.json", "bytes":1000, "sha256":"a".repeat(64)
+        }));
+        extra["files"] = json!(5);
+        extra["bytes"] = json!(5000);
+        let entries: Vec<EndpointArtifactFile> =
+            serde_json::from_value(extra["entries"].clone()).unwrap();
+        extra["sha256"] = json!(inventory_digest(&entries));
+        assert!(validate_inventory(&extra)
+            .unwrap_err()
+            .contains("exactly the consumed shared files"));
         let mut reordered = inventory;
         reordered["entries"].as_array_mut().unwrap().swap(0, 1);
         assert!(validate_inventory(&reordered)

@@ -30,10 +30,11 @@ export function buildEndpointConfig(summaryRaw, bundleRaws, loaderClosureDigest)
   for (const field of ["files", "bytes", "sha256"]) {
     require(inventory[field] === summary.artifactInventory[field], `ordered artifact inventory ${field} differs`);
   }
-  const roots = ["base/", "components/tokenizer_clip_l/", "components/tokenizer_clip_bigg/", "components/vae_fp16_fix/"];
-  require(roots.every((root) => inventory.entries.some((entry) => entry.path.startsWith(root)))
-    && inventory.entries.every((entry) => roots.some((root) => entry.path.startsWith(root))),
-  "inventory must cover the complete stock SDXL source assembly");
+  const sharedFiles = ["components/tokenizer_clip_l/tokenizer.json", "components/tokenizer_clip_bigg/tokenizer.json", "components/vae_fp16_fix/diffusion_pytorch_model.safetensors"];
+  require(inventory.entries.some((entry) => entry.path.startsWith("base/"))
+    && sharedFiles.every((file) => inventory.entries.some((entry) => entry.path === file))
+    && inventory.entries.every((entry) => entry.path.startsWith("base/") || sharedFiles.includes(entry.path)),
+  "inventory must cover the full base tier and exactly the consumed shared files");
   const pair = {};
   for (const name of NAMES) {
     const matches = summary.endpoints.filter((entry) => entry.endpoint === name);

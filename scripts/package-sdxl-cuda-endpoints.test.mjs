@@ -11,7 +11,7 @@ const seed = JSON.parse(await readFile(new URL("../docs/calibration/sc-22738/sdx
 
 // Unit-only data derived from a valid historical gated shape. Never packaged as a measurement.
 function fixture() {
-  const inventory = artifactInventoryReceipt(["base/weights.safetensors", "components/tokenizer_clip_l/tokenizer.json", "components/tokenizer_clip_bigg/tokenizer.json", "components/vae_fp16_fix/vae.safetensors"]
+  const inventory = artifactInventoryReceipt(["base/weights.safetensors", "components/tokenizer_clip_l/tokenizer.json", "components/tokenizer_clip_bigg/tokenizer.json", "components/vae_fp16_fix/diffusion_pytorch_model.safetensors"]
     .map((path) => ({ path, bytes: 1000, sha256: "a".repeat(64) })));
   const bundles = {};
   const endpoints = [];
@@ -94,6 +94,15 @@ test("packaging refuses changed or incomplete capture bindings", () => {
   f.summary.endpoints[0].recordId = bundle.records[0].id;
   f.summary.endpoints[0].evidenceSha256 = hash(f.bundles.resident);
   assert.throws(() => build(f), /stock eager/);
+});
+
+test("packaging rejects unused shared snapshot members even with a valid composite digest", () => {
+  const f = fixture();
+  f.summary.artifactInventory = artifactInventoryReceipt([
+    ...f.summary.artifactInventory.entries,
+    { path: "components/tokenizer_clip_l/config.json", bytes: 1000, sha256: "a".repeat(64) },
+  ]);
+  assert.throws(() => build(f), /exactly the consumed shared files/);
 });
 
 function outputFixture() {
