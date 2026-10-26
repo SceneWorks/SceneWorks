@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:65462a14a974f96158fac81cf28f68bb913a530c2d417d806adf6978895f0f15",
+    "sceneWorksRevision": "source-tree:596ed0d54e5071a3e27f0332d59cdecf1001a1b1a1d029c2b6c8e22eb676670e",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -9,15 +9,15 @@
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "efcd393df0977f30f9ed95ca375df4f8c3da334bb5c39c7edb5c513efecbc8d3"
+        "sha256": "cf02214b9ade6ed6ab7d5f348aef36f737553e082d286a45418e8bfa4f13acf7"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "23f0b07513e9533219728f048d2de6262ddf03636b0347e87b52c2db2e4a0aad"
+        "sha256": "fe00a4f4ee6bc4c99a5c749f8403601ff83140acc4421c52f33e664cf9038d8c"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "d8995c8b538220de69feb1aefdd0cbe7960ee6c1c9834eaae4ecb2176ad688f3"
+        "sha256": "404860b83a23e97e6c4c5a6baf3d33b261cb8e07db40bcdada54470a9e486f35"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -29,7 +29,7 @@
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "6f7be5e3ad4d25ce7b46434bc8bad7e51b69c7075b0c392a8d168993148f5155"
+        "sha256": "2a195ec098ee5c510765a13d47d0a12c888e6bfff498c42edc5f73e00aa738e3"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "c03769813826ceec1fca4e2a24f69a8d3b5e30f7851ec09d16f77cf04cc62a7d"
+        "sha256": "a40b16cd8850479e7bcbf38a6fdfd0501029c568e1b8621b0065cf68d34e8612"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "a18e3a741a1beb4f0b2eb03f4b814bd47e8682c3d3fb672eafaa73218998f873"
+        "sha256": "83241790d7b0a2579b90af3e9dc4b90bd6e566683db9a6685aadfd3a6439c364"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -81,7 +81,7 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "507a0f3785e5967f75115eb320cc94b857c6b8b8e6a8b365864a8ddc24b90394"
+        "sha256": "9de0d961fe24dd1d1ad788f523cbd7d9637efc43aa2f80ea5751ced058758587"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
@@ -177,7 +177,7 @@
     "anchors": 259,
     "analyticOnlyCells": 104,
     "anchoredCells": 3988,
-    "staleAnchors": 258,
+    "staleAnchors": 259,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -9373,7 +9373,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 2
     },
@@ -229572,7 +229572,7 @@
         "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
         "tier": "bf16",
         "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -229616,7 +229616,7 @@
         "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
         "tier": "bf16",
         "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },

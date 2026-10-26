@@ -1847,9 +1847,19 @@ fn a_mutated_bound_component_refuses_generation_through_the_frozen_closure() {
         message.contains("incompatible-component"),
         "the refusal keeps the checkpoint-plan refusal vocabulary: {message}"
     );
+    // The frozen-closure guard has three equally valid refusal wordings, each naming the
+    // mismatch that opened it: the acquired bytes differ from the persisted closure digest, or
+    // from the recorded staging binding, or the frozen component was never acquired at all.
+    // Which one fires depends on which binding the mutated bytes diverge through, so the
+    // assertion accepts the drift vocabulary rather than one wording of it.
     assert!(
         message.contains("H3 component content drift")
+            || message.contains("staging SHA/bytes binding differs from acquired content")
             || message.contains("frozen H3 component was not acquired"),
+        "the refusal says the acquired content no longer matches the frozen closure: {message}"
+    );
+    assert!(
+        message.contains("q4/transformer_ref"),
         "the refusal names the drifted component: {message}"
     );
     assert!(
