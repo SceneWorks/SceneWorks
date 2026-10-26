@@ -359,7 +359,7 @@ async function main() {
     // request log is the proof's record of what the UI actually asked the API for, so failing to
     // collect it fails the proof rather than writing a summary with an empty log.
     await bounded("browser context close", context.close(), BOUND_MS.context).catch((error) => {
-      console.error(error.message);
+      writeAll(2, `${error.message}\n`);
     });
     proofStage = "request-log";
     const serverLog = await bounded(
@@ -441,7 +441,7 @@ async function main() {
     // not be allowed to hold the job open until its timeout: the run would be reported as
     // cancelled and a proof that actually ran could never be recorded as green.
     await bounded("browser close", browser ? browser.close() : Promise.resolve(), BOUND_MS.browser).catch((error) => {
-      console.error(error.message);
+      writeAll(2, `${error.message}\n`);
     });
     // Destroy any socket the fixture's event streams still hold. The stream lives in the Vite
     // server process, so it cannot be closed from here directly; dropping the connections is
@@ -452,7 +452,7 @@ async function main() {
       // best effort
     }
     await bounded("server close", server ? server.close() : Promise.resolve(), BOUND_MS.server).catch((error) => {
-      console.error(error.message);
+      writeAll(2, `${error.message}\n`);
     });
   }
   // The proof is over and everything it claims is on disk. Exit explicitly, so that no lingering
