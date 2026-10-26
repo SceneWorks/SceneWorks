@@ -168,7 +168,7 @@ test('the macOS terminal lane selects a reviewed CPython 3.12 instead of the hos
 test('manual workflow is execution-only and uses existing runner/token infrastructure without global locks', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
   assert.match(workflow, /workflow_call:/); assert.doesNotMatch(workflow,/^  workflow_dispatch:/m,'only the existing registered terminal routes may call asset ensure'); assert.doesNotMatch(workflow, /^  (push|pull_request|schedule):/m);
-  assert.match(workflow, /rw-chroma/); assert.match(workflow, /real-weights/); assert.match(workflow, /cancel-in-progress: false/);
+  assert.match(workflow, /\[\"self-hosted\",\"macOS\",\"ARM64\",\"real-weights\"\]/); assert.match(workflow, /real-weights/); assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /SCENEWORKS_INFERENCE_READ_TOKEN/); assert.match(workflow, /stationary_pair_authorized/);
   assert.doesNotMatch(workflow, /registration_only|pkill|flock|gpu.token/i);
 });
@@ -222,7 +222,7 @@ test('H3 caller forwards only explicit request fields and the standing read toke
 });
 test('terminal reuses native device queues and binds manual CUDA zero without changing ordinary queues',async()=>{
   const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),job=workflowJob(workflow,'terminal');
-  const group=/^      group: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(group,{backend:'cuda'}),'windows-candle-gpu-real-weights');assert.equal(workflowExpression(group,{backend:'mlx'}),'h3-import-proofs-nax-macos-2');assert.match(job,/cancel-in-progress: false/);
+  const group=/^      group: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(group,{backend:'cuda'}),'windows-candle-gpu-real-weights');assert.equal(workflowExpression(group,{backend:'mlx'}),'h3-import-proofs-nax-macos');assert.match(job,/cancel-in-progress: false/);
   for(const [key,value]of [['CUDA_DEVICE_ORDER','PCI_BUS_ID'],['CUDA_VISIBLE_DEVICES','0'],['SCENEWORKS_GPU_ID','0']]){const expression=new RegExp(`^          ${key}: (.+)$`,'m').exec(job)[1];assert.equal(workflowExpression(expression,{backend:'cuda'}),value);}
 });
 test('actual reusable preflight rejects source-ref drift before product execution without a main activation prerequisite',async t=>{

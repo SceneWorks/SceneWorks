@@ -52,7 +52,7 @@ EXPECTED = {
 }
 PYARROW_VERSION = "19.0.1"
 PYARROW_REQUIRED = f"pyarrow=={PYARROW_VERSION}"
-ALLOWED_MAC_RUNNERS = frozenset({"nax-macos-2"})
+ALLOWED_MAC_RUNNERS = frozenset({"nax-macos"})
 ALLOWED_WINDOWS_RUNNERS = frozenset({"cuda-windows", "cuda-windows-2"})
 SOURCE_NAME = "source-audio.bin"
 SPEECH_NAME = "speech-32000.wav"

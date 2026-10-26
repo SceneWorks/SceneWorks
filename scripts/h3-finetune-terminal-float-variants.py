@@ -65,7 +65,7 @@ NUMPY_REQUIRED = f"numpy=={NUMPY_VERSION}"
 DEFAULT_CHUNK_BYTES = 8 * 1024 * 1024
 MAX_CHUNK_BYTES = 64 * 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024 * 1024
-ALLOWED_MAC_RUNNERS = frozenset({"nax-macos-2"})
+ALLOWED_MAC_RUNNERS = frozenset({"nax-macos"})
 ALLOWED_WINDOWS_RUNNERS = frozenset({"cuda-windows", "cuda-windows-2"})
 PACKED_SUFFIXES = (".comfy_quant", ".weight_scale", ".weight_s_rel")
 KNOWN_AUTHORITY = ("kind", "approvedBy", "approvedAt", "reference", "subjects", "acknowledged")

@@ -55,9 +55,9 @@ concurrency:
 jobs:
   terminal:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.stationary_pair_authorized == true && (inputs.backend == 'mlx' || inputs.backend == 'cuda') }}
-    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-chroma"]') || fromJSON('["self-hosted","windows","cuda","real-weights"]') }}
+    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","real-weights"]') || fromJSON('["self-hosted","windows","cuda","real-weights"]') }}
     concurrency:
-      group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || 'h3-import-proofs-nax-macos-2' }}
+      group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || 'h3-import-proofs-nax-macos' }}
       cancel-in-progress: false
     timeout-minutes: 1440
     env:

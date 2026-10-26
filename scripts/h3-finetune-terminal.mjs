@@ -95,7 +95,7 @@ export function authorized(p, c) {
   assert.notEqual(p.proof_kind,'unit_fake','unit_fake is not campaign authorization');
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'real services/native commands are explicit Actions-only');
   assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR, `${p.sceneworks}:${p.inference}`);
-  if (c.backend === 'mlx') { assert.equal(process.platform,'darwin'); assert.equal(process.env.RUNNER_NAME,'nax-macos-2'); }
+  if (c.backend === 'mlx') { assert.equal(process.platform,'darwin'); assert.equal(process.env.RUNNER_NAME,'nax-macos'); }
   else assert.equal(process.platform,'win32');
 }
 export async function sourcePair(p, root, inferenceRoot) {
@@ -648,7 +648,7 @@ export async function runCase(p, id, root, inferenceRoot) {
   assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR, `${p.sceneworks}:${p.inference}`, 'explicit final pair authorization required');
   validatePlan(p); await sourcePair(p, root, inferenceRoot);
   const c = executionCases(p).find(c => c.id === id); assert.ok(c, 'unknown or intentionally omitted operational case');
-  if (c.backend === 'mlx') { assert.equal(process.platform, 'darwin'); assert.equal(process.env.RUNNER_NAME, 'nax-macos-2'); }
+  if (c.backend === 'mlx') { assert.equal(process.platform, 'darwin'); assert.equal(process.env.RUNNER_NAME, 'nax-macos'); }
   else assert.equal(process.platform, 'win32');
   await verifyMatrixAdmission(p);
   const budget=p.inventory==='reduced-v1'?await laneBudget(p,c.backend):null;
