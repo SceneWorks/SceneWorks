@@ -19,6 +19,13 @@ function receipt() {
     cleanup: { beforeBytes: 512, afterBytes: 512, toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true } };
 }
 
+function replaySelection() {
+  return { backend: "candle", route: "sdxl", actualTier: "q4", mode: "text_to_image", strategy: "bounded_attention",
+    basis: "measured_endpoint", geometry: { width: 1024, height: 1024, batch: 1 },
+    parameters: { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 },
+    predictedPeakBytes: 3_000_000_000, admittedPeakGb: 3.7, reserveGb: 1.5, availableGb: 4.5 };
+}
+
 test("endpoint pair keeps one q4 artifact and renders only maximum and minimum", () => {
   const original = structuredClone(plan);
   const cases = ENDPOINTS.map((endpoint) => endpointCase(plan, endpoint));
@@ -148,16 +155,13 @@ test("admitted replay submits ordinary explicit-q4 defaults without a strategy o
   assert.equal(env.SCENEWORKS_WORKER_CHILD, "1"); assert.equal(env.SCENEWORKS_BACKEND_CANDLE_ENABLED, "true");
 });
 
-test("admitted replay requires actual measured optimized worker selection and budget telemetry", () => {
-  const selection = { backend: "candle", route: "sdxl", actualTier: "q4", mode: "text_to_image", strategy: "bounded_attention",
-    basis: "measured_endpoint", geometry: { width: 1024, height: 1024, batch: 1 },
-    parameters: { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 },
-    predictedPeakBytes: 3_000_000_000, reserveGb: 1.5, availableGb: 4.5 };
-  assert.doesNotThrow(() => assertAdmittedReplaySelection(selection));
+test("admitted replay requires the complete emitted worker selection and budget telemetry", () => {
+  const selection = replaySelection();
+  assert.equal(assertAdmittedReplaySelection(selection), "measured_minimum");
   for (const patch of [{ strategy: "resident" }, { actualTier: "q8" }, { basis: "estimated" }, { predictedPeakBytes: null }, { availableGb: 95 }]) {
     assert.throws(() => assertAdmittedReplaySelection({ ...selection, ...patch }));
   }
-  assert.throws(() => assertAdmittedReplaySelection({ ...selection, parameters: { ...selection.parameters, stageResidency: false } }));
+  assert.throws(() => assertAdmittedReplaySelection({ ...selection, parameters: { ...selection.parameters, stageResidency: false } }), "a middle estimate cannot claim exact endpoint coverage");
   const emitted = { event: "image_memory_strategy_selected", ...selection };
   const flat = { event: emitted.event, route: "sdxl", actual_tier: "q4", predicted_peak_bytes: selection.predictedPeakBytes };
   const workerLog = ["non-JSON startup diagnostic", JSON.stringify(flat), JSON.stringify(emitted)].join("\n");
@@ -165,6 +169,37 @@ test("admitted replay requires actual measured optimized worker selection and bu
   assert.throws(() => admittedReplaySelection(JSON.stringify(flat)), /saw 0/);
   assert.throws(() => admittedReplaySelection(`${workerLog}\n${JSON.stringify(emitted)}`), /saw 2/);
   assert.throws(() => admittedReplaySelection(JSON.stringify({ ...emitted, parameters: { ...selection.parameters, stageResidency: false } })), /did not admit/);
+});
+
+test("admitted replay accepts the ordinary selector's cheaper affordable SDXL compositions", () => {
+  const selection = replaySelection();
+  const plain = { stageResidency: false, decodeTileEdge: null, decodeOverlap: null, attentionChunkSize: null, transformerWindowSize: null };
+  const bounded = { ...plain, decodeTileEdge: 512, decodeOverlap: 64 };
+  for (const [strategy, parameters, basis, coverage] of [
+    ["resident", plain, "measured_endpoint", "measured_resident"],
+    ["staged_residency", { ...plain, stageResidency: true }, "anchor_derived", "estimated_intermediate"],
+    ["bounded_decode", bounded, "anchor_derived", "estimated_intermediate"],
+    ["bounded_decode", { ...bounded, stageResidency: true }, "anchor_derived", "estimated_intermediate"],
+    ["bounded_attention", { ...bounded, attentionChunkSize: 67_108_864 }, "anchor_derived", "estimated_intermediate"],
+    ["bounded_attention", selection.parameters, "measured_endpoint", "measured_minimum"],
+  ]) {
+    assert.equal(assertAdmittedReplaySelection({ ...selection, strategy, parameters, basis }), coverage);
+  }
+  // availableGb is already net of reserve; an affordable 4.5-GiB admission under
+  // a six-GiB free cap and 1.5-GiB reserve must not pay that reserve twice.
+  assert.doesNotThrow(() => assertAdmittedReplaySelection({ ...selection, admittedPeakGb: 4.5 }));
+  assert.doesNotThrow(() => assertAdmittedReplaySelection({ ...selection, admittedPeakGb: 4.5 + 1 / 1024 ** 3 }));
+  for (const patch of [
+    { strategy: "bounded_transformer_residency" },
+    { strategy: "staged_residency", parameters: plain },
+    { strategy: "resident", parameters: { ...plain, stageResidency: true } },
+    { parameters: { ...selection.parameters, decodeOverlap: 128 } },
+    { parameters: { ...selection.parameters, attentionChunkSize: null } },
+    { parameters: { ...selection.parameters, transformerWindowSize: 1 } },
+    { parameters: { ...selection.parameters, unsupportedControl: true } },
+    { admittedPeakGb: 4.6 }, { admittedPeakGb: 2 }, { availableGb: 5 }, { availableGb: -1 },
+    { reserveGb: Number.NaN }, { predictedPeakBytes: 6 * 1024 ** 3 },
+  ]) assert.throws(() => assertAdmittedReplaySelection({ ...selection, ...patch }), /did not admit/);
 });
 
 test("admitted replay waits for API persisted assets and validates the actual sidecar shape", () => {
