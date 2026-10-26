@@ -131,7 +131,7 @@ test("required CI fetches the exact terminal inference revision", async () => {
   assert.equal(requirements.terminal, permanentPin);
   assert.ok(requirements.revisions.includes(preflightRevision));
   assert.match(workflow, /name: Fetch and verify all immutable inference history\n        run: node scripts\/prepare-inference-history\.mjs/);
-  assert.match(workflow, /name: Run historical source and anchor closure integration\n        run: node scripts\/scaffold-test-selection\.mjs --history/);
+  assert.match(workflow, /name: Run historical source and anchor closure integration\n        run: node scripts\/unit-hf-sandbox\.mjs -- node scripts\/scaffold-test-selection\.mjs --history/);
 });
 
 test("exact pinned validator accepts sealed golden receipt and rejects every gate mutation", { skip: process.platform === "win32" ? "canonical evidence sealing runs on macOS; Windows only produces portable tuple artifacts" : inferenceSkip }, async () => {
