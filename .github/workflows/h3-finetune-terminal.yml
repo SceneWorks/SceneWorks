@@ -77,6 +77,17 @@ jobs:
       H3_TERMINAL_ROUTE: h3-terminal-${{ inputs.backend }}
       H3_STAGE_REQUEST: ${{ inputs.campaign_request }}
     steps:
+      # The Windows lane's steps run under bash. A self-hosted Windows listener's own bash
+      # resolution falls through to the WSL relay, which has no /bin/bash there, so the job died in
+      # its very first step. Git for Windows' bash IS on the box; putting it on the PATH is how
+      # this organization selects it (the inference Windows native-terminal lane does the same), and
+      # its absence is then a loud refusal instead of a relay error.
+      - name: Select Git Bash
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: cmd
+        run: |
+          if not exist "C:\Program Files\Git\bin\bash.exe" exit /b 1
+          echo C:\Program Files\Git\bin>>"%GITHUB_PATH%"
       - name: Record the original terminal job start
         shell: bash
         run: echo "H3_TERMINAL_JOB_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"

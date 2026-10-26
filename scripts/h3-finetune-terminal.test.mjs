@@ -165,6 +165,23 @@ test('the macOS terminal lane selects a reviewed CPython 3.12 instead of the hos
   // The macOS lane must never reach the hosted-tool-cache action at all.
   assert.doesNotMatch(workflow, /- uses: actions\/setup-python@\S+[^\n]*\n\s+if: \$\{\{ fromJSON/);
 });
+test('the Windows terminal lane selects Git Bash before its first bash step', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  const job = workflowJob(workflow, 'terminal');
+  // A self-hosted Windows listener's own bash resolution falls through to the WSL relay, which has
+  // no /bin/bash there, so the lane died in its very first step. Git for Windows' bash IS on the
+  // box and has to be put on the PATH before any bash step runs — the same selection the
+  // inference Windows native-terminal lane makes.
+  const selectIndex = job.indexOf('Select Git Bash');
+  const firstBashIndex = job.indexOf('shell: bash');
+  assert.ok(selectIndex >= 0, 'the Windows lane must select Git Bash');
+  assert.ok(firstBashIndex >= 0, 'the lane runs bash steps');
+  assert.ok(selectIndex < firstBashIndex, 'Git Bash must be selected before the first bash step');
+  assert.ok(job.includes('if not exist "C:\\Program Files\\Git\\bin\\bash.exe" exit /b 1'), 'a missing Git Bash must be a loud refusal');
+  assert.ok(job.includes('echo C:\\Program Files\\Git\\bin>>"%GITHUB_PATH%"'), 'Git Bash must be put on the PATH');
+  assert.ok(job.includes("inputs.backend == 'cuda'"), 'the selection is the Windows lane only');
+});
+
 test('the macOS terminal lane reads and writes its staged set on the reviewed-weights volume', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
   // The runner service carries no HF_HOME, so the staging probe would otherwise read a
