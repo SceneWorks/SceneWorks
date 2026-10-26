@@ -76,7 +76,6 @@ on:
           - supra2-mlx-real-weights
           - moss-edit-terminal
           - moss-upstream-reference
-          - moss-owned-hf-maintenance
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -251,42 +250,6 @@ env:
   INPUT_PULID_WEIGHTS: ${{ inputs.pulid_weights }}
 
 jobs:
-  # CI_IMPACT: manual metadata-only disk recovery, no learned-byte scan, model, checkout or build.
-  moss-owned-hf-maintenance:
-    if: inputs.profile == 'moss-owned-hf-maintenance'
-    runs-on: [self-hosted, Windows, X64, cuda]
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      actions: read
-    env:
-      MOSS_SOURCE_SHA: ${{ inputs.ref }}
-      MOSS_REFERENCE: ${{ inputs.moss_reference }}
-      MOSS_REFERENCE_BACKEND: ${{ inputs.backend }}
-    steps:
-      - name: Inventory or explicitly reclaim one exact stopped HF leaf
-        shell: powershell
-        env:
-          MOSS_MAINTENANCE_TOKEN: ${{ github.token }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:MOSS_SOURCE_SHA -notmatch '^[a-f0-9]{40}$' -or $env:MOSS_SOURCE_SHA -ne $env:GITHUB_SHA -or $env:MOSS_REFERENCE_BACKEND -ne 'candle') { throw 'Exact reviewed source and Windows backend required' }
-          $value = $env:MOSS_REFERENCE | ConvertFrom-Json
-          if ((@($value.PSObject.Properties.Name | Sort-Object) -join ',') -ne 'candidate,phase') { throw 'Closed maintenance envelope required' }
-          if (-not (($value.phase -eq 'inventory' -and $null -eq $value.candidate) -or ($value.phase -eq 'cleanup' -and $value.candidate -cin @('h39','h42-partial')))) { throw 'Exact inventory or unprotected cleanup candidate required' }
-          $runnerRoot = Split-Path (Split-Path $env:RUNNER_TEMP -Parent) -Parent
-          $node = Join-Path $runnerRoot 'externals\node24\bin\node.exe'
-          if (-not (Test-Path -LiteralPath $node -PathType Leaf)) { throw 'Existing runner Node24 required; no install on full disk' }
-          $headers = @{ Authorization = "Bearer $env:MOSS_MAINTENANCE_TOKEN"; Accept = 'application/vnd.github+json' }
-          $url = "https://api.github.com/repos/SceneWorks/SceneWorks/contents/scripts/ci/moss-owned-cache-maintenance.mjs?ref=$env:MOSS_SOURCE_SHA"
-          $helper = Invoke-RestMethod -Uri $url -Headers $headers
-          if ($helper.path -ne 'scripts/ci/moss-owned-cache-maintenance.mjs' -or $helper.encoding -ne 'base64' -or $helper.size -gt 131072) { throw 'Unexpected reviewed maintenance helper' }
-          $bytes = [Convert]::FromBase64String($helper.content)
-          $hash = ([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes))).Replace('-','').ToLowerInvariant()
-          if ($bytes.Length -ne $helper.size -or $hash -ne '72d2f73b328f077a02a4fe89e0dbec78ce0d3ea24879a54f364c72be90a5c065') { throw 'Reviewed maintenance helper bytes changed' }
-          # Exact-ref source stays in memory. Hashed receipts are retained in Actions logs even on full D:.
-          [Text.Encoding]::UTF8.GetString($bytes) | & $node --input-type=module - --moss-selected-hf
-          if ($LASTEXITCODE -ne 0) { throw 'Guarded selected HF maintenance failed; inspect retained receipt' }
   moss-reference-maintenance:
     if: inputs.profile == 'moss-upstream-reference' && (fromJSON(inputs.moss_reference).phase == 'upload' || fromJSON(inputs.moss_reference).phase == 'execute')
     runs-on: [self-hosted, Windows, X64, cuda, real-weights]
@@ -346,7 +309,7 @@ jobs:
         id: reference
         run: node scripts/ci/moss-first-step-probe.mjs route validate
       - name: Upload immutable small reference payload (no model weights or venv)
-        if: steps.reference.outputs.phase == 'upload' || steps.reference.outputs.phase == 'upload-probe' || steps.reference.outputs.phase == 'upload-cases' || steps.reference.outputs.phase == 'upload-encoding' || steps.reference.outputs.phase == 'upload-encoding-precision' || steps.reference.outputs.phase == 'upload-encoding-block-trace'
+        if: steps.reference.outputs.phase == 'upload' || steps.reference.outputs.phase == 'upload-probe' || steps.reference.outputs.phase == 'upload-cases' || steps.reference.outputs.phase == 'upload-encoding' || steps.reference.outputs.phase == 'upload-encoding-precision' || steps.reference.outputs.phase == 'upload-encoding-block-trace' || steps.reference.outputs.phase == 'upload-encoding-block-trace-upstream'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: moss-upstream-reference-payload-${{ github.run_id }}-${{ github.run_attempt }}
@@ -354,7 +317,7 @@ jobs:
           if-no-files-found: error
           retention-days: 90
       - name: Download exact immutable reference payload
-        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace'
+        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           artifact-ids: ${{ steps.reference.outputs.artifact_id }}
@@ -362,6 +325,15 @@ jobs:
           github-token: ${{ github.token }}
           merge-multiple: true
           path: ${{ runner.temp }}/moss-upstream-reference-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Download fixed authenticated original native trace for upstream-only carry
+        if: steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.reference.outputs.native_artifact_id }}
+          run-id: ${{ steps.reference.outputs.native_artifact_run_id }}
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: ${{ runner.temp }}/moss-native-trace-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Checkout exact native source for cfg(test)-only first-step overlay
         if: steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-encoding'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -381,10 +353,12 @@ jobs:
           persist-credentials: false
           token: ${{ secrets.INFERENCE_READ_TOKEN || secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
       - name: Run one reviewed fixed MPS reference after payload, runtime and model authentication
-        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace'
+        if: steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream'
+        env:
+          MOSS_TRACE_TOKEN: ${{ github.token }}
         run: node scripts/ci/moss-first-step-probe.mjs route execute
       - name: Retain only reference outputs and authentication, separate from native evidence
-        if: always() && (steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace')
+        if: always() && (steps.reference.outputs.phase == 'execute' || steps.reference.outputs.phase == 'execute-probe' || steps.reference.outputs.phase == 'execute-cases' || steps.reference.outputs.phase == 'execute-encoding' || steps.reference.outputs.phase == 'execute-encoding-precision' || steps.reference.outputs.phase == 'execute-encoding-block-trace' || steps.reference.outputs.phase == 'execute-encoding-block-trace-upstream')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: moss-upstream-reference-result-${{ github.run_id }}-${{ github.run_attempt }}
@@ -402,6 +376,8 @@ jobs:
             ${{ steps.reference.outputs.root }}/execution.log
             ${{ steps.reference.outputs.root }}/probe-authentication.json
             ${{ steps.reference.outputs.root }}/probe-completion.json
+            ${{ steps.reference.outputs.root }}/native-carry-authentication.json
+            ${{ steps.reference.outputs.root }}/upstream-authentication.json
             ${{ steps.reference.outputs.root }}/comparison.json
             ${{ steps.reference.outputs.root }}/*.log
             ${{ steps.reference.outputs.root }}/upstream/*.json
