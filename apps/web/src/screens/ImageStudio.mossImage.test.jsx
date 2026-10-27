@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
+import { click, mountRoot, setInput, setSelect, setFileInput, unmountRoot } from "../testUtils/dom.js";
 
 vi.mock("../api.js", async (importOriginal) => {
   const actual = await importOriginal();
@@ -24,6 +25,7 @@ import { configure, verifyReplayForm, labelledSelect } from '../testUtils/imageC
 import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
 import { ImageStudio } from "./ImageStudio.jsx";
 import { apiFetch } from "../api.js";
+import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MANIFEST_PATH = resolve(HERE, "../../../../config/manifests/builtin.models.jsonc");
@@ -286,6 +288,65 @@ describe("MOSS Image Studio", () => {
   expect(ctx.createImageJob).toHaveBeenCalledTimes(1);await page.getByLabel('Upscale',{exact:true}).setChecked(false);
   delete expected.advanced.mossImageAdvanced;expected.prompt="first";expected.prompts=["first","second"];expected.seed=173;expected.advanced.mossImage.max_sequence_length=4096;expected.advanced.mossImageAdvanced={output:"images",negativePrompts:["bad first","bad second"]};
   await configure(page,expected,'full',[]);await verifyReplayForm(page,expected,[]);await click(generateButton());expect(ctx.createImageJob.mock.calls.at(-1)[0].prompts).toEqual(expected.prompts);
+ });
+
+ // CI_IMPACT: one CPU-only mounted-form regression; no model execution or new CI lane.
+ it("posts the water-bottle edit through the shared Assets/Upload picker and production creator", async () => {
+  const expected = JSON.parse(readFileSync(resolve(HERE, "../../../../tests/fixtures/water-bottle-edit-request.json"), "utf8"));
+  const photo = readFileSync(resolve(HERE, "../../../../tests/fixtures/images/water-bottle.png"));
+  expect(createHash("sha256").update(photo).digest("hex")).toBe("c6ec194e6d7e04a2893449e530cf51d064c6adfd9847f0b028921b21e1c1bcb5");
+  const bottle = { id: "water-bottle", projectId: "project_1", type: "image", displayName: "water-bottle.png", file: { path: "assets/water-bottle.png" }, status: {} };
+  const replacement = { ...bottle, id: "water-bottle-upload", file: { path: "assets/water-bottle-upload.png" } };
+  const model = { ...installed(expected.model), conditionalPurposes: { moss_image_edit: { installState: "installed" } } };
+  const setError = vi.fn();
+  const originalApi = apiFetch.getMockImplementation();
+  apiFetch.mockImplementation(async (path, ...args) => path === "/api/v1/image/jobs" ? { id: "bottle-job", status: "queued" } : originalApi(path, ...args));
+  const posts = () => apiFetch.mock.calls.filter(([path, , options]) => path === "/api/v1/image/jobs" && options?.method === "POST").map(([, , options]) => JSON.parse(options.body));
+  const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "test-token", project: { id: "project_1", name: "My Project" }, requestedGpu: "auto", setJobs: vi.fn(), setError });
+  let ctx = baseContext({ imageModels: [model], models: [model], assets: [bottle], createImageJob,
+   studioLaunch: { id: "bottle-form", view: "Image", replaySeed: expected.seed, recipe: { model: expected.model, mode: expected.mode, prompt: expected.prompt, seed: expected.seed, normalizedSettings: { width: expected.width, height: expected.height, count: expected.count }, rawAdapterSettings: { ...expected.advanced, referenceAssetIds: [] } } },
+   importAsset: vi.fn(async () => { ctx = { ...ctx, assets: [bottle, replacement] }; await render(ctx); return replacement; }),
+  });
+  const pickerDialog = () => document.body.querySelector('[role="dialog"]');
+  const button = (scope, name) => [...scope.querySelectorAll("button")].find((node) => node.textContent === name);
+  try {
+   await render(ctx);
+   expect(generateButton().disabled).toBe(true);
+   await click(generateButton());
+   expect(posts()).toEqual([]);
+   await click(button(container, "Add reference image"));
+   expect(generateButton().disabled).toBe(true);
+   await click(button(container, "Select image"));
+   await click(pickerDialog().querySelector('small[title="water-bottle"]').closest('[role="option"]'));
+   await click(button(pickerDialog(), "Use Selection"));
+   expect(generateButton().disabled).toBe(false);
+   await click(generateButton());
+   expect(posts()).toHaveLength(1);
+   expect(posts()[0]).toMatchObject({ ...expected, projectId: "project_1", projectName: "My Project", requestedGpu: "auto" });
+   expect(posts()[0]).not.toHaveProperty("sourceAssetId");
+   expect(posts()[0]).not.toHaveProperty("referenceAssetId");
+
+   await click(container.querySelector('.asset-picker-field button[aria-haspopup="dialog"]'));
+   await click(button(pickerDialog(), "File Upload"));
+   const file = new File([photo], "water-bottle.png", { type: "image/png" });
+   await act(async () => setFileInput(pickerDialog().querySelector('input[type="file"]'), [file]));
+   expect(ctx.importAsset).toHaveBeenCalledWith(file, { select: false, throwOnError: true });
+   expect(file.size).toBe(photo.length);
+   expect(pickerDialog()).toBeNull();
+   expect(generateButton().disabled).toBe(false);
+   await click(generateButton());
+   expect(posts()).toHaveLength(2);
+   expect(posts()[1]).toMatchObject({ ...expected, referenceAssetIds: [replacement.id] });
+   expect(posts()[1].referenceAssetIds).not.toContain(bottle.id);
+
+   await click(button(container, "Remove image 1"));
+   expect(generateButton().disabled).toBe(true);
+   await click(generateButton());
+   expect(posts()).toHaveLength(2);
+   expect(setError).not.toHaveBeenCalledWith(expect.stringMatching(/.+/));
+  } finally {
+   apiFetch.mockImplementation(originalApi);
+  }
  });
 
 });

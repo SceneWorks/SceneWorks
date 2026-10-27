@@ -1456,160 +1456,110 @@ async fn moss_shared_assets_record_deleted_decoded_parent_and_refuse_commercial_
     assert_moss_shared_asset_usage_policy(true).await;
 }
 
-// CI_IMPACT: replaces the removed publication-gate fixture with one CPU-only shared-writer
-// recovery fixture covering Base/SFT through the shared asset path; no inference or new CI lane.
+// CI_IMPACT: one uploaded-photo routing check in the existing API suite; CPU/file I/O only.
+// Shares the exact request/photo with UI and worker boundary tests; no weights or inference.
 #[tokio::test]
-async fn moss_shared_tensor_batches_recover_and_remain_readable_after_job_clear() {
-    use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
+async fn water_bottle_edit_survives_api_enqueue_and_candle_claim_with_its_reference() {
     let _hf = isolate_hf_cache();
-    for model in ["moss_image_base", "moss_image_sft"] {
-        let temp = tempfile::tempdir().unwrap();
-        setup(&temp);
-        let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
-        let project = state
-            .project_store
-            .create_project("Shared batch recovery")
+    let temp = tempfile::tempdir().unwrap();
+    setup(&temp);
+    super::yue2_catalog::seed_snapshot(
+        &temp,
+        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
+    );
+    let mut settings = test_settings(&temp);
+    settings.candle_required = true; // Exercise Windows routing on every test host.
+    let (app, state) = create_app_with_state(settings).unwrap();
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Bottle edit"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let photo = include_bytes!("../../../../tests/fixtures/images/water-bottle.png");
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!(
+            "/api/v1/projects/{}/assets",
+            project["id"].as_str().unwrap()
+        ),
+        "water-bottle.png",
+        "image/png",
+        photo,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{asset}");
+    let mut body: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/water-bottle-edit-request.json"
+    ))
+    .unwrap();
+    body["projectId"] = project["id"].clone();
+    body["referenceAssetIds"] = json!([asset["id"]]);
+    let (status, job) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "image_edit");
+    claim_job_as_worker(
+        &app,
+        job["id"].as_str().unwrap(),
+        "bottle-recorder",
+        &["gpu", "image_edit", "candle"],
+    )
+    .await;
+    let claimed = state
+        .jobs_store
+        .get_job(job["id"].as_str().unwrap())
+        .unwrap();
+    for key in [
+        "model",
+        "mode",
+        "prompt",
+        "width",
+        "height",
+        "count",
+        "seed",
+        "referenceAssetIds",
+    ] {
+        assert_eq!(claimed.payload[key], body[key], "API/claim changed {key}");
+    }
+    let expected_options =
+        sceneworks_core::moss_image::options(body["advanced"].as_object().unwrap()).unwrap();
+    let actual_options =
+        sceneworks_core::moss_image::options(claimed.payload["advanced"].as_object().unwrap())
             .unwrap();
-        let job = state.jobs_store.create_job(CreateJob {
-            job_type: JobType::ImageEdit,
-            project_id: Some(project.id.clone()),
-            project_name: Some(project.name.clone()),
-            payload: json!({"model":model,"mode":"edit_image","count":2,"advanced":{"mossImageAdvanced":{"output":"latents"}}}).as_object().unwrap().clone(),
-            requested_gpu: "auto".into(), source_job_id: None, duplicate_of_job_id: None,
-            attempts: 1, initial_status: None,
-        }).unwrap();
-        claim_job_as_worker(
-            &app,
-            &job.id,
-            "shared-writer",
-            &[
-                "image_edit",
-                "gpu",
-                if cfg!(target_os = "macos") {
-                    "mlx"
-                } else {
-                    "candle"
-                },
-            ],
-        )
-        .await;
-        let set = "genset_shared";
-        let root = std::path::Path::new(&project.path);
-        let mut facts = Vec::new();
-        for index in 0..2 {
-            let relative = format!("assets/tensors/{set}/{index:04}.npy");
-            let path = root.join(&relative);
-            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-            std::fs::write(
-                &path,
-                sceneworks_core::tensor_artifact::encode_f32(
-                    &[1, 128, 1, 1],
-                    &vec![index as f32; 128],
-                )
-                .unwrap(),
-            )
-            .unwrap();
-            let tensor = sceneworks_core::tensor_artifact::inspect(&path).unwrap();
-            facts.push(json!({"assetId":format!("asset_shared{index}"),"displayName":format!("latent {index}"),"type":"tensor","mimeType":"application/x-npy","tensor":tensor,"mediaPath":relative,"mode":"edit_image","model":model,"seed":null,"createdAt":"2026-10-23T00:00:00Z"}));
-        }
-        let result = json!({"generationSetId":set,"expectedCount":2,"generationSet":{"id":set,"model":model,"mode":"edit_image","count":2},"assetWrites":facts});
-        let completion = json!({"status":"completed","stage":"completed","progress":1,"message":"Done","workerId":"shared-writer","result":result});
-        state
-            .progress_side_effects_fail_job_ids
-            .lock()
-            .insert(job.id.clone());
-        let (status, _) = request(
-            app.clone(),
-            "POST",
-            &format!("/api/v1/jobs/{}/progress", job.id),
-            completion.clone(),
-        )
-        .await;
-        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-        // A partial shared write is idempotently completed by the durable terminal handoff.
-        state
-            .project_store
-            .write_generation_set(
-                &project.id,
-                &job.id,
-                &result["generationSet"],
-                facts.first(),
-            )
-            .unwrap();
-        state
-            .project_store
-            .persist_generated_asset(&project.id, &job.id, set, &facts[0])
-            .unwrap();
-        let (status, partial) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/projects/{}/assets/asset_shared0", project.id),
-            Value::Null,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{model}: {partial}");
-        state
-            .progress_side_effects_fail_job_ids
-            .lock()
-            .remove(&job.id);
-        let mut retry = completion;
-        retry["result"] = json!({"forged":true});
-        let (status, ready) = request(
-            app.clone(),
-            "POST",
-            &format!("/api/v1/jobs/{}/progress", job.id),
-            retry,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{model}: {ready}");
+    assert_eq!(
+        serde_json::to_value(actual_options).unwrap(),
+        serde_json::to_value(expected_options).unwrap()
+    );
+    for key in ["steps", "guidanceScale", "schedulerShift", "mossImageEdit"] {
         assert_eq!(
-            ready["result"]["assetIds"],
-            json!(["asset_shared0", "asset_shared1"])
-        );
-        assert!(ready["result"].get("assetWrites").is_none());
-        assert!(ready["result"].get("forged").is_none());
-        for index in 0..2 {
-            let asset = &ready["result"]["assets"][index];
-            assert_eq!(asset["type"], "tensor");
-            assert_eq!(asset["recipe"]["seed"], Value::Null);
-            assert_eq!(asset["lineage"]["jobId"], job.id);
-            assert_eq!(asset["tensor"], facts[index]["tensor"]);
-        }
-        state.jobs_store.clear_job(&job.id).unwrap();
-        let (status, listed) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/projects/{}/assets?scope=all", project.id),
-            Value::Null,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{model}: {listed}");
-        assert_eq!(listed.as_array().unwrap().len(), 2);
-        let (status, asset) = request(
-            app.clone(),
-            "GET",
-            &format!("/api/v1/projects/{}/assets/asset_shared1", project.id),
-            Value::Null,
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{model}: {asset}");
-        let (status, _, bytes) = request_raw(
-            app,
-            "GET",
-            &format!(
-                "/api/v1/projects/{}/files/assets/tensors/{set}/0001.npy",
-                project.id
-            ),
-            Body::empty(),
-            &[],
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{model}");
-        assert_eq!(
-            bytes,
-            std::fs::read(root.join(format!("assets/tensors/{set}/0001.npy"))).unwrap()
+            claimed.payload["advanced"][key], body["advanced"][key],
+            "API/claim changed advanced.{key}"
         );
     }
+    assert!(claimed.payload["modelManifestEntry"]["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["repo"] == "chinoll/Moss-Image-Edit"));
+    let (status, _, stored_photo) = request_raw(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/v1/projects/{}/files/{}",
+            project["id"].as_str().unwrap(),
+            asset["file"]["path"].as_str().unwrap()
+        ),
+        Body::empty(),
+        &[],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stored_photo, photo.as_slice());
+    body["referenceAssetIds"] = json!([]);
+    let (status, refused) = request(app, "POST", "/api/v1/image/jobs", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
 }
 
 async fn moss_consumer_reference_assets(app: axum::Router, project: &str) -> Vec<String> {
