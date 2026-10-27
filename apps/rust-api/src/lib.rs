@@ -637,6 +637,20 @@ pub(crate) fn json_decode_error_response(detail: String) -> Response {
         .into_response()
 }
 
+/// The HTTP API's Tokio runtime.
+///
+/// With `SCENEWORKS_RUN_UTILITY_INPROCESS` (the desktop default) the API's runtime threads poll the
+/// in-process utility workers' complete dispatch future, the same future the standalone worker
+/// gives an explicitly sized thread ([`sceneworks_worker::WORKER_ENTRY_STACK_BYTES`]). Tokio's
+/// default worker stack is 2 MiB, and a claimed MiniMax-H3 model import overflowed it, aborting
+/// the whole API. Size every runtime thread the same as the worker entry thread.
+pub fn api_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES)
+        .build()
+}
+
 /// Run this binary as a standalone worker process instead of the HTTP API.
 /// One-shot GPU preflight (sc-8411 Metal, sc-16247 CUDA). Dispatched from `main` when
 /// `SCENEWORKS_GPU_CHECK=1`: a probe that the desktop spawns at startup. Reuses this

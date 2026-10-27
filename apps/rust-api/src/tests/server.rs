@@ -514,3 +514,25 @@ async fn upload_route_accepts_body_larger_than_json_cap() {
         "large upload should be staged successfully (got {status}: {upload})"
     );
 }
+
+/// Stack an in-process utility worker's dispatch needs beyond Tokio's 2 MiB default. Held in a
+/// plain function frame so only the polling runtime thread carries it, never the test thread.
+#[inline(never)]
+fn use_three_mib_of_stack() -> usize {
+    let frame = [1_u8; 3 * 1024 * 1024];
+    std::hint::black_box(&frame)
+        .iter()
+        .map(|&byte| usize::from(byte))
+        .sum()
+}
+
+#[test]
+fn api_runtime_threads_carry_the_worker_entry_stack() {
+    // A claimed H3 import in the in-process utility worker overflowed the default runtime stack
+    // and aborted the API; its threads must carry the worker entry thread's stack.
+    let runtime = crate::api_runtime().expect("api runtime");
+    let used = runtime
+        .block_on(async { tokio::spawn(async { use_three_mib_of_stack() }).await })
+        .expect("task on a runtime thread");
+    assert_eq!(used, 3 * 1024 * 1024);
+}

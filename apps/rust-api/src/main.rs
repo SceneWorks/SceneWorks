@@ -38,8 +38,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .map_err(Into::into);
     }
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(sceneworks_rust_api::run())
+    sceneworks_rust_api::api_runtime()?.block_on(sceneworks_rust_api::run())
 }
