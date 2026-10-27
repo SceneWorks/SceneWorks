@@ -1,10 +1,13 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { buildEndpointConfig } from "../../scripts/package-sdxl-cuda-endpoints.mjs";
 
 // Build-time projection of the same retained pair the worker uses. No capture paths, artifact
 // inventories or device identifiers enter the browser, and Vite's filesystem allowlist stays closed.
-export function loadSdxlCudaMemoryProjection(root = new URL("../../", import.meta.url)) {
+const repositoryRoot = pathToFileURL(`${resolve(dirname(fileURLToPath(import.meta.url)), "../..")}/`);
+export function loadSdxlCudaMemoryProjection(root = repositoryRoot) {
   try {
     const read = (path) => readFileSync(new URL(path, root), "utf8");
     const config = JSON.parse(read("config/sdxl-cuda-memory-endpoints.json"));
