@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import {createHash} from 'node:crypto';
-import {mkdtemp,mkdir,readFile,writeFile,rm,stat,access} from 'node:fs/promises';
+import {mkdtemp,mkdir,readFile,writeFile,rm,stat,access,link,copyFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {bootstrapTerminal,validateBootstrapRequest} from './h3-finetune-terminal-bootstrap.mjs';
 import {caseBook} from './h3-finetune-terminal-cases.mjs';
@@ -37,16 +37,32 @@ async function fixture(t){
   return {temporary,env,book,calls,args:{request:request(),backend:'mlx',swRoot:root,inferenceRoot:product,evidenceRoot,env,outputRoot:path.join(temporary,'h3-terminal-bootstrap-101-1'),deps:{proof_kind:'unit_fake',book,stage,resolveInputs,prepareReferences:prepareReferenceFixtures,referenceExecute,tools:{ffmpeg:'/unit_fake/ffmpeg',ffprobe:'/unit_fake/ffprobe'},prepareSpeech}}};
 }
 function fakeAPI(){let index=0,library;const jobs=new Map(),calls=[];return {calls,fetchImpl:async(url,options)=>{const route=url.pathname;calls.push({route,options});let result,status=200;if(route==='/api/v1/projects'){status=201;result={id:'unit-project'};}else if(route.endsWith('/assets')&&options.method==='POST'){assert.ok(options.body instanceof FormData);assert.ok(options.body.get('file').size>0);status=201;result={id:'unit-asset-'+(++index),projectId:'unit-project'};}else if(route==='/api/v1/models/library-roots'){status=201;library=JSON.parse(options.body).path;result={rootId:'unit-root'};}else if(['/api/v1/models/import','/api/v1/loras/import','/api/v1/video/jobs'].includes(route)){status=201;const payload=JSON.parse(options.body),id='unit-job-'+(++index);result={id,status:'queued',payload};const source=payload.sourcePath??(payload.linkedRelativePath?path.join(library,payload.linkedRelativePath):undefined),observed=source?await hashFile(source):undefined,failed=observed&&payload.expectedSha256&&observed!==payload.expectedSha256;jobs.set(id,{id,status:failed?'failed':'completed',payload,result:{modelId:payload.modelId,loraId:payload.loraId},...(failed?{error:`integrity check expected ${payload.expectedSha256}, actual ${observed}`}:{})});}else if(route==='/api/v1/loras'){result=calls.filter(c=>c.route==='/api/v1/loras/import').map(c=>{const p=JSON.parse(c.options.body);return {id:p.loraId,baseModel:p.baseModel};});}else{result=jobs.get(route.split('/').at(-1));assert.ok(result,'mock only the existing owned API protocol');}return {status,text:async()=>JSON.stringify(result)};}};}
+// Seed a case exactly as the owned runtime does before it submits the scenario: managed sources and
+// adapters are imported from private copies inside the case's own data directory.
+async function seedLikeRuntime(plan,c){
+  const runDir=path.join(plan.output,'services',c.id);
+  for(const seed of c.runtime.seedFiles){const dest=path.join(runDir,...seed.destination.split('/'));try{await access(dest);continue;}catch{}await mkdir(path.dirname(dest),{recursive:true});if(seed.mode==='hardlink')await link(seed.input,dest);else await copyFile(seed.input,dest);}
+  return runDir;
+}
 test('fresh filesystem and one scoped input reach a real source-bound prepared cohort without prior plan/scenario files',async t=>{
   for(const backend of ['mlx','cuda']){
   const f=await fixture(t),original=structuredClone(f.args.request.bootstrap.legalAuthority);f.args.backend=backend;f.env.H3_TERMINAL_ROUTE=`h3-terminal-${backend}`;await assert.rejects(access(f.args.outputRoot),/ENOENT/);
   const result=await bootstrapTerminal(f.args);assert.equal(result.prepared,true);assert.equal(result.proof,false);assert.equal(result.cases,25);assert.equal(f.calls.stage,1);assert.equal(f.calls.inputs,1);
   const plan=JSON.parse(await readFile(result.planPath,'utf8'));validatePlan(plan);assert.equal(plan.backend,backend);assert.equal(plan.proof_kind,'unit_fake');assert.equal(plan.preparationState,'bound');assert.equal(plan.assetStaging.receipt.sha256,await hashFile(plan.assetStaging.receipt.path));
   for(const c of plan.cases)await verifyInputs(c);
-  const c=plan.cases.find(v=>v.index===1),scenario=JSON.parse(await readFile(c.runtime.scenario,'utf8')),api=fakeAPI();const executed=await runScenario(scenario,{fetchImpl:api.fetchImpl,sleep:async()=>{},uploadFile:async spec=>new Blob([await readFile(spec.path)],{type:spec.mimeType})});assert.ok(executed.transcript.length>0);assert.equal(api.calls.filter(v=>v.route==='/api/v1/video/jobs').length,1);assert.equal(api.calls.filter(v=>v.route==='/api/v1/loras/import').length,1,'published accelerator is actually imported, not only selected as builtin');
+  const c=plan.cases.find(v=>v.index===1),scenario=JSON.parse(await readFile(c.runtime.scenario,'utf8')),api=fakeAPI();
+  // The API confines a local-copy import to <data>/models and a LoRA import to <data>/loras, so
+  // every managed source and adapter is imported from a seeded private copy in the case's own data
+  // directory — never straight from the staging root, which the API refuses. Seed exactly as the
+  // owned runtime does before it submits the scenario.
+  const runDir=await seedLikeRuntime(plan,c),dataDir=path.join(runDir,'data');
+  const imports=scenario.steps.filter(v=>['/api/v1/models/import','/api/v1/loras/import'].includes(v.path)&&v.body?.sourcePath);
+  assert.ok(imports.length>=2,'the case imports its managed source and its accelerator');
+  for(const step of imports){const root=path.join(dataDir,step.path==='/api/v1/models/import'?'models':'loras');assert.ok(step.body.sourcePath.startsWith(root+path.sep),`${step.id} must import from the case's own ${path.basename(root)} directory, not the staging root`);}
+  const executed=await runScenario(scenario,{fetchImpl:api.fetchImpl,sleep:async()=>{},uploadFile:async spec=>new Blob([await readFile(spec.path)],{type:spec.mimeType})});assert.ok(executed.transcript.length>0);assert.equal(api.calls.filter(v=>v.route==='/api/v1/video/jobs').length,1);assert.equal(api.calls.filter(v=>v.route==='/api/v1/loras/import').length,1,'published accelerator is actually imported, not only selected as builtin');
   assert.deepEqual(c.declaredSourceBindings[0].licenseAuthority.operatorInput,original);assertScopedBinding(c.declaredSourceBindings[0].licenseAuthority,{allowUnitFake:true});
-  const identity=plan.cases.find(v=>v.index===4).declaredSourceBindings;assert.notEqual(identity[0].model.sha256,identity[1].model.sha256);assert.equal(identity[0].model.originalSha256,identity[0].model.sha256);const lokr=plan.cases.find(v=>v.index===3).declaredSourceBindings[0].adapters.find(v=>v.kind==='lokr');assert.equal(lokr.sha256,await hashFile(lokr.importPath));
-  const identityCase=plan.cases.find(v=>v.index===4),identityScenario=JSON.parse(await readFile(identityCase.runtime.scenario,'utf8')),identityAPI=fakeAPI();await runScenario(identityScenario,{fetchImpl:identityAPI.fetchImpl,sleep:async()=>{},uploadFile:async spec=>new Blob([await readFile(spec.path)],{type:spec.mimeType})});assert.equal(identityAPI.calls.filter(v=>v.route==='/api/v1/video/jobs').length,1,'negative integrity control never generates');
+  const identity=plan.cases.find(v=>v.index===4).declaredSourceBindings;assert.notEqual(identity[0].model.sha256,identity[1].model.sha256);assert.equal(identity[0].model.originalSha256,identity[0].model.sha256);const lokrCase=plan.cases.find(v=>v.index===3);await seedLikeRuntime(plan,lokrCase);const lokr=lokrCase.declaredSourceBindings[0].adapters.find(v=>v.kind==='lokr');assert.equal(lokr.sha256,await hashFile(lokr.importPath));
+  const identityCase=plan.cases.find(v=>v.index===4);await seedLikeRuntime(plan,identityCase);const identityScenario=JSON.parse(await readFile(identityCase.runtime.scenario,'utf8')),identityAPI=fakeAPI();await runScenario(identityScenario,{fetchImpl:identityAPI.fetchImpl,sleep:async()=>{},uploadFile:async spec=>new Blob([await readFile(spec.path)],{type:spec.mimeType})});assert.equal(identityAPI.calls.filter(v=>v.route==='/api/v1/video/jobs').length,1,'negative integrity control never generates');
   await assert.rejects(runCase(plan,c.id,root,f.args.inferenceRoot),/unit_fake/);await assert.rejects(access(path.join(result.output,c.id,'execution.json')),/ENOENT/);
   }
 });

@@ -205,6 +205,21 @@ test('the bootstrap output root shares a volume with the staged model files', as
   assert.equal(win, 'E:\\huggingface\\sc26691-private\\7-1');
 });
 
+test('the Windows terminal lane activates the MSVC host compiler for nvcc before any build', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  const job = workflowJob(workflow, 'terminal');
+  // A fresh step has no MSVC environment, so the native build failed with
+  // "nvcc fatal: Cannot find compiler 'cl.exe' in PATH". The lane loads the same BuildTools
+  // MSVC 14.44 the Windows Candle lanes use and exports it to the rest of the job.
+  const activate = job.indexOf('Activate the MSVC host compiler for nvcc');
+  assert.ok(activate >= 0, 'the Windows lane must activate MSVC');
+  assert.ok(activate < job.indexOf('Execute or reverify the reduced operational cases'), 'before any native build');
+  assert.ok(job.includes('2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat'));
+  assert.ok(job.includes('NVCC_CCBIN=%VCToolsInstallDir%bin\\Hostx64\\x64'));
+  assert.ok(job.includes('if not exist "%NVCC_CCBIN%\\cl.exe" exit /b 1'), 'a missing host compiler must refuse loudly');
+  assert.ok(job.includes('$env:GITHUB_ENV'), 'the MSVC environment must reach the later bash/node build steps');
+});
+
 test('the Windows terminal lane selects Git Bash before its first bash step', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
   const job = workflowJob(workflow, 'terminal');

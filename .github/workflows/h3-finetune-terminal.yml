@@ -94,6 +94,19 @@ jobs:
         run: |
           if not exist "C:\Program Files\Git\bin\bash.exe" exit /b 1
           echo C:\Program Files\Git\bin>>"%GITHUB_PATH%"
+      # nvcc needs the MSVC host compiler, and a fresh step has no MSVC environment, so the native
+      # build failed with "nvcc fatal: Cannot find compiler 'cl.exe' in PATH". This loads the same
+      # BuildTools MSVC 14.44 the Windows Candle lanes use (CUDA 12.9 rejects VS2026's 14.51) and
+      # exports its environment to the REST of the job, because this lane builds through bash and
+      # node across several steps rather than inside one cmd invocation.
+      - name: Activate the MSVC host compiler for nvcc
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set "NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64"
+          if not exist "%NVCC_CCBIN%\cl.exe" exit /b 1
+          powershell -NoProfile -Command "foreach ($n in 'PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','VCINSTALLDIR','VCToolsVersion','WindowsSdkDir','WindowsSDKVersion','WindowsSdkBinPath','UCRTVersion','UniversalCRTSdkDir','VSCMD_ARG_TGT_ARCH','VSCMD_ARG_HOST_ARCH','NVCC_CCBIN') { $v = [Environment]::GetEnvironmentVariable($n); if ($v) { ($n + '=' + $v) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append } }" || exit /b 1
       - name: Record the original terminal job start
         shell: bash
         run: echo "H3_TERMINAL_JOB_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
