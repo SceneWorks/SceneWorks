@@ -250,8 +250,11 @@ jobs:
           Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--no-run')
           if ($env:PREPARE_DERIVED -eq 'true') {
             foreach ($model in @('flux3_klein', 'flux3_klein_base')) {
-              $snap = Get-ChildItem "$env:HF_HUB_CACHE/models--black-forest-labs--$model/snapshots" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-              if (-not $snap) { throw "pinned $model snapshot missing under $env:HF_HUB_CACHE" }
+              $snapRoot = Join-Path (Join-Path $env:HF_HUB_CACHE "models--black-forest-labs--$model") 'snapshots'
+              Write-Host "snapshot root: $snapRoot"
+              $snap = Get-ChildItem -LiteralPath $snapRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+              if (-not $snap) { throw "pinned $model snapshot missing under $snapRoot" }
+              Write-Host "snapshot: $($snap.FullName)"
               $env:FLUX3_CAPTURE_MODEL_ID = $model
               $env:FLUX3_CAPTURE_SOURCE_DIR = $snap.FullName
               $env:FLUX3_CAPTURE_OUT_DIR = "$env:SCENEWORKS_DATA_DIR/models/derived"
