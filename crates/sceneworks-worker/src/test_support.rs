@@ -60,17 +60,7 @@ pub fn prepare_selected_adapters(
 pub async fn register_real_acceptance_worker(
     settings: &Settings,
 ) -> WorkerResult<sceneworks_core::contracts::WorkerSnapshot> {
-    let url = reqwest::Url::parse(&settings.api_url)
-        .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))?;
-    if settings.access_token.is_some()
-        || !settings.credentials.is_empty()
-        || url.scheme() != "http"
-        || !matches!(url.host_str(), Some("127.0.0.1" | "::1"))
-    {
-        return Err(crate::WorkerError::InvalidPayload(
-            "acceptance registration requires credential-free owned loopback settings".into(),
-        ));
-    }
+    require_acceptance_loopback(settings)?;
     let health = crate::cuda_startup_health(settings).await;
     if !health.is_usable() {
         return Err(crate::WorkerError::InvalidPayload(
@@ -91,6 +81,36 @@ pub async fn register_real_acceptance_worker(
         ));
     }
     crate::register_worker(&ApiClient::new(settings), settings, &gpu).await
+}
+
+/// Register the separate production CPU utility identity for local adapter imports. Register
+/// immediately before each import: a preceding GPU training run may outlast the idle-worker lease.
+/// This does not alter the GPU worker's identity or advertise utility capabilities on it.
+pub async fn register_acceptance_cpu_utility_worker(
+    settings: &Settings,
+) -> WorkerResult<(Settings, sceneworks_core::contracts::WorkerSnapshot)> {
+    require_acceptance_loopback(settings)?;
+    let mut utility = settings.clone();
+    utility.worker_id = crate::gpu::cpu_worker_id(&settings.worker_id);
+    utility.gpu_id = "cpu".into();
+    let gpu = crate::gpu::cpu_gpu();
+    let registered = crate::register_worker(&ApiClient::new(&utility), &utility, &gpu).await?;
+    Ok((utility, registered))
+}
+
+fn require_acceptance_loopback(settings: &Settings) -> WorkerResult<()> {
+    let url = reqwest::Url::parse(&settings.api_url)
+        .map_err(|error| crate::WorkerError::InvalidPayload(error.to_string()))?;
+    if settings.access_token.is_some()
+        || !settings.credentials.is_empty()
+        || url.scheme() != "http"
+        || !matches!(url.host_str(), Some("127.0.0.1" | "::1"))
+    {
+        return Err(crate::WorkerError::InvalidPayload(
+            "acceptance registration requires credential-free owned loopback settings".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Full production utility dispatcher, including source guard, import/image

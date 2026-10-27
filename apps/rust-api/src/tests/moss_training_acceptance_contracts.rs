@@ -279,3 +279,98 @@ fn recovery_safetensors_streaming_checks_the_final_payload_chunk() {
     std::fs::write(&right, &bytes).unwrap();
     assert!(exact_safetensors_equal(&left, &right).is_err());
 }
+
+// CI_IMPACT: loopback API, production CPU utility registration/dispatcher and one literal
+// safetensors float. No model construction, tensor execution, GPU query or external download.
+#[tokio::test]
+async fn adapter_import_uses_cpu_utility_identity_and_preserves_exact_library_bytes() {
+    use super::moss_training_acceptance::worker_settings;
+    use super::support::*;
+    use futures_util::FutureExt;
+    use sceneworks_worker::test_support as native;
+    use sha2::{Digest, Sha256};
+
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let app = create_app(settings.clone()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let worker = worker_settings(
+        format!("http://{}", listener.local_addr().unwrap()),
+        &settings,
+        "1".into(),
+    );
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let served = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, served)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    let outcome = std::panic::AssertUnwindSafe(async {
+        // This synthetic GPU advertisement tests refusal only; it is never native execution proof.
+        let (status, gpu) = request(app.clone(), "POST", "/api/v1/workers/register", json!({
+            "workerId":worker.worker_id,"gpuId":worker.gpu_id,
+            "gpuName":"schema-only GPU claimant, no device execution",
+            "capabilities":["gpu","lora_train","lora_train_execute"],"loadedModels":[]
+        })).await;
+        assert_eq!(status, StatusCode::OK, "{gpu}");
+        let (status, project) = request(app.clone(), "POST", "/api/v1/projects", json!({"name":"CPU import contract"})).await;
+        assert_eq!(status, StatusCode::CREATED, "{project}");
+        let incoming = settings.data_dir.join("loras/incoming");
+        std::fs::create_dir_all(&incoming).unwrap();
+        let source = incoming.join("literal.safetensors");
+        let header = br#"{"__metadata__":{"family":"moss-image","baseModel":"moss_image_base","sceneworks_adapter_format":"moss_transformer_adapter_v1","networkType":"lora","rank":"4","alpha":"6"},"factor":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header);
+        bytes.extend_from_slice(&1.0f32.to_le_bytes());
+        std::fs::write(&source, &bytes).unwrap();
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let (status, job) = request(app.clone(), "POST", "/api/v1/loras/import", json!({
+            "sourcePath":source,"expectedSha256":hash,"baseModel":"moss_image_base",
+            "scope":"project","projectId":project["id"],"name":"CPU imported adapter"
+        })).await;
+        assert_eq!(status, StatusCode::CREATED, "{job}");
+        assert_eq!(job["type"], "lora_import");
+        let (status, refused) = request(app.clone(), "POST", "/api/v1/jobs/claim", json!({"workerId":worker.worker_id})).await;
+        assert_eq!(status, StatusCode::OK, "{refused}");
+        assert!(refused["job"].is_null(), "GPU must not claim CPU import: {refused}");
+        let (utility, registered) = native::register_acceptance_cpu_utility_worker(&worker).await.unwrap();
+        assert_eq!(utility.gpu_id, "cpu");
+        assert_ne!(utility.worker_id, worker.worker_id);
+        assert_eq!(registered.gpu_id, "cpu");
+        assert!(registered.capabilities.contains(&WorkerCapability::Cpu));
+        assert!(registered.capabilities.contains(&WorkerCapability::LoraImport));
+        assert!(!registered.capabilities.contains(&WorkerCapability::Gpu));
+        let (status, claimed) = request(app.clone(), "POST", "/api/v1/jobs/claim", json!({"workerId":utility.worker_id})).await;
+        assert_eq!(status, StatusCode::OK, "{claimed}");
+        assert_eq!(claimed["job"]["id"], job["id"]);
+        assert_eq!(claimed["job"]["workerId"], utility.worker_id);
+        assert_eq!(claimed["job"]["assignedGpu"], "cpu");
+        native::run_acceptance_utility_job(&utility, serde_json::from_value(claimed["job"].clone()).unwrap()).await;
+        let (status, completed) = request(app.clone(), "GET", &format!("/api/v1/jobs/{}",job["id"].as_str().unwrap()), Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{completed}");
+        assert_eq!(completed["status"], "completed", "{completed}");
+        assert_eq!(completed["workerId"], utility.worker_id);
+        assert_eq!(completed["assignedGpu"], "cpu");
+        let (status, library) = request(app.clone(), "GET", &format!("/api/v1/loras?projectId={}",project["id"].as_str().unwrap()), Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{library}");
+        let items = library.as_array().or_else(|| library["loras"].as_array()).unwrap();
+        let entry = items.iter().find(|entry| entry["id"] == job["payload"]["loraId"]).unwrap();
+        assert_eq!(entry["family"], "moss-image");
+        assert_eq!(entry["baseModel"], "moss_image_base");
+        let installed = std::path::PathBuf::from(entry["installedPath"].as_str().unwrap());
+        let installed = if installed.is_dir() { installed.join(source.file_name().unwrap()) } else { installed };
+        assert_eq!(format!("{:x}", Sha256::digest(std::fs::read(installed).unwrap())), hash);
+        assert_eq!(std::fs::read(source).unwrap(), bytes);
+        assert_eq!(worker.gpu_id, "1", "utility selection must not replace GPU settings");
+    }).catch_unwind();
+    let result = tokio::time::timeout(Duration::from_secs(30), outcome).await;
+    let _ = stop.send(());
+    assert!(server.await.unwrap().is_ok());
+    match result.expect("bounded local import contract") {
+        Ok(()) => (),
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}

@@ -432,7 +432,7 @@ impl Case {
     }
 }
 
-fn worker_settings(
+pub(super) fn worker_settings(
     url: String,
     settings: &crate::Settings,
     gpu_id: String,
@@ -1344,15 +1344,23 @@ async fn import_adapter(
         format!("adapter import submission failed: {job}"),
     )?;
     let id = text(&job, "id")?.to_owned();
-    let claimed = case.claim(app, worker, &id).await?;
-    let execution = utility(case, worker, claimed).await;
+    let (import_worker, registration) = native::register_acceptance_cpu_utility_worker(worker)
+        .await
+        .map_err(|e| e.to_string())?;
+    case.record["raw"]["utilityWorkerRegistrations"][label] =
+        serde_json::to_value(registration).map_err(|e| e.to_string())?;
+    case.persist()?;
+    let claimed = case.claim(app, &import_worker, &id).await?;
+    let execution = utility(case, &import_worker, claimed).await;
     let completed = case.get_job(app, &id).await?;
     case.record["raw"]["utilityTerminal"][&id] = completed.clone();
     case.persist()?;
     execution?;
     require(
-        completed["status"] == "completed",
-        format!("real import utility job failed: {completed}"),
+        completed["status"] == "completed"
+            && completed["workerId"] == import_worker.worker_id
+            && completed["assignedGpu"] == "cpu",
+        format!("real CPU import utility job failed: {completed}"),
     )?;
     let (status, library) = case
         .api(
