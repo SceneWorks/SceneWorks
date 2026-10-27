@@ -1293,9 +1293,9 @@ async fn moss_advanced_owned_npy_mcp_rest_and_portable_reacquisition_preserve_na
     let _ = server.await;
 }
 
-// Exercise the completed-progress path (which bypasses persist_reported_assets), not just
-// the policy helper: every atomic output must retain lineage consumed by commercial exports.
-async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool) {
+// Exercise the shared completed-progress writer: every output retains lineage consumed by
+// commercial exports, including references removed after the worker decoded them.
+async fn assert_moss_shared_asset_usage_policy(parent_removed_after_decode: bool) {
     use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
     let _hf = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
@@ -1354,11 +1354,11 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
             .is_err());
     }
     let set = "genset_policy";
-    let directory = root.join(format!("assets/images/moss-edit/{set}"));
+    let directory = root.join(format!("assets/images/{set}"));
     std::fs::create_dir_all(&directory).unwrap();
     let mut facts = Vec::new();
     for index in 0..2 {
-        let relative = format!("assets/images/moss-edit/{set}/{index:04}.png");
+        let relative = format!("assets/images/{set}/{index:04}.png");
         decoded.save(root.join(&relative)).unwrap();
         facts.push(json!({"assetId":format!("policy-output-{index}"), "displayName":"MOSS edit", "type":"image", "createdAt":"2026-10-24T00:00:00Z", "mimeType":"image/png", "mediaPath":relative, "parents":[parent["id"]], "model":"moss_image_sft", "mode":"edit_image", "seed":index, "width":16, "height":16}));
     }
@@ -1381,7 +1381,8 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
         )
         .unwrap()
         .is_none());
-    assert!(crate::moss_output_publication::canonical_batch(&saved).is_some());
+    assert_eq!(saved.result["assets"].as_array().unwrap().len(), 2);
+    assert_eq!(saved.result["assetIds"].as_array().unwrap().len(), 2);
     assert!(!saved.result.contains_key("assetWrites"));
     let expected = if parent_removed_after_decode {
         json!({"assetId":"policy-parent", "policy":null, "unresolved":"not_found"})
@@ -1396,7 +1397,8 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
             json!([expected]),
             "{asset}"
         );
-        assert_eq!(asset["extra"]["mossPublication"]["jobId"], job.id);
+        assert_eq!(asset["lineage"]["jobId"], job.id);
+        assert!(asset["extra"].get("mossPublication").is_none());
         let (status, mut timeline) = request(
             app.clone(),
             "POST",
@@ -1429,7 +1431,7 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
             }
         );
     }
-    // Repeated completion still acknowledges exactly the published batch and keeps its policies.
+    // Repeated completion keeps the same shared asset batch and policies.
     let (status, response) = request(
         app,
         "POST",
@@ -1445,250 +1447,169 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
 }
 
 #[tokio::test]
-async fn moss_atomic_publication_inherits_parent_policies_and_refuses_commercial_export() {
-    assert_moss_publication_usage_policy(false).await;
+async fn moss_shared_assets_inherit_parent_policies_and_refuse_commercial_export() {
+    assert_moss_shared_asset_usage_policy(false).await;
 }
 
 #[tokio::test]
-async fn moss_atomic_publication_records_deleted_decoded_parent_and_refuses_commercial_export() {
-    assert_moss_publication_usage_policy(true).await;
+async fn moss_shared_assets_record_deleted_decoded_parent_and_refuse_commercial_export() {
+    assert_moss_shared_asset_usage_policy(true).await;
 }
 
+// CI_IMPACT: replaces the removed publication-gate fixture with one CPU-only shared-writer
+// recovery fixture covering Base/SFT through the shared asset path; no inference or new CI lane.
 #[tokio::test]
-async fn moss_output_pending_handoff_blocks_every_public_artifact_until_exact_recovery() {
+async fn moss_shared_tensor_batches_recover_and_remain_readable_after_job_clear() {
     use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
     let _hf = isolate_hf_cache();
-    let temp = tempfile::tempdir().unwrap();
-    setup(&temp);
-    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
-    let project = state
-        .project_store
-        .create_project("Atomic MOSS publication")
-        .unwrap();
-    let job=state.jobs_store.create_job(CreateJob{job_type:JobType::ImageEdit,project_id:Some(project.id.clone()),project_name:Some(project.name.clone()),payload:json!({"model":"moss_image_sft","mode":"edit_image","prompt":"edit","referenceAssetIds":["original"],"count":2,"width":16,"height":16,"advanced":{"mossImageAdvanced":{"output":"latents"}}}).as_object().unwrap().clone(),requested_gpu:"auto".into(),source_job_id:None,duplicate_of_job_id:None,attempts:1,initial_status:None}).unwrap();
-    claim_job_as_worker(
-        &app,
-        &job.id,
-        "moss-publisher",
-        &[
-            "image_edit",
-            "gpu",
-            if cfg!(target_os = "macos") {
-                "mlx"
-            } else {
-                "candle"
-            },
-        ],
-    )
-    .await;
-    let set = "genset_publication";
-    let root = std::path::Path::new(&project.path);
-    let directory = root.join(format!("assets/tensors/moss-edit/{set}"));
-    std::fs::create_dir_all(&directory).unwrap();
-    let mut facts = Vec::new();
-    for index in 0..2 {
-        let relative = format!("assets/tensors/moss-edit/{set}/{index:04}.npy");
-        std::fs::write(
-            root.join(&relative),
-            sceneworks_core::tensor_artifact::encode_f32(&[1, 128, 1, 1], &vec![index as f32; 128])
-                .unwrap(),
-        )
-        .unwrap();
-        let tensor = sceneworks_core::tensor_artifact::inspect(&root.join(&relative)).unwrap();
-        facts.push(json!({"assetId":format!("asset_publication{index}"),"displayName":format!("MOSS latent {index}"),"type":"tensor","mimeType":"application/x-npy","tensor":tensor,"mediaPath":relative,"mode":"edit_image","model":"moss_image_sft","seed":null,"createdAt":"2026-10-23T00:00:00Z","rawAdapterSettings":{"mossImageEditExecutionReport":{"actual":true}}}));
-    }
-    let result = json!({"generationSetId":set,"expectedCount":2,"generationSet":{"id":set,"model":"moss_image_sft","mode":"edit_image","count":2},"assetWrites":facts});
-    let completion = json!({"status":"completed","stage":"completed","progress":1,"message":"Done","workerId":"moss-publisher","result":result});
-    state
-        .progress_side_effects_fail_job_ids
-        .lock()
-        .insert(job.id.clone());
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{}/progress", job.id),
-        completion.clone(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let (_, pending) = request(
-        app.clone(),
-        "GET",
-        &format!("/api/v1/jobs/{}", job.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(pending["status"], "completed");
-    assert_eq!(pending["result"]["outputPublication"]["state"], "pending");
-    assert!(pending["result"].get("assetWrites").is_none());
-    assert!(!pending.to_string().contains("mossImageEditExecutionReport"));
-    let file_route = format!(
-        "/api/v1/projects/{}/files/assets/tensors/moss-edit/{set}/0000.npy",
-        project.id
-    );
-    let (status, _) = request(app.clone(), "GET", &file_route, Value::Null).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    for alias in [
-        format!("assets/tensors/./moss-edit/{set}/0000.npy"),
-        format!("assets/tensors//moss-edit/{set}/0000.npy"),
-    ] {
-        assert!(
-            crate::moss_output_publication::require_path(&state, &project.id, &alias)
-                .await
-                .is_err(),
-            "{alias}"
-        );
-    }
-    #[cfg(unix)]
-    {
-        let alias = root.join("assets/uploads/moss-output-alias.npy");
-        std::os::unix::fs::symlink(directory.join("0000.npy"), &alias).unwrap();
-        assert!(crate::moss_output_publication::require_path(
-            &state,
-            &project.id,
-            "assets/uploads/moss-output-alias.npy"
-        )
-        .await
-        .is_err());
-    }
-    // Simulate an interrupted old per-file side effect: same-job partial metadata is not public.
-    state
-        .project_store
-        .write_generation_set(
-            &project.id,
+    for model in ["moss_image_base", "moss_image_sft"] {
+        let temp = tempfile::tempdir().unwrap();
+        setup(&temp);
+        let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+        let project = state
+            .project_store
+            .create_project("Shared batch recovery")
+            .unwrap();
+        let job = state.jobs_store.create_job(CreateJob {
+            job_type: JobType::ImageEdit,
+            project_id: Some(project.id.clone()),
+            project_name: Some(project.name.clone()),
+            payload: json!({"model":model,"mode":"edit_image","count":2,"advanced":{"mossImageAdvanced":{"output":"latents"}}}).as_object().unwrap().clone(),
+            requested_gpu: "auto".into(), source_job_id: None, duplicate_of_job_id: None,
+            attempts: 1, initial_status: None,
+        }).unwrap();
+        claim_job_as_worker(
+            &app,
             &job.id,
-            &result["generationSet"],
-            facts.first(),
+            "shared-writer",
+            &[
+                "image_edit",
+                "gpu",
+                if cfg!(target_os = "macos") {
+                    "mlx"
+                } else {
+                    "candle"
+                },
+            ],
         )
-        .unwrap();
-    let mut partial = facts[0].clone();
-    partial["extra"] =
-        json!({"mossPublication":{"jobId":job.id,"attempt":job.attempts,"generationSetId":set}});
-    state
-        .project_store
-        .persist_generated_asset(&project.id, &job.id, set, &partial)
-        .unwrap();
-    let (status, list) = request(
-        app.clone(),
-        "GET",
-        &format!("/api/v1/projects/{}/assets?scope=all", project.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(list, json!([]));
-    for suffix in ["", "/workflow"] {
+        .await;
+        let set = "genset_shared";
+        let root = std::path::Path::new(&project.path);
+        let mut facts = Vec::new();
+        for index in 0..2 {
+            let relative = format!("assets/tensors/{set}/{index:04}.npy");
+            let path = root.join(&relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(
+                &path,
+                sceneworks_core::tensor_artifact::encode_f32(
+                    &[1, 128, 1, 1],
+                    &vec![index as f32; 128],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let tensor = sceneworks_core::tensor_artifact::inspect(&path).unwrap();
+            facts.push(json!({"assetId":format!("asset_shared{index}"),"displayName":format!("latent {index}"),"type":"tensor","mimeType":"application/x-npy","tensor":tensor,"mediaPath":relative,"mode":"edit_image","model":model,"seed":null,"createdAt":"2026-10-23T00:00:00Z"}));
+        }
+        let result = json!({"generationSetId":set,"expectedCount":2,"generationSet":{"id":set,"model":model,"mode":"edit_image","count":2},"assetWrites":facts});
+        let completion = json!({"status":"completed","stage":"completed","progress":1,"message":"Done","workerId":"shared-writer","result":result});
+        state
+            .progress_side_effects_fail_job_ids
+            .lock()
+            .insert(job.id.clone());
         let (status, _) = request(
             app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{}/progress", job.id),
+            completion.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        // A partial shared write is idempotently completed by the durable terminal handoff.
+        state
+            .project_store
+            .write_generation_set(
+                &project.id,
+                &job.id,
+                &result["generationSet"],
+                facts.first(),
+            )
+            .unwrap();
+        state
+            .project_store
+            .persist_generated_asset(&project.id, &job.id, set, &facts[0])
+            .unwrap();
+        let (status, partial) = request(
+            app.clone(),
             "GET",
-            &format!(
-                "/api/v1/projects/{}/assets/asset_publication0{suffix}",
-                project.id
-            ),
+            &format!("/api/v1/projects/{}/assets/asset_shared0", project.id),
             Value::Null,
         )
         .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-    }
-    state
-        .progress_side_effects_fail_job_ids
-        .lock()
-        .remove(&job.id);
-    let second = directory.join("0001.npy");
-    let second_bytes = std::fs::read(&second).unwrap();
-    std::fs::remove_file(&second).unwrap();
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{}/progress", job.id),
-        completion.clone(),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "the actual API refuses an unavailable second artifact"
-    );
-    let (_, hidden) = request(
-        app.clone(),
-        "GET",
-        &format!("/api/v1/projects/{}/assets?scope=all", project.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(hidden, json!([]));
-    std::fs::write(second, second_bytes).unwrap();
-    // Reconciliation uses the original durable handoff. A replacement retry payload is ignored.
-    state
-        .progress_side_effects_fail_job_ids
-        .lock()
-        .remove(&job.id);
-    let mut retry = completion;
-    retry["result"] = json!({"forged":true});
-    let (status, ready) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{}/progress", job.id),
-        retry,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{ready}");
-    assert_eq!(ready["result"]["assets"].as_array().unwrap().len(), 2);
-    assert!(ready["result"].get("outputPublication").is_none());
-    assert!(ready["result"].get("forged").is_none());
-    assert_eq!(ready["result"]["assets"][0]["recipe"]["seed"], Value::Null);
-    let (status, listed) = request(
-        app.clone(),
-        "GET",
-        &format!("/api/v1/projects/{}/assets?scope=all", project.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), 2);
-    let mut mismatched = ready["result"]["assets"][0].clone();
-    mismatched["id"] = json!("asset_other");
-    assert!(
-        crate::moss_output_publication::require_asset(&state, &project.id, &mismatched)
-            .await
-            .is_err()
-    );
-    // Exact canonical artifacts are readable; sidecars/temp paths never become public outputs.
-    crate::moss_output_publication::require_path(
-        &state,
-        &project.id,
-        &format!("assets/tensors/moss-edit/{set}/0000.npy"),
-    )
-    .await
-    .unwrap();
-    for name in [
-        "0000.sceneworks.json",
-        "0000.tmp.npy",
-        "0000.sceneworks-workflow.json",
-    ] {
-        assert!(crate::moss_output_publication::require_path(
-            &state,
-            &project.id,
-            &format!("assets/tensors/moss-edit/{set}/{name}")
+        assert_eq!(status, StatusCode::OK, "{model}: {partial}");
+        state
+            .progress_side_effects_fail_job_ids
+            .lock()
+            .remove(&job.id);
+        let mut retry = completion;
+        retry["result"] = json!({"forged":true});
+        let (status, ready) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/jobs/{}/progress", job.id),
+            retry,
         )
-        .await
-        .is_err());
+        .await;
+        assert_eq!(status, StatusCode::OK, "{model}: {ready}");
+        assert_eq!(
+            ready["result"]["assetIds"],
+            json!(["asset_shared0", "asset_shared1"])
+        );
+        assert!(ready["result"].get("assetWrites").is_none());
+        assert!(ready["result"].get("forged").is_none());
+        for index in 0..2 {
+            let asset = &ready["result"]["assets"][index];
+            assert_eq!(asset["type"], "tensor");
+            assert_eq!(asset["recipe"]["seed"], Value::Null);
+            assert_eq!(asset["lineage"]["jobId"], job.id);
+            assert_eq!(asset["tensor"], facts[index]["tensor"]);
+        }
+        state.jobs_store.clear_job(&job.id).unwrap();
+        let (status, listed) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{}/assets?scope=all", project.id),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{model}: {listed}");
+        assert_eq!(listed.as_array().unwrap().len(), 2);
+        let (status, asset) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/projects/{}/assets/asset_shared1", project.id),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{model}: {asset}");
+        let (status, _, bytes) = request_raw(
+            app,
+            "GET",
+            &format!(
+                "/api/v1/projects/{}/files/assets/tensors/{set}/0001.npy",
+                project.id
+            ),
+            Body::empty(),
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{model}");
+        assert_eq!(
+            bytes,
+            std::fs::read(root.join(format!("assets/tensors/{set}/0001.npy"))).unwrap()
+        );
     }
-    state.jobs_store.clear_job(&job.id).unwrap();
-    crate::moss_output_publication::require_path(
-        &state,
-        &project.id,
-        &format!("assets/tensors/moss-edit/{set}/0000.npy"),
-    )
-    .await
-    .unwrap();
-    assert!(crate::moss_output_publication::require_path(
-        &state,
-        &project.id,
-        "assets/tensors/moss-edit/genset_missing/0000.npy"
-    )
-    .await
-    .is_err());
 }
 
 async fn moss_consumer_reference_assets(app: axum::Router, project: &str) -> Vec<String> {
