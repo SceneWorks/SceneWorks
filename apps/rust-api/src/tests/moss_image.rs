@@ -1455,6 +1455,51 @@ async fn moss_atomic_publication_records_deleted_decoded_parent_and_refuses_comm
 }
 
 #[tokio::test]
+async fn moss_publication_list_preserves_ordinary_assets_with_shared_generation_paths() {
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    setup(&temp);
+    let (_, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let ordinary = json!({"id":"ordinary", "file":{"path":"assets/images/shared/0.png"}});
+    let same_generation = json!({"id":"second", "file":{"path":"assets/images/shared/1.png"}});
+    let unpublished =
+        json!({"id":"pending", "file":{"path":"assets/images/moss-edit/shared/0.png"}});
+    let upload = json!({"id":"upload", "file":{"path":"assets/uploads/0.png"}});
+    let no_path = json!({"id":"no-path"});
+    // Per-generation memoization must not allow a recognized MOSS path just because an
+    // ordinary path with the same generation has already been admitted (or vice versa).
+    for assets in [
+        vec![
+            ordinary.clone(),
+            unpublished.clone(),
+            same_generation.clone(),
+            upload.clone(),
+            no_path.clone(),
+        ],
+        vec![
+            unpublished,
+            ordinary.clone(),
+            same_generation.clone(),
+            upload.clone(),
+            no_path.clone(),
+        ],
+    ] {
+        let visible = crate::moss_output_publication::visible_assets(&state, "project", assets)
+            .await
+            .unwrap();
+        assert_eq!(
+            visible,
+            vec![
+                ordinary.clone(),
+                same_generation.clone(),
+                upload.clone(),
+                no_path.clone()
+            ]
+        );
+    }
+}
+
+#[tokio::test]
 async fn moss_output_pending_handoff_blocks_every_public_artifact_until_exact_recovery() {
     use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
     let _hf = isolate_hf_cache();
@@ -1675,6 +1720,18 @@ async fn moss_output_pending_handoff_blocks_every_public_artifact_until_exact_re
         .is_err());
     }
     state.jobs_store.clear_job(&job.id).unwrap();
+    let (status, after_clear) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/projects/{}/assets?scope=all", project.id),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        after_clear, listed,
+        "clearing the queue must not hide published assets"
+    );
     crate::moss_output_publication::require_path(
         &state,
         &project.id,

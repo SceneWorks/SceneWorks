@@ -243,8 +243,40 @@ pub(crate) async fn visible_assets(
     project: &str,
     assets: Vec<Value>,
 ) -> Result<Vec<Value>, ApiError> {
-    // Reuse each exact generation lookup within this response only. Recovery may change it later.
-    let mut readiness: HashMap<String, Option<Vec<Value>>> = HashMap::new();
+    // Resolve the entire response in one indexed read, rather than opening the jobs DB and
+    // scanning project history once per generation (including non-MOSS generations).
+    // This snapshot is request-local: recovery can change readiness on the next request.
+    let generations = assets
+        .iter()
+        .filter_map(|asset| asset.pointer("/file/path").and_then(Value::as_str))
+        .filter_map(path_generation)
+        .map(|(generation, _)| generation.to_owned())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if generations.is_empty() {
+        return Ok(assets);
+    }
+    let jobs = store_call(state.clone(), {
+        let project = project.to_owned();
+        move |store, _| store.jobs_for_generation_sets(&project, &generations)
+    })
+    .await?;
+    let readiness = jobs
+        .into_iter()
+        .map(|(generation, jobs)| {
+            let moss = jobs
+                .iter()
+                .filter(|job| jobs::moss_edit_output_batch(job))
+                .collect::<Vec<_>>();
+            let batch = if jobs.len() == 1 && moss.len() == 1 {
+                canonical_batch(moss[0]).cloned()
+            } else {
+                None
+            };
+            (generation, (!moss.is_empty(), batch))
+        })
+        .collect::<HashMap<_, _>>();
     let mut visible = Vec::with_capacity(assets.len());
     for asset in assets {
         let Some(path) = asset.pointer("/file/path").and_then(Value::as_str) else {
@@ -255,31 +287,13 @@ pub(crate) async fn visible_assets(
             visible.push(asset);
             continue;
         };
-        if !readiness.contains_key(generation) {
-            let jobs = store_call(state.clone(), {
-                let project = project.to_owned();
-                let generation = generation.to_owned();
-                move |store, _| store.jobs_for_generation_set(&project, &generation)
-            })
-            .await?;
-            let moss = jobs
-                .iter()
-                .filter(|job| jobs::moss_edit_output_batch(job))
-                .collect::<Vec<_>>();
-            let batch = if jobs.len() == 1 && moss.len() == 1 {
-                canonical_batch(moss[0]).cloned()
-            } else {
-                None
-            };
-            if !recognized && moss.is_empty() {
-                visible.push(asset);
-                continue;
-            }
-            readiness.insert(generation.to_owned(), batch);
+        let entry = readiness.get(generation);
+        if !recognized && !entry.is_some_and(|(has_moss, _)| *has_moss) {
+            visible.push(asset);
+            continue;
         }
-        if readiness
-            .get(generation)
-            .and_then(Option::as_ref)
+        if entry
+            .and_then(|(_, batch)| batch.as_ref())
             .is_some_and(|batch| {
                 batch.iter().any(|canonical| {
                     same_asset_binding(canonical, &asset)
