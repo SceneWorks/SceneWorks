@@ -229,11 +229,11 @@ test('contrasts hold complete creative configuration and bind only the adapters 
 });
 test('private environment isolates cache/config/credentials while preserving device restrictions',()=>{
   const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'unit_fake',backend:'mlx'},'task-generated-token');
-  assert.equal(env.HF_HOME,path.join('/unit_fake_owned','hf'));assert.equal(env.SCENEWORKS_RUN_UTILITY_INPROCESS,'0');assert.ok(!Object.hasOwn(env,'HF_TOKEN'));assert.equal(env.HF_HUB_OFFLINE,'1');assert.equal(env.SCENEWORKS_ACCESS_TOKEN,'task-generated-token');
+  assert.equal(env.HF_HOME,path.join('/unit_fake_owned','hf'));assert.equal(env.SCENEWORKS_RUN_UTILITY_INPROCESS,'1','the API utility pool is the only worker that claims imports');assert.equal(env.SCENEWORKS_MLX_REQUIRED,'1');assert.equal(env.SCENEWORKS_CANDLE_REQUIRED,undefined);assert.ok(!Object.hasOwn(env,'HF_TOKEN'));assert.equal(env.HF_HUB_OFFLINE,'1');assert.equal(env.SCENEWORKS_ACCESS_TOKEN,'task-generated-token');
 });
 test('root-selected compiler reaches private child environments without inheriting credentials',()=>{
   const previous=process.env.RUSTUP_TOOLCHAIN;process.env.RUSTUP_TOOLCHAIN='9.8.7';
-  try{const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'0',backend:'cuda'},'unit_fake_token');assert.equal(env.RUSTUP_TOOLCHAIN,'9.8.7');assert.ok(!Object.hasOwn(env,'HF_TOKEN'));}
+  try{const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'0',backend:'cuda'},'unit_fake_token');assert.equal(env.RUSTUP_TOOLCHAIN,'9.8.7');assert.equal(env.SCENEWORKS_CANDLE_REQUIRED,'1');assert.equal(env.SCENEWORKS_CANDLE_UNSUPPORTED_MODE,'enforce');assert.equal(env.SCENEWORKS_MLX_REQUIRED,undefined);assert.ok(!Object.hasOwn(env,'HF_TOKEN'));}
   finally{if(previous===undefined)delete process.env.RUSTUP_TOOLCHAIN;else process.env.RUSTUP_TOOLCHAIN=previous;}
 });
 test('CUDA receipt binds PCI-ordered device zero rather than NVML index zero using only fake inventory',async()=>{

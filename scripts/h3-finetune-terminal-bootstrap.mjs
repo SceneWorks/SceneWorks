@@ -36,6 +36,9 @@ export function validateBootstrapRequest(request,{backend,unitFake=false}={}){
   assert.equal(op.compatibleBase,'builtin:minimax_h3','explicit compatible base binding required');
   assert.ok(Number.isSafeInteger(op.seed)&&op.seed>=0&&op.seed<=0xffffffff);assert.ok(typeof op.requestedGpu==='string'&&op.requestedGpu.length);assert.ok(typeof op.gpuId==='string'&&op.gpuId.length);
   if(backend==='cuda')assert.equal(op.gpuId,'0','manual bootstrap retains product GPU zero');
+  // The macOS lane's worker is the product's in-process MLX worker, whose GPU id is `mlx`; claim
+  // routing keys on it, and a job requesting any other GPU is never handed to that worker.
+  if(backend==='mlx'){assert.equal(op.gpuId,'mlx','the macOS lane runs the product MLX worker (GPU id mlx)');assert.equal(op.requestedGpu,'mlx','macOS jobs must request the MLX worker (requestedGpu mlx)');}
   assert.ok(Number.isInteger(op.port)&&op.port>1024&&op.port<=65535);assert.ok(['q4','q8','bf16'].includes(op.componentTier));
   for(const field of ['hostBudgetBytes','deviceBudgetBytes','minimumControlDelta','lokrAmplitude'])positive(op[field]);assert.ok(Number.isFinite(op.maximumBaselineDelta)&&op.maximumBaselineDelta>=0);
   for(const field of ['width','height','wideWidth','wideHeight'])assert.ok(Number.isInteger(op[field])&&op[field]>0&&op[field]%32===0,'explicit stride-aligned cohort geometry required');

@@ -58,7 +58,7 @@ The following builds one exact request from actual operator choices. It does not
 
 ```sh
 jq -n --arg sw "$PUBLISHED_FINAL_SHA" --argjson ack "$ACTUAL_SCOPE_ACKNOWLEDGED" \
-  --arg runner "$EXPECTED_RUNNER" --argjson host "$OPERATOR_HOST_BUDGET_BYTES" \
+  --arg runner "$EXPECTED_RUNNER" --arg gpu "$PRODUCT_GPU_ID" --argjson host "$OPERATOR_HOST_BUDGET_BYTES" \
   --argjson device "$OPERATOR_DEVICE_BUDGET_BYTES" \
   --argjson shift "$OPERATOR_PULPCUT_SHIFT" --argjson audioShift "$OPERATOR_PULPCUT_AUDIO_SHIFT" '
 {
@@ -72,7 +72,7 @@ jq -n --arg sw "$PUBLISHED_FINAL_SHA" --argjson ack "$ACTUAL_SCOPE_ACKNOWLEDGED"
     componentSelections: [{modelId:"minimax_h3",tier:"q4"},{modelId:"minimax_h3_ref",tier:"q4"}],
     operator: {
       compatibleBase:"builtin:minimax_h3", projectName:"H3 reduced terminal proof",
-      seed:314159, requestedGpu:"0", gpuId:"0", port:43210, componentTier:"q4",
+      seed:314159, requestedGpu:$gpu, gpuId:$gpu, port:43210, componentTier:"q4",
       hostBudgetBytes:$host, deviceBudgetBytes:$device,
       minimumControlDelta:0.01, maximumBaselineDelta:0.001,
       width:1088, height:544, wideWidth:1536, wideHeight:768,
@@ -94,7 +94,7 @@ gh workflow run server-candle-linux.yml --repo SceneWorks/SceneWorks \
   -f campaign_run_id="$(cat "$ACTUAL_TERMINAL_REQUEST_JSON")"
 ```
 
-For MLX, `TERMINAL_OPERATION=h3-terminal-mlx` and `EXPECTED_RUNNER=nax-macos`. For CUDA use `h3-terminal-cuda` and the actual approved full-weights runner selected from the live pool; the manual lane retains PCI ordering/device zero and discovers its physical UUID. Adaptive mode exchanges metadata-only first-reference/first-hybrid timings between the two existing jobs with a bounded wait; no GPU ratio is assumed. `adaptive_matrix:false` runs the symmetric maximum for an independently scheduled lane. Neither mode makes optional 84-catalog cells a close gate.
+For MLX, `TERMINAL_OPERATION=h3-terminal-mlx`, `EXPECTED_RUNNER=nax-macos` and `PRODUCT_GPU_ID=mlx` (the product's in-process MLX worker; claim routing keys on it). For CUDA, `PRODUCT_GPU_ID=0` (product GPU zero). For CUDA use `h3-terminal-cuda` and the actual approved full-weights runner selected from the live pool; the manual lane retains PCI ordering/device zero and discovers its physical UUID. Adaptive mode exchanges metadata-only first-reference/first-hybrid timings between the two existing jobs with a bounded wait; no GPU ratio is assumed. `adaptive_matrix:false` runs the symmetric maximum for an independently scheduled lane. Neither mode makes optional 84-catalog cells a close gate.
 
 A prepared plan is not execution proof. Missing required reduced executions, failed native/source/AV/causal guarantees, inconsistent identities/counts or invalid omission prerequisites fail. `requiredReducedComplete` / `ok` describe this reduced requirement; `catalogComplete` and the explicit catalog UNPROVEN list are separate disclosures. Packed projection is not QKV/FFN codec proof, and cold cancellation completes no load or peak.
 
