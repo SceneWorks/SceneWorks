@@ -19,6 +19,11 @@ COPY apps/web/package.json apps/web/package-lock.json ./apps/web/
 RUN --mount=type=cache,target=/root/.npm npm ci --prefix apps/web
 COPY apps/web ./apps/web
 COPY apps/desktop/licenses ./apps/desktop/licenses
+# Model Manager's build-time projection authenticates the retained CUDA evidence through the
+# repository packager. These are build inputs only; the emitted browser payload is compact.
+COPY scripts ./scripts
+COPY config ./config
+COPY packages/schemas ./packages/schemas
 # The editor-guides Vite plugin bundles these first-party documents.
 COPY docs/film-script-writing.md docs/film-editor.md ./docs/
 # Explicit empty (not unset): apps/web/src/api.js maps this to window.location.origin.
