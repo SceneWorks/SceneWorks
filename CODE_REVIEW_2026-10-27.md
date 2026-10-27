@@ -1,23 +1,27 @@
-# Full Codebase Review (Rust backend) — SceneWorks — 2026-10-27
+# Full Codebase Review — SceneWorks — 2026-10-27
 
 Branch `claude/sceneworks-codebase-review-j3yimb`, reviewed at the tip as of 2026-10-27. Prior reviews: `docs/code-review/CODE_REVIEW_2026-05-17.md`, `_2026-07-01.md`, `_2026-07-12.md`.
 
 ## Executive summary
 
-- **Repository at a glance:** Rust workspace (`crates/sceneworks-worker`, `-core`, `-memory-adapter`, `-mcp`, `-image-quality`; `apps/rust-api`, `apps/desktop`, `apps/rust-worker`), roughly 580 source files and ~900k lines including very large inline test modules. Axum API + native MLX/Candle job workers + Tauri shell; inference engines come from the pinned `SceneWorks/inference` repo.
-- **Coverage:** the Rust backend only (scope chosen by the user). Eleven parallel read-only reviewers, one per subsystem plus one for the seams between crates. Excluded: `apps/web`, `scripts/`, `tests/` (pytest), `docs/`, `vendor/` (only noted whether still needed), generated files, logs, binaries. Tests were surveyed structurally, not line-audited. Reviewers read and grepped; **nobody ran `cargo build`/`cargo test`**. See *Coverage notes* for per-area gaps (large files such as `mlx_fit_gate.rs` were skimmed, not line-audited).
-- **Headline:** no Critical findings. Your instinct about duplication is right and it is the dominant theme: the pattern is *"a helper is hardened in one place, then re-copied unhardened elsewhere"*, usually because the original is `pub(crate)` or the shared module (`smoke_support`, `analysis_jobs_common`, `store_util`, `payload`) was only partly adopted. Several copies have already drifted in behaviour (MLX vs Candle floors, ETag/path confinement, atomic-write durability, repo-id validation, env-flag parsing). Architectural drift shows up mostly as *rules that exist only as comments*: `architecture_tests.rs` does not enforce layering or cfg rules, and the web `fallbackModels` seed has already drifted from the manifest. The most important security item is a combined one: **loopback trust with no `Origin`/`Host` validation** on `/api/*`, and the `/mcp` rebinding defence being switched off in the desktop's LAN mode. Most items from the 2026-07-12 review are fixed (26 of 28 spot-checked); the two big structural ones are still open and worse (`image_jobs/base.rs` is now 19.6k lines, the 1,292-line image job function remains).
-- **Counts (188 findings):** Critical: 0 | High: 7 | Medium: 86 | Low: 89 | Info: 6.
-- **Findings by category:** redundant 73, architecture-drift 45, readability 20, security 18, bad-pattern 18, dead-code 11, efficiency 3.
-- **How to read this report:** findings are severity-ranked and renumbered `F-001…`. Each keeps its **Source ID** (e.g. `W3-003`) because findings and the per-reviewer notes refer to each other by source ID. Prefixes: W = worker, C = core, A = rust-api, X = memory-adapter/mcp/desktop/vendor, D = cross-crate. Confidence is the reviewer's; the *Lead verification* line marks the four I re-checked against the code myself.
+- **Repository at a glance (Part 1, Rust backend):** Rust workspace (`crates/sceneworks-worker`, `-core`, `-memory-adapter`, `-mcp`, `-image-quality`; `apps/rust-api`, `apps/desktop`, `apps/rust-worker`), roughly 580 source files and ~900k lines including very large inline test modules. Axum API + native MLX/Candle job workers + Tauri shell; inference engines come from the pinned `SceneWorks/inference` repo.
+- **Coverage:** two passes. **Part 1** — the Rust backend (11 parallel read-only reviewers, F-001…F-188). **Part 2** — the web app (`apps/web`, ~225k LOC incl. ~350 test files), `scripts/`, `tests/`, `docker/`, `.github/workflows`, `packages/schemas` and repo hygiene (7 reviewers, F-189…F-274). Excluded: `docs/` prose, `vendor/` (only noted whether still needed), generated files, binaries. Tests were surveyed structurally, not line-audited. Reviewers read and grepped; **nobody ran `cargo`, `npm`, ESLint or knip**. The Part 2 reviews were shallower than Part 1 on the largest files; see *Coverage notes* for per-area gaps.
+- **Headline (Part 1):** no Critical findings. Your instinct about duplication is right and it is the dominant theme: the pattern is *"a helper is hardened in one place, then re-copied unhardened elsewhere"*, usually because the original is `pub(crate)` or the shared module (`smoke_support`, `analysis_jobs_common`, `store_util`, `payload`) was only partly adopted. Several copies have already drifted in behaviour (MLX vs Candle floors, ETag/path confinement, atomic-write durability, repo-id validation, env-flag parsing). Architectural drift shows up mostly as *rules that exist only as comments*: `architecture_tests.rs` does not enforce layering or cfg rules, and the web `fallbackModels` seed has already drifted from the manifest. The most important security item is a combined one: **loopback trust with no `Origin`/`Host` validation** on `/api/*`, and the `/mcp` rebinding defence being switched off in the desktop's LAN mode. Most items from the 2026-07-12 review are fixed (26 of 28 spot-checked); the two big structural ones are still open and worse (`image_jobs/base.rs` is now 19.6k lines, the 1,292-line image job function remains).
+- **Counts (274 findings):** Critical: 0 | High: 7 | Medium: 118 | Low: 137 | Info: 12.  Part 1 (Rust): Critical: 0 | High: 7 | Medium: 86 | Low: 89 | Info: 6.  Part 2 (web/tooling): Critical: 0 | High: 0 | Medium: 32 | Low: 48 | Info: 6.
+- **Findings by category:** redundant 98, architecture-drift 55, bad-pattern 38, readability 29, security 23, dead-code 21, efficiency 10.
+- **How to read this report:** findings are severity-ranked and renumbered `F-001…`. Each keeps its **Source ID** (e.g. `W3-003`) because findings and the per-reviewer notes refer to each other by source ID. Prefixes: W = worker, C = core, A = rust-api, X = memory-adapter/mcp/desktop/vendor, D = cross-crate (Part 1); B = web app, S = scripts/CI/docker/hygiene (Part 2). Confidence is the reviewer's; the *Lead verification* line marks the four I re-checked against the code myself.
+- **Headline (Part 2):** the web app has no High or Critical findings and a good security posture (no HTML sinks, `postMessage`/iframe surface or unsafe links found in the areas read; ticketed SSE/media; write-only credential inputs). The problems are structural: god components that keep growing (`App.jsx` 2.4k→4.3k, `ImageStudio` 3.2k→4.9k lines), helpers/hooks extracted once but never migrated to (the `api/` layer is bypassed at ~236 call sites), server-owned rules re-implemented client-side (license acks in `localStorage`, training validation that ignores the advertised limits, a test-only model catalog mirror), unguarded polling/import loops, and a parallel Simple-UI overlay stack without the shared modal's focus handling. `scripts/` (139k LOC) re-implements hashing/canonical-JSON helpers per harness; the dev web Docker image is missing build inputs; 192 MB of raw calibration frames are tracked.
 
 
-## Critical findings
+# Part 1 — Rust backend
+
+
+### Critical findings — Rust backend
 
 *None.*
 
 
-## High findings
+### High findings — Rust backend
 
 #### [F-001] No Origin/Host validation on `/api/*`: CSRF and DNS-rebinding reach the loopback-trusted API
 - **Source ID:** A2-001
@@ -93,7 +97,7 @@ Branch `claude/sceneworks-codebase-review-j3yimb`, reviewed at the tip as of 202
 - **Confidence:** High
 
 
-## Medium findings
+### Medium findings — Rust backend
 
 #### [F-008] Server-supplied ETag is joined into a path without confinement
 - **Source ID:** W3-003
@@ -982,7 +986,7 @@ Branch `claude/sceneworks-codebase-review-j3yimb`, reviewed at the tip as of 202
 - **Confidence:** High
 
 
-## Low findings
+### Low findings — Rust backend
 
 #### [F-094] Bearer token survives a same-host scheme or port change on redirect
 - **Source ID:** W3-007
@@ -1875,7 +1879,7 @@ Branch `claude/sceneworks-codebase-review-j3yimb`, reviewed at the tip as of 202
 - **Confidence:** Medium
 
 
-## Informational
+### Informational findings — Rust backend
 
 #### [F-183] Misc cleanliness: stray module-level `#[test]`, a silent credential parse failure, and an odd `src/` file
 - **Source ID:** W3-017
@@ -1941,7 +1945,899 @@ Branch `claude/sceneworks-codebase-review-j3yimb`, reviewed at the tip as of 202
 - **Confidence:** High
 
 
+# Part 2 — Web app, scripts and CI
+
+
+### Critical findings — web/tooling
+
+*None.*
+
+
+### High findings — web/tooling
+
+*None.*
+
+
+### Medium findings — web/tooling
+
+#### [F-189] Split the 3,750-line `App()` component along its existing section boundaries
+- **Source ID:** B1-001
+- **Category:** readability
+- **Severity:** Medium
+- **Location:** `apps/web/src/App.jsx:574-4320` (the single `App` function); sections at 1167-1330 (job creators), 2008-2490 (refresh/hydration), 2524-2810 (job/prompt runners), 2822-3265 (send-to-studio and asset actions), 3460-3580 (job actions), 3637-3891 (context literals), 1797-1900 (WebView2 repaint pump)
+- **Finding:** `App()` is one function with about 238 hook calls plus roughly 80 inline `async function`/`useCallback` bodies. `useJobEvents`, `useAccessGate`, `useCharacters` and the others were extracted since F-052, but the file went from 2.4k to 4.3k lines. The growth is new feature wiring (workflow embed, model library, Simple UI, training datasets, film), not shell logic.
+- **Impact:** Every feature touches this file. Review and merge conflicts concentrate here, and the hand-maintained dependency arrays (B1-002) are the main place bugs hide.
+- **Suggested fix:** Extract in this order, each as a `useX({deps}) -> actions` hook like the existing ones. (a) `usePromptRunners` for refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe and compareFaceLikeness (2594-2782); they are already pure `pollJobToCompletion` wrappers over `token`. (b) `useAssetActions` for 3094-3265 (status, tags, move, delete, purge, preview delete). (c) `useSendToStudio` for 2822-3086 (`sendAssetTo*`, `launchImageRecipe`, `sendPresetToStudio`, `sendCharacterTo*`). (d) `useJobActions` for 3460-3580. (e) `useShellHydration` for 2008-2490, including the ledger refs. (f) `useWebView2RepaintPump` for the 100-line effect at 1797-1900 and `useThemeAccent` for the theme and accent effects at 1611-1640. (g) Move the nav and keep-alive tables (258-372) and `ProjectSwitcher`/`FirstRunProjectGate` (373-573) into `components/shell/`. Together these remove roughly 1,800 lines with no behavior change.
+- **Confidence:** High
+
+#### [F-190] Hand-mirrored 230-line context literals and a 30-ref forwarding pattern are fragile
+- **Source ID:** B1-002
+- **Category:** architecture-drift
+- **Severity:** Medium
+- **Location:** `apps/web/src/App.jsx:3655-3891` (`appStaticValue` object plus dependency array), `App.jsx:1034-1064` (about 28 `*Ref` handles), `App.jsx:1314-1322`
+- **Finding:** `appStaticValue` lists about 300 names twice: once as the object and once as the `useMemo` dependency array. A comment says "each dependency array must mirror the corresponding object". Forwarding refs (`refreshAssetsRef`, `refreshCharactersRef`, `refreshModelsRef`, ...) plus `stableRefreshData*` wrappers exist because the `function refreshX()` declarations (2051-2201, 2473) are recreated every render. This was the root cause of F-009.
+- **Impact:** A key added to the object but not the array (or the reverse) gives a stale or never-updating context value. The compiler and `react-hooks/exhaustive-deps` do not check a manually built literal, and no test pins the equality.
+- **Suggested fix:** Convert the `refreshX` function declarations to `useCallback` in their hooks, then delete the forwarding refs. Build the context value from domain sub-objects (`{ training, characters, timelines, models, assets }`), each memoized in the hook that owns it. Failing that, add a test that parses the literal and the array and asserts equal key sets.
+- **Confidence:** High
+
+#### [F-191] Seven hooks hand-roll the same project-scoped refresh body; `useScopedCrudList` covers only two
+- **Source ID:** B1-003
+- **Category:** redundant
+- **Severity:** Medium
+- **Location:** `apps/web/src/hooks/useCharacters.js:20-48`, `usePersonTracks.js:17-45`, `useSavedVoices.js:19-60`, `useModelsAndLoras.js` (refreshLoras), `useTimelines.js`, `useTraining.js`, `App.jsx` (`refreshAssets`, 2154-2200); the shared form is `hooks/useScopedCrudList.js:22-46`
+- **Finding:** Each hook repeats the sequence: missing-project guard, stale pre-check, `apiFetch`, stale post-check, `setItems`, `setError("")`, `refreshSuccess`, and a catch with stale, abort and error branches. `rg 'refreshFailure\("stale"\)'` finds this in 8 files. `useScopedCrudList` already encapsulates it, but only `usePresets` and `usePromptBatches` use it.
+- **Impact:** F-056 had to be fixed by hand in four copies. The next fix (a new status such as "interrupted", or a changed notice policy) must again be applied to seven or eight places. `useSavedVoices` already uses a slightly different helper (`isCurrentVoiceRequest`) than its siblings.
+- **Suggested fix:** Extract `useProjectScopedList({ path, token, activeProject, activeProjectRef, setError, normalize })` (or add a `scope: "project-only"` mode to `useScopedCrudList`) returning `{ items, setItems, refresh }`. Rebuild characters, voices, person-tracks and loras on top of it.
+- **Confidence:** High
+
+#### [F-192] Film timeline refresh polls once per second for as long as a film timeline is selected
+- **Source ID:** B1-004
+- **Category:** efficiency
+- **Severity:** Medium
+- **Location:** `apps/web/src/hooks/useTimelines.js:98-115`
+- **Finding:** The comment says "bounded read refresh". The effect is keyed on `[activeProject.id, selectedTimelineId, isFilmTimeline, token]`, where `isFilmTimeline = Boolean(activeTimeline?.filmAssembly)`. That value stays true after delivery, so `setInterval(…, 1000)` runs forever. Each tick is a full `GET …/timelines/:id` that is parsed and rebased into editor state. The request takes no `AbortSignal`, and the hook lives in `App`, so it keeps polling when the Editor is not the active view, and in background tabs. An SSE stream already exists.
+- **Impact:** Steady 1 req/s against the local API plus `rebaseTimeline` work for as long as the selection is a film timeline, including after delivery and while on other screens. In remote/LAN mode it keeps hitting the auth throttle path.
+- **Suggested fix:** Stop polling once the assembly status is terminal (delivered, failed or cancelled). Poll only while the Editor is visible and `document.visibilityState` is visible. Better, publish a `timeline.updated` or `job.updated`-driven refresh through `useJobEvents`. Pass an `AbortController` signal and abort it in cleanup.
+- **Confidence:** Medium (the terminal-state field was not traced, but no stop condition is visible in the effect)
+
+#### [F-193] API layer is mostly bypassed; request paths are hand-written at 236 call sites with unencoded ids
+- **Source ID:** B1-005
+- **Category:** architecture-drift
+- **Severity:** Medium
+- **Location:** `apps/web/src/api.js:1-265`, `api/` (only `films.js`, `filmReview.js`, `filmPlannerConnections.js`, `yue2.js`); `rg 'apiFetch\(' --glob '!*.test.*'` gives 236 sites in 45 files, including components and screens (`screens/ImageEditor.jsx`, `ImageStudio.jsx`, `SettingsScreen.jsx`, `components/Moss*Controls.jsx`, `ControlOverlayPicker.jsx`). 53 of 56 `apiFetch(\`/api/v1/projects/${id}…\`)` sites interpolate the id without `encodeURIComponent` (for example `hooks/useCharacters.js:25`, `useTimelines.js:107`)
+- **Finding:** `api/` is meant to be the endpoint layer, but only four domains live there. `api.js` itself mixes the transport (`apiFetch`, `ApiError`, tickets) with domain endpoints (workflow inspect, Iris curricula, training data-walk, Iris sidecars at 187-265). Hooks, screens and components build paths and bodies inline. The film and yue2 modules encode ids; the hooks mostly do not.
+- **Impact:** No single place to find, mock, or change an endpoint contract. Id encoding is inconsistent, which is harmless for UUIDs but breaks if an id ever contains `/`, `?` or `#`. Tests mock `fetch` per file (hence the 34 FakeEventSource/fetch fixtures) because there is no seam.
+- **Suggested fix:** Split `api.js` into `api/client.js` (transport, `ApiError`, tickets) and per-domain modules (`api/training.js`, `api/workflows.js`, `api/projects.js`, ...). Migrate the hooks first, since they have the most repeats. Add an ESLint `no-restricted-imports` or custom rule so `apiFetch` can only be imported from `api/**`, and always `encodeURIComponent` ids in the helper.
+- **Confidence:** High
+
+#### [F-194] `modelCatalog.js` is a 1,233-line hand-maintained mirror consumed only by tests and covering a third of the manifest
+- **Source ID:** B1-007
+- **Category:** dead-code
+- **Severity:** Medium
+- **Location:** `apps/web/src/modelCatalog.js:1-1233`, `apps/web/src/data/previewSupport.json`, `apps/web/scripts/generate-preview-support.mjs:86-166`, `apps/web/vite-plugin-bundle-report.js:76`
+- **Finding:** After sc-24217 moved the catalog out of the eager graph, nothing in production imports `modelCatalog.js` (`rg 'modelCatalog|fallbackModels'` hits only `*.test.*` files, plus comments in `constants.js` and `modelEligibility.js`). The file has 46 entries; `config/manifests/builtin.models.jsonc` has 140. Missing entries include ideogram_4, flux2_dev, krea_2_*, boogu_image*, iris_3b*, mage_flow*, anima_*, pid_* and sana_*. It is a hand-written third copy beside the manifest and the Rust `MODEL_TABLE`. `previewSupport.json` is generated (and kept in CI-guarded sync) only to feed this file, and the bundle report still lists "Offline model catalog" as a tracked chunk.
+- **Impact:** Parity tests (`controlModesParity`, `imageAxesParity`, `memoryFloorCatalogParity`, `videoGeometryParity`) guard only the 46 seeded models. Newer models are unguarded, and each new model asks the author to hand-edit this file for tests only. The `previewSupport.json` regeneration step is overhead with no runtime consumer.
+- **Suggested fix:** Either delete the mirror and have the parity tests read `builtin.models.jsonc` through a small JSONC loader (the pytest side already does), or generate `modelCatalog.js` from the manifest the way `previewSupport.json` is. If it stays, add a test asserting the seed ids are a subset of the manifest ids so it cannot rot silently. Drop the `previewSupport.json` output and its bundle-report entry if the mirror goes.
+- **Confidence:** High (importer check done by grep; the "test-only" reading matches the file header, so this is partly intended)
+
+#### [F-195] Batch run keeps posting jobs after ImageStudio unmounts (project switch) and cannot be stopped
+- **Source ID:** B2-001
+- **Category:** bad-pattern
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/ImageStudio.jsx:2807-2814, 2818-2984`; remount key at `apps/web/src/App.jsx:4190`
+- **Finding:** `runBatch` is an async loop that awaits `waitForBatchSlot()` and `createImageJob()`. `batchAbortRef` is only set by `cancelBatchRun` (L2987); there is no unmount cleanup. App.jsx keys ImageStudio by `activeProject.id:studioRestoreEpoch`, so switching project (or a studio restore) unmounts the component mid-run.
+- **Impact:** The orphaned loop keeps enqueuing jobs for the old project, with a closure over the old request state, and the user has no Stop button for it. Once `activeJobIds` stops updating, the loop parks forever on a promise held in `batchSlotWaitersRef`. Large Cartesian batches (up to the confirmed cap) are the worst case.
+- **Suggested fix:** Add `useEffect(() => () => { batchAbortRef.current = true; releaseBatchSlotWaiters(); }, [])`, and check a mounted ref before each `createImageJob`. Consider moving the batch runner into a hook (see B2-002).
+- **Confidence:** Medium (derived from reading; keep-alive does not apply across a project switch because of the key).
+
+#### [F-196] ImageStudio is a single 4,500-line component; propose concrete split seams (F-035, still present and worse)
+- **Source ID:** B2-002
+- **Category:** readability
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/ImageStudio.jsx:332-4846` (component body); 74 `useState`, 27 `useEffect`, 83 hook calls, 6 `exhaustive-deps` disables (L1341, 1431, 1445, 1667, 1918, 2135)
+- **Finding:** Logic is L332-3204 (about 2,870 lines) and one JSX return is L3204-4845 (about 1,640 lines). The `screens/imageStudio/` folder holds only 3 tiny files (`useImageControlState.js` is 20 lines and exports `useStrictControlState`/`usePidState`, so the filename doesn't match). Review said 3.2k lines in July; it is now 4.9k.
+- **Impact:** Every feature (MOSS, Iris, Krea multi-phase, hires-fix, batch, structured captions) edits the same closure. Order-dependent TDZ hazards are already documented in comments (L1420-1422). The cross-field reset effects (L1310-1342 touches about 15 setters) are fragile.
+- **Suggested fix:** Extract along existing comment-delimited seams, in this order:
+  1. `useImageBatchRun` (L2797-3000: replaceBatchRun, waitForBatchSlot, runBatch, cancelBatchRun, plus `useBatchPromptState`).
+  2. `useImageRecipeReplay` (L1920-2135, a 215-line effect). It should be a pure `recipeToStudioPatch(recipe)` plus a thin effect.
+  3. `useMossImageState` (L535-555, 1648-1670, `MossOrdinaryControls`).
+  4. `useStructuredPrompt` (`onMagicExpand`/`onImageCaption`/`onImageDescribe`, L2175-2275).
+  5. JSX: `<ImageAdvancedPanel>` (about L4208-4760), `<ImageReviewPanel>` (L4791+), `<ImagePromptComposer>` and the generation-settings row.
+  6. A shared `validateSubmitPreconditions()` for the guards duplicated between `submit` and `runBatch` (see B2-009).
+- **Confidence:** High
+
+#### [F-197] ImageEditor component is 3,300 lines; pure helpers and 190-key "scope bag" undercut the existing split
+- **Source ID:** B2-003
+- **Category:** readability
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/ImageEditor.jsx:1208-4546` (component), `:1-1207` (about 50 exported pure helpers), `:3496-3676` (`toolPanelScope`), `apps/web/src/screens/imageEditor/ImageEditorToolPanel.jsx:22-45`
+- **Finding:** Tool hooks (mask/boxes/color) and the tool panel were extracted, but `ImageEditor.jsx` still holds the history/undo, layer ops, crop, AI-op runner, save/export and shell. Roughly 40 exported helpers (`editorDownloadPlan`, `buildSaveProvenance`, `historyCheckpoint`, `leaveGuardArming`, `blobToEditorImage`, `exportEditorFile`, …) are exported only for tests: zero non-test importers (checked by grep). The tool panels receive a ~190-key `toolPanelScope` object that is re-proxied by `useStableImageEditorToolPanelScope`. Each panel destructures 60+ keys on one line (L57-58), and `samePanelProps` does a keywise `Object.is` across all of them. That is a service locator, not a component interface.
+- **Impact:** Any new editor control means touching 3 sites (state, scope literal, panel destructure). Memoisation is mostly defeated, since any changed key (`jobs`, `assets`, `working`) re-renders the active panel. Unit-testing the pure logic requires importing a 4.5k-line React module.
+- **Suggested fix:** Move L1-1207 helpers into `screens/imageEditor/{history,export,provenance,leaveGuard,launchGuard}.js` (tests re-point imports). Extract `useEditorHistory` (L1882-2046), `useLayerOps` (L2597-2760), `useEditorAiOps` (L2903-3213) and `useEditorSave` (L3213-3430). Give each tool panel a narrow props object built by its own hook (e.g. `useEditTool()` returns `{state, actions}`) instead of one global scope.
+- **Confidence:** High
+
+#### [F-198] Sampler/scheduler/steps seed-snap-render logic is copy-pasted across four surfaces
+- **Source ID:** B2-005
+- **Category:** redundant
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/ImageStudio.jsx:1510-1522, 1629, 1673-1683, 4262-4290`; `apps/web/src/screens/VideoStudio.jsx:1005-1010, 2962`; `apps/web/src/components/CharacterAdvancedOptions.jsx:65-103, 333`; `apps/web/src/components/editor/GenerationRail.jsx:254-266`; also `screens/PresetManagerScreen.jsx:1621-1634`
+- **Finding:** All of these re-derive `samplerOptionsFromModel`/`schedulerOptionsFromModel`, gate the picker on `options.length > 1`, snap to the model default when the current value leaves the menu, and render near-identical `<select>`s. `CharacterAdvancedOptions.jsx:20-23` documents "mirrors the Image Studio advanced panel" as the consistency mechanism.
+- **Impact:** Each new knob (sc-15299 negative-prompt axis, sc-25681 CFG interval, etc.) has to be added to each copy and has drifted before. `samplerOptions.js` shares only the pure parts.
+- **Suggested fix:** Create a `useSamplerControls(model, backend, {saved})` hook plus `<SamplerSchedulerFields>` in `components/`, consumed by all four surfaces.
+- **Confidence:** Medium (Image/Character/Rail confirmed; Video checked at hook level only).
+
+#### [F-199] ImageStudio re-implements helpers that already exist in the Simple UI modules (and the Simple UI is the wrong home)
+- **Source ID:** B2-006
+- **Category:** redundant
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/ImageStudio.jsx:282-293, 394-418`; `apps/web/src/simple/modelDefaults.js:25-46`; `apps/web/src/simple/simpleJobs.js:33-40`; `apps/web/src/screens/DocumentStudio.jsx:128-131` vs `ImageStudio.jsx:295-298`
+- **Finding:** `preferredOption`/`preferredResolution` are defined in ImageStudio with subtly different semantics from the simple twins (the ImageStudio `preferredOption` falls back to `"default"` for an empty list, the simple one returns `undefined`). The `convRotEligible`/`nvfp4Eligible` memos duplicate `workerAdvertises()` from `simple/simpleJobs.js`, whose comment says it "mirrors the advanced studios' gates". `formatResolutionLabel` is copied verbatim into DocumentStudio and ImageStudio. Shared logic sits under `simple/`, so the advanced screens would have to import "downwards" from the simple package.
+- **Impact:** Simple and advanced runs of the same model are documented as byte-identical ("starts on the same geometry"), but the guarantee rests on two code copies staying in sync. The `"default"` vs `undefined` empty-list difference is already a behavioural fork.
+- **Suggested fix:** Move `workerAdvertises`, `preferredOption`, `preferredResolution` and `formatResolutionLabel` into a neutral module (e.g. `studioDefaults.js`). Have ImageStudio, DocumentStudio and `simple/` import it, and delete the local copies.
+- **Confidence:** High
+
+#### [F-200] Film render/export `while (run.controllerActive)` loops have no unmount, project-switch, or iteration guard
+- **Source ID:** B3-001
+- **Category:** bad-pattern
+- **Severity:** Medium
+- **Location:** `components/editor/FilmWorkspace.jsx:503-509`, `components/editor/FilmWorkspace.jsx:546-550`
+- **Finding:** `renderSelected` and `exportCurrentCut` poll the run every 500 ms inside the click handler until `controllerActive` clears. They have no AbortController, mounted flag, or project/draft check, and they capture `activeProject.id` and `token` from the render that started them. Any thrown fetch error ends the loop (`catch` then `setNotice`), and the loop never checks whether the component or project is still current.
+- **Impact:** After navigating away or switching project, the loop keeps hitting the old project's endpoint and calls `setLastRun`/`setNotice` for a stale run, so another project's workspace can show the old project's run. If the controller never clears, the loop runs forever. A single transient network error stops progress reporting while the render continues.
+- **Suggested fix:** Replace both loops with a cancellable poller (effect keyed on runId plus an abort signal, like `pollInstall` at lines 226-257). `FilmLifecycle` already refreshes runs every 2 s, so deriving progress from `runs` would make the loops unnecessary.
+- **Confidence:** High
+
+#### [F-201] Three overlapping film-run polls, one unconditional and unabortable
+- **Source ID:** B3-002
+- **Category:** efficiency
+- **Severity:** Medium
+- **Location:** `components/editor/FilmLifecycle.jsx:44-55`, `hooks/useTimelines.js:100-118`, `components/editor/FilmWorkspace.jsx:503-509`
+- **Finding:** `FilmLifecycle` fires two GETs (`/film-runs` and `/planning`) every 2 s for as long as it is mounted, even with no active run. `useTimelines` fetches the full timeline every 1 s for any film timeline regardless of delivery state. `FilmWorkspace` adds its own 500 ms run poll while a render is active. There are no abort signals, no `document.hidden` pause, and no SSE use, although the job SSE stream (`useJobEvents`) already exists.
+- **Impact:** A constant background request load (about 3.5 req/s during a render, about 1.5 req/s idle on a film timeline). Each timeline poll runs `adoptStoredTimeline`, which can re-render the editor. Requests are not cancelled on unmount.
+- **Suggested fix:** Poll only while a run is `controllerActive` or a delivery is pending. Pass `signal` to `apiFetch`, pause when hidden, and merge into one run feed. Ideally push run and timeline-revision events over SSE.
+- **Confidence:** High
+
+#### [F-202] Training config validation ignores the target's advertised numeric ranges and the integer requirement the API enforces
+- **Source ID:** B4-001
+- **Category:** bad-pattern
+- **Severity:** Medium
+- **Location:** `apps/web/src/training/trainingConfig.js:1018-1032` (generic `> 0` loop) vs `crates/sceneworks-core/src/training.rs:4119-4160` (`validate_advertised_numeric_limits`), `:662-677` (`TrainingConfig` u32/i64 fields), `:2018-2022` (limits `rank [4,128]`, `steps [200,6000]`, `batchSize [1,4]`)
+- **Finding:** `configValidation` only checks `rank/alpha/steps/resolution/batchSize/gradientAccumulation/saveEvery` for "> 0". It never reads `limits.rank`, `limits.alpha`, `limits.steps` or `limits.batchSize` (only `limits.sampleCount`, `microStepFields`, `resolutions` via the select), and never checks `Number.isInteger` or the u32 ceiling. The API refuses all of these (advertised range check, `u32` deserialization of `100.5`/`1e10`). `seed` is not validated at all, and a blank/garbage seed becomes `null` in the payload for a required `i64`.
+- **Impact:** The "Needs input" pill reads ready and Start training enables for `steps=10` on a `[200,6000]` target or `rank=3.5`; the user gets a server 400 with no field outline, which is exactly what epic 10644's validation design was built to prevent. This is the one place the web rule set is looser than the backend while the file header claims it mirrors the API.
+- **Suggested fix:** Add one loop over `["rank","alpha","steps","batchSize"]` that reads `selectedTarget.limits[field]` as `[min,max]`, requires `Number.isInteger`, and emits the same message as the API (`invalid_advertised_limit` wording); add integer/range checks for `gradientAccumulation`, `saveEvery`, `seed`. Optionally set `min`/`max` on the `numericInput`s from the same limits (ConfigureJobPanel.jsx:606-614 passes none).
+- **Confidence:** High (backend side verified; web side is a straight read of the rule list).
+
+#### [F-203] Dataset editor re-renders every caption card on every keystroke and every SSE tick (no per-card component, no memo, no windowing)
+- **Source ID:** B4-002
+- **Category:** efficiency
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/training/DatasetEditorPanel.jsx:588-754` (inline `visibleAssets.map` building ~170 lines of JSX per card, no `React.memo`); `apps/web/src/screens/TrainingStudio.jsx:372,1665-1672` (`updateCaption` sets `captionDraftById` on the 2.6k-line root); `styles.css:6434` (`.asset-tile-windowed` exists but is not applied to `.training-caption-card`)
+- **Finding:** Each card contains a controlled `<textarea>`, a `ReadinessBadge`, `AssetThumbnail`, mask overlay and five buttons, all built inline in the parent's render. Typing one character calls `setCaptionDraftById`, re-rendering TrainingStudio (a `useAppContext()` consumer, so it also re-renders on every job/SSE update) and then every card. Dataset sizes of hundreds of images are the normal case (Parquet import, catalog materialize up to 500 rows, character sets). The project already solved the paint side for asset grids with `content-visibility: auto`, but not here and not for the React reconciliation side.
+- **Impact:** Visible typing lag in large datasets, and a full-grid reconcile on every training progress tick while the editor is open.
+- **Suggested fix:** Extract `<CaptionCard>` wrapped in `React.memo`, passing only that item's `draft`, `readinessEntry`, `savedItem`, `maskStatus` and stable (ref-bridged) callbacks; add a `content-visibility: auto; contain-intrinsic-size` class to `.training-caption-card`; keep caption text in card-local state flushed on blur/debounce if keystroke latency remains.
+- **Confidence:** Medium (re-render cost inferred from structure; no profile taken).
+
+#### [F-204] Dataset import uploads files strictly one by one with no partial-failure recovery, no progress, and no project-switch guard; the logic is duplicated for references
+- **Source ID:** B4-003
+- **Category:** bad-pattern
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/TrainingStudio.jsx:1879-1957` (`handleImport`), `:1692-1716` (`importItemReferences`, same loop copy-pasted), `:1914` (per-file `setUploadedDatasetAssets`), `components/DatasetAddDialog.jsx:117-127` (drop handler)
+- **Finding:** (a) `for (const file of imageFiles) await uploadDatasetItem(file)` aborts on the first rejected upload; images already uploaded are in `uploadedDatasetAssets` but never added to `selectedAssetIds` (the `setSelectedAssetIds` happens only after the loop), so a failure on file 80 of 100 leaves 79 orphan server-side uploads and a one-line error with no count. (b) No progress indicator, no concurrency, and `.txt`/`.json` sidecars are read sequentially with `await file.text()` with no size cap. (c) The loop keeps running after the project-switch reset effect (TrainingStudio.jsx:1142-1165 clears the draft), so asset ids from the old project are then written into the new project's `selectedAssetIds`/caption drafts. (d) Each success does `setUploadedDatasetAssets([...filter...])`, O(n^2) over a large drop. (e) The reference variant duplicates the same upload+flag+merge block.
+- **Impact:** Large drops are slow and all-or-nothing in practice; a mid-batch failure silently strands uploads; a project switch during import corrupts the new draft.
+- **Suggested fix:** Extract `uploadDatasetFiles(files, {signal, onProgress})` used by both paths: bounded concurrency (3-4), collect per-file results, select the successes and report "N of M failed: names" instead of throwing; accumulate assets in a local array and set state once; abort via a controller bumped in the project-reset effect; cap sidecar size before `file.text()`.
+- **Confidence:** High on (a)(d)(e); Medium on (c) (depends on switch-guard timing).
+
+#### [F-205] `CatalogCuration` is not keyed by catalog, so a catalog switch mid-open lets the old catalog's fetches write into the new one's state
+- **Source ID:** B4-004
+- **Category:** bad-pattern
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/DatasetCatalogsScreen.jsx:1224` (`<CatalogCuration catalogId={selected.id} .../>` with no `key`), `:291-307` (reset effect clears only some state), `:365-386` (`openCuration` has no abort or generation guard), `:312` (`run` closes over `catalogId`), `:253-278`
+- **Finding:** The reset effect on `catalogId` aborts only `abortRef`/`materializeAbortRef`, and resets `open/items/selectedRecord/materialization`, but not `cursor`, `total`, `facets`, `savedViews`, `projects`, `reviews`, `busy`. `openCuration` awaits saved-views/projects with no signal, then calls `run` from the closure of the catalog that was selected when "Browse catalog" was clicked. If the user switches catalogs during that await, `run` creates a fresh controller (the earlier abort already happened) and loads catalog A's page into the component now displaying catalog B; "Load next page" can also pass A's `cursor` with B's id. A run aborted by the effect leaves `busy` true (`finally` only clears it for non-aborted runs).
+- **Impact:** Wrong-catalog thumbnails/saved views/materialize target after a quick switch; stale "Saved views (n)" and facets from the previous catalog until the next run.
+- **Suggested fix:** Render `<CatalogCuration key={selected.id} .../>` so all state resets by construction (then most of the reset effect can go), and give `openCuration` the same abort/generation guard `materializeResults` already has.
+- **Confidence:** High on the missing key and state not being reset; Medium on hitting the race in practice.
+
+#### [F-206] Pose library create panel bypasses the shared library module its keypoint sibling uses, and maps staged uploads to files by array index
+- **Source ID:** B4-005
+- **Category:** architecture-drift
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/PoseLibraryScreen.jsx:157-185` (raw `apiFetch("/api/v1/poses/sources")` + `URL.createObjectURL(images[index])`), `:230-258`, `:334`, `:467`, `:539-545`, `:566-593`; contrast `apps/web/src/keypointLibrary.js:51-90` (`stageKeypointSource`, `saveKeypointPreset`, ...)
+- **Finding:** `keypointLibrary.js` owns every endpoint and the staging helper for the Key Point screen; `poseLibrary.js` has only constants/record converters, so `PoseLibraryScreen` hand-builds URLs for stage/save/list/status/tags/delete/purge/preview inline. The staging code also posts all images in one multipart request and then pairs `result.sources[index]` with `images[index]` for `displayName` and the preview `objectUrl`; if the server drops or reorders any file (non-decodable image, dedupe), previews and names attach to the wrong source. The two screens also carry near-identical stage -> job -> watch-`jobs`-for-terminal -> review state machines (`terminalStatuses` effect at PoseLibraryScreen.jsx:257-270 vs KeyPointLibraryScreen's capture panel) that should share a hook.
+- **Impact:** Endpoint changes need edits in screen code; wrong preview/name pairing on partial server acceptance; two copies of the detect-job watcher to keep in sync (neither times out, so a missed SSE event leaves "detecting" forever).
+- **Suggested fix:** Move `stagePoseSources`, `savePoses`, `loadPoseAssets`, `setPoseStatus/Tags`, `deletePose/purgePose` into `poseLibrary.js` (mirroring keypointLibrary), have the server echo the original filename/index so the client matches by key, and factor `useDetectJob(jobId, jobs)`.
+- **Confidence:** High on the bypass; Medium on mismatch (depends on the server's response ordering guarantees).
+
+#### [F-207] TrainingStudio is still a 2.6k-line, effect-driven state machine; the F-036 "session" bags are fresh object literals each render
+- **Source ID:** B4-007
+- **Category:** readability
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/TrainingStudio.jsx:372-2607` (single component), `:2487-2530` (inline `datasetSession={{ ...~25 keys }}` / `captionSession` / `config` literals), effects at `:640,767,819,1013,1052,1103,1131,1142,1153,1159,1213,1232,1245,1290,1419,1502,1510,1551`; 7 `eslint-disable react-hooks/exhaustive-deps`
+- **Finding:** Previously F-036 (2026-07-12, then 1,567 lines) asked to group the prop bags. The bags were grouped (DatasetEditorPanel now takes `datasetSession/captionSession/...`), but the root grew to 2,607 lines and the grouping is cosmetic: each bag is rebuilt inline every render, so no child can ever skip a render, and the many "mirror state into state" effects (config reseed `:1245-1288`, trigger-follows-captions `:1290`, prompts-follow-trigger, gpu clamp, dataset-reset `:1142`) are derived state kept in sync by effects, which is the shape that produced F-005.
+- **Impact:** Every dataset-editor or config change is a three-file edit in one very large component; memoization of children (B4-002) is blocked by the unstable bags.
+- **Suggested fix:** Seams: (1) `useDatasetDraft()` owning `activeDataset/draftName/selectedAssetIds/captionDraftById/referenceDraftById/holdoutById` plus `persistDataset/handleImport/openDataset` (about 900 lines); (2) `useTrainingConfigDraft()` owning `configDraft/customizedConfigFields/configBasisRef` and the reseed/follow effects, using `configReseedDecision` as a reducer; (3) move `TrainingLiveProgress/TrainedLoraOfferCard/trainingSampleGroups` (`:201-366`) to `screens/training/`. Return stable, memoized session objects from the hooks.
+- **Confidence:** High.
+
+#### [F-208] ModelManagerScreen renders the whole catalog through ~750 lines of inline render closures
+- **Source ID:** B5-001
+- **Category:** efficiency
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/ModelManagerScreen.jsx:1313-1820` (renderModelCard), `:1866-2110` (renderLoraRow), `:604-2535` (whole component), `:625` (useAppContext)
+- **Finding:** `renderModelCard` (~510 lines) and `renderLoraRow` (~245 lines) are closures inside the 1,900-line `ModelManagerScreen`. They recompute per-model derived state on every render: job filters, tier logic, license gate, availability badges. They cannot be `React.memo`'d. The screen reads the merged `useAppContext()`, so it re-renders on every live context tick (job progress SSE, worker heartbeat) and re-renders every model and LoRA card each time.
+- **Impact:** While a download or convert job streams progress, the full catalog (100+ cards, each running several `jobs.filter` passes) is rebuilt on every tick. This is the file the brief flags as 2.5k lines.
+- **Suggested fix:** Extract `<ModelCard>`, `<LoraRow>`, `<LoraImportPanel>` and `<LinkedLibraryStatus>` into `screens/modelManager/*.jsx`, wrapped in `React.memo`. Pass each card only its own `downloadJobs`/`convertJobs` slice, computed once by indexing `jobs` by modelId in a single `useMemo`. Move the delete/relink/rescan handlers to a `useModelManagerActions` hook. The `ModelTierDownloadPanel` extraction at line 314 shows the seam already works.
+- **Confidence:** High
+
+#### [F-209] Per-model license acknowledgment lives only in origin-scoped localStorage, and the code itself says it is wiped on desktop relaunch
+- **Source ID:** B5-002
+- **Category:** architecture-drift
+- **Severity:** Medium
+- **Location:** `apps/web/src/licenseAcknowledgment.js` (`readLicenseAck`/`writeLicenseAck`), `apps/web/src/screens/ModelManagerScreen.jsx:734-772,1363-1366`, `apps/web/src/screens/SetupWizard.jsx:114-116`, `apps/web/src/hooks/useModelsAndLoras.js:334,355,411`
+- **Finding:** The acceptance gate is a localStorage boolean, and the client then asserts `licenseAcknowledged: true` to the API. The ModelManager comment admits localStorage "does not survive" a desktop relaunch. `SettingsScreen.jsx:248-251` says the same thing about why `ui-preferences.json` exists: the shell origin is `127.0.0.1:<port>` and changes each launch. Theme, accent and default quality were moved to a server-side write-through; license acks were not.
+- **Impact:** Desktop users re-accept each gated license on every launch (the F-sc-17227 comment describes this as "unrecoverable through the UI"). The backend only trusts a client boolean, so there is no durable record of acceptance on the server.
+- **Suggested fix:** Persist acks through the same `/api/v1/ui-preferences` merge path, or add a small `license-acks` route. Keep localStorage as the instant-paint cache only. Have the server record the acknowledgment with its timestamp, and key it by the id and the `licenseAcknowledgmentSource`.
+- **Confidence:** Medium. The origin-wipe behaviour is taken from the repo's own comments; I did not run the desktop shell.
+
+#### [F-210] Pose capture and Key Point capture are near-identical state machines, and both bypass the shared job-creation path
+- **Source ID:** B5-003
+- **Category:** redundant
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/PoseLibraryScreen.jsx:122-345` and `apps/web/src/screens/KeyPointLibraryScreen.jsx:127-262,640-660`
+- **Finding:** Both panels implement the same flow: stage a file or asset, POST `/api/v1/jobs` by hand, watch the SSE-fed `jobs` list for a terminal status, review, then save or discard behind the same `appConfirm`. Both carry the same `objectUrl` lifecycle and the same `hasUnsavedWork` logic. They call `apiFetch("/api/v1/jobs", …)` directly (`PoseLibraryScreen.jsx:232`, `KeyPointLibraryScreen.jsx:645`) instead of the `makeCreateJob` or `CREATE_JOB_DEFINITIONS` factory that Image, Video and Vector use. `PoseLibraryScreen.jsx:559-595` also reimplements status, tags, delete and purge against an arbitrary `projectId`.
+- **Impact:** Any fix has to be made twice. Two bugs remain unfixed in both: a job pruned from `jobs` before the watcher sees it leaves the panel stuck in "detecting" or "extracting" forever, and a request that fails after the optimistic stage has no retry. Hand-posted jobs also skip the `setJobs` optimistic insert and the shared error banner.
+- **Suggested fix:** Add `useStagedJobCapture({jobType, stage, buildPayload})` to `hooks/`, covering the sources, objectUrl revocation, job watch (with a timeout or `jobs`-miss fallback) and discard-confirm. Register `pose_detect` and `kps_extract` in `CREATE_JOB_DEFINITIONS`. Make the asset mutators in `App` accept `projectId` instead of duplicating them in Pose.
+- **Confidence:** High on the duplication, Medium on the stuck-state edge.
+
+#### [F-211] LogsScreen: filter change races the in-flight poll and snapshot, so rows from the old filter can be appended to the new view
+- **Source ID:** B5-004
+- **Category:** bad-pattern
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/LogsScreen.jsx:168-188` (loadSnapshot), `:191-216` (poll), `:244-267` (scheduler effect)
+- **Finding:** `poll()` has no cancellation. When `source` or `level` changes, the scheduler effect's cleanup only sets `closed = true`. A `poll()` already awaiting `fetchLogs` with the old filter still reaches `setEntries(prev.concat(rows))` and `lastSeqRef.current = …`. `loadSnapshot` has no staleness guard either, so two quick filter clicks can resolve out of order. If the snapshot fails, `lastSeqRef` keeps the old filter's seq while `entries` still holds the old rows.
+- **Impact:** A user switching Source or Level can briefly see, and then keep, entries from the previous filter. The `seq` bookkeeping then skips or duplicates rows until the next filter change.
+- **Suggested fix:** Use a request-generation ref, or an `AbortController` passed to `fetchLogs`. Have `loadSnapshot` and `poll` bail out if the generation changed. Clear `entries` and `lastSeqRef` synchronously when the filter changes.
+- **Confidence:** Medium. The race window is small and depends on timing.
+
+#### [F-212] PresetManagerScreen defines its own `slugify` that has drifted from `slugifyPresetId`
+- **Source ID:** B5-005
+- **Category:** redundant
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/PresetManagerScreen.jsx:209-215,442,543,597` versus `apps/web/src/presetUtils.js:740-746` (`slugifyPresetId`, documented as mirroring the backend `slugify_preset_id`)
+- **Finding:** Both use the same regex, but the screen's version strips only leading and trailing `_` (`/^_+|_+$/g`). The shared one strips `[_-]`. The shared one is the helper documented as mirroring `apps/rust-api/src/recipe_presets.rs:1075`. The screen's helper is a separate copy used to build the preset `id` sent to the API. A name like `-Hero` yields `-hero` in the editor and `hero` in the studios' save-as-preset. The empty-slug case (`!!!`) also yields `""` here, where the backend falls back to `"preset"`.
+- **Impact:** The same preset name produces different ids depending on which screen created it. A leading-dash id may be rejected or duplicated server-side.
+- **Suggested fix:** Delete the local `slugify` and import `slugifyPresetId`. Add a parity test against the backend cases.
+- **Confidence:** High
+
+#### [F-213] StatsCharts picks chart colours from the OS colour scheme, not the app theme
+- **Source ID:** B5-006
+- **Category:** bad-pattern
+- **Severity:** Medium
+- **Location:** `apps/web/src/screens/StatsScreen.jsx:192-197`
+- **Finding:** `isDark` is read from `window.matchMedia("(prefers-color-scheme: dark)")`. The app applies its own theme as `data-theme` on `<html>` (`App.jsx:1619`) and offers an explicit toggle (`useAppContext().theme`). The grid colour is a hex literal, and the value is computed on every render with no subscription.
+- **Impact:** If the user's app theme differs from the OS (Settings, then Light on a dark OS), the grid lines and ticks render wrong or near-invisible. They also do not update when the OS scheme flips mid-session.
+- **Suggested fix:** Read `theme` from `useAppStatic()`, or use CSS variables (`stroke="var(--border)"`) as the tooltip style already does, and drop the matchMedia read.
+- **Confidence:** High
+
+#### [F-214] SimpleSheet and SimplePreview reimplement Modal without focus trap, focus restore or (Preview) Escape
+- **Source ID:** B6-001
+- **Category:** architecture-drift
+- **Severity:** Medium
+- **Location:** `apps/web/src/simple/SimpleSheet.jsx:12-50`, `apps/web/src/simple/SimplePreview.jsx:58`, `apps/web/src/components/Modal.jsx:36-110`
+- **Finding:** `Modal.jsx` is the shared primitive ("so every overlay behaves consistently"): Tab trap, Escape, restores focus to the opener on unmount. `SimpleSheet` rolls its own role=dialog and aria-modal, but only focuses the panel on mount and handles Escape. It has no Tab trap and never restores focus. `SimplePreview` is a bare `role="dialog"` div with no aria-modal, no Escape handler, no focus move and no trap. It is a full-screen overlay, so a keyboard user can Tab into the shell behind it.
+- **Impact:** Keyboard and screen-reader users in the Simple UI lose their place on close, or tab into hidden content. The advanced UI does not have this problem.
+- **Suggested fix:** Build SimpleSheet and SimplePreview on `Modal`, or extract a `useDialogFocus(ref, onClose)` hook from Modal and use it in all three. Add a keyboard test to SimpleShell.test.jsx.
+- **Confidence:** High
+
+#### [F-215] The "fetch the prompt guide and read it as text" step is implemented three times with raw fetch
+- **Source ID:** B6-002
+- **Category:** redundant
+- **Severity:** Medium
+- **Location:** `apps/web/src/components/RefinePromptControl.jsx:100-113`, `apps/web/src/simple/useSimpleRefine.js:52-65`, `apps/web/src/components/PromptGuideModal.jsx:16-30`
+- **Finding:** Three near-identical best-effort `fetch(guidePath)` blocks (AbortError handling, `response.ok`, `.text()`). The first two are line for line the same. The whole refine flow in `useSimpleRefine` also mirrors `RefinePromptControl.handleRefine`: abort the previous run, set busy, fetch the guide, call refinePrompt, check `signal.aborted`. The copies differ on error classification (`err?.name === "AbortError"` here, `isAbortError` from api.js elsewhere).
+- **Impact:** Simple and advanced refine can drift. The guide fetch bypasses the `api.js` layer.
+- **Suggested fix:** Add `fetchPromptGuide(path, signal)` to `api.js` or a small `promptGuides.js`. Have `RefinePromptControl` consume the Simple hook, or share one `useRefinePrompt` hook. Use `isAbortError` everywhere (6 hand-written `err?.name === "AbortError"` checks remain).
+- **Confidence:** High
+
+#### [F-216] LayersPanel.jsx is dead (no importer); only its test keeps it alive
+- **Source ID:** B6-004
+- **Category:** dead-code
+- **Severity:** Medium
+- **Location:** `apps/web/src/components/LayersPanel.jsx:1-240`, `apps/web/src/components/LayersPanel.test.jsx`
+- **Finding:** A scan of every non-test component and simple file for importers found exactly one with zero: this file. The only reference in src is a comment at `screens/ImageEditor.jsx:1307` ("mirrors LayersPanel"). ImageEditor (4.5k lines) evidently inlines its own layers UI.
+- **Impact:** 240 lines plus a test maintained for nothing. The comment in ImageEditor points a reader at a component that is not used.
+- **Suggested fix:** Either wire it into ImageEditor, which also shrinks that 4.5k-line file (a split seam), or delete the component and its test, and fix the comment.
+- **Confidence:** High
+
+#### [F-217] Dev `web` compose image is missing build inputs that vite.config.js and the app require
+- **Source ID:** S1-001
+- **Category:** bad-pattern
+- **Severity:** Medium
+- **Location:** `docker/web.Dockerfile:12-17`, `apps/web/vite-plugin-editor-guides.js:8-12`, `apps/web/src/data/bundledLicenses.js:9-12`, `apps/web/vite.config.js:26-27`
+- **Finding:** web.Dockerfile copies `scripts`, `config`, `packages/schemas` to `/` but not `docs/film-script-writing.md`, `docs/film-editor.md` (read by editor-guides plugin via `../../docs/...`) nor `apps/desktop/licenses` (imported by bundledLicenses.js, also the `server.fs.allow` root). rust.Dockerfile's web-builder stage copies both explicitly (lines 20, 29), so the two web build paths have drifted.
+- **Impact:** `docker compose up` web service (Vite dev) would fail on `virtual:editor-guides` (EditorScreen) and the licenses screen with ENOENT/resolve errors. `scripts/check-docker-web-runtime.mjs:19-29` only fetches `/` (index.html), so CI cannot see it.
+- **Suggested fix:** COPY the two docs files and `apps/desktop/licenses` into the dev image at the same relative locations, and have check-docker-web-runtime.mjs fetch `/src/components/editor/EditorGuides.jsx` and `/src/data/bundledLicenses.js` (transform requests) to prove the graph resolves.
+- **Confidence:** Medium (derived from Dockerfile vs. import paths; not run)
+
+#### [F-218] 192 MB of raw `.rgb` calibration frames tracked in git
+- **Source ID:** S1-002
+- **Category:** redundant
+- **Severity:** Medium
+- **Location:** `docs/calibration/sc-19721/*.rgb` (30 files, 94.4 MB), `docs/calibration/sc-18353/*.rgb` (26 files, 81.8 MB), `docs/calibration/sc-15833/*.rgb` (5 files, 15.7 MB)
+- **Finding:** 61 uncompressed 1024x1024x3 (3,145,728 B) frames make up 191.9 MB of the 196.7 MB under docs/calibration (668 tracked files). .gitattributes marks `*.rgb binary` but there is no LFS and no ignore. Only the hash-addressed names are referenced (memory_calibration.rs, memory-calibration-harness tests, sdxl evidence JSON), not the bytes.
+- **Impact:** every clone/CI checkout pays for this (.git is 91 MB packed here even though raw tree is ~230 MB for tracked files); each re-capture adds another 3 MB per frame permanently.
+- **Suggested fix:** if only the digests are load-bearing, store the sha256 in the evidence JSON and drop the frames (or move to release assets / LFS); at minimum compress (png/zstd) and gitignore `docs/calibration/**/*.rgb` going forward so new captures do not land by default.
+- **Confidence:** High on sizes; Medium on whether any test reads the bytes (hashing tests may need them)
+
+#### [F-219] Hard-coded personal absolute paths and unreadable minified source in tracked CI scripts
+- **Source ID:** S1-003
+- **Category:** readability
+- **Severity:** Medium
+- **Location:** `scripts/ci/moss-first-step-probe.mjs:11-22` (112 lines >300 chars of 89 KB), `scripts/ci/moss-first-step-probe.test.mjs` (61 long lines), `scripts/ci/moss-owned-cache-maintenance.mjs` (25), `scripts/ci/moss-upstream-quality.mjs`, `scripts/ci/moss-upstream-reference-common.mjs`, `scripts/lib/moss-edit-terminal-actions.mjs`
+- **Finding:** 38 occurrences of `/Users/michael/...` and `/Volumes/Models/...` (e.g. `PROBE_STAGED`, `WARM`, `CARGO_SEED` at moss-first-step-probe.mjs:11-22) are baked into scripts, and moss-first-step-probe.mjs is written in a compressed no-whitespace style (line 41 is a single ~900-char `run()`), which also hides yet another copy of a spawn-and-tee-to-log helper.
+- **Impact:** scripts only work on one machine, cannot be reviewed or linted meaningfully, and leak a developer's home path/layout into a public repo.
+- **Suggested fix:** move machine paths into env/config (one `scripts/lib/runner-paths.mjs`), run the files through the formatter used elsewhere, and reuse `scripts/lib` process helpers.
+- **Confidence:** High
+
+#### [F-220] Same helpers re-implemented per script instead of living in scripts/lib
+- **Source ID:** S1-004
+- **Category:** redundant
+- **Severity:** Medium
+- **Location:** sha256: `scripts/package-sdxl-cuda-endpoints.mjs:18`, `yue2-acceptance.mjs:961`, `extract-memory-anchors.mjs:160`, `generate-memory-matrix.mjs:786`, `scan-inference-provenance.mjs:166`, `check-runpod-staged-image.mjs:14`, `starvector-production-closure.mjs:104`, `inference-closure-digest.mjs:133`, `kv-baseline-harness.mjs:608`, `rearchitecture/capture-catalog-baseline.mjs:65` (98 `createHash("sha256")` calls total; only 6 scripts use `scripts/lib/file-sha256.mjs`). Canonical JSON: `memory-calibration-harness.mjs:400`, `kv-baseline-harness.mjs:581`, `starvector-production-closure.mjs:96` (stableJson), `epic-20738-terminal-cuda-harness.mjs:266` (canonicalize). JSONC read: `audit-hf-cache-liveness.mjs:281`, `check-no-nc-weights.mjs:260`, `check-scaffold.mjs:314`, `check-tier-integrity.mjs:148`, `rearchitecture/capture-catalog-baseline.mjs:12` (a private copy of `stripJsoncComments` despite `scripts/lib/jsonc.mjs`). git/run/fail wrappers: `git()` x4 (inference-closure-digest:129, release:248, rung4-contract-prerequisites:777, epic-20738...:1046), `run()` x6, `fail()` x11.
+- **Finding:** these differ subtly (kv-baseline's canonicalJson is indented and numeric-normalised, stableJson sorts by UTF-8 order, canonicalize uses default `sort()` UTF-16 order, memory-calibration appends "\n"), so they are near-twins that can disagree on non-ASCII keys when the same digest is computed by two scripts.
+- **Impact:** digest/receipt code is the integrity layer for the evidence bundles; silent divergence in key ordering is a latent hash mismatch, and every fix has to be repeated.
+- **Suggested fix:** add `scripts/lib/{sha256,canonical-json,exec}.mjs`, pick one documented ordering, migrate callers; add a lint-style test banning new local `function sha256`.
+- **Confidence:** High on duplication; Medium on any current mismatch
+
+
+### Low findings — web/tooling
+
+#### [F-221] YuE2 licence link is rendered from the catalog without the URL allow-list used everywhere else
+- **Source ID:** B1-010
+- **Category:** security
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/audioYue2Lab.jsx:265-269`, `apps/web/src/yue2Policy.js:18`
+- **Finding:** `identity.licenseUrl` (any string from `model.licenseUrl`) goes straight to `<a href>`. Every sibling site (`LicenseGateNotice`, `ModelLicenseSummary`, `LicensesScreen`, `ConfigureJobPanel`) wraps the value in `safeExternalUrl()` from `urls.js`.
+- **Impact:** A `javascript:` or `data:` URL in a manifest, or one supplied by a future remote or user-provided catalog, would run on click. The Tauri CSP (`script-src 'self'`) blocks inline script, but the Docker/browser build has no equivalent guard. The risk is low because the source is the built-in manifest.
+- **Suggested fix:** `href={safeExternalUrl(identity.licenseUrl)}` and omit the link if it is undefined. Do the same in `yue2Policy.js` so the value is normalized at the source.
+- **Confidence:** High
+
+#### [F-222] Production Docker builds fetch unpinned toolchains and floating base images
+- **Source ID:** S1-005
+- **Category:** security
+- **Severity:** Low
+- **Location:** `docker/rust.Dockerfile:217` (`curl ... https://sh.rustup.rs | sh -s -- -y`), `docker/rust.Dockerfile:16,36,136,172,315` (`node:22-bookworm-slim`, `rust:1-bookworm`, `debian:bookworm-slim`, `ubuntu:24.04`), `docker/web.Dockerfile:1` (`node:22-alpine`); contrast `nvidia/cuda:12.9.1-...` which is version-tagged
+- **Finding:** rustup-init is piped to sh with no checksum and installs a toolchain before rust-toolchain.toml pins take over; base images use floating tags, none by digest, while GitHub Actions are carefully SHA-pinned.
+- **Impact:** release image content is not reproducible and a compromised tag/rustup script flows straight into published RunPod images.
+- **Suggested fix:** pin images by `@sha256:` (Dependabot/renovate can bump), install rustup via a version-pinned rustup-init with a verified sha256.
+- **Confidence:** High
+
+#### [F-223] workflow_dispatch inputs interpolated directly into `run:` shell
+- **Source ID:** S1-006
+- **Category:** security
+- **Severity:** Low
+- **Location:** `.github/workflows/flux3-quant-matrix.yml:79`, `.github/workflows/flux3-quant-matrix.yml:162`
+- **Finding:** `${{ inputs.runner }}` is expanded inside the shell script text; other workflows consistently route inputs through `env:` (e.g. macos-mlx.yml:642-665).
+- **Impact:** only users with write access can dispatch, so this is injection-by-maintainer, but it is on self-hosted runners and inconsistent with the rest.
+- **Suggested fix:** `env: EXPECTED_RUNNER: ${{ inputs.runner }}` and compare `"$EXPECTED_RUNNER"`.
+- **Confidence:** High
+
+#### [F-224] `fetchYue2TranscriptionFile` re-implements `apiFetch` error handling and bypasses the 401 gate
+- **Source ID:** B1-006
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `apps/web/src/api/yue2.js:119-138` (vs `api.js:94-142`); other raw `fetch` of API URLs: `audioWaveform.js:142`, `screens/KeyPointLibraryScreen.jsx:232`
+- **Finding:** This function builds its own `Headers`, calls raw `fetch`, and hand-assembles an `ApiError` (without `authRequired`). It never calls `unauthorizedHandler`, so a stale token on this path never re-prompts the access gate, which is the sc-15105 failure mode `apiFetch` exists to prevent.
+- **Impact:** A 401 on a transcription export download shows a generic error instead of locking the session. The error shape also drifts from `apiFetch`.
+- **Suggested fix:** Give `apiFetch` a `responseType: "blob"` (or `parse: (response) => …`) option and use it here.
+- **Confidence:** High
+
+#### [F-225] Dead modules and exports with zero importers
+- **Source ID:** B1-008
+- **Category:** dead-code
+- **Severity:** Low
+- **Location:** `apps/web/src/useAudioPreviewGain.js:1-45` (no importer anywhere), `audioPreviewGain.js:1-94` plus `audioPreviewGain.test.js` (imported only by that hook), `timeline.js:1-7` (`aspectOptions`, `transitionOptions`, `speedPresets`; one occurrence each in the tree), `appHydration.js` `GLOBAL_HYDRATION_DOMAINS`, `yue2Lab.js` `YUE2_KINDS`, `audioWaveform.js` `resetAudioPeakCache`; `components/LayersPanel.jsx:1-240` (only a test imports it; `ImageEditor.jsx:1307` just mentions it in a comment)
+- **Finding:** The audio preview gain graph (hook, `AudioContext` lease code and test, about 230 lines, last touched in "Fix boosted audio preview gain") is not wired into any component. Likewise the three timeline option tables and the listed constants. Greps were run across `src/` for each name, including `.jsx`.
+- **Impact:** Dead code that still gets tested and maintained. The gain code creates an `AudioContext` and would be a leak risk if someone wired it up without noticing it is untested in the app.
+- **Suggested fix:** Delete the hook, `audioPreviewGain.js` and its test (or wire the hook in if the boost feature is still wanted). Delete the unused constants. Remove or integrate `LayersPanel.jsx`.
+- **Confidence:** High
+
+#### [F-226] Static-only consumers use `useAppContext()` and re-render on every SSE tick
+- **Source ID:** B1-009
+- **Category:** efficiency
+- **Severity:** Low
+- **Location:** `apps/web/src/components/ControlOverlayPicker.jsx:12` (`token, activeProject`), `simple/SimplePreview.jsx:31` (`audioModels`), `simple/SimpleLoraSheet.jsx:31` (`loras, createLoraImportJob, activeProject`), `context/AppContext.js:62-90`
+- **Finding:** sc-8855 split the context so cold readers can use `useAppStatic()`, but 30 files still call `useAppContext()` against 15 that use `useAppStatic()`. The three above read only fields that live in `appStaticValue` (`token`, `activeProject`, `audioModels`, `loras`, `createLoraImportJob` all appear in the static literal at `App.jsx:3655-3891`). `useAppContext` subscribes to the live context and also spreads about 300 keys into a fresh object whenever either value changes (`useMemo` at `AppContext.js:62`).
+- **Impact:** The point of the split is lost for these consumers. Each job or worker tick re-renders them and re-runs the merge.
+- **Suggested fix:** Switch those three to `useAppStatic()`. Audit the other 27 for static-only destructures, and add a lint or test that flags a `useAppContext` consumer whose destructured keys are all static.
+- **Confidence:** High
+
+#### [F-227] SSE connect surfaces an error from a torn-down connection and cannot abort its ticket request
+- **Source ID:** B1-011
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `apps/web/src/hooks/useJobEvents.js:429-440`
+- **Finding:** In `connect()`'s catch, `setError(err.message)` runs before the `if (!closed)` check, and the ticket `apiFetch` has no `AbortSignal`. When the effect re-runs (token change, gate re-lock) while a ticket POST is in flight, the old closure can still push its failure notice after cleanup. The `closed` check afterwards (`if (closed) return;`) covers the success path only.
+- **Impact:** A spurious error notice (and a reconnect timer that is correctly skipped) during login/lock transitions. This is cosmetic but visible in the same flow F-007 fixed.
+- **Suggested fix:** Check `closed` first in the catch, and pass an `AbortController` signal that cleanup aborts.
+- **Confidence:** Medium
+
+#### [F-228] Small helpers reimplemented several times: backoff delay and byte formatters
+- **Source ID:** B1-012
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** backoff `Math.min(30000, 1000 * 2 ** n)` at `hooks/useJobEvents.js:435,466`, `hooks/useAccessGate.js:197,253,414`, plus variants at `uiPreferences.js:74`, `workflowEmbedPreferences.js:91`, `screens/LogsScreen.jsx:257`; byte formatters `formatting.js:52` (`formatBytes`, binary, "GiB"), `screens/ModelManagerScreen.jsx:121` (`formatTierSize`, binary), `components/RefinePromptControl.jsx:5` (`formatGb`, decimal "GB"), `screens/TrainingStudio.jsx:706` (inline `/1e9`)
+- **Finding:** The same exponential-backoff expression is inlined five times in the two gate/stream hooks (and three more variants elsewhere). Size formatting exists in one canonical module and three ad hoc copies that disagree on units (GiB versus GB).
+- **Impact:** Users see inconsistent sizes for the same model (a 16 GiB download labeled "17.2 GB" in one panel). A backoff policy change needs eight edits.
+- **Suggested fix:** Add `backoffDelay(attempt, {baseMs, maxMs})` to `pollJob.js` or a new `retry.js`. Replace the ad hoc formatters with `formatBytes` and keep one unit convention.
+- **Confidence:** High
+
+#### [F-229] Debounced durable studio-settings write is cancelled on unmount
+- **Source ID:** B1-013
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `apps/web/src/hooks/useStudioSettings.js:282-283`
+- **Finding:** The effect writes the local cache immediately but defers `persistToServer` by 400 ms, and its cleanup is `clearTimeout`. If the studio unmounts, or `serialized` changes again, within the window, the pending durable PUT for the earlier value is dropped. On unmount no later effect run exists to issue it.
+- **Impact:** The last edit made within 400 ms of leaving a non-keep-alive studio (or closing the app) is saved to `localStorage` but never reaches the server copy that sc-15425 made durable across relaunch.
+- **Suggested fix:** Flush on cleanup when the effect is unmounting (call `persistToServer` instead of only `clearTimeout`), or add a `pagehide`/`visibilitychange` flush.
+- **Confidence:** Medium
+
+#### [F-230] Test scaffolding re-declared in many files despite shared helpers
+- **Source ID:** B1-015
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `apps/web/src/hooks/appGateHooks.test.jsx:91-117` (own `FakeEventSource`, `deferred`, `settle`) vs `main.testSupport.jsx:174-213` and `testUtils/dom.js`; local `settle` in 15 test files, `deferred` in 14, `mount`/`render` helpers in 14
+- **Finding:** `main.testSupport.jsx` and `testUtils/dom.js` exist as the shared homes (sc-8937, sc-8943), but many files still define their own `settle`, `deferred` and `FakeEventSource` copies. The two `FakeEventSource` versions already differ (`close()` records `closed` in one, is a no-op in the other).
+- **Impact:** Test-technique fixes (for example flushing lazy imports in `settle`, as `main.testSupport.jsx:200-215` does) do not reach the local copies, which risks flaky tests.
+- **Suggested fix:** Move `deferred`, `settle` and a `FakeEventSource` that records `closed` into `testUtils/`, then codemod the local copies.
+- **Confidence:** High
+
+#### [F-231] `useStableImageEditorToolPanelScope` freezes the set of function-valued keys at first render
+- **Source ID:** B2-004
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/imageEditor/ImageEditorToolPanel.jsx:22-45`
+- **Finding:** `stableFunctions.current` is built once from the keys that are functions on first render. Later, `typeof value === "function" ? stableFunctions.current[key] : value` returns `undefined` for a key that was non-function at mount but becomes a function later. The reverse case yields a trampoline that throws `TypeError` when the key later becomes null/undefined. Context-supplied callbacks such as `createModelDownloadJob`/`createLoraDownloadJob`, `importAsset` and `tensorAssets` are plausible candidates in partial providers, and tests already pass partial contexts.
+- **Impact:** A latent crash that appears only for optional callbacks that arrive after mount (late capability/catalog hydration).
+- **Suggested fix:** Build trampolines lazily on first sight of each key (cache per key), and make the trampoline tolerate a missing target. Better still, remove the proxy by passing a stable `actions` object (see B2-003).
+- **Confidence:** Medium
+
+#### [F-232] Crop leaks decoded object URLs on partial failure and works from a stale `working` snapshot
+- **Source ID:** B2-007
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/ImageEditor.jsx:2527-2569`
+- **Finding:** `Promise.all(working.layers.map(... blobToImage ...))` rejects on the first failure while sibling layers have already created object URLs that are never revoked (the `catch` only sets status). Also, `working` is the closure value from before the awaits, but the commit reads `workingRef.current.layers` for revocation. A layer added or replaced during the encode window is cropped inconsistently (document dims are updated, the new layer is not cropped).
+- **Impact:** A small blob-URL and decoded-bitmap leak on failure; a rare inconsistent document after concurrent edits.
+- **Suggested fix:** Use `Promise.allSettled`, revoke fulfilled results on any rejection, and bail out (revoke) if `workingRef.current.layers` changed identity between the start and the commit.
+- **Confidence:** Medium
+
+#### [F-233] `openAsset` has no abort/ordering guard, and canvases are never released
+- **Source ID:** B2-008
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/ImageEditor.jsx:2198-2222, 2150-2196, 2263, 2427, 2540, 2667, 1045-1100`
+- **Finding:** `openAsset` does a raw `fetch(url)` (not `apiFetch`, no `AbortController`) and then `openFromBlob`. Opening asset A then B quickly lets the slower response win, installing the wrong image; after unmount `installWorkingImage` runs and creates an object URL that no cleanup revokes (the unmount effect has already run). `openFromBlob` also reads the whole blob into an ArrayBuffer (L2160) just to sniff alpha. Several scratch `<canvas>` elements (crop, duplicate, blank, composite, cutout) are created per operation and never zeroed (`canvas.width = canvas.height = 0`), which matters because the file itself targets WebKit/WKWebView canvas ceilings (L669, `EDITOR_CANVAS_MAX_AREA`) and Safari holds backing stores until GC.
+- **Impact:** Occasionally the wrong image is shown; transient memory pressure on large images on macOS (Tauri/WKWebView).
+- **Suggested fix:** Keep a monotonically increasing `openGeneration` ref and drop stale results (revoking their URL). Check `mountedRef` before install. Release scratch canvases after `toBlob`/`drawImage`. Read only the PNG header bytes for the alpha check (`blob.slice(0, N)`).
+- **Confidence:** Medium
+
+#### [F-234] Submit and batch preflight validation is duplicated verbatim
+- **Source ID:** B2-009
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/ImageStudio.jsx:2495-2527` vs `2818-2858`
+- **Finding:** Both functions repeat the MOSS-components/edit-adapter error string, the `selectedModelServesMode` message, the decoder-capabilities-pending message, the dimension/hires-fix message and the cfg-interval message. The MOSS message is a long inline literal copied twice.
+- **Impact:** A new precondition is easy to add to one path only. F-031 was exactly this class of drift, fixed for the payload builder but not for the guards.
+- **Suggested fix:** One `preflightError()` returning a string or null, used by both, with the setter chosen by the caller.
+- **Confidence:** High
+
+#### [F-235] Batch enqueue failures are swallowed with no reason
+- **Source ID:** B2-010
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/ImageStudio.jsx:2976-2979` (bare `catch {}`), also `2958`
+- **Finding:** Any error from `createImageJob`/`onMagicExpand` only increments `failed` counters. The error message (413, validation, offline, "Auto-generated caption was invalid") is discarded, and a chunk with `n>1` adds `n` failures without saying why.
+- **Impact:** A user sees "N failed" in a 500-item batch with no way to learn why. A systematic error (bad model, 422) runs the whole loop before it is visible.
+- **Suggested fix:** Capture the first (and last) error message in the batch-run state and show it. Optionally abort after K consecutive identical failures.
+- **Confidence:** High
+
+#### [F-236] ImageStudio calls `apiFetch` with a hard-coded endpoint instead of the context/api layer
+- **Source ID:** B2-011
+- **Category:** architecture-drift
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/ImageStudio.jsx:1, 544-554`; also ImageEditor raw `fetch` at `ImageEditor.jsx:2209, 3167` and `apiFetch(endpoint…)` at `~2955`
+- **Finding:** Every other action (`createModelDownloadJob`, `createImageJob`, `imageCaption`, …) comes from `useAppContext`, but `downloadMossAcceleration` builds `/api/v1/models/${model}/conditional-components/…/download` in the screen with the token. It also has no in-flight guard beyond `busy` UI and no unmount guard. ImageEditor fetches asset files with a bare `fetch(assetUrl(...))` (works only because assets are public/unauthenticated; any token-gated asset mode would break it silently), duplicating `createLatestMaskAssetLoader`'s fetch-blob-decode in `imageEditor/maskAssetLoader.js`.
+- **Impact:** Endpoint knowledge is spread over screens; the next auth/header change in `api.js` must be hunted down.
+- **Suggested fix:** Add `downloadConditionalComponents(model, purpose)` to the models hook/context and a shared `fetchAssetBlob(asset, {signal})` used by `openAsset`, the AI-result loader and the mask loader.
+- **Confidence:** Medium
+
+#### [F-237] `consumeEditorLaunch` is dead in production code
+- **Source ID:** B2-012
+- **Category:** dead-code
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/ImageEditor.jsx:391-397` (usage only in `ImageEditor.test.jsx:97, 339, 350`)
+- **Finding:** The exported function has no non-test caller; `createEditorLaunchGuard` (L398) is what the component uses. A test keeps the older entry point alive.
+- **Impact:** Two launch-consumption implementations to keep in sync, with only the unused one covered.
+- **Suggested fix:** Delete it and point the tests at `createEditorLaunchGuard().consume`.
+- **Confidence:** High (checked by grep for importers).
+
+#### [F-238] `downloadText`/`downloadBlob` copy-pasted twice, plus two more anchor-download implementations
+- **Source ID:** B3-004
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `screens/audioYue2Parts.jsx:35-45`, `screens/audioYue2Recording.jsx:48-57`, `saveExportFile.js:26-29`, `assetActions.js:169`
+- **Finding:** The two yue2 files each define the same create-object-URL, hidden anchor, click, remove, revoke sequence. `saveExportFile.js` and `assetActions.js` repeat it again. `downloadText` is exported from audioYue2Parts but `audioYue2Recording` defines its own blob variant.
+- **Impact:** Four places to change for download behavior, such as deferring revoke. An immediate `revokeObjectURL` right after `click()` can cancel the download in some browsers.
+- **Suggested fix:** Use one `saveExportFile`-style helper that takes a Blob and defers the revoke with `setTimeout`. Delete the local copies.
+- **Confidence:** High
+
+#### [F-239] Film components bypass `api/films.js` with inline URL-building `apiFetch` calls
+- **Source ID:** B3-005
+- **Category:** architecture-drift
+- **Severity:** Low
+- **Location:** `components/editor/FilmWorkspace.jsx:192,229,309,338,369,397,498-499,505,548`, `components/editor/FilmLifecycle.jsx:30-31,63`, `components/editor/FilmReview.jsx:115`, `components/editor/FilmReferences.jsx:163,200,240,348`, `hooks/useTimelines.js:107,157,190,217,252,256,306,324,343,397,402`
+- **Finding:** `api/films.js`, `api/filmReview.js` and `api/yue2.js` provide wrappers for the film and yue2 routes, but about 30 film and timeline calls hand-build `/api/v1/projects/${id}/...` strings. Several do not `encodeURIComponent` ids; others do (`FilmWorkspace.jsx:229,309`). There is no `api/timelines.js`.
+- **Impact:** Route strings are scattered, so a backend path change needs many edits. Id encoding is inconsistent. Run polling (`.../film-runs/${id}`) is built in three files.
+- **Suggested fix:** Add `getFilmRun/listFilmRuns/startFilmRun/...` and `api/timelines.js`, and replace the inline calls.
+- **Confidence:** High
+
+#### [F-240] The `AudioContext ?? webkitAudioContext` shim is defined in three modules
+- **Source ID:** B3-006
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `audioPreviewGain.js:3-5`, `audioWaveform.js:129-134`, `timelineAudioPlayback.js:114`
+- **Finding:** Each module has its own constructor lookup. They differ on `window` versus `globalThis` and on how a missing constructor is reported.
+- **Impact:** Minor drift and inconsistent SSR/test behavior.
+- **Suggested fix:** Export one `getAudioContextCtor()` from a small `audioContext.js` module and use it in all three (or two, after B3-003).
+- **Confidence:** High
+
+#### [F-241] Yue2 lab `reloadVersions`/`reloadComparisons` have no stale-response guard
+- **Source ID:** B3-007
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `screens/audioYue2Lab.jsx:439-466`, `screens/audioYue2Lab.jsx:485-492`
+- **Finding:** The two `useCallback` loaders set state after `await` with no live/request-id check, unlike the transcription and detail effects in `audioYue2Recording.jsx:689-740`, which do guard. They are triggered from effects on `finishedKey` and `enabled` and from manual handlers.
+- **Impact:** A slow response from a previous project can overwrite the current project's versions and comparisons after a project switch. It also sets state after unmount.
+- **Suggested fix:** Add a request counter ref (as `FilmLifecycle` does) or abort on projectId change. The `createdAt` descending sort is written four times (`audioYue2Lab.jsx:440,458`, `audioYue2Recording.jsx:695`) and could share a helper.
+- **Confidence:** Medium
+
+#### [F-242] Timeline editor Space shortcut hijacks focused buttons and links
+- **Source ID:** B3-008
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `screens/EditorScreen.jsx:205-213`
+- **Finding:** The global keydown handler skips only INPUT, TEXTAREA and SELECT targets. For Space it calls `preventDefault` and toggles playback, so pressing Space on a focused button (Delete clip, tabs, transition buttons) toggles playback instead of activating it. Delete/Backspace similarly act when focus is on `contenteditable` or a button.
+- **Impact:** Keyboard-only users cannot activate buttons with Space while the editor is the active screen. This is an accessibility regression.
+- **Suggested fix:** Also skip `BUTTON`, `A`, `[role=button|tab]` and `isContentEditable`, or scope the listener to the editor container.
+- **Confidence:** High
+
+#### [F-243] Unused exports and over-exported helpers in timeline, yue2 and audio modules
+- **Source ID:** B3-009
+- **Category:** dead-code
+- **Severity:** Low
+- **Location:** `timeline.js:1-7`, `audioWaveform.js` (`resetAudioPeakCache`), `yue2Lab.js` (about 15 exports), `audioTakes.js`, `screens/audioResults.jsx`
+- **Finding:** `aspectOptions`, `transitionOptions` and `speedPresets` in `timeline.js` have zero references anywhere. `resetAudioPeakCache` is documented as a test seam but no test calls it. About 20 other exports (`YUE2_KINDS`, `samplingBody`, `isYue2Job`, `audioJobIsRunning`, `AudioRunGroup`, `AudioInflightStrip`, and similar) are used only inside their own file.
+- **Impact:** Stale option tables can drift from the real transition and speed sets (the editor presumably hard-codes them elsewhere). Extra exports obscure the real module APIs.
+- **Suggested fix:** Delete the three unused constants and the unused reset function. Drop `export` from file-local helpers.
+- **Confidence:** High
+
+#### [F-244] Character and Look selects, advanced-settings state, and prompt-guide wiring are duplicated across Image and Video studios
+- **Source ID:** B3-010
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `screens/VideoStudio.jsx:3094-3115` vs `screens/ImageStudio.jsx:3822-3843`; also `VideoStudio.jsx:337,354,490,495,2446,2948,2963,2975` vs `ImageStudio.jsx:659,515,556,631,4003,4211,4263,4275`
+- **Finding:** The markup for the Character and Look pickers is identical except for the placeholder text. The GPU, sampler and scheduler selects, the `saved.*` state initializers and the `resolveJobResultAssets` wrappers are line-for-line twins. `components/generationStudio.jsx` already holds shared pieces (ModeTabs, TierPickerField), but these were not extracted.
+- **Impact:** A fix such as look filtering must be applied in both studios, and AudioStudio drifts further.
+- **Suggested fix:** Add `CharacterLookFields`, `GpuSelect` and `SamplerSchedulerFields` to `generationStudio.jsx`, and have both studios use them.
+- **Confidence:** High
+
+#### [F-245] God files with clear split seams (VideoStudio, AudioStudio, audioYue2*)
+- **Source ID:** B3-011
+- **Category:** readability
+- **Severity:** Low
+- **Location:** `screens/VideoStudio.jsx` (3268 lines, one `VideoStudio()` from line 228, 14 effects, 7 `eslint-disable react-hooks/exhaustive-deps` at 914, 1087, 1131, 1186, 1210, 1371, 1389), `screens/AudioStudio.jsx` (1751 lines, `AudioStudio()` from line 217), `screens/audioYue2Lab.jsx` (1286 lines)
+- **Finding:** `VideoStudio` is a single component of about 3,000 lines. The 7 dependency-array suppressions mark effects whose inputs are not modeled.
+- **Impact:** Hard to review, and stale-closure bugs are likely in the suppressed effects.
+- **Suggested fix:** Extract hooks `useVideoModelSelection`, `useVideoRecipeReplay` (the lines 1186-1390 effects), and `useLtx25Controls`. Move the tier and recipe helpers at lines 133-226 to `videoTierHelpers.js`. Extract the settings panels as components.
+- **Confidence:** Medium
+
+#### [F-246] Large pickers render every candidate and do O(n*k) selection lookups
+- **Source ID:** B4-006
+- **Category:** efficiency
+- **Severity:** Low
+- **Location:** `apps/web/src/components/DatasetAddDialog.jsx:27` (`selectedIds.includes(asset.id)` per card; `CandidateGrid` maps all `libraryCandidates`), `apps/web/src/components/AssetPicker.jsx:565,878,1031` (`isSelected={(asset) => selectedIds.includes(asset.id)}`), `apps/web/src/screens/characterPanels.jsx:1029-1044` (CharacterAssets filter + sort with `new Date()` per comparison on every render, not memoized, over the whole project asset list)
+- **Finding:** Candidate lists are the whole project library (thousands of assets) and are mounted unwindowed, with selection tested by array scan per card per render. `CharacterAssets` recomputes `scopedAssets` (filter + date-parsing sort) and the active/trashed splits on every render, unlike `CharacterStudio` which memoizes the equivalent `characterReferenceCandidates`. `CharacterStudio.jsx:374` does the same unmemoized filter on `latestAssets` for the generation panel.
+- **Impact:** Slow open/toggle of "Add images" and the Character import dialog in large projects; wasted work on each CharacterStudio re-render (the studio re-renders on SSE job ticks).
+- **Suggested fix:** Build `new Set(selectedIds)` once per render, apply the existing `.asset-tile-windowed` class to picker cards, and `useMemo` the CharacterAssets lists keyed on `[assets, characterId, referenceAssetIds]` (pre-parse `createdAt` once).
+- **Confidence:** Medium.
+
+#### [F-247] LTX-2.5 training tables live only in the web bundle and the target-contract carve-outs are re-encoded as `baseModel === "ltx_2_5"` literals
+- **Source ID:** B4-008
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `apps/web/src/training/trainingConfig.js:455-470` (`ltx25ValidationDefaults`), `:475-500` (`LTX25_WORKFLOW_PLANS`, 15 workflows), `:546-587` (validation ranges 32..4096, frames 1..257 `% 8 == 1`, STG block 0..47), literals at `:200, :250, :817, :1167, :1279, :1598`, `ConfigureJobPanel.jsx:335,450,585`; Rust twins `crates/sceneworks-core/src/training.rs:2773-2790` (same defaults), `:2824-2845` (workflow list)
+- **Finding:** The parity test pins the numeric aux-loss bounds and `depthAnchoringNoVideoLtxWorkflows`, but not the LTX validation defaults (duplicated verbatim in `ltx_2_5_video_lora_target`), the workflow names keyed in `LTX25_WORKFLOW_PLANS` versus `limits.ltxWorkflows`, or the validation ranges (no backend check exists, so the web rule set is the only enforcement and is unverified against the engine). Several carve-outs that the backend already expresses as capability flags (`supportsSubjectMaskLoss` not advertised for LTX-2.5, `supportsResolutionBuckets` withheld) are additionally hardcoded by base-model name in the web.
+- **Impact:** A new LTX workflow or default change in Rust silently diverges from the Studio's plan/defaults; `normalRestrictToSubject` for another no-image base would need a web edit.
+- **Suggested fix:** Extend `training_contracts.rs` to read `ltx25ValidationDefaults` and the `LTX25_WORKFLOW_PLANS` keys against `ltxWorkflows`; expose a `limits.supportsNormalRestrictToSubject` flag instead of the `baseModel` literal.
+- **Confidence:** Medium.
+
+#### [F-248] Failed reference upload / import in the character panels strands state or reports false success
+- **Source ID:** B4-009
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/characterPanels.jsx:613-634` (`onUpload`), `:1013-1020` (`importAssetIds`), `apps/web/src/hooks/useCharacters.js:44-58` (`withCharacterApi` returns `null` on error)
+- **Finding:** `addCharacterReference` never throws (it returns `null` after setting the banner), so `onUpload` proceeds to `setReferenceAssetId(asset.id)` and clears its status even when approving failed (the reference-guard effect then snaps the pick back to `[0]`); `importAssetIds` ignores the `null`s, loops sequentially, and the dialog closes (`attach` then `onClose`) as if all were attached. The generation `generate()` has `try/finally` with no `catch`, so a rejecting `createImageJob` is an unhandled rejection from the click handler.
+- **Impact:** Partial imports look successful; "Uploading reference..." can be replaced by nothing while the reference was not saved.
+- **Suggested fix:** Check the return value and surface "k of n attached"; add `catch` with a status message in `generate`.
+- **Confidence:** Medium.
+
+#### [F-249] Dead per-family wrappers and test-only exports in trainingConfig.js
+- **Source ID:** B4-010
+- **Category:** dead-code
+- **Severity:** Low
+- **Location:** `apps/web/src/training/trainingConfig.js:1643-1666` (`depthAnchoringIssues`, `depthAnchoringSnapshot`, `faceLossSnapshot` have zero references anywhere, including tests; `bodyLossSnapshot`, `latentPerceptualSnapshot`, `bodyLossIssues`, `faceLossIssues`, `latentPerceptualIssues` are referenced only by tests), `:1127-1131` aside; also `targetSupportsVaeAnchorLoss/targetSupportsLatentLpipsLoss` (`:~1480`, tests only), `optimizerLabels`, `networkTypeLabels` and `qualityPresetLabels` exports (internal use only)
+- **Finding:** Exports verified by grep across `apps/web/src` (excluding `*.test.*`): the eight family wrappers have no production importer since `configValidation`/`trainingConfigSnapshot` call `auxLossesIssues/auxLossesSnapshot` directly. Many `export const` bound constants (`vaeAnchor*`, `latentLpips*`, `defaultSampleCount`, `ltx25ValidationDefaults`, `ZIMAGE_TURBO_TRAINING_ADAPTER_REPO`) have no JS importer; those that the Rust parity test reads by `export const NAME = ` text must stay.
+- **Impact:** Extra surface and tests keeping unused helpers alive; the "must stay because Rust greps the line" constraint is only documented in comments.
+- **Suggested fix:** Delete the 8 wrappers (and their tests); mark parity-read constants in one block with a comment, or move them to `trainingLimits.js` so the Rust `include_str!` target is a small file.
+- **Confidence:** High.
+
+#### [F-250] Duplicated upload/file filtering helpers across the three file-drop entry points
+- **Source ID:** B4-011
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/TrainingStudio.jsx:101-125` (`uploadFileBaseName/Extension/Stem`, `isImageUpload`, `isCaptionUpload`), `PoseLibraryScreen.jsx:160` (`file.type?.startsWith("image/")`), `components/AssetPicker.jsx:537-541,814-818,1019-1023` (three copies of `handleDrop`), `components/DatasetAddDialog.jsx:117-127`
+- **Finding:** Each drop surface re-implements its own image-type test (training uses MIME OR extension set, pose uses MIME only, so an extensionless/HEIC-labelled drop is accepted in one and not the other) and the same `preventDefault -> setDragActive(false) -> files` handler, although `FileDropzone` already exists.
+- **Impact:** Inconsistent accept rules across screens; fixes to drop handling need N edits.
+- **Suggested fix:** Move the predicates to a `uploadFiles.js` util and let `FileDropzone` own `onDrop` normalization (hand callers a plain array).
+- **Confidence:** High.
+
+#### [F-251] Download-size label formatting is copy-pasted in six places
+- **Source ID:** B5-007
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `ModelManagerScreen.jsx:111-116`, `SetupWizard.jsx:63-68`, `PresetManagerScreen.jsx:199-201`, `components/RequiredModelsNotice.jsx:30-33`, `components/ModelAvailabilityGate.jsx:23-26`, `simple/SimpleModelManager.jsx:274-277`
+- **Finding:** Each one repeats `downloadSizeEstimated ? "~"+label : label`. Only the "unavailable" fallback text differs ("Unavailable" vs "Size unavailable").
+- **Impact:** The simple and advanced Model Managers can diverge on wording. Adding a size unit needs six edits.
+- **Suggested fix:** Add `downloadSizeText(model, fallback)` to `formatting.js` and use it everywhere.
+- **Confidence:** High
+
+#### [F-252] Byte and GiB helpers duplicated beside `formatBytes` and `modelCache.bytesToGib`
+- **Source ID:** B5-008
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `ModelManagerScreen.jsx:121-132` (`formatTierSize`), `QueueScreen.jsx:182-190` (`formatMemory`), `SettingsScreen.jsx:121-129` (`telemetryBytesToGib`/`telemetryGibLabel`), `hooks/useModelsAndLoras.js:18-21` (`uploadLimitLabel`), versus `formatting.js:52` (`formatBytes`) and `modelCache.js:19,305` (`BYTES_PER_GIB`/`bytesToGib`)
+- **Finding:** There are four more hand-rolled `/1024/1024/1024` formatters. `ModelManagerScreen` already imports `formatBytes` and still keeps `formatTierSize`.
+- **Impact:** Slightly different rounding and unit text across the Models, Queue and Settings screens.
+- **Suggested fix:** Give `formatBytes` and `formatMiB` options for the "Size unavailable" fallback, and delete the local copies.
+- **Confidence:** High
+
+#### [F-253] Queue screen ships a "Placeholder generation" job composer to production
+- **Source ID:** B5-009
+- **Category:** dead-code
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/QueueScreen.jsx:259,288,330-345`; `apps/web/src/App.jsx:2524-2544`
+- **Finding:** The first panel on Queue is "Add a job", a free-text prompt (default "Placeholder generation") that POSTs `type: "placeholder"`. This is the Phase-0 scaffold from before real studios existed.
+- **Impact:** End users can enqueue a no-op job type. It adds `createPlaceholderJob` to the app context surface, and its tests keep a dead path alive.
+- **Suggested fix:** Remove the composer, or gate it behind a dev flag. Keep the GPU and project filter controls, then drop `createPlaceholderJob` from `appStaticValue`.
+- **Confidence:** Medium. It may be kept deliberately for smoke-testing.
+
+#### [F-254] `MODEL_IMPORT_ENABLED` is an always-true compile-time flag that still guards dead branches
+- **Source ID:** B5-010
+- **Category:** dead-code
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/ModelManagerScreen.jsx:180,823,2139`
+- **Finding:** The flag is `const MODEL_IMPORT_ENABLED = true`. The `!MODEL_IMPORT_ENABLED` arms at 823 and 2139 can never run. This was flagged as F-139 in 07-01 when it was `false`. It has since flipped, but the guards were left behind.
+- **Impact:** Misleading conditionals; the credential-fetch effect reads as optional but always runs.
+- **Suggested fix:** Delete the constant and simplify both conditions (the credential effect gate becomes unconditional).
+- **Confidence:** High
+
+#### [F-255] LibraryScreen recomputes filters and tag sets over all assets on every render, from the live context
+- **Source ID:** B5-011
+- **Category:** efficiency
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/LibraryScreen.jsx:78-137` (also `PoseLibraryScreen.jsx:610-622`, which is partly memoized)
+- **Finding:** `libraryAssets`, `visibleAssets` (`foldUpscaledAssetVariants`), `trashedInView`, `availableTags` and the VQA job filter are unmemoized, and the screen reads the merged `useAppContext()`. Each job-progress tick re-runs several O(n) passes plus `[...new Set(flatMap)].sort()`.
+- **Impact:** Slows interaction on large projects while a generation runs. `AssetGrid` receives a fresh `visibleAssets` array each time, which defeats any memoization inside it.
+- **Suggested fix:** Wrap the derivations in `useMemo` keyed on `assets` and the filters. Split the `useAppContext` read so only `jobs` (needed for VQA) subscribes live.
+- **Confidence:** Medium. I did not profile it.
+
+#### [F-256] `assetMatchesSearch` is exported from a screen and imported by a component in `simple/`
+- **Source ID:** B5-012
+- **Category:** architecture-drift
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/LibraryScreen.jsx:11` consumed by `apps/web/src/simple/SimpleAssets.jsx:7`
+- **Finding:** A pure helper lives in a screen module, so the Simple UI imports the whole `LibraryScreen` module (and, via the asset panels, its dependency graph). That inverts the intended layering of components and utils below screens.
+- **Impact:** Any change to `LibraryScreen` imports can create cycles or pull its code into the simple bundle. There is also no single search predicate owned by the asset layer.
+- **Suggested fix:** Move it to `assetSearch.js` (next to `assetVariants.js`) and import it from both.
+- **Confidence:** High
+
+#### [F-257] VectorStudio is written as dense one-line JSX and does not follow the WorkPanel and page-frame convention
+- **Source ID:** B5-013
+- **Category:** readability
+- **Severity:** Low
+- **Location:** `apps/web/src/screens/VectorStudio.jsx:222-305`
+- **Finding:** Whole forms and selects are inlined into single 200-300 character lines (e.g. :273-283, :293). It uses a bare `section.vector-studio` with `work-panel` classes instead of the shared `WorkPanel`, `ModeTabs` and `page-frame` building blocks that Library, Queue, Logs and Settings use. The three `useEffect`-driven model pickers (lines 160-163, 165-185) fan out into seven separate model-id states.
+- **Impact:** Hard to review or diff; it diverges visually from sibling screens.
+- **Suggested fix:** Reformat, use `WorkPanel` and `ModeTabs`, and collapse the model ids into one reducer or `useVectorModels` hook.
+- **Confidence:** High
+
+#### [F-258] SettingsScreen (1,409 lines) and PresetManagerScreen (1,714 lines) hold several screens each
+- **Source ID:** B5-014
+- **Category:** readability
+- **Severity:** Low
+- **Location:** `SettingsScreen.jsx:209-1409` (tabs at `:223,692`), `PresetManagerScreen.jsx:309-1714`
+- **Finding:** Settings is one component with about 25 `useState`s and 12 handlers spanning appearance, workflow-embed, credentials, cache, remote access, GPU, storage and worker restart. Its Unicode-aware remote-password normalizer (`:130-182`) is a security-relevant contract mirror inline in the file. Preset Manager contains the list view, the editor, general versus model presets, the payload builders, and `buildGeneralPayload`/`buildPayload`, which duplicate the prompt and order assembly (`:515-545` and `:567-600`).
+- **Impact:** Every settings change touches a god component, and the password contract mirror is not unit-isolated.
+- **Suggested fix:** For Settings, extract one component per tab under `screens/settings/` (Credentials, Cache, RemoteAccess, Gpu, Storage). Move the password policy to `remotePasswordPolicy.js` with a parity test against Rust. For Presets, extract `PresetList`, `PresetEditor` and `presetPayload.js`, and unify the two payload builders.
+- **Confidence:** High
+
+#### [F-259] Duplicated "resolved-model cache" state and refresh wiring between Settings and ModelManager
+- **Source ID:** B5-015
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `SettingsScreen.jsx:290-336` and `ModelManagerScreen.jsx:884-915`
+- **Finding:** Both screens define the same `refreshCache` and `refreshModelCache` callbacks (fetch snapshot, set state, set error string, null on failure) around the shared `useCacheConvergence`. Only the hook was shared.
+- **Impact:** The error handling of the two copies can diverge. ModelManager also treats `snapshot.error` while Settings reads `cache.error` only at render time.
+- **Suggested fix:** Add `useModelCacheStatus()` returning `{cache, error, refresh, stalled}` and use it in both screens.
+- **Confidence:** Medium
+
+#### [F-260] ModelManager duplicated linked-library scan, and three near-identical delete handlers
+- **Source ID:** B5-016
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `ModelManagerScreen.jsx:1231-1249` (`refreshLinkedStatuses`) versus `:1291-1311` (mount effect); `:1063-1115`, `:1117-1160`, `:1162-1190` (deleteModel, deleteModelVariant, deleteLora); `:630-636` (`onResumeDownloadJob`/`onFreshDownloadJob`)
+- **Finding:** The mount effect re-implements `refreshLinkedStatuses` (fetch roots, scan each, index). The only differences are cancellation and the empty-roots reset, and the effect does not clear stale statuses when roots become empty. The three delete functions share one confirm, then set-busy, then call, then message pattern. The two download-job callbacks are the same function.
+- **Impact:** Divergent edge handling (a stale "Needs relink" can persist after the last root is removed), and more code to maintain.
+- **Suggested fix:** Have the effect call a shared `loadLinkedStatuses(signal)`. Factor one `runDeletion({confirm, call, successText})` helper. Drop one of the two retry aliases.
+- **Confidence:** High
+
+#### [F-261] PoseLibrary refresh clears `loading` after abort, and `resetSession` revokes object URLs inside a state updater
+- **Source ID:** B5-017
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `PoseLibraryScreen.jsx:535-554` (refresh `finally`), `:285-289`, `:204-211`
+- **Finding:** When a request is aborted, `finally { setLoading(false) }` still runs, so it can flip `loading` false while the newer request is still in flight (and set state after unmount). `URL.revokeObjectURL` is called inside `setSources` updater functions, which are meant to be pure (StrictMode runs them twice). Mutation helpers call `refresh()` without a signal, so they can overlap the effect's fetch with no ordering guard.
+- **Impact:** A minor flicker or stale list; the double revoke is harmless today.
+- **Suggested fix:** Guard `setLoading(false)` with `if (!signal?.aborted)`. Do the revoke outside the updater. Serialize refreshes through a ref'd controller, as `useGenerationMetrics` already does.
+- **Confidence:** Medium
+
+#### [F-262] Outside-click plus Escape dropdown effect is copy-pasted in 4 components
+- **Source ID:** B6-003
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `apps/web/src/components/CompactSelector.jsx:26-44`, `apps/web/src/components/StylePicker.jsx:122-136`, `apps/web/src/components/AccentPicker.jsx:17-30`, `apps/web/src/components/generationStudio.jsx:1082-1095`
+- **Finding:** Each defines identical `onDocMouseDown` / `onDocKey` handlers and add/remove listener boilerplate. `assetPanels.jsx:822` and `SimpleSheet.jsx:28` have variants. None returns focus to the trigger or supports arrow keys.
+- **Impact:** Four places to fix any dropdown a11y bug, and none of them gets focus return.
+- **Suggested fix:** Extract `useDismissOnOutsideOrEscape(ref, open, close)` into a hooks file, and add focus-return there once.
+- **Confidence:** High
+
+#### [F-263] Roughly 130 CSS class selectors in styles.css (and a few in simple.css) are never referenced from source
+- **Source ID:** B6-005
+- **Category:** dead-code
+- **Severity:** Low
+- **Location:** `apps/web/src/styles.css` (20k lines), e.g. `.keyboard-card` (6093, 6303), `.form-row` (2233), `.job-row`, `.local-job-card`, `.asset-bin*`, `.asset-tray`, `.tray-*`, `.timeline-panel/-track/-ruler`, `.video-preview-*`, `.video-playback-*`, `.video-review*`, `.preset-rail*`, `.model-row*`, `.recent-clips-*`, `.training-live-*`, `.training-sample-*`; `apps/web/src/simple/simple.css` (`.su-asset-placeholder`, `.su-notice--error`)
+- **Finding:** A class-name scan against the concatenated non-test JS/JSX found 173 candidate names. After excluding names built from template-literal prefixes, 131 remain. They look like leftovers from retired screens (older video studio, tray, model-row layout, timeline). Some are duplicated, e.g. `.keyboard-card` is defined twice and `.form-row button` rules are repeated. A few are false positives (`googleapis`, `gstatic`, `woff2` come from URLs).
+- **Impact:** Bloats the 20k-line stylesheet and the cascade, and makes real dead rules hard to tell from live ones.
+- **Suggested fix:** Run a PurgeCSS or knip-style check with a safelist for dynamic prefixes (`chip-*`, `arch-*`, `su-dot--*`, `su-job-badge--*`), then delete the confirmed selectors.
+- **Confidence:** Medium (dynamic class construction through helpers such as `cx(...)` is possible)
+
+#### [F-264] Duplicated micro-helpers instead of shared formatting utils
+- **Source ID:** B6-006
+- **Category:** redundant
+- **Severity:** Low
+- **Location:** `apps/web/src/components/RefinePromptControl.jsx:6-11` (`formatGb`), `apps/web/src/screens/ModelManagerScreen.jsx:121` (`formatTierSize`), `apps/web/src/formatting.js:52` (`formatBytes`); `apps/web/src/components/QwenRewritePromptControl.jsx:35-40` and `RefinePromptControl.jsx:18-23` (`isModelMissing`, same regex); `components/AssetPicker.jsx:35-60` (`compactDate`, `titleFor`) vs `components/DatasetAddDialog.jsx:8` (`assetTitle`)
+- **Finding:** Byte, size and title formatters are re-declared locally even though `formatting.js` exists. The "model not installed" detector is duplicated verbatim across the two prompt controls. Both controls (216 and 227 lines) also share the same abort, status and review skeleton.
+- **Impact:** Inconsistent units (1e9 vs 1024 base) and message detection that can drift.
+- **Suggested fix:** Move `isModelMissing` and a `titleForAsset` into shared modules, reuse `formatBytes`, and consider a `usePromptRewriteFlow` hook behind both controls.
+- **Confidence:** Medium
+
+#### [F-265] Hard-coded model ids in generic UI code (Simple and editor) duplicate backend capability data
+- **Source ID:** B6-007
+- **Category:** architecture-drift
+- **Severity:** Low
+- **Location:** `apps/web/src/simple/SimpleVideoStudio.jsx:167`, `apps/web/src/simple/simpleJobs.js:351` (`model === "minimax_h3" && mode === "image_to_video"`), `apps/web/src/components/editor/FilmSound.jsx:7` (`SPEECH_MODELS`), `components/editor/useEditorGeneration.js:22` (`LTX_VIDEO_MODEL_ID`), `components/editor/FilmWorkspace.jsx:238`
+- **Finding:** The last-frame capability is keyed on a literal model id, in both the UI gate and the job-body builder, instead of a manifest or capability flag. The speech-model list is also hard-coded. Advanced VideoStudio presumably uses model capability data for last-frame, so Simple will not pick up the next model that supports it.
+- **Impact:** Simple vs advanced parity drift. Adding a model needs UI edits in several places.
+- **Suggested fix:** Read a `supportsLastFrame` or `ui.capabilities` flag from the model entry (as `ui.promptGuide` already is) and drop the literals.
+- **Confidence:** Medium
+
+#### [F-266] Web bundle config: build-time projection silently swallows all errors; web CI Node differs from Docker
+- **Source ID:** S1-007
+- **Category:** bad-pattern
+- **Severity:** Low
+- **Location:** `apps/web/sdxl-cuda-memory-projection.js:45-48`, `apps/web/vite.config.js:10,45`, `.github/workflows/check.yml:49` (`node-version: "20"`) vs `docker/rust.Dockerfile:16` / `web.Dockerfile:1` (Node 22)
+- **Finding:** `loadSdxlCudaMemoryProjection` returns `null` on any exception (including a failed `import` of `scripts/package-sdxl-cuda-endpoints.mjs`' dependencies or hash mismatch) and the build proceeds with the conservative estimate; the vite config also depends on a repo-root script outside apps/web. CI lints/tests/builds on Node 20 while shipping on 22 and Vite 8 / vitest 4 floor is Node 20.19/22.12.
+- **Impact:** evidence tampering or a broken receipt degrades the UI estimate without any build signal; Node-version-specific bugs would not be caught by the web job.
+- **Suggested fix:** log a `console.warn` (or fail when `CI`/production) on the catch path, and align `setup-node` to 22 (or add `engines`).
+- **Confidence:** Medium
+
+#### [F-267] Tracked non-source artifacts: design zips, experiment dirs, one-shot spikes
+- **Source ID:** S1-008
+- **Category:** dead-code
+- **Severity:** Low
+- **Location:** `design/*.zip` (12 files, 4.3 MB), `docs/sc-3494/` (4.25 MB), `docs/sc-4422-kps-experiment/` (5.3 MB incl. 2 PNG + .py), `docs/sc-16962/` (326 KB), 31 other `docs/sc-NNNN*` dirs/files (2022-era spikes), `scripts/spikes/` (9 py + 2 ort projects, last touched 2026-09-10), `docs/generated/memory-matrix.json` (9.2 MB, generated), root `screenshot*.png` (4 files, ~0.6 MB), `docs/calibration/**/*.log` (164 tracked logs, 881 KB total; 97 in sc-16170, 16 loose `sc-15823-refresh-*.log`)
+- **Finding:** these are historical evidence, designer hand-offs and generated output. The 164 logs are intentionally allow-listed in .gitignore:60-64 and marked binary in .gitattributes for hash stability, so they are not a mistake and are small; the 16 top-level `sc-15823-refresh-*.log` and the `sc-15833` logs are the only ones outside the allow-listed sub-dirs' hashing protection. The zips are opaque to review/grep.
+- **Impact:** repo bloat (~230 MB working tree dominated by S1-002) and stale-doc noise; nothing here is a correctness risk.
+- **Suggested fix:** move `design/*.zip` and finished spike dirs to a release/archive branch or wiki; keep logs but consider one archive per sc-NNNN; leave memory-matrix.json (it is CI-checked via `check:memory-matrix`) but note it is 9 MB of diff noise on every regenerate.
+- **Confidence:** High on sizes; Medium on whether to delete (owner call)
+
+#### [F-268] Root `package.json` `check` script is a hand-maintained 100-file list
+- **Source ID:** S1-009
+- **Category:** readability
+- **Severity:** Low
+- **Location:** `package.json:11`; guard in `scripts/test-list-coverage.test.mjs`; `scripts/platform-review-contracts.test.mjs` (5.5k lines of regex assertions over workflow/Dockerfile text)
+- **Finding:** one ~7 KB `node --test a b c ...` line must list every test; a coverage test exists to catch omissions. Several tests (e.g. platform-review-contracts.test.mjs:1889, :2145) assert exact strings in workflow YAML (`huggingface_hub==0\.36\.0`), so routine workflow edits need matching test edits.
+- **Impact:** merge-conflict magnet and brittle string-pin tests; not a defect.
+- **Suggested fix:** `node --test "scripts/**/*.test.mjs"` with an explicit exclude list for the one separate invocation; trim text-pin tests to behavioural checks.
+- **Confidence:** Medium
+
+
+### Informational findings — web/tooling
+
+#### [F-269] Access token stays plaintext in localStorage and rides in `?ticket=` query strings (still present, documented)
+- **Source ID:** B1-014
+- **Category:** security
+- **Severity:** Info
+- **Location:** `apps/web/src/accessToken.js:1-80`, `api.js:144-177` (`eventUrl`, `withMediaTicket`)
+- **Finding:** Previously F-078 (2026-07-12), still present and now explicitly accepted in the module header. The long-lived token never goes into a URL (header only). The URL-borne values are short-lived sliding tickets, which resolves F-008. Residual risk is XSS exfiltration of the stored token. The review found no `dangerouslySetInnerHTML`, `innerHTML`, `postMessage` or `window.open` in `apps/web/src`, and all `target="_blank"` links carry `rel`. `Markdown.jsx` builds React elements and allow-lists `href`.
+- **Impact:** None new. The posture is acceptable for loopback/LAN. It would need the httpOnly-cookie exchange noted in the header before any public exposure.
+- **Suggested fix:** None required now. Keep the one-file seam, and add a CSP `<meta>` or response header for the Docker/browser build (the Tauri build has one in `tauri.conf.json:25`).
+- **Confidence:** High
+
+#### [F-270] Hand-rolled SHA-256 fallback in a protocol path
+- **Source ID:** B4-012
+- **Category:** security
+- **Severity:** Info
+- **Location:** `apps/web/src/training/datasetReadiness.js:16-100`
+- **Finding:** `captionHash` falls back to a 60-line custom SHA-256 for non-secure contexts. It is the only implementation in the app and is exercised by tests, so this is an observation, not a defect: `expectedCaptionHash` is a concurrency token, not a secret.
+- **Impact:** Maintenance cost only.
+- **Suggested fix:** Optionally replace with a vetted tiny library (or have the server hash) to drop the custom crypto.
+- **Confidence:** High.
+
+#### [F-271] Three independent "load an image to get pixels/dims" helpers
+- **Source ID:** B2-013
+- **Category:** redundant
+- **Severity:** Info
+- **Location:** `apps/web/src/screens/ImageEditor.jsx:1031-1043` (`blobToImage`), `apps/web/src/imageDimensions.js:2-22` (`probeImageDimensions`), `apps/web/src/assetBatch.jsx:166-186` (`loadImageDims`)
+- **Finding:** Each creates `new Image()`; only `probeImageDimensions` is cancel-safe. `loadImageDims` has no timeout, and on a stuck network load the batch for-loop (L193+) can hang.
+- **Impact:** Minor; inconsistent cleanup and error handling.
+- **Suggested fix:** Consolidate in `imageDimensions.js` (decode-from-blob with owner-revoked URL; dims probe with abort).
+- **Confidence:** Medium
+
+#### [F-272] Mixed token sources inside the same screens
+- **Source ID:** B5-018
+- **Category:** architecture-drift
+- **Severity:** Info
+- **Location:** `SettingsScreen.jsx:499` (`serverToken()`), versus `ModelManagerScreen.jsx:625,1235,1295` and `LogsScreen.jsx:121` (context `token`); `credentials.js:23-49`
+- **Finding:** Some code reads the access token from context and some from the module-level `serverToken()`. They resolve to the same `accessToken.js` store today, but any caller in a screen can pick either.
+- **Impact:** Low; a future change to token rotation must be applied to both paths.
+- **Suggested fix:** Standardise on `useAppStatic().token`, or on `readAccessToken()` everywhere, and document the choice in `credentials.js`.
+- **Confidence:** Medium
+
+---
+
+#### [F-273] Clickable div in EditorGuides, with link interception that is not keyboard-friendly
+- **Source ID:** B6-008
+- **Category:** bad-pattern
+- **Severity:** Info
+- **Location:** `apps/web/src/components/editor/EditorGuides.jsx:39-46`
+- **Finding:** `onClick` on a non-interactive div is used to delegate clicks on `<a href="#editor-guide-…">` produced by Markdown. Enter on a link also fires click, so keyboard access works. There is no real security issue, since Markdown is rendered as React elements (`Markdown.jsx:7`).
+- **Impact:** Minor lint a11y noise only.
+- **Suggested fix:** Optional: pass a link renderer to `Markdown` instead.
+- **Confidence:** Medium
+
+#### [F-274] `huggingface_hub==0.36.0` pin repeated inline in 8+ places
+- **Source ID:** S1-010
+- **Category:** redundant
+- **Severity:** Info
+- **Location:** `.github/workflows/windows-candle.yml:696,1076,1396`, `macos-mlx.yml:722,733`, `scripts/ci/iris-mlx-real-weights/run.sh:79`, `scripts/ci/supra2-mlx-real-weights/run.sh:49`
+- **Finding:** version literal is duplicated and enforced by a test regex rather than a shared constant/requirements file.
+- **Impact:** bumping requires editing all and the pin test.
+- **Suggested fix:** a single `scripts/ci/requirements-hf.txt` used with `pip install -r`.
+- **Confidence:** High
+
+
 ## Themes and systemic observations
+
+### Part 1 themes (Rust backend)
 
 1. **Hardened-then-re-copied helpers (the main source of duplication).** Atomic temp+rename writes exist ~9 times with different durability (D1-001, C1-002); streaming file hashing 13 times and hex encoding 10 (D1-002, W3); `safe_download_dir` three times byte-identical, "kept in sync" by a comment (D1-003, A2-002, W5); eight-plus "safe relative path" predicates and four Hugging Face repo-id validators with different rules (A1-002/006, C1-005); safetensors header reading six times (C2-003); the same `MemoryEvidence` literal ~10 times (W2-003). Root cause per D1: core utilities are `pub(crate)` and there is no public core `hashing`/`env`/`fs` module. Promoting ~6 functions to a public core module fixes most clusters.
 2. **MLX ↔ Candle twin drift.** Same tier clamp / quant parse / adapter loop / model-dir resolver once per backend with "mirrors X" comments (W1), diverged floor semantics (W2-001), 15 byte-identical functions plus many near-identical ones in the memory-adapter binaries (X1-006..008). Video is consistently one hardening generation behind image (W1). A backend-neutral shared layer is the highest-leverage structural change.
@@ -1955,17 +2851,30 @@ Branch `claude/sceneworks-codebase-review-j3yimb`, reviewed at the tip as of 202
 10. **Drift guards are strong where they exist** (job types, family allow-lists, geometry, version alignment) **and absent one layer down:** web `fallbackModels` vs `builtin.models.jsonc` (D1-005), env-flag truthiness (D1-004), crate dependency direction. Docs: CLAUDE.md/FEATURE_DEVELOPMENT.md are current; CONTRIBUTING.md and per-crate READMEs lag the deliberate CI/merge-queue/gate teardown (D1).
 11. **Positive notes:** all 211 API routes sit behind one `access_control` layer with 5 public paths and constant-time token compare (A2); most prior High findings are verified fixed; dead code is near zero in rust-api; the timeout/SSRF/atomic-promotion work in downloads is solid within each stack (W3).
 
+
+### Part 2 themes (web app, scripts, CI)
+
+1. **Extract-once, never-migrate.** `pollJobToCompletion`, `useScopedCrudList`, `useAppStatic`, `testUtils/dom.js` and the `api/` layer each cover only a fraction of their callers (2 of 9 refresh hooks, 15 of 45 context consumers, 4 of ~40 endpoint domains; request paths hand-written at 236 call sites) — B1-003/005/009, B3-005, B2-011. Finish the migration or add a lint rule that forbids the old form.
+2. **God components that keep growing.** `App.jsx` 2.4k → 4.3k lines (one 3,750-line `App()`), `ImageStudio` 3.2k → 4.9k, `ImageEditor` 4.1k → 4.5k with a ~190-key scope bag, `TrainingStudio` 2.6k, `ModelManagerScreen` renders the whole catalog through ~750 lines of inline closures (B1-001, B2-002/003, B4-007, B5-001). The earlier July decomposition findings are still open and worse; concrete split seams are in the findings.
+3. **Polling and lifecycle gaps on error/race paths.** Film run/export loops and three overlapping film polls with no abort or visibility guard (B3-001/002, B1-004), batch runs that outlive the studio (B2-001), import flows with no abort/partial-failure recovery (B4-003/009), stale-response races (B3-007, B4-004, B5-004). Media/object-URL/listener hygiene is otherwise good.
+4. **Server-owned state re-implemented client-side.** License acks in `localStorage` that is wiped on desktop relaunch (B5-002), training-config validation that ignores the advertised `limits` (B4-001), `modelCatalog.js` as a test-only mirror of 46/140 manifest models (B1-007; see also F-092), hard-coded model ids in generic UI (B6-007), LTX-2.5 tables only in the web bundle (B4-008). The Rust↔JS parity tests pin constants but not rules.
+5. **Parallel UI stacks.** The Simple UI built its own overlay stack without the shared `Modal` focus handling (B6-001), and duplicates refine/guide/dropdown logic (B6-002/003, B2-006). Pose and Key Point capture are near-identical state machines that bypass shared job creation (B5-003).
+6. **Dead code is mostly in CSS and a few modules.** ~130 orphan selectors in `styles.css`, `LayersPanel.jsx`, `useAudioPreviewGain.js`/`audioPreviewGain.js`, `consumeEditorLaunch`, an always-true `MODEL_IMPORT_ENABLED` flag (B6-004/005, B1-008, B2-012, B5-010). A `knip`/ESLint unused-export check in CI would catch this class.
+7. **Scripts and CI.** `scripts/` is 139k LOC of mostly one-epic harnesses that each re-implement sha256, canonical JSON, JSONC and exec helpers with different key ordering, so the same data can hash differently (S1-004). The dev `web` Docker image lacks build inputs the Vite config needs and its smoke test only proves liveness (S1-001); 192 MB of raw `.rgb` frames and machine-specific paths are tracked in git (S1-002/003); `workflow_dispatch` inputs are interpolated into `run:` shell (S1-006). Otherwise CI hardening is consistently applied (SHA-pinned actions, same-repo gates, empty advisory-ignores).
+8. **Security posture of the web app is good.** No HTML sinks, `postMessage`/iframe surface or unsafe `target=_blank` found in screens, components or Simple UI; URLs go through `safeExternalUrl`; credential inputs are write-only. Residual items: access token in `localStorage` and `?ticket=` query strings (B1-014, documented), an un-allow-listed licence link (B1-010).
+
 ## Suggested remediation order
 
 1. Security: fix A2-001/X1-001 in the middleware (Origin/Host validation, apply the MCP rebinding check to `/api`, no wildcard-bind exemption under loopback trust); W3-003 (`safe_join` the ETag); A1-001 (`require_local_peer` on catalog `sourcePath`); C2-001 (ffmpeg timeout/protocol whitelist).
 2. Correctness: C1-001 (`BEGIN IMMEDIATE` for project.db); W2-001 (decide `any` vs `all` and share one helper); W4-001/003 (route hand-rolled cancel loops through the shared loop).
 3. De-duplication via a public core utility module (atomic write, hashing, hex, random id, safe path, safe_download_dir, glob, format_bytes, env bool), then delete the copies; extend `architecture_tests.rs` to forbid new ones.
 4. Structural: `build.rs` cfg alias; split `image_jobs`, `rust-api/lib.rs`, `models.rs`; extract inline tests.
+5. Part 2 (web/tooling): fix the dev web Dockerfile inputs (S1-001) and `workflow_dispatch` shell interpolation (S1-006); add abort/unmount guards to film loops and batch runs (B3-001, B2-001); make training validation honour `limits` (B4-001); move license acks server-side (B5-002); then migrate callers onto the existing `api/`, `useScopedCrudList` and `useAppStatic` seams and split `App.jsx`/`ImageStudio`/`ImageEditor` along the seams named in B1-001, B2-002, B2-003.
 
 
 ## Coverage notes
 
-Reviewed: Rust backend only. Per-area gaps reported by each reviewer (source prefixes: W=worker, C=core, A=rust-api, X=adapter/mcp/desktop/vendor, D=cross-crate):
+Per-area gaps reported by each reviewer (prefixes as above).
 
 **W1**
 
@@ -2048,6 +2957,56 @@ Not line-audited: film_compile.rs, film_review.rs, film_timeline.rs, film_planne
 - `packages/schemas` enum parity with Rust enums (sampler/scheduler/tier keys) was only spot-read, not diffed.
 - Prior reviews: ~28 findings checked of ~170; the Low clusters (F-052..F-060) not re-verified.
 - Functional correctness of the duplicates (e.g. whether worker `write_json_value` ever races in practice) is inferred from code, not reproduced.
+
+**B1**
+
+- `apps/web/src/screens/**`, `components/**`, `simple/**`, `training/**` beyond targeted greps (other reviewers). `LayersPanel.jsx` is noted in B1-008 only.
+- Line-level audit of root domain modules (`workflowShare.js`, `tierSuggestion.js`, `yue2Lab.js`, `ideogramCaption.js`, `presetUtils.js`) and of `hooks/useTraining.js`, `useWorkflowDrop.js`, `useModelsAndLoras.js` internals; `App.jsx` 2327-2490 (hydration ledger) was skimmed, not traced.
+- Test files, surveyed structurally only. `data/*.json` rows (styles, tags, thumbnails) were not audited; the style catalog to manifest derivation is drift-tested and was left alone.
+- No `knip`/ESLint run (offline, no install). Dead-code results come from an `rg`/script importer scan limited to this area's exports, and exports used only by tests were not reported.
+
+**B2**
+
+- ImageStudio JSX L3204-4846 and the many MOSS/Iris/Krea branches were only sampled, not line-audited.
+- `imageEditor/useMaskTool.js`, `useBoxesTool.js`, `useColorGradeTool.js`, `ImageEditorToolPanel.jsx` (1.4k) internals and `*Math.js`/`maskStroke.js` were not read beyond the lifecycle grep. They have no createObjectURL/listener/timer calls.
+- CharacterStudio, VectorStudio, DocumentStudio, ReplacePersonPanel, PoseLibraryScreen (object-URL handling at L174/209/222/285 looked balanced) and KeyPointLibraryScreen were only grep-checked.
+- Konva `key={index}` at ImageEditor.jsx:4142/4204 (crop overlay rects, mask lines) look safe (fixed/append-only lists).
+- Did not verify bundle impact of Konva or test files.
+
+**B3**
+
+- `simple/` audio and video UIs, `components/audioTakeParts.jsx`, `components/assetPanels.jsx`, and the body of `AudioStudio.jsx` (only structure and greps).
+- Line-level review of `VideoStudio.jsx` effects and `yue2Lab.js` logic. `FilmReferences`, `FilmShots`, `FilmPlanning` and `GenerationRail` were not read.
+- Test files were surveyed only by grep. Whether the earlier docs/code-review web findings in this area are fixed was not checked.
+
+**B4**
+
+- `ConfigureJobPanel.jsx` (1452 lines), `DatasetDoctor.jsx`, `Iris*` option panels: only grepped for hardcoded ids and numeric inputs, not line-audited.
+- `training/irisOptions.js`, `irisTaskOptions.js`, `irisCurricula.js`, `datasetHelpers.js`, `trainedLoraOffer.js`: parity with the Rust Iris validation not compared.
+- `CharacterStudio.jsx` lines 520-998 and most of `characterPanels.jsx` (Looks, Loras, Test, LikenessCompare) only skimmed; `KeyPointLibraryScreen.jsx` Collections panel not read.
+- `DatasetCatalogsScreen.jsx` lines 830-1379 (polling loop, mutation helpers) read only at the top; no CSS dead-code pass.
+- No tests run; no profiler data.
+
+**B5**
+
+- `ModelManagerScreen.jsx` lines ~1420-1820 (model card JSX body) and ~1866-2110 (LoRA row JSX) were skimmed, not line-audited. `PresetManagerScreen.jsx` JSX from ~700 onward was surveyed.
+- `DocumentStudio.jsx`, `ReplacePersonPanel.jsx` (past the draft-reseed logic), `audioResults.jsx` and `audioYueControls.jsx` were only grep-audited for effects, listeners, object URLs, HTML sinks and fetches. No problems turned up, but they got no logic review.
+- Test files (`*.test.jsx`) were not audited. `imageStudio/` helper files were not reviewed. `components/` (including `LicenseGateNotice.jsx`) was read only where it affects these screens.
+- No lint or knip run. Importer checks were by grep.
+
+**B6**
+
+- Line-level review of generationStudio.jsx (1248 lines), assetPanels.jsx (1496), AssetPicker.jsx (1109) and WorkerProgressCard.jsx (996). Only the dropdown and Escape handlers, fetch sites and headers were read.
+- Duplication between WorkerProgressCard and SimpleJobCard progress UI, and between SimpleLoraSheet and LoraPickerField (not diffed).
+- `components/editor/*` Film* components (only grepped).
+- Whether the dead-CSS candidates are referenced from `index.html` or non-src files.
+
+**S1**
+
+- Line-level audit of the ~139k LOC of scripts (read structure, headers and cross-file duplicates only); the four largest (measure-memory-catalog, epic-20738-terminal-cuda-harness, run-ltx-safety-canary, kv-baseline-harness) were not read end to end.
+- Field-by-field comparison of each JSON schema against Rust serde DTOs (only consumer wiring checked); the Rust side has its own contract tests (`checkpoint_import_contracts.rs`).
+- tests/ pytest harness internals (9.7k LOC) beyond file inventory; apps/web/scripts/generate-style-thumbnails.mjs (613 lines) and vite-plugin-bundle-report.js not read in detail.
+- No `npm audit`/lockfile freshness check (offline, no install).
 
 
 ### Per-reviewer systemic observations (verbatim)
@@ -2139,3 +3098,58 @@ Not line-audited: film_compile.rs, film_review.rs, film_timeline.rs, film_planne
 - Drift guards are strong where they exist (job types, family allow-lists, image-axes, geometry, version alignment) and absent for the next layer down (web fallback capabilities/samplers, crate dependency direction, env-flag semantics).
 - `image_jobs` (include! ladder, 98.8k lines) and `memory-adapter/src/bin/mlx.rs` (33.8k lines) are the two structural outliers; both keep growing and drive the cfg-trap guidance in CONTRIBUTING.
 - Doc prose around CI/merge-queue/gate teardown lags behind the (deliberate) tooling changes; CLAUDE.md/FEATURE_DEVELOPMENT.md are current, CONTRIBUTING.md and per-crate READMEs are not.
+
+**B1**
+
+- Earlier web findings (F-007, 008, 009, 053, 054, 055, 056, 057, 058) are verified fixed. The remaining work is structural: App.jsx grew 80% since F-052 by absorbing features instead of hooks.
+- The recurring pattern is "extract once, don't migrate the rest": `pollJobToCompletion`, `useScopedCrudList`, `useAppStatic`, `testUtils/dom.js` and `api/` all exist but cover only a fraction of their potential callers (2 of 9 hooks, 15 of 45 context consumers, 4 of ~40 endpoint domains). Each fix should finish the migration or add a lint rule that prevents the old form.
+- Tests are the main consumer of several large data modules (`modelCatalog.js`, `previewSupportDerivation.js`, `entitlementsPlistContract.js`). That is fine when intentional, but a `src/__fixtures__/` or `test-support/` home would make the boundary visible.
+- Auth and transport hygiene is good: single token seam, ticketed SSE/media, abort-aware loops, 401 gate. The remaining holes are bypasses (raw `fetch` in `api/yue2.js`) rather than design gaps.
+- Recovery and polling loops (gate probe, media ticket, SSE reconnect, film timeline refresh) are each hand-written with their own timers. One small `useRetryLoop` or `createBackoff` utility would remove the duplication and make the unbounded cases, such as B1-004, easier to see.
+
+**B2**
+
+- Listener/object-URL hygiene in this area is good: window listeners are ref-bridged and removed (L2146-2149, 3401-3404), `ResizeObserver` is disconnected, layer URLs are revoked on delete/replace/unmount (`revokeLayerUrls`), the workflow-inspect effect aborts, and the mask loader has generation + abort. The remaining leaks are on error and race paths (B2-007, B2-008).
+- Growth continues after the July decomposition findings: ImageStudio 3.2k to 4.9k and ImageEditor 4.1k to 4.5k lines. The extractions done so far (tool hooks, `useStrictControlState`) are shallow; the state, effects and handlers remain in one closure, and a per-model reset-effect web (6 `exhaustive-deps` disables, mostly justified by comments) keeps the coupling.
+- Cross-surface duplication is mostly of "small copied helpers plus control clusters" (samplers, tier eligibility, resolution defaults, preflight guards), not of whole components. Shared modules exist (`samplerOptions.js`, `quantTier.js`, `imageJobRequest.js`) but the shared layer sits partly under `simple/`, which forces mirrors instead of imports.
+- Exports-for-tests-only from screen files (about 40 in ImageEditor.jsx) are a symptom of pure logic living in the component module; moving it out would also shrink the 4.5k file by about a quarter with no behaviour change.
+
+**B3**
+
+- The recording and AudioContext lifecycles (`MicrophoneTake`, `timelineAudioPlayback`, `audioWaveform` decode) are handled carefully: tracks are stopped, contexts closed, and `live` flags are present. The weak spots are polling, not media.
+- Polling is ad hoc: at least 6 different `setInterval`/`setTimeout` loops in film and timeline code, with inconsistent abort, visibility, and backoff handling. A shared `usePolling` hook or SSE would remove most of them.
+- The API layer is only partly adopted: yue2 and the film planner use `api/*.js`, while run, draft and timeline calls build URLs inline.
+- Manual `live` flags in effects (about 10 in yue2) lack AbortControllers, so requests are not cancelled. A small `useAsyncResource` hook would remove the duplication.
+- Dead audio code (B3-003) suggests features landing without a caller. A knip run in CI would catch this.
+
+**B4**
+
+- The best-engineered part of this area is the Rust-to-JS parity test for numeric bounds; the gap is that it covers constants but not the validation *rules* (ranges from `limits`, integer-ness), which is where the web diverges (B4-001).
+- Screens build their own list/upload plumbing (sequential upload loops, per-file state sets, `selectedIds.includes`) instead of a shared `useFileImport`/`Set`-based selection; the same shape appears in training, pose, keypoint, character import and dataset-add (B4-003, B4-005, B4-006, B4-011).
+- `useAppContext()` consumers (TrainingStudio, CharacterStudio, Pose create panel) re-render on every SSE tick while their big lists are not memoized; only DatasetCatalogs uses `useAppStatic` as the comment intends.
+- Components keyed by selected entity are inconsistent: CharacterStudio is remounted by workspace and carefully seeds drafts, while `CatalogCuration` relies on an incomplete manual reset (B4-004). Preferring `key=` over reset effects would remove a class of stale-state bugs.
+- The earlier reviews' stale-closure and unmount-guard fixes (F-005, aborts in readiness/subject-mask effects, `generationRef` in the catalogs screen) are present and well commented; remaining risk is concentrated in import/upload flows that do not take an abort signal.
+
+**B5**
+
+- The security posture in this area is good: zero HTML sinks, no postMessage or iframe, URL hardening via `safeExternalUrl`, write-only credential inputs. Dismantled or shipped fixes cite sc-/F- ids and are mostly real (F-033 Logs, F-079 URLs).
+- Server-owned state keeps being re-implemented client-side with localStorage or hand-copied contracts: license acks (B5-002), the remote-password policy (`SettingsScreen.jsx:130-182`), `slugify` (B5-005), the preset workflow-segment tables, and the fallback resolution and duration lists in `PresetManagerScreen.jsx:46-95`. Each is a drift risk against the Rust side.
+- The "small helper copied per screen" pattern (size label ×6, byte formatters ×5, slugify ×2, cache refresh ×2) suggests a missing `formatting.js` and shared-hook pass. Cleanup would be cheap and mechanical.
+- Large screens use inline `renderX()` closures instead of memoizable child components. The big-context consumers (ModelManager, Library) pay for it on every live tick. `useAppStatic` versus `useAppLive` is only used by the lighter screens.
+- Staged-capture flows (Pose, Key Point, Vector, Document) each hand-roll job creation and job watching, which is the same architecture-drift seam called out for the studios in the brief.
+
+**B6**
+
+- A shared `Modal` primitive exists with good focus handling, but the Simple UI built a parallel overlay stack, so a11y fixes land in only one of them.
+- Small UI behaviours (outside-click dismiss, refine and rewrite flows, guide fetch, abort classification) are copy-pasted rather than hooked. A `hooks/` set of 3-4 primitives would remove most of the duplication in this area.
+- Simple and advanced parity is maintained by duplicating logic, not by shared hooks. Model-specific capability checks are hard-coded in the Simple UI.
+- Dead-code hygiene is mostly good for JS (only LayersPanel found), but CSS has accumulated about 130 orphan selectors.
+- No XSS or unsafe-link problems found in this area.
+
+**S1**
+
+- Evidence/receipt machinery is the dominant weight: scripts/ is 139k LOC, mostly bespoke one-epic harnesses (starvector-terminal-*, moss-*, yue2-*, epic-20738). Shared primitives (hash, canonical JSON, exec, JSONC) were never extracted, so each harness carries its own.
+- CI hardening is consistently applied (pins, permissions, same-repo guards, env-routed inputs); the few exceptions found are isolated and cheap to fix.
+- Repo hygiene tracks evidence permanently in-tree (calibration frames, logs, zips); the cost is concentrated in a few directories and is easy to cap with an ignore rule plus an archive policy.
+- Two parallel web build paths (rust.Dockerfile web-builder vs web.Dockerfile dev image) have no shared source of truth for "what the Vite config needs", which is how S1-001 arose; smoke tests prove liveness, not graph resolution.
+- Machine-specific values (user home, /Volumes/Models) leak into scripts under scripts/ci; moving them to runner config would also make those scripts testable off the author's Mac.
