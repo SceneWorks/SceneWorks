@@ -4,8 +4,9 @@ import { pathToFileURL } from "node:url";
 
 // Match the build contexts, including Rust include_str! inputs and the web dev image. A UI edit
 // really does affect web.Dockerfile; a native edit really does affect rust.Dockerfile.
+// Endpoint projection adds repository scripts and schema inputs to the web-builder COPY roots.
 const DOCKER_RELEVANT =
-  /^(?:docker\/|vendor\/|config\/|crates\/|apps\/(?:rust-api|rust-worker|web)\/|apps\/desktop\/(?:licenses\/|(?:Cargo\.toml|build\.rs)$)|docs\/calibration\/|docs\/(?:film-script-writing|film-editor)\.md$|docs\/generated\/(?:memory-calibration-evidence|video-memory-curves|ltx-mlx-[^/]+|krea-candle-five-rung-sc-11045|qwen-candle-five-rung-sc-15817)\.json$|docker-compose\.yml$|\.dockerignore$|Cargo\.(?:toml|lock)$|rust(?:-toolchain\.toml|fmt\.toml)$|\.cargo\/|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
+  /^(?:docker\/|vendor\/|config\/|scripts\/|packages\/schemas\/|crates\/|apps\/(?:rust-api|rust-worker|web)\/|apps\/desktop\/(?:licenses\/|(?:Cargo\.toml|build\.rs)$)|docs\/calibration\/|docs\/(?:film-script-writing|film-editor)\.md$|docs\/generated\/(?:memory-calibration-evidence|video-memory-curves|ltx-mlx-[^/]+|krea-candle-five-rung-sc-11045|qwen-candle-five-rung-sc-15817)\.json$|docker-compose\.yml$|\.dockerignore$|Cargo\.(?:toml|lock)$|rust(?:-toolchain\.toml|fmt\.toml)$|\.cargo\/|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
 
 export function dockerSmokeDecision(changedFileCount, files) {
   if (!Number.isSafeInteger(changedFileCount) || changedFileCount < 0) {

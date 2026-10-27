@@ -6,6 +6,7 @@ import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
+import { hostMemoryGbForBackend } from "../hostMemory.js";
 import {
   borrowedLicenseAcknowledgmentBlocked,
   licenseAcknowledgmentBlocked,
@@ -16,6 +17,7 @@ import {
   declaredFloorHostGb,
   installedFloorHostGb,
   lightestInstallableTier,
+  sdxlCudaMemoryEstimate,
 } from "../tierSuggestion.js";
 import { workerAdvertises } from "./simpleJobs.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
@@ -65,6 +67,7 @@ export function SimpleModelManager() {
   // Which lane's memory evidence the rows quote. Same derivation as ImageStudio / SimpleImageStudio —
   // the memory numbers are per-backend and must not be crossed (see `needsLabel`).
   const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
+  const hostMemoryGb = hostMemoryGbForBackend(hostMemory, backend);
   // The candle-only tiers' host-eligibility gates, derived exactly as SimpleImageStudio derives them for
   // tier RESOLUTION (sc-9300 / sc-11042). The memory floor has to agree with the picker: a host where no
   // live worker advertises `int8_convrot` will never be offered that tier, so its measured row must not
@@ -73,10 +76,11 @@ export function SimpleModelManager() {
   const tierOptions = useMemo(
     () => ({
       backend,
+      hostMemoryGb,
       convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
       nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
     }),
-    [backend, visibleWorkers],
+    [backend, hostMemoryGb, visibleWorkers],
   );
 
   const rows = useMemo(() => {
@@ -100,6 +104,8 @@ export function SimpleModelManager() {
         id: model.id,
         name: model.name ?? model.id,
         meta: [sizeLabel(model), needsLabel(model, tierOptions)].filter(Boolean).join(" · "),
+        memoryTitle: needsLabel(model, tierOptions)?.startsWith("Q4 optimized ")
+          ? sdxlCudaMemoryEstimate(model, "q4", tierOptions.backend)?.description : undefined,
         manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
         entry: model,
         kind: "model",
@@ -223,7 +229,7 @@ export function SimpleModelManager() {
               </span>
               <span className="su-row-text">
                 <span className="su-row-title">{row.name}</span>
-                <span className="su-row-meta">{row.meta || "—"}</span>
+                <span className="su-row-meta" title={row.memoryTitle}>{row.meta || "—"}</span>
               </span>
               {row.manageOnly ? (
                 <button
@@ -319,6 +325,14 @@ function sizeLabel(entry) {
 // literal — so a defect that lived only in how the three cases compose (the blanket fallback) had no
 // test that could see it.
 export function needsLabel(model, tierOptions) {
+  const endpoint = sdxlCudaMemoryEstimate(model, "q4", tierOptions?.backend);
+  const installedVariants = model?.variants?.filter((variant) => variant.installState === "installed") ?? [];
+  if (endpoint && model.variants?.some((variant) => variant.variant === "q4")
+      && ((installedVariants.length === 0 && model.installState !== "installed")
+        || (installedVariants.length === 1 && installedVariants[0].variant === "q4"))) {
+    return endpoint.label + (Number.isFinite(tierOptions?.hostMemoryGb)
+      && tierOptions.hostMemoryGb >= endpoint.optimizedHostGb ? " · can fit with optimizations" : "");
+  }
   const installed = installedFloorHostGb(model, tierOptions);
   if (installed !== null) {
     return `needs ${installed} GB`;

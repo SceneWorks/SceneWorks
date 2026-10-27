@@ -1875,6 +1875,20 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     return [...container.querySelectorAll(".model-tier-row")];
   }
 
+  // CI_IMPACT: two catalog-only DOM states, above/below the same measured budget; no compute.
+  it.each([[8, true], [5.3, false]])("shows SDXL Q4 optimized fit honestly on a %s GiB host", async (memory, fits) => {
+    hostPlatform = "windows";
+    hostMemoryGb = memory;
+    await render([{ ...matrixModel(), id: "sdxl", name: "SDXL",
+      candle: { measured: false, minMemoryGb: 12, vramGbByTier: { q4: 12, q8: 16, bf16: 24 } },
+    }]);
+    const q4 = tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"));
+    expect(q4.textContent).toContain("Q4 optimized ~5.4 GiB");
+    expect(q4.textContent.includes("can fit with optimizations")).toBe(fits);
+    expect(Boolean(q4.querySelector(".model-tier-memory-warning"))).toBe(!fits);
+    expect(q4.querySelector('[title*="Measured CUDA peaks"]').title).toContain("resident 9.32 GiB");
+  });
+
   it("uses Candle tier evidence for a dedicated-VRAM host", async () => {
     hostPlatform = "windows";
     hostMemoryGb = 12;
