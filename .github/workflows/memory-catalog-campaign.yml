@@ -652,6 +652,9 @@ jobs:
           if errorlevel 1 exit /b 1
           cargo test --release --locked -p sceneworks-worker --features backend-candle --lib generator_cache::tests::sdxl_cuda_policy_transitions_reload_without_fragmenting_other_provider_caches -- --exact --nocapture
           if errorlevel 1 exit /b 1
+          rem CI_IMPACT: reuse the built test binary for the pure production component/inventory contracts.
+          cargo test --release --locked -p sceneworks-worker --features backend-candle --lib image_jobs::sdxl_endpoint_inventory_tests -- --nocapture
+          if errorlevel 1 exit /b 1
           cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings
           if errorlevel 1 exit /b 1
           rem Preserve linked capability output from this already-required worker build; no weights or inference.

@@ -469,6 +469,8 @@ test("admitted replay workflow uses GPU1 only as bootstrap before selecting GPU0
   assert.match(source, /CUDA_VISIBLE_DEVICES: "1"/); assert.match(source, /SCENEWORKS_GPU_ID: "1"/);
   assert.match(source, /cargo test --release --locked -p sceneworks-core --lib sdxl_endpoint_/);
   assert.match(source, /cargo test --release --locked -p sceneworks-worker --features backend-candle --lib candle_memory_strategy::tests::sdxl_/);
+  // CI_IMPACT: one source assertion keeps the pure production-assembly regression ahead of the render.
+  assert.match(source, /cargo test --release --locked -p sceneworks-worker --features backend-candle --lib image_jobs::sdxl_endpoint_inventory_tests/);
   assert.match(source, /cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings/);
   // CI_IMPACT: source-only assertion; the manual replay reuses its worker objects for a weights-free dump.
   assert.match(source, /cargo run --release --locked -p sceneworks-worker --no-default-features --features backend-candle --bin dump-engine-capabilities/);
