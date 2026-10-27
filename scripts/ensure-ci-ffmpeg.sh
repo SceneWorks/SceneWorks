@@ -63,13 +63,18 @@ apt_options=(
   -o 'Acquire::Retries=1'
   -o 'Acquire::http::Timeout=20'
   -o 'Acquire::https::Timeout=20'
+  # This job installs packages only; translations and desktop command/app metadata
+  # waste the download budget before APT reaches FFmpeg's package indexes.
+  -o 'Acquire::Languages=none'
+  -o 'Acquire::IndexTargets::deb::CNF::DefaultEnabled=false'
+  -o 'Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false'
   -o 'Acquire::AllowInsecureRepositories=false'
   -o 'APT::Get::AllowUnauthenticated=false'
 )
 # Transport inactivity timeouts do not bound a continuously slow download. Hard-bound
 # metadata/download phases separately, before dpkg runs, so expiry cannot interrupt unpacking.
 apt_used=1
-sudo timeout --signal=TERM --kill-after=10s 90s apt-get "${apt_options[@]}" update
+sudo timeout --signal=TERM --kill-after=10s 180s apt-get "${apt_options[@]}" update
 sudo timeout --signal=TERM --kill-after=10s 180s apt-get "${apt_options[@]}" \
   install -y --no-install-recommends --download-only ffmpeg
 sudo apt-get "${apt_options[@]}" install -y --no-install-recommends --no-download ffmpeg
