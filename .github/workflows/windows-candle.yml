@@ -814,6 +814,12 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - name: Check Windows owned CPU preparation before compilation
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        timeout-minutes: 3
+        shell: cmd
+        # CI_IMPACT: seconds of real CPU child/CIM supervision; no compiler, model or GPU execution.
+        run: node --test --test-name-pattern="^Windows real CPU preparation" scripts/moss-native-api-validation.test.mjs
       - name: Isolate Cargo dependency checkout
         shell: powershell
         run: |

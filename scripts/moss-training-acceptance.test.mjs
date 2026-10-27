@@ -1,5 +1,7 @@
 import {isPreparationCommand} from "./moss-native-api-validation.mjs";
 import test from 'node:test';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { spawnSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
@@ -10,7 +12,7 @@ import { deflateSync } from 'node:zlib';
 import { recordInspection, parseInspectionArgs } from './moss-preview-inspection.mjs';
 import { digest } from './moss-consumer-assertions.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
-import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, processRows, remainingCaseMs, decodePreviewPng, run } from './moss-training-acceptance.mjs';
+import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, processRows, executeSupervised, remainingCaseMs, decodePreviewPng, run } from './moss-training-acceptance.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const fixture=t=>{const dir=mkdtempSync(path.join(os.tmpdir(),'moss-harness-unit-'));t.after(()=>{rmSync(dir,{recursive:true,force:true});rmSync(`${dir}-selected-artifacts`,{recursive:true,force:true});});return dir;};
 const source={workflowSource:'a'.repeat(40),inferencePin:'b'.repeat(40),manifestSha256:MANIFEST_SHA256,cargoLockSha256:'c'.repeat(64),driverSha256:'d'.repeat(64),workflowSha256:'e'.repeat(64)};
@@ -208,6 +210,23 @@ test('Windows birth guards reject stale root PID and each stale ParentProcessId 
  rows.set(42,row(42,process.pid,50));assert.throws(()=>observeOwned(rows,new Map(),42),/root birth/);
  rows.set(42,row(42,process.pid,200));delete rows.get(44).birthMs;assert.throws(()=>observeOwned(rows,new Map(),42),/birth telemetry/);
 });
+test('Windows stale parent edges exclude blank unrelated paths before authenticating genuine children',()=>{
+ const row=(pid,ppid,birthMs,executable=`owned-${pid}`)=>({pid,ppid,birthMs,birth:String(birthMs),executable,rssBytes:1});
+ const rows=new Map([[process.pid,row(process.pid,0,100)],[42,row(42,process.pid,200)],[43,row(43,42,150,'')],[44,row(44,42,300)],[45,row(45,44,250,'')]]);
+ const known=new Map();assert.deepEqual(observeOwned(rows,known,42,()=>assert.fail('stale rows are not owned identity failures')).live.map(r=>r.pid),[42,44]);
+ assert.equal(known.has(43),false);assert.equal(known.has(45),false);
+ let witness;rows.set(46,row(46,44,400,''));
+ assert.throws(()=>observeOwned(rows,known,42,value=>{witness=value;}),/descendant identity missing/);
+ assert.equal(witness.rootPid,42);assert.equal(witness.candidate.pid,46);assert.equal(witness.candidate.executable,'');assert.equal(witness.parent.pid,44);assert.equal(witness.parent.birthMs,300);
+ rows.delete(46);const unknown=row(47,44,400,'');delete unknown.birthMs;rows.set(47,unknown);
+ assert.throws(()=>observeOwned(rows,known,42),/Windows birth telemetry missing/);
+});
+test('owned identity refusal records only one bounded candidate relation',()=>{
+ const parent={pid:42,ppid:process.pid,birth:'owned-birth',executable:'p'.repeat(1000),rssBytes:1};
+ const rows=new Map([[42,parent],[43,{pid:43,ppid:42,birth:'',executable:'',rssBytes:1}],[99,{pid:99,ppid:1,secret:'unrelated process command line'}]]);let witness;
+ assert.throws(()=>observeOwned(rows,new Map(),42,value=>{witness=value;}),/descendant identity missing/);
+ assert.equal(witness.parent.executable.length,512);assert.equal(witness.candidate.pid,43);assert.equal(JSON.stringify(witness).includes('secret'),false);assert.equal(Object.hasOwn(witness,'rows'),false);
+});
 test('POSIX census records bounded failure facts while preserving null telemetry and the exact query budget',()=>{
  for(const result of [{error:Object.assign(new Error('spawnSync ps ETIMEDOUT'),{code:'ETIMEDOUT'}),status:null,signal:'SIGTERM'}, {error:null,status:1,signal:null}]) {
   let failure;const rows=processRows('darwin',value=>{failure=value;},(command,args,options)=>{
@@ -224,6 +243,68 @@ test('successful POSIX census preserves parsing without emitting an availability
   const rows=processRows('darwin',()=>assert.fail('successful ps is not unavailable telemetry'),()=>({status:0,stdout}));
   assert.ok(rows instanceof Map);assert.equal(rows.size,stdout.startsWith('42')?1:0);
  }
+});
+// Controlled census/close ordering: no host process queries, model execution or signals.
+function exitRaceChild(samples) {
+ const child=Object.assign(new EventEmitter(),{pid:4242,stdout:new PassThrough(),stderr:new PassThrough()});let queries=0;
+ return {child,get queries(){return queries;},query:()=>{
+  const sample=samples[Math.min(queries++,samples.length-1)];
+  if(Object.hasOwn(sample,'close'))queueMicrotask(()=>child.emit('close',sample.close));
+  return sample.rows===null?null:new Map(sample.rows.map(row=>[row.pid,row]));
+ }};
+}
+const rssRoot=rssBytes=>({pid:4242,ppid:process.pid,birth:'owned-root-birth',executable:'/owned/native',rssBytes});
+const rssDescendant=(rssBytes,ppid=4242)=>({pid:4243,ppid,birth:'owned-child-birth',executable:'/owned/helper',rssBytes});
+test('RSS shutdown race preserves the cap refusal until close and fresh owned absence',async t=>{
+ const dir=fixture(t),log=path.join(dir,'case.log'),state={};
+ const probe=exitRaceChild([{rows:[rssRoot(10)]},{rows:[rssRoot(21)]},{rows:[rssRoot(0)],close:7},{rows:[]}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],log,3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:1000}),/aggregate owned RSS exceeded cap \(21 > 20\)/);
+ assert.equal(state.cancelled,true);assert.equal(state.rssFirstBytes,10);assert.equal(state.rssPeakBytes,21);
+ assert.deepEqual(state.rssSamples.map(s=>s.aggregateBytes),[10,21]);assert.ok(probe.queries>=4);
+ assert.equal(state.cleanup.released,true);assert.equal(state.unsafe,false);
+ assert.match(JSON.parse(readFileSync(`${log}.cancel`)).reason,/aggregate owned RSS exceeded cap \(21 > 20\)/);
+});
+test('RSS shutdown race accepts exit zero only after close and a fresh empty owned census',async t=>{
+ const dir=fixture(t),state={};const probe=exitRaceChild([{rows:[rssRoot(10)]},{rows:[rssRoot(0)],close:0},{rows:[]}]);
+ const result=await executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:50});
+ assert.equal(result.exit,0);assert.equal(state.cleanup.released,true);assert.ok(probe.queries>=3);
+ assert.deepEqual(state.rssSamples.map(s=>s.aggregateBytes),[10]);
+});
+test('RSS shutdown race still refuses a true initial zero RSS sample',async t=>{
+ const dir=fixture(t),state={};const probe=exitRaceChild([{rows:[rssRoot(0)],close:0},{rows:[]}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:50}),/no positive initial aggregate owned RSS/);
+ assert.equal(state.rssFirstBytes,undefined);
+});
+test('RSS shutdown race never turns unavailable telemetry into release proof',async t=>{
+ const dir=fixture(t),state={};const probe=exitRaceChild([{rows:[rssRoot(10)]},{rows:null,close:0},{rows:null}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:1}),/owned process telemetry unavailable/);
+ assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);
+});
+test('RSS shutdown race never releases a known surviving reparented descendant',async t=>{
+ const dir=fixture(t),state={};const probe=exitRaceChild([{rows:[rssRoot(10),rssDescendant(1)]},{rows:[rssRoot(0),rssDescendant(0)],close:0},{rows:[rssDescendant(1,1)]}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:50}),/owned processes did not cooperatively release/);
+ assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);assert.ok(state.cleanup.observedIdentities.some(r=>r.pid===4243));
+});
+test('owned identity refusal persists the first candidate through later cleanup failures',async t=>{
+ const dir=fixture(t),state={};const missing=pid=>({pid,ppid:4242,birth:'owned-child-birth',executable:'',rssBytes:1});
+ const probe=exitRaceChild([{rows:[rssRoot(10)]},{rows:[rssRoot(10),missing(4243)]},{rows:[rssRoot(10),missing(4244)],close:7},{rows:[]}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:1000}),/descendant identity missing/);
+ assert.equal(state.identityFailure.candidate.pid,4243);assert.equal(state.identityFailure.parent.pid,4242);assert.equal(state.cleanup.released,true);assert.equal(state.unsafe,false);
+});
+test('RSS shutdown race retains the cap breach alongside unavailable cleanup telemetry',async t=>{
+ const dir=fixture(t),log=path.join(dir,'case.log'),state={};const probe=exitRaceChild([{rows:[rssRoot(10)]},{rows:[rssRoot(21)]},{rows:null,close:7},{rows:null}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],log,3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:50}),error=>{
+  assert.match(error.message,/owned process telemetry unavailable/);assert.match(error.message,/aggregate owned RSS exceeded cap \(21 > 20\)/);return true;
+ });
+ assert.equal(state.cancelled,true);assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);
+ assert.match(JSON.parse(readFileSync(`${log}.cancel`)).reason,/aggregate owned RSS exceeded cap \(21 > 20\)/);
+});
+test('RSS shutdown race retains the cap breach alongside a surviving descendant refusal',async t=>{
+ const dir=fixture(t),state={};const probe=exitRaceChild([{rows:[rssRoot(21),rssDescendant(1)]},{rows:[rssRoot(0),rssDescendant(0)],close:7},{rows:[rssDescendant(1,1)]}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:400}),error=>{
+  assert.match(error.message,/owned processes did not cooperatively release/);assert.match(error.message,/aggregate owned RSS exceeded cap \(22 > 20\)/);return true;
+ });
+ assert.equal(state.cancelled,true);assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);
 });
 test('sequential capture publishes each cell live, reuses preparation, and preserves complete backend receipt',async t=>{
  for(const backend of ['mlx','cuda']) {

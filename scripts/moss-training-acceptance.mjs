@@ -165,7 +165,7 @@ export function processRows(platform = process.platform, onFailure = null, run =
   return rows;
 }
 const matches = (a,b) => a && b && a.birth === b.birth && a.executable === b.executable;
-export function observeOwned(rows, known, rootPid) {
+export function observeOwned(rows, known, rootPid, onIdentityFailure = null) {
   assert(rows instanceof Map, 'owned process telemetry unavailable');
   const root = rows.get(rootPid);
   if (!known.has(rootPid)) {
@@ -186,12 +186,20 @@ export function observeOwned(rows, known, rootPid) {
   const live = new Map([...known].filter(([pid,identity]) => matches(rows.get(pid),identity)).map(([pid]) => [pid, rows.get(pid)]));
   let changed = true;
   while (changed) { changed = false; for (const row of rows.values()) if (!live.has(row.pid) && live.has(row.ppid)) {
-    assert(row.birth && row.executable, 'descendant identity missing');
     const parent=live.get(row.ppid);
-    // CIM's stale ParentProcessId is not an authenticated edge after PID reuse.
+    let identityError = null;
+    // Exclude a proven stale CIM parent edge before requiring the unrelated row's path.
     if (Object.hasOwn(row,'birthMs') || Object.hasOwn(parent,'birthMs')) {
-      assert(Number.isFinite(row.birthMs) && Number.isFinite(parent.birthMs), 'Windows birth telemetry missing');
-      if (row.birthMs < parent.birthMs) continue;
+      if (!Number.isFinite(row.birthMs) || !Number.isFinite(parent.birthMs)) identityError = 'Windows birth telemetry missing';
+      else if (row.birthMs < parent.birthMs) continue;
+    }
+    if (!identityError && !(row.birth && row.executable)) identityError = 'descendant identity missing';
+    if (identityError) {
+      const facts=r=>({pid:r.pid,ppid:r.ppid,birthMs:Number.isFinite(r.birthMs)?r.birthMs:null,
+        birth:typeof r.birth==='string'?r.birth.slice(0,128):null,executable:typeof r.executable==='string'?r.executable.slice(0,512):null,
+        rssBytes:Number.isSafeInteger(r.rssBytes)?r.rssBytes:null});
+      onIdentityFailure?.({at:new Date().toISOString(),reason:identityError,rootPid,candidate:facts(row),parent:facts(parent)});
+      fail(identityError);
     }
     if (known.has(row.pid)) assert(matches(row,known.get(row.pid)), 'owned descendant PID reused');
     known.set(row.pid,row); live.set(row.pid,row); changed = true;
@@ -204,47 +212,53 @@ export function observeOwned(rows, known, rootPid) {
 // Cooperative cancellation is a native-polled owned file, NOT SIGKILL of a Metal
 // command buffer. If release cannot be proven, stop the lane, preserve logs and
 // report failure; never proceed to the next cell or signal an unrelated process.
-export async function executeSupervised(root, command, log, limitMs, state, { env = process.env, capBytes = null, cancelFile = `${log}.cancel`, query = processRows, releaseMs = BOUNDS.release } = {}) {
+export async function executeSupervised(root, command, log, limitMs, state, { env = process.env, capBytes = null, cancelFile = `${log}.cancel`, query = processRows, releaseMs = BOUNDS.release, spawnChild = spawn } = {}) {
   const fd = openSync(log,'w');
-  const child = spawn(command[0],command.slice(1),{cwd:root,env:{...env,MOSS_ACCEPTANCE_CANCEL_FILE:cancelFile},stdio:['ignore','pipe','pipe'],windowsHide:true});
+  const child = spawnChild(command[0],command.slice(1),{cwd:root,env:{...env,MOSS_ACCEPTANCE_CANCEL_FILE:cancelFile},stdio:['ignore','pipe','pipe'],windowsHide:true});
   let done = false, code = null, error = null, logOpen = true;
   const completed = new Promise(resolve => { child.on('error',e => {error=e;}); child.on('close',c => {done=true;code=c;resolve();}); });
   for (const stream of [child.stdout,child.stderr]) stream.on('data',b => { if(logOpen) writeSync(fd,b); });
   const known = new Map();
   const queryOwned=()=>query(process.platform,failure=>{state.telemetryFailure??=failure;});
+  const observe=()=>observeOwned(queryOwned(),known,child.pid,witness=>{state.identityFailure??=witness;});
   const deadline = Date.now() + limitMs;
-  let cancelAt = null;
+  let cancelAt = null, cancelReason = null;
   try {
     while (true) {
-      const observed = observeOwned(queryOwned(),known,child.pid);
+      const observed = observe();
       if (!done && capBytes !== null) {
-        assert(observed.rss > 0, 'no positive initial aggregate owned RSS');
-        state.rssFirstBytes ??= observed.rss;
-        state.rssPeakBytes = Math.max(state.rssPeakBytes ?? 0, observed.rss);
-        (state.rssSamples ??= []).push({at:new Date().toISOString(),aggregateBytes:observed.rss,ownedPids:observed.live.map(r=>r.pid)});
-        if (observed.rss > capBytes) state.cancelled = true;
+        assert(state.rssFirstBytes > 0 || observed.rss > 0, 'no positive initial aggregate owned RSS');
+        // A process may exit during the synchronous census before its close event is delivered.
+        // Zero RSS after a positive sample is neither a resource sample nor release proof.
+        if (observed.rss > 0) {
+          state.rssFirstBytes ??= observed.rss;
+          state.rssPeakBytes = Math.max(state.rssPeakBytes ?? 0, observed.rss);
+          (state.rssSamples ??= []).push({at:new Date().toISOString(),aggregateBytes:observed.rss,ownedPids:observed.live.map(r=>r.pid)});
+          if (observed.rss > capBytes) { state.cancelled = true; cancelReason ??= `aggregate owned RSS exceeded cap (${observed.rss} > ${capBytes})`; }
+        }
       }
       if (done && !observed.live.length) { state.cleanup = { released:true, observedIdentities:[...known.values()] }; break; }
       if (done || state.cancelled || Date.now() >= deadline) {
-        if (!cancelAt) { cancelAt = Date.now(); writeFileSync(cancelFile, JSON.stringify({cancel:true,reason:'owned cancellation/deadline/resource limit'})); }
+        if (!cancelAt) { cancelAt = Date.now(); writeFileSync(cancelFile, JSON.stringify({cancel:true,reason:cancelReason??'owned cancellation/deadline/resource limit'})); }
         if (Date.now() - cancelAt >= releaseMs) { state.unsafe = true; fail('owned processes did not cooperatively release; refusing forced GPU kill or next case'); }
       }
       await Promise.race([completed,pause(250)]);
       if (done) await pause(50);
     }
-    if (cancelAt || state.cancelled || Date.now() > deadline) fail('command canceled or deadline exceeded');
+    if (cancelAt || state.cancelled || Date.now() > deadline) fail(cancelReason??'command canceled or deadline exceeded');
     if (error) throw error;
     return { exit:code, output:readFileSync(log,'utf8') };
   } catch (e) {
-    writeFileSync(cancelFile,JSON.stringify({cancel:true,reason:e.message}));
+    writeFileSync(cancelFile,JSON.stringify({cancel:true,reason:cancelReason??e.message}));
     // Even telemetry failures request cooperative cancellation and prove release.
     const until = Date.now()+releaseMs;
     let released = false;
     while (Date.now()<until) {
-      try { const o=observeOwned(queryOwned(),known,child.pid); if(done && !o.live.length) {released=true;break;} } catch { /* unavailable telemetry is never release proof */ }
+      try { const o=observe(); if(done && !o.live.length) {released=true;break;} } catch { /* unavailable telemetry is never release proof */ }
       await pause(250);
     }
     state.cleanup={released,observedIdentities:[...known.values()]}; state.unsafe=!released;
+    if (cancelReason && !e.message.includes(cancelReason)) throw new Error(`${e.message}; ${cancelReason}`, {cause:e});
     throw e;
   } finally { logOpen=false; closeSync(fd); }
 }

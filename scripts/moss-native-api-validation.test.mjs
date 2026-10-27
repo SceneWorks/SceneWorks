@@ -688,6 +688,25 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
     assert.equal(result.exit,code);assert.match(result.output,output);assert.equal(state.completion.completed,true);assert.equal(state.cleanup,undefined);
     t.diagnostic(JSON.stringify({name,completion:state.completion}));
   }
+  // Exercise the actual native supervisor and CIM with CPU processes before any compiler/model.
+  // The helper exits cooperatively only after a prior authenticated RSS sample contains both PIDs.
+  const {executeSupervised,processRows}=await import("./moss-training-acceptance.mjs");
+  const releaseFile=path.join(root,"owned-guard-release"),log=path.join(root,"owned-guard.log"),state={};
+  const helperCode="const fs=require('node:fs');setInterval(()=>{if(fs.existsSync(process.argv[1])||fs.existsSync(process.env.MOSS_ACCEPTANCE_CANCEL_FILE))process.exit(0);},20);setTimeout(()=>process.exit(9),25000);";
+  const ownedCode=`const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(helperCode)},${JSON.stringify(releaseFile)}],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({rootPid:process.pid,childPid:child.pid}));child.on('error',()=>process.exit(9));child.on('close',code=>process.exit(code??9));setTimeout(()=>process.exit(9),26000);`;
+  let identities=null,released=false,result;
+  const query=(platform,onFailure)=>{
+    const rows=processRows(platform,onFailure);
+    const line=readFileSync(log,"utf8").split("\n").find(value=>value.startsWith('{"rootPid":'));
+    if(line)identities=JSON.parse(line);
+    if(!released&&identities&&state.rssSamples?.some(sample=>sample.ownedPids.includes(identities.rootPid)&&sample.ownedPids.includes(identities.childPid))){writeFileSync(releaseFile,"cooperative release");released=true;}
+    return rows;
+  };
+  try{result=await executeSupervised(ROOT,[process.execPath,"-e",ownedCode],log,30_000,state,{query,capBytes:512*1024*1024});}
+  catch(error){t.diagnostic(JSON.stringify({kind:"owned-native-guard-failure",identities,identityFailure:state.identityFailure??null,telemetryFailure:state.telemetryFailure??null,cleanup:state.cleanup??null,unsafe:state.unsafe??null}));throw error;}
+  assert.equal(result.exit,0);assert.equal(released,true);assert.ok(state.rssFirstBytes>0);assert.equal(state.cleanup.released,true);assert.notEqual(state.unsafe,true);
+  for(const pid of [identities.rootPid,identities.childPid]){const identity=state.cleanup.observedIdentities.find(row=>row.pid===pid);assert.ok(Number.isSafeInteger(identity?.birthMs)&&identity.executable);}
+  t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,samples:state.rssSamples.length,cleanup:state.cleanup}));
 });
 
 test("manual Windows capture checks actual preparation supervision before its first compiler command", () => {
@@ -697,6 +716,12 @@ test("manual Windows capture checks actual preparation supervision before its fi
   const step = capture.slice(check, capture.indexOf("      - ", check + 1));
   assert.match(step, /if: \$\{\{ matrix\.backend == 'cuda' \}\}/);
   assert.match(step, /node --test --test-name-pattern="\^Windows real CPU preparation" scripts\/moss-native-api-validation\.test\.mjs/);
+  const normal=readFileSync(path.join(ROOT,".github/workflows/windows-candle.yml"),"utf8").split("  imported-nvfp4-worker-smoke:")[0];
+  const early=normal.indexOf("- name: Check Windows owned CPU preparation before compilation");
+  assert.ok(early>normal.indexOf("- name: Set up Node for Cargo cache selection")&&early<normal.indexOf("- name: Isolate Cargo dependency checkout")&&early<normal.indexOf("- name: Fetch the pinned inference release"));
+  const normalStep=normal.slice(early,normal.indexOf("      - ",early+1));
+  assert.match(normalStep,/if: \$\{\{ github\.event_name != 'workflow_dispatch' \}\}/);assert.match(normalStep,/timeout-minutes: 3/);
+  assert.match(normalStep,/node --test --test-name-pattern="\^Windows real CPU preparation" scripts\/moss-native-api-validation\.test\.mjs/);
 });
 
 for (const phase of ["planning", "post-termination"]) {
