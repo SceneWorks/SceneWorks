@@ -160,7 +160,7 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
   });
   it.each(["moss_image_base", "moss_image_sft"])("Simple submits %s ordered repeated edit slots with visible controls and component readiness", async (id) => {
     const model={...manifestModels.find((entry)=>entry.id===id),capabilities:["text_to_image","edit_image"],installState:"installed",conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
-    const assets=[{id:"wide",type:"image",projectId:"project-1",displayName:"Wide"},{id:"tall",type:"image",projectId:"project-1",displayName:"Tall"}];
+    const assets=[{id:"wide",type:"frame",projectId:"project-1",displayName:"Wide"},{id:"tall",type:"upload",file:{mimeType:"image/png"},projectId:"project-1",displayName:"Tall"}];
     const context=await openImage(baseContext({imageModels:[model],models:[model],assets,recentImageAssets:assets}));
     await click([...container.querySelectorAll('[role="tab"]')].find((tab)=>tab.textContent==="Edit"));await openAdvanced();
     const label=(text)=>[...container.querySelectorAll("label")].find((node)=>node.textContent.startsWith(text))?.querySelector("input,select");

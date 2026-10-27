@@ -7,6 +7,7 @@ import { mossAdvancedIssue } from "../mossImageAdvancedValidation.js";
 import { isMossEdit, mossEditDefaults, mossComponentState, mossEditWireOptions, mossEditReferenceIds, mossEditControlsError } from "../mossImage.js";
 import { MossImageEditControls } from "../components/MossImageEditControls.jsx";
 import { MossReferencePicker } from "../components/MossReferencePicker.jsx";
+import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
@@ -425,7 +426,7 @@ export function SimpleImageStudio() {
       mossEditWireOptions(mossImageEdit); mossEditReferenceIds({ referenceAssetIds: orderedReferenceIds });
       mossEditError = mossEditControlsError({ steps, guidanceScale: guidance, schedulerShift: mossShift, max_sequence_length: mossContext, training_shift: mossTrainingShift });
       mossEditError ||= mossAdvancedIssue(mossImageAdvanced, { assets, prompt, effectivePrompt: composeStyledPrompt({ userPrompt: prompt, styleText: styleTextForId(styleId) }), prompts: mossPromptBatch, negativePrompt, count: variations, width: Number(widthOverride || resolution.split("x")[0]), height: Number(heightOverride || resolution.split("x")[1]), context: mossContext });
-      if (orderedReferenceIds.some((id) => !assets.some((asset) => asset.id === id && asset.type === "image"))) mossEditError = "A MOSS reference is missing. Reacquire the exact ordered slot before editing.";
+      if (orderedReferenceIds.some((id) => !assets.some((asset) => asset.id === id && (assetCanRenderAsImage(asset) || asset.type === "frame")))) mossEditError = "A MOSS reference is missing. Reacquire the exact ordered slot before editing.";
     } catch (error) { mossEditError = error.message; }
   }
   const busy = submitting || jobIsRunning(latestJob);
