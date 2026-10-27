@@ -22541,8 +22541,8 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         .expect("the Preview arm of consume_gen_events");
     let arm_end = arm_start
         + base[arm_start..]
-            .find("\n            GenEvent::Image {")
-            .expect("the Preview arm is followed by the Image arm");
+            .find("\n            GenEvent::")
+            .expect("the Preview arm is followed by another event arm");
     let arm = &base[arm_start..arm_end];
     assert!(
         !arm.contains("update_job("),
