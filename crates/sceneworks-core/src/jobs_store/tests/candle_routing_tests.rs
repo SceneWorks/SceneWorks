@@ -152,15 +152,23 @@ fn moss_edit_candle_named_lane_and_claim_share_ordered_reference_contract() {
                     payload["referenceAssetIds"]
                 );
             }
-            for job in [
-                image_generate_job(json!(payload)),
-                image_edit_job(json!(payload)),
-            ] {
+            let mut custom = payload.clone();
+            custom.insert("loras".into(), json!([{"id":"custom"}]));
+            for accepted in [&payload, &custom] {
                 assert_eq!(
-                    image_job_candle_lane(&job),
-                    Some(CandleImageLane::MossImageEdit)
+                    crate::moss_image::edit_reference_ids(accepted).unwrap(),
+                    crate::moss_image::edit_reference_ids(&payload).unwrap()
                 );
-                assert!(worker_supports_job(&worker, &job));
+                for job in [
+                    image_generate_job(json!(accepted)),
+                    image_edit_job(json!(accepted)),
+                ] {
+                    assert_eq!(
+                        image_job_candle_lane(&job),
+                        Some(CandleImageLane::MossImageEdit)
+                    );
+                    assert!(worker_supports_job(&worker, &job));
+                }
             }
             assert!(crate::moss_image::edit_backend_eligible(model, "candle"));
             assert!(crate::moss_image::edit_backend_eligible(model, "mlx"));
@@ -177,7 +185,6 @@ fn moss_edit_candle_named_lane_and_claim_share_ordered_reference_contract() {
                 json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"],"referenceAssetId":null}),
                 json!({"referenceAssetId":"conflict","referenceAssetIds":["ref"],"sourceAssetId":null}),
                 json!({"maskAssetId":"mask"}),
-                json!({"loras":[{"id":"custom"}]}),
                 json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
                 json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
                 json!({"advanced":{"mossImageEdit":{"unknown":true}}}),

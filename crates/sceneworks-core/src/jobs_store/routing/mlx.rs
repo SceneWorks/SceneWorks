@@ -1324,6 +1324,16 @@ mod tests {
                     super::image_request_mlx_eligible(model, &payload),
                     "{payload:?}"
                 );
+                let mut custom = payload.clone();
+                custom.insert("loras".into(), json!([{"id":"custom"}]));
+                assert_eq!(
+                    json!(crate::moss_image::edit_reference_ids(&custom).unwrap()),
+                    references
+                );
+                assert!(
+                    super::image_request_mlx_eligible(model, &custom),
+                    "{custom:?}"
+                );
                 for patch in [
                     json!({"referenceAssetIds":[],"sourceAssetId":null,"referenceAssetId":null}),
                     json!({"referenceAssetIds":null,"sourceAssetId":null,"referenceAssetId":null}),
@@ -1336,7 +1346,6 @@ mod tests {
                     json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"],"referenceAssetId":null}),
                     json!({"referenceAssetId":"conflict","referenceAssetIds":["ref"],"sourceAssetId":null}),
                     json!({"maskAssetId":"mask"}),
-                    json!({"loras":[{"id":"custom"}]}),
                     json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
                     json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
                     json!({"advanced":{"mossImageEdit":{"unknown":true}}}),
