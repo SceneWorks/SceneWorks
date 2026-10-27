@@ -10,7 +10,7 @@ import { deflateSync } from 'node:zlib';
 import { recordInspection, parseInspectionArgs } from './moss-preview-inspection.mjs';
 import { digest } from './moss-consumer-assertions.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
-import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, remainingCaseMs, decodePreviewPng, run } from './moss-training-acceptance.mjs';
+import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, processRows, remainingCaseMs, decodePreviewPng, run } from './moss-training-acceptance.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const fixture=t=>{const dir=mkdtempSync(path.join(os.tmpdir(),'moss-harness-unit-'));t.after(()=>{rmSync(dir,{recursive:true,force:true});rmSync(`${dir}-selected-artifacts`,{recursive:true,force:true});});return dir;};
 const source={workflowSource:'a'.repeat(40),inferencePin:'b'.repeat(40),manifestSha256:MANIFEST_SHA256,cargoLockSha256:'c'.repeat(64),driverSha256:'d'.repeat(64),workflowSha256:'e'.repeat(64)};
@@ -207,6 +207,23 @@ test('Windows birth guards reject stale root PID and each stale ParentProcessId 
  assert.equal(observed.rss,30);assert.deepEqual(observed.live.map(r=>r.pid).sort((a,b)=>a-b),[42,44,46]);assert.equal(known.has(43),false);assert.equal(known.has(45),false);
  rows.set(42,row(42,process.pid,50));assert.throws(()=>observeOwned(rows,new Map(),42),/root birth/);
  rows.set(42,row(42,process.pid,200));delete rows.get(44).birthMs;assert.throws(()=>observeOwned(rows,new Map(),42),/birth telemetry/);
+});
+test('POSIX census records bounded failure facts while preserving null telemetry and the exact query budget',()=>{
+ for(const result of [{error:Object.assign(new Error('spawnSync ps ETIMEDOUT'),{code:'ETIMEDOUT'}),status:null,signal:'SIGTERM'}, {error:null,status:1,signal:null}]) {
+  let failure;const rows=processRows('darwin',value=>{failure=value;},(command,args,options)=>{
+   assert.equal(command,'ps');assert.deepEqual(args,['-axo','pid=,ppid=,rss=,lstart=,comm=']);assert.equal(options.timeout,3000);assert.equal(options.maxBuffer,16*1024*1024);assert.equal(options.env.LC_ALL,'C');
+   return {...result,stdout:'PRIVATE PROCESS TABLE MUST NOT BE RECORDED',stderr:'diagnostic '.repeat(100)};
+  });
+  assert.equal(rows,null);assert.throws(()=>observeOwned(rows,new Map(),42),/owned process telemetry unavailable/);
+  assert.equal(failure.command,'ps');assert.equal(failure.timeoutMs,3000);assert.ok(failure.elapsedMs>=0);assert.equal(failure.status,result.status);assert.equal(failure.signal,result.signal);assert.equal(failure.error?.code??null,result.error?.code??null);
+  assert.equal(failure.stderr.length,512);assert.equal(JSON.stringify(failure).includes('PRIVATE PROCESS TABLE'),false);assert.equal(Object.hasOwn(failure,'env'),false);
+ }
+});
+test('successful POSIX census preserves parsing without emitting an availability failure',()=>{
+ for(const stdout of ['42 1 10 Mon Oct 26 20:08:34 2026 /owned/node\n','unparseable row\n']) {
+  const rows=processRows('darwin',()=>assert.fail('successful ps is not unavailable telemetry'),()=>({status:0,stdout}));
+  assert.ok(rows instanceof Map);assert.equal(rows.size,stdout.startsWith('42')?1:0);
+ }
 });
 test('sequential capture publishes each cell live, reuses preparation, and preserves complete backend receipt',async t=>{
  for(const backend of ['mlx','cuda']) {

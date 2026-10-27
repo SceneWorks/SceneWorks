@@ -144,13 +144,19 @@ export function validatePreflight(p, backend, source, caseId, phase = 'capture')
 
 // Mac and Windows share pid+birth+executable identity. The Windows query is reused
 // from the CPU driver; no CPU execution function or its fixed bounds are changed.
-export function processRows(platform = process.platform) {
+export function processRows(platform = process.platform, onFailure = null, run = spawnSync) {
   if (platform === 'win32') {
     const rows = queryWindowsProcesses();
     return rows && new Map([...rows].map(([pid,r]) => [pid,{ ...r, birth: String(r.birthMs), executable: r.path }]));
   }
-  const p = spawnSync('ps', ['-axo','pid=,ppid=,rss=,lstart=,comm='], { encoding:'utf8', env:{...process.env,LC_ALL:'C'}, timeout:3000, maxBuffer:16*1024*1024 });
-  if (p.error || p.status !== 0) return null;
+  const started=performance.now();
+  const p = run('ps', ['-axo','pid=,ppid=,rss=,lstart=,comm='], { encoding:'utf8', env:{...process.env,LC_ALL:'C'}, timeout:3000, maxBuffer:16*1024*1024 });
+  if (p.error || p.status !== 0) {
+    onFailure?.({command:'ps',at:new Date().toISOString(),timeoutMs:3000,elapsedMs:performance.now()-started,
+      error:p.error?{code:p.error.code??null,message:p.error.message}:null,status:p.status??null,signal:p.signal??null,
+      stderr:typeof p.stderr==='string'?p.stderr.slice(0,512):null});
+    return null;
+  }
   const rows = new Map();
   for (const line of p.stdout.split('\n')) {
     const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s+(.+)$/.exec(line);
@@ -205,11 +211,12 @@ export async function executeSupervised(root, command, log, limitMs, state, { en
   const completed = new Promise(resolve => { child.on('error',e => {error=e;}); child.on('close',c => {done=true;code=c;resolve();}); });
   for (const stream of [child.stdout,child.stderr]) stream.on('data',b => { if(logOpen) writeSync(fd,b); });
   const known = new Map();
+  const queryOwned=()=>query(process.platform,failure=>{state.telemetryFailure??=failure;});
   const deadline = Date.now() + limitMs;
   let cancelAt = null;
   try {
     while (true) {
-      const observed = observeOwned(query(),known,child.pid);
+      const observed = observeOwned(queryOwned(),known,child.pid);
       if (!done && capBytes !== null) {
         assert(observed.rss > 0, 'no positive initial aggregate owned RSS');
         state.rssFirstBytes ??= observed.rss;
@@ -234,7 +241,7 @@ export async function executeSupervised(root, command, log, limitMs, state, { en
     const until = Date.now()+releaseMs;
     let released = false;
     while (Date.now()<until) {
-      try { const o=observeOwned(query(),known,child.pid); if(done && !o.live.length) {released=true;break;} } catch { /* unavailable telemetry is never release proof */ }
+      try { const o=observeOwned(queryOwned(),known,child.pid); if(done && !o.live.length) {released=true;break;} } catch { /* unavailable telemetry is never release proof */ }
       await pause(250);
     }
     state.cleanup={released,observedIdentities:[...known.values()]}; state.unsafe=!released;
