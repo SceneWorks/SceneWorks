@@ -433,6 +433,14 @@ export async function decodedDelta(a, b, stream, command = exec) {
   x.forEach((v, i) => { assert.ok(Number.isFinite(v) && Number.isFinite(y[i])); squared += (v - y[i]) ** 2; });
   return Math.sqrt(squared / x.length);
 }
+// The native comparison binary lives under the run's output root, or — on Windows, where that root
+// is too deep for cargo/nvcc — in the run root's short `<run>-<attempt>-native` sibling (cargoTarget).
+export function assertOwnedNativeBinary(output, binary) {
+  if (!path.relative(output, binary).startsWith('..')) return contained(output, binary);
+  const parent = path.dirname(output);
+  assert.match(path.relative(parent, contained(parent, binary)).split(path.sep)[0], /^\d+-\d+-native$/, 'native binary outside the run-owned output');
+  return binary;
+}
 const contained = (base, name) => {
   const p = path.resolve(base, name), rel = path.relative(base, p);
   assert.ok(rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel), 'evidence path escapes case directory');
@@ -577,7 +585,7 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
       const { validateComparisonProof } = await import('./h3-finetune-terminal-runtime.mjs');
       const proof = await json(contained(dir, e.nativeComparison));
       assert.equal(proof.sceneworks, p.sceneworks); assert.equal(proof.inference, p.inference);
-      contained(await realpath(p.output), await realpath(proof.binary.path));
+      assertOwnedNativeBinary(await realpath(p.output), await realpath(proof.binary.path));
       assert.equal(await hashFile(proof.binary.path), proof.binary.sha256, 'compiled native binary changed');
       for (const input of [...proof.fixtures, ...proof.referenceBlobs]) assert.equal(await hashFile(input.path), input.sha256);
       let nativeLog = '';

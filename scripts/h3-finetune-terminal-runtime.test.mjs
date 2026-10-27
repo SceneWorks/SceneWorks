@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat } from 'node:fs/promises';
-import { executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
-import { hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
+import { cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
+import { assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
 const sw='a'.repeat(40),inf='b'.repeat(40),semantic='c'.repeat(64);
@@ -157,6 +157,28 @@ test('owned API startup waits through the bootstrap `starting` health state and 
   {const f=await fixture(t),fake=fakeRuntime(f,{health:['starting','starting','ok']});const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
    assert.ok(fake.calls.filter(c=>c[0]==='request'&&c[1]==='/api/v1/health').length>=3,'startup must poll health until ready');await service.stop();}
   {const f=await fixture(t),fake=fakeRuntime(f,{health:['degraded']});await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize(),/starting or ok/);}
+});
+test('Windows product build targets a short run-owned path and a failed build keeps its log as evidence',async t=>{
+  // The CUDA build's target sat ~200 characters deep under the bootstrap output root, and its
+  // log stayed outside the uploaded case directory, so a failed build left no evidence.
+  const f=await fixture(t),fake=fakeRuntime(f),saved={id:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT};
+  t.after(()=>{for(const [k,v] of [['GITHUB_RUN_ID',saved.id],['GITHUB_RUN_ATTEMPT',saved.attempt]])if(v===undefined)delete process.env[k];else process.env[k]=v;});
+  process.env.GITHUB_RUN_ID='40488447618';process.env.GITHUB_RUN_ATTEMPT='1';let target;
+  const deps={...fake.deps,platform:'win32',runProcess:async(argv,options)=>{target=options.env.CARGO_TARGET_DIR;await writeFile(options.logPath,'error: nvcc failed\n',{flag:'wx'});throw new Error('case process failed');}};
+  await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir,deps).build(),/case process failed/);
+  assert.equal(target,'E:\\huggingface\\sc26691-private\\40488447618-1-target');
+  assert.equal(await readFile(path.join(f.dir,'service-build.log'),'utf8'),'error: nvcc failed\n');
+});
+test('every Windows cargo target is a short run-owned sibling, and only the native one is an accepted binary home',async t=>{
+  const saved={id:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT};
+  t.after(()=>{for(const [k,v] of [['GITHUB_RUN_ID',saved.id],['GITHUB_RUN_ATTEMPT',saved.attempt]])if(v===undefined)delete process.env[k];else process.env[k]=v;});
+  process.env.GITHUB_RUN_ID='7';process.env.GITHUB_RUN_ATTEMPT='2';const c={backend:'cuda'};
+  for(const kind of ['target','native','fixture'])assert.equal(cargoTarget(c,kind,'/deep/path','win32'),`E:\\huggingface\\sc26691-private\\7-2-${kind}`);
+  assert.equal(cargoTarget(c,'native','/deep/path','darwin'),'/deep/path');
+  const parent=path.join(os.tmpdir(),'sc26691-private'),output=path.join(parent,'7-2-bootstrap-'+'a'.repeat(40));
+  assert.equal(assertOwnedNativeBinary(output,path.join(output,'native-target','x')),path.join(output,'native-target','x'));
+  assert.equal(assertOwnedNativeBinary(output,path.join(parent,'7-2-native','debug','deps','x')),path.join(parent,'7-2-native','debug','deps','x'));
+  for(const foreign of [path.join(parent,'7-2-fixture','x'),path.join(parent,'other','x'),path.join(os.tmpdir(),'x')])assert.throws(()=>assertOwnedNativeBinary(output,foreign),/outside the run-owned output|escapes/);
 });
 test('foreign listener is never contacted or signalled',async t=>{
   const f=await fixture(t),fake=fakeRuntime(f,{wrongListener:true});

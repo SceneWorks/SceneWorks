@@ -13,6 +13,13 @@ import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normaliz
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
 import { cudaDeviceEvidence } from './ci/h3-import-native-proof.mjs';
+import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
+// Windows: the bootstrap output root is ~95 characters deep and cargo/nvcc nest candle's kernel
+// build ~50 more below CARGO_TARGET_DIR, so a target under the output root overruns MAX_PATH.
+// There the target is a short sibling of this run's private root (`<run>-<attempt>-<kind>`).
+export function cargoTarget(c,kind,longPath,platform=process.platform){
+  return platform==='win32'?`${privateRunRoot({backend:c.backend,platform,env:process.env,runId:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT})}-${kind}`:longPath;
+}
 const exec = promisify(execFile);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const json = async p => JSON.parse(await readFile(p, 'utf8'));
@@ -149,7 +156,7 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   assert.equal(n.package,c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3');
   if(c.backend==='cuda') base.push('--features','cuda');
   const buildCommand=[...base,'--no-run','--message-format=json'];
-  const opts={cwd:inferenceRoot,env:{...process.env,...(c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:path.join(p.output,`native-target-${p.inference}-${c.backend}`),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'},timeoutSeconds:c.timeoutSeconds};
+  const opts={cwd:inferenceRoot,env:{...process.env,...(c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:cargoTarget(c,'native',path.join(p.output,`native-target-${p.inference}-${c.backend}`),deps.platform),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'},timeoutSeconds:c.timeoutSeconds};
   await runner(buildCommand,{...opts,logPath:path.join(dir,'native-build.log')});
   const records=(await readFile(path.join(dir,'native-build.log'),'utf8')).split('\n').flatMap(l=>{try{return [JSON.parse(l)];}catch{return [];}});
   const artifact=records.find(v=>v.reason==='compiler-artifact' && v.target?.name==='integration' && v.profile?.test && v.executable);
@@ -188,7 +195,7 @@ export async function executeFixture(p,c,swRoot,inferenceRoot,dir,deps={}) {
   assert.equal(c.fixtureProof.kind,'source-bound-assertions');assert.equal(c.command[0],'cargo');assert.ok(c.command.includes('test')&&c.command.includes(path.join(swRoot,'Cargo.toml')));
   assert.ok(c.inputs.length);for(const input of c.inputs)assert.equal(await hashFile(input.path),input.sha256);
   const state=path.join(dir,'fixture-state');await mkdir(state);
-  const env={...privateEnvironment(state,{port:43210,gpuId:'cpu',backend:c.backend},randomUUID()),CARGO_TARGET_DIR:path.join(p.output,`fixture-target-${p.sceneworks}-${p.inference}-${c.backend}`),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'};
+  const env={...privateEnvironment(state,{port:43210,gpuId:'cpu',backend:c.backend},randomUUID()),CARGO_TARGET_DIR:cargoTarget(c,'fixture',path.join(p.output,`fixture-target-${p.sceneworks}-${p.inference}-${c.backend}`),deps.platform),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'};
   await (deps.runProcess??runProcess)(c.command,{cwd:swRoot,env,logPath:path.join(dir,'assertions.log'),timeoutSeconds:c.timeoutSeconds});
   const log=await readFile(path.join(dir,'assertions.log'),'utf8'),passed=executedTests(log);assert.ok(!/\bSKIP\b/.test(log));
   const proof={kind:'source-bound-assertions',proof_kind:fake?'unit_fake':'campaign_fixture',sceneworks:p.sceneworks,inference:p.inference,command:c.command,passed,inputs:c.inputs,meaning:'Executed source-bound synthetic contract assertions; no real-model/native load or measured peak claimed'};
@@ -281,14 +288,17 @@ export class OwnedService {
     const runner=this.deps.runProcess??runProcess;
     const command=['cargo','build','--locked','--manifest-path',path.join(this.swRoot,'Cargo.toml'),'-p','sceneworks-rust-api','--bin','sceneworks-rust-api'];
     if(this.c.backend==='cuda')command.push('--features','sceneworks-rust-api/backend-candle');
-    const buildRoot=path.join(this.p.output,`service-build-${this.p.sceneworks}-${this.p.inference}-${this.c.backend}`),target=path.join(buildRoot,'target'),receipt=path.join(buildRoot,'build.json');
+    const platform=this.deps.platform??process.platform,buildRoot=path.join(this.p.output,`service-build-${this.p.sceneworks}-${this.p.inference}-${this.c.backend}`),receipt=path.join(buildRoot,'build.json');
+    const target=cargoTarget(this.c,'target',path.join(buildRoot,'target'),platform);
     const configuration={command,flags:Object.fromEntries(['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','RUSTUP_TOOLCHAIN'].map(k=>[k,process.env[k]??null])),proof_kind:this.fake?'unit_fake':'campaign_native'};
     let cached;
     try{await mkdir(buildRoot);}catch(error){if(error.code!=='EEXIST')throw error;cached=await json(receipt);assert.deepEqual(cached.configuration,configuration,'source/build configuration drift; preserve prior candidate');assert.equal(await hashFile(cached.binary),cached.sha256);}
     if(cached){this.buildIdentity=cached;this.binary=cached.binary;this.binaryHash=cached.sha256;await copyFile(path.join(buildRoot,'build.log'),path.join(this.dir,'service-build.log'));}
     else {
-      await runner(command,{cwd:this.swRoot,env:{...process.env,...(this.c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:target,CARGO_PROFILE_DEV_DEBUG:'0'},logPath:path.join(buildRoot,'build.log'),timeoutSeconds:this.c.timeoutSeconds});
-      this.binary=path.join(target,'debug',`sceneworks-rust-api${(this.deps.platform??process.platform)==='win32'?'.exe':''}`);
+      // A failed build keeps its log in the case directory, which is what the evidence upload carries.
+      try{await runner(command,{cwd:this.swRoot,env:{...process.env,...(this.c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:target,CARGO_PROFILE_DEV_DEBUG:'0'},logPath:path.join(buildRoot,'build.log'),timeoutSeconds:this.c.timeoutSeconds});}
+      catch(error){await copyFile(path.join(buildRoot,'build.log'),path.join(this.dir,'service-build.log')).catch(()=>{});throw error;}
+      this.binary=path.join(target,'debug',`sceneworks-rust-api${platform==='win32'?'.exe':''}`);
       this.binaryHash=await hashFile(this.binary);this.buildIdentity={command,binary:this.binary,sha256:this.binaryHash,sceneworks:this.p.sceneworks,inference:this.p.inference,backend:this.c.backend,configuration};await save(receipt,this.buildIdentity);await copyFile(path.join(buildRoot,'build.log'),path.join(this.dir,'service-build.log'));
     }
     await save(path.join(this.dir,'service-build.json'),this.buildIdentity);
