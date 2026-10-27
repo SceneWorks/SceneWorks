@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Explicit manual profile: no catalog walk or publication. Preserve the workflow's existing
-# CUDA concurrency lease. The adapter rechecks physical GPU1 UUID, activity and headroom after
-# compilation and immediately before each load; an unused context is part of the stable baseline.
+# CUDA concurrency lease. After compilation the controller selects one idle physical GPU0/1;
+# the adapter rechecks its UUID, activity and headroom immediately before each load.
+# An unused context is part of the stable baseline.
 source "$(dirname "$0")/common.sh"
 require_campaign
 if [[ ! "$BASE_REF" =~ ^[0-9a-f]{40}$ ]] || [[ "$(git rev-parse HEAD)" != "$BASE_REF" ]]; then

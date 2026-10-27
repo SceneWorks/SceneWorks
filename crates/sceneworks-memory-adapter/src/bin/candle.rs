@@ -19,7 +19,8 @@ use sceneworks_memory_adapter as protocol;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 // sc-22736: the Wan 2.2 family and SCAIL-2. Four engine providers on one arm, kept in their own
 // module for the same reason LTX-2.5's would be — a video family's carrier, rate menu and per-tier
@@ -592,6 +593,50 @@ impl NvidiaSmi {
             .parse::<u64>()
             .map(|used_mib| used_mib * MIB)
             .map_err(|error| format!("parse nvidia-smi memory.used: {error}"))
+    }
+
+    // Endpoint admission has a wall-clock ceiling; a stalled telemetry child must not bypass it.
+    fn query_bounded(&self, fields: &str, timeout: Duration) -> Result<String, String> {
+        let started = Instant::now();
+        let mut child = Command::new(&self.executable)
+            .arg(format!("--id={}", self.physical_id))
+            .arg(format!("--query-gpu={fields}"))
+            .arg("--format=csv,noheader,nounits")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("start {}: {error}", self.executable.display()))?;
+        loop {
+            let status = match child.try_wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("poll telemetry child: {error}"));
+                }
+            };
+            if status.is_some() {
+                let output = child
+                    .wait_with_output()
+                    .map_err(|error| error.to_string())?;
+                return if output.status.success() {
+                    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+                } else {
+                    Err(format!(
+                        "nvidia-smi query failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    ))
+                };
+            }
+            if started.elapsed() >= timeout {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("selected GPU telemetry query exceeded {timeout:?}"));
+            }
+            std::thread::sleep(
+                Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
+            );
+        }
     }
 }
 
@@ -8461,13 +8506,45 @@ fn inspect_sdxl_output(request: &Value) -> Result<Value, String> {
 }
 
 fn probe_sdxl_endpoint() -> Result<Value, String> {
-    let mut response = probe()?;
-    let uuid = NvidiaSmi::resolve()?.query("uuid")?;
-    if uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" {
-        return Err(format!("SDXL endpoint probe GPU1 UUID mismatch: {uuid}"));
+    let expected = sdxl_endpoint_expected_uuid()?;
+    let uuid = NvidiaSmi::resolve()?.query_bounded("uuid", Duration::from_secs(5))?;
+    if uuid != expected {
+        return Err(format!(
+            "SDXL endpoint probe physical UUID mismatch: expected {expected}, observed {uuid}"
+        ));
     }
+    let mut response = probe()?;
     response["hardware"]["deviceId"] = json!(uuid);
     Ok(response)
+}
+
+fn valid_sdxl_gpu_uuid(value: &str) -> bool {
+    let Some(uuid) = value.strip_prefix("GPU-") else {
+        return false;
+    };
+    uuid.len() == 36
+        && uuid.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
+
+fn validate_sdxl_endpoint_binding(visible: &str, physical: &str, uuid: &str) -> Result<(), String> {
+    if !matches!(visible, "0" | "1") || visible != physical || !valid_sdxl_gpu_uuid(uuid) {
+        return Err("SDXL endpoint requires identical physical index 0/1 in CUDA_VISIBLE_DEVICES and SCENEWORKS_GPU_ID, plus a canonical SCENEWORKS_SDXL_EXPECTED_GPU_UUID".into());
+    }
+    Ok(())
+}
+
+fn sdxl_endpoint_expected_uuid() -> Result<String, String> {
+    let visible = protocol::required_env("CUDA_VISIBLE_DEVICES")?;
+    let physical = protocol::required_env("SCENEWORKS_GPU_ID")?;
+    let expected = protocol::required_env("SCENEWORKS_SDXL_EXPECTED_GPU_UUID")?;
+    validate_sdxl_endpoint_binding(&visible, &physical, &expected)?;
+    Ok(expected)
 }
 
 fn sdxl_endpoint_context_uuid() -> Result<String, String> {
@@ -8497,37 +8574,96 @@ fn sdxl_endpoint_context_uuid() -> Result<String, String> {
 
 // A persistent idle CUDA context is part of the sampled baseline, not evidence of activity.
 // This manual profile verifies repeated physical-device activity and stable residency before load.
-fn endpoint_vram_probe() -> Result<VramProbe, String> {
-    let smi = NvidiaSmi::resolve()?;
+fn wait_for_sdxl_idle(
+    mut query: impl FnMut(Duration) -> Result<String, String>,
+    elapsed: impl Fn() -> Duration,
+    mut sleep: impl FnMut(Duration),
+) -> Result<Vec<u64>, String> {
+    let timeout = Duration::from_secs(30);
+    let mut samples = Vec::new();
     let mut used = Vec::new();
-    for _ in 0..5 {
-        let fields = smi.query("memory.used,memory.free,utilization.gpu,utilization.memory")?;
+    while elapsed() < timeout {
+        let fields = query(
+            timeout
+                .saturating_sub(elapsed())
+                .min(Duration::from_secs(5)),
+        )
+        .map_err(|error| {
+            format!("SDXL endpoint activity telemetry: {error}; samples={samples:?}")
+        })?;
+        samples.push(format!("{}ms:{fields}", elapsed().as_millis()));
+        eprintln!(
+            "SDXL endpoint selected-device idle sample: {}",
+            samples.last().unwrap()
+        );
         let values = fields
             .split(',')
             .map(|value| value.trim().parse::<u64>())
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("SDXL endpoint activity telemetry: {error}"))?;
-        if values.len() != 4 || values[1] < 16 * 1024 || values[2] != 0 || values[3] != 0 {
-            return Err(format!("SDXL endpoint requires idle GPU1 with at least 16 GiB free (includes 2 GiB headroom): {fields}"));
+            .map_err(|error| {
+                format!("SDXL endpoint invalid activity telemetry: {error}; samples={samples:?}")
+            })?;
+        if values.len() != 4
+            || values[2] > 100
+            || values[3] > 100
+            || values[0].checked_mul(MIB).is_none()
+            || values[1].checked_mul(MIB).is_none()
+        {
+            return Err(format!(
+                "SDXL endpoint invalid activity telemetry; samples={samples:?}"
+            ));
         }
-        used.push(values[0]);
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        if values[1] < 16 * 1024 || values[2] != 0 || values[3] != 0 {
+            used.clear();
+        } else {
+            used.push(values[0]);
+            if used.iter().max().unwrap() - used.iter().min().unwrap() > 64 {
+                used.clear();
+                used.push(values[0]);
+            }
+            if used.len() == 5 && elapsed() <= timeout {
+                return Ok(used);
+            }
+        }
+        sleep(Duration::from_millis(200).min(timeout.saturating_sub(elapsed())));
     }
-    if used.iter().max().unwrap() - used.iter().min().unwrap() > 64 {
+    Err(format!("SDXL endpoint did not settle within 30s to five consecutive zero-utilization samples with at least 16 GiB free and <=64 MiB drift; samples={samples:?}"))
+}
+
+fn endpoint_vram_probe() -> Result<VramProbe, String> {
+    let expected = sdxl_endpoint_expected_uuid()?;
+    let smi = NvidiaSmi::resolve()?;
+    let physical_uuid = smi.query_bounded("uuid", Duration::from_secs(5))?;
+    if physical_uuid != expected {
         return Err(format!(
-            "SDXL endpoint baseline drift exceeds 64 MiB: {used:?}"
+            "SDXL endpoint physical UUID mismatch: expected {expected}, observed {physical_uuid}"
         ));
     }
+    eprintln!(
+        "SDXL endpoint awaiting idle physical GPU{} UUID={expected}",
+        smi.physical_id
+    );
+    let started = Instant::now();
+    let used = wait_for_sdxl_idle(
+        |remaining| {
+            smi.query_bounded(
+                "memory.used,memory.free,utilization.gpu,utilization.memory",
+                remaining,
+            )
+        },
+        || started.elapsed(),
+        std::thread::sleep,
+    )?;
     let mut probe = VramProbe::start_rendered();
     let context_sample = probe.phase();
     let uuid = sdxl_endpoint_context_uuid()?;
     probe.end_load(context_sample);
-    if uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" {
+    if uuid != expected {
         return Err(format!(
-            "SDXL endpoint logical CUDA0 context UUID mismatch: {uuid}"
+            "SDXL endpoint logical CUDA0 context UUID mismatch: expected {expected}, observed {uuid}"
         ));
     }
-    eprintln!("SDXL endpoint stable GPU1 baseline MiB: {used:?}; actual logical CUDA0 UUID={uuid}");
+    eprintln!("SDXL endpoint stable physical GPU{} baseline MiB: {used:?}; actual logical CUDA0 UUID={uuid}", smi.physical_id);
     Ok(probe)
 }
 
@@ -8594,11 +8730,7 @@ fn run_sdxl_endpoint(request: &Value) -> Result<Value, String> {
     {
         return Err("SDXL endpoint only accepts base SDXL q4 and its exact endpoint rung".into());
     }
-    if std::env::var("CUDA_VISIBLE_DEVICES").as_deref() != Ok("1")
-        || std::env::var("SCENEWORKS_GPU_ID").as_deref() != Ok("1")
-    {
-        return Err("SDXL endpoint requires physical GPU1 in both CUDA_VISIBLE_DEVICES and SCENEWORKS_GPU_ID".into());
-    }
+    let expected = sdxl_endpoint_expected_uuid()?;
     let (width, height) = protocol::target_geometry(request)?;
     let parameters = protocol::strategy_parameters(request)?;
     let expected_parameters = if endpoint == "resident" {
@@ -8613,19 +8745,33 @@ fn run_sdxl_endpoint(request: &Value) -> Result<Value, String> {
         return Err("SDXL endpoint requires 1024-square geometry and the exact resident/fully-optimized composition".into());
     }
     let smi = NvidiaSmi::resolve()?;
-    let uuid = smi.query("uuid")?;
-    if uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" {
-        return Err(format!("SDXL endpoint GPU1 UUID mismatch: {uuid}"));
+    let uuid = smi.query_bounded("uuid", Duration::from_secs(5))?;
+    if uuid != expected {
+        return Err(format!(
+            "SDXL endpoint physical UUID mismatch: expected {expected}, observed {uuid}"
+        ));
     }
-    let before = smi.used_bytes()?;
+    let used_bytes = || -> Result<u64, String> {
+        let mib = smi
+            .query_bounded("memory.used", Duration::from_secs(5))?
+            .parse::<u64>()
+            .map_err(|error| format!("SDXL endpoint memory.used: {error}"))?;
+        mib.checked_mul(MIB)
+            .ok_or_else(|| "SDXL endpoint memory.used overflow".into())
+    };
+    let before = used_bytes()?;
     let mut fragment = run_five_rung_reference(request)?;
     // run_five_rung_reference drops the request scope and generator before returning.
-    let after = smi.used_bytes()?;
+    let after = used_bytes()?;
     fragment["endpointMeasurement"]["providerDrop"] = json!({
         "beforeBytes": before, "afterBytes": after, "generatorDropped": true,
     });
     fragment["endpointMeasurement"]["deviceUuid"] = json!(uuid);
-    fragment["endpointMeasurement"]["cudaContextUuid"] = json!(sdxl_endpoint_context_uuid()?);
+    let context_uuid = sdxl_endpoint_context_uuid()?;
+    if context_uuid != expected {
+        return Err(format!("SDXL endpoint logical CUDA0 context UUID mismatch: expected {expected}, observed {context_uuid}"));
+    }
+    fragment["endpointMeasurement"]["cudaContextUuid"] = json!(context_uuid);
     fragment["endpointMeasurement"]["logicalCudaDevice"] = json!(0);
     fragment["endpointMeasurement"]["endpoint"] = json!(endpoint);
     Ok(fragment)
@@ -8651,6 +8797,101 @@ fn main() {
 #[cfg(test)]
 mod sdxl_family_tests {
     use super::*;
+
+    // CI_IMPACT: pure strings and injected monotonic clock; no process, model or device execution.
+    #[test]
+    fn sdxl_endpoint_device_binding_requires_one_physical_index_and_canonical_uuid() {
+        let uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
+        for index in ["0", "1"] {
+            assert!(validate_sdxl_endpoint_binding(index, index, uuid).is_ok());
+        }
+        for (visible, physical, expected) in [
+            ("0", "1", uuid),
+            ("1", "0", uuid),
+            ("0,1", "0", uuid),
+            ("2", "2", uuid),
+            ("1", "1", "GPU-other"),
+            ("1", "1", "1"),
+            ("1", "1", "GPU-e4b799317be6-f216-460a-f5405cfafffe"),
+        ] {
+            assert!(validate_sdxl_endpoint_binding(visible, physical, expected).is_err());
+        }
+    }
+
+    fn fake_sdxl_idle(rows: &[&str]) -> (Result<Vec<u64>, String>, usize) {
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let calls = std::cell::Cell::new(0usize);
+        let result = wait_for_sdxl_idle(
+            |remaining| {
+                assert!(remaining > Duration::ZERO && remaining <= Duration::from_secs(5));
+                let index = calls.get();
+                calls.set(index + 1);
+                Ok(rows[index.min(rows.len() - 1)].to_owned())
+            },
+            || clock.get(),
+            |duration| clock.set(clock.get() + duration),
+        );
+        (result, calls.get())
+    }
+
+    #[test]
+    fn sdxl_endpoint_idle_wait_accepts_counter_decay_and_resets_memory_stability() {
+        let (idle, calls) = fake_sdxl_idle(&["2048,96000,0,0"]);
+        assert_eq!(idle.unwrap(), vec![2048; 5]);
+        assert_eq!(calls, 5);
+        let (decay, calls) =
+            fake_sdxl_idle(&["2048,96000,1,1", "2048,96000,0,1", "2048,96000,0,0"]);
+        assert_eq!(decay.unwrap(), vec![2048; 5]);
+        assert_eq!(calls, 7);
+        let (drift, calls) = fake_sdxl_idle(&["2048,96000,0,0", "2176,96000,0,0"]);
+        assert_eq!(drift.unwrap(), vec![2176; 5]);
+        assert_eq!(calls, 6);
+    }
+
+    #[test]
+    fn sdxl_endpoint_idle_wait_rejects_invalid_telemetry_and_times_out_with_samples() {
+        for invalid in [
+            "2048,96000,0",
+            "2048,96000,NaN,0",
+            "2048,96000,101,0",
+            "2048,96000,0,101",
+            "-1,96000,0,0",
+        ] {
+            let (result, calls) = fake_sdxl_idle(&[invalid]);
+            let error = result.unwrap_err();
+            assert!(error.contains("invalid activity telemetry") && error.contains(invalid));
+            assert_eq!(calls, 1);
+        }
+        let unstable: Vec<_> = (0..150)
+            .map(|index| {
+                if index % 2 == 0 {
+                    "2048,96000,0,0"
+                } else {
+                    "2176,96000,0,0"
+                }
+            })
+            .collect();
+        for rows in [vec!["2048,96000,1,1"], vec!["2048,15000,0,0"], unstable] {
+            let (result, calls) = fake_sdxl_idle(&rows);
+            let error = result.unwrap_err();
+            assert!(error.contains("within 30s") && error.contains(rows[0]));
+            assert_eq!(calls, 150);
+        }
+        let clock = std::cell::Cell::new(Duration::ZERO);
+        let calls = std::cell::Cell::new(0usize);
+        let late = wait_for_sdxl_idle(
+            |_| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 5 {
+                    clock.set(Duration::from_secs(31));
+                }
+                Ok("2048,96000,0,0".to_owned())
+            },
+            || clock.get(),
+            |duration| clock.set(clock.get() + duration),
+        );
+        assert!(late.unwrap_err().contains("within 30s"));
+    }
 
     #[test]
     fn kolors_capture_revision_passes_real_provider_admission() {
