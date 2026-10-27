@@ -160,8 +160,8 @@ jobs:
       CUDA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
       HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:\huggingface' }}
-      SCENEWORKS_DATA_DIR: D:/tmp/sc26243-quant-data
-      FLUX3_FOOTPRINT_OUT_DIR: D:/tmp/sc26243-quant-evidence
+      SCENEWORKS_DATA_DIR: E:/tmp/sc26243-quant-data
+      FLUX3_FOOTPRINT_OUT_DIR: E:/tmp/sc26243-quant-evidence
       VCVARS: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat
     steps:
       - name: Refuse a runner other than the dispatched Windows box
@@ -243,6 +243,7 @@ jobs:
           PREPARE_DERIVED: ${{ inputs.prepare_derived }}
         run: |
           $ErrorActionPreference = 'Stop'
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | Format-Table | Out-String | Write-Host
           function Invoke-Cargo([string[]]$CargoArgs, [string]$LogFile) {
             $line = "call `"$env:VCVARS`" >nul && set NVCC_CCBIN=!VCToolsInstallDir!bin\Hostx64\x64 && cargo " + ($CargoArgs -join ' ')
             if ($LogFile) { & cmd /v:on /c $line 2>&1 | Tee-Object -FilePath $LogFile } else { & cmd /v:on /c $line }
@@ -290,6 +291,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: flux3-quant-matrix-candle-${{ inputs.runner }}-${{ github.run_id }}
-          path: D:/tmp/sc26243-quant-evidence/**
+          path: E:/tmp/sc26243-quant-evidence/**
           if-no-files-found: warn
           retention-days: 30
