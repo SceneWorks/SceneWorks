@@ -12,7 +12,7 @@ mod dispatch_transaction_tests {
         Fail,
         CancelAfterOutput,
         MissingReport,
-        InvalidReport,
+        WrongReferenceReceipt,
         NoOutput,
         ApiCancel,
     }
@@ -202,13 +202,14 @@ mod dispatch_transaction_tests {
                 .generate_moss_image_edit(request, inputs, progress)?;
             match attempt {
                 Attempt::MissingReport => *self.inner.edit_report.borrow_mut() = None,
-                Attempt::InvalidReport => {
+                Attempt::WrongReferenceReceipt => {
                     self.inner
                         .edit_report
                         .borrow_mut()
                         .as_mut()
                         .unwrap()
-                        .applied_projections = 0
+                        .references[0]
+                        .original_dimensions[0] += 1
                 }
                 Attempt::NoOutput => output = MossImageAdvancedOutput::Images(vec![]),
                 Attempt::ApiCancel => {
@@ -400,26 +401,6 @@ mod dispatch_transaction_tests {
         })
         .await
         .expect("bounded actual dispatch/cache/event transaction");
-        // Mirror the actual outer worker boundary: staged edits publish only after the native
-        // task/event consumer succeeded; the shared publication helper owns the acknowledgment.
-        let batch = { plan.moss_staged.lock().unwrap().take() };
-        let result = match (result, batch) {
-            (Ok(()), Some(batch)) => {
-                publish_moss_batch(
-                    &ApiClient::new(settings),
-                    &job,
-                    &plan,
-                    backend,
-                    &writes,
-                    batch,
-                )
-                .await
-            }
-            (result, batch) => {
-                drop(batch);
-                result
-            }
-        };
         (result, writes, id)
     }
 
@@ -540,7 +521,7 @@ mod dispatch_transaction_tests {
                 Attempt::Fail,
                 Attempt::CancelAfterOutput,
                 Attempt::MissingReport,
-                Attempt::InvalidReport,
+                Attempt::WrongReferenceReceipt,
                 Attempt::NoOutput,
                 Attempt::ApiCancel,
             ] {
