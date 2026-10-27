@@ -112,7 +112,7 @@ png = "0.18"
 # hatch it looks like — onnxruntime-gpu 1.27 moved its CUDA EP to CUDA 13 (`nvidia-*-cu13`), and
 # every other DLL the provisioners stage, plus cudarc/candle, is CUDA 12.9. Lifting the floor above
 # 26 therefore means migrating the whole GPU runtime to CUDA 13, not swapping one wheel.
-ort = { version = "=2.0.0-rc.13", default-features = false, features = [
+ort = { version = "=2.0.0-rc.15", default-features = false, features = [
     # rc.13's default set, verbatim, EXCEPT `api-27` -> `api-26`.
     "std",
     "ndarray",
