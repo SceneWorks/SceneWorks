@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 RAW_FORMAT = "moss-native-api-acceptance-candidate/v1"
-SEAL = "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320"
+SEAL = "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1"
 CHUNK_BYTES = 1024 * 1024
 MAX_HEADER_BYTES = 16 * 1024 * 1024
 ENCODING = "logical-row-major-f32-le-v1"

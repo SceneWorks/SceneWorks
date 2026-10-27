@@ -96,7 +96,7 @@
             "resolution": {"$ref": "#/$defs/dimension256"},
             "rank": {"type": "integer", "minimum": 4, "maximum": 4, "const": 4},
             "alpha": {"type": "number", "exclusiveMinimum": 0, "const": 6.0},
-            "learningRate": {"type": "number", "exclusiveMinimum": 0, "const": 0.001},
+            "learningRate": {"type": "number", "exclusiveMinimum": 0, "const": 0.0001},
             "seed": {"type": "integer", "minimum": 0, "const": 1789},
             "optimizer": {"type": "string", "enum": ["adamw"]},
             "triggerWord": {"const": "sksmoss"},

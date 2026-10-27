@@ -15,7 +15,7 @@
     "missing": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "unproven": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "failureReason": {"type": ["string", "null"]},
-    "manifestSha256": {"const": "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320"},
+    "manifestSha256": {"const": "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1"},
     "caseId": {"enum": ["mlx/base/lora", "mlx/base/lokr", "mlx/sft/lora", "mlx/sft/lokr", "cuda/base/lora", "cuda/base/lokr", "cuda/sft/lora", "cuda/sft/lokr"]},
     "identity": {"$ref": "#/$defs/identity"},
     "datasetIdentity": {"$ref": "#/$defs/datasetIdentity"},

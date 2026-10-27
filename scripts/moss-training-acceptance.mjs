@@ -13,7 +13,7 @@ import { stageLatestMossArtifacts } from './moss-training-artifacts.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
 import { lockedInferenceRevision } from './select-windows-cargo-cache.mjs';
 
-export const MANIFEST_SHA256 = '6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320';
+export const MANIFEST_SHA256 = '6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1';
 export const PREFIX = 'tests::moss_training_acceptance::';
 export const CELLS = ['base/lora', 'base/lokr', 'sft/lora', 'sft/lokr'];
 export const testsFor = (phase, executionBackend='mlx') => {

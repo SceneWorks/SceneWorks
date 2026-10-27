@@ -53,7 +53,7 @@
       "resolution": 256,
       "rank": 4,
       "alpha": 6.0,
-      "learningRate": 0.001,
+      "learningRate": 0.0001,
       "seed": 1789,
       "optimizer": "adamw",
       "triggerWord": "sksmoss",

@@ -134,7 +134,7 @@ record = {
     "isCampaignEvidence": False,
     "acceptanceDisposition": "not-campaign-evidence",
     "missing": [], "unproven": [], "failureReason": None,
-    "manifestSha256": "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320",
+    "manifestSha256": "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1",
     "caseId": "mlx/base/lora",
     "identity": {
         "rulebook": "sc-26584/moss-image-training-acceptance/v1",

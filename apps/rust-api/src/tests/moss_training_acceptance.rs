@@ -23,7 +23,7 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, String>;
-const SEAL: &str = "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320";
+const SEAL: &str = "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1";
 const PROMPT: &str = "sksmoss red circle centered on a pale background";
 const WALL: u64 = 3600;
 
@@ -763,7 +763,7 @@ fn validate_prepared_request(
         && c.seed == 1789
         && c.rank == 4
         && c.alpha.to_bits() == 6.0_f32.to_bits()
-        && c.learning_rate.to_bits() == 0.001_f32.to_bits()
+        && c.learning_rate.to_bits() == 0.0001_f32.to_bits()
         && c.batch_size == 1
         && c.gradient_accumulation == 1
         && c.save_every == 20
