@@ -21,7 +21,7 @@
 # then captures only resident maximum + fully optimized sequential minimum in fresh processes.
 # It retains JSON evidence and PNG output as artifacts; it makes no branch, commit, push or PR.
 # After packaging the pair, sdxl-cuda-admitted-replay exercises one ordinary owned API/worker
-# request at a six-GiB admission cap, with measured GPU1 activity/peak and real served PNG output.
+# request at a six-GiB admission cap, with selected-card activity/peak and real served PNG output.
 # CI_IMPACT: manual only, two real renders, 60 minutes each; 180-minute job ceiling includes
 # the existing native CUDA build. Normal CI adds only a small pure metadata test.
 #
@@ -448,8 +448,8 @@ jobs:
     env:
       # Native sm_120 (Blackwell) -- this runner IS the RTX PRO 6000 box, same as windows-candle.yml.
       CUDA_COMPUTE_CAP: "120"
-      # The runbook keeps exactly one device visible on the CUDA capture host; the harness's own
-      # preflight refuses the walk when this is unset.
+      # Catalog defaults to GPU1. After compilation the manual SDXL controller selects one idle
+      # physical GPU0/1 and gives each child a matching single-device visibility/identity binding.
       CUDA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
       CARGO_NET_OFFLINE: "true"
@@ -630,6 +630,11 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           if errorlevel 1 exit /b 1
+          rem CI_IMPACT: manual SDXL profiles only; three pure binding/clock contracts, no GPU or model calls.
+          if "%MEMORY_CAMPAIGN_PROFILE:~0,10%"=="sdxl-cuda-" (
+            cargo test --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter sdxl_endpoint_ -- --nocapture
+            if errorlevel 1 exit /b 1
+          )
           echo ADAPTER=%GITHUB_WORKSPACE%\target\release\memory-candle-adapter.exe>>%GITHUB_ENV%
 
       # CI_IMPACT: explicit replay only. Reuses this job's native CUDA toolchain and caches,
