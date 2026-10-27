@@ -649,6 +649,9 @@ jobs:
           if errorlevel 1 exit /b 1
           cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings
           if errorlevel 1 exit /b 1
+          rem Preserve linked capability output from this already-required worker build; no weights or inference.
+          cargo run --release --locked -p sceneworks-worker --no-default-features --features backend-candle --bin dump-engine-capabilities -- "%RUNNER_TEMP%\memory-catalog-%CAMPAIGN%-%GITHUB_RUN_ID%\engine-capability-facts"
+          if errorlevel 1 exit /b 1
           cargo build --release --locked -p sceneworks-rust-api --features backend-candle --bin sceneworks-rust-api
           if errorlevel 1 exit /b 1
           echo SDXL_REPLAY_API=%GITHUB_WORKSPACE%\target\release\sceneworks-rust-api.exe>>%GITHUB_ENV%

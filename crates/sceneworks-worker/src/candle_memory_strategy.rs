@@ -45,7 +45,7 @@ const IDEOGRAM_REQUEST_EVIDENCE_REVISION: &str =
 pub(crate) const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str =
     "sc-15839-candle-pulid-flux-request-scope-v1";
 const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
-pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v2";
+pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v3";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sha256:";
 const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additive.sha256:";

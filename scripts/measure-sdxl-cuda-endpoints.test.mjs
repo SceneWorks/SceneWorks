@@ -269,6 +269,9 @@ test("admitted replay workflow remains manual and runs native pure gates on GPU1
   assert.match(source, /cargo test --release --locked -p sceneworks-core --lib sdxl_endpoint_/);
   assert.match(source, /cargo test --release --locked -p sceneworks-worker --features backend-candle --lib candle_memory_strategy::tests::sdxl_/);
   assert.match(source, /cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings/);
+  // CI_IMPACT: source-only assertion; the manual replay reuses its worker objects for a weights-free dump.
+  assert.match(source, /cargo run --release --locked -p sceneworks-worker --no-default-features --features backend-candle --bin dump-engine-capabilities/);
+  assert.match(source, /engine-capability-facts"/);
   assert.ok(source.indexOf("Validate the SDXL gate") < source.indexOf("Replay one ordinary admitted SDXL"));
   const script = await readFile(new URL("./measure-sdxl-cuda-endpoints.mjs", import.meta.url), "utf8");
   assert.match(script, /POST", "\/api\/v1\/image\/jobs"/);
