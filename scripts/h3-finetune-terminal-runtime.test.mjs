@@ -155,7 +155,10 @@ test('owned API startup waits through the bootstrap `starting` health state and 
   // The API binds a bootstrap health surface that reports `starting` until its readiness-critical
   // startup completes. The first real case read health once, caught `starting`, and failed.
   {const f=await fixture(t),fake=fakeRuntime(f,{health:['starting','starting','ok']});const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
-   assert.ok(fake.calls.filter(c=>c[0]==='request'&&c[1]==='/api/v1/health').length>=3,'startup must poll health until ready');await service.stop();}
+   assert.ok(fake.calls.filter(c=>c[0]==='request'&&c[1]==='/api/v1/health').length>=3,'startup must poll health until ready');
+   // The in-process utility worker (API process) must not share the GPU worker's registration id.
+   const api=fake.children.find(c=>c.kind==='api'),worker=fake.children.find(c=>c.kind==='worker');
+   assert.equal(api.env.SCENEWORKS_WORKER_ID,`${worker.env.SCENEWORKS_WORKER_ID}-utility`);await service.stop();}
   {const f=await fixture(t),fake=fakeRuntime(f,{health:['degraded']});await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize(),/starting or ok/);}
 });
 test('Windows product build targets a short run-owned path and a failed build keeps its log as evidence',async t=>{

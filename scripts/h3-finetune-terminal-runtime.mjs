@@ -311,7 +311,10 @@ export class OwnedService {
     const env=privateEnvironment(this.runDir,{...this.c.runtime,memoryCap:this.memoryCap??this.c.runtime.memoryCap,backend:this.c.backend},this.token);
     this.guardian=launch([process.execPath,'-e',"process.stdin.resume();process.stdin.on('end',()=>process.exit(0));"],env,this.swRoot,path.join(this.dir,`guardian-${epoch}.log`));
     assert.ok(this.guardian.pid>1);env.SCENEWORKS_PARENT_PID=String(this.guardian.pid);
-    this.api=launch([this.binary],env,this.swRoot,path.join(this.dir,`api-${epoch}.log`));assert.ok(this.api.pid>1);
+    // The API's in-process utility worker registers under the API's SCENEWORKS_WORKER_ID unchanged.
+    // Sharing the GPU worker's id let the GPU worker's registration replace it, so nothing advertised
+    // model_import and every import stayed queued. The desktop likewise gives them distinct ids.
+    this.api=launch([this.binary],{...env,SCENEWORKS_WORKER_ID:`${env.SCENEWORKS_WORKER_ID}-utility`},this.swRoot,path.join(this.dir,`api-${epoch}.log`));assert.ok(this.api.pid>1);
     this.startTime=new Date().toISOString();this.stopped=false;
     const deadline=Date.now()+60000;
     for(;;) {
