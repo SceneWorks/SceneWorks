@@ -395,6 +395,40 @@ test("Windows Cargo cache diagnostic distinguishes an actual locked Git commit f
 // clears a MISSING wrapper) and before the first cargo invocation, so both the `bash` fetch step and
 // the `shell: cmd` vcvars build inherit the cleared variable.
 const CAMPAIGN_WORKFLOW = ".github/workflows/memory-catalog-campaign.yml";
+
+test("Windows storage probe is an exact-listener read-only manual profile with no model jobs", async () => {
+  const workflow = await source(CAMPAIGN_WORKFLOW);
+  const probe = workflowJob(workflow, "windows-storage-probe");
+  assert.match(probe, /runs-on: \[self-hosted, Windows, X64, cuda-windows-2\]/);
+  assert.match(probe, /timeout-minutes: 3/);
+  assert.match(probe, /permissions: \{\}/);
+  const expression = workflowExpression(probe);
+  for (const event of ["push", "pull_request", "workflow_dispatch"]) {
+    assert.equal(evaluateWorkflow(expression, event, { profile: "windows-storage-probe" }), event === "workflow_dispatch");
+  }
+  const names = [...workflow.slice(workflow.indexOf("jobs:\n")).matchAll(/^  ([a-z0-9-]+):$/gm)].map(match => match[1]);
+  for (const training of [false, true]) {
+    const inputs = { profile: "windows-storage-probe", backend: "candle", run_moss_training_acceptance: training };
+    for (const name of names.filter(name => name !== "windows-storage-probe")) {
+      assert.equal(evaluateWorkflow(workflowExpression(workflowJob(workflow, name)), "workflow_dispatch", inputs), false, `${name} must not accompany the storage probe`);
+    }
+  }
+  assert.match(probe, /GITHUB_WORKSPACE -ine \$workspace/);
+  assert.match(probe, /PROBE_SOURCE -cne \$env:GITHUB_SHA/);
+  assert.match(probe, /PROBE_TRAINING -ne 'false'.*PROBE_DOWNLOAD -ne 'false'/);
+  assert.match(probe, /Get-Volume -DriveLetter D/);
+  assert.match(probe, /CARGO_TARGET_DIR.*CARGO_BUILD_TARGET_DIR.*CARGO_HOME/);
+  assert.match(probe, /Assert-Unredirected \$target/);
+  assert.match(probe, /FileAttributes\]::ReparsePoint/);
+  assert.match(probe, /visited -gt 250000/);
+  assert.match(probe, /Elapsed.TotalSeconds -gt 90/);
+  assert.match(probe, /Get-CimInstance Win32_Process -Filter \$filter/);
+  assert.match(probe, /-OperationTimeoutSec 5 \| Select-Object -First 65/);
+  assert.match(probe, /rows.Count -gt 64/);
+  assert.match(probe, /MOSS_WINDOWS_STORAGE_PROBE=/);
+  assert.doesNotMatch(probe, /uses:|Remove-Item|Stop-Process|Start-Process|Invoke-WebRequest|Invoke-RestMethod|Set-Content|WriteAll|Copy-Item|Move-Item|New-Item|cargo (?:build|test|clean)|nvidia-smi/);
+  assert.doesNotMatch(probe, /commandLine\s*=|command\s*=\s*\$_.*ConvertTo-Json/i, "process command lines must not enter the output");
+});
 const CAMPAIGN_WRAPPER_STEP = [
   "      - name: Disable unstable sccache wrapper for the heavy Candle lane",
   "        shell: powershell",

@@ -108,6 +108,7 @@ on:
           - moss-upstream-reference
           - sdxl-cuda-endpoints
           - sdxl-cuda-admitted-replay
+          - windows-storage-probe
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -282,8 +283,144 @@ env:
   INPUT_PULID_WEIGHTS: ${{ inputs.pulid_weights }}
 
 jobs:
+  windows-storage-probe:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.profile == 'windows-storage-probe' }}
+    runs-on: [self-hosted, Windows, X64, cuda-windows-2]
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      # CI_IMPACT: manual only; bounded filesystem/CIM reads, no checkout, downloads,
+      # compiler, GPU, model, deletion or process control. Results stay in Actions logs.
+      - name: Observe only the exact failed listener build directory
+        shell: powershell
+        env:
+          PROBE_SOURCE: ${{ inputs.ref }}
+          PROBE_BACKEND: ${{ inputs.backend }}
+          PROBE_TRAINING: ${{ inputs.run_moss_training_acceptance }}
+          PROBE_DOWNLOAD: ${{ inputs.download_missing }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+          $workspace = 'D:\actions-runner-2\_work\SceneWorks\SceneWorks'
+          $target = Join-Path $workspace 'target\debug'
+          $clock = [Diagnostics.Stopwatch]::StartNew()
+          $report = [ordered]@{
+            schema = 1; kind = 'sc-26584-read-only-windows-storage-probe'
+            runId = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT; source = $env:GITHUB_SHA
+            runner = $env:RUNNER_NAME; workspace = $env:GITHUB_WORKSPACE; target = $target
+            startedAt = [DateTime]::UtcNow.ToString('o'); status = 'incomplete'
+            limitations = @('No deletion authorization', 'Scoped CIM matches absolute target paths only; relative paths, inaccessible process metadata and open file handles are not resolved', 'Cargo is not executed; configuration evidence is not a complete effective Cargo configuration evaluation')
+          }
+          function Check-Bound {
+            if ($clock.Elapsed.TotalSeconds -gt 90) { throw 'Read-only inventory exceeded 90 seconds' }
+          }
+          function Assert-Unredirected([string]$path) {
+            $cursor = [IO.Path]::GetFullPath($path)
+            while ($cursor) {
+              Check-Bound
+              if ([IO.File]::Exists($cursor) -or [IO.Directory]::Exists($cursor)) {
+                if (([IO.File]::GetAttributes($cursor) -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "Reparse ancestor: $cursor" }
+              }
+              $next = [IO.Path]::GetDirectoryName($cursor)
+              if ($next -eq $cursor) { break }
+              $cursor = $next
+            }
+          }
+          try {
+            if ($env:RUNNER_NAME -ne 'cuda-windows-2' -or $env:RUNNER_OS -ne 'Windows' -or $env:GITHUB_REPOSITORY -ne 'SceneWorks/SceneWorks' -or $env:GITHUB_EVENT_NAME -ne 'workflow_dispatch') { throw 'Unexpected probe venue' }
+            if ($env:GITHUB_WORKSPACE -ine $workspace -or $env:PROBE_SOURCE -cne $env:GITHUB_SHA -or $env:PROBE_SOURCE -cnotmatch '^[a-f0-9]{40}$') { throw 'Exact source/workspace required' }
+            if ($env:PROBE_BACKEND -ne 'candle' -or $env:PROBE_TRAINING -ne 'false' -or $env:PROBE_DOWNLOAD -ne 'false') { throw 'Read-only candle profile requires training/download selectors off' }
+            $volume = Get-Volume -DriveLetter D
+            $report.volumeBefore = @{ drive = 'D'; size = [long]$volume.Size; free = [long]$volume.SizeRemaining }
+            $report.targetEnvironment = @{ CARGO_TARGET_DIR = $env:CARGO_TARGET_DIR; CARGO_BUILD_TARGET_DIR = $env:CARGO_BUILD_TARGET_DIR; CARGO_HOME = $env:CARGO_HOME }
+            $configs = [Collections.Generic.List[object]]::new()
+            $directories = [Collections.Generic.List[string]]::new()
+            $cursor = $workspace
+            while ($cursor) {
+              $directories.Add((Join-Path $cursor '.cargo'))
+              $cursor = [IO.Path]::GetDirectoryName($cursor)
+            }
+            if ($env:CARGO_HOME) { $directories.Add($env:CARGO_HOME) }
+            else { $directories.Add((Join-Path $env:USERPROFILE '.cargo')) }
+            foreach ($directory in ($directories | Select-Object -Unique)) {
+              foreach ($name in @('config', 'config.toml')) {
+                Check-Bound
+                $file = Join-Path $directory $name
+                Assert-Unredirected $file
+                if (-not [IO.File]::Exists($file)) { continue }
+                $info = [IO.FileInfo]::new($file)
+                if ($info.Length -gt 65536) { throw 'Cargo configuration exceeds read bound' }
+                $section = ''; $settings = @(); $lineNumber = 0
+                foreach ($line in [IO.File]::ReadAllLines($file)) {
+                  $lineNumber++
+                  if ($line -match '^\s*\[([^]]+)\]') { $section = $matches[1] }
+                  if (($section -eq 'build' -and $line -match '^\s*target-dir\s*=') -or $line -match '^\s*build\.target-dir\s*=') {
+                    $settings += @{ line = $lineNumber; setting = $line.Substring(0, [Math]::Min(512, $line.Length)) }
+                  }
+                }
+                $configs.Add(@{ path = $file; bytes = $info.Length; targetSettings = $settings })
+              }
+            }
+            $report.cargoConfigurations = @($configs.ToArray())
+            Assert-Unredirected $target
+            $categories = @{}; $visited = 0; $reparse = [Collections.Generic.List[string]]::new()
+            $report.inventory = @{ exists = [IO.Directory]::Exists($target); categories = $categories; files = 0; bytes = [long]0; visited = 0; reparseCount = 0; reparseExamples = @(); complete = $false }
+            $stack = [Collections.Generic.Stack[string]]::new()
+            if ($report.inventory.exists) { $stack.Push($target) }
+            while ($stack.Count) {
+              Check-Bound
+              foreach ($entry in [IO.Directory]::EnumerateFileSystemEntries($stack.Pop())) {
+                Check-Bound
+                $visited++; $report.inventory.visited = $visited
+                if ($visited -gt 250000) { throw 'Target inventory exceeds 250000 entries' }
+                $relative = $entry.Substring($target.Length + 1)
+                $attributes = [IO.File]::GetAttributes($entry)
+                if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                  $report.inventory.reparseCount++
+                  if ($reparse.Count -lt 16) { $reparse.Add($relative.Substring(0, [Math]::Min(512, $relative.Length))) }
+                  $report.inventory.reparseExamples = @($reparse.ToArray())
+                  continue
+                }
+                if (($attributes -band [IO.FileAttributes]::Directory) -ne 0) { $stack.Push($entry); continue }
+                $category = if ($relative.Contains('\')) { $relative.Split('\')[0] } else { '(root files)' }
+                if ($category -notin @('deps', 'build', 'incremental', '.fingerprint', 'examples', '(root files)')) { $category = '(other)' }
+                if (-not $categories.ContainsKey($category)) { $categories[$category] = @{ files = 0; bytes = [long]0 } }
+                $length = [IO.FileInfo]::new($entry).Length
+                $categories[$category].files++
+                $categories[$category].bytes += $length
+                $report.inventory.files++
+                $report.inventory.bytes += $length
+              }
+            }
+            $report.inventory.complete = $report.inventory.reparseCount -eq 0
+            Check-Bound
+            $escaped = $target.Replace('\', '\\').Replace("'", "''")
+            $filter = "ExecutablePath LIKE '$escaped\\%' OR CommandLine LIKE '%$escaped\\%'"
+            $rows = @(Get-CimInstance Win32_Process -Filter $filter -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,CommandLine -OperationTimeoutSec 5 | Select-Object -First 65)
+            if ($rows.Count -gt 64) { throw 'Scoped target process evidence exceeds 64 rows' }
+            $report.scopedProcesses = @($rows | ForEach-Object {
+              $executable = [string]$_.ExecutablePath
+              $command = [string]$_.CommandLine
+              $underTarget = $executable.StartsWith($target + '\', [StringComparison]::OrdinalIgnoreCase)
+              $mentionsTarget = $command.IndexOf($target + '\', [StringComparison]::OrdinalIgnoreCase) -ge 0
+              if ($underTarget -or $mentionsTarget) {
+                @{ pid = $_.ProcessId; ppid = $_.ParentProcessId; created = [string]$_.CreationDate; executableName = [IO.Path]::GetFileName($executable); executableMetadataAvailable = [bool]$executable; commandMetadataAvailable = [bool]$command; executableUnderTarget = $underTarget; commandMentionsTarget = $mentionsTarget }
+              }
+            })
+            $volume = Get-Volume -DriveLetter D
+            $report.volumeAfter = @{ drive = 'D'; size = [long]$volume.Size; free = [long]$volume.SizeRemaining }
+            Check-Bound
+            $report.status = 'observed'
+          } catch {
+            $report.error = $_.Exception.Message.Substring(0, [Math]::Min(512, $_.Exception.Message.Length))
+            throw
+          } finally {
+            $report.elapsedSeconds = $clock.Elapsed.TotalSeconds
+            $report.finishedAt = [DateTime]::UtcNow.ToString('o')
+            Write-Output ('MOSS_WINDOWS_STORAGE_PROBE=' + ($report | ConvertTo-Json -Depth 8 -Compress))
+          }
   moss-selector-preflight:
-    if: ${{ inputs.run_moss_training_acceptance }}
+    if: ${{ inputs.run_moss_training_acceptance && inputs.profile != 'windows-storage-probe' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -361,7 +498,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   moss-training-acceptance:
-    if: ${{ inputs.run_moss_training_acceptance }}
+    if: ${{ inputs.run_moss_training_acceptance && inputs.profile != 'windows-storage-probe' }}
     needs: moss-selector-preflight
     permissions:
       contents: read
