@@ -149,9 +149,6 @@ jobs:
     concurrency:
       group: flux3-quant-matrix-candle-${{ inputs.runner }}
       cancel-in-progress: false
-    defaults:
-      run:
-        shell: powershell
     env:
       CARGO_NET_OFFLINE: "true"
       CUDA_VISIBLE_DEVICES: "1"
@@ -161,6 +158,7 @@ jobs:
       FLUX3_FOOTPRINT_OUT_DIR: D:/tmp/sc26243-quant-evidence
     steps:
       - name: Refuse a runner other than the dispatched Windows box
+        shell: powershell
         run: |
           if ($env:RUNNER_NAME -ne '${{ inputs.runner }}') {
             Write-Error "dispatched for ${{ inputs.runner }}, running on $env:RUNNER_NAME"
@@ -175,11 +173,13 @@ jobs:
         with:
           toolchain: "1.97.1"
       - name: Build the release test binary with Candle
+        shell: powershell
         run: |
           cargo test -p sceneworks-worker --release --features backend-candle --lib --no-run
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Convert missing Candle q4/q8 packages (CPU only)
         if: ${{ inputs.prepare_derived }}
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path "$env:SCENEWORKS_DATA_DIR/models/derived", "$env:FLUX3_FOOTPRINT_OUT_DIR" | Out-Null
@@ -194,6 +194,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Measure requested Candle cells
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path "$env:FLUX3_FOOTPRINT_OUT_DIR" | Out-Null
