@@ -2510,8 +2510,17 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 .or_else(|| value.as_str()?.trim().parse().ok())
                 .unwrap_or(0)
         }),
-        memory_limit_fraction: technique_value(advanced, "memoryLimitFraction")
-            .map(|_| advanced_f32(advanced, "memoryLimitFraction", f32::NAN)),
+        memory_limit_fraction: technique_value(advanced, "memoryLimitFraction").map(|value| {
+            // Check the source value before f32 conversion: a fraction just above 1 can round
+            // down to 1.0f32 and otherwise bypass the engine's range validation.
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+                .filter(|fraction| fraction.is_finite() && *fraction > 0.0 && *fraction <= 1.0)
+                .map(|fraction| fraction as f32)
+                .filter(|fraction| *fraction > 0.0)
+                .unwrap_or(f32::NAN)
+        }),
         // Epic 2123 depth anchoring (sc-2125) starts off here; `apply_depth_anchoring` (which owns
         // the strict parse and the auxiliary-model resolution, and so can fail) fills it in when
         // the plan enables it.
@@ -6231,6 +6240,21 @@ mod tests {
         assert_eq!(explicit.memory_limit_bytes, Some(9_876_543_210));
         assert_eq!(explicit.memory_limit_fraction, Some(0.75));
         assert_eq!(explicit.model_options, config.advanced);
+
+        config
+            .advanced
+            .insert("memoryLimitFraction".into(), json!("0.75"));
+        assert_eq!(
+            map_training_config(&config).memory_limit_fraction,
+            Some(0.75)
+        );
+        for value in [json!(1.00000001), json!("1.00000001")] {
+            config.advanced.insert("memoryLimitFraction".into(), value);
+            assert!(map_training_config(&config)
+                .memory_limit_fraction
+                .unwrap()
+                .is_nan());
+        }
 
         config
             .advanced
