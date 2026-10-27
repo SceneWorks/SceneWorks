@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:986c70ab92661145bbf0b6c1e30397dd51782bc65f5c379e3f2fa7808b059fe5",
+    "sceneWorksRevision": "source-tree:117a0e9ff92e1a025b48e6e41abdfde40ef7f78a8429a05c7d1f4443e1821b4b",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -89,7 +89,7 @@
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "8890eba102ddda6d3ad7724ad7c88a32c19947aeca5a2750d663457c21a8ce1f"
+        "sha256": "ad10f6db2271c09a2bef66ae9b15779a41260d0eab3510461e2f1181bf39e085"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
