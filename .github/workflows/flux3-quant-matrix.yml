@@ -112,7 +112,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$SCENEWORKS_DATA_DIR/models/derived" "$FLUX3_FOOTPRINT_OUT_DIR"
           for model in flux3_klein flux3_klein_base; do
-            snap=$(ls -d "$HF_HOME/hub/models--black-forest-labs--$model"/snapshots/* 2>/dev/null | head -1)
+            repo=flux-3-image-klein
+            [[ "$model" == "flux3_klein_base" ]] && repo=flux-3-image-klein-base
+            snap=$(ls -d "$HF_HOME/hub/models--black-forest-labs--$repo"/snapshots/* 2>/dev/null | head -1)
             [[ -n "$snap" ]] || { echo "::error::pinned $model snapshot missing under $HF_HOME"; exit 1; }
             FLUX3_CAPTURE_MODEL_ID="$model" FLUX3_CAPTURE_SOURCE_DIR="$snap" \
             FLUX3_CAPTURE_OUT_DIR="$SCENEWORKS_DATA_DIR/models/derived" \
@@ -249,8 +251,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:SCENEWORKS_DATA_DIR/models/derived", "$env:FLUX3_FOOTPRINT_OUT_DIR" | Out-Null
           Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--no-run')
           if ($env:PREPARE_DERIVED -eq 'true') {
+            $repos = @{ 'flux3_klein' = 'flux-3-image-klein'; 'flux3_klein_base' = 'flux-3-image-klein-base' }
             foreach ($model in @('flux3_klein', 'flux3_klein_base')) {
-              $snapRoot = Join-Path (Join-Path $env:HF_HUB_CACHE "models--black-forest-labs--$model") 'snapshots'
+              $repo = $repos[$model]
+              $snapRoot = Join-Path (Join-Path $env:HF_HUB_CACHE "models--black-forest-labs--$repo") 'snapshots'
               Write-Host "snapshot root: $snapRoot"
               $snap = Get-ChildItem -LiteralPath $snapRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
               if (-not $snap) { throw "pinned $model snapshot missing under $snapRoot" }
