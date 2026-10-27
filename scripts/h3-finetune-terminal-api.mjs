@@ -49,7 +49,14 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
     assert.ok(now() < deadline, 'scenario timeout');
     let wireBody=body===undefined?undefined:JSON.stringify(body),headers={'content-type':'application/json'},recordedBody=body;
     if(upload){assert.equal(method,'POST');assert.match(route,/^\/api\/v1\/projects\/[^/]+\/assets$/,'only the existing asset upload endpoint accepts files');assert.equal(typeof uploadFile,'function','source-bound upload adapter required');assert.equal(body,undefined,'upload fields are explicit, not arbitrary request bodies');const blob=await uploadFile(upload);assert.ok(blob instanceof Blob&&blob.size>0);const form=new FormData();form.set('file',blob,upload.fileName);wireBody=form;headers={};recordedBody={multipartFile:{path:upload.path,sha256:upload.sha256,mimeType:upload.mimeType,fileName:upload.fileName}};}
-    const response = await fetchImpl(url, { method, headers, body:wireBody, signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - now()))) });
+    // A read is safe to repeat: under heavy disk I/O (a checkpoint-sized staging copy on the same
+    // volume as the jobs database) one status read can outlast 30s while the service is healthy.
+    // Retry a timed-out GET until the scenario deadline; any other method fails on its first timeout.
+    let response;
+    for (;;) {
+      try { response = await fetchImpl(url, { method, headers, body:wireBody, signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - now()))) }); break; }
+      catch (error) { if (method !== 'GET' || error?.name !== 'TimeoutError' || now() >= deadline) throw error; console.warn(`H3_READ_RETRY: ${method} ${route} timed out; retrying before the scenario deadline`); }
+    }
     const text = await response.text();
     const result = text ? JSON.parse(text) : null;
     await record({ method, route, request: recordedBody, status: response.status, result });

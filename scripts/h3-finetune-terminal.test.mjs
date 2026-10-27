@@ -143,6 +143,24 @@ test('API failure/timeout cancels actual submitted job, not the GPU process', as
   let time = 0;
   await assert.rejects(runScenario(s, { now: () => time, sleep: async ms => { time += ms; }, fetchImpl: async url => url.pathname.endsWith('/import') ? response({ id: 'import-job' }, 201) : response({ status: 'running' }) }), /timeout/);
 });
+test('a timed-out status read is retried before the deadline; a timed-out submission is not', async () => {
+  // The CUDA campaign's status poll outlasted 30s while a checkpoint copy saturated the jobs
+  // database's volume; the healthy case failed on that one read.
+  const timeout = () => Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' });
+  const s = scenario(); s.steps = s.steps.slice(0, 2); let reads = 0;
+  const result = await runScenario(s, { sleep: async () => {}, fetchImpl: async url => {
+    if (url.pathname.endsWith('/import')) return response({ id: 'import-job' }, 201);
+    if (++reads === 1) throw timeout();
+    return response({ status: 'completed', result: { modelId: 'imported-model' } });
+  } });
+  assert.equal(reads, 2); assert.equal(result.captures.installed.status, 'completed');
+  await assert.rejects(runScenario(s, { fetchImpl: async () => { throw timeout(); } }), /timeout/);
+  let time = 0;
+  await assert.rejects(runScenario(s, { now: () => time, sleep: async ms => { time += ms; }, fetchImpl: async url => {
+    if (url.pathname.endsWith('/import')) return response({ id: 'import-job' }, 201);
+    time += 6000; throw timeout();
+  } }), /timeout/);
+});
 test('API assertions fail on dropped selected-model propagation and external services', async () => {
   const s = scenario(); s.baseUrl = 'https://unrelated.example'; await assert.rejects(runScenario(s));
   s.baseUrl = 'http://localhost:43210'; s.steps = [s.steps[0]];
