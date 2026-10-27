@@ -3,9 +3,9 @@ import {readFile,writeFile,mkdir,lstat,stat,realpath,readlink,readdir,copyFile,s
 import {createReadStream,createWriteStream,constants} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {resolve,dirname} from 'node:path';
-import {spawn} from 'node:child_process';
+import {spawn,execFile} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {isDeepStrictEqual} from 'node:util';
+import {isDeepStrictEqual,promisify} from 'node:util';
 import {safe,verifyPayload,validateRuntime,PAYLOAD_SHA} from './moss-upstream-reference-common.mjs';
 import {copyCacheExclusive,actionsApi,stopped} from './moss-owned-cache-maintenance.mjs';
 export const PROBE_STAGED='/Users/michael/.codex/epic-runs/sc-26752/first-step-probe-r15/payload';
@@ -382,14 +382,58 @@ async function layer3Main(){
  if(process.argv[3]==='validate'){if(value.phase.startsWith('upload-'))await verifyLayer3Payload(profile.staged);await appendFile(env.GITHUB_OUTPUT,Object.entries({...value,root,payload:profile.staged,native_pin:profile.pin}).map(([k,v])=>`${k}=${v??''}\n`).join(''));return;}
  check(process.argv[3]==='execute'&&value.phase==='execute-encoding-layer3','fixed layer3 execute required');await noLinks(BASE);check((await lstat('/Volumes/Models')).dev!==(await lstat('/Volumes')).dev,'mounted Models volume required');await mkdir(root,{mode:0o700});const download=resolve(env.RUNNER_TEMP,`moss-upstream-reference-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);await verifyLayer3Payload(download);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await executeLayer3(root,resolve(root,'payload'),env);
 }
+export const SDPA_STAGED='/Users/michael/.codex/epic-runs/sc-26752/resume-20261026/sdpa-causal-contract-prep/payload';
+export const SDPA_SHA='e6277e5b541095cf5637467d7f85d5899a068c39bf5a60b50a97b80907e5712b';
+const SDPA_PHASES=['upload-sdpa-causal-contract','execute-sdpa-causal-contract'];
+const SDPA_FILES=['capture_sdpa.py','frozen_runtime_bridge.py','sdpa-contract.json','source/capture-authentication.json','source/artifact-metadata.json','source/probe-authentication.json','source/probe-completion.json','source/native-trace.json','source/upstream-trace.json','source/comparison.json','input/q.f32le','input/k.f32le','input/v-projection.f32le','input/v.f32le','historical/hf-sdpa.f32le','historical/native-sdpa.f32le'];
+const SDPA_CALLS=['cpu-f32-math-causal','mps-bf16-implicit-causal','mps-bf16-explicit-bool-causal'];
+export function sdpaProfile(){return {staged:SDPA_STAGED,sha:SDPA_SHA,kind:'sc-26752-saved-sdpa-inputs/v1'};}
+export function sdpaEnvelope(raw,ref,sha,backend){
+ const value=JSON.parse(raw);check(value&&Object.keys(value).sort().join(',')==='artifact_id,artifact_run_id,phase'&&SDPA_PHASES.includes(value.phase),'closed saved SDPA envelope required');check(/^[a-f0-9]{40}$/.test(ref)&&ref===sha&&backend==='mlx','exact saved SDPA source and mlx required');
+ for(const key of ['artifact_id','artifact_run_id'])check(value.phase.startsWith('upload-')?value[key]===null:typeof value[key]==='string'&&/^[1-9][0-9]{5,19}$/.test(value[key]),'exact saved SDPA artifact identity required');return value;
+}
+export async function verifySdpaPayload(root,profile=sdpaProfile()){
+ await noLinks(root);const bytes=await readFile(resolve(root,'payload-manifest.json'));check(bytes.length<65536&&digest(bytes)===profile.sha,'saved SDPA manifest SHA mismatch');const manifest=JSON.parse(bytes);
+ check(manifest.kind===profile.kind&&manifest.source?.runId==='40428788379'&&manifest.source.attempt==='1'&&manifest.source.toolingSha==='a6320337e843ea5234580bb0285f278470f63bfc'&&manifest.source.nativePin===BLOCK_TRACE_PIN&&manifest.source.artifactId==='12701291893'&&manifest.runtimeInventory?.path===resolve(PRIOR,'payload/runtime-files.json')&&manifest.runtimeInventory.sha256==='053fa7d3a714423a5ab82c9e7207768b4d3c53216ed9f175d22a907fde0e8cae','saved SDPA provenance changed');
+ check(Array.isArray(manifest.files)&&manifest.files.map(x=>x.file).sort().join('\n')===SDPA_FILES.slice().sort().join('\n'),'exact saved SDPA payload closure required');const wanted=new Set(['payload-manifest.json']);
+ for(const item of manifest.files){const path=safe(root,item.file);await noLinks(path);const info=await lstat(path);check(info.isFile()&&info.nlink===1&&Number.isSafeInteger(item.byteLength)&&item.byteLength<=4*1024*1024&&info.size===item.byteLength&&await fileHash(path)===item.sha256,'saved SDPA file mismatch');wanted.add(item.file);}
+ async function walk(path,prefix=''){for(const entry of await readdir(path,{withFileTypes:true})){check(!entry.isSymbolicLink(),'saved SDPA payload link');const file=prefix+entry.name;if(entry.isDirectory())await walk(resolve(path,entry.name),file+'/');else check(wanted.has(file),'unlisted saved SDPA file');}}await walk(root);
+ const contract=JSON.parse(await readFile(resolve(root,'sdpa-contract.json')));check(isDeepStrictEqual(contract.source,manifest.source)&&isDeepStrictEqual(contract.calls,SDPA_CALLS)&&contract.attentionCalls===3&&contract.encoderForwards===0&&contract.nativeBuilds===0&&contract.scale===0.0625&&contract.gqaFactor===4&&contract.hostUuid==='D299B954-4C63-5322-86A5-BD5667051634','fixed saved SDPA call/host contract changed');return {manifest,contract};
+}
+export function sdpaArtifact(artifact,source){check(String(artifact.id)===source.artifactId&&artifact.name===source.artifactName&&artifact.size_in_bytes===source.artifactBytes&&artifact.digest===`sha256:${source.artifactSha256}`&&artifact.expired===false&&String(artifact.workflow_run?.id)===source.runId&&artifact.workflow_run.head_sha===source.toolingSha,'saved SDPA original artifact changed');return artifact;}
+export async function sdpaHost(execute=promisify(execFile)){
+ const options={timeout:10000,maxBuffer:512*1024};let registry,graphics;try{registry=(await execute('/usr/sbin/ioreg',['-rd1','-c','IOPlatformExpertDevice'],options)).stdout;graphics=JSON.parse((await execute('/usr/sbin/system_profiler',['SPDisplaysDataType','-json'],options)).stdout);}catch{throw Error('saved SDPA bounded hardware metadata unavailable');}
+ const uuid=/"IOPlatformUUID"\s*=\s*"([^"]+)"/.exec(registry)?.[1],gpu=graphics.SPDisplaysDataType?.find(x=>x._name==='Apple M5 Max'),metal=gpu?.spdisplays_mtlgpufamilysupport;
+ check(uuid==='D299B954-4C63-5322-86A5-BD5667051634'&&metal==='spdisplays_metal4','saved SDPA requires its policy Mac UUID and Metal device');return {uuid,model:gpu._name,metal,originalArtifactUuid:'UNRECORDED; current policy guard is separate'};
+}
+export function sdpaCommands(root,payload){return ['-B',resolve(payload,'capture_sdpa.py'),'--payload',payload,'--manifest-sha',SDPA_SHA,'--output-dir',resolve(root,'upstream'),'--stat-node',process.execPath];}
+export async function executeSdpa(root,payload,env=process.env){
+ const producer=blockTraceRun(env),{manifest}=await verifySdpaPayload(payload);check(/^v24\./.test(process.version),'actual Node24 saved SDPA bridge required');const host=await sdpaHost(),artifact=sdpaArtifact(await actionsApi(env.MOSS_TRACE_TOKEN,'actions/artifacts/12701291893'),manifest.source);
+ const bytes=await readFile(manifest.runtimeInventory.path);check(digest(bytes)===manifest.runtimeInventory.sha256,'saved SDPA runtime inventory changed');const runtime=JSON.parse(bytes);validateRuntime(runtime);check(await realpath(runtime.launcher)===runtime.executable,'saved SDPA frozen Python changed');const executable=runtime.files.find(x=>x.path===runtime.executable);check(executable&&await fileHash(executable.path)===executable.sha256,'saved SDPA runtime executable changed');
+ const common={...env,MOSS_TRACE_TOKEN:'',PYTHONPATH:'',PYTHONDONTWRITEBYTECODE:'1',PYTHONPYCACHEPREFIX:resolve(root,'pycache'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',PYTORCH_ENABLE_MPS_FALLBACK:'0',CUDA_VISIBLE_DEVICES:'',OMP_NUM_THREADS:'1'};
+ check((await run('git',['rev-parse','HEAD'],{cwd:env.GITHUB_WORKSPACE,env:common,log:resolve(root,'tooling-source.log')})).trim()===producer.toolingSha,'saved SDPA actual tooling checkout changed');check(!(await run('git',['status','--porcelain'],{cwd:env.GITHUB_WORKSPACE,env:common,log:resolve(root,'tooling-clean.log')})).trim(),'saved SDPA tooling checkout must be clean');
+ await writeFile(resolve(root,'probe-authentication.json'),JSON.stringify({kind:'sc-26752-saved-sdpa-controller-auth/v1',...producer,manifestSha256:SDPA_SHA,source:manifest.source,parentArtifact:artifact,host,scope:'3attention calls only; no native checkout/build, model weights or encoder'},null,2)+'\n',{flag:'wx'});
+ const preflight="import importlib.util,pathlib,sys;p=pathlib.Path(sys.argv[1]);s=importlib.util.spec_from_file_location('sealed_sdpa',p/'capture_sdpa.py');m=importlib.util.module_from_spec(s);s.loader.exec_module(m);m.validate_inputs(p,m.module(p/'frozen_runtime_bridge.py').verify_payload(p,sys.argv[2]));m.producer(m.os.environ)";await run(runtime.launcher,['-B','-c',preflight,payload,SDPA_SHA],{cwd:payload,env:common,log:resolve(root,'input-preflight.log')});
+ try{await run(runtime.launcher,sdpaCommands(root,payload),{cwd:payload,env:{...common,MOSS_SDPA_ADMITTED:'1'},log:resolve(root,'execution.log')});}finally{await verifySdpaPayload(payload);}
+ const observation=JSON.parse(await readFile(resolve(root,'upstream/observation.json')));check(observation.actualToolingSha===producer.toolingSha&&observation.runId===producer.runId&&observation.attempt===producer.attempt&&observation.manifestSha256===SDPA_SHA&&observation.attentionCalls===3&&observation.encoderForwards===0&&observation.nativeBuilds===0&&observation.originalMpsRepeatByteExact===true&&observation.cpuFirstTokenExactlyV0===true&&observation.interpretation?.valid===true,'saved SDPA current capture/interpretation changed');
+ const outputs={};for(const name of SDPA_CALLS){const path=resolve(root,'upstream',name+'.f32le'),record=observation.actualCalls[name];check(record?.status==='CAPTURED'&&record.output.file===name+'.f32le'&&(await lstat(path)).size===1163264&&await fileHash(path)===record.output.sha256,'saved SDPA actual output changed');outputs[name]=record.output.sha256;}
+ await writeFile(resolve(root,'probe-completion.json'),JSON.stringify({kind:'sc-26752-saved-sdpa-completion/v1',...producer,manifestSha256:SDPA_SHA,source:manifest.source,observationSha256:await fileHash(resolve(root,'upstream/observation.json')),outputs,scope:'Supplemental contract diagnostic only; no quality/policy/reference replacement'},null,2)+'\n',{flag:'wx'});
+}
+async function sdpaMain(){
+ const env=process.env;blockTraceRun(env);const value=sdpaEnvelope(env.MOSS_REFERENCE,env.SOURCE_REF,env.GITHUB_SHA,env.INPUT_BACKEND),root=resolve(BASE,`moss-sdpa-contract-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);check(process.argv[2]==='route','fixed saved SDPA route required');
+ if(process.argv[3]==='validate'){if(value.phase.startsWith('upload-'))await verifySdpaPayload(SDPA_STAGED);await appendFile(env.GITHUB_OUTPUT,Object.entries({...value,root,payload:SDPA_STAGED}).map(([k,v])=>`${k}=${v??''}\n`).join(''));return;}
+ check(process.argv[3]==='execute'&&value.phase==='execute-sdpa-causal-contract','fixed saved SDPA execute required');await noLinks(BASE);check((await lstat('/Volumes/Models')).dev!==(await lstat('/Volumes')).dev,'mounted Models volume required');await mkdir(root,{mode:0o700});const download=resolve(env.RUNNER_TEMP,`moss-upstream-reference-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);await verifySdpaPayload(download);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await executeSdpa(root,resolve(root,'payload'),env);
+}
+export function referenceFallback(phase){return ['upload-corrected-cases','execute-corrected-cases'].includes(phase)?'./moss-upstream-quality.mjs':'./moss-upstream-reference.mjs';}
 async function encodingMain(){
  const phase=JSON.parse(process.env.MOSS_REFERENCE??'{}').phase;
+ if(SDPA_PHASES.includes(phase))return sdpaMain();
  if(LAYER3_PHASES.includes(phase))return layer3Main();
  if(BLOCK_TRACE_UPSTREAM_PHASES.includes(phase))return blockTraceUpstreamMain();
  if(BLOCK_TRACE_PHASES.includes(phase))return blockTraceMain();
  if(!['upload-encoding','execute-encoding','upload-encoding-precision','execute-encoding-precision'].includes(phase)){
   check(process.argv[2]==='route'&&['validate','execute'].includes(process.argv[3]),'fixed reference route required');
-  const code=await new Promise((done,fail)=>{const child=spawn(process.execPath,[fileURLToPath(new URL('./moss-upstream-reference.mjs',import.meta.url)),process.argv[3]],{stdio:'inherit',env:process.env});child.on('error',fail);child.on('close',done);});check(code===0,'original reference route failed');return;
+  const code=await new Promise((done,fail)=>{const child=spawn(process.execPath,[fileURLToPath(new URL(referenceFallback(phase),import.meta.url)),process.argv[3]],{stdio:'inherit',env:process.env});child.on('error',fail);child.on('close',done);});check(code===0,'original reference route failed');return;
  }
  check(process.env.GITHUB_ACTIONS==='true'&&process.env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&process.platform==='darwin','registered Mac encoding route only');
  const value=encodingEnvelope(process.env.MOSS_REFERENCE,process.env.SOURCE_REF,process.env.GITHUB_SHA,process.env.INPUT_BACKEND);

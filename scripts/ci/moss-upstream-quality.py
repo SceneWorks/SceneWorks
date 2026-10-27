@@ -1,6 +1,7 @@
 """Three fixed MPS quality comparisons using the unchanged frozen upstream learned source."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 import argparse
 import hashlib
 import importlib.util
@@ -38,11 +39,87 @@ class ExactCaseNoise:
         return self.tensor.clone()
 
 
+
+@contextmanager
+def corrected_prompt_encoding(adapter, functional, torch, retain):
+    """Change only encoder causal SDPA; denoiser runs after this scope restores F."""
+    original_encode = adapter.encode_prompts
+    original_sdpa = functional.scaled_dot_product_attention
+    calls = []
+
+    def explicit_causal(query, key, value, attn_mask=None, dropout_p=0.0,
+                        is_causal=False, *, scale=None, enable_gqa=False):
+        changed = is_causal
+        if changed:
+            if (attn_mask is not None or query.device.type != 'mps'
+                    or query.dtype != torch.bfloat16 or key.dtype != query.dtype
+                    or value.dtype != query.dtype or query.ndim != 4
+                    or query.shape[-2] != key.shape[-2] or key.shape != value.shape
+                    or query.shape[-1] != 256 or query.shape[-3] % value.shape[-3]
+                    or dropout_p != 0.0):
+                raise ValueError('Unexpected frozen encoder causal SDPA contract')
+            attn_mask = torch.ones((query.shape[-2], key.shape[-2]),
+                                   dtype=torch.bool, device=query.device).tril()
+        output = original_sdpa(query, key, value, attn_mask=attn_mask,
+                               dropout_p=dropout_p, is_causal=False if changed else is_causal,
+                               scale=scale, enable_gqa=enable_gqa)
+        if changed:
+            first_value = value.repeat_interleave(query.shape[-3] // value.shape[-3], dim=-3)
+            if not torch.equal(output[:, :, 0, :], first_value[:, :, 0, :]):
+                raise ValueError('Explicit causal encoder first query differs from V0')
+            calls.append({'queryShape': list(query.shape), 'keyShape': list(key.shape),
+                          'valueShape': list(value.shape), 'firstQueryEqualsV0': True})
+        return output
+
+    def encode(*args, **kwargs):
+        if functional.scaled_dot_product_attention is not original_sdpa:
+            raise ValueError('Encoder SDPA already intercepted')
+        functional.scaled_dot_product_attention = explicit_causal
+        try:
+            result = original_encode(*args, **kwargs)
+        finally:
+            functional.scaled_dot_product_attention = original_sdpa
+        if not calls:
+            raise ValueError('Corrected encoder did not consume causal SDPA')
+        retain(result, calls)
+        return result
+
+    adapter.encode_prompts = encode
+    try:
+        yield calls
+    finally:
+        functional.scaled_dot_product_attention = original_sdpa
+        adapter.encode_prompts = original_encode
+
+
+def retain_conditioning(result, calls, output, torch):
+    root = output.with_suffix('.conditioning')
+    root.mkdir(mode=0o700)
+    records = []
+    for name in ('positive', 'negative'):
+        condition = getattr(result, name)
+        if condition is None:
+            raise ValueError('Both computed prompt conditions required')
+        for field, dtype, suffix in [('embeds', torch.float32, 'f32le'),
+                                     ('attention_mask', torch.uint8, 'u8')]:
+            tensor = getattr(condition, field).detach().to(device='cpu', dtype=dtype).contiguous()
+            payload = tensor.numpy().tobytes(order='C')
+            path = root / f'{name}.{suffix}'
+            with path.open('xb') as handle:
+                handle.write(payload)
+            records.append({'file': path.name, 'shape': list(tensor.shape),
+                            'dtype': suffix, 'sha256': hashlib.sha256(payload).hexdigest(),
+                            'byteLength': len(payload)})
+    (root / 'wire.json').write_text(json.dumps({'kind': 'sc-26752-corrected-conditioning/v1',
+        'source': 'already computed adapter.encode_prompts return; no additional encode',
+        'causalCalls': calls, 'files': records}, indent=2) + '\n')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--prior-payload', type=Path, required=True)
     parser.add_argument('--case-payload', type=Path, required=True)
-    parser.add_argument('--case', choices=['base-four', 'sft-single', 'sft-four'], required=True)
+    parser.add_argument('--case', choices=['base-single', 'base-four', 'sft-single', 'sft-four'], required=True)
     parser.add_argument('--snapshot-view', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--device', choices=['mps'], required=True)
@@ -61,6 +138,9 @@ def main():
     if frozen.verify_frozen_sources() != 24:
         raise ValueError('Frozen learned source closure changed')
     cases = json.loads((args.case_payload / 'cases.json').read_text())
+    corrected = cases['kind'] == 'sc-26752-upstream-corrected-quality-cases/v1'
+    if not corrected and args.case == 'base-single':
+        raise ValueError('Original three-case profile excludes Base/single')
     case = next(item for item in cases['cases'] if item['id'] == args.case)
     refs = []
     for item in case['refs']:
@@ -99,7 +179,15 @@ def main():
     original_time, original_sampler = MossEditModel._time, infer.sample_latents
     try:
         MossEditModel._time, infer.sample_latents = frozen.placed_time, sample_once
-        result = infer.run(frozen_args, config)
+        if corrected:
+            import torch
+            import torch.nn.functional as functional
+            import moss_edit.components as components
+            with corrected_prompt_encoding(components, functional, torch,
+                    lambda result, calls: retain_conditioning(result, calls, args.output, torch)):
+                result = infer.run(frozen_args, config)
+        else:
+            result = infer.run(frozen_args, config)
         if noise.calls != 1:
             raise RuntimeError('Frozen sampler did not consume supplied noise exactly once')
     finally:
@@ -108,6 +196,10 @@ def main():
                'noiseSha256': noise_info['sha256'], 'noiseShape': noise_info['shape'],
                'noiseAllocations': noise.calls, 'wrapperSha256': digest(Path(__file__)),
                'placementAdaptation': 'same frozen CPU F32/F64 sinusoid and learned-dtype transfer as Base/single',
+               'conditioningRoute': 'MPS explicit Bool causal mask only within encode_prompts' if corrected else 'original MPS implicit causal',
+               'scope': 'additional diagnostic reference; not an accepted baseline replacement' if corrected else 'original quality comparison',
+               'toolingSha': os.environ.get('GITHUB_SHA'), 'runId': os.environ.get('GITHUB_RUN_ID'),
+               'attempt': os.environ.get('GITHUB_RUN_ATTEMPT'),
                'noQuantization': True, 'frozenFilesVerifiedAfterRun': frozen.verify_frozen_sources()}
     args.output.with_suffix('.diagnostic.json').write_text(json.dumps(receipt, indent=2) + '\n')
     print(json.dumps(receipt, indent=2))

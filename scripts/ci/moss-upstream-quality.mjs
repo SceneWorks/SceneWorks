@@ -10,6 +10,9 @@ import {safe,verifyPayload as verifyPriorPayload,validateRuntime} from './moss-u
 export const PRIOR_PAYLOAD='/Users/michael/.codex/epic-runs/sc-26752/upstream-reference-actions-r15/payload';
 export const CASES_STAGED='/Users/michael/.codex/epic-runs/sc-26752/h22-upstream-comparison-prep/payload';
 export const CASES_MANIFEST_SHA256='af8ff343a598772bbe114164651b80225fc6f62b66ac4da26e5cb2071570ca57';
+export const CORRECTED_STAGED='/Users/michael/.codex/epic-runs/sc-26752/resume-20261026/corrected-upstream-quality-prep/payload';
+export const CORRECTED_MANIFEST_SHA256='d9575dba2c1b8a07dfec9b2570ae3d31332ac44b4643f7193a7e7d45f5706088';
+const CORRECTED_IDS=['base-single','base-four','sft-single','sft-four'];
 const BASE='/Volumes/Models/sceneworks-terminal-sc-26752';
 const INPUTS='/Users/michael/.codex/epic-runs/sc-26752/quality-inputs-v1/inputs.json';
 const INPUTS_SHA='5fba2bfa980357e5e94e5bfb37523b120cec90ccbdc7e8836d553a20002fa458';
@@ -24,20 +27,22 @@ const check=(ok,message)=>{if(!ok)throw Error(message);};
 const hash=bytes=>createHash('sha256').update(bytes).digest('hex');
 async function fileHash(path){const digest=createHash('sha256');for await(const chunk of createReadStream(path))digest.update(chunk);return digest.digest('hex');}
 async function noLinks(root){for(let path=resolve(root);;path=dirname(path)){check(!(await lstat(path)).isSymbolicLink(),'linked ancestor refused');if(dirname(path)===path)break;}}
-export function envelope(raw,ref,sha,backend){
+export function envelope(raw,ref,sha,backend,corrected=false){
+  const phases=corrected?['upload-corrected-cases','execute-corrected-cases']:['upload-cases','execute-cases'];
   const value=JSON.parse(raw);
-  check(value&&Object.keys(value).sort().join(',')==='artifact_id,artifact_run_id,phase'&&['upload-cases','execute-cases'].includes(value.phase),'closed quality suite envelope required');
+  check(value&&Object.keys(value).sort().join(',')==='artifact_id,artifact_run_id,phase'&&phases.includes(value.phase),'closed quality suite envelope required');
   check(/^[a-f0-9]{40}$/.test(ref)&&ref===sha&&backend==='mlx','exact quality suite source and mlx required');
-  if(value.phase==='upload-cases')check(value.artifact_id===null&&value.artifact_run_id===null,'upload cannot consume artifact IDs');
+  if(value.phase===phases[0])check(value.artifact_id===null&&value.artifact_run_id===null,'upload cannot consume artifact IDs');
   else check([value.artifact_id,value.artifact_run_id].every(id=>typeof id==='string'&&/^[1-9][0-9]{5,19}$/.test(id)),'execute requires exact uploaded artifact identity');
   return value;
 }
 export async function verifyCasePayload(root,expected=CASES_MANIFEST_SHA256){
+  const corrected=expected===CORRECTED_MANIFEST_SHA256,ids=corrected?CORRECTED_IDS:IDS;
   await noLinks(root);
   const bytes=await readFile(resolve(root,'payload-manifest.json'));
   check(hash(bytes)===expected,'quality payload manifest SHA mismatch');
   const manifest=JSON.parse(bytes);
-  check(manifest.kind==='sc-26752-upstream-quality-cases-payload/v1'&&manifest.priorPayloadManifestSha256===PRIOR_SHA&&Array.isArray(manifest.files)&&manifest.files.length>=12,'fixed quality payload closure required');
+  check(manifest.kind===(corrected?'sc-26752-upstream-corrected-quality-payload/v1':'sc-26752-upstream-quality-cases-payload/v1')&&manifest.priorPayloadManifestSha256===PRIOR_SHA&&Array.isArray(manifest.files)&&manifest.files.length>=12,'fixed quality payload closure required');
   const wanted=new Set(['payload-manifest.json']);
   for(const item of manifest.files){
     const path=safe(root,item.file);check(!wanted.has(item.file)&&SHA.test(item.sha256)&&Number.isSafeInteger(item.byteLength)&&item.byteLength>0,'duplicate or malformed quality payload file');wanted.add(item.file);
@@ -47,7 +52,7 @@ export async function verifyCasePayload(root,expected=CASES_MANIFEST_SHA256){
   const inputsBytes=await readFile(INPUTS);check(hash(inputsBytes)===INPUTS_SHA,'frozen quality input manifest changed');
   const inputs=JSON.parse(inputsBytes),assets=Object.fromEntries(inputs.assets.map(item=>[item.id,item]));
   const cases=JSON.parse(await readFile(resolve(root,'cases.json'))),models=JSON.parse(await readFile(resolve(root,'model-mappings.json')));
-  check(cases.kind==='sc-26752-upstream-quality-cases/v1'&&cases.priorPayloadManifestSha256===PRIOR_SHA&&Array.isArray(cases.cases)&&cases.cases.length===3&&cases.cases.every((item,index)=>item.id===IDS[index]),'exact three ordered quality cases required');
+  check(cases.kind===(corrected?'sc-26752-upstream-corrected-quality-cases/v1':'sc-26752-upstream-quality-cases/v1')&&cases.priorPayloadManifestSha256===PRIOR_SHA&&Array.isArray(cases.cases)&&cases.cases.length===ids.length&&cases.cases.every((item,index)=>item.id===ids[index]),'exact ordered quality cases required');
   for(const item of cases.cases){
     const four=item.id.endsWith('four'),variant=item.id.split('-')[0],task=inputs[four?'four_case':'single_case'];
     check(item.variant===variant&&item.rowId===`quality-mlx-${item.id}`&&item.prompt===task.prompt&&item.negativePrompt===''&&item.width===task.width&&item.height===task.height&&item.seed===173&&item.steps===30&&item.cfg===4&&item.inferenceShift===5&&item.referenceMaxEdge===512&&item.useKvCache===true,'case request/settings differ from frozen native cell');
@@ -92,14 +97,15 @@ export async function authenticateModels(root,payload,plans){
   }
   return {views,identities:[...identity.values()],assertStable:async()=>{for(const item of observed)check(JSON.stringify(boundStat(await stat(item.source,{bigint:true})))===JSON.stringify(item.stat),'frozen model source changed during quality suite');}};
 }
-async function execute(root,payload){
-  const {cases,models}=await verifyCasePayload(payload);await verifyPriorPayload(PRIOR_PAYLOAD);
+async function execute(root,payload,expected=CASES_MANIFEST_SHA256){
+  const corrected=expected===CORRECTED_MANIFEST_SHA256;
+  const {cases,models}=await verifyCasePayload(payload,expected);await verifyPriorPayload(PRIOR_PAYLOAD);
   const runtime=JSON.parse(await readFile(resolve(PRIOR_PAYLOAD,'runtime-files.json')));validateRuntime(runtime);
   check(await realpath(runtime.launcher)===runtime.executable,'prepared Python launcher changed');
   for(const item of runtime.files){const info=await lstat(item.path);check(info.isFile()&&info.size===item.byteLength&&await fileHash(item.path)===item.sha256,'prepared runtime file changed');}
   const {views,identities,assertStable}=await authenticateModels(root,payload,{base:models.base.plannedMappings,sft:models.sft});
   const wrapper=fileURLToPath(new URL('./moss-upstream-quality.py',import.meta.url)),wrapperSha256=await fileHash(wrapper);
-  await writeFile(resolve(root,'authentication.json'),JSON.stringify({qualityCasesManifestSha256:CASES_MANIFEST_SHA256,priorPayloadManifestSha256:PRIOR_SHA,toolingSha:process.env.GITHUB_SHA,wrapperSha256,nativeProductSha:'42a8aff9852d01e0506df8afc466c0024b6eed8c',nativeInferenceSha:'857f7a1996e3678a0773c3509ac0087522c19ce6',runtimeVersions:runtime.versions,models:identities,cases:IDS,scope:'upstream quality comparison only; H21 native evidence unchanged'},null,2)+'\n',{flag:'wx'});
+  await writeFile(resolve(root,'authentication.json'),JSON.stringify({qualityCasesManifestSha256:expected,priorPayloadManifestSha256:PRIOR_SHA,toolingSha:process.env.GITHUB_SHA,wrapperSha256,nativeProductSha:'42a8aff9852d01e0506df8afc466c0024b6eed8c',nativeInferenceSha:'857f7a1996e3678a0773c3509ac0087522c19ce6',runtimeVersions:runtime.versions,models:identities,cases:cases.cases.map(item=>item.id),runId:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT,conditioningRoute:corrected?'MPS explicit Bool causal mask scoped to encode_prompts':'original MPS implicit causal',scope:corrected?'four additional diagnostic references only; original upstream and native evidence/policy unchanged':'upstream quality comparison only; H21 native evidence unchanged'},null,2)+'\n',{flag:'wx'});
   const outputs=[];
   for(const item of cases.cases){
     const output=resolve(root,`upstream-${item.id}.png`),log=createWriteStream(resolve(root,`upstream-${item.id}.log`),{flags:'wx'});
@@ -108,19 +114,22 @@ async function execute(root,payload){
     outputs.push({caseId:item.id,imageSha256:await fileHash(output),diagnosticSha256:await fileHash(output.replace(/\.png$/,'.diagnostic.json'))});
     await assertStable();
   }
-  await writeFile(resolve(root,'suite-summary.json'),JSON.stringify({toolingSha:process.env.GITHUB_SHA,qualityCasesManifestSha256:CASES_MANIFEST_SHA256,outputs},null,2)+'\n',{flag:'wx'});
+  await writeFile(resolve(root,'suite-summary.json'),JSON.stringify({toolingSha:process.env.GITHUB_SHA,qualityCasesManifestSha256:expected,outputs},null,2)+'\n',{flag:'wx'});
 }
 export async function main(){
   check(process.env.GITHUB_ACTIONS==='true'&&process.env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&process.platform==='darwin','registered Mac Actions route only');
-  const value=envelope(process.env.MOSS_REFERENCE,process.env.SOURCE_REF,process.env.GITHUB_SHA,process.env.INPUT_BACKEND);
-  const root=resolve(BASE,`moss-upstream-quality-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);
+  const corrected=['upload-corrected-cases','execute-corrected-cases'].includes(JSON.parse(process.env.MOSS_REFERENCE).phase);
+  const staged=corrected?CORRECTED_STAGED:CASES_STAGED,expected=corrected?CORRECTED_MANIFEST_SHA256:CASES_MANIFEST_SHA256;
+  const value=envelope(process.env.MOSS_REFERENCE,process.env.SOURCE_REF,process.env.GITHUB_SHA,process.env.INPUT_BACKEND,corrected);
+  const root=resolve(BASE,`moss-upstream-${corrected?'corrected-quality':'quality'}-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);
   check(/^[1-9][0-9]+$/.test(process.env.GITHUB_RUN_ID)&&/^[1-9][0-9]*$/.test(process.env.GITHUB_RUN_ATTEMPT),'actual Actions identity required');
   if(process.argv[2]==='validate'){
-    if(value.phase==='upload-cases')await verifyCasePayload(CASES_STAGED);
-    await appendFile(process.env.GITHUB_OUTPUT,Object.entries({...value,root,payload:CASES_STAGED}).map(([key,value])=>`${key}=${value??''}\n`).join(''));return;
+    if(value.phase.startsWith('upload-'))await verifyCasePayload(staged,expected);
+    await appendFile(process.env.GITHUB_OUTPUT,Object.entries({...value,root,payload:staged}).map(([key,value])=>`${key}=${value??''}\n`).join(''));return;
   }
-  check(process.argv[2]==='execute'&&value.phase==='execute-cases','fixed execute-cases phase required');
+  check(process.argv[2]==='execute'&&value.phase===(corrected?'execute-corrected-cases':'execute-cases'),'fixed quality execute phase required');
   await noLinks(BASE);check((await lstat('/Volumes/Models')).dev!==(await lstat('/Volumes')).dev,'mounted Models volume required');await mkdir(root,{mode:0o700});
   const download=resolve(process.env.RUNNER_TEMP,`moss-upstream-reference-${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}`);
-  await verifyCasePayload(download);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await execute(root,resolve(root,'payload'));
+  await verifyCasePayload(download,expected);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await execute(root,resolve(root,'payload'),expected);
 }
+if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url))main().catch(error=>{console.error(error);process.exitCode=1;});
