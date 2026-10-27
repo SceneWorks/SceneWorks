@@ -952,24 +952,53 @@ function assertSdxlEndpointProbeGuards(adapter) {
     const next = adapter.slice(at + 1).search(/^fn /m);
     return adapter.slice(at, next < 0 ? undefined : at + 1 + next);
   };
+  const binding = body("validate_sdxl_endpoint_binding");
+  assert.match(binding, /!matches!\(visible, "0" \| "1"\) \|\| visible != physical \|\| !valid_sdxl_gpu_uuid\(uuid\)/);
+  const uuid = body("valid_sdxl_gpu_uuid");
+  assert.match(uuid, /strip_prefix\("GPU-"\)/);
+  assert.match(uuid, /uuid\.len\(\) == 36/);
+  assert.match(uuid, /\[8, 13, 18, 23\]/);
+  assert.match(uuid, /byte\.is_ascii_digit\(\) \|\| \(b'a'\.\.=b'f'\)\.contains/);
+  const expected = body("sdxl_endpoint_expected_uuid");
+  for (const variable of ["CUDA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID", "SCENEWORKS_SDXL_EXPECTED_GPU_UUID"]) {
+    assert.match(expected, new RegExp(`protocol::required_env\\("${variable}"\\)\\?`));
+  }
+  assert.match(expected, /validate_sdxl_endpoint_binding\(&visible, &physical, &expected\)\?/);
   const probe = body("endpoint_vram_probe");
-  assert.match(probe, /for _ in 0\.\.5/);
+  assert.match(probe, /let expected = sdxl_endpoint_expected_uuid\(\)\?/);
+  assert.match(probe, /query_bounded\("uuid", Duration::from_secs\(5\)\)\?/);
+  assert.match(probe, /if physical_uuid != expected/);
+  assert.match(probe, /Instant::now\(\)/);
+  assert.match(probe, /wait_for_sdxl_idle\(/);
   assert.match(probe, /memory\.used,memory\.free,utilization\.gpu,utilization\.memory/);
-  assert.match(probe, /values\[1\] < 16 \* 1024 \|\| values\[2\] != 0 \|\| values\[3\] != 0/);
-  assert.match(probe, /used\.iter\(\)\.max\(\)\.unwrap\(\) - used\.iter\(\)\.min\(\)\.unwrap\(\) > 64/);
+  assert.match(probe, /\|\| started\.elapsed\(\)/);
   assert.match(probe, /sdxl_endpoint_context_uuid\(\)\?/);
-  assert.match(probe, /uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"/);
+  assert.match(probe, /if uuid != expected/);
   assert.doesNotMatch(probe, /pure_compute|assert_idle|assert_stable_idle/, "unused contexts remain part of the measured baseline");
+  const idle = body("wait_for_sdxl_idle");
+  assert.match(idle, /let timeout = Duration::from_secs\(30\)/);
+  assert.match(idle, /while elapsed\(\) < timeout/);
+  assert.match(idle, /saturating_sub\(elapsed\(\)\)[\s\S]*?\.min\(Duration::from_secs\(5\)\)/);
+  assert.match(idle, /parse::<u64>\(\)/);
+  assert.match(idle, /values\.len\(\) != 4[\s\S]*?values\[2\] > 100[\s\S]*?values\[3\] > 100/);
+  assert.match(idle, /values\[1\] < 16 \* 1024 \|\| values\[2\] != 0 \|\| values\[3\] != 0/);
+  assert.match(idle, /used\.iter\(\)\.max\(\)\.unwrap\(\) - used\.iter\(\)\.min\(\)\.unwrap\(\) > 64/);
+  assert.match(idle, /used\.clear\(\)/);
+  assert.match(idle, /used\.len\(\) == 5 && elapsed\(\) <= timeout/);
+  assert.match(idle, /Duration::from_millis\(200\)\.min\(timeout\.saturating_sub\(elapsed\(\)\)\)/);
+  assert.match(idle, /samples=\{samples:\?\}/);
   const context = body("sdxl_endpoint_context_uuid");
   assert.match(context, /candle_gen::default_device\(\)/);
   assert.match(context, /\.as_cuda_device\(\)/);
   assert.match(context, /\.cuda_stream\(\)[\s\S]*?\.context\(\)[\s\S]*?\.uuid\(\)/);
-  const endpoint = body("run_sdxl_endpoint");
-  for (const variable of ["CUDA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID"]) {
-    assert.match(endpoint, new RegExp(`std::env::var\\("${variable}"\\)\\.as_deref\\(\\) != Ok\\("1"\\)`));
+  for (const name of ["run_sdxl_endpoint", "probe_sdxl_endpoint"]) {
+    const endpoint = body(name);
+    assert.match(endpoint, /let expected = sdxl_endpoint_expected_uuid\(\)\?/);
+    assert.match(endpoint, /query_bounded\("uuid", Duration::from_secs\(5\)\)\?/);
+    assert.match(endpoint, /if uuid != expected/);
   }
-  assert.match(endpoint, /let uuid = smi\.query\("uuid"\)\?/);
-  assert.match(endpoint, /uuid != "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"/);
+  const endpoint = body("run_sdxl_endpoint");
+  assert.match(endpoint, /if context_uuid != expected/);
   assert.match(endpoint, /planned_provider\(request\)\? != SDXL_ID/);
   assert.match(endpoint, /planned_tier\(request\)\? != "q4"/);
 }
@@ -977,14 +1006,28 @@ function assertSdxlEndpointProbeGuards(adapter) {
 test("manual SDXL probe exception rejects missing activity, headroom, stability or actual-device guards", async () => {
   const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
   assertSdxlEndpointProbeGuards(adapter);
-  for (const [from, to] of [
-    ["for _ in 0..5", "for _ in 0..1"],
-    ["values[1] < 16 * 1024", "values[1] < 1"],
-    ["values[2] != 0", "values[2] > 100"],
-    ["values[3] != 0", "values[3] > 100"],
-    ['sdxl_endpoint_context_uuid()?', 'String::from("unverified")'],
-    ['std::env::var("SCENEWORKS_GPU_ID").as_deref() != Ok("1")', 'false'],
-  ]) assert.throws(() => assertSdxlEndpointProbeGuards(adapter.replace(from, to)), from);
+  for (const [owner, from, to] of [
+    ["wait_for_sdxl_idle", "Duration::from_secs(30)", "Duration::from_secs(31)"],
+    ["wait_for_sdxl_idle", "while elapsed() < timeout", "while true"],
+    ["wait_for_sdxl_idle", "values[1] < 16 * 1024", "values[1] < 1"],
+    ["wait_for_sdxl_idle", "values[2] != 0", "values[2] > 100"],
+    ["wait_for_sdxl_idle", "values[3] != 0", "values[3] > 100"],
+    ["wait_for_sdxl_idle", "used.len() == 5", "used.len() == 1"],
+    ["wait_for_sdxl_idle", "elapsed() <= timeout", "true"],
+    ["endpoint_vram_probe", 'sdxl_endpoint_context_uuid()?', 'String::from("unverified")'],
+    ["endpoint_vram_probe", "if uuid != expected", "if false"],
+    ["endpoint_vram_probe", 'query_bounded("uuid", Duration::from_secs(5))?', 'query_bounded("uuid", Duration::from_secs(30))?'],
+    ["validate_sdxl_endpoint_binding", "visible != physical", "false"],
+    ["sdxl_endpoint_expected_uuid", "SCENEWORKS_SDXL_EXPECTED_GPU_UUID", "UNVERIFIED_UUID"],
+    ["run_sdxl_endpoint", "if context_uuid != expected", "if false"],
+  ]) {
+    const start = adapter.indexOf(`fn ${owner}(`);
+    const next = adapter.slice(start + 1).search(/^fn /m);
+    const end = next < 0 ? adapter.length : start + 1 + next;
+    const original = adapter.slice(start, end);
+    assert.ok(original.includes(from), `${owner} owns the mutated guard`);
+    assert.throws(() => assertSdxlEndpointProbeGuards(adapter.slice(0, start) + original.replace(from, to) + adapter.slice(end)), `${owner}: ${from}`);
+  }
 });
 
 function assertEveryVramProbeIsCertifying(adapter) {

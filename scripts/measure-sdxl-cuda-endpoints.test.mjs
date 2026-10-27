@@ -5,7 +5,7 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource, selectCaptureGpu, parseGpuInventory, endpointGpuEnv } from "./measure-sdxl-cuda-endpoints.mjs";
 import { EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
 
 // CI_IMPACT: one pure cross-module path contract; no files, build, API or model execution.
@@ -21,6 +21,9 @@ test("replay accepts the packager's dedicated summary and rejects other source p
 
 const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
 const uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
+const uuid0 = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+const gpuCsv = (physicalIndex, id, used = 2048, free = 90000, gpu = 0, memory = 0) =>
+  `${physicalIndex},${id},${used},${free},${gpu},${memory}`;
 function receipt() {
   return { inferencePin: "b".repeat(40), endpoint: "resident", deviceUuid: uuid, cudaContextUuid: uuid, logicalCudaDevice: 0,
     loadPeakBytes: 1024, wholeRunPeakBytes: 2048, baselineBytes: 512, wholeDevicePeakBytes: 2560,
@@ -77,6 +80,69 @@ test("both actual endpoint requests match the adapter's exact composition guard"
 
 test("endpoint receipt accepts whole-run load-inclusive peak and natural cleanup", () => {
   assert.doesNotThrow(() => validateEndpoint(receipt(), ENDPOINTS[0]));
+  const gpu0 = { ...receipt(), deviceUuid: uuid0, cudaContextUuid: uuid0 };
+  assert.doesNotThrow(() => validateEndpoint(gpu0, ENDPOINTS[0], gpu0.inferencePin, uuid0));
+  assert.throws(() => validateEndpoint(gpu0, ENDPOINTS[0], gpu0.inferencePin, uuid));
+  assert.throws(() => validateEndpoint({ ...gpu0, cudaContextUuid: uuid }, ENDPOINTS[0], gpu0.inferencePin, uuid0));
+});
+
+// CI_IMPACT: mocked SMI output and injected monotonic clock; no real waits or device work.
+test("capture selects idle GPU0 when GPU1 is busy and prefers GPU1 when both qualify", async () => {
+  const choose = async (gpu1Utilization) => {
+    let elapsed = 0;
+    return selectCaptureGpu(async () => [gpuCsv(0, uuid0), gpuCsv(1, uuid, 2048, 90000, gpu1Utilization)].join("\n"),
+      { now: () => elapsed, sleep: async (ms) => { elapsed += ms; } });
+  };
+  const gpu0 = await choose(1);
+  assert.deepEqual(gpu0.selected, { physicalIndex: 0, uuid: uuid0 });
+  assert.ok(Object.isFrozen(gpu0.selected));
+  assert.equal(gpu0.samples.length, 5); assert.equal(gpu0.elapsedMs, 800);
+  assert.deepEqual((await choose(0)).selected, { physicalIndex: 1, uuid });
+});
+
+test("capture times out if neither permitted GPU has five idle stable samples with headroom", async () => {
+  for (const gpu0 of [gpuCsv(0, uuid0, 2048, 90000, 1), gpuCsv(0, uuid0, 2048, 16383)]) {
+    let elapsed = 0;
+    await assert.rejects(() => selectCaptureGpu(async () => [gpu0, gpuCsv(1, uuid, 2048, 90000, 1)].join("\n"),
+      { timeoutMs: 1_200, now: () => elapsed, sleep: async (ms) => { elapsed += ms; } }), (error) => {
+      assert.match(error.message, /neither physical GPU0 nor GPU1 settled within 1200ms/);
+      assert.equal(error.samples.length, 6); assert.equal(elapsed, 1_200); return true;
+    });
+  }
+});
+
+test("capture fails closed on malformed inventory, duplicates and changing UUIDs", async () => {
+  const valid = [gpuCsv(0, uuid0), gpuCsv(1, uuid)].join("\n");
+  assert.equal(parseGpuInventory(valid).length, 2);
+  for (const invalid of [gpuCsv(0, uuid0), `${gpuCsv(0, uuid0)}\n${gpuCsv(0, uuid)}`,
+    `${gpuCsv(0, uuid0)}\n${gpuCsv(1, uuid0)}`, valid.replace("90000", "N/A"),
+    valid.replace("0,0\n", "101,0\n"), valid.replace("1,GPU-", "2,GPU-")]) {
+    let elapsed = 0;
+    await assert.rejects(() => selectCaptureGpu(async () => invalid,
+      { now: () => elapsed, sleep: async (ms) => { elapsed += ms; } }), (error) => {
+      assert.equal(error.samples[0].raw, invalid); return true;
+    });
+  }
+  let elapsed = 0, probes = 0;
+  await assert.rejects(() => selectCaptureGpu(async () => ++probes === 1 ? valid : valid.replace(uuid0, "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+    { now: () => elapsed, sleep: async (ms) => { elapsed += ms; } }), /UUID changed/);
+});
+
+test("selected device environment scopes both capture and replay without inheriting bootstrap identity", () => {
+  const gpu = { physicalIndex: 0, uuid: uuid0 };
+  const parent = { PATH: "/tools", CUDA_VISIBLE_DEVICES: "1", SCENEWORKS_GPU_ID: "1", SCENEWORKS_SDXL_EXPECTED_GPU_UUID: uuid, HF_TOKEN: "secret" };
+  const capture = endpointGpuEnv(parent, gpu);
+  const replay = admittedReplayEnv(parent, { state: "/owned", hub: "/hub", workerId: "worker", port: 1234, parentPid: 12, gpu });
+  for (const env of [capture, replay]) {
+    assert.equal(env.CUDA_VISIBLE_DEVICES, "0"); assert.equal(env.SCENEWORKS_GPU_ID, "0");
+    assert.equal(env.SCENEWORKS_SDXL_EXPECTED_GPU_UUID, uuid0);
+  }
+  assert.equal(replay.HF_TOKEN, undefined); assert.equal(replay.SCENEWORKS_CUDA_VRAM_CAP_GB, "6");
+  assert.deepEqual(parent.CUDA_VISIBLE_DEVICES, "1");
+  assert.throws(() => endpointGpuEnv(parent, { ...gpu, physicalIndex: 2 }));
+  assert.throws(() => endpointGpuEnv(parent, { ...gpu, uuid: "GPU-wrong" }));
+  assert.throws(() => parseReplayGpuSample(gpuCsv(0, uuid), "sample", gpu));
+  assert.throws(() => parseReplayGpuSample(gpuCsv(1, uuid0), "sample", gpu));
 });
 
 test("endpoint receipt rejects missing load inclusion, context mismatch, flat output and leaked residency", () => {
@@ -104,7 +170,8 @@ test("post-exit settling requires five consecutive idle stable samples after cou
     let elapsed = 0; let index = 0;
     return settlePostExitGpu(async (remainingMs) => {
       assert.ok(remainingMs > 0 && remainingMs <= timeoutMs);
-      return rows[Math.min(index++, rows.length - 1)];
+      const [used, ...activity] = rows[Math.min(index++, rows.length - 1)].split(",");
+      return `1,${uuid},${used},90000,${activity.join(",")}`;
     }, { timeoutMs, now: () => elapsed, sleep: async (ms) => { elapsed += ms; } });
   };
   const idle = await simulate(["2048,0,0"]);
@@ -113,6 +180,8 @@ test("post-exit settling requires five consecutive idle stable samples after cou
   const decayed = await simulate(["2200,30,7", "2100,0,5", "2048,0,0"]);
   assert.equal(decayed.samples.length, 7); assert.equal(decayed.elapsedMs, 1200);
   assert.equal(decayed.afterBytes, idle.afterBytes);
+  assert.equal(decayed.stableWindow.length, 5);
+  assert.ok(decayed.stableWindow.every((sample) => sample.usedBytes === idle.afterBytes));
   const interrupted = await simulate(["2048,0,0", "2048,0,0", "2048,1,0", "2048,0,0"]);
   assert.equal(interrupted.samples.length, 8, "activity resets the consecutive-idle count");
   const stabilized = await simulate(["2048,0,0", "2176,0,0"]);
@@ -127,8 +196,9 @@ test("post-exit settling requires five consecutive idle stable samples after cou
   }
   for (const invalid of ["2048,0", "2048,0,NaN", "2048,,0", "2048,101,0", "-1,0,0", "N/A,0,0"]) {
     await assert.rejects(() => simulate([invalid]), (error) => {
-      assert.match(error.message, /invalid physical GPU1 post-exit telemetry/);
-      assert.equal(error.samples[0].raw, invalid); return true;
+      assert.match(error.message, /physical GPU telemetry identity or counters unavailable/);
+      const [used, ...activity] = invalid.split(",");
+      assert.equal(error.samples[0].raw, `1,${uuid},${used},90000,${activity.join(",")}`); return true;
     });
   }
 });
@@ -140,7 +210,7 @@ test("capture retains the parsed response before settling without promoting fail
   const settling = capture.indexOf("settled = await settlePostExitGpu");
   assert.ok(response >= 0 && settling > response);
   assert.match(capture, /status: "failed", error: error\.message, samples: error\.samples/);
-  const validation = capture.indexOf("validateEndpoint(measurement, endpoint, pin)");
+  const validation = capture.indexOf("validateEndpoint(measurement, endpoint, pin, gpu.uuid)");
   assert.ok(validation >= 0 && capture.indexOf("await writeFile(bundlePath, bundleBytes)") > validation);
   assert.match(capture, /afterBytes: settled\.afterBytes, toleranceBytes: 64 \* 1024 \*\* 2/);
 });
@@ -230,7 +300,7 @@ test("admitted replay submits ordinary explicit-q4 defaults without a strategy o
   assert.equal(request.width, 1024); assert.equal(request.height, 1024); assert.equal(request.count, 1);
   assert.equal(request.model, "sdxl"); assert.deepEqual(request.loras, []);
   const env = admittedReplayEnv({ PATH: "/tools", CUDA_VISIBLE_DEVICES: "0", SCENEWORKS_GPU_ID: "0", SCENEWORKS_DATA_DIR: "/user", HF_TOKEN: "secret" },
-    { state: "/owned/state", hub: "/cache/hub", workerId: "owned-worker", port: 17931, parentPid: 1234 });
+    { state: "/owned/state", hub: "/cache/hub", workerId: "owned-worker", port: 17931, parentPid: 1234, gpu: { physicalIndex: 1, uuid } });
   assert.equal(env.CUDA_VISIBLE_DEVICES, "1"); assert.equal(env.SCENEWORKS_GPU_ID, "1");
   assert.equal(env.SCENEWORKS_CUDA_VRAM_CAP_GB, "6"); assert.equal(env.SCENEWORKS_PARENT_PID, "1234");
   assert.equal(env.SCENEWORKS_DATA_DIR, path.join("/owned/state", "data")); assert.equal(env.HF_TOKEN, undefined);
@@ -319,19 +389,19 @@ test("admitted replay waits for API persisted assets and validates the actual si
   }
 });
 
-test("admitted replay rejects malformed or incomplete physical GPU1 telemetry", () => {
-  assert.deepEqual(parseReplayGpuSample(`${uuid}, 2048, 90000, 0, 3`, "sample-time"), {
-    at: "sample-time", uuid, usedBytes: 2048 * 1024 ** 2, freeBytes: 90000 * 1024 ** 2, gpuUtilization: 0, memoryUtilization: 3,
+test("admitted replay rejects malformed or incomplete selected physical GPU telemetry", () => {
+  assert.deepEqual(parseReplayGpuSample(`1, ${uuid}, 2048, 90000, 0, 3`, "sample-time"), {
+    at: "sample-time", physicalIndex: 1, uuid, usedBytes: 2048 * 1024 ** 2, freeBytes: 90000 * 1024 ** 2, gpuUtilization: 0, memoryUtilization: 3,
   });
   for (const csv of [`${uuid},2048,90000,0`, `${uuid},2048,90000,0,`, `${uuid},2048,90000,0,NaN`,
     `${uuid},2048,90000,0,N/A`, `${uuid},2048,90000,0,101`, `${uuid},2048,90000,101,0`,
     `${uuid},-1,90000,0,0`, `${uuid},2048,Infinity,0,0`, `${uuid},2048,90000,0,0,extra`,
     `${uuid},2048,90000,0,0\n${uuid},2048,90000,0,0`, "GPU-wrong,2048,90000,0,0"]) {
-    assert.throws(() => parseReplayGpuSample(csv), /telemetry identity or counters unavailable/);
+    assert.throws(() => parseReplayGpuSample(`1,${csv}`), /telemetry identity or counters unavailable/);
   }
 });
 
-test("admitted replay workflow remains manual and runs native pure gates on GPU1 before one app job", async () => {
+test("admitted replay workflow uses GPU1 only as bootstrap before selecting GPU0 or GPU1", async () => {
   const source = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
   assert.match(source, /- sdxl-cuda-admitted-replay/);
   assert.match(source, /CUDA_VISIBLE_DEVICES: "1"/); assert.match(source, /SCENEWORKS_GPU_ID: "1"/);
@@ -349,4 +419,12 @@ test("admitted replay workflow remains manual and runs native pure gates on GPU1
   assert.match(script, /receipt\.selection = admittedReplaySelection\(await readFile/);
   assert.match(script, /persistedReplayAsset\(job, project\.id, jobId\)/);
   assert.match(script, /\/assets\/\$\{encodeURIComponent\(persisted\.image\.id\)\}/, "read the persisted sidecar through the ordinary asset API");
+  const main = script.slice(script.indexOf("export async function main("));
+  assert.equal((main.match(/await selectCaptureGpu\(/g) ?? []).length, 1, "one frozen selection for the whole pair");
+  assert.ok(main.indexOf("await selectCaptureGpu(") < main.indexOf("for (const endpoint of ENDPOINTS)"));
+  assert.match(main, /const gpu = gpuPreflight\.selected;\s*const env = endpointGpuEnv\(baseEnv, gpu\)/);
+  assert.match(main, /validateEndpoint\(measurement, endpoint, pin, gpu\.uuid\)/);
+  assert.match(main, /"gpu-selection\.json"[\s\S]*?status: "failed"[\s\S]*?samples: error\.samples/);
+  assert.match(script, /receipt\.worker\.gpuId !== String\(gpu\.physicalIndex\)/);
+  assert.match(script, /"-i", String\(gpu\.physicalIndex\)/);
 });
