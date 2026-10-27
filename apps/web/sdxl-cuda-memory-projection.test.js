@@ -1,11 +1,11 @@
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 import { loadSdxlCudaMemoryProjection } from "./sdxl-cuda-memory-projection.js";
 
-const root = new URL("../../", import.meta.url);
+const root = pathToFileURL(`${resolve(dirname(fileURLToPath(import.meta.url)), "../..")}/`);
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 
 describe("SDXL CUDA browser evidence projection", () => {
