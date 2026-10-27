@@ -428,13 +428,18 @@ fn measure_candle_cell(
     let png_path = flux3_footprint_png_path(model, tier, "candle");
     let baseline_apps = sampler.compute_apps();
     let foreign_baseline = foreign_compute_apps(&baseline_apps);
-    assert!(
-        foreign_baseline.is_empty(),
-        "CUDA device {} already has foreign compute processes holding memory (baseline {foreign_baseline:?}); \
-         refusing to measure a whole-device delta on a shared device",
-        sampler.physical_id
-    );
     let baseline = sampler.used_bytes();
+    // A Windows WDDM desktop always has UI/other clients with a CUDA context, so presence alone is
+    // not evidence of contention. Use the same 2 GiB baseline admission bound as the installed Candle
+    // app lifecycle, and require the tenant pid set to be stable for the whole measurement below.
+    assert!(
+        baseline <= 2048 * MIB,
+        "CUDA device {} baseline device memory {} MiB exceeds the 2048 MiB campaign admission bound \
+         (foreign compute apps: {foreign_baseline:?}); refusing to measure a whole-device delta on a \
+         busy device",
+        sampler.physical_id,
+        baseline / MIB,
+    );
     let mut peak = baseline;
 
     println!(
@@ -515,6 +520,8 @@ fn measure_candle_cell(
         "pngSha256": png_sha256,
         "measurementScope": FLUX3_CANDLE_SCOPE,
         "physicalDeviceId": sampler.physical_id.clone(),
+        "baselineUsedBytes": baseline,
+        "afterUsedBytes": after,
         "foreignTenants": foreign_tenants_json(&foreign_after),
         "fit": flux3_fit_receipt(entry, "candle", tier, peak),
     });
