@@ -3260,7 +3260,7 @@ export function stopProcessTree(child, signal, { detached = false, platform = pr
  *   error carrying `timedOut: true` and `timeoutMs`, so a caller can tell a bound it imposed from
  *   a failure the child reported.
  */
-function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false, input = null, timeoutMs = null } = {}) {
+export function run(command, args, { cwd = ROOT, env = process.env, log = null, detached = false, input = null, timeoutMs = null } = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd, env, stdio: [input === null ? "ignore" : "pipe", "pipe", "pipe"], detached });
     if (input !== null) child.stdin.end(input);

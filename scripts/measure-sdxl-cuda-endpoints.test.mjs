@@ -1,0 +1,515 @@
+// CI_IMPACT: pure request/receipt validation only, <1 second; no model, CUDA context or build.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, admittedReplayProcessEnvs, admittedReplayWorker, assertAdmittedReplayCompletion, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource, selectCaptureGpu, parseGpuInventory, endpointGpuEnv, replayInferenceSourceIdentity } from "./measure-sdxl-cuda-endpoints.mjs";
+import { EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
+
+// CI_IMPACT: one pure cross-module path contract; no files, build, API or model execution.
+test("replay accepts the packager's dedicated summary and rejects other source paths", () => {
+  const source = { path: `${EVIDENCE_DIR}/sdxl-cuda-endpoints.json`, sha256: "a".repeat(64) };
+  assert.equal(validatePackagedEndpointSummarySource(source), source);
+  for (const path of ["docs/calibration/sdxl-cuda-endpoints.json", "../sdxl-cuda-endpoints.json", `${EVIDENCE_DIR}/other.json`]) {
+    assert.throws(() => validatePackagedEndpointSummarySource({ ...source, path }));
+  }
+  assert.throws(() => validatePackagedEndpointSummarySource({ ...source, sha256: "bad" }));
+  assert.throws(() => validatePackagedEndpointSummarySource(null));
+});
+
+// CI_IMPACT: mocked Git argv/results only; no subprocess, network, API, or inference execution.
+test("replay source advancement requires identical complete Git trees and retains both pins", async () => {
+  const capturedPin = "a".repeat(40), activePin = "b".repeat(40), tree = "c".repeat(40);
+  const same = await replayInferenceSourceIdentity(capturedPin, capturedPin, "/inference", () => assert.fail("same pin needs no Git lookup"));
+  assert.deepEqual(same, { capturedPin, activePin: capturedPin, match: "same_pin", capturedTree: null, activeTree: null, completeGitTreesEqual: null });
+  const calls = [];
+  const execute = async (command, argv, options) => {
+    calls.push(argv);
+    assert.equal(command, "git"); assert.equal(options.cwd, "/inference");
+    assert.equal(options.env.GIT_NO_LAZY_FETCH, "1");
+    assert.deepEqual(argv.slice(0, 2), ["rev-parse", "--verify"]);
+    return { stdout: `${tree}\n` };
+  };
+  const equivalent = await replayInferenceSourceIdentity(capturedPin, activePin, "/inference", execute);
+  assert.deepEqual(calls, [["rev-parse", "--verify", `${capturedPin}^{tree}`], ["rev-parse", "--verify", `${activePin}^{tree}`]]);
+  assert.deepEqual(equivalent, { capturedPin, activePin, match: "identical_complete_git_tree", capturedTree: tree, activeTree: tree, completeGitTreesEqual: true });
+  await assert.rejects(() => replayInferenceSourceIdentity(capturedPin, activePin, "/inference", async (_command, argv) =>
+    ({ stdout: argv[2].startsWith(capturedPin) ? tree : "d".repeat(40) })), /complete Git tree differs/);
+  await assert.rejects(() => replayInferenceSourceIdentity(capturedPin, activePin, "/inference", async () => {
+    throw new Error("missing tree object");
+  }), /missing tree object/);
+  for (const stdout of ["", "missing", "c".repeat(39), "C".repeat(40), `${tree}\n${tree}`]) {
+    await assert.rejects(() => replayInferenceSourceIdentity(capturedPin, activePin, "/inference", async () => ({ stdout })), /unavailable or malformed/);
+  }
+  for (const invalid of [undefined, "HEAD", "a".repeat(39), "A".repeat(40), `${capturedPin};fetch`]) {
+    await assert.rejects(() => replayInferenceSourceIdentity(invalid, activePin, "/inference", () => assert.fail("invalid pins cannot reach Git")), /canonical/);
+    await assert.rejects(() => replayInferenceSourceIdentity(capturedPin, invalid, "/inference", () => assert.fail("invalid pins cannot reach Git")), /canonical/);
+  }
+});
+
+const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
+const uuid = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
+const uuid0 = "GPU-01234567-89ab-cdef-0123-456789abcdef";
+const gpuCsv = (physicalIndex, id, used = 2048, free = 90000, gpu = 0, memory = 0) =>
+  `${physicalIndex},${id},${used},${free},${gpu},${memory}`;
+function receipt() {
+  return { inferencePin: "b".repeat(40), endpoint: "resident", deviceUuid: uuid, cudaContextUuid: uuid, logicalCudaDevice: 0,
+    loadPeakBytes: 1024, wholeRunPeakBytes: 2048, baselineBytes: 512, wholeDevicePeakBytes: 2560,
+    output: { width: 1024, height: 1024, channels: 3, rgbBytes: 1024 * 1024 * 3,
+      spatiallyNonFlat: true, rgbSha256: "a".repeat(64) },
+    settings: { flashAttn: true, count: 1, cfgInterval: null, guidanceMethod: null, schedulerShift: null },
+    engineBuild: { adapterCandleFeature: true, sdxlFlashAttentionKernelCompiled: false },
+    cleanup: { beforeBytes: 512, afterBytes: 512, toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true } };
+}
+
+function replaySelection() {
+  return { backend: "candle", route: "sdxl", actualTier: "q4", mode: "text_to_image", strategy: "bounded_attention",
+    basis: "measured_endpoint", geometry: { width: 1024, height: 1024, batch: 1 },
+    parameters: { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16_777_216 },
+    predictedPeakBytes: 3_000_000_000, admittedPeakGb: 3.7, reserveGb: 1.5, availableGb: 4.5 };
+}
+
+test("endpoint pair keeps one q4 artifact and renders only maximum and minimum", () => {
+  const original = structuredClone(plan);
+  const cases = ENDPOINTS.map((endpoint) => endpointCase(plan, endpoint));
+  assert.equal(cases.length, 2);
+  assert.deepEqual(cases.map((item) => item.strategy.rung), ["resident", "bounded_attention"]);
+  assert.deepEqual(cases.map((item) => item.target), [cases[0].target, cases[0].target]);
+  assert.deepEqual(cases[0].target.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+  assert.equal(cases[0].target.tier, "q4");
+  assert.deepEqual(cases.map((item) => item.loadShape), ["eager_materialization", "eager_materialization"]);
+  assert.notEqual(cases[0].logicalCaseId, cases[1].logicalCaseId);
+  assert.deepEqual(cases[1].strategy.parameters, { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16 * 1024 ** 2 });
+  assert.deepEqual(cases.map((item) => item.calibrationFingerprint), Array(2).fill("sdxl-candle-sdxl-staged-decode-attention-v3"));
+  assert.deepEqual(plan, original);
+});
+
+// CI_IMPACT: pure cross-language request/guard contract, <1 second; no adapter execution/build.
+test("both actual endpoint requests match the adapter's exact composition guard", async () => {
+  const source = await readFile(new URL("../crates/sceneworks-memory-adapter/src/bin/candle.rs", import.meta.url), "utf8");
+  const start = source.indexOf("fn run_sdxl_endpoint(");
+  assert.ok(start >= 0);
+  const adapter = source.slice(start, source.indexOf("\nfn main()", start));
+  const guarded = /let expected_parameters = if endpoint == "resident" \{([\s\S]*?)\n    \};/.exec(adapter);
+  assert.ok(guarded, "endpoint validator owns an explicit resident/minimum contract");
+  const parameterPairs = [...guarded[1].matchAll(/json!\((\{[\s\S]*?\})\)/g)].map((match) =>
+    JSON.parse(match[1].replace(/(\d)_(?=\d)/g, "$1").replace(/,(\s*[}\]])/g, "$1")));
+  assert.equal(parameterPairs.length, 2);
+  assert.match(adapter, /\(width, height\) != \(1024, 1024\) \|\| json!\(parameters\) != expected_parameters/);
+  for (const [index, endpoint] of ENDPOINTS.entries()) {
+    const request = { action: "sdxl_endpoint", sdxlEndpoint: endpoint.name, planned: endpointCase(plan, endpoint) };
+    assert.match(adapter, new RegExp(`"${request.sdxlEndpoint}" => "${request.planned.strategy.rung}"`));
+    assert.deepEqual(request.planned.target.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+    assert.deepEqual(request.planned.strategy.parameters, parameterPairs[index]);
+  }
+  assert.notDeepEqual({ stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 }, parameterPairs[1],
+    "the previous minimum must fail the current endpoint guard rather than capture a mislabeled recipe");
+});
+
+test("endpoint receipt accepts whole-run load-inclusive peak and natural cleanup", () => {
+  assert.doesNotThrow(() => validateEndpoint(receipt(), ENDPOINTS[0]));
+  const gpu0 = { ...receipt(), deviceUuid: uuid0, cudaContextUuid: uuid0 };
+  assert.doesNotThrow(() => validateEndpoint(gpu0, ENDPOINTS[0], gpu0.inferencePin, uuid0));
+  assert.throws(() => validateEndpoint(gpu0, ENDPOINTS[0], gpu0.inferencePin, uuid));
+  assert.throws(() => validateEndpoint({ ...gpu0, cudaContextUuid: uuid }, ENDPOINTS[0], gpu0.inferencePin, uuid0));
+});
+
+// CI_IMPACT: mocked SMI output and injected monotonic clock; no real waits or device work.
+test("capture selects idle GPU0 when GPU1 is busy and prefers GPU1 when both qualify", async () => {
+  const choose = async (gpu1Utilization) => {
+    let elapsed = 0;
+    return selectCaptureGpu(async () => [gpuCsv(0, uuid0), gpuCsv(1, uuid, 2048, 90000, gpu1Utilization)].join("\n"),
+      { now: () => elapsed, sleep: async (ms) => { elapsed += ms; } });
+  };
+  const gpu0 = await choose(1);
+  assert.deepEqual(gpu0.selected, { physicalIndex: 0, uuid: uuid0 });
+  assert.ok(Object.isFrozen(gpu0.selected));
+  assert.equal(gpu0.samples.length, 5); assert.equal(gpu0.elapsedMs, 800);
+  assert.deepEqual((await choose(0)).selected, { physicalIndex: 1, uuid });
+});
+
+test("capture times out if neither permitted GPU has five idle stable samples with headroom", async () => {
+  for (const gpu0 of [gpuCsv(0, uuid0, 2048, 90000, 1), gpuCsv(0, uuid0, 2048, 16383)]) {
+    let elapsed = 0;
+    await assert.rejects(() => selectCaptureGpu(async () => [gpu0, gpuCsv(1, uuid, 2048, 90000, 1)].join("\n"),
+      { timeoutMs: 1_200, now: () => elapsed, sleep: async (ms) => { elapsed += ms; } }), (error) => {
+      assert.match(error.message, /neither physical GPU0 nor GPU1 settled within 1200ms/);
+      assert.equal(error.samples.length, 6); assert.equal(elapsed, 1_200); return true;
+    });
+  }
+});
+
+test("capture fails closed on malformed inventory, duplicates and changing UUIDs", async () => {
+  const valid = [gpuCsv(0, uuid0), gpuCsv(1, uuid)].join("\n");
+  assert.equal(parseGpuInventory(valid).length, 2);
+  for (const invalid of [gpuCsv(0, uuid0), `${gpuCsv(0, uuid0)}\n${gpuCsv(0, uuid)}`,
+    `${gpuCsv(0, uuid0)}\n${gpuCsv(1, uuid0)}`, valid.replace("90000", "N/A"),
+    valid.replace("0,0\n", "101,0\n"), valid.replace("1,GPU-", "2,GPU-")]) {
+    let elapsed = 0;
+    await assert.rejects(() => selectCaptureGpu(async () => invalid,
+      { now: () => elapsed, sleep: async (ms) => { elapsed += ms; } }), (error) => {
+      assert.equal(error.samples[0].raw, invalid); return true;
+    });
+  }
+  let elapsed = 0, probes = 0;
+  await assert.rejects(() => selectCaptureGpu(async () => ++probes === 1 ? valid : valid.replace(uuid0, "GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
+    { now: () => elapsed, sleep: async (ms) => { elapsed += ms; } }), /UUID changed/);
+});
+
+test("selected device environment scopes both capture and replay without inheriting bootstrap identity", () => {
+  const gpu = { physicalIndex: 0, uuid: uuid0 };
+  const parent = { PATH: "/tools", CUDA_VISIBLE_DEVICES: "1", SCENEWORKS_GPU_ID: "1", SCENEWORKS_SDXL_EXPECTED_GPU_UUID: uuid, HF_TOKEN: "secret" };
+  const capture = endpointGpuEnv(parent, gpu);
+  const replay = admittedReplayEnv(parent, { state: "/owned", hub: "/hub", workerId: "worker", port: 1234, parentPid: 12, gpu });
+  for (const env of [capture, replay]) {
+    assert.equal(env.CUDA_VISIBLE_DEVICES, "0"); assert.equal(env.SCENEWORKS_GPU_ID, "0");
+    assert.equal(env.SCENEWORKS_SDXL_EXPECTED_GPU_UUID, uuid0);
+  }
+  assert.equal(replay.HF_TOKEN, undefined); assert.equal(replay.SCENEWORKS_CUDA_VRAM_CAP_GB, "6");
+  assert.deepEqual(parent.CUDA_VISIBLE_DEVICES, "1");
+  assert.throws(() => endpointGpuEnv(parent, { ...gpu, physicalIndex: 2 }));
+  assert.throws(() => endpointGpuEnv(parent, { ...gpu, uuid: "GPU-wrong" }));
+  assert.throws(() => parseReplayGpuSample(gpuCsv(0, uuid), "sample", gpu));
+  assert.throws(() => parseReplayGpuSample(gpuCsv(1, uuid0), "sample", gpu));
+});
+
+test("endpoint receipt rejects missing load inclusion, context mismatch, flat output and leaked residency", () => {
+  for (const mutate of [
+    (value) => { value.wholeRunPeakBytes = value.loadPeakBytes - 1; },
+    (value) => { value.cudaContextUuid = "GPU-foreign"; },
+    (value) => { value.inferencePin = "missing"; },
+    (value) => { value.output.spatiallyNonFlat = false; },
+    (value) => { value.settings.flashAttn = false; },
+    (value) => { value.settings.cfgInterval = [0.1, 0.9]; },
+    (value) => { value.settings.guidanceMethod = "apg"; },
+    (value) => { value.settings.schedulerShift = 3; },
+    (value) => { value.settings.count = 2; },
+    (value) => { value.engineBuild.sdxlFlashAttentionKernelCompiled = true; },
+    (value) => { value.cleanup.afterBytes += value.cleanup.toleranceBytes + 1; },
+  ]) {
+    const value = receipt(); mutate(value);
+    assert.throws(() => validateEndpoint(value, ENDPOINTS[0]));
+  }
+});
+
+// CI_IMPACT: injected probes and clock only; no actual waits, processes or GPU access.
+test("post-exit settling requires five consecutive idle stable samples after counter decay", async () => {
+  const simulate = async (rows, timeoutMs = 2_000) => {
+    let elapsed = 0; let index = 0;
+    return settlePostExitGpu(async (remainingMs) => {
+      assert.ok(remainingMs > 0 && remainingMs <= timeoutMs);
+      const [used, ...activity] = rows[Math.min(index++, rows.length - 1)].split(",");
+      return `1,${uuid},${used},90000,${activity.join(",")}`;
+    }, { timeoutMs, now: () => elapsed, sleep: async (ms) => { elapsed += ms; } });
+  };
+  const idle = await simulate(["2048,0,0"]);
+  assert.equal(idle.samples.length, 5); assert.equal(idle.elapsedMs, 800);
+  assert.equal(idle.afterBytes, 2048 * 1024 ** 2); assert.equal(idle.stableSamples, 5);
+  const decayed = await simulate(["2200,30,7", "2100,0,5", "2048,0,0"]);
+  assert.equal(decayed.samples.length, 7); assert.equal(decayed.elapsedMs, 1200);
+  assert.equal(decayed.afterBytes, idle.afterBytes);
+  assert.equal(decayed.stableWindow.length, 5);
+  assert.ok(decayed.stableWindow.every((sample) => sample.usedBytes === idle.afterBytes));
+  const interrupted = await simulate(["2048,0,0", "2048,0,0", "2048,1,0", "2048,0,0"]);
+  assert.equal(interrupted.samples.length, 8, "activity resets the consecutive-idle count");
+  const stabilized = await simulate(["2048,0,0", "2176,0,0"]);
+  assert.equal(stabilized.samples.length, 6, "a memory jump resets the stable window");
+  assert.equal(stabilized.afterBytes, 2176 * 1024 ** 2);
+  for (const rows of [["2048,2,0"], ["2048,0,2"], ["2048,0,0", "2176,0,0", "2048,0,0", "2176,0,0", "2048,0,0", "2176,0,0"]]) {
+    await assert.rejects(() => simulate(rows, 1_200), (error) => {
+      assert.match(error.message, /did not settle.*1200ms/);
+      assert.match(error.message, /"usedBytes":/); assert.equal(error.samples.length, 6);
+      return true;
+    });
+  }
+  for (const invalid of ["2048,0", "2048,0,NaN", "2048,,0", "2048,101,0", "-1,0,0", "N/A,0,0"]) {
+    await assert.rejects(() => simulate([invalid]), (error) => {
+      assert.match(error.message, /physical GPU telemetry identity or counters unavailable/);
+      const [used, ...activity] = invalid.split(",");
+      assert.equal(error.samples[0].raw, `1,${uuid},${used},90000,${activity.join(",")}`); return true;
+    });
+  }
+});
+
+test("capture retains the parsed response before settling without promoting failed diagnostics", async () => {
+  const source = await readFile(new URL("./measure-sdxl-cuda-endpoints.mjs", import.meta.url), "utf8");
+  const capture = source.slice(source.indexOf("for (const endpoint of ENDPOINTS)"));
+  const response = capture.indexOf("`${endpoint.name}-response.json`");
+  const settling = capture.indexOf("settled = await settlePostExitGpu");
+  assert.ok(response >= 0 && settling > response);
+  assert.match(capture, /status: "failed", error: error\.message, samples: error\.samples/);
+  const validation = capture.indexOf("validateEndpoint(measurement, endpoint, pin, gpu.uuid)");
+  assert.ok(validation >= 0 && capture.indexOf("await writeFile(bundlePath, bundleBytes)") > validation);
+  assert.match(capture, /afterBytes: settled\.afterBytes, toleranceBytes: 64 \* 1024 \*\* 2/);
+});
+
+// One changed channel distinguishes a true RGB comparison from a digest-only attestation.
+test("saved RGB quality comparison measures every channel and rejects a shape mismatch", () => {
+  const comparison = compareRgb(Buffer.from([0, 100, 255]), Buffer.from([0, 101, 255]));
+  assert.equal(comparison.maximumAbsoluteRgbDelta255, 1);
+  assert.equal(comparison.meanAbsoluteRgbDelta255, 1 / 3);
+  assert.equal(comparison.changedChannels, 1);
+  assert.equal(comparison.identical, false);
+  assert.throws(() => compareRgb(Buffer.from([0]), Buffer.from([0, 1])));
+});
+
+// CI_IMPACT: pure bytes/identity checks extend the existing endpoint receipt tests; no inference.
+test("endpoint summary binds exact evidence bytes, record, artifact inventory, compiled pin and device", () => {
+  const inventorySha256 = "a".repeat(64); const inferencePin = "b".repeat(40);
+  const record = { id: "imc-" + "c".repeat(20), artifact: { inventorySha256 },
+    repositories: { inference: { revision: inferencePin } }, hardware: { deviceId: uuid } };
+  const bundle = { records: [record] }; const bytes = JSON.stringify(bundle) + "\n";
+  const expected = { inventorySha256, inferencePin, deviceUuid: uuid };
+  const reference = endpointEvidenceReference(bundle, bytes, expected);
+  assert.equal(reference.recordId, record.id);
+  assert.match(reference.evidenceSha256, /^[a-f0-9]{64}$/);
+  assert.notEqual(reference.evidenceSha256, endpointEvidenceReference(bundle, bytes + " ", expected).evidenceSha256);
+  for (const patch of [{ inventorySha256: "d".repeat(64) }, { inferencePin: "d".repeat(40) }, { deviceUuid: "GPU-foreign" }]) {
+    assert.throws(() => endpointEvidenceReference(bundle, bytes, { ...expected, ...patch }));
+  }
+  assert.throws(() => endpointEvidenceReference({ records: [record, record] }, bytes, expected));
+});
+
+// CI_IMPACT: executes only the shell revision-list guard with a synthetic node function; no Git,
+// network, model, CUDA context or source preparation is executed.
+test("only the manual SDXL profile omits historical inference anchor queries", async () => {
+  const source = await readFile(new URL("./ci/memory-catalog/inference.sh", import.meta.url), "utf8");
+  const block = source.slice(source.indexOf('WANTED=("$PIN")'), source.indexOf("# A space-separated string"));
+  assert.ok(block.includes("--anchor-revisions"));
+  const pin = "a".repeat(40); const historical = "b".repeat(40);
+  const script = `set -euo pipefail\nPIN=${pin}\nnode() { printf '%s\\n' ${historical}; printf 'historical-query\\n' >&2; }\n${block}\nprintf 'wanted:%s\\n' "\${WANTED[@]}"\n`;
+  const wanted = (profile) => {
+    const result = spawnSync("bash", ["-c", script], {
+      env: { ...process.env, MEMORY_CAMPAIGN_PROFILE: profile }, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+    return { revisions: result.stdout.trim().split("\n").filter((line) => line.startsWith("wanted:")), queried: result.stderr.includes("historical-query") };
+  };
+  assert.deepEqual(wanted("sdxl-cuda-endpoints"), { revisions: [`wanted:${pin}`], queried: false });
+  assert.deepEqual(wanted("sdxl-cuda-admitted-replay"), { revisions: [`wanted:${pin}`], queried: false });
+  assert.deepEqual(wanted("catalog"), { revisions: [`wanted:${pin}`, `wanted:${historical}`], queried: true });
+  assert.deepEqual(wanted(""), { revisions: [`wanted:${pin}`, `wanted:${historical}`], queried: true });
+  const workflow = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
+  assert.match(workflow, /MEMORY_CAMPAIGN_PROFILE: \$\{\{ inputs\.profile \|\| 'catalog' \}\}/);
+});
+
+// CI_IMPACT: four tiny source-directory fixtures prove all actual SDXL assembly roles are bound.
+test("SDXL assembly inventory binds shared VAE and both tokenizer roots beside the base tier", async () => {
+  const hub = await mkdtemp(path.join(tmpdir(), "sdxl-assembly-"));
+  const roots = {};
+  for (const role of ["base", "tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"]) {
+    const root = path.join(hub, `models--fixture--${role}`, "snapshots", "a".repeat(40));
+    roots[role] = role === "base" ? path.join(root, "q4") : root;
+    await mkdir(roots[role], { recursive: true });
+    const file = role === "base" ? "weights.bin" : role === "vae_fp16_fix" ? "diffusion_pytorch_model.safetensors" : "tokenizer.json";
+    await writeFile(path.join(roots[role], file), role);
+  }
+  const row = { tierRoot: roots.base, env: {
+    SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L: roots.tokenizer_clip_l,
+    SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG: roots.tokenizer_clip_bigg,
+    SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX: roots.vae_fp16_fix,
+  } };
+  const first = await sdxlAssemblyInventory(row);
+  assert.deepEqual(first.entries.map((entry) => entry.path), ["base/weights.bin", "components/tokenizer_clip_bigg/tokenizer.json", "components/tokenizer_clip_l/tokenizer.json", "components/vae_fp16_fix/diffusion_pytorch_model.safetensors"]);
+  await writeFile(path.join(roots.tokenizer_clip_l, "model.safetensors"), "unused cached CLIP weights");
+  assert.equal((await sdxlAssemblyInventory(row)).sha256, first.sha256);
+  await writeFile(path.join(roots.tokenizer_clip_l, "tokenizer.json"), "changed consumed tokenizer");
+  const changedTokenizer = await sdxlAssemblyInventory(row);
+  assert.notEqual(changedTokenizer.sha256, first.sha256);
+  await writeFile(path.join(roots.vae_fp16_fix, "diffusion_pytorch_model.safetensors"), "changed-shared-vae");
+  assert.notEqual((await sdxlAssemblyInventory(row)).sha256, changedTokenizer.sha256);
+  await assert.rejects(() => sdxlAssemblyInventory({ ...row, env: {} }), /source missing/);
+});
+
+// CI_IMPACT: pure production-request/environment/receipt contracts; never starts API or worker.
+test("admitted replay submits ordinary explicit-q4 defaults without a strategy override", () => {
+  const request = admittedReplayRequest("owned-project");
+  assert.deepEqual(request.advanced, { mlxQuantize: 4 });
+  assert.equal(request.width, 1024); assert.equal(request.height, 1024); assert.equal(request.count, 1);
+  assert.equal(request.model, "sdxl"); assert.deepEqual(request.loras, []);
+  const env = admittedReplayEnv({ PATH: "/tools", CUDA_VISIBLE_DEVICES: "0", SCENEWORKS_GPU_ID: "0", SCENEWORKS_DATA_DIR: "/user", HF_TOKEN: "secret" },
+    { state: "/owned/state", hub: "/cache/hub", workerId: "owned-worker", port: 17931, parentPid: 1234, gpu: { physicalIndex: 1, uuid } });
+  assert.equal(env.CUDA_VISIBLE_DEVICES, "1"); assert.equal(env.SCENEWORKS_GPU_ID, "1");
+  assert.equal(env.SCENEWORKS_CUDA_VRAM_CAP_GB, "6"); assert.equal(env.SCENEWORKS_PARENT_PID, "1234");
+  assert.equal(env.SCENEWORKS_DATA_DIR, path.join("/owned/state", "data")); assert.equal(env.HF_TOKEN, undefined);
+  assert.equal(env.SCENEWORKS_WORKER_CHILD, "1"); assert.equal(env.SCENEWORKS_BACKEND_CANDLE_ENABLED, "true");
+});
+
+// CI_IMPACT: pure startup environment and registration snapshots only; no process or API calls.
+test("admitted replay separates utility identities and waits for the selected idle image worker", () => {
+  for (const physicalIndex of [0, 1]) {
+    const gpu = { physicalIndex, uuid };
+    const env = admittedReplayEnv({}, { state: "/owned", hub: "/hub", workerId: "owned-cuda", port: 1234, parentPid: 12, gpu });
+    const { api, worker } = admittedReplayProcessEnvs(env);
+    assert.equal(api.SCENEWORKS_WORKER_ID, "owned-cuda-utility");
+    assert.equal(api.SCENEWORKS_RUST_WORKER_GPU_ID, "cpu");
+    assert.equal(api.SCENEWORKS_RUN_UTILITY_INPROCESS, "1");
+    assert.equal(worker.SCENEWORKS_WORKER_ID, "owned-cuda");
+    assert.equal(worker.SCENEWORKS_WORKER_ONLY, "1");
+    assert.equal(worker.SCENEWORKS_RUN_UTILITY_INPROCESS, undefined);
+    assert.equal(worker.SCENEWORKS_RUST_WORKER_GPU_ID, undefined);
+    for (const child of [api, worker]) {
+      assert.equal(child.CUDA_VISIBLE_DEVICES, String(physicalIndex));
+      assert.equal(child.SCENEWORKS_GPU_ID, String(physicalIndex));
+      assert.equal(child.SCENEWORKS_SDXL_EXPECTED_GPU_UUID, uuid);
+      assert.equal(child.SCENEWORKS_CUDA_VRAM_CAP_GB, "6");
+    }
+    const utility = { id: api.SCENEWORKS_WORKER_ID, gpuId: "cpu", status: "idle", capabilities: ["cpu", "model_download"] };
+    const ready = { id: worker.SCENEWORKS_WORKER_ID, gpuId: String(physicalIndex), status: "idle", capabilities: ["image_generate"] };
+    assert.equal(admittedReplayWorker([utility], "owned-cuda", gpu), false);
+    // Reproduce the failed receipt: even an idle CPU registration with the requested ID cannot finish the wait.
+    for (const patch of [{ gpuId: "cpu", capabilities: utility.capabilities }, { gpuId: String(1 - physicalIndex) }, { capabilities: ["cpu"] }, { capabilities: "image_generate" }, { status: "busy" }]) {
+      assert.equal(admittedReplayWorker([utility, { ...ready, ...patch }], "owned-cuda", gpu), false);
+    }
+    assert.equal(admittedReplayWorker([utility, ready], "owned-cuda", gpu), ready);
+    assert.throws(() => admittedReplayWorker([ready, ready], "owned-cuda", gpu), /duplicate/);
+    assert.throws(() => admittedReplayWorker({}, "owned-cuda", gpu), /array/);
+  }
+});
+
+test("admitted replay requires the complete emitted worker selection and budget telemetry", () => {
+  const selection = replaySelection();
+  assert.equal(assertAdmittedReplaySelection(selection), "measured_minimum");
+  for (const patch of [{ strategy: "resident" }, { actualTier: "q8" }, { basis: "estimated" }, { predictedPeakBytes: null }, { availableGb: 95 }]) {
+    assert.throws(() => assertAdmittedReplaySelection({ ...selection, ...patch }));
+  }
+  assert.throws(() => assertAdmittedReplaySelection({ ...selection, parameters: { ...selection.parameters, stageResidency: false } }), "a middle estimate cannot claim exact endpoint coverage");
+  const emitted = { event: "image_memory_strategy_selected", ...selection };
+  const flat = { event: emitted.event, route: "sdxl", actual_tier: "q4", predicted_peak_bytes: selection.predictedPeakBytes };
+  const workerLog = ["non-JSON startup diagnostic", JSON.stringify(flat), JSON.stringify(emitted)].join("\n");
+  assert.deepEqual(admittedReplaySelection(workerLog), emitted, "retain the complete emitted payload, ignoring its adjacent flat tracing summary");
+  assert.throws(() => admittedReplaySelection(JSON.stringify(flat)), /saw 0/);
+  assert.throws(() => admittedReplaySelection(`${workerLog}\n${JSON.stringify(emitted)}`), /saw 2/);
+  assert.throws(() => admittedReplaySelection(JSON.stringify({ ...emitted, parameters: { ...selection.parameters, stageResidency: false } })), /did not admit/);
+});
+
+test("admitted replay accepts the ordinary selector's cheaper affordable SDXL compositions", () => {
+  const selection = replaySelection();
+  const plain = { stageResidency: false, decodeTileEdge: null, decodeOverlap: null, attentionChunkSize: null, transformerWindowSize: null };
+  const bounded = { ...plain, decodeTileEdge: 512, decodeOverlap: 64 };
+  for (const [strategy, parameters, basis, coverage] of [
+    ["resident", plain, "measured_endpoint", "measured_resident"],
+    ["staged_residency", { ...plain, stageResidency: true }, "anchor_derived", "estimated_intermediate"],
+    ["bounded_decode", bounded, "anchor_derived", "estimated_intermediate"],
+    ["bounded_decode", { ...bounded, stageResidency: true }, "anchor_derived", "estimated_intermediate"],
+    ["bounded_attention", { ...bounded, attentionChunkSize: 67_108_864 }, "anchor_derived", "estimated_intermediate"],
+    ["bounded_attention", selection.parameters, "measured_endpoint", "measured_minimum"],
+  ]) {
+    assert.equal(assertAdmittedReplaySelection({ ...selection, strategy, parameters, basis }), coverage);
+  }
+  // Pure contract coverage only: these numeric combinations must describe the
+  // actual recipe the worker selected; no additional model render is planned.
+  for (const decodeTileEdge of [256, 512]) for (const attentionChunkSize of [16_777_216, 67_108_864]) for (const stageResidency of [false, true]) {
+    const measuredMinimum = stageResidency && decodeTileEdge === 256 && attentionChunkSize === 16_777_216;
+    const current = { ...selection, parameters: { ...bounded, decodeTileEdge, attentionChunkSize, stageResidency },
+      basis: measuredMinimum ? "measured_endpoint" : "anchor_derived" };
+    assert.equal(assertAdmittedReplaySelection(current), measuredMinimum ? "measured_minimum" : "estimated_intermediate");
+    assert.throws(() => assertAdmittedReplaySelection({ ...current, basis: measuredMinimum ? "anchor_derived" : "measured_endpoint" }),
+      "only the exact freshly measured minimum can claim endpoint coverage");
+  }
+  for (const decodeTileEdge of [256, 512]) for (const stageResidency of [false, true]) {
+    assert.equal(assertAdmittedReplaySelection({ ...selection, strategy: "bounded_decode", basis: "anchor_derived",
+      parameters: { ...bounded, decodeTileEdge, stageResidency } }), "estimated_intermediate");
+  }
+  // availableGb is already net of reserve; an affordable 4.5-GiB admission under
+  // a six-GiB free cap and 1.5-GiB reserve must not pay that reserve twice.
+  assert.doesNotThrow(() => assertAdmittedReplaySelection({ ...selection, admittedPeakGb: 4.5 }));
+  assert.doesNotThrow(() => assertAdmittedReplaySelection({ ...selection, admittedPeakGb: 4.5 + 1 / 1024 ** 3 }));
+  for (const patch of [
+    { strategy: "bounded_transformer_residency" },
+    { strategy: "staged_residency", parameters: plain },
+    { strategy: "resident", parameters: { ...plain, stageResidency: true } },
+    { parameters: { ...selection.parameters, decodeOverlap: 128 } },
+    { parameters: { ...selection.parameters, decodeTileEdge: 384 } },
+    { parameters: { ...selection.parameters, attentionChunkSize: 4_194_304 } },
+    { parameters: { ...selection.parameters, attentionChunkSize: null } },
+    { parameters: { ...selection.parameters, transformerWindowSize: 1 } },
+    { parameters: { ...selection.parameters, unsupportedControl: true } },
+    { admittedPeakGb: 4.6 }, { admittedPeakGb: 2 }, { availableGb: 5 }, { availableGb: -1 },
+    { reserveGb: Number.NaN }, { predictedPeakBytes: 6 * 1024 ** 3 },
+  ]) assert.throws(() => assertAdmittedReplaySelection({ ...selection, ...patch }), /did not admit/);
+});
+
+// CI_IMPACT: pure completed-job records only; no API, subprocess, device or render.
+test("admitted replay completion binds the owned worker, physical GPU fields and Candle SDXL result", () => {
+  for (const physicalIndex of [0, 1]) {
+    const gpu = { physicalIndex, uuid };
+    const job = { status: "completed", workerId: "owned-worker", backend: String(physicalIndex),
+      assignedGpu: String(physicalIndex), result: { adapter: "candle_sdxl" } };
+    assert.doesNotThrow(() => assertAdmittedReplayCompletion(job, "owned-worker", gpu));
+    for (const patch of [{ status: "failed" }, { workerId: "other-worker" }, { workerId: undefined },
+      { backend: "candle" }, { backend: String(1 - physicalIndex) }, { backend: undefined },
+      { assignedGpu: String(1 - physicalIndex) }, { assignedGpu: undefined },
+      { result: { adapter: "mlx_sdxl" } }, { result: { adapter: "candle_sdxl_edit" } }, { result: {} }, { result: undefined }]) {
+      assert.throws(() => assertAdmittedReplayCompletion({ ...job, ...patch }, "owned-worker", gpu), /owned worker/);
+    }
+  }
+});
+
+test("admitted replay waits for API persisted assets and validates the actual sidecar shape", () => {
+  const image = { id: "asset_replay", projectId: "project_replay", type: "image", lineage: { jobId: "job_replay" },
+    file: { path: "assets/images/replay.png", mimeType: "image/png", width: 1024, height: 1024 } };
+  const job = { status: "completed", result: { assets: [image], assetIds: [image.id] } };
+  assert.equal(persistedReplayAsset({ status: "completed", result: { assetWrites: [{ mediaPath: image.file.path }] } }, "project_replay", "job_replay"), null,
+    "completed worker facts do not prove durable API asset persistence");
+  assert.equal(persistedReplayAsset({ ...job, result: { ...job.result, assetWrites: [] } }, "project_replay", "job_replay"), null);
+  assert.deepEqual(persistedReplayAsset(job, "project_replay", "job_replay"), image);
+  for (const result of [{ ...job.result, assetIds: ["other"] }, { ...job.result, assets: [image, image] },
+    { ...job.result, assets: [{ ...image, projectId: "other" }] },
+    { ...job.result, assets: [{ ...image, lineage: { jobId: "other" } }] },
+    { ...job.result, assets: [{ ...image, file: { ...image.file, width: 768 } }] },
+    { ...job.result, assets: [{ ...image, file: { ...image.file, path: "../replay.png" } }] },
+    { ...job.result, assets: [{ ...image, file: { ...image.file, path: "C:\\replay.png" } }] },
+    { ...job.result, assets: [{ ...image, file: { ...image.file, mimeType: "video/mp4" } }] }]) {
+    assert.throws(() => persistedReplayAsset({ ...job, result }, "project_replay", "job_replay"), /sidecar/);
+  }
+});
+
+test("admitted replay rejects malformed or incomplete selected physical GPU telemetry", () => {
+  assert.deepEqual(parseReplayGpuSample(`1, ${uuid}, 2048, 90000, 0, 3`, "sample-time"), {
+    at: "sample-time", physicalIndex: 1, uuid, usedBytes: 2048 * 1024 ** 2, freeBytes: 90000 * 1024 ** 2, gpuUtilization: 0, memoryUtilization: 3,
+  });
+  for (const csv of [`${uuid},2048,90000,0`, `${uuid},2048,90000,0,`, `${uuid},2048,90000,0,NaN`,
+    `${uuid},2048,90000,0,N/A`, `${uuid},2048,90000,0,101`, `${uuid},2048,90000,101,0`,
+    `${uuid},-1,90000,0,0`, `${uuid},2048,Infinity,0,0`, `${uuid},2048,90000,0,0,extra`,
+    `${uuid},2048,90000,0,0\n${uuid},2048,90000,0,0`, "GPU-wrong,2048,90000,0,0"]) {
+    assert.throws(() => parseReplayGpuSample(`1,${csv}`), /telemetry identity or counters unavailable/);
+  }
+});
+
+test("admitted replay workflow uses GPU1 only as bootstrap before selecting GPU0 or GPU1", async () => {
+  const source = await readFile(new URL("../.github/workflows/memory-catalog-campaign.yml", import.meta.url), "utf8");
+  assert.match(source, /- sdxl-cuda-admitted-replay/);
+  assert.match(source, /CUDA_VISIBLE_DEVICES: "1"/); assert.match(source, /SCENEWORKS_GPU_ID: "1"/);
+  assert.match(source, /cargo test --release --locked -p sceneworks-core --lib sdxl_endpoint_/);
+  assert.match(source, /cargo test --release --locked -p sceneworks-worker --features backend-candle --lib candle_memory_strategy::tests::sdxl_/);
+  // CI_IMPACT: one source assertion keeps the pure production-assembly regression ahead of the render.
+  assert.match(source, /cargo test --release --locked -p sceneworks-worker --features backend-candle --lib image_jobs::sdxl_endpoint_inventory_tests/);
+  assert.match(source, /cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings/);
+  // CI_IMPACT: source-only assertion; the manual replay reuses its worker objects for a weights-free dump.
+  assert.match(source, /cargo run --release --locked -p sceneworks-worker --no-default-features --features backend-candle --bin dump-engine-capabilities/);
+  assert.match(source, /engine-capability-facts"/);
+  assert.ok(source.indexOf("Validate the SDXL gate") < source.indexOf("Replay one ordinary admitted SDXL"));
+  const script = await readFile(new URL("./measure-sdxl-cuda-endpoints.mjs", import.meta.url), "utf8");
+  assert.match(script, /POST", "\/api\/v1\/image\/jobs"/);
+  assert.match(script, /child\.stdin\.end\(\)/, "owned worker uses existing natural stdin-EOF shutdown");
+  assert.match(script, /SCENEWORKS_PARENT_PID/, "owned API uses existing parent-death natural shutdown");
+  assert.match(script, /receipt\.selection = admittedReplaySelection\(await readFile/);
+  assert.match(script, /assertAdmittedReplayCompletion\(receipt\.completedJob, workerId, gpu\)/);
+  assert.match(script, /persistedReplayAsset\(job, project\.id, jobId\)/);
+  assert.match(script, /\/assets\/\$\{encodeURIComponent\(persisted\.image\.id\)\}/, "read the persisted sidecar through the ordinary asset API");
+  const main = script.slice(script.indexOf("export async function main("));
+  assert.equal((main.match(/await selectCaptureGpu\(/g) ?? []).length, 1, "one frozen selection for the whole pair");
+  assert.ok(main.indexOf("await selectCaptureGpu(") < main.indexOf("for (const endpoint of ENDPOINTS)"));
+  assert.match(main, /const gpu = gpuPreflight\.selected;\s*const env = endpointGpuEnv\(baseEnv, gpu\)/);
+  assert.match(main, /validateEndpoint\(measurement, endpoint, pin, gpu\.uuid\)/);
+  assert.match(main, /"gpu-selection\.json"[\s\S]*?status: "failed"[\s\S]*?samples: error\.samples/);
+  assert.match(script, /const processEnvs = admittedReplayProcessEnvs\(childEnv\)/);
+  assert.match(script, /launch\(apiBinary, \[\], processEnvs\.api, "api"\)/);
+  assert.match(script, /launch\(apiBinary, \[\], processEnvs\.worker, "worker"\)/);
+  assert.match(script, /return admittedReplayWorker\(workers, workerId, gpu\);\s*\}, 180,/,
+    "selected GPU/image capability validation remains inside the bounded registration wait");
+  assert.match(script, /"-i", String\(gpu\.physicalIndex\)/);
+});
