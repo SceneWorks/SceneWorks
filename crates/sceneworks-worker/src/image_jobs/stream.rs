@@ -13,6 +13,10 @@ enum GenEvent {
         index: usize,
         phase: LoadPhase,
     },
+    LoadActivity {
+        index: usize,
+        pending: Arc<std::sync::Mutex<load_progress::PendingLoadActivity>>,
+    },
     /// One latent-resolution preview frame of image `index`'s developing render (epic 16624,
     /// sc-16904). Forwarded from a [`gen_core::PreviewSink`] by [`preview_sink_for`]; engines
     /// that don't emit previews simply never produce this variant.
@@ -148,6 +152,52 @@ fn prompt_enhancement_event_sink_for(
     }
 }
 
+fn observe_image_load_activity(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+) -> gen_core::LoadActivityObserver {
+    let tx = tx.clone();
+    load_progress::observe(move |pending| {
+        let _ = tx.blocking_send(GenEvent::LoadActivity { index, pending });
+    })
+}
+
+/// Route preparation can hash a changed checkpoint before a generator exists. Run that
+/// read-only work off the async runtime and report only observed hash work; warm source stamps
+/// remain silent. The existing helper keeps heartbeats alive throughout a large file read.
+async fn prepare_image_route_with_progress<T: Send + 'static>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    prepare: impl FnOnce() -> WorkerResult<T> + Send + 'static,
+) -> WorkerResult<T> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::task::spawn_blocking(move || {
+        let _observer = gen_core::LoadActivityObserver::new(move |activity| {
+            let _ = tx.send(activity);
+        });
+        prepare()
+    });
+    let pending = heartbeat_while_blocking(api, settings, job_id, "image source preparation", task);
+    tokio::pin!(pending);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            // Drain the ordered observations before returning a completed prepared route.
+            biased;
+            activity = rx.recv(), if open => {
+                let Some(activity) = activity else { open = false; continue; };
+                update_job(api, job_id, progress_payload(
+                    JobStatus::LoadingModel, ProgressStage::LoadingModel, 0.0,
+                    &format!("{}.", load_activity_message(activity)),
+                    None, None, None,
+                )).await?;
+            }
+            result = &mut pending => return result,
+        }
+    }
+}
+
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
     if matches!(progress, Progress::ConditioningComplete) {
@@ -229,6 +279,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
@@ -271,6 +322,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
             index,
@@ -322,6 +374,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
@@ -355,6 +408,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
             index,
@@ -398,6 +452,7 @@ where
     ) -> WorkerResult<(Vec<(u32, u32, Vec<u8>)>, Option<JsonObject>)>,
 {
     let _cache_release = RequestCacheRelease;
+    let _load_observer = observe_image_load_activity(&tx, 0);
     let mut on_progress = |progress| send_gen_progress(&tx, 0, progress);
     let (images, facts) = generate(preview_sink_for(&tx, 0), &mut on_progress)?;
     if images.len() != expected {

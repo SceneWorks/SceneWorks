@@ -15889,6 +15889,33 @@ async fn consume_gen_events_with_disclosure(
                 )
                 .await?;
             }
+            GenEvent::LoadActivity { index, pending } => {
+                let activity = load_progress::take(&pending);
+                let (status, stage) = if activity == Some(gen_core::LoadActivity::EncodingPrompt) {
+                    (JobStatus::Running, ProgressStage::Generating)
+                } else {
+                    (JobStatus::LoadingModel, ProgressStage::LoadingModel)
+                };
+                mark_started(index);
+                tracing::info!(event = "image_load_activity", job_id = %job.id,
+                    image_index = index, activity = ?activity);
+                update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        status,
+                        stage,
+                        step_fraction(index, 0, 1, total_u32),
+                        &progress_with_auto_tier_streaming(
+                            &format!("Image {}/{total} — {}.", index + 1,
+                                load_activity_message(activity)),
+                            auto_tier_streaming,
+                        ),
+                        Some(streaming_result(plan, asset_writes)),
+                        backend,
+                    ),
+                ).await?;
+            }
             GenEvent::Loading { index, phase } => {
                 mark_started(index);
                 let component = match phase {

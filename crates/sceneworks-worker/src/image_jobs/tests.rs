@@ -22452,6 +22452,7 @@ mod preview_stream_tests {
             GenEvent::Step { .. } => "Step",
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
+            GenEvent::LoadActivity { .. } => "LoadActivity",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
