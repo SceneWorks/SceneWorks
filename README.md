@@ -183,14 +183,21 @@ build the Rust lanes with nothing configured. (Two workflows still name a
 
 ## LoRA training
 
-SceneWorks trains LoRAs locally with a native Rust/MLX/candle trainer — no torch.
-Build a captioned dataset in **Data Sets**, validate the plan with a dry run,
-train on the GPU worker, and the result registers as a normal SceneWorks LoRA —
-image LoRAs selectable in Image Studio, video LoRAs in Video Studio.
+SceneWorks trains adapters locally with a native Rust/MLX/candle trainer — no torch.
+Build a captioned dataset in **Data Sets**, choose a target in Training Studio,
+and use **Start training** to launch a real run on the GPU worker. Completed
+adapters register in the library — image adapters are selectable in Image Studio,
+video adapters in Video Studio. API clients can validate a plan with `dryRun: true`
+before submitting a real run.
 
 - **Image LoRAs** — Z-Image-Turbo, SDXL (the generic SDXL-UNet kernel that
   SDXL-family models such as Kolors extend), Lens, Krea 2, and Stable Diffusion
   3.5 (Large/Medium).
+- **MOSS-Image LoRA / LoKr** — explicit Base and SFT targets on Apple Silicon
+  (MLX) and CUDA (candle). Base weights, text encoder and VAE stay frozen.
+  Adapters can be imported on either backend for the same exact parent; Base and
+  SFT are distinct compatibility targets. See the [MOSS training guide](docs/moss-image-integration.md#adapter-training)
+  for controls, checkpoint recovery, memory admission and generation options.
 - **Video LoRAs** — LTX-2.3 and Wan 2.2 (TI2V-5B single-expert, and the A14B
   mixture-of-experts denoisers trained as a high/low-noise LoRA pair).
 - **ControlNet overlays** — train a Krea 2 pose-control overlay from your own

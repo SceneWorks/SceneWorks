@@ -4,6 +4,38 @@ The catalog exposes `moss_image_base` and `moss_image_sft` as native text-to-ima
 
 SFT's **8-step acceleration** starts OFF. Its two explicit policies are `unmerged_bf16` (BF16 backbone with the published FP32 residual/time/modulation operations) and `full_fp32` (the published already distilled FP32 transformer, without a second LoRA). Both select a trained prefix of 1–8 steps, defaulting to 8. Installing components or requesting eight ordinary steps never enables acceleration.
 
+## Adapter training
+
+Training Studio exposes **MOSS-Image Base LoRA / LoKr** and **MOSS-Image SFT LoRA / LoKr**. Each trains transformer adapters while keeping the parent weights, text encoder and VAE frozen.
+
+| Parent target | Network type | Apple Silicon (MLX) | CUDA (candle) |
+| --- | --- | --- | --- |
+| MOSS-Image Base | LoRA | Supported | Supported |
+| MOSS-Image Base | LoKr | Supported | Supported |
+| MOSS-Image SFT | LoRA | Supported | Supported |
+| MOSS-Image SFT | LoKr | Supported | Supported |
+
+Validation status, 2026-10-27: the table describes implemented combinations. Final real-weight acceptance across all eight combinations, including learning, recovery, generation and opposite-backend import, is still pending. It is not a performance or quality comparison.
+
+1. Install the selected parent and its required components, then prepare images and captions in **Data Sets**. Base uses its own transformer with the shared SFT text encoder/VAE components; choosing Base does not remove those dependencies.
+2. In Training Studio, select the dataset and the exact **Target**, give the adapter a **LoRA name**, and set **Steps**, **Checkpoint cadence** and resolution. Under advanced controls, select **Network type**: LoRA or **LoKr (LyCORIS Kronecker)**. LoKr additionally exposes **LoKr factor** (`-1` selects automatic decomposition).
+3. Set **Rank**, **Alpha**, **Batch size**, **Gradient accumulation**, **Optimizer**, **Learning rate** and schedule as needed. MOSS accepts positive fractional alpha and a literal nonnegative **Seed**, including zero; **Randomize seed** saves a concrete value. **MOSS target modules** accepts one exact, case-sensitive native path per line; leave it blank for all supported projections. **Cache VAE latents** and **Cache text embeddings** trade retained cache memory for repeated encoding when disabled. Native VAE preparation uses the deterministic posterior mean.
+4. Choose **Start training** to submit a real job. Watch progress and checkpoint saves in the queue. A completed run registers its adapter in the normal library for selection in Image Studio. Select the matching Base or SFT model and adjust adapter strength through the usual LoRA controls.
+
+For API clients, `GET /api/v1/training/targets` supplies current target defaults and limits. The target IDs are `moss_image_base_lora` and `moss_image_sft_lora`; `config.advanced.networkType` chooses `lora` or `lokr`. Submit a dataset, output name and configuration through `POST /api/v1/projects/:project_id/training/jobs`. Use `dryRun: true` for plan validation, then `dryRun: false` for real execution. Training Studio's **Start training** always submits a real run; it has no dry-run selector.
+
+### Checkpoints, cancellation and memory
+
+**Cancel** requests cancellation of the active job. When a complete checkpoint is available, the stopped queue card offers **Resume from step N**; **Restart from step 0** starts over. Resume restores adapter and optimizer state, scheduler position, seed/draw cursor and any pending gradient accumulation. Keep the original dataset, parent, settings and total step horizon: mismatched or incomplete state is refused. A standalone exported adapter is for generation/import, not a substitute for a complete resume bundle. Cancellation does not claim a completed final adapter.
+
+Training uses the configured GPU memory budget and authenticates required model files before loading weights. An over-budget plan is refused rather than silently changing its precision or training controls. Review the refusal and reduce the requested workload or cache residency before submitting a new plan; a dry run validates the plan but does not establish that actual device execution fits.
+
+### Saved adapters and generation
+
+The exported `.safetensors` adapter can be imported through **Import LoRA** and used on MLX or CUDA with the same exact parent checkpoint, method, rank and alpha metadata. Parent identity is preserved through library registration and import: a Base adapter is not advertised as compatible with SFT, or vice versa. Cross-backend portability here concerns the adapter export; it does not promise cross-backend transfer of an in-progress optimizer checkpoint.
+
+Training targets the ordinary Base or SFT model. **8-step acceleration** is a separate SFT generation choice, initially OFF. A custom trained SFT adapter and the selected DMD accelerator have separate roles and remain separately selected; the custom adapter does not replace the accelerator's required components. Base with DMD is refused. Turning acceleration OFF returns to ordinary generation with the selected custom adapter. Disabling that adapter's strength removes its contribution without enabling or changing acceleration.
+
 ## Requests and replay
 
 Typed `POST /api/v1/image/jobs`, MCP `generate_image`, presets, retry and duplicate use the same final payload validator, after preset expansion or replay merging. The existing raw `POST /api/v1/jobs` security boundary refuses `image_generate` and `image_edit` for every model. Its directly allowed `image_detail` operation refuses MOSS because that provider implements text-to-image only.
