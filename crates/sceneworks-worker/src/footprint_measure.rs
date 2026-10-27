@@ -48,13 +48,42 @@
 //!
 //! Extra tiers (other quants / models) auto-measure if their subdir is cached; otherwise the test
 //! panics with a download hint and is simply not part of the run.
+//!
+//! ## FLUX 3 Image Klein campaign cells (sc-26243)
+//!
+//! Six MLX cells (`flux3_klein` / `flux3_klein_base` × bf16 / q4 / q8) are terminal campaign
+//! measurements, not ordinary CI. Every test is `#[ignore]`d and must run in its OWN process:
+//!
+//! ```text
+//! FLUX3_FOOTPRINT_OUT_DIR=/absolute/outside/the/repo //!   cargo test -p sceneworks-worker --release //!     footprint_flux3_klein_mlx_q4 -- --ignored --exact --nocapture
+//! ```
+//!
+//! Required environment:
+//! * `FLUX3_FOOTPRINT_OUT_DIR` — required, absolute, outside the checkout. Each cell retains
+//!   `<model>_<tier>_mlx.png` there; the printed `[[FOOTPRINT]]` JSON is the receipt.
+//! * `SCENEWORKS_DATA_DIR` — optional; when unset the production `Settings` platform default is
+//!   used, exactly as the worker resolves it.
+//! * `FP_PROMPT` — optional prompt override; resolution/steps/seed are fixed by the cell contract.
+//!
+//! The dense `bf16` cell reads the pinned snapshot the catalog manifest names. `q4`/`q8` are NOT
+//! downloaded: they must already exist under
+//! `<data_dir>/models/derived/<model>/<tier>/<conversion>/` from an offline CPU conversion. A missing
+//! or hash-mismatched package fails with its exact expected path and the conversion command; it
+//! never falls back to bf16. The same rule is enforced by the Candle sibling module.
+//!
+//! Resident is `active_after_clear − baseline` sampled after the generation and after
+//! `clear_cache()` (steady-state weights only); peak is the allocator high-water mark reset before
+//! load and read after generation. `measurementScope` is `mlx-process-delta`.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
-use super::smoke_support::{env_or, image_std, DEGENERATE_STD_FLOOR_DEFAULT};
+use super::smoke_support::{
+    env_or, flux3_footprint_png_path, image_std, save_png, sha256_file_hex,
+    DEGENERATE_STD_FLOOR_DEFAULT,
+};
 
 /// One-tier-per-process guard (sc-8925). The MLX memory counters + allocator peak high-water mark are
 /// PROCESS-GLOBAL and persist across tests in the same binary, so measuring a second tier in the same
@@ -147,7 +176,28 @@ fn quant_for(tier: &str) -> Option<Quant> {
 // Every caller discards the result — the resident/peak numbers are consumed off the printed
 // `[[FOOTPRINT]]` scrape line, not the return value — so this reports through stdout and returns
 // nothing (sc-8952).
-fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: GenerationRequest) {
+/// The FLUX 3 campaign's extra receipt fields. Present only for the campaign cells; the historical
+/// calibration callers pass `None` and keep their byte-identical `[[FOOTPRINT]]` line.
+struct FootprintArtifacts<'a> {
+    backend: &'a str,
+    engine_id: &'a str,
+    png_path: &'a Path,
+    measurement_scope: &'a str,
+    physical_device_id: Option<&'a str>,
+}
+
+/// General measurement seam (sc-26243): the caller supplies the resolved [`LoadSpec`], the retained
+/// PNG path and the receipt's scope. `measure_footprint` below keeps the historical
+/// `(model, tier, engine, dir, request)` signature and its `[[FOOTPRINT]]` line unchanged.
+fn measure_footprint_spec(
+    model: &str,
+    tier: &str,
+    engine_id: &str,
+    spec: &LoadSpec,
+    req: &GenerationRequest,
+    weights_dir: &Path,
+    artifacts: Option<&FootprintArtifacts<'_>>,
+) {
     // Enforce the "RUN ONE TIER PER PROCESS" invariant (sc-8925): the MLX counters are process-global,
     // so a second measurement in the same binary invocation would report numbers contaminated by the
     // first tier's allocator residue + peak high-water mark. Fail loudly instead of scraping garbage.
@@ -160,7 +210,7 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
 
     println!(
         "[footprint] loading {model} ({tier}) from {} ...",
-        dir.display()
+        weights_dir.display()
     );
 
     // 1. Clean baseline: drop the allocator's free cache and zero the peak high-water mark so the
@@ -169,12 +219,8 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
     mlx_rs::memory::reset_peak_memory();
     let baseline = mlx_rs::memory::get_active_memory() as u64;
 
-    let mut spec = LoadSpec::new(WeightsSource::Dir(dir.to_path_buf()));
-    if let Some(q) = quant_for(tier) {
-        spec = spec.with_quant(q);
-    }
-    let generator = crate::inference_runtime::load(engine_id, &spec)
-        .unwrap_or_else(|e| panic!("load {engine_id} ({tier}): {e:?}"));
+    let generator = crate::inference_runtime::load(engine_id, spec)
+        .unwrap_or_else(|e| panic!("load {engine_id} ({model} {tier}): {e:?}"));
 
     // Geometry is part of the measurement contract (sc-16020). Capture it from the actual request —
     // FP_W/FP_H are overridable, so hard-coding the historical 1024² default in the output would make
@@ -184,7 +230,7 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
     // 3. One generation, then the load+gen peak high-water mark (reset in step 1, never since).
     let mut last = String::new();
     let output = generator
-        .generate(&req, &mut |p| {
+        .generate(req, &mut |p| {
             let s = format!("{p:?}");
             if s != last {
                 println!("[progress] {s}");
@@ -196,11 +242,35 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
         GenerationOutput::Images(mut images) => images.pop().expect("engine returned no image"),
         other => panic!("expected Images output, got {other:?}"),
     };
+    assert_eq!(
+        (image.width, image.height),
+        (req.width, req.height),
+        "{model} {tier}: engine returned {}x{}, request was {}x{}",
+        image.width,
+        image.height,
+        req.width,
+        req.height
+    );
     let std = image_std(&image);
     assert!(
         std > DEGENERATE_STD_FLOOR_DEFAULT,
         "{model} {tier} render looks degenerate (std {std:.2}) — measured footprint would be bogus"
     );
+
+    let (png_sha256, steps, seed) = match artifacts {
+        Some(artifacts) => {
+            save_png(&image, artifacts.png_path);
+            let sha = sha256_file_hex(artifacts.png_path);
+            let steps = req
+                .steps
+                .unwrap_or_else(|| panic!("{model} {tier}: footprint request must name steps"));
+            let seed = req
+                .seed
+                .unwrap_or_else(|| panic!("{model} {tier}: footprint request must pin a seed"));
+            (Some(sha), Some(steps), Some(seed))
+        }
+        None => (None, None, None),
+    };
     let peak = mlx_rs::memory::get_peak_memory() as u64;
 
     // 4. STEADY-STATE RESIDENT: release the gen's transient working buffers, THEN sample. This is the
@@ -211,10 +281,40 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
     let resident = active_resident.saturating_sub(baseline);
     let transient = peak.saturating_sub(active_resident);
 
-    // Machine-parseable line — scrape `[[FOOTPRINT]]` to backfill builtin.models.jsonc.
-    println!(
-        "[[FOOTPRINT]] {{\"model\":\"{model}\",\"tier\":\"{tier}\",\"residentMemoryBytes\":{resident},\"peakMemoryBytes\":{peak},\"measuredPixels\":{measured_pixels}}}"
-    );
+    match artifacts {
+        None => {
+            // Machine-parseable line — scrape `[[FOOTPRINT]]` to backfill builtin.models.jsonc.
+            println!(
+                "[[FOOTPRINT]] {{\"model\":\"{model}\",\"tier\":\"{tier}\",\"residentMemoryBytes\":{resident},\"peakMemoryBytes\":{peak},\"measuredPixels\":{measured_pixels}}}"
+            );
+        }
+        Some(artifacts) => {
+            let mut receipt = serde_json::json!({
+                "model": model,
+                "tier": tier,
+                "backend": artifacts.backend,
+                "engineId": artifacts.engine_id,
+                "residentMemoryBytes": resident,
+                "peakMemoryBytes": peak,
+                "measuredPixels": measured_pixels,
+                "width": req.width,
+                "height": req.height,
+                "steps": steps,
+                "seed": seed,
+                "pngSha256": png_sha256,
+                "measurementScope": artifacts.measurement_scope,
+            });
+            if let Some(device) = artifacts.physical_device_id {
+                receipt["physicalDeviceId"] = serde_json::Value::String(device.to_owned());
+            }
+            println!("[[FOOTPRINT]] {receipt}");
+            println!(
+                "[footprint] retained {} (sha256 {})",
+                artifacts.png_path.display(),
+                png_sha256.as_deref().unwrap_or_default()
+            );
+        }
+    }
     println!(
         "[footprint] {model} {tier}: resident {:.2} GiB (active {:.2}, baseline {:.2}) | peak {:.2} GiB | transient (peak−resident) {:.2} GiB | render std {:.1}",
         resident as f64 / 1024.0 / 1024.0 / 1024.0,
@@ -224,6 +324,19 @@ fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: 
         transient as f64 / 1024.0 / 1024.0 / 1024.0,
         std,
     );
+}
+
+/// Historical calibration entrypoint. Builds the packed-tier [`LoadSpec`] from `dir`/`tier` and
+/// measures through [`measure_footprint_spec`] with no retained artifact, preserving the original
+/// `[[FOOTPRINT]]` line and every existing caller.
+fn measure_footprint(model: &str, tier: &str, engine_id: &str, dir: &Path, req: GenerationRequest) {
+    let mut spec = LoadSpec::new(WeightsSource::Dir(dir.to_path_buf()));
+    if let Some(q) = quant_for(tier) {
+        spec = spec.with_quant(q);
+    }
+    // No artifact is retained for the historical calibration set; the artifact-less branch keeps the
+    // original JSON shape.
+    measure_footprint_spec(model, tier, engine_id, &spec, &req, dir, None);
 }
 
 /// SDXL-family default request: 1024², real CFG. Kept modest on steps to keep the harness quick; the
@@ -264,6 +377,300 @@ fn turbo_request(steps: u32, guidance: Option<f32>) -> GenerationRequest {
         guidance,
         ..Default::default()
     }
+}
+
+// ── FLUX 3 Image Klein (sc-26243) ────────────────────────────────────────────────────────────────
+// The campaign contract: {distilled, base} × MLX {bf16, q4, q8}, one fresh process per cell, one real
+// load + generation, a non-degenerate retained PNG and one `[[FOOTPRINT]]` receipt line.
+
+const FLUX3_DISTILLED: &str = "flux3_klein";
+const FLUX3_BASE: &str = "flux3_klein_base";
+const FLUX3_WIDTH: u32 = 1024;
+const FLUX3_HEIGHT: u32 = 1024;
+const FLUX3_SEED: u64 = 26243;
+const FLUX3_DISTILLED_STEPS: u32 = 16;
+const FLUX3_BASE_STEPS: u32 = 50;
+const FLUX3_BASE_GUIDANCE: f32 = 3.5;
+const FLUX3_MLX_SCOPE: &str = "mlx-process-delta";
+
+fn flux3_manifest_entry(model: &str) -> serde_json::Value {
+    crate::tests::builtin_model_entry(model)
+}
+
+/// The dense original row (`variant: bf16`) whose repository/revision pins the snapshot root.
+fn flux3_dense_row<'a>(model: &str, entry: &'a serde_json::Value) -> &'a serde_json::Value {
+    entry["downloads"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{model}: manifest entry has no downloads array"))
+        .iter()
+        .find(|row| row.get("variant").and_then(serde_json::Value::as_str) == Some("bf16"))
+        .unwrap_or_else(|| panic!("{model}: manifest entry has no dense bf16 download row"))
+}
+
+fn flux3_snapshot_root(
+    model: &str,
+    entry: &serde_json::Value,
+    settings: &crate::Settings,
+) -> PathBuf {
+    let row = flux3_dense_row(model, entry);
+    let repo = row["repo"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{model}: dense row has no repo"));
+    let revision = row["revision"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{model}: dense row has no pinned revision"));
+    let root = crate::model_jobs::huggingface_pinned_snapshot_dir(
+        &settings.data_dir,
+        repo,
+        revision,
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "{model}: the pinned dense FLUX 3 snapshot is not installed (repo {repo}@{revision} under \
+             {}); install it through Model Manager or point SCENEWORKS_DATA_DIR at the installed data \
+             directory",
+            settings.data_dir.display()
+        )
+    });
+    for member in ["config.json", "model.safetensors"] {
+        let path = root.join(member);
+        assert!(
+            path.is_file(),
+            "{model}: pinned dense snapshot is incomplete; expected {}",
+            path.display()
+        );
+    }
+    root
+}
+
+/// The catalog row for one derived tier on `platform` (macos for MLX, windows/linux for Candle).
+fn flux3_derivation_row<'a>(
+    model: &str,
+    tier: &str,
+    platform: &str,
+    entry: &'a serde_json::Value,
+) -> &'a serde_json::Value {
+    entry["downloads"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{model}: manifest entry has no downloads array"))
+        .iter()
+        .find(|row| {
+            row.get("variant").and_then(serde_json::Value::as_str) == Some(tier)
+                && row.get("localDerivation").is_some()
+                && row
+                    .get("platforms")
+                    .and_then(serde_json::Value::as_array)
+                    .is_none_or(|platforms| platforms.iter().any(|p| p.as_str() == Some(platform)))
+        })
+        .unwrap_or_else(|| {
+            panic!("{model}: the catalog declares no {tier} local derivation for {platform}")
+        })
+}
+
+/// Resolve and VERIFY the derived q4/q8 package before planning, so a missing or stale conversion
+/// fails with its exact expected path and the offline conversion command rather than a generic
+/// "not installed" or a dense fallback.
+fn require_flux3_derived_package(
+    model: &str,
+    tier: &str,
+    platform: &str,
+    entry: &serde_json::Value,
+    settings: &crate::Settings,
+    snapshot_root: &Path,
+) -> PathBuf {
+    use sceneworks_core::model_artifacts::artifact_selection::{
+        derived_snapshot_state, local_derivation, local_derivation_snapshot_dir,
+        DerivedSnapshotState,
+    };
+
+    let row = flux3_derivation_row(model, tier, platform, entry);
+    let derivation = local_derivation(row)
+        .unwrap_or_else(|| panic!("{model}: the {tier} localDerivation row is malformed"));
+    let expected = local_derivation_snapshot_dir(&settings.data_dir, model, tier, &derivation)
+        .unwrap_or_else(|| {
+            panic!(
+                "{model}: the {tier} derivation path has a non-plain model/tier/conversion segment"
+            )
+        });
+    match derived_snapshot_state(&expected, &derivation) {
+        DerivedSnapshotState::Verified => expected,
+        state => panic!(
+            "{model}: the {tier} package is not installed/verified at exactly {}\n\
+             state: {state:?}\n\
+             Derived tiers are produced OFFLINE on the CPU first (never downloaded, never replaced by \
+             bf16). Convert it once, then re-run this cell:\n\
+             \n  FLUX3_CAPTURE_MODEL_ID={model} \\\n  FLUX3_CAPTURE_SOURCE_DIR={} \\\n  FLUX3_CAPTURE_OUT_DIR={} \\\n  FLUX3_CAPTURE_CONVERSIONS={} \\\n  cargo test -p sceneworks-worker --lib local_derivation::tests::flux3_capture_conversion_artifacts -- --ignored --nocapture\n",
+            expected.display(),
+            snapshot_root.display(),
+            settings.data_dir.join("models").join("derived").display(),
+            derivation.conversion,
+        ),
+    }
+}
+
+fn flux3_image_request(
+    model: &str,
+    tier: &str,
+    entry: &serde_json::Value,
+) -> sceneworks_core::image_request::ImageRequest {
+    let steps = if model == FLUX3_BASE {
+        FLUX3_BASE_STEPS
+    } else {
+        FLUX3_DISTILLED_STEPS
+    };
+    let guidance = (model == FLUX3_BASE).then_some(FLUX3_BASE_GUIDANCE);
+    let payload = serde_json::json!({
+        "projectId": "sc-26243-footprint",
+        "model": model,
+        "prompt": env_or(
+            "FP_PROMPT",
+            "a photorealistic portrait of a red fox in a sunlit autumn forest, sharp focus",
+        ),
+        "width": FLUX3_WIDTH,
+        "height": FLUX3_HEIGHT,
+        "count": 1,
+        "seed": FLUX3_SEED,
+        "advanced": {"quantTier": tier, "steps": steps, "guidanceScale": guidance},
+        "modelManifestEntry": entry,
+    });
+    sceneworks_core::image_request::ImageRequest::from_payload(
+        payload
+            .as_object()
+            .expect("footprint payload is a JSON object"),
+    )
+}
+
+fn flux3_generation_request(model: &str) -> GenerationRequest {
+    GenerationRequest {
+        prompt: env_or(
+            "FP_PROMPT",
+            "a photorealistic portrait of a red fox in a sunlit autumn forest, sharp focus",
+        ),
+        width: FLUX3_WIDTH,
+        height: FLUX3_HEIGHT,
+        count: 1,
+        seed: Some(FLUX3_SEED),
+        steps: Some(if model == FLUX3_BASE {
+            FLUX3_BASE_STEPS
+        } else {
+            FLUX3_DISTILLED_STEPS
+        }),
+        guidance: (model == FLUX3_BASE).then_some(FLUX3_BASE_GUIDANCE),
+        ..Default::default()
+    }
+}
+
+/// One MLX FLUX 3 cell: resolve the package through the production planner, build the same
+/// `LoadSpec` composition the worker uses (package dir + quant + root encoder/autoencoder), then run
+/// the single measured generation. `FOOTPRINT_RAN` still enforces one cell per process.
+fn flux3_mlx_cell(model: &str, tier: &str) {
+    let settings = crate::Settings::from_env();
+    let entry = flux3_manifest_entry(model);
+    let snapshot_root = flux3_snapshot_root(model, &entry, &settings);
+    let request = flux3_image_request(model, tier, &entry);
+
+    let derived = if tier == "bf16" {
+        None
+    } else {
+        Some(require_flux3_derived_package(
+            model,
+            tier,
+            "macos",
+            &entry,
+            &settings,
+            &snapshot_root,
+        ))
+    };
+
+    let descriptor = crate::inference_runtime::media_descriptor(model)
+        .unwrap_or_else(|| panic!("{model}: no media descriptor is registered on this build"));
+    let plan = crate::image_jobs::flux3_precision::mlx_flux3_plan(
+        &request,
+        &settings,
+        &snapshot_root,
+        descriptor.capabilities.supported_quants,
+    )
+    .unwrap_or_else(|error| panic!("{model} {tier}: FLUX 3 MLX plan refused: {error:?}"))
+    .unwrap_or_else(|| panic!("{model}: not a FLUX 3 model in the production planner"));
+    assert_eq!(
+        plan.tier.key(),
+        tier,
+        "{model}: planner resolved a different package"
+    );
+    match &derived {
+        Some(expected) => {
+            let canonical = std::fs::canonicalize(expected).expect("derived package canonicalizes");
+            assert_eq!(
+                plan.weights_dir, canonical,
+                "{model} {tier}: planner and catalog resolve different derived packages"
+            );
+        }
+        None => assert_eq!(
+            plan.weights_dir, snapshot_root,
+            "{model}: bf16 must load the pinned snapshot root"
+        ),
+    }
+
+    let mut spec = LoadSpec::new(WeightsSource::Dir(plan.weights_dir.clone()));
+    if let Some(quant) = plan.quant() {
+        spec = spec.with_quant(quant);
+    }
+    spec = plan.attach_components(spec);
+
+    let generation = flux3_generation_request(model);
+    let png_path = flux3_footprint_png_path(model, tier, "mlx");
+    let artifacts = FootprintArtifacts {
+        backend: "mlx",
+        engine_id: model,
+        png_path: &png_path,
+        measurement_scope: FLUX3_MLX_SCOPE,
+        physical_device_id: None,
+    };
+    measure_footprint_spec(
+        model,
+        tier,
+        model,
+        &spec,
+        &generation,
+        &plan.weights_dir,
+        Some(&artifacts),
+    );
+}
+
+#[test]
+#[ignore = "terminal campaign cell; needs the pinned FLUX 3 dense snapshot + an Apple-Silicon Mac + FLUX3_FOOTPRINT_OUT_DIR"]
+fn footprint_flux3_klein_mlx_bf16() {
+    flux3_mlx_cell(FLUX3_DISTILLED, "bf16");
+}
+
+#[test]
+#[ignore = "terminal campaign cell; needs the offline-derived flux3_klein MLX q4 package + an Apple-Silicon Mac + FLUX3_FOOTPRINT_OUT_DIR"]
+fn footprint_flux3_klein_mlx_q4() {
+    flux3_mlx_cell(FLUX3_DISTILLED, "q4");
+}
+
+#[test]
+#[ignore = "terminal campaign cell; needs the offline-derived flux3_klein MLX q8 package + an Apple-Silicon Mac + FLUX3_FOOTPRINT_OUT_DIR"]
+fn footprint_flux3_klein_mlx_q8() {
+    flux3_mlx_cell(FLUX3_DISTILLED, "q8");
+}
+
+#[test]
+#[ignore = "terminal campaign cell; needs the pinned FLUX 3 base dense snapshot + an Apple-Silicon Mac + FLUX3_FOOTPRINT_OUT_DIR"]
+fn footprint_flux3_klein_base_mlx_bf16() {
+    flux3_mlx_cell(FLUX3_BASE, "bf16");
+}
+
+#[test]
+#[ignore = "terminal campaign cell; needs the offline-derived flux3_klein_base MLX q4 package + an Apple-Silicon Mac + FLUX3_FOOTPRINT_OUT_DIR"]
+fn footprint_flux3_klein_base_mlx_q4() {
+    flux3_mlx_cell(FLUX3_BASE, "q4");
+}
+
+#[test]
+#[ignore = "terminal campaign cell; needs the offline-derived flux3_klein_base MLX q8 package + an Apple-Silicon Mac + FLUX3_FOOTPRINT_OUT_DIR"]
+fn footprint_flux3_klein_base_mlx_q8() {
+    flux3_mlx_cell(FLUX3_BASE, "q8");
 }
 
 const SDXL_SENTINEL: &str = "unet/diffusion_pytorch_model.safetensors";

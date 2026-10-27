@@ -912,6 +912,12 @@ mod voiceclone_smoke;
 // manifest footprint fields.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
+// FLUX 3 Image Klein on the Candle/CUDA lane (sc-26243): the off-macOS half of the footprint campaign.
+// Same #[ignore]-gated, one-generation-per-process contract as footprint_measure, but the memory
+// receipt is the whole-GPU delta read from nvidia-smi. Compiled only for non-macOS candle test builds;
+// it runs no model compute unless an operator invokes an ignored campaign test by name.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod flux3_candle_footprint;
 // On-device RESOLUTION sweep of the MLX activation transient (sc-16195, epic 15448). Test-only +
 // macOS-only; the sibling of footprint_measure with the axis rotated — that one measures ONE
 // resolution across tiers, this one measures ONE tier across resolutions, sampling the same

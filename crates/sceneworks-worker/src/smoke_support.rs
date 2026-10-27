@@ -435,6 +435,68 @@ pub(crate) fn save_png(img: &Image, path: &Path) {
         .unwrap_or_else(|e| panic!("save {}: {e}", path.display()));
 }
 
+/// The required retained-PNG path for one FLUX 3 footprint cell:
+/// `$FLUX3_FOOTPRINT_OUT_DIR/<model>_<tier>_<backend>.png`.
+///
+/// The campaign is terminal evidence, not ordinary CI, so the artifact directory is REQUIRED and
+/// must be absolute and outside the checkout. Failing here (rather than writing into the repo or
+/// silently skipping the artifact) keeps a measurement from being reported without its quality
+/// artifact.
+pub(crate) fn flux3_footprint_png_path(
+    model: &str,
+    tier: &str,
+    backend: &str,
+) -> std::path::PathBuf {
+    let raw = std::env::var("FLUX3_FOOTPRINT_OUT_DIR").unwrap_or_else(|_| {
+        panic!(
+            "FLUX3_FOOTPRINT_OUT_DIR is required: set it to an absolute directory OUTSIDE the checkout so the measured cell's PNG is retained (got nothing)"
+        )
+    });
+    let dir = std::path::PathBuf::from(raw.trim());
+    assert!(
+        dir.is_absolute(),
+        "FLUX3_FOOTPRINT_OUT_DIR must be an absolute path outside the checkout, got {}",
+        dir.display()
+    );
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("create FLUX3_FOOTPRINT_OUT_DIR {}: {e}", dir.display()));
+    let canonical_dir = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|e| panic!("canonicalize {}: {e}", dir.display()));
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crate manifest sits under the repository root");
+    let canonical_repo =
+        std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    assert!(
+        !canonical_dir.starts_with(&canonical_repo),
+        "FLUX3_FOOTPRINT_OUT_DIR must be outside the repository ({} is inside {})",
+        canonical_dir.display(),
+        canonical_repo.display()
+    );
+    canonical_dir.join(format!("{model}_{tier}_{backend}.png"))
+}
+
+/// Lowercase hex SHA-256 of an on-disk artifact (the retained-PNG receipt).
+pub(crate) fn sha256_file_hex(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path)
+        .unwrap_or_else(|e| panic!("open {} for sha256: {e}", path.display()));
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0u8; 1 << 20];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .unwrap_or_else(|e| panic!("read {} for sha256: {e}", path.display()));
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    format!("{:x}", hasher.finalize())
+}
+
 /// GPU-free structural coverage for the video-lane motion metric (sc-11992). The smoke that consumes
 /// [`mean_abs_frame_delta`] is `#[ignore]`d and needs ~50 GB of weights, so these tests pin the
 /// metric's two load-bearing properties against synthetic frames: a frozen pair scores EXACTLY 0
