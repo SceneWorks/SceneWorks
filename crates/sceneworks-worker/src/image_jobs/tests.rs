@@ -28676,9 +28676,17 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         .split_once("match (needed, budget) {")
         .expect("deference arm body")
         .0;
-    let deference = format!("sequential_capable{deference}");
+    // Rustfmt may split a long method chain before the dot (`memory_strategy_selection\n
+    // .is_some_and(...)`), which is semantically identical and must not red this guard. Normalize
+    // whitespace before a dot once, then both the contract check and the mutation replacen below see
+    // the same spelling.
+    let deference = format!("sequential_capable{deference}").replace(" .", ".");
     let deference_contract = |arm: &str| {
-        arm.split_whitespace().collect::<Vec<_>>().join(" ").starts_with(
+        arm.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" .", ".")
+            .starts_with(
             "sequential_capable && memory_strategy_selection.is_some_and(|selection| selection.strategy.is_optimized()) && generation_memory.is_some_and(|memory| memory.stage_residency) {",
         )
     };
