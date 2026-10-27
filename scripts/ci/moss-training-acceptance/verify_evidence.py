@@ -114,44 +114,11 @@ def timestamp(value):
 
 
 def read_safetensors(file):
-    """Read only the bounded standard safetensors header; payloads stay streamed."""
-    file = Path(file)
-    with file.open("rb") as source:
-        prefix = source.read(8)
-        require(len(prefix) == 8, "truncated safetensors prefix")
-        size = struct.unpack("<Q", prefix)[0]
-        require(0 < size <= MAX_HEADER_BYTES, "safetensors header outside bounded parser workspace")
-        encoded = source.read(size)
-        require(len(encoded) == size, "truncated safetensors header")
-    header = json.loads(encoded, parse_constant=_invalid_constant, object_pairs_hook=_unique_object)
-    require(isinstance(header, dict), "safetensors header must be an object")
-    tensors = {name: value for name, value in header.items() if name != "__metadata__"}
-    require(tensors, "adapter contains no tensors")
-    sizes = {"BOOL": 1, "U8": 1, "I8": 1, "U16": 2, "I16": 2,
-             "U32": 4, "I32": 4, "U64": 8, "I64": 8,
-             "F16": 2, "BF16": 2, "F32": 4, "F64": 8}
-    end = file.stat().st_size - 8 - size
-    ranges = []
-    for name, tensor in tensors.items():
-        require(isinstance(tensor, dict) and tensor.get("dtype") in sizes,
-                f"unsupported actual adapter tensor dtype: {name}")
-        shape = tensor.get("shape")
-        require(isinstance(shape, list) and all(type(x) is int and x > 0 for x in shape),
-                f"invalid tensor shape: {name}")
-        offsets = tensor.get("data_offsets")
-        require(isinstance(offsets, list) and len(offsets) == 2
-                and all(type(x) is int for x in offsets), f"invalid tensor offsets: {name}")
-        left, right = offsets
-        require(0 <= left < right <= end
-                and right - left == math.prod(shape) * sizes[tensor["dtype"]],
-                f"tensor range/shape mismatch: {name}")
-        ranges.append((left, right))
-    ranges.sort()
-    require(ranges[0][0] == 0 and ranges[-1][1] == end
-            and all(a[1] == b[0] for a, b in zip(ranges, ranges[1:])),
-            "adapter has overlap, holes or unbound payload")
-    return tensors, 8 + size
-
+    try:
+        tensors, start, _ = _normalizer._safetensors_header(file)
+        return tensors, start
+    except _normalizer.NormalizationError as error:
+        raise EvidenceError(str(error)) from error
 
 def _values(data, dtype):
     if dtype == "BF16":
@@ -161,21 +128,10 @@ def _values(data, dtype):
 
 
 def tensor_payloads_equal(left_file, right_file):
-    left, left_start = read_safetensors(left_file)
-    right, right_start = read_safetensors(right_file)
-    require(set(left) == set(right), "recovery export tensor keys differ")
-    with Path(left_file).open("rb") as a, Path(right_file).open("rb") as b:
-        for key in sorted(left):
-            x, y = left[key], right[key]
-            require(x["shape"] == y["shape"] and x["dtype"] == y["dtype"],
-                    f"recovery tensor layout differs: {key}")
-            remaining = x["data_offsets"][1] - x["data_offsets"][0]
-            a.seek(left_start + x["data_offsets"][0])
-            b.seek(right_start + y["data_offsets"][0])
-            while remaining:
-                count = min(remaining, CHUNK_BYTES)
-                require(a.read(count) == b.read(count), f"actual recovered factor differs: {key}")
-                remaining -= count
+    try:
+        _normalizer.tensor_payloads_equal(left_file, right_file)
+    except _normalizer.NormalizationError as error:
+        raise EvidenceError(str(error)) from error
 
 
 def recompute_factor_delta(left_file, right_file):
@@ -551,7 +507,7 @@ def verify_record(record, root, manifest, expected_source, verification_time=Non
         else:
             require(left == right, f"actual recovered {key} differs")
     saved = record["saveReloadGenerate"]
-    require(saved["adapterSha256"] == saved["resolvedSha256"] == resumed["factorDelta"]["finalExport"]["sha256"],
+    require(saved["adapterSha256"] == saved["resolvedSha256"] == reference["factorDelta"]["finalExport"]["sha256"],
             "library resolution did not select final exported adapter")
     for role, strength in (("before", 1.0), ("after", 1.0), ("disableControl", 0.0)):
         verify_png(root, saved[role], strength, manifest)

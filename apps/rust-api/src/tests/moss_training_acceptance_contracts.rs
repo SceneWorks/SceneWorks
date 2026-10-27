@@ -195,3 +195,87 @@ async fn refused_training_allows_only_the_actual_submission_config_snapshot() {
         );
     }
 }
+
+#[test]
+fn recovery_safetensors_compare_all_metadata_descriptors_and_exact_bits() {
+    use super::moss_training_acceptance::exact_safetensors_equal;
+    use std::path::Path;
+    fn write(path: &Path, header: &str, payload: &[u8]) {
+        let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(header.as_bytes());
+        bytes.extend_from_slice(payload);
+        std::fs::write(path, bytes).unwrap();
+    }
+    let root = tempfile::tempdir().unwrap();
+    // Literal host bytes only: neither backend tensor nor model is constructed.
+    for role in ["optimizer", "export"] {
+        let left = root.path().join(format!("{role}-left.safetensors"));
+        let right = root.path().join(format!("{role}-right.safetensors"));
+        let header = r#"{"a":{"dtype":"F32","shape":[1],"data_offsets":[0,4]},"b":{"dtype":"F32","shape":[1],"data_offsets":[4,8]},"__metadata__":{"optimizer":"adamw","optim.step":"60"}}"#;
+        let reordered = r#"{"__metadata__":{"optim.step":"60","optimizer":"adamw"},"b":{"shape":[1],"data_offsets":[0,4],"dtype":"F32"},"a":{"shape":[1],"data_offsets":[4,8],"dtype":"F32"}}"#;
+        let a = [0x01, 0, 0xc0, 0x7f]; // NaN payload bits, not float equality.
+        let b = [0, 0, 0, 0x80]; // -0 must remain distinct from +0.
+        write(&left, header, &[a, b].concat());
+        write(&right, reordered, &[b, a].concat());
+        assert_ne!(
+            std::fs::read(&left).unwrap(),
+            std::fs::read(&right).unwrap()
+        );
+        exact_safetensors_equal(&left, &right).unwrap();
+        for changed in [
+            header.replace("adamw", "adafactor"),
+            header.replace(",\"optim.step\":\"60\"", ""),
+            header.replace("\"a\":", "\"extra\":"),
+            header.replace("\"shape\":[1]", "\"shape\":[1,1]"),
+            header.replace("F32", "I32"),
+            header.replace(
+                ",\"b\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[4,8]}",
+                "",
+            ),
+            header.replace(
+                "\"__metadata__\":{\"optimizer\":\"adamw\",\"optim.step\":\"60\"}",
+                "\"__metadata__\":{}",
+            ),
+        ] {
+            write(&right, &changed, &[a, b].concat());
+            assert!(
+                exact_safetensors_equal(&left, &right).is_err(),
+                "accepted {changed}"
+            );
+        }
+        let missing = header.replace(
+            ",\"b\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[4,8]}",
+            "",
+        );
+        write(&right, &missing, &a);
+        assert!(exact_safetensors_equal(&left, &right).is_err());
+        let extra = header.replace(
+            "\"__metadata__\":",
+            "\"extra\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[8,12]},\"__metadata__\":",
+        );
+        write(&right, &extra, &[a, b, b].concat());
+        assert!(exact_safetensors_equal(&left, &right).is_err());
+        let mut changed = [a, b].concat();
+        changed[7] ^= 0x80;
+        write(&right, header, &changed);
+        assert!(exact_safetensors_equal(&left, &right).is_err());
+    }
+}
+
+#[test]
+fn recovery_safetensors_streaming_checks_the_final_payload_chunk() {
+    use super::moss_training_acceptance::exact_safetensors_equal;
+    let root = tempfile::tempdir().unwrap();
+    let left = root.path().join("a");
+    let right = root.path().join("b");
+    let header = br#"{"factor":{"dtype":"F32","shape":[16385],"data_offsets":[0,65540]}}"#;
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(header);
+    bytes.resize(bytes.len() + 65540, 0);
+    std::fs::write(&left, &bytes).unwrap();
+    std::fs::write(&right, &bytes).unwrap();
+    exact_safetensors_equal(&left, &right).unwrap();
+    *bytes.last_mut().unwrap() = 1;
+    std::fs::write(&right, &bytes).unwrap();
+    assert!(exact_safetensors_equal(&left, &right).is_err());
+}

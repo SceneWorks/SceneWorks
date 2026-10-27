@@ -13,7 +13,7 @@ use sceneworks_worker::test_support::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -1659,6 +1659,110 @@ fn retain_run_exports(case: &mut Case, run: &Run, label: &str) -> Result<(PathBu
     Ok((start, final_path))
 }
 
+/// Exact logical equality, including ALL metadata. JSON key order and physical
+/// tensor placement are representation details; dtype/shape and every payload
+/// bit remain exact. Original artifacts and raw hashes are never rewritten.
+pub(super) fn exact_safetensors_equal(left: &Path, right: &Path) -> Result<()> {
+    fn header(path: &Path) -> Result<(Value, u64)> {
+        let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+        let mut prefix = [0u8; 8];
+        file.read_exact(&mut prefix).map_err(|e| e.to_string())?;
+        let size = u64::from_le_bytes(prefix);
+        require(
+            size > 0 && size <= 16 * 1024 * 1024,
+            "unbounded safetensors header",
+        )?;
+        require(
+            sceneworks_core::safetensors::file_is_structurally_valid(path),
+            "invalid recovery safetensors structure",
+        )?;
+        let mut encoded = vec![0u8; size as usize];
+        file.read_exact(&mut encoded).map_err(|e| e.to_string())?;
+        let header: Value = serde_json::from_slice(&encoded).map_err(|e| e.to_string())?;
+        if let Some(metadata) = header.get("__metadata__") {
+            require(
+                metadata
+                    .as_object()
+                    .is_some_and(|values| values.values().all(Value::is_string)),
+                "invalid safetensors metadata",
+            )?;
+        }
+        Ok((header, 8 + size))
+    }
+    let (left_header, left_start) = header(left)?;
+    let (right_header, right_start) = header(right)?;
+    let left_entries = left_header
+        .as_object()
+        .ok_or("safetensors header is not an object")?;
+    let right_entries = right_header
+        .as_object()
+        .ok_or("safetensors header is not an object")?;
+    require(
+        left_entries.keys().collect::<BTreeSet<_>>()
+            == right_entries.keys().collect::<BTreeSet<_>>(),
+        "recovery tensor/metadata keys differ",
+    )?;
+    require(
+        left_header.get("__metadata__") == right_header.get("__metadata__"),
+        "recovery safetensors metadata differs",
+    )?;
+    let mut a = std::fs::File::open(left).map_err(|e| e.to_string())?;
+    let mut b = std::fs::File::open(right).map_err(|e| e.to_string())?;
+    let mut a_bytes = [0u8; 65536];
+    let mut b_bytes = [0u8; 65536];
+    for (name, descriptor) in left_entries {
+        if name == "__metadata__" {
+            continue;
+        }
+        let other = &right_entries[name];
+        let mut x = descriptor.clone();
+        let mut y = other.clone();
+        x.as_object_mut()
+            .ok_or("invalid tensor descriptor")?
+            .remove("data_offsets");
+        y.as_object_mut()
+            .ok_or("invalid tensor descriptor")?
+            .remove("data_offsets");
+        require(
+            x == y,
+            format!("recovery tensor descriptor differs: {name}"),
+        )?;
+        // Structural validation above authenticates each contiguous range.
+        let offsets = |v: &Value| -> Result<(u64, u64)> {
+            Ok((
+                v["data_offsets"][0]
+                    .as_u64()
+                    .ok_or("missing tensor start")?,
+                v["data_offsets"][1].as_u64().ok_or("missing tensor end")?,
+            ))
+        };
+        let (start, end) = offsets(descriptor)?;
+        let (other_start, other_end) = offsets(other)?;
+        require(
+            end - start == other_end - other_start,
+            "recovery tensor byte length differs",
+        )?;
+        a.seek(SeekFrom::Start(left_start + start))
+            .map_err(|e| e.to_string())?;
+        b.seek(SeekFrom::Start(right_start + other_start))
+            .map_err(|e| e.to_string())?;
+        let mut remaining = end - start;
+        while remaining > 0 {
+            let count = remaining.min(a_bytes.len() as u64) as usize;
+            a.read_exact(&mut a_bytes[..count])
+                .map_err(|e| e.to_string())?;
+            b.read_exact(&mut b_bytes[..count])
+                .map_err(|e| e.to_string())?;
+            require(
+                a_bytes[..count] == b_bytes[..count],
+                format!("recovery tensor payload differs: {name}"),
+            )?;
+            remaining -= count as u64;
+        }
+    }
+    Ok(())
+}
+
 fn compare_recovery(case: &mut Case, reference: &Run, resumed: &Run, canceled: &Run) -> Result<()> {
     let reference_bundle = gen_core::moss_image_training::recovery::resume_bundle_path(
         &reference.request.output_dir,
@@ -1683,7 +1787,12 @@ fn compare_recovery(case: &mut Case, reference: &Run, resumed: &Run, canceled: &
     case.record["raw"]["recovery"] = json!({"finalStates":state_artifact,"canceledProgress":acceptance_progress_snapshot(&canceled.ledger).map_err(|e|e.to_string())?,"resumedProgress":acceptance_progress_snapshot(&resumed.ledger).map_err(|e|e.to_string())?});
     case.persist()?;
     require(reference_state==resumed_state,"reference/resumed complete native optimizer scheduler RNG cursor accumulation state differs")?;
-    // Hash every native-produced optimizer tensor file, not just a scalar clock.
+    // Reauthenticate EACH native manifest against its original raw bytes; the
+    // manifest hashes remain raw identities, not cross-run state comparisons.
+    for bundle in [&reference_bundle, &resumed_bundle] {
+        gen_core::moss_image_training::recovery::bundle::read(bundle).map_err(|e| e.to_string())?;
+    }
+    // Retain every original raw hash, including the two distinct manifests.
     let inventory = |root: &Path| -> Result<BTreeMap<String, String>> {
         fn walk(root: &Path, path: &Path, result: &mut BTreeMap<String, String>) -> Result<()> {
             for entry in std::fs::read_dir(path).map_err(|e| e.to_string())? {
@@ -1721,14 +1830,26 @@ fn compare_recovery(case: &mut Case, reference: &Run, resumed: &Run, canceled: &
     )?;
     case.record["raw"]["recovery"]["bundleInventory"] = artifact;
     case.persist()?;
+    let expected: BTreeSet<_> = [
+        "complete.json",
+        "run.json",
+        "optimizer.safetensors",
+        "tensors.safetensors",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
     require(
-        !a.is_empty() && a == b,
-        "exact reference/resumed native bundle bytes differ",
+        a.keys().cloned().collect::<BTreeSet<_>>() == expected
+            && b.keys().cloned().collect::<BTreeSet<_>>() == expected,
+        "native bundle population differs",
     )?;
-    require(
-        file_sha(Path::new(text(&reference.receipt, "final_adapter_path")?))?
-            == file_sha(Path::new(text(&resumed.receipt, "final_adapter_path")?))?,
-        "final reference/resumed exported adapter bytes differ",
+    for member in ["optimizer.safetensors", "tensors.safetensors"] {
+        exact_safetensors_equal(&reference_bundle.join(member), &resumed_bundle.join(member))?;
+    }
+    exact_safetensors_equal(
+        Path::new(text(&reference.receipt, "final_adapter_path")?),
+        Path::new(text(&resumed.receipt, "final_adapter_path")?),
     )?;
     require(
         reference.receipt["evaluation_after"] == resumed.receipt["evaluation_after"]
@@ -2153,10 +2274,9 @@ async fn body(
                 && !fresh.request.config.resume,
             "fresh run reused/cleared the original cancellation token or resumed old state",
         )?;
-        require(
-            file_sha(Path::new(text(&fresh.receipt, "final_adapter_path")?))?
-                == file_sha(&trained)?,
-            "fresh independent full run differs from uninterrupted reference",
+        exact_safetensors_equal(
+            Path::new(text(&fresh.receipt, "final_adapter_path")?),
+            &trained,
         )?;
     }
     let initial = probe

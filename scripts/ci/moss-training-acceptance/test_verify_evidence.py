@@ -428,12 +428,132 @@ class StaticContractTests(unittest.TestCase):
         with self.assertRaises(verifier.EvidenceError):
             verifier.recompute_factor_delta(left, right)
 
-    def test_recovery_compares_payload_not_job_metadata(self):
-        left, right = self.root / "a.safetensors", self.root / "b.safetensors"
-        tiny_export(left, [0.25], {"job": "schema-test-only-left"})
-        tiny_export(right, [0.25], {"job": "schema-test-only-right"})
+    def test_recovery_exact_content_ignores_only_representation_order(self):
+        def write(path, header, payload):
+            encoded = json.dumps(header, separators=(",", ":")).encode()
+            path.write_bytes(struct.pack("<Q", len(encoded)) + encoded + payload)
+        # Include NaN payload and signed-zero bits: comparison must stay bitwise.
+        a, b = bytes.fromhex("0100c07f"), bytes.fromhex("00000080")
+        for role in ("optimizer", "export"):
+            with self.subTest(role=role):
+                left, right = self.root / (role + "-a"), self.root / (role + "-b")
+                header = {"a": {"dtype": "F32", "shape": [1], "data_offsets": [0, 4]},
+                          "b": {"dtype": "F32", "shape": [1], "data_offsets": [4, 8]},
+                          "__metadata__": {"optimizer": "adamw", "optim.step": "60"}}
+                reordered = {"__metadata__": {"optim.step": "60", "optimizer": "adamw"},
+                             "b": {"shape": [1], "data_offsets": [0, 4], "dtype": "F32"},
+                             "a": {"shape": [1], "data_offsets": [4, 8], "dtype": "F32"}}
+                write(left, header, a + b)
+                write(right, reordered, b + a)
+                self.assertNotEqual(verifier.digest(left), verifier.digest(right))
+                verifier.tensor_payloads_equal(left, right)
+                verifier._normalizer.tensor_payloads_equal(left, right)
+                for mutation in ("metadata-value", "metadata-key", "metadata-absent", "metadata-extra",
+                                 "shape", "dtype", "missing", "extra", "payload"):
+                    with self.subTest(mutation=mutation):
+                        changed, payload = copy.deepcopy(header), a + b
+                        if mutation == "metadata-value":
+                            changed["__metadata__"]["optim.step"] = "59"
+                        elif mutation == "metadata-key":
+                            del changed["__metadata__"]["optimizer"]
+                        elif mutation == "metadata-absent":
+                            del changed["__metadata__"]
+                        elif mutation == "metadata-extra":
+                            changed["__metadata__"]["unbound"] = "extra"
+                        elif mutation == "shape":
+                            changed["a"]["shape"] = [1, 1]
+                        elif mutation == "dtype":
+                            changed["a"]["dtype"] = "I32"
+                        elif mutation == "missing":
+                            del changed["b"]
+                            payload = a
+                        elif mutation == "extra":
+                            changed["extra"] = {"dtype": "F32", "shape": [1], "data_offsets": [8, 12]}
+                            payload += b
+                        else:
+                            payload = a + bytes.fromhex("00000000")
+                        write(right, changed, payload)
+                        with self.assertRaises(verifier.EvidenceError):
+                            verifier.tensor_payloads_equal(left, right)
+                        with self.assertRaises(verifier._normalizer.NormalizationError):
+                            verifier._normalizer.tensor_payloads_equal(left, right)
+
+    def test_recovery_original_bundle_manifests_and_inventory_remain_authenticated(self):
+        ctx = verifier._normalizer._Context(self.root)
+        for role in ("reference", "resumed"):
+            directory = self.root / role
+            directory.mkdir()
+            (directory / "run.json").write_text('{"step":60,"final_loss":0.013737086}')
+            tiny_export(directory / "optimizer.safetensors", [0.25], {"optim.step": "60"})
+            tiny_export(directory / "tensors.safetensors", [0.5])
+            manifest = {"format": "moss-complete-state-v2", "files": {
+                name: [path.stat().st_size, verifier.digest(path)]
+                for path in directory.iterdir() for name in [path.name]}}
+            (directory / "complete.json").write_text(json.dumps(manifest))
+            members = {path.name: ctx.reference(path) for path in directory.iterdir()}
+            inventory = {name: ref["sha256"] for name, ref in members.items()}
+            checkpoint = {"members": members, "state": {"step": 60, "final_loss": 0.013737086206674576}}
+            verifier._normalizer._checked_recovery_bundle(ctx, checkpoint, inventory)
+            # Even refreshed outer references cannot conceal a stale native
+            # complete.json after one original optimizer payload bit changes.
+            path = directory / "optimizer.safetensors"
+            changed = bytearray(path.read_bytes())
+            changed[-1] ^= 1
+            path.write_bytes(changed)
+            with self.assertRaises(verifier._normalizer.NormalizationError):
+                verifier._normalizer._checked_recovery_bundle(ctx, checkpoint, inventory)
+            members[path.name] = ctx.reference(path)
+            inventory[path.name] = members[path.name]["sha256"]
+            with self.assertRaisesRegex(verifier._normalizer.NormalizationError, "manifest member changed"):
+                verifier._normalizer._checked_recovery_bundle(ctx, checkpoint, inventory)
+
+    def test_run_state_loss_compares_exact_native_f32_bits_only(self):
+        normalizer = verifier._normalizer
+        raw = {"final_loss": 0.013737086, "step": 60, "update": 60, "rng": {"cursor": 60}}
+        promoted = copy.deepcopy(raw)
+        promoted["final_loss"] = 0.013737086206674576
+        self.assertNotEqual(raw, promoted)
+        normalizer._require_same_run_state(raw, promoted)
+        for sign in (1, -1):
+            normalizer._require_same_run_state(
+                {"final_loss": sign * 3.4028235e38},
+                {"final_loss": sign * 3.4028234663852886e38})
+        for changed in (0.013737087, True, float("nan"), float("inf"),
+                        3.4028236e38, -3.4028236e38, 1e300):
+            promoted["final_loss"] = changed
+            with self.assertRaises(normalizer.NormalizationError):
+                normalizer._require_same_run_state(raw, promoted)
+        with self.assertRaises(normalizer.NormalizationError):
+            normalizer._require_same_run_state({"final_loss": 0.0}, {"final_loss": -0.0})
+        with self.assertRaises(normalizer.NormalizationError):
+            normalizer._require_same_run_state({"final_loss": 1.0}, {"final_loss": struct.unpack("<f", bytes.fromhex("0100803f"))[0]})
+        for key, changed in (("step", 59), ("rng", {"cursor": 59}), ("extra", True)):
+            promoted = copy.deepcopy(raw)
+            promoted[key] = changed
+            with self.assertRaises(normalizer.NormalizationError):
+                normalizer._require_same_run_state(raw, promoted)
+
+    def test_library_keeps_actual_reference_file_hash_after_logical_recovery_comparison(self):
+        runs = {name: {"factorDelta": {"finalExport": {"sha256": value}}}
+                for name, value in (("uninterrupted", "a" * 64), ("resumed", "b" * 64))}
+        normalizer = verifier._normalizer
+        self.assertEqual(normalizer._registered_reference_sha(runs, {"sha256": "a" * 64}), "a" * 64)
+        with self.assertRaises(normalizer.NormalizationError):
+            normalizer._registered_reference_sha(runs, {"sha256": "b" * 64})
+
+    def test_recovery_exact_comparison_checks_payload_past_streaming_chunk(self):
+        left, right = self.root / "large-a", self.root / "large-b"
+        payload = b"\x00" * (verifier.CHUNK_BYTES + 4)
+        header = {"factor": {"dtype": "F32", "shape": [len(payload) // 4],
+                             "data_offsets": [0, len(payload)]}}
+        encoded = json.dumps(header).encode()
+        container = struct.pack("<Q", len(encoded)) + encoded + payload
+        left.write_bytes(container)
+        right.write_bytes(container)
         verifier.tensor_payloads_equal(left, right)
-        tiny_export(right, [0.5])
+        changed = bytearray(container)
+        changed[-1] ^= 1
+        right.write_bytes(changed)
         with self.assertRaises(verifier.EvidenceError):
             verifier.tensor_payloads_equal(left, right)
 

@@ -17,7 +17,8 @@ missing, unproven, failureReason}; its resourceGuard must come from the controll
 All artifact references returned are relative to caseRoot, ready for the main
 finalizer's existing bundle-prefix rebasing. Derived JSON and adapter-optimizer
 copies are written beneath caseRoot/normalized-native, never into the HF cache.
-No imports from the verifier: loading this module cannot create an import cycle.
+The verifier reuses the bounded safetensors content reader below; this module
+does not import the verifier, so loading it cannot create an import cycle.
 """
 from __future__ import annotations
 
@@ -27,11 +28,14 @@ import json
 import math
 import re
 import shutil
+import struct
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
 RAW_FORMAT = "moss-native-api-acceptance-candidate/v1"
 SEAL = "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320"
+CHUNK_BYTES = 1024 * 1024
+MAX_HEADER_BYTES = 16 * 1024 * 1024
 ENCODING = "logical-row-major-f32-le-v1"
 
 
@@ -89,6 +93,72 @@ def _invalid(value):
 def _read(path):
     with Path(path).open(encoding="utf-8") as source:
         return json.load(source, object_pairs_hook=_pairs, parse_constant=_invalid)
+
+
+def _safetensors_header(file):
+    """Read only the bounded standard safetensors header; payloads stay streamed."""
+    file = Path(file)
+    with file.open("rb") as source:
+        prefix = source.read(8)
+        require(len(prefix) == 8, "truncated safetensors prefix")
+        size = struct.unpack("<Q", prefix)[0]
+        require(0 < size <= MAX_HEADER_BYTES, "safetensors header outside bounded parser workspace")
+        encoded = source.read(size)
+        require(len(encoded) == size, "truncated safetensors header")
+    header = json.loads(encoded, parse_constant=_invalid, object_pairs_hook=_pairs)
+    require(isinstance(header, dict), "safetensors header must be an object")
+    metadata = header.get("__metadata__")
+    require("__metadata__" not in header or (isinstance(metadata, dict)
+            and all(isinstance(value, str) for value in metadata.values())),
+            "invalid safetensors metadata")
+    tensors = {name: value for name, value in header.items() if name != "__metadata__"}
+    require(tensors, "adapter contains no tensors")
+    sizes = {"BOOL": 1, "U8": 1, "I8": 1, "U16": 2, "I16": 2,
+             "U32": 4, "I32": 4, "U64": 8, "I64": 8,
+             "F16": 2, "BF16": 2, "F32": 4, "F64": 8}
+    end = file.stat().st_size - 8 - size
+    ranges = []
+    for name, tensor in tensors.items():
+        require(isinstance(tensor, dict) and set(tensor) == {"dtype", "shape", "data_offsets"}
+                and tensor.get("dtype") in sizes,
+                f"unsupported actual adapter tensor dtype: {name}")
+        shape = tensor.get("shape")
+        require(isinstance(shape, list) and all(type(x) is int and x > 0 for x in shape),
+                f"invalid tensor shape: {name}")
+        offsets = tensor.get("data_offsets")
+        require(isinstance(offsets, list) and len(offsets) == 2
+                and all(type(x) is int for x in offsets), f"invalid tensor offsets: {name}")
+        left, right = offsets
+        require(0 <= left < right <= end
+                and right - left == math.prod(shape) * sizes[tensor["dtype"]],
+                f"tensor range/shape mismatch: {name}")
+        ranges.append((left, right))
+    ranges.sort()
+    require(ranges[0][0] == 0 and ranges[-1][1] == end
+            and all(a[1] == b[0] for a, b in zip(ranges, ranges[1:])),
+            "adapter has overlap, holes or unbound payload")
+    return tensors, 8 + size, metadata
+
+
+def tensor_payloads_equal(left_file, right_file):
+    left, left_start, left_metadata = _safetensors_header(left_file)
+    right, right_start, right_metadata = _safetensors_header(right_file)
+    require(left_metadata == right_metadata, "recovery safetensors metadata differs")
+    require(set(left) == set(right), "recovery export tensor keys differ")
+    with Path(left_file).open("rb") as a, Path(right_file).open("rb") as b:
+        for key in sorted(left):
+            x, y = left[key], right[key]
+            require(x["shape"] == y["shape"] and x["dtype"] == y["dtype"],
+                    f"recovery tensor layout differs: {key}")
+            remaining = x["data_offsets"][1] - x["data_offsets"][0]
+            a.seek(left_start + x["data_offsets"][0])
+            b.seek(right_start + y["data_offsets"][0])
+            while remaining:
+                count = min(remaining, CHUNK_BYTES)
+                a_bytes, b_bytes = a.read(count), b.read(count)
+                require(len(a_bytes) == len(b_bytes) == count and a_bytes == b_bytes,
+                        f"actual recovered factor differs: {key}")
+                remaining -= count
 
 
 def _at_ms(value):
@@ -305,6 +375,22 @@ def _cursor(state, reference, accumulation):
             "stateArtifact": reference}
 
 
+def _require_same_run_state(left, right):
+    # RunState.final_loss is native f32. Direct serialization uses its shortest
+    # round-trip decimal; serde_json::Value promotes the same f32 to f64 first.
+    # Compare its exact declared bits, while every other field stays JSON-exact.
+    a, b = dict(left), dict(right)
+    losses = [_finite(value.pop("final_loss"), "RunState final_loss") for value in (a, b)]
+    try:
+        bits = [struct.pack("<f", value) for value in losses]
+    except OverflowError as error:
+        raise NormalizationError("RunState final_loss outside f32") from error
+    require(all(math.isfinite(struct.unpack("<f", value)[0]) for value in bits),
+            "RunState final_loss outside finite f32")
+    require(a == b and bits[0] == bits[1],
+            "retained durable RunState differs")
+
+
 def _run(ctx, raw, name, source, dataset_hash, config_hash, evaluation_hash):
     run = raw["raw"]["subruns"][name]
     reference = run["nativeReceipt"]
@@ -321,7 +407,7 @@ def _run(ctx, raw, name, source, dataset_hash, config_hash, evaluation_hash):
     checkpoint = run["durableCheckpoint"]
     state = checkpoint["state"]
     state_ref = checkpoint["members"]["run.json"]
-    require(ctx.read(state_ref) == state, "retained durable run state differs")
+    _require_same_run_state(ctx.read(state_ref), state)
     start = native["run_start_adapter"]
     start_step = _integer(start["start_step"], "actual adapter start step")
     completed = _integer(state["step"], "actual adapter final step")
@@ -491,14 +577,39 @@ def _backend_reentry(ctx, raw):
             "freshTokenUncanceled": fresh["tokenObservedCanceled"] is False, "freshRunCompletedStep": fresh["steps"][-1]}
 
 
+def _checked_recovery_bundle(ctx, checkpoint, inventory):
+    # Authenticate each ORIGINAL manifest against its own raw files. Containers
+    # with equal logical state can legitimately have different raw hashes.
+    members = checkpoint["members"]
+    names = {"complete.json", "run.json", "optimizer.safetensors", "tensors.safetensors"}
+    require(set(members) == set(inventory) == names, "native bundle member inventory differs")
+    paths = {name: ctx.checked(reference) for name, reference in members.items()}
+    require({name: reference["sha256"] for name, reference in members.items()} == inventory,
+            "retained native bundle inventory differs")
+    manifest = _read(paths["complete.json"])
+    require(manifest["format"] == "moss-complete-state-v2"
+            and set(manifest["files"]) == names - {"complete.json"}, "incomplete native bundle manifest")
+    for name, (size, digest) in manifest["files"].items():
+        require(type(size) is int and size == paths[name].stat().st_size
+                and digest == members[name]["sha256"], "native bundle manifest member changed")
+    _require_same_run_state(_read(paths["run.json"]), checkpoint["state"])
+    return paths
+
+
 def _recovery(ctx, raw, runs, dataset_hash, config_hash):
     local = raw["raw"]["recovery"]
     states = ctx.read(local["finalStates"])
     require(states["reference"] == states["resumed"], "actual complete native reference/resumed state differs")
     inventory = ctx.read(local["bundleInventory"])
-    require(inventory["reference"] and inventory["reference"] == inventory["resumed"], "actual optimizer/tensor bundle bytes differ")
-    require(runs["uninterrupted"]["factorDelta"]["finalExport"]["sha256"] == runs["resumed"]["factorDelta"]["finalExport"]["sha256"],
-            "actual reference/resumed final exports differ")
+    bundles = {}
+    for name, label in (("reference", "uninterrupted"), ("resumed", "resumed")):
+        checkpoint = raw["raw"]["subruns"][label]["durableCheckpoint"]
+        _require_same_run_state(checkpoint["state"], states[name])
+        bundles[name] = _checked_recovery_bundle(ctx, checkpoint, inventory[name])
+    for member in ("optimizer.safetensors", "tensors.safetensors"):
+        tensor_payloads_equal(bundles["reference"][member], bundles["resumed"][member])
+    tensor_payloads_equal(ctx.checked(runs["uninterrupted"]["factorDelta"]["finalExport"]),
+                          ctx.checked(runs["resumed"]["factorDelta"]["finalExport"]))
     normalized = {}
     for name, label in (("reference", "uninterrupted"), ("resumed", "resumed")):
         state = states[name]
@@ -536,6 +647,13 @@ def _recovery(ctx, raw, runs, dataset_hash, config_hash):
             "optimizerSchedulerRngState": pair, "originalCancelToken": old["tokenId"], "resumedCancelToken": new["tokenId"],
             "distinctResumedTokenObserved": old["tokenId"] != new["tokenId"], "originalTokenRemainsCanceled": old["tokenObservedCanceled"],
             "checkpointStall": native_stall, "backendReentryWitness": _backend_reentry(ctx, raw)}
+
+
+def _registered_reference_sha(runs, library):
+    # Registration/preview/transfer use the actual uninterrupted reference file.
+    sha = runs["uninterrupted"]["factorDelta"]["finalExport"]["sha256"]
+    require(library["sha256"] == sha, "actual library selection is not the reference final adapter")
+    return sha
 
 
 def normalize_capture(raw, caseRoot, manifest, driverReceipt, caseEntry):
@@ -589,10 +707,9 @@ def normalize_capture(raw, caseRoot, manifest, driverReceipt, caseEntry):
     result["subruns"] = runs
     result["recovery"] = _recovery(ctx, raw, runs, dataset_hash, config_hash)
     result["memoryRefusal"] = _memory_refusal(ctx, raw)
-    final_sha = runs["resumed"]["factorDelta"]["finalExport"]["sha256"]
-    start_sha = runs["uninterrupted"]["factorDelta"]["startExport"]["sha256"]
     library = raw["raw"]["trainingLibraryRegistration"]
-    require(library["sha256"] == final_sha, "actual library selection is not the final adapter")
+    final_sha = _registered_reference_sha(runs, library)
+    start_sha = runs["uninterrupted"]["factorDelta"]["startExport"]["sha256"]
     application, selected = _application(ctx, raw, "after-trained", final_sha)
     images = raw["raw"]["images"]
     require(images["no-adapter-baseline"]["pixelSha256"] == images["disable-control"]["pixelSha256"]
