@@ -23,6 +23,7 @@ pub const PACKAGED_SDXL_CUDA_MEMORY_ENDPOINTS: &str =
 // Populated only with actual retained captures. These resources intentionally do not participate
 // in the ordinary anchor extractor: a fully bounded endpoint is not its unbounded derivation row.
 const PACKAGED_ENDPOINT_SOURCES: &[(&str, &str)] = &[];
+#[cfg(test)]
 const GPU_UUID: &str = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
 const FINGERPRINT: &str = "sdxl-candle-sdxl-staged-decode-attention-v3";
 const FIXTURE: &str = "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps";
@@ -187,6 +188,10 @@ pub fn load_sdxl_cuda_memory_endpoints(
     }
     let resident_record = &records[0];
     let sequential_record = &records[1];
+    require(
+        receipts[0]["deviceUuid"] == receipts[1]["deviceUuid"],
+        "endpoint pair changed physical device",
+    )?;
     for field in [
         "artifact",
         "hardware",
@@ -358,9 +363,10 @@ fn validate_endpoint(
             && record["loadability"]["resolvedPathFingerprint"] == fingerprint,
         "artifact loadability identity",
     )?;
+    let device_uuid = text(receipt, "/deviceUuid")?;
     require(
-        receipt["deviceUuid"] == GPU_UUID
-            && receipt["cudaContextUuid"] == GPU_UUID
+        is_gpu_uuid(device_uuid)
+            && receipt["cudaContextUuid"] == device_uuid
             && receipt["logicalCudaDevice"] == 0
             && receipt["offloadPolicy"] == name,
         "physical CUDA context/offload identity",
@@ -372,7 +378,7 @@ fn validate_endpoint(
         "captured CUDA build/attention kernel policy",
     )?;
     require(
-        record["hardware"]["deviceId"] == GPU_UUID
+        record["hardware"]["deviceId"] == device_uuid
             && text(record, "/hardware/probe")?.contains("nvidia-smi")
             && number(record, "/hardware/memoryBytes")? > 0,
         "CUDA hardware receipt",
@@ -615,6 +621,19 @@ fn is_hex(value: &str, length: usize) -> bool {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
+fn is_gpu_uuid(value: &str) -> bool {
+    let Some(uuid) = value.strip_prefix("GPU-") else {
+        return false;
+    };
+    uuid.len() == 36
+        && uuid.bytes().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                byte == b'-'
+            } else {
+                byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)
+            }
+        })
+}
 fn text<'a>(value: &'a Value, pointer: &str) -> Result<&'a str, String> {
     value
         .pointer(pointer)
@@ -820,6 +839,36 @@ mod tests {
             assert_eq!(bundle["records"][0]["status"], "gated");
             assert_eq!(bundle["records"][0]["predictedPeakBytes"], Value::Null);
             assert_eq!(bundle["records"][0]["quality"]["result"], "not_run");
+        }
+    }
+
+    // CI_IMPACT: tiny synthetic source/receipt mutations only; no model or device execution.
+    #[test]
+    fn sdxl_endpoint_binds_one_actual_uuid_for_both_endpoint_sources() {
+        let alternate = "GPU-11111111-2222-3333-4444-555555555555";
+        let set_device = |fixture: &mut Fixture, index: usize, uuid: &str| {
+            fixture.bundles[index]["records"][0]["hardware"]["deviceId"] = json!(uuid);
+            fixture.summary["endpoints"][index]["deviceUuid"] = json!(uuid);
+            fixture.summary["endpoints"][index]["cudaContextUuid"] = json!(uuid);
+        };
+        let mut other_device = fixture();
+        for index in 0..2 {
+            set_device(&mut other_device, index, alternate);
+        }
+        assert!(other_device.load().unwrap().is_some());
+
+        let mut changed_mid_pair = fixture();
+        set_device(&mut changed_mid_pair, 1, alternate);
+        assert!(changed_mid_pair
+            .load()
+            .unwrap_err()
+            .contains("changed physical device"));
+        for invalid in ["0", "GPU-other", "GPU-e4b799317be6-f216-460a-f5405cfafffe"] {
+            let mut malformed = fixture();
+            for index in 0..2 {
+                set_device(&mut malformed, index, invalid);
+            }
+            assert!(malformed.load().is_err());
         }
     }
 
