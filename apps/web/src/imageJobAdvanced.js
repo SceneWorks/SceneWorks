@@ -1,4 +1,4 @@
-import { isMossImage, mossWireOptions, mossAccelerated } from "./mossImage.js";
+import { isMossImage, isMossEdit, mossWireOptions, mossAccelerated, buildMossEditJobAdvanced } from "./mossImage.js";
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
 import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
@@ -105,9 +105,23 @@ export function buildImageJobAdvanced(state) {
   } = state;
 
   const moss = isMossImage(state.model ?? selectedModel?.id);
+  const mossEdit = isMossEdit(state.model ?? selectedModel?.id, mode);
+  const editAdvanced = mossEdit ? buildMossEditJobAdvanced(state) : null;
   const dmd = moss && mossAccelerated(state.mossImage);
   const effectiveSteps = dmd ? state.mossDmdSteps ?? 8 : stepsOverride;
   return {
+    ...(mossEdit ? {
+      resolution,
+      mossImage: editAdvanced.mossImage,
+      mossImageEdit: editAdvanced.mossImageEdit,
+      ...(editAdvanced.mossImageAdvanced ? { mossImageAdvanced: editAdvanced.mossImageAdvanced } : {}),
+      ...(editAdvanced.promptBatch ? { promptBatch: editAdvanced.promptBatch } : {}),
+      steps: editAdvanced.steps,
+      guidanceScale: editAdvanced.guidanceScale,
+      schedulerShift: editAdvanced.schedulerShift,
+      ...(styleId ? { styleId: editAdvanced.styleId, ...(Object.hasOwn(editAdvanced, "stylePrompt") ? { stylePrompt: editAdvanced.stylePrompt } : {}) } : {}),
+
+    } : {
     ...(moss ? { mossImage: mossWireOptions(state.mossImage) } : {}),
     ...(dmd && state.mossOrdinarySettings ? { mossOrdinarySettings: state.mossOrdinarySettings } : {}),
     resolution,
@@ -327,5 +341,7 @@ export function buildImageJobAdvanced(state) {
     // { steps, guidance, loras:[{ index, weight? }] } shape the worker parses; the omit-when-inactive
     // rule keeps the round-trip lossless.
     ...(multiPhaseActive && Array.isArray(phases) && phases.length ? { phases } : {}),
+
+    }),
   };
 }

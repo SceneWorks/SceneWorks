@@ -486,6 +486,33 @@ impl CacheAdapterSpec {
     }
 }
 
+/// Selects the existing serialized cache worker; isolated tests use the same worker loop.
+#[derive(Clone)]
+pub(crate) struct GeneratorCacheHandle {
+    worker: mpsc::Sender<GeneratorJob>,
+    evict_transform: bool,
+}
+impl GeneratorCacheHandle {
+    pub(crate) fn global() -> Self {
+        Self {
+            worker: generator_worker().clone(),
+            evict_transform: true,
+        }
+    }
+    #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+    pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
+        let (worker, rx) = mpsc::channel();
+        let join = thread::spawn(move || run_generator_cache_worker(rx, None));
+        (
+            Self {
+                worker,
+                evict_transform: false,
+            },
+            join,
+        )
+    }
+}
+
 fn generator_worker() -> &'static mpsc::Sender<GeneratorJob> {
     GENERATOR_WORKER.get_or_init(|| {
         let (tx, rx) = mpsc::channel::<GeneratorJob>();
@@ -1216,6 +1243,7 @@ where
         let loaded_policy = ExecutionPolicy::from_load_spec(&spec);
         // Held across the load so the two snapshots share one live primary context (see
         // `bind_backend_load_context`).
+        crate::moss_terminal_observation::entry(engine_id, "cache_context")?;
         let _backend_context = bind_backend_load_context()?;
         let external_committed_bytes = capture_backend_committed_bytes()?;
         let generator = load_generator(engine_id, &spec)
@@ -1249,6 +1277,7 @@ where
         move || cold_admission.admit(),
         load,
         move |cached, access| {
+            crate::moss_terminal_observation::entry(engine_id, "cache_dispatch")?;
             let cache_state = match access {
                 CacheAccess::Cold => MemoryCacheState::Cold,
                 CacheAccess::Warm => MemoryCacheState::Warm,
@@ -1290,9 +1319,48 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_using_cache(
+        GeneratorCacheHandle::global(),
+        engine_id,
+        spec,
+        load_error_context,
+        load_generator,
+        run,
+    )
+    .await
+}
+
+pub(crate) async fn with_cached_generator_for_request_using_cache<R>(
+    cache: GeneratorCacheHandle,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
     with_cached_generator_for_request_after_cold_admission_using_on(
-        generator_worker(),
-        crate::transform_cache::evict_resident_transform(),
+        &cache.worker,
+        async {
+            if cache.evict_transform {
+                crate::transform_cache::evict_resident_transform().await
+            } else {
+                Ok(false)
+            }
+        },
         engine_id,
         spec,
         load_error_context,
@@ -1402,6 +1470,7 @@ where
         let loaded_policy = ExecutionPolicy::from_load_spec(&spec);
         // Held across the load so the two snapshots share one live primary context (see
         // `bind_backend_load_context`).
+        crate::moss_terminal_observation::entry(engine_id, "cache_context")?;
         let _backend_context = bind_backend_load_context()?;
         let external_committed_bytes = capture_backend_committed_bytes()?;
         let generator = load_generator(engine_id, &spec)
@@ -1423,6 +1492,7 @@ where
         })
     };
     let run = move |cached: &CachedGenerator, access| {
+        crate::moss_terminal_observation::entry(engine_id, "cache_dispatch")?;
         run_spec.validate_prepared_file_pins().map_err(|error| {
             crate::classify_engine_error("Generator run source validation failed", error)
         })?;

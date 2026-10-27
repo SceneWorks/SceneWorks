@@ -208,8 +208,24 @@ impl ImageRequest {
 
     /// The images this request produces: `count`, or `prompts × count` for a native prompt batch.
     pub fn image_count(&self) -> u32 {
-        self.count
-            .saturating_mul(u32::try_from(self.prompts.len().max(1)).unwrap_or(u32::MAX))
+        let embedding_batch =
+            if crate::moss_image::is_moss(&self.model) && self.mode == "edit_image" {
+                self.advanced
+                    .get(crate::moss_image_advanced::KEY)
+                    .and_then(|v| v.get("positive"))
+                    .and_then(|v| v.get("values"))
+                    .and_then(|v| v.get("metadata"))
+                    .and_then(|v| v.get("shape"))
+                    .and_then(|v| v.get(0))
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n <= 8)
+                    .unwrap_or(1) as usize
+            } else {
+                1
+            };
+        self.count.saturating_mul(
+            u32::try_from(self.prompts.len().max(embedding_batch).max(1)).unwrap_or(u32::MAX),
+        )
     }
 
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:

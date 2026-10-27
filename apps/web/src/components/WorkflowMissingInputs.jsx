@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useState } from "react";
+import { mossTensorMatches } from "../mossImageAdvanced.js";
 
 import {
   workflowInputSlots,
@@ -36,22 +37,25 @@ import {
 // closed and reopened — a dead button, and a user waiting for something that already stopped. When
 // the job is known to have failed the button comes back and the row SAYS so, rather than quietly
 // reverting to "Download" as though the press had never happened.
-function InstallRow({ row, busy, done, failed, onInstall }) {
+function InstallRow({ row, busy, done, failed, error, onInstall }) {
+  const [acknowledged, setAcknowledged] = useState(false);
   return (
     <li className="workflow-fix-row">
       <span className="workflow-fix-head">
         <strong>
-          {row.kind === "model" ? "Model" : "LoRA"} — {row.name}
+          {row.kind === "component" ? "Edit package" : row.kind === "model" ? "Model" : "LoRA"} — {row.name}
         </strong>
         <button
           className="btn compact"
-          disabled={busy || done}
-          onClick={() => onInstall(row)}
+          disabled={busy || done || (row.kind === "component" && !acknowledged)}
+          onClick={() => onInstall(row.kind === "component" ? { ...row, licenseAcknowledged: acknowledged } : row)}
           type="button"
         >
           {done ? "Queued" : busy ? "Starting…" : failed ? "Try again" : "Download"}
         </button>
       </span>
+      {error ? <span role="alert">{error}</span> : null}
+      {row.kind === "component" ? <label><input type="checkbox" checked={acknowledged} onChange={(event) => setAcknowledged(event.target.checked)} />I acknowledge the adapter source and unspecified weight license.</label> : null}
       <span className="workflow-fix-detail">
         {failed ? "That download failed — the queue has the reason. " : ""}
         {row.detail}
@@ -73,6 +77,7 @@ export function WorkflowMissingInputs({
   // The rows whose download job failed. Kept apart from `installed` because they are different
   // answers: "not queued" is a button that was never pressed, "failed" is one that was.
   installFailed = {},
+  installErrors = {},
   onInstall,
   substituteModelId = "",
   onSubstituteModel,
@@ -99,6 +104,7 @@ export function WorkflowMissingInputs({
               busy={Boolean(installing[`${row.kind}:${row.id}`])}
               done={Boolean(installed[`${row.kind}:${row.id}`])}
               failed={Boolean(installFailed[`${row.kind}:${row.id}`])}
+              error={installErrors[`${row.kind}:${row.id}`]}
               key={`${row.kind}:${row.id}`}
               onInstall={onInstall}
               row={row}
@@ -161,7 +167,7 @@ export function WorkflowMissingInputs({
                       value={inputPicks[slot.key] ?? ""}
                     >
                       <option value="">Choose an image…</option>
-                      {assets.map((asset) => (
+                      {assets.filter((asset) => asset.type !== "tensor").map((asset) => (
                         <option key={asset.id} value={asset.id}>
                           {asset.displayName ?? asset.id}
                         </option>
@@ -178,6 +184,12 @@ export function WorkflowMissingInputs({
           </ul>
         </div>
       ) : null}
+      {(report?.tensors ?? []).map((tensor) => <label key={tensor.role}>Exact {tensor.role} tensor
+        <select value={inputPicks[`tensor:${tensor.role}`] ?? ""} onChange={(event) => onPickInput?.(`tensor:${tensor.role}`, event.target.value)}>
+          <option value="">Reacquire matching NPY artifact…</option>
+          {assets.filter((asset) => mossTensorMatches(asset, tensor)).map((asset) => <option key={asset.id} value={asset.id}>{asset.displayName ?? asset.id}</option>)}
+        </select><small>{tensor.detail}</small>
+      </label>)}
     </div>
   );
 }
