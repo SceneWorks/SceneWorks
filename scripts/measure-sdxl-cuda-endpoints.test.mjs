@@ -5,7 +5,7 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, validatePackagedEndpointSummarySource } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource } from "./measure-sdxl-cuda-endpoints.mjs";
 import { EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
 
 // CI_IMPACT: one pure cross-module path contract; no files, build, API or model execution.
@@ -74,6 +74,53 @@ test("endpoint receipt rejects missing load inclusion, context mismatch, flat ou
     const value = receipt(); mutate(value);
     assert.throws(() => validateEndpoint(value, ENDPOINTS[0]));
   }
+});
+
+// CI_IMPACT: injected probes and clock only; no actual waits, processes or GPU access.
+test("post-exit settling requires five consecutive idle stable samples after counter decay", async () => {
+  const simulate = async (rows, timeoutMs = 2_000) => {
+    let elapsed = 0; let index = 0;
+    return settlePostExitGpu(async (remainingMs) => {
+      assert.ok(remainingMs > 0 && remainingMs <= timeoutMs);
+      return rows[Math.min(index++, rows.length - 1)];
+    }, { timeoutMs, now: () => elapsed, sleep: async (ms) => { elapsed += ms; } });
+  };
+  const idle = await simulate(["2048,0,0"]);
+  assert.equal(idle.samples.length, 5); assert.equal(idle.elapsedMs, 800);
+  assert.equal(idle.afterBytes, 2048 * 1024 ** 2); assert.equal(idle.stableSamples, 5);
+  const decayed = await simulate(["2200,30,7", "2100,0,5", "2048,0,0"]);
+  assert.equal(decayed.samples.length, 7); assert.equal(decayed.elapsedMs, 1200);
+  assert.equal(decayed.afterBytes, idle.afterBytes);
+  const interrupted = await simulate(["2048,0,0", "2048,0,0", "2048,1,0", "2048,0,0"]);
+  assert.equal(interrupted.samples.length, 8, "activity resets the consecutive-idle count");
+  const stabilized = await simulate(["2048,0,0", "2176,0,0"]);
+  assert.equal(stabilized.samples.length, 6, "a memory jump resets the stable window");
+  assert.equal(stabilized.afterBytes, 2176 * 1024 ** 2);
+  for (const rows of [["2048,2,0"], ["2048,0,2"], ["2048,0,0", "2176,0,0", "2048,0,0", "2176,0,0", "2048,0,0", "2176,0,0"]]) {
+    await assert.rejects(() => simulate(rows, 1_200), (error) => {
+      assert.match(error.message, /did not settle.*1200ms/);
+      assert.match(error.message, /"usedBytes":/); assert.equal(error.samples.length, 6);
+      return true;
+    });
+  }
+  for (const invalid of ["2048,0", "2048,0,NaN", "2048,,0", "2048,101,0", "-1,0,0", "N/A,0,0"]) {
+    await assert.rejects(() => simulate([invalid]), (error) => {
+      assert.match(error.message, /invalid physical GPU1 post-exit telemetry/);
+      assert.equal(error.samples[0].raw, invalid); return true;
+    });
+  }
+});
+
+test("capture retains the parsed response before settling without promoting failed diagnostics", async () => {
+  const source = await readFile(new URL("./measure-sdxl-cuda-endpoints.mjs", import.meta.url), "utf8");
+  const capture = source.slice(source.indexOf("for (const endpoint of ENDPOINTS)"));
+  const response = capture.indexOf("`${endpoint.name}-response.json`");
+  const settling = capture.indexOf("settled = await settlePostExitGpu");
+  assert.ok(response >= 0 && settling > response);
+  assert.match(capture, /status: "failed", error: error\.message, samples: error\.samples/);
+  const validation = capture.indexOf("validateEndpoint(measurement, endpoint, pin)");
+  assert.ok(validation >= 0 && capture.indexOf("await writeFile(bundlePath, bundleBytes)") > validation);
+  assert.match(capture, /afterBytes: settled\.afterBytes, toleranceBytes: 64 \* 1024 \*\* 2/);
 });
 
 // One changed channel distinguishes a true RGB comparison from a digest-only attestation.
