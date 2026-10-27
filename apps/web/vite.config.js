@@ -7,6 +7,7 @@ import precompressPlugin from "./vite-plugin-precompress.js";
 import bundleReportPlugin from "./vite-plugin-bundle-report.js";
 import themeInitPlugin from "./vite-plugin-theme-init.js";
 import editorGuidesPlugin from "./vite-plugin-editor-guides.js";
+import { loadSdxlCudaMemoryProjection } from "./sdxl-cuda-memory-projection.js";
 
 // Expose the product version (kept in lockstep across the repo's package.json /
 // tauri.conf.json by scripts/sync-version.mjs) to the frontend as a build-time
@@ -41,6 +42,7 @@ export default defineConfig({
   // the specific key keeps it lint-safe (no bare global) under no-undef.
   define: {
     "import.meta.env.VITE_APP_VERSION": JSON.stringify(pkg.version),
+    "import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS": JSON.stringify(loadSdxlCudaMemoryProjection()),
   },
   // react-konva pulls its own react-reconciler; without deduping, Vite's dep
   // optimizer can hand it a second React copy, tripping "Invalid hook call /
