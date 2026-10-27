@@ -551,6 +551,12 @@ mod flux2_dev_gpu_smoke;
 // the resulting asset carries the engine's measured mixed/native checkpointWeightFacts receipt.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
+// Real-weight end-to-end worker smoke for a LINKED imported Krea 2 checkpoint stored in a ComfyUI
+// descriptor-gated quant — scalar-scaled fp8 (E4M3FN) or Kitchen MXFP8 (sc-27092). Same shape as the
+// NVFP4 smoke: model_import + image_generate through the checkpoint-plan route, asserting the
+// manifest's classification and the asset's measured dense-fallback receipt.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod imported_comfy_quant_gpu_smoke;
 // Real-weight end-to-end worker smoke for Iris-3B on Candle/CUDA (sc-25680): one production
 // `image_generate` job through the shipped catalog entry and the generic text_encoder seam. The
 // native prompt-batch smoke (sc-25681) also runs on the macOS/MLX lane.
