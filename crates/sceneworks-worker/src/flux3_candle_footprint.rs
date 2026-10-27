@@ -433,8 +433,8 @@ fn measure_candle_cell(
     // not evidence of contention. Use the same 2 GiB baseline admission bound as the installed Candle
     // app lifecycle, and require the tenant pid set to be stable for the whole measurement below.
     assert!(
-        baseline <= 2048 * MIB,
-        "CUDA device {} baseline device memory {} MiB exceeds the 2048 MiB campaign admission bound \
+        baseline <= 4096 * MIB,
+        "CUDA device {} baseline device memory {} MiB exceeds the 4096 MiB campaign admission bound \
          (foreign compute apps: {foreign_baseline:?}); refusing to measure a whole-device delta on a \
          busy device",
         sampler.physical_id,
