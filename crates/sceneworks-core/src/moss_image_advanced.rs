@@ -121,11 +121,14 @@ pub fn schema() -> Value {
     json!({"type":"object","additionalProperties":false,"properties":{"positive":embeddings,"negative":embeddings,"noise":tensor,"negativePrompts":{"type":"array","minItems":1,"maxItems":8,"items":{"type":"string","maxLength":4000}},"output":{"type":"string","enum":["images","latents"],"default":"images"}}})
 }
 
+type ResolvedTensor = (PathBuf, TensorMetadata, Option<Vec<u8>>);
+
 fn resolve(
     store: &ProjectStore,
     project: &str,
     reference: &mut TensorRef,
-) -> Result<(PathBuf, TensorMetadata), String> {
+    materialize: Option<usize>,
+) -> Result<ResolvedTensor, String> {
     if reference.sha256.len() != 64
         || !reference
             .sha256
@@ -148,7 +151,12 @@ fn resolve(
         .project_file(project, path)
         .map_err(|e| e.to_string())?
         .path;
-    let metadata = tensor_artifact::inspect(&path)?;
+    let (metadata, bytes) = if let Some(budget) = materialize {
+        let (metadata, bytes) = tensor_artifact::read_checked(&path, budget)?;
+        (metadata, Some(bytes))
+    } else {
+        (tensor_artifact::inspect(&path)?, None)
+    };
     if metadata.sha256 != reference.sha256 {
         return Err(format!(
             "tensor {} identity changed; reacquire the exact bytes",
@@ -159,15 +167,14 @@ fn resolve(
         return Err("tensor metadata does not match its exact artifact".into());
     }
     reference.metadata = Some(metadata.clone());
-    Ok((path, metadata))
+    Ok((path, metadata, bytes))
 }
 fn embedding_metadata(
-    store: &ProjectStore,
-    project: &str,
     reference: &mut EmbeddingsRef,
     context: usize,
+    resolve: &mut impl FnMut(&mut TensorRef) -> Result<ResolvedTensor, String>,
 ) -> Result<usize, String> {
-    let (_, meta) = resolve(store, project, &mut reference.values)?;
+    let (_, meta, _) = resolve(&mut reference.values)?;
     if meta.dtype != "float32"
         || meta.shape.len() != 3
         || meta.shape[0] > 8
@@ -177,11 +184,14 @@ fn embedding_metadata(
         return Err("embeddings must be finite FP32 [B,S,4096], B1–8 and S within context".into());
     }
     if let Some(mask) = reference.mask.as_mut() {
-        let (path, m) = resolve(store, project, mask)?;
+        let (path, m, bytes) = resolve(mask)?;
         if m.dtype != "uint8" || m.shape != meta.shape[..2] {
             return Err("binary attention mask must match [B,S] embeddings".into());
         }
-        let bytes = tensor_artifact::read_data(&path, &m)?;
+        let bytes = match bytes {
+            Some(bytes) => bytes,
+            None => tensor_artifact::read_data(&path, &m)?,
+        };
         if !bytes
             .chunks_exact(meta.shape[1])
             .all(|row| row.contains(&1))
@@ -196,6 +206,21 @@ pub fn canonicalize(
     store: &ProjectStore,
     payload: &mut JsonObject,
     entry: &JsonObject,
+) -> Result<(), String> {
+    let project = payload
+        .get("projectId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    canonicalize_using(payload, entry, &mut |reference| {
+        resolve(store, &project, reference, None)
+    })
+}
+
+fn canonicalize_using(
+    payload: &mut JsonObject,
+    entry: &JsonObject,
+    resolve: &mut impl FnMut(&mut TensorRef) -> Result<ResolvedTensor, String>,
 ) -> Result<(), String> {
     let Some(mut advanced) = options(payload)? else {
         return Ok(());
@@ -212,11 +237,10 @@ pub fn canonicalize(
             .ok_or("advanced must be an object")?
             .insert("promptBatch".into(), Value::Array(prompts));
     }
-    let project = payload
+    payload
         .get("projectId")
         .and_then(Value::as_str)
-        .ok_or("advanced tensors require projectId")?
-        .to_owned();
+        .ok_or("advanced tensors require projectId")?;
     let context = payload
         .get("advanced")
         .and_then(|v| v.get("mossImage"))
@@ -227,7 +251,7 @@ pub fn canonicalize(
         return Err("context limit must be in1–4096".into());
     }
     let batch = if let Some(positive) = advanced.positive.as_mut() {
-        embedding_metadata(store, &project, positive, context)?
+        embedding_metadata(positive, context, resolve)?
     } else {
         payload
             .get("prompts")
@@ -235,7 +259,7 @@ pub fn canonicalize(
             .map_or(1, |p| p.len().max(1))
     };
     if let Some(negative) = advanced.negative.as_mut() {
-        if embedding_metadata(store, &project, negative, context)? != batch {
+        if embedding_metadata(negative, context, resolve)? != batch {
             return Err("negative embedding batch must match positive conditioning".into());
         }
     }
@@ -259,7 +283,7 @@ pub fn canonicalize(
         .filter(|n| *n > 0 && *n <= 8)
         .ok_or("MOSS advanced batch×count must be1–8")?;
     if let Some(noise) = advanced.noise.as_mut() {
-        let (_, meta) = resolve(store, &project, noise)?;
+        let (_, meta, _) = resolve(noise)?;
         if meta.dtype != "float32"
             || meta.shape
                 != [
@@ -427,48 +451,90 @@ impl OwnedInputs {
         entry: &JsonObject,
     ) -> Result<Self, String> {
         let mut checked = payload.clone();
-        canonicalize(store, &mut checked, entry)?;
-        let options = options(&checked)?.unwrap_or_default();
-        let project = checked
+        let project = payload
             .get("projectId")
             .and_then(Value::as_str)
             .ok_or("projectId missing")?;
-        let bytes = |r: &TensorRef| -> Result<Vec<u8>, String> {
-            let mut r = r.clone();
-            let (path, meta) = resolve(store, project, &mut r)?;
-            tensor_artifact::read_data(&path, &meta)
+        // Retain native typed inputs as each artifact is checked. Only small attention masks
+        // are copied back into metadata validation; full FP32 artifacts have one decode buffer.
+        type Loaded = (PathBuf, TensorMetadata, Vec<f32>, Vec<u8>);
+        let mut loaded: std::collections::HashMap<String, Loaded> =
+            std::collections::HashMap::new();
+        let mut loaded_bytes = 0usize;
+        canonicalize_using(&mut checked, entry, &mut |reference| {
+            if let Some((path, metadata, _, mask)) = loaded.get(&reference.asset_id) {
+                if reference.sha256 != metadata.sha256
+                    || reference.metadata.as_ref().is_some_and(|m| m != metadata)
+                {
+                    return Err("tensor metadata does not match its exact artifact".into());
+                }
+                reference.metadata = Some(metadata.clone());
+                return Ok((
+                    path.clone(),
+                    metadata.clone(),
+                    (metadata.dtype == "uint8").then(|| mask.clone()),
+                ));
+            }
+            let (path, metadata, bytes) = resolve(
+                store,
+                project,
+                reference,
+                Some(tensor_artifact::MAX_REQUEST_BYTES - loaded_bytes),
+            )?;
+            loaded_bytes = loaded_bytes
+                .checked_add(metadata.byte_length)
+                .filter(|n| *n <= tensor_artifact::MAX_REQUEST_BYTES)
+                .ok_or("advanced tensor materialization exceeds the1280MiB request budget")?;
+            let bytes = bytes.expect("materialized tensor");
+            let (values, mask) = if metadata.dtype == "float32" {
+                (
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|b| f32::from_le_bytes(*b))
+                        .collect(),
+                    Vec::new(),
+                )
+            } else {
+                (Vec::new(), bytes)
+            };
+            let checked_mask = (metadata.dtype == "uint8").then(|| mask.clone());
+            loaded.insert(
+                reference.asset_id.clone(),
+                (path.clone(), metadata.clone(), values, mask),
+            );
+            Ok((path, metadata, checked_mask))
+        })?;
+        let options = options(&checked)?.unwrap_or_default();
+        let mut remaining = std::collections::HashMap::<String, usize>::new();
+        for reference in references(&options) {
+            *remaining.entry(reference.asset_id.clone()).or_default() += 1;
+        }
+        let mut take = |r: &TensorRef| {
+            // A repeated reference is a separate native conditioning carrier, so retain its
+            // values for the next carrier while moving unique inputs without another copy.
+            let count = remaining.get_mut(&r.asset_id).expect("checked reference");
+            *count -= 1;
+            if *count > 0 {
+                loaded.get(&r.asset_id).expect("checked tensor").clone()
+            } else {
+                loaded.remove(&r.asset_id).expect("checked tensor")
+            }
         };
-        let floats = |r: &TensorRef| -> Result<Vec<f32>, String> {
-            Ok(bytes(r)?
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| f32::from_le_bytes(*b))
-                .collect())
-        };
-        let positive = options
-            .positive
-            .as_ref()
-            .map(|e| floats(&e.values))
-            .transpose()?;
+        let positive = options.positive.as_ref().map(|e| take(&e.values).2);
         let positive_mask = options
             .positive
             .as_ref()
             .and_then(|e| e.mask.as_ref())
-            .map(bytes)
-            .transpose()?;
-        let negative = options
-            .negative
-            .as_ref()
-            .map(|e| floats(&e.values))
-            .transpose()?;
+            .map(|r| take(r).3);
+        let negative = options.negative.as_ref().map(|e| take(&e.values).2);
         let negative_mask = options
             .negative
             .as_ref()
             .and_then(|e| e.mask.as_ref())
-            .map(bytes)
-            .transpose()?;
-        let noise = options.noise.as_ref().map(floats).transpose()?;
+            .map(|r| take(r).3);
+        let noise = options.noise.as_ref().map(|r| take(r).2);
         let sizes = references(&options)
             .iter()
             .map(|r| r.metadata.as_ref().expect("validated metadata").byte_length)
@@ -568,7 +634,7 @@ mod tests {
         }
     }
     #[test]
-    fn owned_masks_context_shapes_modes_and_identities_fail_before_host_materialization() {
+    fn owned_masks_context_shapes_modes_and_identities_fail_before_native_execution() {
         let temp = tempfile::tempdir().unwrap();
         let store = ProjectStore::new(temp.path().to_owned(), "test");
         let project = store.create_project("mask bounds").unwrap();
@@ -591,6 +657,10 @@ mod tests {
             .clone();
         assert!(canonicalize(&store, &mut payload.clone(), &entry)
             .unwrap_err()
+            .contains("each embedding row"));
+        assert!(OwnedInputs::load(&store, &payload, &entry)
+            .err()
+            .unwrap()
             .contains("each embedding row"));
         let mut value = payload.clone();
         value.get_mut("advanced").unwrap()[KEY]["positive"]
@@ -710,6 +780,11 @@ mod tests {
             payload["advanced"][KEY]["noise"]["sha256"]
         );
         assert_eq!(requirements(&share).len(), 2);
+        let mut repeated = payload.clone();
+        repeated.get_mut("advanced").unwrap()[KEY]["negativePrompts"] = Value::Null;
+        repeated.get_mut("advanced").unwrap()[KEY]["negative"] = json!({"values":positive});
+        let repeated = OwnedInputs::load(&store, &repeated, &entry).unwrap();
+        assert_eq!(repeated.positive, repeated.negative);
         payload.insert("prompt".into(), json!("conflicting text"));
         assert!(canonicalize(&store, &mut payload, &entry).is_err());
     }

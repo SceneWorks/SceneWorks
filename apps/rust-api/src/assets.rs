@@ -10,7 +10,6 @@ pub(crate) async fn list_assets(
         Some("library") => sceneworks_core::project_store::AssetScope::Library,
         _ => sceneworks_core::project_store::AssetScope::All,
     };
-    let lookup_project = project_id.clone();
     let (assets, filesystem_operations) = project_call(state.clone(), move |store| {
         store.list_assets_with_filesystem_operations(
             &project_id,
@@ -42,7 +41,6 @@ pub(crate) async fn list_assets(
         asset_count = assets.len(),
         "listed assets from the indexed project store"
     );
-    let assets = moss_output_publication::visible_assets(&state, &lookup_project, assets).await?;
     let assets = match character_id {
         Some(character_id) if !character_id.is_empty() => assets
             .into_iter()
@@ -88,7 +86,6 @@ pub(crate) async fn get_asset(
         store.get_asset(&lookup, &asset_id)
     })
     .await?;
-    moss_output_publication::require_asset(&state, &project_id, &asset).await?;
     Ok(Json(asset))
 }
 
@@ -96,10 +93,6 @@ pub(crate) async fn get_asset_poster(
     State(state): State<AppState>,
     Path((project_id, asset_id, poster_sha256)): Path<(String, String, String)>,
 ) -> Result<Response, ApiError> {
-    let lookup = project_id.clone();
-    let id = asset_id.clone();
-    let asset = project_call(state.clone(), move |store| store.get_asset(&lookup, &id)).await?;
-    moss_output_publication::require_asset(&state, &project_id, &asset).await?;
     let poster = project_call(state, move |store| {
         store.get_asset_poster(&project_id, &asset_id, &poster_sha256)
     })

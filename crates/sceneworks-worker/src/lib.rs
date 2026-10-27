@@ -109,7 +109,6 @@ mod cache_thread;
 // shared availability resolver before any handler constructs a loader.
 mod external_library_runtime;
 mod inference_runtime;
-mod moss_terminal_observation;
 mod text_encoder_selection;
 pub use text_encoder_selection::{
     image_text_encoder_options, resolve_image_text_encoder_selection, ImageTextEncoderOption,
@@ -1691,7 +1690,6 @@ fn reclaim_import_staging(
 }
 
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
-    moss_terminal_observation::initialize(&settings)?;
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
     // diagnosable from one log line. One shared contract version backs every linked backend.
@@ -1727,19 +1725,6 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     let api = ApiClient::new(&settings);
     let http_client = crate::downloads::streaming_download_client();
     register_worker_with_retry(&api, &settings, &gpu).await?;
-    moss_terminal_observation::ready()?;
-    if moss_terminal_observation::enabled() {
-        tokio::spawn(async {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            loop {
-                interval.tick().await;
-                if let Err(error) = moss_terminal_observation::heartbeat() {
-                    tracing::error!(event = "moss_terminal_observation_failed", %error);
-                    break;
-                }
-            }
-        });
-    }
     let mut lock_failures = 0_u32;
     let mut idle_heartbeat = IdleHeartbeat::new(progress_report_interval(&settings));
     // sc-16260 AC 4: the startup probe is one sample, so an unhealthy worker re-probes on an
@@ -2251,7 +2236,6 @@ async fn run_utility_job(
     job: JobSnapshot,
     shutdown: gen_core::CancelFlag,
 ) {
-    let _moss_observation = moss_terminal_observation::begin_job(&job);
     // Bind the process-shutdown flag as a task-local for the whole dispatch (sc-9618, F-043 follow-up)
     // so the per-engine GPU consumer loops awaited below honor it at their per-step cancel checkpoints
     // (via `shutdown_requested()`), stopping a gen/prompt mid-step on quit instead of waiting out the

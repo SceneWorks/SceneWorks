@@ -185,38 +185,38 @@ describe("keep-alive nav vs. close/discard reconciliation (sc-11968)", () => {
   });
 });
 
-describe("durable MOSS edit artifacts", () => {
-  it("retains the exact source and all four typed outputs after release, unmount sweep and registry restart", () => {
+describe("non-canvas editor outputs", () => {
+  it.each(["image", "tensor"])("keeps all native %s batch outputs and recipe inputs after unmount", (type) => {
     const purgeAsset = vi.fn();
     const registry = createEditorScratchRegistry({ purgeAsset });
-    const outputs = Array.from({ length: 4 }, (_, index) => ({ id: `tensor-${index}`, projectId: "project-1", type: "tensor" }));
-    const job = completedJob({ result: { assets: outputs } });
-    registry.track(job.id, [scratchAsset], { retainCompleted: true });
-    const unregister = registry.registerClaim(() => new Set(), () => [job]);
-    unregister();
+    const outputs = Array.from({ length: 4 }, (_, index) => ({ id: `output-${index}`, projectId: "project-1", type }));
+    const job = completedJob({ result: { assets: outputs, expectedCount: 4 } });
+    registry.track(job.id, [scratchAsset]);
+    registry.registerClaim(() => new Set(), () => [job])();
     registry.release(job.id, job);
     expect(registry._size()).toBe(0);
     expect(purgeAsset).not.toHaveBeenCalled();
-    createEditorScratchRegistry({ purgeAsset }).sweep([job]);
-    expect(purgeAsset).not.toHaveBeenCalled();
   });
-  it.each(["failed", "canceled"])("cleans only owned staged/result artifacts on %s, leaving user tensor inputs untouched", (status) => {
+  it("keeps a single tensor out of the canvas cleanup path", () => {
+    const job = completedJob({ result: { assets: [{ id: "latent", projectId: "project-1", type: "tensor" }] } });
+    expect(scratchOpAssetsToPurge({ assets: [scratchAsset] }, job)).toEqual([]);
+  });
+  it("purges a single existing-model image and its inline upscale copy", () => {
+    const job = completedJob({ payload: { model: "krea_2", count: 1, upscale: { enabled: true } }, result: { expectedCount: 2, assets: [{ id: "original", projectId: "project-1", type: "image" }, { id: "upscaled", projectId: "project-1", type: "image" }] } });
+    expect(scratchOpAssetsToPurge({ assets: [scratchAsset] }, job).map((asset) => asset.id)).toEqual(["scratch-1", "original", "upscaled"]);
+  });
+  it("preserves a native batch with inline upscaling", () => {
+    const job = completedJob({ payload: { count: 2, upscale: { enabled: true } }, result: { expectedCount: 4, assets: [{ id: "first" }, { id: "second" }] } });
+    expect(scratchOpAssetsToPurge({ assets: [scratchAsset] }, job)).toEqual([]);
+  });
+  it("purges an ordinary single image regardless of model", () => {
+    const job = completedJob({ payload: { model: "moss_image_base" } });
+    expect(scratchOpAssetsToPurge({ assets: [scratchAsset] }, job)).toEqual([scratchAsset, { id: "result-1", projectId: "project-1" }]);
+  });
+  it.each(["failed", "canceled"])("cleans owned scratch/results on %s without touching user tensor inputs", (status) => {
     const purgeAsset = vi.fn(); const registry = createEditorScratchRegistry({ purgeAsset });
-    registry.track("job-1", [scratchAsset], { retainCompleted: true });
+    registry.track("job-1", [scratchAsset]);
     registry.sweep([completedJob({ status })]);
     expect(purgeAsset.mock.calls.map(([asset]) => asset.id)).toEqual(["scratch-1", "result-1"]);
   });
-});
-
-// A completed render is not a completed publication until the API owns the full batch.
-it("keeps pending-publication scratch ownership until canonical outputs arrive", () => {
-  const purged = [];
-  const registry = createEditorScratchRegistry({ purgeAsset: (asset) => purged.push(asset.id) });
-  registry.track("pending", [{ id: "source", projectId: "p" }], { retainCompleted: true });
-  registry.sweep([{ id: "pending", status: "completed", result: { outputPublication: { state: "pending" } } }]);
-  expect(registry._size()).toBe(1);
-  expect(purged).toEqual([]);
-  registry.sweep([{ id: "pending", status: "completed", result: { assets: [{ id: "output", projectId: "p" }] } }]);
-  expect(registry._size()).toBe(0);
-  expect(purged).toEqual([]);
 });

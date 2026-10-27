@@ -2036,27 +2036,6 @@ async fn apply_progress_side_effects(
             "injected persistent progress side-effect failure",
         ));
     }
-    if moss_edit_output_batch(&job)
-        && result
-            .get("assetWrites")
-            .and_then(Value::as_array)
-            .is_some_and(|facts| !facts.is_empty())
-    {
-        if job.status == JobStatus::Completed {
-            return publish_moss_edit_progress(state, job, clear_terminal_side_effects).await;
-        }
-        if !matches!(
-            job.status,
-            JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
-        ) {
-            return Ok(job); // Keep the existing raw durable handoff; publication waits for completion.
-        }
-        result.remove("assetWrites");
-        result.remove("generationSet");
-        result.remove(sceneworks_core::moss_image::EDIT_REPORT_KEY);
-        result.remove(sceneworks_core::moss_image::REPORT_KEY);
-    }
-
     // Persist any generated assets the worker reported as `assetWrites` facts and
     // re-inject the built sidecars into the result so the UI keeps streaming them
     // (story 1656 — Rust is the single project-store writer).
@@ -2209,123 +2188,6 @@ pub(crate) fn spawn_terminal_progress_side_effect_recovery(
 /// streaming (story 1656). Idempotent: re-applied progress updates upsert the
 /// same rows/files. No-op when there are no `assetWrites` (status-only updates,
 /// or job types that still write their own assets).
-pub(crate) fn moss_edit_output_batch(job: &JobSnapshot) -> bool {
-    matches!(job.job_type, JobType::ImageGenerate | JobType::ImageEdit)
-        && job
-            .payload
-            .get("model")
-            .and_then(Value::as_str)
-            .is_some_and(sceneworks_core::moss_image::is_moss)
-        && sceneworks_core::moss_image::is_edit(&job.payload)
-}
-
-fn stamp_moss_publication(job: &JobSnapshot, facts: &mut [Value]) {
-    for fact in facts {
-        if let Some(fact) = fact.as_object_mut() {
-            let extra = fact.entry("extra").or_insert_with(|| json!({}));
-            if !extra.is_object() {
-                *extra = json!({});
-            }
-            extra["mossPublication"] = json!({"jobId":job.id,"attempt":job.attempts,"generationSetId":job.result.get("generationSetId")});
-        }
-    }
-}
-
-/// The existing project lock covers publication AND the job-result CAS; no await holds it.
-async fn publish_moss_edit_progress(
-    state: &AppState,
-    job: JobSnapshot,
-    clear_pending: bool,
-) -> Result<JobSnapshot, ApiError> {
-    let projects = state.project_store.clone();
-    let jobs = state.jobs_store.clone();
-    tokio::task::spawn_blocking(move || {
-        let project = job
-            .project_id
-            .as_deref()
-            .ok_or_else(|| ApiError::bad_request("MOSS output requires a project"))?;
-        let mut facts = job
-            .result
-            .get("assetWrites")
-            .and_then(Value::as_array)
-            .ok_or_else(|| ApiError::bad_request("Missing MOSS output batch"))?
-            .clone();
-        crate::yue2_jobs::inherit_usage_policies(&projects, project, &mut facts)?;
-        stamp_moss_publication(&job, &mut facts);
-        let set = job
-            .result
-            .get("generationSet")
-            .ok_or_else(|| ApiError::bad_request("Missing MOSS generation set"))?;
-        if job.result.get("generationSetId") != set.get("id") {
-            return Err(ApiError::bad_request("Conflicting MOSS generation set"));
-        }
-        let mut acknowledgment = None;
-        let publication =
-            projects.publish_moss_edit_batch(project, &job.id, set, &facts, |assets| {
-                let mut result = job.result.clone();
-                result.insert("assets".into(), json!(assets));
-                result.insert(
-                    "assetIds".into(),
-                    json!(assets
-                        .iter()
-                        .filter_map(|asset| asset.get("id"))
-                        .collect::<Vec<_>>()),
-                );
-                result.remove("assetWrites");
-                result.remove("generationSet");
-                let mut candidate = job.clone();
-                candidate.result = result.clone();
-                if moss_output_publication::canonical_batch(&candidate).is_none() {
-                    return Err(ProjectStoreError::BadRequest(
-                        "MOSS output batch does not match the authored request/ownership".into(),
-                    ));
-                }
-                let saved = jobs
-                    .replace_job_result_after_progress(
-                        &job.id,
-                        job.worker_id.as_deref(),
-                        job.status.clone(),
-                        &job.result,
-                        &result,
-                        clear_pending,
-                    )
-                    .map_err(ApiError::from)
-                    .and_then(|saved| {
-                        if saved.result == result && saved.status == job.status {
-                            Ok(saved)
-                        } else {
-                            Err(ApiError::conflict(
-                                "MOSS output publication lost job ownership",
-                            ))
-                        }
-                    });
-                let failed = saved.is_err();
-                acknowledgment = Some(saved);
-                if failed {
-                    Err(ProjectStoreError::Io(std::io::Error::other(
-                        "MOSS job-result acknowledgment failed",
-                    )))
-                } else {
-                    Ok(())
-                }
-            });
-        match publication {
-            Ok(()) => acknowledgment.expect("publication requires acknowledgment"),
-            Err(error) => {
-                if matches!(&error, ProjectStoreError::MossBatchRollbackIncomplete(_)) {
-                    return Err(error.into());
-                }
-                if let Some(Err(ack_error)) = acknowledgment {
-                    return Err(ack_error);
-                }
-                Err(error.into())
-            }
-        }
-    })
-    .await
-    .map_err(|error| ApiError::internal(error.to_string()))?
-}
-
 pub(crate) async fn persist_reported_assets(
     state: &AppState,
     job_id: &str,
@@ -2355,31 +2217,10 @@ pub(crate) async fn persist_reported_assets(
     let Some(project_id) = job.project_id.clone() else {
         return Ok(());
     };
-    let moss_batch = moss_edit_output_batch(&job);
-    if moss_batch {
-        stamp_moss_publication(&job, &mut asset_writes);
-    }
     let job_id_owned = job_id.to_owned();
     let built = project_call(state.clone(), move |store| {
         // An asset derived from a policy-bearing input inherits its usage policy (sc-22999).
         crate::yue2_jobs::inherit_usage_policies(&store, &project_id, &mut asset_writes)?;
-        if moss_batch {
-            let set = generation_set.as_ref().ok_or_else(|| {
-                ProjectStoreError::BadRequest("Missing MOSS generation set".into())
-            })?;
-            if set.get("id").and_then(Value::as_str) != Some(generation_set_id.as_str()) {
-                return Err(ProjectStoreError::BadRequest(
-                    "Conflicting MOSS generation set".into(),
-                ));
-            }
-            return store.publish_moss_edit_batch(
-                &project_id,
-                &job_id_owned,
-                set,
-                &asset_writes,
-                |assets| Ok(assets.to_vec()),
-            );
-        }
         if let Some(generation_set) = generation_set.as_ref() {
             store.write_generation_set(
                 &project_id,
