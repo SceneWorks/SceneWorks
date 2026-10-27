@@ -5,7 +5,7 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource, selectCaptureGpu, parseGpuInventory, endpointGpuEnv, replayInferenceSourceIdentity } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, admittedReplayProcessEnvs, admittedReplayWorker, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource, selectCaptureGpu, parseGpuInventory, endpointGpuEnv, replayInferenceSourceIdentity } from "./measure-sdxl-cuda-endpoints.mjs";
 import { EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
 
 // CI_IMPACT: one pure cross-module path contract; no files, build, API or model execution.
@@ -337,6 +337,38 @@ test("admitted replay submits ordinary explicit-q4 defaults without a strategy o
   assert.equal(env.SCENEWORKS_WORKER_CHILD, "1"); assert.equal(env.SCENEWORKS_BACKEND_CANDLE_ENABLED, "true");
 });
 
+// CI_IMPACT: pure startup environment and registration snapshots only; no process or API calls.
+test("admitted replay separates utility identities and waits for the selected idle image worker", () => {
+  for (const physicalIndex of [0, 1]) {
+    const gpu = { physicalIndex, uuid };
+    const env = admittedReplayEnv({}, { state: "/owned", hub: "/hub", workerId: "owned-cuda", port: 1234, parentPid: 12, gpu });
+    const { api, worker } = admittedReplayProcessEnvs(env);
+    assert.equal(api.SCENEWORKS_WORKER_ID, "owned-cuda-utility");
+    assert.equal(api.SCENEWORKS_RUST_WORKER_GPU_ID, "cpu");
+    assert.equal(api.SCENEWORKS_RUN_UTILITY_INPROCESS, "1");
+    assert.equal(worker.SCENEWORKS_WORKER_ID, "owned-cuda");
+    assert.equal(worker.SCENEWORKS_WORKER_ONLY, "1");
+    assert.equal(worker.SCENEWORKS_RUN_UTILITY_INPROCESS, undefined);
+    assert.equal(worker.SCENEWORKS_RUST_WORKER_GPU_ID, undefined);
+    for (const child of [api, worker]) {
+      assert.equal(child.CUDA_VISIBLE_DEVICES, String(physicalIndex));
+      assert.equal(child.SCENEWORKS_GPU_ID, String(physicalIndex));
+      assert.equal(child.SCENEWORKS_SDXL_EXPECTED_GPU_UUID, uuid);
+      assert.equal(child.SCENEWORKS_CUDA_VRAM_CAP_GB, "6");
+    }
+    const utility = { id: api.SCENEWORKS_WORKER_ID, gpuId: "cpu", status: "idle", capabilities: ["cpu", "model_download"] };
+    const ready = { id: worker.SCENEWORKS_WORKER_ID, gpuId: String(physicalIndex), status: "idle", capabilities: ["image_generate"] };
+    assert.equal(admittedReplayWorker([utility], "owned-cuda", gpu), false);
+    // Reproduce the failed receipt: even an idle CPU registration with the requested ID cannot finish the wait.
+    for (const patch of [{ gpuId: "cpu", capabilities: utility.capabilities }, { gpuId: String(1 - physicalIndex) }, { capabilities: ["cpu"] }, { capabilities: "image_generate" }, { status: "busy" }]) {
+      assert.equal(admittedReplayWorker([utility, { ...ready, ...patch }], "owned-cuda", gpu), false);
+    }
+    assert.equal(admittedReplayWorker([utility, ready], "owned-cuda", gpu), ready);
+    assert.throws(() => admittedReplayWorker([ready, ready], "owned-cuda", gpu), /duplicate/);
+    assert.throws(() => admittedReplayWorker({}, "owned-cuda", gpu), /array/);
+  }
+});
+
 test("admitted replay requires the complete emitted worker selection and budget telemetry", () => {
   const selection = replaySelection();
   assert.equal(assertAdmittedReplaySelection(selection), "measured_minimum");
@@ -455,6 +487,10 @@ test("admitted replay workflow uses GPU1 only as bootstrap before selecting GPU0
   assert.match(main, /const gpu = gpuPreflight\.selected;\s*const env = endpointGpuEnv\(baseEnv, gpu\)/);
   assert.match(main, /validateEndpoint\(measurement, endpoint, pin, gpu\.uuid\)/);
   assert.match(main, /"gpu-selection\.json"[\s\S]*?status: "failed"[\s\S]*?samples: error\.samples/);
-  assert.match(script, /receipt\.worker\.gpuId !== String\(gpu\.physicalIndex\)/);
+  assert.match(script, /const processEnvs = admittedReplayProcessEnvs\(childEnv\)/);
+  assert.match(script, /launch\(apiBinary, \[\], processEnvs\.api, "api"\)/);
+  assert.match(script, /launch\(apiBinary, \[\], processEnvs\.worker, "worker"\)/);
+  assert.match(script, /return admittedReplayWorker\(workers, workerId, gpu\);\s*\}, 180,/,
+    "selected GPU/image capability validation remains inside the bounded registration wait");
   assert.match(script, /"-i", String\(gpu\.physicalIndex\)/);
 });

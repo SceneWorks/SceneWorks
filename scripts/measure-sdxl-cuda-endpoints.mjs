@@ -359,6 +359,23 @@ export function admittedReplayEnv(env, { state, hub, workerId, port, parentPid, 
     HUGGINGFACE_HUB_CACHE: hub, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
 }
 
+export function admittedReplayProcessEnvs(env) {
+  return {
+    api: { ...env, SCENEWORKS_WORKER_ID: `${env.SCENEWORKS_WORKER_ID}-utility`,
+      SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu" },
+    worker: { ...env, SCENEWORKS_WORKER_ONLY: "1" },
+  };
+}
+
+export function admittedReplayWorker(workers, workerId, gpu) {
+  if (!Array.isArray(workers)) throw new Error("worker registration response must be an array");
+  const owned = workers.filter((item) => item?.id === workerId);
+  if (owned.length > 1) throw new Error("duplicate owned CUDA worker registrations");
+  const value = owned[0];
+  return value?.status === "idle" && value.gpuId === String(gpu.physicalIndex)
+    && Array.isArray(value.capabilities) && value.capabilities.includes("image_generate") ? value : false;
+}
+
 async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, row, gpu, gpuPreflight }) {
   if (process.platform !== "win32") throw new Error("admitted replay requires the native Windows CUDA lane");
   const apiBinary = process.env.SDXL_REPLAY_API;
@@ -432,11 +449,16 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
     // This task-owned sentinel supplies the API's existing desktop parent-death graceful shutdown.
     sentinel = await launch(process.execPath, ["-e", 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));'], env, "api-parent");
     const childEnv = admittedReplayEnv(env, { state, hub, workerId, port, parentPid: sentinel.pid, gpu });
-    api = await launch(apiBinary, [], { ...childEnv, SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu" }, "api");
+    const processEnvs = admittedReplayProcessEnvs(childEnv);
+    receipt.utilityWorkerId = processEnvs.api.SCENEWORKS_WORKER_ID;
+    api = await launch(apiBinary, [], processEnvs.api, "api");
     receipt.health = await wait(async () => { try { const health = await apiCall("GET", "/api/v1/health"); return health.status === "ok" && health.readiness?.status === "ready" && health; } catch { return false; } }, 180, "API readiness");
-    worker = await launch(apiBinary, [], { ...childEnv, SCENEWORKS_WORKER_ONLY: "1" }, "worker");
-    receipt.worker = await wait(async () => { const value = (await apiCall("GET", "/api/v1/workers")).find((item) => item.id === workerId); return value?.status === "idle" && value; }, 180, "owned CUDA worker registration");
-    if (receipt.worker.gpuId !== String(gpu.physicalIndex) || !receipt.worker.capabilities?.includes("image_generate")) throw new Error("owned worker did not register selected GPU image generation");
+    worker = await launch(apiBinary, [], processEnvs.worker, "worker");
+    receipt.worker = await wait(async () => {
+      const workers = await apiCall("GET", "/api/v1/workers");
+      receipt.workerRegistrations = workers;
+      return admittedReplayWorker(workers, workerId, gpu);
+    }, 180, `owned CUDA worker ${workerId} GPU${gpu.physicalIndex} image generation registration`);
     receipt.modelLibrary = await apiCall("GET", "/api/v1/model-library");
     const project = await apiCall("POST", "/api/v1/projects", { name: `SDXL issue 3197 admitted replay ${workerId}` }); receipt.project = project;
     const projectPath = await realpath(project.path); const relativeProject = path.relative(await realpath(state), projectPath);
