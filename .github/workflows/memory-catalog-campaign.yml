@@ -434,7 +434,7 @@ jobs:
         run: bash scripts/ci/memory-catalog/pr.sh
 
   candle:
-    if: ${{ startsWith(inputs.profile, 'sdxl-cuda-') || ((inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle') }}
+    if: ${{ inputs.profile == 'sdxl-cuda-endpoints' || inputs.profile == 'sdxl-cuda-admitted-replay' || ((inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle') }}
     name: candle catalog campaign
     # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
     # choice here: all four Windows listeners are processes on ONE box.

@@ -5,7 +5,7 @@
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "82ea553e725fc21e371624573929402576326cb1311134b713a503402e0d9529"
+        "sha256": "024af39e37d37c95acab922ac4c0f3506134c1f0ee4676cdb075663d41cd6355"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -73,11 +73,11 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "a18e3a741a1beb4f0b2eb03f4b814bd47e8682c3d3fb672eafaa73218998f873"
+        "sha256": "154c64b6ae4cdda117622fe84ecab72a9589aef6d1a305546399f6356606af8d"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "30aeb5e63b011e16a0c6486df6a335fec75463ed10c506ad7e6c4c80f72a1238"
+        "sha256": "f2cc0e39e8d9f5a72111e41379b392277bec7c06cbf0b4b8aa35cbea8f160166"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -89,7 +89,7 @@
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "dd26ee205ec7303b28a6298e7b06eb0d67769d32d3660481a206ead9beb29b9d"
+        "sha256": "b957345b0d2d7cba17de75d775695c3a2a229b020b0f5ad8c251ef98c6f54176"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
