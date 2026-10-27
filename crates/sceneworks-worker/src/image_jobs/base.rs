@@ -4310,11 +4310,14 @@ mod sdxl_endpoint_inventory_tests {
             .unwrap()
             .as_object()
             .unwrap();
+        let descriptor = crate::inference_runtime::media_descriptor("sdxl").unwrap();
         let mut expected = Vec::new();
         let mut base = None;
         for download in manifest["downloads"].as_array().unwrap() {
             let component = download.get("componentId").and_then(Value::as_str);
-            if component.is_none() && download["variant"] != "q4" {
+            if component.is_some_and(|id| !descriptor.required_components.contains(&id))
+                || (component.is_none() && download["variant"] != "q4")
+            {
                 continue;
             }
             let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(
