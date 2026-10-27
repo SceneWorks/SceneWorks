@@ -650,6 +650,8 @@ impl JobsStore {
               on jobs(status, created_at);
             create index if not exists idx_jobs_project_created
               on jobs(project_id, created_at);
+            create index if not exists idx_jobs_project_generation_set
+              on jobs(project_id, json_extract(result_json, '$.generationSetId'));
             create index if not exists idx_jobs_created
               on jobs(created_at);
             create index if not exists idx_jobs_assigned_gpu_status
@@ -1601,6 +1603,42 @@ impl JobsStore {
             .query_map(params![project_id, generation_set_id], row_to_job)?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(jobs)
+    }
+
+    /// Batch publication lookups on one read connection and snapshot. Keep cleared jobs and
+    /// at most two matches per generation: a duplicate must fail publication closed, without
+    /// loading an unbounded number of duplicate results. JSON binding avoids SQLite's variable
+    /// limit for large libraries, and the expression index avoids rescanning project history.
+    pub fn jobs_for_generation_sets(
+        &self,
+        project_id: &str,
+        generation_set_ids: &[String],
+    ) -> JobsStoreResult<HashMap<String, Vec<JobSnapshot>>> {
+        if generation_set_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let connection = self.open_connection()?;
+        let ids_json = dumps(generation_set_ids)?;
+        let mut statement = connection.prepare(
+            "with requested as (select distinct value from json_each(?2))
+             select jobs.* from requested join jobs on jobs.id in (
+                 select id from jobs
+                  where project_id = ?1
+                    and json_extract(result_json, '$.generationSetId') = requested.value
+                  limit 2
+             )",
+        )?;
+        let mut by_generation: HashMap<String, Vec<JobSnapshot>> = HashMap::new();
+        for job in statement.query_map(params![project_id, ids_json], row_to_job)? {
+            let job = job?;
+            if let Some(generation) = job.result.get("generationSetId").and_then(Value::as_str) {
+                by_generation
+                    .entry(generation.to_owned())
+                    .or_default()
+                    .push(job);
+            }
+        }
+        Ok(by_generation)
     }
 
     pub fn get_job(&self, job_id: &str) -> JobsStoreResult<JobSnapshot> {
