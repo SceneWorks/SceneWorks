@@ -8751,10 +8751,18 @@ fn run_sdxl_endpoint(request: &Value) -> Result<Value, String> {
             "SDXL endpoint physical UUID mismatch: expected {expected}, observed {uuid}"
         ));
     }
-    let before = smi.used_bytes()?;
+    let used_bytes = || -> Result<u64, String> {
+        let mib = smi
+            .query_bounded("memory.used", Duration::from_secs(5))?
+            .parse::<u64>()
+            .map_err(|error| format!("SDXL endpoint memory.used: {error}"))?;
+        mib.checked_mul(MIB)
+            .ok_or_else(|| "SDXL endpoint memory.used overflow".into())
+    };
+    let before = used_bytes()?;
     let mut fragment = run_five_rung_reference(request)?;
     // run_five_rung_reference drops the request scope and generator before returning.
-    let after = smi.used_bytes()?;
+    let after = used_bytes()?;
     fragment["endpointMeasurement"]["providerDrop"] = json!({
         "beforeBytes": before, "afterBytes": after, "generatorDropped": true,
     });
