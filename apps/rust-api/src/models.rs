@@ -5650,14 +5650,57 @@ mod import_gate_tests {
     }
 
     #[test]
+    fn krea2_scalar_fp8_upload_is_accepted() {
+        // A ComfyUI `ModelSave` of an fp8-scaled Krea 2 DiT: `F8_E4M3` weights with an `F32`
+        // per-tensor `.weight_scale` and a `.comfy_quant` descriptor per projection. Before
+        // sc-27092 this classified as `ComfyQuantPacked` — the fp4/mxfp4 bucket — and was refused
+        // with a reason naming a format the file does not use.
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("krea2_fp8_scaled.safetensors");
+        let mut names = Vec::new();
+        for index in 0..6 {
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.weight"),
+                "F8_E4M3",
+            ));
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.weight_scale"),
+                "F32",
+            ));
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.comfy_quant"),
+                "U8",
+            ));
+        }
+        names.push(("model.diffusion_model.blocks.0.mod.lin".to_owned(), "BF16"));
+        names.push((
+            "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+            "F32",
+        ));
+        let entries: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(name, dtype)| (name.as_str(), *dtype))
+            .collect();
+        write_safetensors(&file, &entries);
+
+        assert!(
+            import_source_supported(&file).is_ok(),
+            "a Krea 2 scalar-fp8 DiT upload must pass the import gate"
+        );
+    }
+
+    #[test]
     fn krea2_packed_quant_upload_is_refused_with_reason() {
-        // Same family/component but `.comfy_quant` packed int8 → no loader yet → 400 with a reason.
+        // Same family/component but `.comfy_quant` fp4/mxfp4-packed — nibble-packed `U8` weights
+        // with no `I8` weight anywhere → the refuse bucket → 400 with a reason. (The fixture is
+        // genuinely packed: sc-27092 replaced the old "bulk `I8` or it is packed" proxy with a
+        // per-projection reading, so a file that really is packed must say so in its dtypes.)
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("kreamania_variant4.safetensors");
         write_safetensors(
             &file,
             &[
-                ("model.diffusion_model.blocks.0.attn.wq.weight", "I8"),
+                ("model.diffusion_model.blocks.0.attn.wq.weight", "U8"),
                 ("model.diffusion_model.blocks.0.attn.wq.comfy_quant", "U8"),
                 ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
                 (

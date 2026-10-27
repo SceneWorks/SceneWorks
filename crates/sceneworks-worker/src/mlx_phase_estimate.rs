@@ -264,6 +264,7 @@ mod tests {
         contract.phase_facts = Some(MemoryPhaseFacts {
             native_quant: None,
             architecture: None,
+            native_quant: None,
             staged_weights: StagedWeightSchedule::ThreeStage,
             transformer_stream: Some(StreamedWeightFacts {
                 resident_bytes: 2,

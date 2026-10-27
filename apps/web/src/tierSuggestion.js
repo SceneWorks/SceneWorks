@@ -28,6 +28,8 @@
 // The suggestion therefore budgets against PEAK (the real ceiling a generation must fit).
 
 import { installedTiers, isSelectableTier, tierHostEligible, tierQuantize } from "./quantTier.js";
+export { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
+import { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
 
 // Fidelity order, HIGHEST first. The suggestion walks this list and picks the first tier that both
 // exists on the model AND fits memory; bf16 is preferred, then q8, then q4 (the smallest, always-fits
@@ -805,6 +807,8 @@ export function tierFits(variant, hostMemoryGb, options = {}) {
   if (hostMemoryGb == null || !Number.isFinite(hostMemoryGb)) {
     return true;
   }
+  const endpoint = sdxlCudaMemoryEstimate(options.model, variant?.variant, options.backend);
+  if (endpoint) return endpoint.optimizedHostGb <= hostMemoryGb;
   // A tier's own declared RESIDENT floor (sc-24112 `minMemoryGbByTier`) is a hard veto on both
   // lanes: it is the number the Candle VRAM gate refuses on, and the MLX lane's statement of the
   // same derived peak. Without it a Candle tier with no measured row read as "unknown ⇒ fits" on

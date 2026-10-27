@@ -52,6 +52,7 @@ import {
   lightestInstallableTier,
   suggestTier,
   tierFits,
+  sdxlCudaMemoryEstimate,
 } from "../tierSuggestion.js";
 import { RETIRED_MODEL_CAPABILITIES, capabilityLabel } from "../modelCapabilities.js";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
@@ -404,6 +405,7 @@ function ModelTierDownloadPanel({
           // (e.g. bf16 on a small Mac) is flagged. Advisory only — SUGGEST-NEVER-WITHHOLD (epic 8506
           // decision 1) keeps every tier's checkbox enabled regardless.
           const overBudget = !tierFits(variant, unifiedMemoryGb, { backend, model });
+          const endpoint = sdxlCudaMemoryEstimate(model, tier, backend);
           // A torn tier: the cache holds SOME of this tier's declared files but not all. Distinct from
           // both "installed" and "not installed" (sc-12279).
           const incomplete = !installed && variant.cacheState === "incomplete";
@@ -454,12 +456,17 @@ function ModelTierDownloadPanel({
                 <span className="model-tier-label">
                   {tierLabel(tier)}
                   {isSuggested ? <span className="model-tier-suggested-badge">Suggested</span> : null}
+                  {endpoint ? (
+                    <span className="model-tier-suggested-badge" title={endpoint.description}>
+                      {endpoint.label}{Number.isFinite(unifiedMemoryGb) && !overBudget ? " · can fit with optimizations" : ""}
+                    </span>
+                  ) : null}
                   {/* Distinct class (NOT `.status-badge`) so it never collides with the per-row
                       install-state status badge query/rendering — this is a separate RAM advisory. */}
                   {overBudget ? (
                     <span
                       className="model-tier-memory-warning"
-                      title={`This tier's peak memory is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB. It can still install, but may run out of memory during generation.`}
+                      title={endpoint?.description ?? `This tier's peak memory is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB. It can still install, but may run out of memory during generation.`}
                     >
                       may exceed memory
                     </span>

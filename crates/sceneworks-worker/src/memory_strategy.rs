@@ -344,6 +344,10 @@ pub enum CandidateBasis {
     /// video law widens every phase by `ANCHOR_ALLOCATOR_ENVELOPE_MARGIN` inside the derivation;
     /// the image law widens nothing.
     EstimateAnchorDerived { lane: AnchorDerivationLane },
+    /// The raw peak is a measured endpoint for this exact request coordinate, without a complete
+    /// calibration/parity certification. Admission retains the normal estimate uncertainty;
+    /// telemetry distinguishes the literal measurement from an analytically derived peak.
+    EstimateMeasuredEndpoint,
     /// Synthesized estimate from the weights + headroom floor — no measured cell in its
     /// extrapolation basis, so the binding-phase constraint does not apply (see the scope
     /// sentence on the constraint's doc).
@@ -367,7 +371,10 @@ impl CandidateBasis {
     pub const fn is_estimate(self) -> bool {
         matches!(
             self,
-            Self::EstimateFittedCurve | Self::EstimateAnchorDerived { .. } | Self::EstimateFloor
+            Self::EstimateFittedCurve
+                | Self::EstimateAnchorDerived { .. }
+                | Self::EstimateMeasuredEndpoint
+                | Self::EstimateFloor
         )
     }
 
@@ -377,6 +384,7 @@ impl CandidateBasis {
             Self::Measured => "measured",
             Self::EstimateFittedCurve => "fitted_curve",
             Self::EstimateAnchorDerived { .. } => "anchor_derived",
+            Self::EstimateMeasuredEndpoint => "measured_endpoint",
             Self::EstimateFloor => "floor",
         }
     }

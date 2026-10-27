@@ -3035,6 +3035,7 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
     streamed.phase_facts = Some(gen_core::MemoryPhaseFacts {
         native_quant: None,
         architecture: None,
+        native_quant: None,
         staged_weights: gen_core::StagedWeightSchedule::TwoStage,
         transformer_stream: Some(gen_core::StreamedWeightFacts {
             resident_bytes: 0,

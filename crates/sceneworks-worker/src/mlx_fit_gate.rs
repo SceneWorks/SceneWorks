@@ -9982,6 +9982,7 @@ mod tests {
         contract.phase_facts = Some(gen_core::MemoryPhaseFacts {
             native_quant: None,
             architecture: None,
+            native_quant: None,
             staged_weights: gen_core::StagedWeightSchedule::TwoStage,
             transformer_stream: Some(gen_core::StreamedWeightFacts {
                 resident_bytes: 0,
@@ -11757,6 +11758,7 @@ mod tests {
         sdxl.phase_facts = Some(gen_core::MemoryPhaseFacts {
             native_quant: None,
             architecture: Some(gen_core::ImagePipelineArchitecture::SdxlUnetWithDualClip),
+            native_quant: None,
             staged_weights: gen_core::StagedWeightSchedule::TwoStage,
             transformer_stream: None,
             decoder_workspace: None,

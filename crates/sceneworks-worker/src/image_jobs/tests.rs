@@ -28090,10 +28090,16 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
     );
     // The final pass is the priced twin (epic 25899: it carries the prefix-KV-cache surcharge);
     // the hires first pass is the plain selection.
-    let shared_calls = stream
+    // Per-tier preflight also uses the shared selector before generation-memory construction.
+    // This guard concerns the final render pass and its independent Hires first pass.
+    let render_selectors = stream
+        .split_once("let mut generation_memory:")
+        .expect("render selection begins after the per-tier capability clamp")
+        .1;
+    let shared_calls = render_selectors
         .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
         .count()
-        + stream
+        + render_selectors
             .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced(")
             .count();
     assert_eq!(
