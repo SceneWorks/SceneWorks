@@ -403,7 +403,7 @@ export async function stageOneFile({ entry, root, acknowledgment = null, fetchIm
       const cacheSha256 = await hashFileSha256(probe.sourcePath, { signal, deadline: jobDeadline, now });
       if (cacheSha256 !== entry.expectedSha256) { record.cache.state = 'mismatch'; record.cache.observedSha256 = cacheSha256; throw stageError('H3_STAGE_CACHE_MISMATCH', `${probe.sourcePath}: cached ${cacheSha256}, expected ${entry.expectedSha256}; explicit blocker, no fresh fallback`); }
       await ensureOwnedFileTarget(partPath);
-      await copyFile(probe.sourcePath, partPath);
+      await copyFile(probe.sourcePath, partPath, fsConstants.COPYFILE_FICLONE);
       const actualBytes = (await stat(partPath)).size;
       const observedSha256 = await hashFileSha256(partPath, { signal, deadline: jobDeadline, now });
       record.actualBytes = actualBytes; record.observedSha256 = observedSha256;
