@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import JSON5 from 'json5';
-import { configure, controlScope } from '../../../../scripts/lib/moss-edit-terminal-controls.mjs';
+import { configure, controlScope } from '../testUtils/imageControls.js';
 import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
 import { click } from '../testUtils/dom.js';
 import { ImageEditor } from "./ImageEditor.jsx";

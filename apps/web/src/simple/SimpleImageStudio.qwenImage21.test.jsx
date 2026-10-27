@@ -15,7 +15,7 @@ import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
-import { configure, configureReferences } from '../../../../scripts/lib/moss-edit-terminal-controls.mjs';
+import { configure, configureReferences } from '../testUtils/imageControls.js';
 import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
 import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";

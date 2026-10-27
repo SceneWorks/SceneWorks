@@ -15941,11 +15941,23 @@ async fn consume_gen_events_with_disclosure(
             GenEvent::ImageFacts { index, facts } => {
                 pending_image_facts.entry(index).or_default().extend(facts);
             }
-            GenEvent::MossAssets(batch) => {
-                let mut staged = plan.moss_staged.lock().expect("MOSS staging lock");
-                if staged.is_some() { return Err(WorkerError::Engine("MOSS emitted multiple output batches".into())); }
-                asset_writes.extend(batch.facts.iter().cloned().map(Value::Object));
-                *staged = Some(batch);
+            GenEvent::AssetWritten { index, fact } => {
+                phase_timer.mark_item_done(Instant::now());
+                asset_writes.push(Value::Object(fact));
+                update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        JobStatus::Running,
+                        ProgressStage::Generating,
+                        0.1 + 0.85 * ((index + 1) as f64 / total as f64),
+                        &format!("Generated output {}/{total}.", index + 1),
+                        Some(streaming_result(plan, asset_writes)),
+                        backend,
+                    ),
+                )
+                .await?;
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
             }
             GenEvent::PromptEnhancement {
                 index,

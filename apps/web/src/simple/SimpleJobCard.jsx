@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Icon } from "../components/Icons.jsx";
-import { jobOutputsPending, errorStatuses, pendingStatuses, terminalStatuses } from "../jobTypes.js";
+import { errorStatuses, pendingStatuses, terminalStatuses } from "../jobTypes.js";
 import { percent } from "../formatting.js";
 
 // The Simple UI's one job card. Rendered in TWO places from this single definition:
@@ -32,7 +32,6 @@ const BUCKET_LABEL = {
  * @returns {"running"|"queued"|"done"|"failed"}
  */
 export function bucketFor(job) {
-  if (jobOutputsPending(job)) return "running";
   if (terminalStatuses.has(job.status)) {
     return errorStatuses.has(job.status) ? "failed" : "done";
   }
@@ -58,7 +57,7 @@ export function jobIsCancelable(job) {
 //   failed / interrupted → the card is the ONLY place the worker's reason is shown in a
 //     studio. Dismissing it would put us back to a run that silently produced nothing.
 export function jobClearsFromStudio(job) {
-  return !jobOutputsPending(job) && (job?.status === "completed" || job?.status === "canceled");
+  return job?.status === "completed" || job?.status === "canceled";
 }
 
 // The job's headline: the model it runs, falling back to the job type — what the
@@ -69,7 +68,6 @@ export function jobTitle(job) {
 }
 
 export function jobSub(job) {
-  if (jobOutputsPending(job)) return `Publishing outputs · ${job.id}`;
   const parts = [formatType(job.type)];
   const { width, height, count } = job.payload ?? {};
   if (width && height) {

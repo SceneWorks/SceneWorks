@@ -1,6 +1,9 @@
 enum GenEvent {
-    /// An actual MOSS edit image or NPY latent artifact; nullable effective seed is retained.
-    MossAssets(MossOutputBatch),
+    /// An output already encoded by its producing lane, persisted through shared assetWrites.
+    AssetWritten {
+        index: usize,
+        fact: JsonObject,
+    },
     Step {
         index: usize,
         current: u32,
@@ -63,7 +66,7 @@ enum GenEvent {
     },
     Image {
         index: usize,
-        seed: i64,
+        seed: Option<i64>,
         width: u32,
         height: u32,
         pixels: Vec<u8>,
@@ -186,7 +189,7 @@ fn send_generated_image(
     let (seed, width, height, pixels) = image;
     tx.blocking_send(GenEvent::Image {
         index,
-        seed,
+        seed: Some(seed),
         width,
         height,
         pixels,
@@ -204,7 +207,7 @@ fn send_scored_generated_image(
     let (seed, width, height, pixels, face_likeness) = image;
     tx.blocking_send(GenEvent::Image {
         index,
-        seed,
+        seed: Some(seed),
         width,
         height,
         pixels,

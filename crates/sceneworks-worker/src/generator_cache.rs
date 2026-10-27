@@ -1293,7 +1293,6 @@ where
         let loaded_policy = ExecutionPolicy::from_load_spec(&spec);
         // Held across the load so the two snapshots share one live primary context (see
         // `bind_backend_load_context`).
-        crate::moss_terminal_observation::entry(engine_id, "cache_context")?;
         let _backend_context = bind_backend_load_context()?;
         let external_committed_bytes = capture_backend_committed_bytes()?;
         let generator = load_generator(engine_id, &spec)
@@ -1327,7 +1326,6 @@ where
         move || cold_admission.admit(),
         load,
         move |cached, access| {
-            crate::moss_terminal_observation::entry(engine_id, "cache_dispatch")?;
             let cache_state = match access {
                 CacheAccess::Cold => MemoryCacheState::Cold,
                 CacheAccess::Warm => MemoryCacheState::Warm,
@@ -1565,7 +1563,6 @@ where
         let loaded_policy = ExecutionPolicy::from_load_spec(&spec);
         // Held across the load so the two snapshots share one live primary context (see
         // `bind_backend_load_context`).
-        crate::moss_terminal_observation::entry(engine_id, "cache_context")?;
         let _backend_context = bind_backend_load_context()?;
         let external_committed_bytes = capture_backend_committed_bytes()?;
         let generator = load_generator(engine_id, &spec)
@@ -1587,7 +1584,6 @@ where
         })
     };
     let run = move |cached: &CachedGenerator, access| {
-        crate::moss_terminal_observation::entry(engine_id, "cache_dispatch")?;
         run_spec.validate_prepared_file_pins().map_err(|error| {
             crate::classify_engine_error("Generator run source validation failed", error)
         })?;

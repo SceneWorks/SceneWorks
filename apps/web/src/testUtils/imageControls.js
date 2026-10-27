@@ -1,4 +1,4 @@
-// Pure DOM interactions shared by the terminal browser and rendered-UI tests.
+// Rendered form interactions shared by Image Studio, Simple, and Editor regression tests.
 const now=()=>new Date().toISOString();
 const requireThat=(condition,message)=>{if(!condition)throw Error(message);};
 export async function click(locator, actions, label) { await locator.click(); actions.push({ at: now(), action: 'click', control: label }); }
@@ -14,35 +14,6 @@ export const modelPicker = page => page.locator('label.settings-field-model sele
 // KeepAlive retains Studio forms while Image Editor is active. Never resolve its
 // shared control labels against the whole page or choose an arbitrary first match.
 export const controlScope = (page,kind) => kind==='editor' ? page.locator('.image-editor-surface:visible .ie-insp-body:visible') : page;
-export async function waitForModelCatalog(page,actions,timeoutMs=120000) {
-  const started=Date.now(),deadline=started+timeoutMs,responses=[];
-  const onResponse=response=>{try {if(new URL(response.url()).pathname==='/api/v1/models')responses.push({status:response.status(),at:now()});}catch{}};
-  page.on('response',onResponse);
-  try {
-    let terminalSince=null;
-    while(Date.now()<deadline){
-      // React can replace the gate with the form between two Playwright reads.
-      // Observe the model first, then the gate; an overlapping transition is
-      // retried instead of treating a stale gate observation as a failure.
-      const modelVisible=await modelPicker(page).isVisible();
-      const initializing=await page.getByRole('progressbar',{name:'Initializing models'}).isVisible();
-      if(modelVisible&&!initializing){
-        actions.push({at:now(),action:'observe-model-catalog-ready',elapsedMs:Date.now()-started,modelResponses:responses});
-        return;
-      }
-      const terminalGate=await page.locator('.model-availability-gate').isVisible()&&!initializing;
-      terminalSince=terminalGate?(terminalSince??Date.now()):null;
-      if(terminalSince!==null&&Date.now()-terminalSince>=1000)throw Error('model catalog settled without an available Image Studio model');
-      await page.waitForTimeout(Math.min(250,deadline-Date.now()));
-    }
-    throw Error('model catalog remained unsettled before the deadline');
-  } catch(error) {
-    const gate=page.getByRole('progressbar',{name:'Initializing models'});
-    const initializing=await gate.isVisible().catch(()=>false);
-    const gateText=initializing?await page.locator('.model-availability-gate').first().innerText().catch(()=>null):null;
-    throw Error(`image model catalog/form unavailable after ${Date.now()-started} ms; initializing=${initializing}; gate=${JSON.stringify(gateText)}; modelResponses=${JSON.stringify(responses)}; ${error.message}`);
-  } finally {page.off('response',onResponse);}
-}
 export async function advanced(page, actions) {
   const simple = page.locator('details.su-advanced');
   if (await simple.count()) { if (!(await simple.getAttribute('open') !== null)) await click(simple.locator(':scope > summary'), actions, 'Advanced disclosure'); return; }
@@ -102,25 +73,6 @@ export async function verifyReplayForm(page, expected, actions) {
   actions.push({ at: now(), action: 'verify-restored-form', values: actual, referenceAssetIds: expected.referenceAssetIds, nativeOutput: native.output });
 }
 
-export async function waitForReplayForm(page, expected, actions, timeoutMs=10000) {
-  const started=Date.now(),deadline=started+timeoutMs;
-  let lastError;
-  try {
-    do {
-      page.setDefaultTimeout(Math.max(1,Math.min(1000,deadline-Date.now())));
-      try {
-        await verifyReplayForm(page,expected,actions);
-        actions.push({at:now(),action:'observe-complete-replay-hydration',expectedModel:expected.model,elapsedMs:Date.now()-started});
-        return;
-      } catch(error) { lastError=error; }
-      if(Date.now()>=deadline)break;
-      await page.waitForTimeout(Math.min(100,deadline-Date.now()));
-    } while(true);
-    const model=await modelPicker(page).inputValue({timeout:1000}).catch(error=>`unavailable: ${error.message}`);
-    throw Error(`actual replay form did not stabilize in ${Date.now()-started} ms: ${lastError?.message}; Model expected ${expected.model}, observed ${model}`);
-  } finally {page.setDefaultTimeout(30000);}
-}
-
 export async function configure(page, expected, kind, actions) {
   const form=controlScope(page,kind);
   if (kind === 'editor') {
@@ -177,8 +129,7 @@ export async function configure(page, expected, kind, actions) {
   await adapter.waitFor({ state: 'visible' }); actions.push({ at: now(), action: 'observe-installed-adapter', text: await adapter.innerText(), model: expected.model });
 }
 
-// This frozen campaign requires embedded portable recipes. Acknowledge only the
-// normal first-use product choice, through its actual positive UI action.
+// Exercise the normal first-use recipe choice through the actual product UI.
 export async function acknowledgeRecipeChoice(page,actions) {
   const dialog=page.getByRole('dialog',{name:'Include the recipe in generated images?',exact:true});
   if(!await dialog.count())return false;

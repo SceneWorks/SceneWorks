@@ -424,8 +424,6 @@ pub(crate) fn textllms() -> impl ExactSizeIterator<Item = &'static TextLlmRegist
 }
 
 pub(crate) fn load(id: &str, spec: &LoadSpec) -> gen_core::Result<Box<dyn Generator>> {
-    crate::moss_terminal_observation::entry(id, "provider_load")
-        .map_err(|error| gen_core::Error::Unsupported(error.to_string()))?;
     media().load(id, spec)
 }
 

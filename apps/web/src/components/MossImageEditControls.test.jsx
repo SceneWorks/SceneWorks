@@ -24,6 +24,17 @@ describe("conditional MOSS edit package installation",()=>{
     expect(details.querySelector("select").value).toBe("");
     expect(onAdvancedChange).not.toHaveBeenCalled();
   });
+  it("keeps Guidance available in tools without the shared editor control", async () => {
+    ({root,container}=mountRoot());
+    await act(async () => root.render(<MossImageEditControls
+      model={{id:"moss_image_base",conditionalPurposes:{moss_image_edit:{installState:"installed"}}}}
+      options={{reference_max_edge:512,use_kv_cache:true}} onChange={vi.fn()}
+      generation={{width:512,height:512,steps:30,guidanceScale:4,negativePrompt:""}} onGenerationChange={vi.fn()}
+    />));
+    const guidance = [...container.querySelectorAll("label")].find((label) => label.textContent === "Guidance");
+    expect(guidance.querySelector("input").value).toBe("4");
+    expect(guidance.closest("details").open).toBe(false);
+  });
   it.each(["moss_image_base","moss_image_sft"])("installs the exact %s purpose with explicit source acknowledgment and actionable retries",async(id)=>{
     ({root,container}=mountRoot());
     const props={model:{id,conditionalPurposes:{moss_image_edit:{installState:"missing"}}},token:"owned-test",options:{reference_max_edge:512,use_kv_cache:true},onChange:vi.fn()};

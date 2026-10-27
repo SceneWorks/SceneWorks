@@ -296,7 +296,6 @@ pub(crate) async fn get_asset_workflow(
         store.get_asset(&lookup_project, &asset_id)
     })
     .await?;
-    moss_output_publication::require_asset(&state, &project_id, &asset).await?;
     if asset.get("type").and_then(Value::as_str) == Some("tensor") {
         if let Some(companion) = asset.pointer("/extra/workflowCompanion") {
             let relative = companion

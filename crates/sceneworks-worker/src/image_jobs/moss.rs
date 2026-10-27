@@ -153,7 +153,6 @@ fn moss_render(
     request: &GenerationRequest,
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(Vec<(i64, Image)>, JsonObject)> {
-    crate::moss_terminal_observation::provider_run()?;
     let output = generator
         .generate(request, on_progress)
         .map_err(|error| crate::classify_engine_error("MOSS generation", error))?;
@@ -285,7 +284,6 @@ fn moss_edit_render(
     advanced: gen_core::moss_image::MossImageAdvancedInputs<'_>,
     progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(gen_core::moss_image::MossImageAdvancedOutput, JsonObject)> {
-    crate::moss_terminal_observation::provider_run()?;
     let output = generator
         .generate_moss_image_edit(
             request,
@@ -306,26 +304,9 @@ fn moss_edit_render(
         .ok_or_else(|| {
             WorkerError::Engine("MOSS edit completed without its actual execution receipt".into())
         })?;
-    report
-        .validate()
-        .map_err(|e| WorkerError::Engine(e.to_string()))?;
-    let variant =
-        gen_core::moss_image::MossImageVariant::from_provider_id(generator.descriptor().id)
-            .ok_or_else(|| WorkerError::Engine("MOSS edit generator identity is missing".into()))?;
-    let expected = gen_core::moss_image::MossImageResolved::resolve(variant, request)
-        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-    let expected_count = advanced
-        .validate(request, &expected)
-        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-    if report.base.data().resolved != expected
-        || report.base.data().output_kind != advanced.output
-        || report.base.data().latent_shape
-            != [
-                expected_count,
-                128,
-                request.height as usize / 16,
-                request.width as usize / 16,
-            ]
+    // The provider returns the validated native receipt. Retain the worker boundary's
+    // output type/count/shape checks and carry that receipt as provenance.
+    if report.base.data().output_kind != advanced.output
         || report.base.data().images_per_prompt != request.count
         || report.reference_max_edge != options.reference_max_edge
         || report.use_kv_cache != options.use_kv_cache
@@ -337,7 +318,7 @@ fn moss_edit_render(
             .any(|(receipt, image)| receipt.original_dimensions != [image.width, image.height])
     {
         return Err(WorkerError::Engine(
-            "MOSS edit receipt differs from the actual authored request/reference batch".into(),
+            "MOSS edit receipt differs from actual output/reference provenance".into(),
         ));
     }
     let output_count = match &output {
@@ -371,7 +352,14 @@ fn moss_edit_render(
             ))
         }
     };
-    if report.base.data().samples.len() != output_count
+    if report.base.data().latent_shape
+        != [
+            output_count,
+            128,
+            request.height as usize / 16,
+            request.width as usize / 16,
+        ]
+        || report.base.data().samples.len() != output_count
         || report
             .base
             .data()
@@ -391,186 +379,12 @@ fn moss_edit_render(
     Ok((output, facts))
 }
 
-fn moss_input_parents(raw: &JsonObject) -> WorkerResult<Vec<String>> {
-    let mut parents = sceneworks_core::moss_image::edit_reference_slots(raw)
-        .map_err(WorkerError::InvalidPayload)?;
-    if let Some(value) = raw.get(sceneworks_core::moss_image_advanced::KEY) {
-        let options: sceneworks_core::moss_image_advanced::EditAdvanced =
-            serde_json::from_value(value.clone())
-                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
-        for reference in sceneworks_core::moss_image_advanced::references(&options) {
-            if !parents.contains(&reference.asset_id) {
-                parents.push(reference.asset_id.clone());
-            }
-        }
-    }
-    Ok(parents)
-}
-struct MossOutputBatch {
-    facts: Vec<JsonObject>,
-    paths: Vec<PathBuf>,
-    committed: bool,
-}
-impl MossOutputBatch {
-    fn new() -> Self {
-        Self {
-            facts: Vec::new(),
-            paths: Vec::new(),
-            committed: false,
-        }
-    }
-    fn stage(&mut self, path: PathBuf, bytes: &[u8]) -> WorkerResult<()> {
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        self.paths.push(path);
-        file.write_all(bytes)?;
-        Ok(())
-    }
-    fn commit(&mut self) {
-        self.committed = true;
-    }
-}
-impl Drop for MossOutputBatch {
-    fn drop(&mut self) {
-        if !self.committed {
-            for path in &self.paths {
-                if let Err(error) = std::fs::remove_file(path) {
-                    if error.kind() != std::io::ErrorKind::NotFound {
-                        tracing::error!(event="moss_unpublished_output_cleanup_failed",%error,path=%path.display(),"Unpublished MOSS staging could not be removed");
-                    }
-                }
-            }
-        }
-    }
-}
-fn moss_stage_image_files(
-    plan: &ImagePlan,
-    temp: &Path,
-    media: &Path,
-) -> WorkerResult<MossOutputBatch> {
-    let mut files = MossOutputBatch::new();
-    if sceneworks_core::moss_image::is_moss(&plan.request.model)
-        && plan.request.mode == "edit_image"
-    {
-        files.stage(temp.to_path_buf(), &[])?;
-        files.stage(media.to_path_buf(), &[])?;
-        if let Some(batch) = plan.moss_staged.lock().expect("MOSS staging lock").as_mut() {
-            batch.paths.extend(files.paths.iter().cloned());
-        }
-    }
-    Ok(files)
-}
-
-/// A lost HTTP acknowledgment never licenses deletion of an accepted durable handoff.
-async fn publish_moss_batch(
-    api: &ApiClient,
-    job: &JobSnapshot,
-    plan: &ImagePlan,
-    backend: &str,
-    facts: &[Value],
-    mut batch: MossOutputBatch,
-) -> WorkerResult<()> {
-    check_cancel(
-        api,
-        &job.id,
-        "MOSS edit canceled before output publication.",
-    )
-    .await?;
-    let expected = facts
-        .iter()
-        .map(|fact| fact.get("assetId").cloned().unwrap_or(Value::Null))
-        .collect::<Vec<_>>();
-    let matches = |saved: &JobSnapshot| {
-        saved.id == job.id
-            && saved.project_id == job.project_id
-            && saved.attempts == job.attempts
-            && saved.payload.get("model").and_then(Value::as_str)
-                == Some(plan.request.model.as_str())
-            && saved.result.get("generationSetId").and_then(Value::as_str)
-                == Some(plan.genset_id.as_str())
-            && saved.result.get("assetIds").and_then(Value::as_array) == Some(&expected)
-            && saved
-                .result
-                .get("assets")
-                .and_then(Value::as_array)
-                .is_some_and(|assets| {
-                    assets.len() == facts.len()
-                        && assets.iter().zip(facts).all(|(asset, fact)| {
-                            asset.get("id") == fact.get("assetId")
-                                && asset.pointer("/file/path") == fact.get("mediaPath")
-                                && asset.get("projectId").and_then(Value::as_str)
-                                    == job.project_id.as_deref()
-                                && asset.get("generationSetId").and_then(Value::as_str)
-                                    == Some(plan.genset_id.as_str())
-                                && asset.pointer("/lineage/jobId").and_then(Value::as_str)
-                                    == Some(job.id.as_str())
-                        })
-                })
-    };
-    let response = update_job(
-        api,
-        &job.id,
-        image_progress(
-            JobStatus::Completed,
-            ProgressStage::Completed,
-            1.0,
-            &format!("Generated {} outputs.", expected.len()),
-            Some(streaming_result(plan, facts)),
-            backend,
-        ),
-    )
-    .await;
-    match response {
-        Ok(saved) if saved.status == JobStatus::Completed && matches(&saved) => {
-            batch.commit();
-            Ok(())
-        }
-        response => {
-            let authoritative = api
-                .get_json::<JobSnapshot>(&format!("/api/v1/jobs/{}", job.id))
-                .await;
-            match authoritative {
-                Ok(saved) if saved.status == JobStatus::Completed && matches(&saved) => {
-                    batch.commit();
-                    Ok(())
-                }
-                Ok(saved)
-                    if saved.id == job.id
-                        && matches!(
-                            saved.status,
-                            JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
-                        ) =>
-                {
-                    Err(WorkerError::Canceled(format!(
-                        "MOSS output publication was rejected for job {}",
-                        job.id
-                    )))
-                }
-                _ => {
-                    // Keep exact staged media for the existing durable pending-side-effect retry.
-                    // No completed output is claimed here; the server's canonical assets decide readiness.
-                    batch.commit();
-                    let detail = response
-                        .err()
-                        .map(|error| error.to_string())
-                        .unwrap_or_else(|| "canonical output acknowledgment unavailable".into());
-                    Err(WorkerError::Engine(format!("MOSS output publication pending or uncertain for job {}: {detail}. Poll this job; do not resubmit generation.",job.id)))
-                }
-            }
-        }
-    }
-}
-
 fn write_moss_tensor_companion(
     plan: &ImagePlan,
     project: &Path,
     index: usize,
     raw: &JsonObject,
     seed: Option<u64>,
-    staged: &mut MossOutputBatch,
 ) -> WorkerResult<Value> {
     use sha2::{Digest, Sha256};
     let mut payload = plan.workflow_source.as_deref().cloned().unwrap_or_else(|| {
@@ -602,14 +416,16 @@ fn write_moss_tensor_companion(
         },
         &payload,
     )
-    .ok_or_else(|| WorkerError::Engine("MOSS workflow companion exceeds bounded envelope size".into()))?;
+    .ok_or_else(|| {
+        WorkerError::Engine("MOSS workflow companion exceeds bounded envelope size".into())
+    })?;
     let bytes = serde_json::to_vec(&share).map_err(|e| WorkerError::Engine(e.to_string()))?;
     let relative = format!(
-        "assets/tensors/moss-edit/{}/{index:04}.sceneworks-workflow.json",
+        "assets/tensors/{}/{index:04}.sceneworks-workflow.json",
         plan.genset_id
     );
     let path = safe_join(project, &relative)?;
-    staged.stage(path, &bytes)?;
+    std::fs::write(path, &bytes)?;
     Ok(
         json!({"path":relative,"mimeType":"application/json","sha256":format!("{:x}",Sha256::digest(&bytes))}),
     )
@@ -629,11 +445,8 @@ fn emit_moss_advanced_outputs(
     let samples = &report.base.data().samples;
     let mut raw = raw;
     raw.extend(facts.clone());
-    let mut staged = MossOutputBatch::new();
     if request.cancel.is_cancelled() {
-        return Err(WorkerError::Canceled(
-            "MOSS output publication canceled".into(),
-        ));
+        return Err(WorkerError::Canceled("MOSS output canceled".into()));
     }
     match output {
         gen_core::moss_image::MossImageAdvancedOutput::Images(images) => {
@@ -645,24 +458,20 @@ fn emit_moss_advanced_outputs(
             for (index, (image, sample)) in images.into_iter().zip(samples).enumerate() {
                 let mut settings = raw.clone();
                 settings.insert("mossImageSampleIndex".into(), json!(index));
-                let mut fact = write_image_asset(
-                    plan,
+                tx.blocking_send(GenEvent::ImageFacts {
                     index,
-                    sample.seed.map(|n| n as i64),
-                    image.width,
-                    image.height,
-                    image.pixels,
-                    plan.adapter,
-                    settings,
-                    project,
-                )?;
-                staged.paths.push(safe_join(
-                    project,
-                    fact["mediaPath"].as_str().expect("written image path"),
-                )?);
-                fact.insert("batchIndex".into(), json!(index));
-                fact.insert("parents".into(), json!(moss_input_parents(&raw)?));
-                staged.facts.push(fact);
+                    facts: settings,
+                })
+                .map_err(|_| WorkerError::Canceled("image output consumer closed".into()))?;
+                tx.blocking_send(GenEvent::Image {
+                    index,
+                    seed: sample.seed.map(|seed| seed as i64),
+                    width: image.width,
+                    height: image.height,
+                    pixels: image.pixels,
+                    face_likeness: None,
+                })
+                .map_err(|_| WorkerError::Canceled("image output consumer closed".into()))?;
             }
         }
         gen_core::moss_image::MossImageAdvancedOutput::Latents { values, shape } => {
@@ -678,11 +487,10 @@ fn emit_moss_advanced_outputs(
                     values,
                 )
                 .map_err(WorkerError::InvalidPayload)?;
-                let relative =
-                    format!("assets/tensors/moss-edit/{}/{index:04}.npy", plan.genset_id);
+                let relative = format!("assets/tensors/{}/{index:04}.npy", plan.genset_id);
                 let path = safe_join(project, &relative)?;
                 std::fs::create_dir_all(path.parent().expect("tensor directory"))?;
-                staged.stage(path.clone(), &bytes)?;
+                std::fs::write(&path, &bytes)?;
                 let metadata = sceneworks_core::tensor_artifact::inspect(&path)
                     .map_err(WorkerError::InvalidPayload)?;
                 let mut settings = raw.clone();
@@ -690,33 +498,25 @@ fn emit_moss_advanced_outputs(
                     .map_err(WorkerError::InvalidPayload)?;
                 settings.insert("referenceAssetIds".into(), json!(reference_ids));
                 settings.insert("mossImageSampleIndex".into(), json!(index));
-                let companion = write_moss_tensor_companion(
-                    plan,
-                    project,
-                    index,
-                    &settings,
-                    sample.seed,
-                    &mut staged,
-                )?;
+                let companion =
+                    write_moss_tensor_companion(plan, project, index, &settings, sample.seed)?;
                 let fact = json!({"assetId":fresh_asset_id(),"type":"tensor","mediaPath":relative,"mimeType":sceneworks_core::tensor_artifact::MIME,
                     "tensor":metadata,"batchIndex":index,"parents":moss_input_parents(&raw)?,"displayName":format!("MOSS sampled latents {}",index+1),"createdAt":now_rfc3339(),
                     "mode":"edit_image","model":plan.request.model,"adapter":plan.adapter,"prompt":plan.request.image_prompt(index),"negativePrompt":plan.request.negative_prompt,
                     "seed":sample.seed,"count":plan.request.count,"normalizedWidth":request.width,"normalizedHeight":request.height,
                     "sourceAssetId":reference_ids.first(),
                     "rawAdapterSettings":settings,"extra":{"workflowCompanion":companion,"mossOutput":{"kind":"sampled_latents","sampleIndex":index,"nativeBatchShape":shape,"artifactSha256":metadata.sha256}}});
-                staged
-                    .facts
-                    .push(fact.as_object().expect("fact object").clone());
+                tx.blocking_send(GenEvent::AssetWritten {
+                    index,
+                    fact: fact.as_object().expect("fact object").clone(),
+                })
+                .map_err(|_| WorkerError::Canceled("asset output consumer closed".into()))?;
             }
         }
     }
     if request.cancel.is_cancelled() {
-        return Err(WorkerError::Canceled(
-            "MOSS output publication canceled".into(),
-        ));
+        return Err(WorkerError::Canceled("MOSS output canceled".into()));
     }
-    tx.blocking_send(GenEvent::MossAssets(staged))
-        .map_err(|_| WorkerError::Canceled("MOSS output consumer closed".into()))?;
     Ok(())
 }
 struct MossPreparation<'a> {
@@ -2007,210 +1807,77 @@ mod moss_consumer_tests {
             }]))
         }
     }
-    #[tokio::test]
-    async fn moss_publication_ack_loss_reconciles_exact_completed_batch_and_retains_pending_staging(
-    ) {
-        use axum::{
-            extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router,
-        };
-        use sceneworks_core::jobs_store::{CreateJob, JobsStore};
-        use std::sync::Mutex;
-        for outcome in [
-            "completed",
-            "pending",
-            "unavailable",
-            "failed",
-            "wrong_generation",
-            "cancel",
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let store = JobsStore::new(temp.path().join("jobs.db"));
-            store.initialize().unwrap();
-            let mut job=store.create_job(CreateJob{job_type:JobType::ImageEdit,project_id:Some("project".into()),project_name:None,payload:json!({"model":"moss_image_sft","mode":"edit_image","prompt":"edit","referenceAssetIds":["rgb"]}).as_object().unwrap().clone(),requested_gpu:"auto".into(),source_job_id:None,duplicate_of_job_id:None,attempts:1,initial_status:None}).unwrap();
-            job.cancel_requested = outcome == "cancel";
-            let plan = ImagePlan::new(&ImageRequest::from_payload(&job.payload));
-            let relative = format!("assets/images/moss-edit/{}/output.png", plan.genset_id);
-            let path = temp.path().join("owned-output");
-            let mut batch = MossOutputBatch::new();
-            batch.stage(path.clone(), b"owned").unwrap();
-            let facts = vec![json!({"assetId":"asset_output","mediaPath":relative})];
-            batch.facts = facts
-                .iter()
-                .map(|fact| fact.as_object().unwrap().clone())
-                .collect();
-            #[derive(Clone)]
-            struct Mock {
-                job: Arc<Mutex<JobSnapshot>>,
-                posts: Arc<Mutex<Vec<Value>>>,
-                outcome: &'static str,
-                generation: String,
-                relative: String,
-            }
-            let state = Mock {
-                job: Arc::new(Mutex::new(job.clone())),
-                posts: Arc::new(Mutex::new(Vec::new())),
-                outcome,
-                generation: plan.genset_id.clone(),
-                relative,
-            };
-            let server_state = state.clone();
-            let router=Router::new().route("/api/v1/jobs/:id",get(|State(state):State<Mock>|async move {
-                if state.outcome=="unavailable" && !state.posts.lock().unwrap().is_empty(){return (StatusCode::SERVICE_UNAVAILABLE,Json(json!({"error":"owned fixture unavailable"}))).into_response();}
-                Json(state.job.lock().unwrap().clone()).into_response()
-            })).route("/api/v1/jobs/:id/progress",axum::routing::post(|State(state):State<Mock>,Json(body):Json<Value>|async move {
-                state.posts.lock().unwrap().push(body.clone());
-                let mut job=state.job.lock().unwrap();
-                if body["status"]=="canceled" {job.status=JobStatus::Canceled;return (StatusCode::OK,Json(job.clone())).into_response();}
-                job.status=if state.outcome=="failed" {JobStatus::Failed}else{JobStatus::Completed};
-                job.result=json!({"generationSetId":state.generation,"assetIds":["asset_output"],"assets":[{"id":"asset_output","projectId":"project","generationSetId":state.generation,"file":{"path":state.relative},"lineage":{"jobId":job.id}}]}).as_object().unwrap().clone();
-                if state.outcome=="pending" {job.result=json!({"generationSetId":state.generation,"outputPublication":{"state":"pending"}}).as_object().unwrap().clone();}
-                if state.outcome=="wrong_generation" {job.result.insert("generationSetId".into(),json!("another_generation"));}
-                (StatusCode::INTERNAL_SERVER_ERROR,Json(json!({"error":"lost acknowledgment after owned server commit"}))).into_response()
-            })).with_state(server_state);
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let address = listener.local_addr().unwrap();
-            let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-            let mut settings = Settings::for_test(temp.path().join("data"));
-            settings.api_url = format!("http://{address}");
-            let result = publish_moss_batch(
-                &ApiClient::new(&settings),
-                &job,
-                &plan,
-                "mlx",
-                &facts,
-                batch,
-            )
-            .await;
-            if outcome == "completed" {
-                assert!(result.is_ok());
-            } else {
-                assert!(result.is_err(), "{outcome}");
-            }
-            assert_eq!(
-                path.exists(),
-                !matches!(outcome, "failed" | "cancel"),
-                "{outcome}"
-            );
-            assert_eq!(
-                state
-                    .posts
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|body| body["status"] == "completed")
-                    .count(),
-                usize::from(outcome != "cancel")
-            );
-            task.abort();
-            let _ = task.await;
-        }
-    }
-
     #[test]
-    fn moss_png_staging_refuses_foreign_output_and_cleans_only_its_new_temporary_file() {
+    fn advanced_images_use_shared_image_events_and_preserve_explicit_noise_seed() {
         let temp = tempfile::tempdir().unwrap();
-        let request = ImageRequest::from_payload(
-            json!({"model":"moss_image_sft","mode":"edit_image","prompt":"edit"})
-                .as_object()
-                .unwrap(),
+        let payload = json!({"model":"moss_image_sft","mode":"edit_image","prompt":"edit","referenceAssetIds":["rgb"],"width":16,"height":16,"count":1}).as_object().unwrap().clone();
+        let plan = ImagePlan::with_count_and_adapter(
+            &ImageRequest::from_payload(&payload),
+            1,
+            "mlx_moss_image_sft",
+            Some(Arc::new(payload)),
         );
-        let plan = ImagePlan::new(&request);
-        let temporary = temp.path().join("owned.tmp.png");
-        let media = temp.path().join("foreign.png");
-        std::fs::write(&media, b"original bytes").unwrap();
-        assert!(moss_stage_image_files(&plan, &temporary, &media).is_err());
-        assert!(!temporary.exists());
-        assert_eq!(std::fs::read(&media).unwrap(), b"original bytes");
-    }
-
-    #[test]
-    fn moss_staging_failure_channel_close_and_cancel_publish_no_partial_batch() {
-        use gen_core::moss_image_edit::edit_request;
-        for failure in [
-            "second_file",
-            "companion",
-            "closed_channel",
-            "cancel",
-            "receiver_drop",
-        ] {
-            let temp = tempfile::tempdir().unwrap();
-            let payload=json!({"model":"moss_image_sft","mode":"edit_image","prompt":"edit","referenceAssetIds":["rgb"],"width":16,"height":16,"count":2}).as_object().unwrap().clone();
-            let request = ImageRequest::from_payload(&payload);
-            let plan = ImagePlan::with_count_and_adapter(
-                &request,
-                2,
-                "mlx_moss_image_sft",
-                Some(Arc::new(payload)),
-            );
-            let native = edit_request(&GenerationRequest {
-                prompt: "edit".into(),
-                width: 16,
-                height: 16,
-                count: 2,
-                seed: Some(173),
+        let native = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+            prompt: "edit".into(),
+            width: 16,
+            height: 16,
+            seed: None,
+            ..Default::default()
+        })
+        .unwrap();
+        let references = [Image {
+            width: 16,
+            height: 16,
+            pixels: vec![0; 768],
+        }];
+        let noise = [0.; 128];
+        let (output, facts) = moss_edit_render(
+            &Probe::new(),
+            &native,
+            &references,
+            sceneworks_core::moss_image::EditOptions::default(),
+            MossImageAdvancedInputs {
+                noise: Some(&noise),
                 ..Default::default()
-            })
-            .unwrap();
-            let refs = vec![Image {
-                width: 16,
-                height: 16,
-                pixels: vec![0; 768],
-            }];
-            let probe = Probe::new();
-            let (output, facts) = moss_edit_render(
-                &probe,
-                &native,
-                &refs,
-                sceneworks_core::moss_image::EditOptions::default(),
-                MossImageAdvancedInputs {
-                    output: MossImageOutputKind::Latents,
-                    ..Default::default()
-                },
-                &mut |_| {},
-            )
-            .unwrap();
-            let dir = temp
-                .path()
-                .join("assets/tensors/moss-edit")
-                .join(&plan.genset_id);
-            std::fs::create_dir_all(&dir).unwrap();
-            let collision = match failure {
-                "second_file" => Some(dir.join("0001.npy")),
-                "companion" => Some(dir.join("0000.sceneworks-workflow.json")),
-                _ => None,
-            };
-            if let Some(path) = &collision {
-                std::fs::write(path, b"preexisting foreign bytes").unwrap();
-            }
-            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-            if failure == "closed_channel" {
-                rx.close();
-            }
-            if failure == "cancel" {
-                native.cancel.cancel();
-            }
-            let mut raw = request.advanced.clone();
-            raw.insert("referenceAssetIds".into(), json!(["rgb"]));
-            let result =
-                emit_moss_advanced_outputs(&tx, &plan, temp.path(), output, &facts, raw, &native);
-            if failure == "receiver_drop" {
-                assert!(result.is_ok());
-                drop(rx);
-            } else {
-                assert!(result.is_err(), "{failure}");
-                assert!(rx.try_recv().is_err());
-            }
-            let files = std::fs::read_dir(&dir)
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .collect::<Vec<_>>();
-            if let Some(path) = collision {
-                assert_eq!(files, vec![path.clone()]);
-                assert_eq!(std::fs::read(path).unwrap(), b"preexisting foreign bytes");
-            } else {
-                assert!(files.is_empty(), "{failure}: {files:?}");
-            }
-        }
+            },
+            &mut |_| {},
+        )
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        emit_moss_advanced_outputs(
+            &tx,
+            &plan,
+            temp.path(),
+            output,
+            &facts,
+            JsonObject::from_iter([("referenceAssetIds".into(), json!(["rgb"]))]),
+            &native,
+        )
+        .unwrap();
+        let GenEvent::ImageFacts { index, facts } = rx.try_recv().unwrap() else {
+            panic!("shared image facts")
+        };
+        assert_eq!(index, 0);
+        assert_eq!(facts["mossImageSampleIndex"], 0);
+        let GenEvent::Image {
+            index,
+            seed,
+            width,
+            height,
+            pixels,
+            ..
+        } = rx.try_recv().unwrap()
+        else {
+            panic!("shared image event")
+        };
+        assert_eq!(
+            (index, seed, width, height, pixels.len()),
+            (0, None, 16, 16, 768)
+        );
+        assert!(
+            !temp.path().join("assets").exists(),
+            "the shared consumer owns image encoding"
+        );
     }
 
     #[test]
@@ -2317,11 +1984,15 @@ mod moss_consumer_tests {
         )
         .unwrap();
         drop(tx);
-        let GenEvent::MossAssets(mut batch) = rx.try_recv().unwrap() else {
-            panic!("expected actual tensor artifact batch")
-        };
-        assert_eq!(batch.facts.len(), 4);
-        for (index, fact) in batch.facts.iter().cloned().enumerate() {
+        for index in 0..4 {
+            let GenEvent::AssetWritten {
+                index: actual_index,
+                fact,
+            } = rx.try_recv().unwrap()
+            else {
+                panic!("expected actual tensor artifact write")
+            };
+            assert_eq!(actual_index, index);
             assert_eq!(fact["seed"], Value::Null);
             let asset = store
                 .persist_generated_asset(
@@ -2377,7 +2048,6 @@ mod moss_consumer_tests {
                 2
             );
         }
-        batch.commit();
         assert!(rx.try_recv().is_err());
         assert!(!Path::new(&project.path)
             .join(format!("assets/images/{}", plan.genset_id))

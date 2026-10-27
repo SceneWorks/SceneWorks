@@ -1293,9 +1293,9 @@ async fn moss_advanced_owned_npy_mcp_rest_and_portable_reacquisition_preserve_na
     let _ = server.await;
 }
 
-// Exercise the completed-progress path (which bypasses persist_reported_assets), not just
-// the policy helper: every atomic output must retain lineage consumed by commercial exports.
-async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool) {
+// Exercise the shared completed-progress writer: every output retains lineage consumed by
+// commercial exports, including references removed after the worker decoded them.
+async fn assert_moss_shared_asset_usage_policy(parent_removed_after_decode: bool) {
     use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
     let _hf = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
@@ -1354,11 +1354,11 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
             .is_err());
     }
     let set = "genset_policy";
-    let directory = root.join(format!("assets/images/moss-edit/{set}"));
+    let directory = root.join(format!("assets/images/{set}"));
     std::fs::create_dir_all(&directory).unwrap();
     let mut facts = Vec::new();
     for index in 0..2 {
-        let relative = format!("assets/images/moss-edit/{set}/{index:04}.png");
+        let relative = format!("assets/images/{set}/{index:04}.png");
         decoded.save(root.join(&relative)).unwrap();
         facts.push(json!({"assetId":format!("policy-output-{index}"), "displayName":"MOSS edit", "type":"image", "createdAt":"2026-10-24T00:00:00Z", "mimeType":"image/png", "mediaPath":relative, "parents":[parent["id"]], "model":"moss_image_sft", "mode":"edit_image", "seed":index, "width":16, "height":16}));
     }
@@ -1381,7 +1381,8 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
         )
         .unwrap()
         .is_none());
-    assert!(crate::moss_output_publication::canonical_batch(&saved).is_some());
+    assert_eq!(saved.result["assets"].as_array().unwrap().len(), 2);
+    assert_eq!(saved.result["assetIds"].as_array().unwrap().len(), 2);
     assert!(!saved.result.contains_key("assetWrites"));
     let expected = if parent_removed_after_decode {
         json!({"assetId":"policy-parent", "policy":null, "unresolved":"not_found"})
@@ -1396,7 +1397,8 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
             json!([expected]),
             "{asset}"
         );
-        assert_eq!(asset["extra"]["mossPublication"]["jobId"], job.id);
+        assert_eq!(asset["lineage"]["jobId"], job.id);
+        assert!(asset["extra"].get("mossPublication").is_none());
         let (status, mut timeline) = request(
             app.clone(),
             "POST",
@@ -1429,7 +1431,7 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
             }
         );
     }
-    // Repeated completion still acknowledges exactly the published batch and keeps its policies.
+    // Repeated completion keeps the same shared asset batch and policies.
     let (status, response) = request(
         app,
         "POST",
@@ -1445,307 +1447,119 @@ async fn assert_moss_publication_usage_policy(parent_removed_after_decode: bool)
 }
 
 #[tokio::test]
-async fn moss_atomic_publication_inherits_parent_policies_and_refuses_commercial_export() {
-    assert_moss_publication_usage_policy(false).await;
+async fn moss_shared_assets_inherit_parent_policies_and_refuse_commercial_export() {
+    assert_moss_shared_asset_usage_policy(false).await;
 }
 
 #[tokio::test]
-async fn moss_atomic_publication_records_deleted_decoded_parent_and_refuses_commercial_export() {
-    assert_moss_publication_usage_policy(true).await;
+async fn moss_shared_assets_record_deleted_decoded_parent_and_refuse_commercial_export() {
+    assert_moss_shared_asset_usage_policy(true).await;
 }
 
+// CI_IMPACT: one uploaded-photo routing check in the existing API suite; CPU/file I/O only.
+// Shares the exact request/photo with UI and worker boundary tests; no weights or inference.
 #[tokio::test]
-async fn moss_publication_list_preserves_ordinary_assets_with_shared_generation_paths() {
+async fn water_bottle_edit_survives_api_enqueue_and_candle_claim_with_its_reference() {
     let _hf = isolate_hf_cache();
     let temp = tempfile::tempdir().unwrap();
     setup(&temp);
-    let (_, state) = create_app_with_state(test_settings(&temp)).unwrap();
-    let ordinary = json!({"id":"ordinary", "file":{"path":"assets/images/shared/0.png"}});
-    let same_generation = json!({"id":"second", "file":{"path":"assets/images/shared/1.png"}});
-    let unpublished =
-        json!({"id":"pending", "file":{"path":"assets/images/moss-edit/shared/0.png"}});
-    let upload = json!({"id":"upload", "file":{"path":"assets/uploads/0.png"}});
-    let no_path = json!({"id":"no-path"});
-    // Per-generation memoization must not allow a recognized MOSS path just because an
-    // ordinary path with the same generation has already been admitted (or vice versa).
-    for assets in [
-        vec![
-            ordinary.clone(),
-            unpublished.clone(),
-            same_generation.clone(),
-            upload.clone(),
-            no_path.clone(),
-        ],
-        vec![
-            unpublished,
-            ordinary.clone(),
-            same_generation.clone(),
-            upload.clone(),
-            no_path.clone(),
-        ],
-    ] {
-        let visible = crate::moss_output_publication::visible_assets(&state, "project", assets)
-            .await
-            .unwrap();
-        assert_eq!(
-            visible,
-            vec![
-                ordinary.clone(),
-                same_generation.clone(),
-                upload.clone(),
-                no_path.clone()
-            ]
-        );
-    }
-}
-
-#[tokio::test]
-async fn moss_output_pending_handoff_blocks_every_public_artifact_until_exact_recovery() {
-    use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
-    let _hf = isolate_hf_cache();
-    let temp = tempfile::tempdir().unwrap();
-    setup(&temp);
-    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
-    let project = state
-        .project_store
-        .create_project("Atomic MOSS publication")
-        .unwrap();
-    let job=state.jobs_store.create_job(CreateJob{job_type:JobType::ImageEdit,project_id:Some(project.id.clone()),project_name:Some(project.name.clone()),payload:json!({"model":"moss_image_sft","mode":"edit_image","prompt":"edit","referenceAssetIds":["original"],"count":2,"width":16,"height":16,"advanced":{"mossImageAdvanced":{"output":"latents"}}}).as_object().unwrap().clone(),requested_gpu:"auto".into(),source_job_id:None,duplicate_of_job_id:None,attempts:1,initial_status:None}).unwrap();
+    super::yue2_catalog::seed_snapshot(
+        &temp,
+        &json!({"repo":"chinoll/Moss-Image-Edit","revision":"3be9c40037e1b89b17aa85ff6f8ee805872aa558","files":["adapter_config.json","adapter_model.safetensors"]}),
+    );
+    let mut settings = test_settings(&temp);
+    settings.candle_required = true; // Exercise Windows routing on every test host.
+    let (app, state) = create_app_with_state(settings).unwrap();
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"Bottle edit"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let photo = include_bytes!("../../../../tests/fixtures/images/water-bottle.png");
+    let (status, asset) = request_multipart_upload(
+        app.clone(),
+        &format!(
+            "/api/v1/projects/{}/assets",
+            project["id"].as_str().unwrap()
+        ),
+        "water-bottle.png",
+        "image/png",
+        photo,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{asset}");
+    let mut body: Value = serde_json::from_str(include_str!(
+        "../../../../tests/fixtures/water-bottle-edit-request.json"
+    ))
+    .unwrap();
+    body["projectId"] = project["id"].clone();
+    body["referenceAssetIds"] = json!([asset["id"]]);
+    let (status, job) = request(app.clone(), "POST", "/api/v1/image/jobs", body.clone()).await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    assert_eq!(job["type"], "image_edit");
     claim_job_as_worker(
         &app,
-        &job.id,
-        "moss-publisher",
-        &[
-            "image_edit",
-            "gpu",
-            if cfg!(target_os = "macos") {
-                "mlx"
-            } else {
-                "candle"
-            },
-        ],
+        job["id"].as_str().unwrap(),
+        "bottle-recorder",
+        &["gpu", "image_edit", "candle"],
     )
     .await;
-    let set = "genset_publication";
-    let root = std::path::Path::new(&project.path);
-    let directory = root.join(format!("assets/tensors/moss-edit/{set}"));
-    std::fs::create_dir_all(&directory).unwrap();
-    let mut facts = Vec::new();
-    for index in 0..2 {
-        let relative = format!("assets/tensors/moss-edit/{set}/{index:04}.npy");
-        std::fs::write(
-            root.join(&relative),
-            sceneworks_core::tensor_artifact::encode_f32(&[1, 128, 1, 1], &vec![index as f32; 128])
-                .unwrap(),
-        )
+    let claimed = state
+        .jobs_store
+        .get_job(job["id"].as_str().unwrap())
         .unwrap();
-        let tensor = sceneworks_core::tensor_artifact::inspect(&root.join(&relative)).unwrap();
-        facts.push(json!({"assetId":format!("asset_publication{index}"),"displayName":format!("MOSS latent {index}"),"type":"tensor","mimeType":"application/x-npy","tensor":tensor,"mediaPath":relative,"mode":"edit_image","model":"moss_image_sft","seed":null,"createdAt":"2026-10-23T00:00:00Z","rawAdapterSettings":{"mossImageEditExecutionReport":{"actual":true}}}));
-    }
-    let result = json!({"generationSetId":set,"expectedCount":2,"generationSet":{"id":set,"model":"moss_image_sft","mode":"edit_image","count":2},"assetWrites":facts});
-    let completion = json!({"status":"completed","stage":"completed","progress":1,"message":"Done","workerId":"moss-publisher","result":result});
-    state
-        .progress_side_effects_fail_job_ids
-        .lock()
-        .insert(job.id.clone());
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{}/progress", job.id),
-        completion.clone(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
-    let (_, pending) = request(
-        app.clone(),
-        "GET",
-        &format!("/api/v1/jobs/{}", job.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(pending["status"], "completed");
-    assert_eq!(pending["result"]["outputPublication"]["state"], "pending");
-    assert!(pending["result"].get("assetWrites").is_none());
-    assert!(!pending.to_string().contains("mossImageEditExecutionReport"));
-    let file_route = format!(
-        "/api/v1/projects/{}/files/assets/tensors/moss-edit/{set}/0000.npy",
-        project.id
-    );
-    let (status, _) = request(app.clone(), "GET", &file_route, Value::Null).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    for alias in [
-        format!("assets/tensors/./moss-edit/{set}/0000.npy"),
-        format!("assets/tensors//moss-edit/{set}/0000.npy"),
+    for key in [
+        "model",
+        "mode",
+        "prompt",
+        "width",
+        "height",
+        "count",
+        "seed",
+        "referenceAssetIds",
     ] {
-        assert!(
-            crate::moss_output_publication::require_path(&state, &project.id, &alias)
-                .await
-                .is_err(),
-            "{alias}"
+        assert_eq!(claimed.payload[key], body[key], "API/claim changed {key}");
+    }
+    let expected_options =
+        sceneworks_core::moss_image::options(body["advanced"].as_object().unwrap()).unwrap();
+    let actual_options =
+        sceneworks_core::moss_image::options(claimed.payload["advanced"].as_object().unwrap())
+            .unwrap();
+    assert_eq!(
+        serde_json::to_value(actual_options).unwrap(),
+        serde_json::to_value(expected_options).unwrap()
+    );
+    for key in ["steps", "guidanceScale", "schedulerShift", "mossImageEdit"] {
+        assert_eq!(
+            claimed.payload["advanced"][key], body["advanced"][key],
+            "API/claim changed advanced.{key}"
         );
     }
-    #[cfg(unix)]
-    {
-        let alias = root.join("assets/uploads/moss-output-alias.npy");
-        std::os::unix::fs::symlink(directory.join("0000.npy"), &alias).unwrap();
-        assert!(crate::moss_output_publication::require_path(
-            &state,
-            &project.id,
-            "assets/uploads/moss-output-alias.npy"
-        )
-        .await
-        .is_err());
-    }
-    // Simulate an interrupted old per-file side effect: same-job partial metadata is not public.
-    state
-        .project_store
-        .write_generation_set(
-            &project.id,
-            &job.id,
-            &result["generationSet"],
-            facts.first(),
-        )
-        .unwrap();
-    let mut partial = facts[0].clone();
-    partial["extra"] =
-        json!({"mossPublication":{"jobId":job.id,"attempt":job.attempts,"generationSetId":set}});
-    state
-        .project_store
-        .persist_generated_asset(&project.id, &job.id, set, &partial)
-        .unwrap();
-    let (status, list) = request(
+    assert!(claimed.payload["modelManifestEntry"]["downloads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|entry| entry["repo"] == "chinoll/Moss-Image-Edit"));
+    let (status, _, stored_photo) = request_raw(
         app.clone(),
         "GET",
-        &format!("/api/v1/projects/{}/assets?scope=all", project.id),
-        Value::Null,
+        &format!(
+            "/api/v1/projects/{}/files/{}",
+            project["id"].as_str().unwrap(),
+            asset["file"]["path"].as_str().unwrap()
+        ),
+        Body::empty(),
+        &[],
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(list, json!([]));
-    for suffix in ["", "/workflow"] {
-        let (status, _) = request(
-            app.clone(),
-            "GET",
-            &format!(
-                "/api/v1/projects/{}/assets/asset_publication0{suffix}",
-                project.id
-            ),
-            Value::Null,
-        )
-        .await;
-        assert_eq!(status, StatusCode::CONFLICT);
-    }
-    state
-        .progress_side_effects_fail_job_ids
-        .lock()
-        .remove(&job.id);
-    let second = directory.join("0001.npy");
-    let second_bytes = std::fs::read(&second).unwrap();
-    std::fs::remove_file(&second).unwrap();
-    let (status, _) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{}/progress", job.id),
-        completion.clone(),
-    )
-    .await;
-    assert_eq!(
-        status,
-        StatusCode::BAD_REQUEST,
-        "the actual API refuses an unavailable second artifact"
-    );
-    let (_, hidden) = request(
-        app.clone(),
-        "GET",
-        &format!("/api/v1/projects/{}/assets?scope=all", project.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(hidden, json!([]));
-    std::fs::write(second, second_bytes).unwrap();
-    // Reconciliation uses the original durable handoff. A replacement retry payload is ignored.
-    state
-        .progress_side_effects_fail_job_ids
-        .lock()
-        .remove(&job.id);
-    let mut retry = completion;
-    retry["result"] = json!({"forged":true});
-    let (status, ready) = request(
-        app.clone(),
-        "POST",
-        &format!("/api/v1/jobs/{}/progress", job.id),
-        retry,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{ready}");
-    assert_eq!(ready["result"]["assets"].as_array().unwrap().len(), 2);
-    assert!(ready["result"].get("outputPublication").is_none());
-    assert!(ready["result"].get("forged").is_none());
-    assert_eq!(ready["result"]["assets"][0]["recipe"]["seed"], Value::Null);
-    let (status, listed) = request(
-        app.clone(),
-        "GET",
-        &format!("/api/v1/projects/{}/assets?scope=all", project.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(listed.as_array().unwrap().len(), 2);
-    let mut mismatched = ready["result"]["assets"][0].clone();
-    mismatched["id"] = json!("asset_other");
-    assert!(
-        crate::moss_output_publication::require_asset(&state, &project.id, &mismatched)
-            .await
-            .is_err()
-    );
-    // Exact canonical artifacts are readable; sidecars/temp paths never become public outputs.
-    crate::moss_output_publication::require_path(
-        &state,
-        &project.id,
-        &format!("assets/tensors/moss-edit/{set}/0000.npy"),
-    )
-    .await
-    .unwrap();
-    for name in [
-        "0000.sceneworks.json",
-        "0000.tmp.npy",
-        "0000.sceneworks-workflow.json",
-    ] {
-        assert!(crate::moss_output_publication::require_path(
-            &state,
-            &project.id,
-            &format!("assets/tensors/moss-edit/{set}/{name}")
-        )
-        .await
-        .is_err());
-    }
-    state.jobs_store.clear_job(&job.id).unwrap();
-    let (status, after_clear) = request(
-        app.clone(),
-        "GET",
-        &format!("/api/v1/projects/{}/assets?scope=all", project.id),
-        Value::Null,
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        after_clear, listed,
-        "clearing the queue must not hide published assets"
-    );
-    crate::moss_output_publication::require_path(
-        &state,
-        &project.id,
-        &format!("assets/tensors/moss-edit/{set}/0000.npy"),
-    )
-    .await
-    .unwrap();
-    assert!(crate::moss_output_publication::require_path(
-        &state,
-        &project.id,
-        "assets/tensors/moss-edit/genset_missing/0000.npy"
-    )
-    .await
-    .is_err());
+    assert_eq!(stored_photo, photo.as_slice());
+    body["referenceAssetIds"] = json!([]);
+    let (status, refused) = request(app, "POST", "/api/v1/image/jobs", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
 }
 
 async fn moss_consumer_reference_assets(app: axum::Router, project: &str) -> Vec<String> {
