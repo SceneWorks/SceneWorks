@@ -1124,3 +1124,15 @@ test('controlled CUDA supplement selects actual ordinary product or separate reu
   assert.throws(()=>controlledQualityTooling({backend:'cuda',sourceSha,reusedExecution:{}}),/actual ordinary or reused/);
   assert.throws(()=>controlledQualityTooling({backend:'cuda',sourceSha:'main'}),/actual ordinary or reused/);
 });
+
+// CI_IMPACT: source-owned assembly contract only; runtime capacity/copy tests use inert metadata.
+test('ordinary R19 reuse refreshes D capacity after browser provisioning before the first package copy',async()=>{
+ const controller=await readFile(new URL('./moss-edit-terminal-actions.mjs',import.meta.url),'utf8');
+ const rehydrate=controller.slice(controller.indexOf('export async function rehydrateCudaPackages'),controller.indexOf('export async function prepareContinuationCudaPackages'));
+ assert.ok(rehydrate.indexOf('await provisionBrowser(config)')<rehydrate.indexOf('await isolateReusedCudaPackages(config,inventory)'));
+ assert.match(rehydrate,/if\(config.reusedExecution\)await isolateReusedCudaPackages\(config,inventory\);\s*else await isolatePackages\(config,\{omitAdapter:true\}\)/);
+ const main=controller.slice(controller.indexOf("if(['execute-reused-cuda','finalize-reused-cuda']"),controller.indexOf("if(phase==='continue-mlx'"));
+ assert.ok(main.indexOf('rehydrate.reusedExecution=config.reusedExecution')<main.indexOf('await rehydrateCudaPackages(rehydrate)'));
+ assert.ok(main.indexOf('rehydrate.executionTooling=config.executionTooling')<main.indexOf('await rehydrateCudaPackages(rehydrate)'));
+ assert.match(controller,/from '\.\/ci\/moss-owned-cache-maintenance.mjs'/);
+});

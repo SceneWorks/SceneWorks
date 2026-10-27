@@ -25,6 +25,22 @@ const H47_PROCESS_ROOTS=[H47_OWNER.root,H47_BUILD,path.dirname(path.dirname(H47_
 const H47_RECORDS=Object.freeze({'hf-transfer.json':'7ec1b9bcf39e86b69da20ce0430baadd651cce98ad4bfe359a142a2355bd1d04','cuda-package-preparation.json':'d44b6efd6f887505fbb7af3df4f588b7c410f30eb1ecc0ca0b360512e1c981fc'});
 // These are identities, never kill targets. A reused PID needs positive later-start evidence.
 const H47_PIDS=[35884,46352,45652],H47_LAST_OBSERVED=Date.parse('2026-10-26T23:51:33.348Z');
+// Derived from original native403499/1 packages.json (SHA below), not campaign hints.
+export const R19_REUSE_CAPACITY=Object.freeze({packagesSha256:'b4b2c1992a282220ddc5f51e86b2dad95a40723baf22f6324e9da60ecd2e62c3',packagesByteLength:11907,packageCount:43,projectionBytes:59241637664,adapterBlobBytes:297435928,planningReserveBytes:4*1024**3,requiredFreeBytes:63834040888});
+export function reuseCapacityBudget(bytes) {
+  check(bytes.length===R19_REUSE_CAPACITY.packagesByteLength&&sha(bytes)===R19_REUSE_CAPACITY.packagesSha256,'original R19 package metadata changed');
+  const packages=JSON.parse(bytes),files=packages.files;
+  check(files?.length===43&&new Set(files.map(item=>item.file)).size===43&&files.every(item=>Number.isSafeInteger(item.byteLength)&&item.byteLength>0),'exact43 authenticated package sizes required');
+  const adapters=files.filter(item=>/^hub\/models--chinoll--Moss-Image-Edit\/snapshots\/3be9c40037e1b89b17aa85ff6f8ee805872aa558\/adapter_(config\.json|model\.safetensors)$/.test(item.file));
+  check(adapters.length===2,'exact two adapter sizes required');
+  const projectionBytes=files.reduce((n,item)=>n+item.byteLength,0),adapterBlobBytes=adapters.reduce((n,item)=>n+item.byteLength,0),requiredFreeBytes=projectionBytes+adapterBlobBytes+R19_REUSE_CAPACITY.planningReserveBytes;
+  check(projectionBytes===R19_REUSE_CAPACITY.projectionBytes&&adapterBlobBytes===R19_REUSE_CAPACITY.adapterBlobBytes&&requiredFreeBytes===R19_REUSE_CAPACITY.requiredFreeBytes,'R19 staging arithmetic changed');
+  return {...R19_REUSE_CAPACITY,projectionBytes,adapterBlobBytes,requiredFreeBytes,adapterFiles:adapters.map(item=>item.file),files};
+}
+export function hasReuseCapacity(observation,budget=R19_REUSE_CAPACITY) {
+  check(observation?.drive==='D'&&['free','size'].every(key=>Number.isSafeInteger(observation[key])&&observation[key]>=0)&&observation.free<=observation.size,'actual D volume capacity required');
+  return observation.free>=budget.requiredFreeBytes;
+}
 export function validateH47Processes(processes) {
   check(Array.isArray(processes)&&processes.length<=128,'bounded H47 process observation required');
   const reused=[];
@@ -53,7 +69,14 @@ export function validateH47Projection(observation,runtime,transfer) {
     if(item)check(entry.sha256===item.sha256&&entry.byteLength===String(item.byteLength),'H47 projection bytes changed');
     else {
       const adapter=transfer.after.find(item=>runtime.editAdapterFiles.includes(item.file)&&item.sha256===entry.sha256&&String(item.byteLength)===entry.byteLength);
-      check(/^hub\/models--chinoll--Moss-Image-Edit\/blobs\/[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(entry.path)&&adapter&&!extras.has(adapter.file),'unexpected H47 HF extra file');extras.add(adapter.file);
+      const blobPath=/^hub\/models--chinoll--Moss-Image-Edit\/blobs\/[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(entry.path),duplicateAdapter=Boolean(adapter&&extras.has(adapter.file));
+      if(!(blobPath&&adapter&&!duplicateAdapter)) {
+        const error=Error('unexpected H47 HF extra file');
+        // Metadata already observed above; never read an unknown file to explain a refusal.
+        error.h47Extra={path:entry.path.slice(0,512).replace(/[\x00-\x1f\x7f]/g,'?'),pathTruncated:entry.path.length>512,byteLength:/^[0-9]{1,20}$/.test(entry.byteLength)?entry.byteLength:null,sha256:/^[a-f0-9]{64}$/.test(entry.sha256??'')?entry.sha256:null,validBlobPath:blobPath,adapterMatched:Boolean(adapter),duplicateAdapter};
+        throw error;
+      }
+      extras.add(adapter.file);
     }
   }
   return proof; // Exactly43 projected files plus at most the two materialized private adapter blobs.
@@ -243,6 +266,11 @@ export async function maintain(env, io, {copyCache=true}={}) {
   const reuse=env.MOSS_NATIVE_RUN_ID&&env.MOSS_MAINTENANCE_PHASE!=='cuda-rebase'?await reuseInvocation(env,io):null;
   check(!reuse||copyCache,'native reuse cannot use reference-only maintenance');
   const receipt = { version: 1, kind: 'sc-26752-stopped-run-disk-recovery', currentRun: env.GITHUB_RUN_ID, currentSource: env.MOSS_SOURCE_SHA, ...(reuse?{reuse}:{}), before: await io.volume(), candidates: [], operations: [] };
+  if(reuse&&hasReuseCapacity(receipt.before)) {
+    receipt.capacity={...R19_REUSE_CAPACITY,mode:'capacity-only-no-pruning',planningReserveMeaning:'Planning reserve only; concurrent disk use can still cause ENOSPC'};
+    receipt.cache={state:'capacity-only-original-targets-retained-no-copy'};receipt.after=receipt.before;
+    io.report({...receipt,stage:'completed'});return receipt; // No old tree, process, copy or mutation.
+  }
   validateTree(await io.inspect(root), root);
   receipt.r9Observation = await diagnoseR9(io);
   for (const binding of OWNED_RUNS.filter(item=>copyCache||item.run!==H47_OWNER.run)) {
@@ -257,7 +285,11 @@ export async function maintain(env, io, {copyCache=true}={}) {
     const metadata = binding.metadataRequired && inventory.exists ? validateHfObservation(await io.metadata(runtime), hf, runtime) : null;
     if(metadata?.completeProjection)check(metadata.projectedBytes<=inventory.bytes,'HF projection exceeds measured inventory');
     if(binding.run===H47_OWNER.run&&inventory.exists)await validateH47Invocation(env,io);
-    const owner = binding.run===H47_OWNER.run&&inventory.exists ? await observeH47Owner(io,runtime,metadata) : null;
+    let owner=null;
+    if(binding.run===H47_OWNER.run&&inventory.exists)try {owner=await observeH47Owner(io,runtime,metadata);}catch(error) {
+      if(error.h47Extra)io.report({stage:'h47-extra-file-refusal',readOnly:true,run:binding.run,entry:error.h47Extra,volumeBefore:{drive:'D',...Object.fromEntries(['free','size'].map(key=>[key,Number.isSafeInteger(receipt.before?.[key])&&receipt.before[key]>=0?receipt.before[key]:null]))}});
+      throw error;
+    }
     receipt.candidates.push({ ...binding, stop, inventory, metadata, cache, cacheProbeError, ...(owner?{owner}:{}) });
   }
   // The full disk may prevent any local pre-write. Emit the bounded before inventory into the

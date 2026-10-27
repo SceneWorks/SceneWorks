@@ -6,7 +6,8 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { win32 as path } from 'node:path';
-import { H47_OWNER, validateReuseMaintenance, H47_PROCESS_FILTER, validateH47Processes, validateH47Projection, h47SourceEntries, OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, hashMetadataFile, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
+import { H47_OWNER, R19_REUSE_CAPACITY, reuseCapacityBudget, hasReuseCapacity, validateReuseMaintenance, H47_PROCESS_FILTER, validateH47Processes, validateH47Projection, h47SourceEntries, OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, hashMetadataFile, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
+import {isolateReusedCudaPackages} from './moss-edit-terminal-actions.mjs';
 const runtimes = await Promise.all([4, 5, 6, 10, 12, 13, 14, 15].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
 const env = { GITHUB_REPOSITORY: 'SceneWorks/SceneWorks', GITHUB_RUN_ID: '99999999999', GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKSPACE: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', MOSS_ROOT: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-99999999999-1-cuda', MOSS_SOURCE_SHA: 'a'.repeat(40), MOSS_INFERENCE_SHA: 'b'.repeat(40) };
 const state = binding => ({ id: Number(binding.run), run_attempt: 1, head_sha: binding.actionsSource ?? binding.source, status: 'completed', conclusion: 'failure' });
@@ -391,7 +392,7 @@ function reuseFixture() {
 }
 test('exact retained R19 reuse reclaims H47 with all owner guards and never copies a target',async()=>{
   const f=reuseFixture();f.roots.add(path.join(OWNED_RUNS[6].root,'target'));
-  f.io.volume=async()=>({drive:'D',free:1024**4,size:2*1024**4});f.io.copy=async()=>assert.fail('reuse must never copy a target');
+  f.io.volume=async()=>({drive:'D',free:R19_REUSE_CAPACITY.requiredFreeBytes-1,size:2*1024**4});f.io.copy=async()=>assert.fail('reuse must never copy a target');
   const receipt=await maintain(f.env,f.io);
   assert.equal(receipt.reuse.toolingSha,f.env.GITHUB_SHA);assert.equal(receipt.reuse.productSha,H47_OWNER.source);
   assert.equal(receipt.cache.state,'native-reuse-original-targets-retained-no-copy');
@@ -434,4 +435,76 @@ test('existing rebase with historical native IDs keeps the original cache path',
  assert.equal(receipt.reuse,undefined);assert.ok(f.mutations.some(item=>item[0]==='copy'));
  const workflow=await readFile(new URL('../.github/workflows/moss-edit-terminal.yml',import.meta.url),'utf8');
  assert.match(workflow,/if \(\$env:MOSS_MAINTENANCE_PHASE -eq 'execute' -and \$env:MOSS_NATIVE_RUN_ID\) \{/);
+});
+
+// CI_IMPACT: two inert metadata-refusal tests; no content reads or host/process calls.
+test('H47 unknown extra refusal reports observed path/size/hash and initial D volume without mutations',async()=>{
+ const f=reuseFixture(),metadata=f.io.metadata;
+ const extra={...h47Entry(h47Transfer.after[0],100),path:'hub/unknown-cache/extra.metadata',byteLength:'123',sha256:'a'.repeat(64),contents:'NEVER_EMIT_CONTENTS',token:'NEVER_EMIT_TOKEN'};
+ f.io.metadata=async()=>{const observed=await metadata();observed.entries.push(extra);return observed;};
+ let volumeCalls=0;f.io.volume=async()=>{volumeCalls++;return {drive:'D',free:123456789,size:987654321,secret:'NEVER_EMIT_VOLUME_SECRET'};};
+ const hash=f.io.hash;let ownerHashCalls=0;f.io.hash=async file=>{ownerHashCalls++;return hash(file);};
+ await assert.rejects(()=>maintain(f.env,f.io),/unexpected H47 HF extra file/);
+ assert.deepEqual(f.mutations,[]);assert.deepEqual(f.writes,[]);assert.equal(volumeCalls,1);assert.equal(ownerHashCalls,1);
+ const report=f.reports.find(item=>item.stage==='h47-extra-file-refusal');
+ assert.deepEqual(report.volumeBefore,{drive:'D',free:123456789,size:987654321});assert.equal(report.readOnly,true);
+ assert.equal(report.entry.path,extra.path);assert.equal(report.entry.byteLength,'123');assert.equal(report.entry.sha256,extra.sha256);
+ assert.equal(report.entry.adapterMatched,false);assert.equal(report.entry.validBlobPath,false);
+ assert.doesNotMatch(JSON.stringify(f.reports),/NEVER_EMIT/);
+});
+test('H47 refusal metadata is bounded, missing hashes stay absent, and duplicate-adapter guard still refuses',async()=>{
+ for(const kind of ['bounded','duplicate']){
+  const f=h47Fixture(),metadata=f.io.metadata;
+  f.io.metadata=async()=>{const observed=await metadata();
+   if(kind==='bounded')observed.entries.push({...h47Entry(h47Transfer.after[0],100),path:'cache/\n'+('x'.repeat(600)),byteLength:'9'.repeat(100),sha256:undefined});
+   else {const item=h47Transfer.after.find(x=>h47Runtime.editAdapterFiles.includes(x.file));for(const digit of ['1','2'])observed.entries.push({...h47Entry(item,100+Number(digit)),path:`hub/models--chinoll--Moss-Image-Edit/blobs/${digit.repeat(40)}`});}
+   return observed;
+  };
+  f.io.volume=async()=>({drive:'D',free:Infinity,size:-1});
+  await assert.rejects(()=>maintain(f.env,f.io),/unexpected H47 HF extra file/);assert.deepEqual(f.mutations,[]);
+  const report=f.reports.find(item=>item.stage==='h47-extra-file-refusal');assert.deepEqual(report.volumeBefore,{drive:'D',free:null,size:null});
+  if(kind==='bounded'){assert.equal(report.entry.path.length,512);assert.equal(report.entry.pathTruncated,true);assert.equal(report.entry.byteLength,null);assert.equal(report.entry.sha256,null);assert.doesNotMatch(report.entry.path,/[\x00-\x1f\x7f]/);}
+  else {assert.equal(report.entry.validBlobPath,true);assert.equal(report.entry.adapterMatched,true);assert.equal(report.entry.duplicateAdapter,true);}
+ }
+});
+
+const originalR19Packages=()=>Buffer.from(JSON.stringify({hfHome:'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40349954885-1-cuda\\hf',files:h47Transfer.after.map(({file,sha256,byteLength})=>({file,sha256,byteLength}))},null,2)+'\n');
+// CI_IMPACT: immutable12KB metadata and mocked capacity/copy boundary only, no model bytes.
+test('R19 staging budget derives authenticated43 plus retained two blobs and existing planning reserve',()=>{
+ const bytes=originalR19Packages(),budget=reuseCapacityBudget(bytes);
+ assert.equal(bytes.length,11907);assert.equal(budget.projectionBytes,59241637664);assert.equal(budget.adapterBlobBytes,297435928);
+ assert.equal(budget.projectionBytes-budget.adapterBlobBytes,58944201736);assert.equal(budget.requiredFreeBytes,63834040888);
+ for(const mutate of [x=>x.files[0].byteLength++,x=>x.files.pop(),x=>x.files[0].sha256='0'.repeat(64),x=>x.files.find(i=>i.file.endsWith('adapter_model.safetensors')).file+='bad']){
+  const changed=JSON.parse(bytes);mutate(changed);assert.throws(()=>reuseCapacityBudget(Buffer.from(JSON.stringify(changed,null,2)+'\n')),/package metadata changed/);
+ }
+ for(const free of [budget.requiredFreeBytes,budget.requiredFreeBytes+1])assert.equal(hasReuseCapacity({drive:'D',free,size:1024**4}),true);
+ assert.equal(hasReuseCapacity({drive:'D',free:budget.requiredFreeBytes-1,size:1024**4}),false);
+ for(const observation of [{drive:'E',free:1024**4,size:1024**4},{drive:'D',free:Infinity,size:1024**4},{drive:'D',free:2,size:1}])assert.throws(()=>hasReuseCapacity(observation));
+});
+test('sufficient R19 capacity returns before any old HF/process/cache inspection or mutation',async()=>{
+ const f=reuseFixture();let reads=0;const read=f.io.read;
+ f.io.read=async file=>{reads++;assert.equal(file,f.env.GITHUB_EVENT_PATH);return read(file);};
+ f.io.volume=async()=>({drive:'D',free:R19_REUSE_CAPACITY.requiredFreeBytes,size:1024**4});
+ for(const key of ['inspect','stopped','metadata','entries','processes','hash','remove','copy','ensure','write'])f.io[key]=async()=>assert.fail(`capacity-only invoked ${key}`);
+ const receipt=await maintain(f.env,f.io);assert.equal(reads,1);assert.deepEqual(receipt.candidates,[]);assert.deepEqual(receipt.operations,[]);
+ assert.equal(receipt.capacity.mode,'capacity-only-no-pruning');assert.equal(receipt.capacity.requiredFreeBytes,63834040888);assert.equal(f.reports.at(-1).stage,'completed');
+ const insufficient=reuseFixture(),metadata=insufficient.io.metadata;insufficient.io.volume=async()=>({drive:'D',free:R19_REUSE_CAPACITY.requiredFreeBytes-1,size:1024**4});
+ insufficient.io.metadata=async()=>{const x=await metadata();x.entries.push({...h47Entry(h47Transfer.after[0],100),path:'unknown-extra',sha256:undefined});return x;};
+ await assert.rejects(()=>maintain(insufficient.env,insufficient.io),/unexpected H47 HF extra file/);assert.deepEqual(insufficient.mutations,[]);
+});
+test('fresh pre-copy capacity binds native metadata/source and refuses disk drop before copy',async()=>{
+ const bytes=originalR19Packages(),packages=JSON.parse(bytes),f=reuseFixture(),r=f.dispatch,events=[];
+ const config={backend:'cuda',candidateId:r.candidate_id,sourceSha:r.product_sha,inferenceSha:H47_OWNER.inference,root:'D:\\inert\\moss-build-99999999999-1-cuda',hfHome:'D:\\inert\\moss-build-99999999999-1-cuda\\hf',buildRoot:resolve('/inert/native'),packageFiles:packages.files.map(({file,sha256})=>({file,sha256})),editAdapterFiles:packages.files.filter(x=>/adapter_(config.json|model.safetensors)$/.test(x.file)).map(x=>x.file),executionTooling:{head:f.env.GITHUB_SHA},reusedExecution:{native:{runId:r.native_run_id,attempt:r.native_run_attempt},mlx:{runId:r.mlx_run_id,attempt:r.mlx_run_attempt,artifactId:r.mlx_artifact_id},stopped:{runId:r.cuda_hf_run_id,attempt:r.cuda_hf_run_attempt,artifactId:r.cuda_hf_artifact_id}}};
+ const inventory={sources:{sceneworks:{head:config.sourceSha},inference:{head:config.inferenceSha}},files:{packages:{sha256:R19_REUSE_CAPACITY.packagesSha256,byteLength:bytes.length}}};
+ const services={env:{...f.env,GITHUB_REPOSITORY:'SceneWorks/SceneWorks'},read:async()=>{events.push('read-authenticated-metadata');return bytes;},inspect:async destination=>{events.push('confined-hf');assert.equal(destination,config.hfHome);return tree(destination,false);},volume:async()=>{events.push('fresh-volume');return {drive:'D',free:R19_REUSE_CAPACITY.requiredFreeBytes,size:1024**4};},save:async(path,receipt)=>{events.push('receipt');assert.ok(path.replaceAll('\\','/').endsWith('moss-execute-99999999999-1-cuda/reuse-capacity-before-copy.json'));assert.equal(receipt.admitted,true);},isolate:async(value,options)=>{events.push('first-copy');assert.equal(value,config);assert.deepEqual(options,{omitAdapter:true});}};
+ await isolateReusedCudaPackages(config,inventory,services);assert.deepEqual(events,['read-authenticated-metadata','confined-hf','fresh-volume','receipt','first-copy']);
+ const dropped=[];await assert.rejects(()=>isolateReusedCudaPackages(config,inventory,{...services,volume:async()=>({drive:'D',free:R19_REUSE_CAPACITY.requiredFreeBytes-1,size:1024**4}),save:async(_path,receipt)=>{assert.equal(receipt.admitted,false);dropped.push('refused');},isolate:async()=>assert.fail('must not copy after disk drop')}),/insufficient current D capacity/);assert.deepEqual(dropped,['refused']);
+ for(const mutate of [x=>x.sourceSha='0'.repeat(40),x=>x.inferenceSha='0'.repeat(40),x=>x.reusedExecution.native.runId='9',x=>x.reusedExecution.stopped.artifactId='9',x=>x.executionTooling.head=H47_OWNER.source,x=>x.editAdapterFiles.pop(),x=>x.packageFiles[0].sha256='0'.repeat(64)]){
+  const value=structuredClone(config);mutate(value);await assert.rejects(()=>isolateReusedCudaPackages(value,inventory,{...services,isolate:async()=>assert.fail('invalid identity reached copy')}));
+ }
+ await assert.rejects(()=>isolateReusedCudaPackages(config,{...inventory,files:{packages:{...inventory.files.packages,sha256:'0'.repeat(64)}}},services),/artifact metadata changed/);
+ for(const patch of [{root:'E:\\inert\\moss-build-99999999999-1-cuda',hfHome:'E:\\inert\\moss-build-99999999999-1-cuda\\hf'},{hfHome:'E:\\other\\hf'},{root:'\\\\server\\share\\moss-build-99999999999-1-cuda',hfHome:'\\\\server\\share\\hf'}])await assert.rejects(()=>isolateReusedCudaPackages({...config,...patch},inventory,{...services,volume:async()=>assert.fail('wrong volume queried'),save:async()=>assert.fail('wrong destination receipt'),isolate:async()=>assert.fail('wrong destination copy')}),/actual confined D HF destination/);
+ await assert.rejects(()=>isolateReusedCudaPackages(config,inventory,{...services,inspect:async destination=>({...tree(destination),reparsePoints:1}),volume:async()=>assert.fail('reparse queried volume'),save:async()=>assert.fail('reparse saved receipt'),isolate:async()=>assert.fail('reparse copied')}),/reparse/);
+ const changed=JSON.parse(bytes);changed.files[0].byteLength++;const forged=Buffer.from(JSON.stringify(changed,null,2)+'\n');const forgedInventory={...inventory,files:{packages:{sha256:createHash('sha256').update(forged).digest('hex'),byteLength:forged.length}}};
+ await assert.rejects(()=>isolateReusedCudaPackages(config,forgedInventory,{...services,read:async()=>forged,isolate:async()=>assert.fail('forged metadata reached copy')}),/original R19 package metadata changed/);
 });

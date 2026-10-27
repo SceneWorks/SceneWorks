@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile, cp, appendFile, chmod, rename, readdir, lstat, realpath, mkdtemp, unlink, rmdir, stat, copyFile } from 'node:fs/promises';
 import { execFile as callback } from 'node:child_process';
 import { promisify } from 'node:util';
-import { resolve, dirname, basename } from 'node:path';
+import { resolve, dirname, basename, win32 } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, BACKEND_FILES, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, createPlan, validatePlan, validateArtifactInventory, validateAdmission, assertDispatchClear, reconcileAttempt, compareTypedMossEditHistory } from './lib/moss-edit-terminal.mjs';
 import { prepare, freeze, bind, frozen, waitJob } from './moss-edit-terminal.mjs';
@@ -17,6 +17,7 @@ import {reuseProducers,executionTooling,validateOrdinaryMlx,readOnlyStoppedPacka
 import * as protocolLibrary from './lib/moss-edit-terminal.mjs';
 import {captureControlledCudaQuality} from './lib/moss-controlled-cuda-quality.mjs';
 import {ordinaryExecutionCapture} from './lib/moss-edit-quality-amendment.mjs';
+import {H47_OWNER,reuseCapacityBudget,hasReuseCapacity,volume,inspectTree,validateTree} from './ci/moss-owned-cache-maintenance.mjs';
 
 import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 
@@ -462,13 +463,32 @@ export async function buildCudaRebase(config,artifactRoot,runId,attempt,artifact
   config.reusedPrivateHf={artifactRoot,old,continuity,artifactIdentity:{sha256:old.inventory.sha256,runId:old.runId,attempt:old.attempt,artifactId:old.artifactId}};
   return buildBackend(config);
 }
+export async function isolateReusedCudaPackages(config,inventory,services={}) {
+  const r=config.reusedExecution,env=services.env??process.env;
+  requireThat(typeof config.root==='string'&&win32.parse(config.root).root.toLowerCase()==='d:\\'&&config.root===win32.resolve(config.root)&&config.hfHome===win32.resolve(config.root,'hf'),'reuse capacity requires the actual confined D HF destination');
+  requireThat(config.backend==='cuda'&&config.candidateId===H47_OWNER.candidate&&config.sourceSha===H47_OWNER.source&&config.inferenceSha===H47_OWNER.inference&&inventory.sources?.sceneworks.head===config.sourceSha&&inventory.sources?.inference.head===config.inferenceSha,'reuse capacity requires the original R19 source pair');
+  requireThat(r?.native.runId==='40349954885'&&r.native.attempt==='1'&&r.mlx.runId==='40349954885'&&r.mlx.attempt==='1'&&r.mlx.artifactId==='12676636780'&&r.stopped.runId==='40349954885'&&r.stopped.attempt==='1'&&r.stopped.artifactId==='12677781687','reuse capacity producer identity changed');
+  requireThat(env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&config.executionTooling?.head===env.GITHUB_SHA&&/^[a-f0-9]{40}$/.test(env.GITHUB_SHA??'')&&env.GITHUB_SHA!==config.sourceSha&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT??''),'reuse capacity requires actual separate Actions tooling');
+  const bytes=await (services.read??readFile)(buildPaths(config).packages);
+  requireThat(canonical({sha256:sha(bytes),byteLength:bytes.length})===canonical(inventory.files.packages),'reuse package artifact metadata changed');
+  const {files,adapterFiles,...budget}=reuseCapacityBudget(bytes);
+  requireThat(canonical(config.packageFiles.map(({file,sha256})=>({file,sha256})))===canonical(files.map(({file,sha256})=>({file,sha256})))&&canonical(config.editAdapterFiles.slice().sort())===canonical(adapterFiles.slice().sort()),'reuse package/adapter plan changed');
+  validateTree(await (services.inspect??inspectTree)(config.hfHome),config.hfHome); // Existing reparse/ancestor guard binds the measured volume.
+  const beforeCopy=await (services.volume??volume)(),admitted=hasReuseCapacity(beforeCopy,budget);
+  const receipt={...budget,operation:'fresh-D-capacity-after-browser-before-first-HF-copy',beforeCopy,admitted,sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,toolingSha:env.GITHUB_SHA,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,originalNativePackages:inventory.files.packages,planningReserveMeaning:'Planning reserve only; concurrent disk use can still cause ENOSPC'};
+  const executionRoot=resolve(dirname(config.root),basename(config.root).replace('moss-build-','moss-execute-'));
+  await (services.save??save)(resolve(executionRoot,'reuse-capacity-before-copy.json'),receipt);
+  requireThat(admitted,'insufficient current D capacity before private HF copy');
+  await (services.isolate??isolatePackages)(config,{omitAdapter:true});return receipt;
+}
 export async function rehydrateCudaPackages(config) {
   requireThat(config.backend==='cuda'&&config.root===resolve(config.sourceRoot,'../..','moss-sc-26752',basename(config.root))&&/^moss-build-[0-9]+-[0-9]+-cuda$/.test(basename(config.root)),'CUDA rehydration requires a fresh exact owned build root');
   const sources=await sourceIdentity(config),paths=buildPaths(config),inventory=validateArtifactInventory(await json(resolve(config.buildRoot,'cuda','inventory.json')),'cuda',sources);
   for(const name of BACKEND_FILES)requireThat(canonical(await fileIdentity(paths[name]))===canonical(inventory.files[name]),`original H17 CUDA ${name} artifact changed`);
   validatePackagePlan(config,JSON.parse(stripJsoncComments(await readFile(resolve(config.sourceRoot,'config/manifests/builtin.models.jsonc'),'utf8'))));
   await provisionBrowser(config);
-  await isolatePackages(config,{omitAdapter:true});
+  if(config.reusedExecution)await isolateReusedCudaPackages(config,inventory);
+  else await isolatePackages(config,{omitAdapter:true});
   config.apiBinary=paths.apiBinary;const token=randomBytes(32).toString('hex'),stack=await startStack(config,token);
   try {
     const project=await stack.api.request('/api/v1/projects',{method:'POST',body:{name:`MOSS continuation package install ${config.candidateId}`}});
@@ -1005,7 +1025,7 @@ export async function main(args=process.argv.slice(2)) {
     const source=await readOnlyStoppedPackageSource(config,resolve(config.root,'prior-cuda'),producers);
     const buildRoot=resolve(dirname(config.root),basename(config.root).replace('moss-execute-','moss-build-'));
     const rehydratePath=await configure(resolve(config.bundleRoot,'campaign.json'),config.sourceRoot,config.inferenceRoot,buildRoot,'cuda',config.buildRoot),rehydrate=await json(rehydratePath);
-    rehydrate.packageSource=source;await writeFile(rehydratePath,`${JSON.stringify(rehydrate,null,2)}\n`,{mode:0o600});
+    rehydrate.packageSource=source;rehydrate.reusedExecution=config.reusedExecution;rehydrate.executionTooling=config.executionTooling;await writeFile(rehydratePath,`${JSON.stringify(rehydrate,null,2)}\n`,{mode:0o600});
     await rehydrateCudaPackages(rehydrate);
     const inventory=await json(resolve(config.buildRoot,'cuda/inventory.json'));
     await transferPrivateHf(config,await json(resolve(buildRoot,'packages.json')),inventory.files.packages);
