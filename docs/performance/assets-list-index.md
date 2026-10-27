@@ -76,6 +76,31 @@ source siblings so later reuse of an id/path cannot inherit old poster content.
 
 ## Benchmark harness
 
+### API publication readiness
+
+The API also checks MOSS edit batch publication after reading the project index.
+This check must use `JobsStore::jobs_for_generation_sets`: one read connection
+and one snapshot for the distinct generation ids in the response. The
+`idx_jobs_project_generation_set` expression index keys project id and
+`json_extract(result_json, '$.generationSetId')`; startup adds it to existing
+databases. Each generation returns at most two jobs so duplicate ownership
+remains detectable without loading an unbounded duplicate history. Cleared jobs
+remain authoritative, and readiness is never cached across requests.
+
+Do not perform an individual jobs-store call per generation in an asset list.
+The former implementation reopened the database and scanned all project job
+results for each generation, including ordinary non-MOSS assets. On 2026-10-27,
+a temporary SQLite backup of an existing Windows local database with 9,440
+project jobs and 5,836 distinct generations took 2,312.62 ms for just 20 such
+queries. Adding the expression index took 131.51 ms; the same 20 queries then
+took 0.91 ms. The batched query fetched all 5,836 generations in 216.18 ms.
+These are Python SQLite query/fetch timings with warm filesystem caches,
+excluding Rust envelope decoding, HTTP transfer, and browser rendering. They
+are not an end-to-end page-load claim. The core harness below does not exercise
+this additional API publication check.
+
+### Core project index
+
 The harness records asset count, elapsed time, and one per-request logical
 filesystem-call inventory. It covers registry opens/metadata/content reads,
 path stats, directory scans, asset-sidecar, generation-set, timeline, and
