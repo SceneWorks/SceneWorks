@@ -135,20 +135,25 @@ jobs:
       #
       # The macOS selector requires an absolute CPython 3.12 arm64 interpreter; the Windows probe
       # checks the interpreter is CPython 3.12, AMD64 and 64-bit.
-      - name: Select the reviewed Windows CPython 3.12
+      - name: Provision the pinned Windows CPython 3.12.10
         if: ${{ runner.os == 'Windows' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
         id: speech_python_windows
         shell: powershell
         working-directory: sceneworks
         run: |
-          . (Join-Path $PWD 'scripts\select-starvector-windows-python.ps1')
-          $candidates = @()
-          $onPath = (Get-Command python -ErrorAction SilentlyContinue).Source
-          if ($onPath) { $candidates += $onPath }
-          $candidates += @(Get-ChildItem (Join-Path $env:RUNNER_TOOL_CACHE 'Python') -Filter 'python.exe' -Recurse -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '3\.12\.\d+\\x64\\python\.exe$' } | ForEach-Object { $_.FullName })
-          $bootstrap = Select-StarVectorBootstrapPython -CandidatePaths @($candidates) -ExpectedVersion @(3, 12)
-          "python-path=$($bootstrap.Executable)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          # The organization's portable CPython 3.12.10 x64: a hash-pinned NuGet package expanded
+          # into an owned root, with no installer and no registry writes. It is idempotent — an
+          # existing install that verifies is reused — and serialized by an exclusive lock, so the
+          # two CUDA listeners can share it. This is the same provisioning the StarVector terminal
+          # lane uses on these hosts; it does not depend on whatever python happens to be on PATH.
+          . (Join-Path $PWD 'scripts\provision-starvector-windows-python.ps1')
+          $pythonRoot = 'E:\huggingface\sc26691-python\cpython-3.12.10-x64-nuget'
+          $lockPath = 'E:\huggingface\sc26691-python\.locks\cpython-3.12.10-x64-nuget.lock'
+          $executable = Invoke-StarVectorWindowsPythonLock -LockPath $lockPath -ScriptBlock {
+            $installed = Install-StarVectorWindowsPythonPackage -DestinationRoot $pythonRoot -AllowedRoot $pythonRoot -RunnerTemp $env:RUNNER_TEMP
+            (Select-StarVectorBootstrapPython -CandidatePaths @($installed) -ExpectedVersion @(3, 12, 10)).Executable
+          }
+          "python-path=$executable" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Select the reviewed macOS CPython 3.12
         if: ${{ runner.os == 'macOS' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
         id: speech_python_macos
@@ -208,6 +213,7 @@ jobs:
           import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
           import path from "node:path";
           import {bootstrapTerminal} from "./scripts/h3-finetune-terminal-bootstrap.mjs";
+          import {privateRunRoot} from "./scripts/h3-finetune-terminal-stage.mjs";
 
           const env = process.env;
           const request = JSON.parse(env.H3_STAGE_REQUEST || "{}");
@@ -227,7 +233,15 @@ jobs:
             assert.equal(env.GITHUB_SHA, env.H3_SCENEWORKS_SHA, "dispatch commit must equal the requested SceneWorks source");
             assert.match(env.H3_SCENEWORKS_SHA ?? "", /^[a-f0-9]{40}$/, "dispatch SceneWorks SHA required");
             assert.match(env.H3_INFERENCE_SHA ?? "", /^[a-f0-9]{40}$/, "dispatch inference SHA required");
-            const outputRoot = path.join(env.RUNNER_TEMP, `h3-terminal-bootstrap-${env.GITHUB_SHA}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+            // The output root sits BESIDE the per-run private staging root, on the same volume. The
+            // runtime hardlinks the staged model files into each case's data directory so a 34 GB
+            // checkpoint costs nothing per case, and a hardlink cannot cross volumes: with the
+            // output root in RUNNER_TEMP (the internal disk on macOS, D: on Windows) and the staged
+            // root on the weights volume (/Volumes/Models, E:), the first case failed with EXDEV. A
+            // sibling — not a child — keeps it out of the stage's own run-root cleanup.
+            const stagedRoot = privateRunRoot({ backend: env.H3_STAGE_BACKEND, platform: process.platform, env, runId: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT });
+            await mkdir(path.dirname(stagedRoot), { recursive: true });
+            const outputRoot = `${stagedRoot}-bootstrap-${env.GITHUB_SHA}`;
             const result = await bootstrapTerminal({
               request, backend: env.H3_STAGE_BACKEND, swRoot: process.cwd(),
               inferenceRoot: path.join(env.GITHUB_WORKSPACE, "inference"), evidenceRoot, env, outputRoot,
@@ -240,8 +254,11 @@ jobs:
             assert.equal(plan.sceneworks, env.H3_SCENEWORKS_SHA, "bootstrap plan must use the dispatch SceneWorks source");
             assert.equal(plan.inference, env.H3_INFERENCE_SHA, "bootstrap plan must use the dispatch inference source");
             assert.equal(plan.inventory, "reduced-v1", "bootstrap plan must be the reduced inventory");
-            const resolvedOutput = path.resolve(result.output), runnerTemp = path.resolve(env.RUNNER_TEMP);
-            assert.ok(resolvedOutput.startsWith(runnerTemp + path.sep), "bootstrap output must stay under the runner temp root");
+            // The output must stay in the workflow-owned, run-scoped location chosen above: beside
+            // this run's private staging root, under the same sc26691-private parent.
+            const resolvedOutput = path.resolve(result.output), ownedParent = path.resolve(path.dirname(stagedRoot));
+            assert.ok(resolvedOutput.startsWith(ownedParent + path.sep), "bootstrap output must stay beside this run's private staging root");
+            assert.equal(path.basename(ownedParent), "sc26691-private", "bootstrap output must stay under the owned sc26691-private parent");
             assert.ok(resolvedOutput.includes(`${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`), "bootstrap output must be derived from the private run/attempt identity");
             await writeFile(path.join(evidenceRoot, "bootstrap.json"), JSON.stringify({ kind: "h3-terminal-bootstrap", prepared: true, proof: false, planPath: result.planPath, output: result.output, sourceSha: env.H3_SCENEWORKS_SHA, inferenceSha: env.H3_INFERENCE_SHA, nativeEvidenceSha: env.H3_NATIVE_EVIDENCE_SHA ?? null }, null, 2) + "\n");
             await appendFile(env.GITHUB_ENV, `H3_PLAN_EFFECTIVE=${result.planPath}\nH3_OUTPUT_EFFECTIVE=${result.output}\nH3_BOOTSTRAP_PREPARED=true\n`);

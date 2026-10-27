@@ -160,7 +160,11 @@ test('both terminal lanes select a reviewed CPython 3.12 instead of installing o
   // the runner, through each platform's own verified selector in this repository.
   assert.doesNotMatch(workflow, /actions\/setup-python@/);
   assert.match(workflow, /id: speech_python_windows/);
-  assert.match(workflow, /Select-StarVectorBootstrapPython -CandidatePaths/);
+  // Windows provisions the organization's hash-pinned portable CPython 3.12.10 (no installer,
+  // no registry writes) and verifies it with the same selector the StarVector lane uses.
+  assert.match(workflow, /Install-StarVectorWindowsPythonPackage -DestinationRoot \$pythonRoot/);
+  assert.match(workflow, /Invoke-StarVectorWindowsPythonLock -LockPath/);
+  assert.match(workflow, /Select-StarVectorBootstrapPython -CandidatePaths @\(\$installed\) -ExpectedVersion @\(3, 12, 10\)/);
   assert.match(workflow, /id: speech_python_macos/);
   assert.match(workflow, /select-starvector-macos-python\.mjs select \/opt\/homebrew\/bin\/python3\.12/);
   assert.match(workflow, /SPEECH_BASE_PYTHON: \$\{\{ steps\.speech_python_windows\.outputs\.python-path \|\| steps\.speech_python_macos\.outputs\.python-path \}\}/);
@@ -182,6 +186,23 @@ test('the Windows terminal lane selects the exact listener the request names', a
   assert.deepEqual(workflowExpression(runsOn, { backend: 'mlx', expected_runner: 'nax-macos' }), [
     'self-hosted', 'macOS', 'ARM64', 'real-weights',
   ]);
+});
+
+test('the bootstrap output root shares a volume with the staged model files', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  // The runtime HARDLINKS staged model files into each case's data directory, and a hardlink
+  // cannot cross volumes. With the output root in RUNNER_TEMP and the staged root on the weights
+  // volume, the first real case failed with EXDEV. The output root is therefore derived from the
+  // same per-run private staging root, as a sibling (outside the stage's own run-root cleanup).
+  assert.match(workflow, /const stagedRoot = privateRunRoot\(/);
+  assert.match(workflow, /const outputRoot = `\$\{stagedRoot\}-bootstrap-\$\{env\.GITHUB_SHA\}`;/);
+  assert.doesNotMatch(workflow, /const outputRoot = path\.join\(env\.RUNNER_TEMP/);
+  // Same device, by construction, on both platforms.
+  const { privateRunRoot } = await import('./h3-finetune-terminal-stage.mjs');
+  const mac = privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: '/Volumes/Models/huggingface' }, runId: '7', attempt: '1' });
+  assert.equal(mac, '/Volumes/Models/huggingface/sc26691-private/7-1');
+  const win = privateRunRoot({ backend: 'cuda', platform: 'win32', env: {}, runId: '7', attempt: '1' });
+  assert.equal(win, 'E:\\huggingface\\sc26691-private\\7-1');
 });
 
 test('the Windows terminal lane selects Git Bash before its first bash step', async () => {
@@ -324,7 +345,8 @@ test('CPU bridge provisions its pinned private interpreter before model assets a
   for(const token of ['torch==2.9.1','https://download.pytorch.org/whl/cpu','H3_PROBE_PYTHON','cpu-tools-freeze.txt','cpu-tools.json','cpu-bridge-help.txt','--help','sys.version_info[:2]==(3,12)','"-I","-B"'])assert.ok(setup.includes(token),token);
   // The bridge's interpreter is a PINNED CPython 3.12 SELECTED from the runner (each platform's
   // own verified selector), not one an action installs: neither platform can install one here.
-  assert.ok(source.includes('ExpectedVersion @(3, 12)'));
+  assert.ok(source.includes('Install-StarVectorWindowsPythonPackage'));
+  assert.ok(source.includes('ExpectedVersion @(3, 12, 10)'));
   assert.ok(source.includes('select-starvector-macos-python.mjs select'));
   assert.doesNotMatch(source,/actions\/setup-python@/);assert.doesNotMatch(setup,/--no-deps|PYTHONPATH|einops|diffusers/);assert.ok(setup.includes('numericProof:false'));
   const adapter=await readFile(new URL('./h3-finetune-terminal-artifact-probe.mjs',import.meta.url),'utf8');assert.ok(adapter.includes("process.env.H3_PROBE_PYTHON"));assert.ok(adapter.includes("const producerCommand=[python,'-I','-B'"));
@@ -364,7 +386,7 @@ test('bootstrap request branches before the first plan read and skips restaging 
   const ensure=callee.indexOf('      - name: Ensure selected assets and conditioning in this terminal route');
   assert.ok(cpu>0&&bootstrap>cpu&&ensure>bootstrap,'CPU Torch preflight -> bootstrap -> ensure ordering');
   const bootSlice=callee.slice(bootstrap,ensure);
-  for(const token of ['h3-finetune-terminal-bootstrap.mjs','bootstrapTerminal','request.bootstrap','sc-26691-h3-cases-v1','reduced-v1','componentSelections','legalAuthority','H3_PLAN_EFFECTIVE','H3_OUTPUT_EFFECTIVE','H3_BOOTSTRAP_PREPARED','GITHUB_OUTPUT','RUNNER_TEMP','GITHUB_RUN_ATTEMPT','H3_SCENEWORKS_SHA','H3_INFERENCE_SHA','set -euo pipefail'])assert.ok(bootSlice.includes(token),token);
+  for(const token of ['h3-finetune-terminal-bootstrap.mjs','bootstrapTerminal','request.bootstrap','sc-26691-h3-cases-v1','reduced-v1','componentSelections','legalAuthority','H3_PLAN_EFFECTIVE','H3_OUTPUT_EFFECTIVE','H3_BOOTSTRAP_PREPARED','GITHUB_OUTPUT','privateRunRoot','sc26691-private','GITHUB_RUN_ATTEMPT','H3_SCENEWORKS_SHA','H3_INFERENCE_SHA','set -euo pipefail'])assert.ok(bootSlice.includes(token),token);
   assert.match(bootSlice,/prepared:\s*true|prepared,\s*true/);assert.match(bootSlice,/proof:\s*false|proof,\s*false/);
   assert.doesNotMatch(bootSlice,/h3-finetune-terminal\.mjs"?\s+"?run-case|run-case/, 'bootstrap only prepares; it does not execute cases');
   const ensureSlice=callee.slice(ensure,callee.indexOf('      - name: Derive explicit dense source variants'));
