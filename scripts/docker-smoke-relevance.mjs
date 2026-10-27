@@ -3,7 +3,25 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 
 const DOCKER_RELEVANT =
-  /^(?:docker\/|vendor\/|config\/|docker-compose\.yml$|Cargo\.toml$|Cargo\.lock$|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
+  /^(?:docker\/|vendor\/|config\/|packages\/schemas\/|apps\/web\/(?:vite\.config|sdxl-cuda-memory-projection)\.js$|docker-compose\.yml$|Cargo\.toml$|Cargo\.lock$|\.github\/workflows\/check\.yml$|scripts\/(?:check-(?:docker-api-runtime|docker-web-runtime|compose-config)|docker-smoke-relevance)(?:\.test)?\.mjs$)/;
+
+// The web builder loads this bounded import closure to authenticate the projected endpoints.
+// The test walks actual static imports so a newly added dependency cannot silently skip smoke.
+const WEB_EVIDENCE_INPUTS = new Set([
+  "scripts/package-sdxl-cuda-endpoints.mjs",
+  "scripts/memory-calibration-harness.mjs",
+  "scripts/anchor-loader-closure.mjs",
+  "scripts/extract-memory-anchors.mjs",
+  "scripts/hash-artifact-inventory.mjs",
+  "scripts/inference-closure-digest.mjs",
+  "scripts/generate-memory-matrix.mjs",
+  "scripts/check-tier-integrity.mjs",
+  "scripts/tier-integrity-measurement-receipts.mjs",
+  "scripts/lib/jsonc.mjs",
+  "scripts/lib/manifest-memory-declarations.mjs",
+  "scripts/lib/source-revision.mjs",
+  "scripts/lib/watchdog-completion.mjs",
+]);
 
 export function dockerSmokeDecision(changedFileCount, files) {
   if (!Number.isSafeInteger(changedFileCount) || changedFileCount < 0) {
@@ -17,7 +35,7 @@ export function dockerSmokeDecision(changedFileCount, files) {
         `${files.length}; running conservatively.`,
     };
   }
-  const relevant = files.find((file) => DOCKER_RELEVANT.test(file));
+  const relevant = files.find((file) => DOCKER_RELEVANT.test(file) || WEB_EVIDENCE_INPUTS.has(file));
   return relevant
     ? { run: true, reason: `Docker-relevant file changed: ${relevant}` }
     : { run: false, reason: "No Docker-relevant files changed." };
