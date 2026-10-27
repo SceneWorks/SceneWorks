@@ -184,6 +184,37 @@ jobs:
         run: |
           cargo fetch --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Locate the pinned FLUX 3 snapshot
+        shell: powershell
+        run: |
+          $candidates = @(
+            $env:HF_HOME,
+            'E:\huggingface',
+            'E:\huggingface\hub',
+            'D:\huggingface',
+            'D:\huggingface\hub',
+            (Join-Path $env:USERPROFILE '.cache\huggingface\hub'),
+            'D:\tmp\huggingface',
+            'D:\tmp\huggingface\hub'
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          $hub = $null
+          foreach ($candidate in $candidates) {
+            if (Test-Path (Join-Path $candidate 'models--black-forest-labs--flux-3-image-klein')) { $hub = $candidate; break }
+            if (Test-Path (Join-Path $candidate 'hub\models--black-forest-labs--flux-3-image-klein')) { $hub = Join-Path $candidate 'hub'; break }
+          }
+          if (-not $hub) {
+            Write-Host '=== drives'; Get-PSDrive -PSProvider FileSystem | Select-Object Name, Root | Format-Table | Out-String | Write-Host
+            foreach ($drive in @('E:\', 'D:\')) {
+              if (Test-Path $drive) {
+                Write-Host "=== $drive top-level"; Get-ChildItem $drive -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName | Write-Host
+                Write-Host "=== $drive search"
+                Get-ChildItem $drive -Directory -Recurse -Depth 3 -Filter 'models--black-forest-labs--flux-3-image-klein' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName | Write-Host
+              }
+            }
+            throw 'pinned FLUX 3 snapshot not found on this runner'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "HF_HUB_CACHE=$hub"
+          Write-Host "HF_HUB_CACHE=$hub"
       - name: Build, convert and measure the requested Candle cells
         shell: powershell
         env:
@@ -201,8 +232,8 @@ jobs:
           Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--no-run')
           if ($env:PREPARE_DERIVED -eq 'true') {
             foreach ($model in @('flux3_klein', 'flux3_klein_base')) {
-              $snap = Get-ChildItem "$env:HF_HOME/hub/models--black-forest-labs--$model/snapshots" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-              if (-not $snap) { throw "pinned $model snapshot missing under $env:HF_HOME" }
+              $snap = Get-ChildItem "$env:HF_HUB_CACHE/models--black-forest-labs--$model/snapshots" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+              if (-not $snap) { throw "pinned $model snapshot missing under $env:HF_HUB_CACHE" }
               $env:FLUX3_CAPTURE_MODEL_ID = $model
               $env:FLUX3_CAPTURE_SOURCE_DIR = $snap.FullName
               $env:FLUX3_CAPTURE_OUT_DIR = "$env:SCENEWORKS_DATA_DIR/models/derived"
