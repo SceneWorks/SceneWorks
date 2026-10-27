@@ -11,7 +11,7 @@ const input=(label,value)=>`<label>${label}<input value="${value}"></label>`;
 const picker=(label,option)=>`<label>${label}<select><option value="${option}">${option}</option></select></label>`;
 const html=`<label class="settings-field-model">Model<select><option value="moss_image_base">Base</option><option value="moss_image_sft">SFT</option></select></label>
 ${Object.entries({'Prompt':expected.prompt,'Variations':2,'Width override':64,'Height override':64,'Steps':2,'Guidance':4,'Schedule shift':5,'Training shift':2.5,'Context limit':128,'Reference maximum edge':32,'Seed':173}).map(([name,value])=>input(name,value)).join('')}
-<div role="group" aria-label="Ordered MOSS references"><label>Image 1<select><option value="asset_B">B</option></select></label></div>
+<div role="group" aria-label="Ordered MOSS references"><div class="asset-picker-field"><div class="asset-preview-chip"><small title="asset_B">B</small></div></div></div>
 <label>Cache reference K/V<input type="checkbox" checked></label>
 ${[['Native output','latents'],['Positive embeddings',''],['Positive attention mask',''],['Negative embeddings',''],['Negative attention mask',''],['Explicit initial noise','']].map(([name,value])=>picker(name,value)).join('')}
 <label>Native text prompt batch<input type="checkbox"></label><label>Per-prompt negative strings<input type="checkbox"></label><label>Upscale<input type="checkbox"></label>`;

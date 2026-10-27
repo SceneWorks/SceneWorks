@@ -3562,7 +3562,7 @@ export function ImageEditor() {
     editAspect,
     editFitMode,
     editGuidance,
-    mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, tensorAssets: assets, importTensorAsset: importAsset,
+    mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, tensorAssets: assets, importTensorAsset: importAsset, characters, projectId: activeProject?.id,
     jobs,
     editLora,
     editLoraDownloadRequested,

@@ -49,7 +49,7 @@ describe("route-owned hydration contract (sc-14783)", () => {
   });
 
   it.each([
-    ["image", ["assets", "models", "loras"]],
+    ["image", ["assets", "models", "loras", "characters"]],
     ["video", ["assets", "models"]],
     ["audio", ["assets", "models"]],
     ["assets", ["assets"]],
