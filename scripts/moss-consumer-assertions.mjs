@@ -29,7 +29,6 @@ export const TESTS = {
 const fail = message => { throw new Error(`MOSS consumer assertions: ${message}`); };
 const requireFact = (value, message) => { if (!value) fail(message); };
 export const digest = value => createHash("sha256").update(value).digest("hex");
-const normalizedDigest = value => digest(value.replace(/\s+/g, ""));
 const SHA = /^[0-9a-f]{40}$/;
 
 // Byte-scoped Rust patching, not regex replacement across a crate. Ignore braces in comments,

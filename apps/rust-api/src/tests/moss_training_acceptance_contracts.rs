@@ -454,7 +454,7 @@ fn training_library_resolves_declared_final_file_by_filesystem_identity() {
     }
 }
 
-// CI_IMPACT: one bounded CPU-only filesystem/API dispatcher guard before model admission.
+// CI_IMPACT: one bounded CPU-only filesystem/catalog/API dispatcher guard before model admission.
 // No loader/tensor/GPU execution, downloads, new workflow or extra campaign command.
 #[test]
 fn pre_model_library_and_dispatch_contracts() {
@@ -476,13 +476,43 @@ fn pre_model_library_and_dispatch_contracts() {
 }
 
 async fn pre_model_library_and_dispatch_cpu_contract() {
-    use super::moss_training_acceptance::worker_settings;
+    use super::moss_training_acceptance::{seed_acceptance_manifests, worker_settings};
     use super::support::*;
     use sceneworks_worker::test_support as native;
     training_library_resolves_declared_final_file_by_filesystem_identity();
     let (dispatcher_bytes, wrapper_bytes) = native::acceptance_utility_future_sizes();
     let temp = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp);
+    seed_acceptance_manifests(&settings).unwrap();
+    // Literal installed local adapters exercise the shipped catalog and API gate only.
+    let mut adapters = Vec::new();
+    for parent in ["base", "sft"] {
+        for method in ["lora", "lokr"] {
+            let id = format!("cpu_{parent}_{method}");
+            let relative = format!("loras/{id}.safetensors");
+            let path = settings.data_dir.join(&relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            let header = serde_json::to_vec(&json!({"__metadata__":{
+                "family":"moss-image","baseModel":format!("moss_image_{parent}"),
+                "sceneworks_adapter_format":"moss_transformer_adapter_v1",
+                "networkType":method,"rank":"4","alpha":"6"},
+                "factor":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}))
+            .unwrap();
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(&header);
+            bytes.extend_from_slice(&1.0f32.to_le_bytes());
+            std::fs::write(&path, bytes).unwrap();
+            adapters.push(json!({"id":id,"name":id,"family":"moss-image",
+                "baseModel":format!("moss_image_{parent}"),"networkType":method,
+                "source":{"provider":"local","path":relative}}));
+        }
+    }
+    std::fs::create_dir_all(settings.config_dir.join("manifests")).unwrap();
+    std::fs::write(
+        settings.config_dir.join("manifests/user.loras.jsonc"),
+        serde_json::to_vec(&json!({"schemaVersion":1,"loras":adapters})).unwrap(),
+    )
+    .unwrap();
     let app = create_app(settings.clone()).unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
@@ -506,6 +536,61 @@ async fn pre_model_library_and_dispatch_cpu_contract() {
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{project}");
+    for adapter in &adapters {
+        for matches_parent in [true, false] {
+            let parent = adapter["baseModel"].as_str().unwrap();
+            let model = if matches_parent {
+                parent
+            } else if parent == "moss_image_base" {
+                "moss_image_sft"
+            } else {
+                "moss_image_base"
+            };
+            let (status, submitted) = request(app.clone(), "POST", "/api/v1/image/jobs",
+                json!({"projectId":project["id"],"model":model,"prompt":"CPU catalog admission only",
+                    "width":256,"height":256,"loras":[{"id":adapter["id"],"weight":1.0}]})).await;
+            if matches_parent {
+                assert_eq!(status, StatusCode::CREATED, "{submitted}");
+                assert_eq!(submitted["status"], "queued", "{submitted}");
+                assert_eq!(submitted["payload"]["modelManifestEntry"]["id"], model);
+                let id = submitted["id"].as_str().unwrap();
+                let (status, canceled) = request(
+                    app.clone(),
+                    "POST",
+                    &format!("/api/v1/jobs/{id}/cancel"),
+                    Value::Null,
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{canceled}");
+                assert_eq!(canceled["status"], "canceled", "{canceled}");
+            } else {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{submitted}");
+                assert!(
+                    submitted["detail"].as_str().unwrap().contains("MOSS"),
+                    "{submitted}"
+                );
+            }
+        }
+    }
+    // Header validation must still refuse a literal local adapter with truncated data.
+    let corrupt = &adapters[0];
+    let path = settings
+        .data_dir
+        .join(corrupt["source"]["path"].as_str().unwrap());
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.pop();
+    std::fs::write(path, bytes).unwrap();
+    let (status, refused) = request(app.clone(), "POST", "/api/v1/image/jobs",
+        json!({"projectId":project["id"],"model":corrupt["baseModel"],"prompt":"CPU corrupt header refusal",
+            "width":256,"height":256,"loras":[{"id":corrupt["id"],"weight":1.0}]})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+    assert!(
+        refused["detail"]
+            .as_str()
+            .unwrap()
+            .contains("incomplete or corrupt"),
+        "{refused}"
+    );
     let source_only = settings.data_dir.join("models/imports/source-only");
     std::fs::create_dir_all(&source_only).unwrap();
     for invalid_image in [false, true] {

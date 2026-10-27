@@ -2492,6 +2492,15 @@ async fn observe_worker_http(
     }
 }
 
+/// Match production startup in the owned temporary config before building the API.
+pub(super) fn seed_acceptance_manifests(settings: &crate::Settings) -> Result<()> {
+    sceneworks_core::builtin_manifests::seed_builtin_manifests(
+        &settings.config_dir,
+        sceneworks_core::builtin_manifests::SeedMode::Overwrite,
+    )
+    .map_err(|error| error.to_string())
+}
+
 async fn run(parent: &str, method: &str, source_backend: &str, cross: bool, preflight: bool) {
     let mut case = Case::admitted(parent, method, source_backend, cross, preflight)
         .unwrap_or_else(|e| panic!("MOSS manual admission refused before model construction: {e}"));
@@ -2505,6 +2514,7 @@ async fn run(parent: &str, method: &str, source_backend: &str, cross: bool, pref
     let temp = tempfile::tempdir().expect("owned isolated app state");
     let mut settings = test_settings(&temp);
     settings.host_os = std::env::consts::OS.into();
+    seed_acceptance_manifests(&settings).expect("owned shipped manifests");
     let app = create_app(settings.clone()).expect("isolated API");
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
