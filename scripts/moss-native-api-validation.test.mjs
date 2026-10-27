@@ -12,7 +12,7 @@ import {
   BOUNDS, checkDiscovery, ENVIRONMENT_WHITELIST, executeOwnedChild, EXPECTED_TESTS, ignoredSourceFacts,
   MOSS_PREFIX, ownedWindowsTree, parseArgs, parseTestList, planAuthenticatedCleanup,
   executePreparation, isPreparationCommand, requireManualContext, RSS_CAP_GB, runValidation, startRssGuard,
-  statedRssCapBytes, sumOwnedRss, sumWindowsOwnedRss, queryWindowsProcesses,
+  statedRssCapBytes, sumOwnedRss, sumWindowsOwnedRss, queryWindowsProcesses, PRE_MODEL_CPU_TEST,
 } from "./moss-native-api-validation.mjs";
 import { TESTS as CLOSED_SELECTOR_TESTS, digest as sha256 } from "./moss-consumer-assertions.mjs";
 
@@ -622,6 +622,19 @@ test("preparation allowlist excludes actual native execution and learned Cargo t
     ["python3","-I","-m","jsonschema","-i","/record",path.join(ROOT,"scripts/ci/moss-training-acceptance/evidence.schema.json")],
     ["python3","-I",path.join(ROOT,"scripts/ci/moss-training-acceptance/verify_evidence.py"),"--root","/peers","--manifest","/manifest","--selection","/selection","--output","/out"]]) assert.equal(isPreparationCommand(ROOT,command),true,command.join(" "));
   for (const command of [["cargo","test","--ignored"],["cargo","run"],["rustc","model.rs"],["/compiled/api",EXPECTED_TESTS[0],"--ignored","--exact"],["/compiled/api","--list",EXPECTED_TESTS[0]],["python3","arbitrary.py"],["python3","-I","-m","jsonschema","-i","/record","/another.schema.json"]]) assert.equal(isPreparationCommand(ROOT,command),false,command.join(" "));
+});
+
+test("preparation permits only the exact filesystem contract and fixed unignored flags", () => {
+  const command = [EXE, PRE_MODEL_CPU_TEST, "--exact", "--nocapture", "--test-threads=1"];
+  assert.equal(isPreparationCommand(ROOT, command), true);
+  for (const mutant of [
+    command.map(value => value === PRE_MODEL_CPU_TEST ? `${value}_other` : value),
+    command.map(value => value === PRE_MODEL_CPU_TEST ? EXPECTED_TESTS[0] : value),
+    command.filter(value => value !== "--exact"),
+    command.map(value => value === "--exact" ? "--ignored" : value),
+    command.map(value => value === "--test-threads=1" ? "--test-threads=2" : value),
+    [...command, "--ignored"], [...command, "--include-ignored"], [...command, "--nocapture"],
+  ]) assert.equal(isPreparationCommand(ROOT, mutant), false, mutant.join(" "));
 });
 
 test("CPU preparation captures real fast zero/nonzero Node exits with root-and-stdio scope only", async t => {

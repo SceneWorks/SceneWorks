@@ -1,4 +1,4 @@
-import {isPreparationCommand} from "./moss-native-api-validation.mjs";
+import {isPreparationCommand, PRE_MODEL_CPU_TEST} from "./moss-native-api-validation.mjs";
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -88,7 +88,8 @@ function mockRun(t, {badCounts=false,missingEvidence=false,missingRss=false,unsa
   if(command[0]==='rustc')text='rustc 1.97.1 (SCHEMA_TEST_ONLY)\nhost: aarch64-apple-darwin\n';
   else if(command[0]==='cargo' && command[1]==='-V')text='cargo 1.97.1 (SCHEMA_TEST_ONLY)\n';
   else if(command[0]==='cargo')text=JSON.stringify({reason:'compiler-artifact',executable:'/mock/api',target:{name:'sceneworks_rust_api',kind:['lib']}});
-  else if(command.includes('--list'))text=entries(backend).map(e=>`${e.name}: test`).join('\n');
+  else if(command.includes('--list'))text=[...entries(backend),...(!command.includes('--ignored')?[{name:PRE_MODEL_CPU_TEST}]:[])].map(e=>`${e.name}: test`).join('\n');
+  else if(command[1]===PRE_MODEL_CPU_TEST)text=goodOutput(PRE_MODEL_CPU_TEST);
   else if(command[1]===PREFLIGHT){writeFileSync(env.MOSS_ACCEPTANCE_DEVICE_PREFLIGHT,'{}');text=goodOutput(PREFLIGHT);}
   else {state.rssFirstBytes=missingRss?undefined:10;state.rssPeakBytes=20;text=badCounts?'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out':goodOutput(command[1]);if(!missingEvidence) {
    const raw=previews?mockPreviewEvidence(env.MOSS_ACCEPTANCE_OUTPUT,env.MOSS_ACCEPTANCE_CASE_ID):{raw:'NOT ACCEPTANCE EVIDENCE'};
@@ -99,20 +100,87 @@ function mockRun(t, {badCounts=false,missingEvidence=false,missingRss=false,unsa
  return {options:{root,output,backend,phase:'capture',manifest:path.join(root,'scripts/ci/moss-training-acceptance/campaign.json'),testPlatform:true,env:{GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/SCHEMA_TEST_ONLY',GITHUB_SHA:source.workflowSource,GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'1',GITHUB_JOB:'capture'},sourceProvider:()=>source,cacheInventory:()=>({ready:true,missing:[]}),execute,statExecutable:()=>true,executableDigest:()=> 'f'.repeat(64),preflightValidator:()=>100},count:()=>executions};
 }
 test('mock capture performs sequential exact native tests and stores raw evidence without asserting learning',async t=>{
- const m=mockRun(t);const r=await run(m.options);assert.equal(r.ok,true);assert.equal(r.cases.length,4);assert.ok(r.cases.every(c=>c.executionPassed));assert.equal(m.count(),13);assert.equal(r.toolchain.binarySha256,'f'.repeat(64));assert.match(r.toolchain.rustc,/SCHEMA_TEST_ONLY/);assert.equal(r.workflow.runId,'123');
- for(const command of r.commands.slice(0,5)){assert.equal(command.supervision.completion.scope,'root-and-stdio');assert.equal(command.supervision.cleanup,undefined);}
+ const m=mockRun(t);const r=await run(m.options);assert.equal(r.ok,true);assert.equal(r.cases.length,4);assert.ok(r.cases.every(c=>c.executionPassed));assert.equal(m.count(),14);assert.equal(r.toolchain.binarySha256,'f'.repeat(64));assert.match(r.toolchain.rustc,/SCHEMA_TEST_ONLY/);assert.equal(r.workflow.runId,'123');
+ for(const command of r.commands.slice(0,6)){assert.equal(command.supervision.completion.scope,'root-and-stdio');assert.equal(command.supervision.cleanup,undefined);}
+ assert.deepEqual(r.preModelCpu,{test:PRE_MODEL_CPU_TEST,log:'pre-model-cpu.log',counts:{passed:1,failed:0,ignored:0,exit_code:0}});
+ assert.equal(r.commands.filter(c=>c.command[1]===PRE_MODEL_CPU_TEST).length,1);
+ assert.equal(r.commands.filter(c=>c.command[1]?.startsWith(PREFIX)).length,8,'native command count remains unchanged');
  assert.equal(r.accepted,undefined);assert.ok(r.members.some(m=>m.path.endsWith('evidence.json')));
  for(const command of r.commands.filter(c=>c.command[1]?.startsWith(PREFIX)))assert.ok(command.command.includes('--exact')&&command.command.includes('--ignored'));
 });
 test('native case rejects a CPU-only completion claim and never starts the next case',async t=>{
  const m=mockRun(t),execute=m.options.execute;
  m.options.execute=async(...args)=>{const r=await execute(...args);if(args[1][1]===testsFor('capture','mlx')[0]){delete args[4].cleanup;args[4].completion={scope:'root-and-stdio',completed:true};}return r;};
- const r=await run(m.options);assert.equal(r.ok,false);assert.equal(m.count(),7);assert.match(r.failures.join(),/completion\/cleanup/);
+ const r=await run(m.options);assert.equal(r.ok,false);assert.equal(m.count(),8);assert.match(r.failures.join(),/completion\/cleanup/);
 });
 test('nonzero CPU preparation exit aborts before discovery or native execution',async t=>{
  const m=mockRun(t),execute=m.options.execute;
  m.options.execute=async(...args)=>({...await execute(...args),exit:7});
  const r=await run(m.options);assert.equal(r.ok,false);assert.equal(m.count(),1);assert.equal(r.cases.length,0);assert.match(r.failures.join(),/rustc-version exited 7/);
+});
+// CI_IMPACT: mocked commands only. No native binary, model or GPU executes here.
+test('filesystem CPU contract is exact, bounded and completed before any native case',async t=>{
+ const m=mockRun(t),execute=m.options.execute;
+ m.options.execute=async(...args)=>{
+  if(args[1][1]===PRE_MODEL_CPU_TEST){assert.ok(args[3]>0&&args[3]<=BOUNDS.list);assert.equal(args[5].env.MOSS_ACCEPTANCE_CASE_ID,undefined);}
+  return execute(...args);
+ };
+ const r=await run(m.options);assert.equal(r.ok,true,r.failures.join());
+ assert.deepEqual(r.commands[5].command,['/mock/api',PRE_MODEL_CPU_TEST,'--exact','--nocapture','--test-threads=1']);
+ assert.equal(r.commands[6].command[1],PREFLIGHT);
+ assert.ok(Date.parse(r.preparationFinishedAt)>=Date.parse(r.commands[5].finishedAt));
+});
+test('missing, duplicated or ignored CPU discovery refuses before CPU or model execution',async t=>{
+ for(const variant of ['missing','duplicate','ignored']){
+  const m=mockRun(t),execute=m.options.execute;
+  m.options.execute=async(...args)=>{
+   const r=await execute(...args);
+   if(args[1].includes('--list')){
+    if(variant==='missing'&&!args[1].includes('--ignored'))r.output=r.output.replace(`${PRE_MODEL_CPU_TEST}: test`,'');
+    if(variant==='duplicate'&&!args[1].includes('--ignored'))r.output+=`\n${PRE_MODEL_CPU_TEST}: test`;
+    if(variant==='ignored'&&args[1].includes('--ignored'))r.output+=`\n${PRE_MODEL_CPU_TEST}: test`;
+   }
+   return r;
+  };
+  const r=await run(m.options);assert.equal(r.ok,false);assert.equal(r.cases.length,0);assert.equal(m.count(),5);assert.match(r.failures.join(),/unignored CPU preparation test/);
+ }
+});
+test('CPU contract refuses failed, ignored, zero, wrong-test and duplicate greens before native preflight',async t=>{
+ for(const variant of ['exit','ignored','zero','wrong','duplicate','cleanup-only']){
+  const m=mockRun(t),execute=m.options.execute;
+  m.options.execute=async(...args)=>{
+   const r=await execute(...args);
+   if(args[1][1]===PRE_MODEL_CPU_TEST){
+    if(variant==='exit')r.exit=7;
+    if(variant==='ignored')r.output=`test ${PRE_MODEL_CPU_TEST} ... ignored\ntest result: ok. 0 passed; 0 failed; 1 ignored;`;
+    if(variant==='zero')r.output='test result: ok. 0 passed; 0 failed; 0 ignored;';
+    if(variant==='wrong')r.output=goodOutput('different::test');
+    if(variant==='duplicate')r.output+=goodOutput(PRE_MODEL_CPU_TEST);
+    if(variant==='cleanup-only'){delete args[4].completion;args[4].cleanup={released:true};}
+   }
+   return r;
+  };
+  const r=await run(m.options);assert.equal(r.ok,false,variant);assert.equal(r.cases.length,0,variant);assert.equal(m.count(),6,variant);assert.equal(r.preModelCpu,undefined);
+ }
+});
+test('CPU contract time remains charged to the original preparation deadline',async t=>{
+ const m=mockRun(t),execute=m.options.execute,RealDate=Date;let clock=RealDate.now();
+ globalThis.Date=class extends RealDate {constructor(...args){super(...(args.length?args:[clock]));}static now(){return clock;}};
+ try {
+  m.options.execute=async(...args)=>{const result=await execute(...args);if(args[1][1]===PRE_MODEL_CPU_TEST)clock+=BOUNDS.build+1;return result;};
+  const r=await run(m.options);assert.equal(r.ok,false);assert.equal(r.cases.length,0);assert.equal(m.count(),6);assert.match(r.failures.join(),/build preparation deadline/);
+ } finally {globalThis.Date=RealDate;}
+});
+test('continuation requires the original successful CPU preparation identity and result',async t=>{
+ for(const variant of ['missing','test','counts']){
+  const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const before=m.count();
+  const file=path.join(m.options.output,'driver.json'),receipt=JSON.parse(readFileSync(file));
+  if(variant==='missing')delete receipt.preModelCpu;
+  if(variant==='test')receipt.preModelCpu.test='different::test';
+  if(variant==='counts')receipt.preModelCpu.counts.passed=0;
+  writeFileSync(file,JSON.stringify(receipt));
+  const r=await run({...m.options,'capture-cell':CELLS[1]});assert.equal(r.ok,false);assert.equal(m.count(),before);assert.match(r.failures.join(),/CPU preparation/);
+ }
 });
 test('continuation rejects a preparation receipt that claims only generic whole-tree release',async t=>{
  const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const before=m.count();
@@ -381,7 +449,7 @@ test('sequential capture publishes each cell live, reuses preparation, and prese
  const m=mockRun(t,{previews:true,backend});let originalClock,firstMembers;
  for(const [i,cell] of CELLS.entries()) {
   const r=await run({...m.options,'capture-cell':cell});
-  assert.equal(r.failures.length,0);assert.equal(r.cellComplete,true);assert.equal(r.ok,i===3);assert.equal(r.cases.length,i+1);assert.equal(m.count(),5+2*(i+1));assert.equal(r.commands.length,5+2*(i+1));
+  assert.equal(r.failures.length,0);assert.equal(r.cellComplete,true);assert.equal(r.ok,i===3);assert.equal(r.cases.length,i+1);assert.equal(m.count(),6+2*(i+1));assert.equal(r.commands.length,6+2*(i+1));
   if(i===0){originalClock=r.preparationStartedAt;firstMembers=r.members;}assert.equal(r.preparationStartedAt,originalClock);
   const index=JSON.parse(readFileSync(path.join(m.options.output,'previews',cell.replace('/','-'),'index.json')));
   assert.equal(index.caseId,`${backend}/${cell}`);assert.equal(index.workflow.runId,'123');assert.deepEqual(index.source,source);
@@ -392,7 +460,7 @@ test('sequential capture publishes each cell live, reuses preparation, and prese
   if(i<3)assert.throws(()=>verifyBundle(m.options.output,source,'capture',backend),/incomplete/);
  }
  const final=verifyBundle(m.options.output,source,'capture',backend);for(const member of firstMembers)assert.deepEqual(final.members.find(x=>x.path===member.path),member);
- assert.equal(final.commands.filter(c=>c.log==='compile.log').length,1);assert.ok(final.members.some(m=>m.path==='base/lora/evidence.json'));
+ assert.equal(final.commands.filter(c=>c.log==='compile.log').length,1);assert.equal(final.commands.filter(c=>c.log==='pre-model-cpu.log').length,1);assert.ok(final.members.some(m=>m.path==='base/lora/evidence.json'));
  }
 });
 test('continuation rejects skipped, repeated, invalid and noncapture selectors without commands',async t=>{
@@ -441,7 +509,7 @@ test('preview publication fails closed on missing, changed or undecodable PNGs',
 });
 test('inspection records actual Date.now and finalizer hashes, appending partial JSON during capture',async t=>{
  const m=mockRun(t,{previews:true});await run({...m.options,'capture-cell':CELLS[0]});const args=reviewArgs(m),before=Date.now(),document=recordInspection(args),after=Date.now();t.after(()=>rmSync(args.output,{force:true}));
- assert.equal(document.cases.length,1);assert.equal(document.captureRunId,'123');assert.equal(document.cases[0].captureWorkflow.attempt,1);assert.equal(m.count(),7);
+ assert.equal(document.cases.length,1);assert.equal(document.captureRunId,'123');assert.equal(document.cases[0].captureWorkflow.attempt,1);assert.equal(m.count(),8);
  for(const inspection of document.cases[0].inspections){assert.ok(Date.parse(inspection.completedAt)>=before && Date.parse(inspection.completedAt)<=after);assert.equal(inspection.beforeFinalAcceptance,true);assert.equal(digest(readFileSync(path.join(m.options.output,...inspection.reviewedArtifact.path.split('/').slice(1)))),inspection.reviewedArtifact.sha256);}
  await run({...m.options,'capture-cell':CELLS[1]});const appended=recordInspection({...args,preview:reviewArgs(m,'base-lokr').preview});assert.equal(appended.cases.length,2);assert.deepEqual(appended.cases[0],document.cases[0]);assert.throws(()=>recordInspection(args),/already recorded/);
 });
@@ -614,7 +682,7 @@ test('every supervised native entry uses the production 8 MiB stack despite ambi
    if(phase==='capture')m.options.output=path.join(peers,`capture-${backend}-attempt-1`);
    else {m.options['peer-artifacts']=peers;m.options.env.MOSS_CROSS_LOAD_JOB_STARTED_AT=new Date().toISOString();}
    const receipt=await run({...m.options,phase});
-   assert.equal(receipt.ok,true,receipt.failures.join());assert.equal(native,8);assert.equal(preparation,5);
+   assert.equal(receipt.ok,true,receipt.failures.join());assert.equal(native,8);assert.equal(preparation,6);
    assert.equal(receipt.toolchain.libtestStackBytes,NATIVE_TEST_STACK_BYTES);
   }
  }

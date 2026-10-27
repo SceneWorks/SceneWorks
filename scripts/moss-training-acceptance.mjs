@@ -8,7 +8,7 @@ import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { digest, parseTestResult } from './moss-consumer-assertions.mjs';
-import { defaultInspect, parseTestList, selectLibTestExecutable, queryWindowsProcesses, executePreparation, isPreparationCommand } from './moss-native-api-validation.mjs';
+import { defaultInspect, parseTestList, selectLibTestExecutable, queryWindowsProcesses, executePreparation, isPreparationCommand, PRE_MODEL_CPU_TEST } from './moss-native-api-validation.mjs';
 import { stageLatestMossArtifacts } from './moss-training-artifacts.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
 import { lockedInferenceRevision } from './select-windows-cargo-cache.mjs';
@@ -381,7 +381,7 @@ export async function run(options) {
     receipt=json(path.join(output,'driver.json'));
     assert(receipt.phase===phase && receipt.backend===backend && !receipt.ok && receipt.cellComplete===true && receipt.failures.length===0, 'prior capture not cleanly closed');
     assert(receipt.cases.length===cellIndex && receipt.cases.every((c,i)=>c.executionPassed && c.caseId===`${backend}/${CELLS[i]}` && c.test===testsFor('capture',backend)[i] && c.rawEvidence===`${CELLS[i]}/evidence.json`), 'continuation requires exact closed case prefix');
-    assert(receipt.commands.length===5+2*cellIndex && receipt.commands.every(c=>c.exitCode===0 && commandComplete(root,c.command,c.supervision)), 'prior capture commands not cleanly closed');
+    assert(receipt.commands.length===6+2*cellIndex && receipt.commands.every(c=>c.exitCode===0 && commandComplete(root,c.command,c.supervision)), 'prior capture commands not cleanly closed');
     assert(JSON.stringify(artifactMembers(output).filter(m=>m.path!=='driver.json'))===JSON.stringify(receipt.members), 'prior capture members changed, missing or added');
   } else {
     assert(!existsSync(output) || readdirSync(output).length===0,'output must be new/empty; never carry prior campaign evidence');
@@ -468,6 +468,11 @@ export async function run(options) {
         executable=receipt.executable.path;
         assert((options.executableDigest?options.executableDigest(executable):fileDigest(executable))===receipt.executable.sha256, 'continuation binary changed');
         assert(JSON.stringify(receipt.discovery)===JSON.stringify([...testsFor('capture',backend),...testsFor('cross-load',backend),PREFLIGHT].sort()), 'continuation discovery changed');
+        const cpu=receipt.preModelCpu;
+        const prior=receipt.commands.filter(c=>c.log==='pre-model-cpu.log');
+        assert(cpu?.test===PRE_MODEL_CPU_TEST && cpu.log==='pre-model-cpu.log' && prior.length===1
+          && JSON.stringify(prior[0].command)===JSON.stringify([executable,PRE_MODEL_CPU_TEST,'--exact','--nocapture','--test-threads=1']), 'continuation CPU preparation identity missing or changed');
+        assert(JSON.stringify(cpu.counts)===JSON.stringify(parseTestResult(readFileSync(path.join(output,cpu.log),'utf8'),prior[0].exitCode,PRE_MODEL_CPU_TEST,'green')), 'continuation CPU preparation result changed');
         const preparedAt=Date.parse(receipt.preparationFinishedAt);
         assert(preparedAt>=buildStart && preparedAt<=Date.now() && preparedAt-buildStart<=BOUNDS.build, 'original preparation deadline exceeded');
       } else {
@@ -483,7 +488,14 @@ export async function run(options) {
       receipt.toolchain.binarySha256=receipt.executable.sha256;
       const all=await command([executable,'--list'],'list',Math.min(BOUNDS.list,preparationRemaining()));
       const ignored=await command([executable,'--ignored','--list'],'ignored-list',Math.min(BOUNDS.list,preparationRemaining()));
-      receipt.discovery=checkDiscovery(parseTestList(all.result.output),parseTestList(ignored.result.output),backend);
+      const allTests=parseTestList(all.result.output), ignoredTests=parseTestList(ignored.result.output);
+      receipt.discovery=checkDiscovery(allTests,ignoredTests,backend);
+      assert(allTests.filter(e=>e.kind==='test'&&e.name===PRE_MODEL_CPU_TEST).length===1
+        && !ignoredTests.some(e=>e.name===PRE_MODEL_CPU_TEST), 'required unignored CPU preparation test missing or ignored');
+      // CI_IMPACT: one filesystem-only contract in the already-built API binary,
+      // once per preparation. This is not native learning/case acceptance evidence.
+      const cpu=await command([executable,PRE_MODEL_CPU_TEST,'--exact','--nocapture','--test-threads=1'],'pre-model-cpu',Math.min(BOUNDS.list,preparationRemaining()));
+      receipt.preModelCpu={test:PRE_MODEL_CPU_TEST,log:'pre-model-cpu.log',counts:parseTestResult(cpu.result.output,cpu.result.exit,PRE_MODEL_CPU_TEST,'green')};
       assert(Date.now()-buildStart<=BOUNDS.build,'build preparation deadline exceeded');
       receipt.preparationFinishedAt=new Date().toISOString();
       }

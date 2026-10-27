@@ -175,13 +175,17 @@ export function selectLibTestExecutable(jsonl, statExecutable = defaultStatExecu
   return candidates[0];
 }
 
-// Only source-owned compile, metadata and schema commands may use preparation
-// completion. Exact native test execution always retains its model supervisor.
+export const PRE_MODEL_CPU_TEST = "tests::moss_training_acceptance_contracts::training_library_resolves_declared_final_file_by_filesystem_identity";
+
+// Only source-owned compile, metadata, schema and the one filesystem-only
+// contract may use preparation completion. Model tests retain their supervisor.
 export function isPreparationCommand(root, args) {
   if (!Array.isArray(args) || args.some(arg => typeof arg !== "string")) return false;
   if (args.length === 2 && ((args[0] === "rustc" && ["-Vv", "-vV"].includes(args[1])) || (args[0] === "cargo" && args[1] === "-V"))) return true;
   if (args[0] === "cargo" && args[1] === "test" && args.includes("--no-run") && !args.includes("--")) return true;
   if ((args.length === 2 && args[1] === "--list") || (args.length === 3 && args[1] === "--ignored" && args[2] === "--list")) return true;
+  if (args.length === 5 && args[1] === PRE_MODEL_CPU_TEST && args[2] === "--exact"
+      && args[3] === "--nocapture" && args[4] === "--test-threads=1") return true;
   if (args.length === 7 && args.slice(0, 5).join(" ") === "python3 -I -m jsonschema -i"
       && path.resolve(args[6]) === path.join(root, "scripts/ci/moss-training-acceptance/evidence.schema.json")) return true;
   return args.length === 11 && args[0] === "python3" && args[1] === "-I"
