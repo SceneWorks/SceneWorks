@@ -98,3 +98,18 @@ The separate native backend acceptance retains advanced tensor and cancellation 
 All initial-load, raw-size and largest-route limits remain enabled and unchanged. Against the clean `875666c7c` baseline, initial JavaScript changes from 474,820 / 146,257 / 124,981 bytes (raw/gzip/Brotli) to 467,260 / 143,621 / 122,981. Sharing disclosure details load through the existing interaction boundary; preference persistence remains on the initial path.
 
 The final reviewed web profile totals 2,897,898 / 862,405 / 736,096 bytes (raw/gzip/Brotli). Its compressed total caps match the measured totals: 862,405 gzip and 736,096 Brotli bytes, with zero remaining headroom. Relative to the previous feature caps of 862,196 and 737,239, gzip increases by 209 bytes and Brotli tightens by 1,143 bytes. The earlier headroom figures of 766 / 1,761 describe a superseded feature snapshot. The raw total cap, initial-load and largest-route caps, coverage checks and negative budget tests remain unchanged.
+
+
+## Training acceptance dispatch
+
+The existing `memory-catalog-campaign.yml` dispatcher keeps training acceptance isolated from
+catalog, edit and upstream-reference profiles. Dispatch the exact reviewed source with `--ref`,
+`run_moss_training_acceptance=true`, an explicitly eligible `moss_runner_label`, and
+`moss_phase=capture`; leave `moss_terminal` and `moss_reference` as their empty `{}` defaults.
+The source is the actual dispatched GitHub SHA. There is no separate `workflowSource` input.
+
+For `moss_phase=finalize`, supply the existing `moss_inspection_json` document. Its positive
+string `captureRunId` selects the original capture artifacts and is checked again by the
+unchanged evidence verifier against the inspection and artifact provenance. There is no
+separate `moss_evidence_run_id` input. These two derived values keep the combined dispatcher
+within GitHub's 25-input limit without removing either acceptance phase or any other profile.

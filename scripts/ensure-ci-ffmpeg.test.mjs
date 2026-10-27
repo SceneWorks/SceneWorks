@@ -151,6 +151,6 @@ test("parity-rust uses the helper while retaining its real-ffmpeg gate and job l
   const workflow = readFileSync(path.join(root, ".github/workflows/check.yml"), "utf8");
   const lane = workflow.split("  parity-rust:")[1].split("\n  parity-scaffold:")[0];
   assert.match(lane, /SCENEWORKS_REQUIRE_FFMPEG: "1"/);
-  assert.match(lane, /timeout-minutes: 45/);
+  assert.match(lane, /^    timeout-minutes: 60$/m);
   assert.match(lane, /run: bash scripts\/ensure-ci-ffmpeg\.sh/);
 });

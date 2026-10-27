@@ -115,3 +115,66 @@ describe("background image regeneration", () => {
     expect(opts.onCreated).not.toHaveBeenCalled();
   });
 });
+
+const mossModel = { id: "moss_image_base", conditionalPurposes: { moss_image_edit: { installState: "installed" } } };
+const mossRefs = Array.from({ length: 4 }, (_, i) => ({ id: `ref-${i}`, type: "image", projectId: "project-1" }));
+const tensor = (id, dtype, shape) => ({ id, type: "tensor", projectId: "project-1", tensor: { dtype, shape, byteLength: shape.reduce((a, b) => a * b, dtype === "float32" ? 4 : 1), sha256: "a".repeat(64) } });
+const positive = tensor("positive", "float32", [2, 2, 4096]), mask = tensor("mask", "uint8", [2, 2]), noise = tensor("noise", "float32", [4, 128, 32, 32]);
+const ref = (item) => ({ assetId: item.id, sha256: item.tensor.sha256, metadata: item.tensor });
+const mossAssets = [...mossRefs, positive, mask, noise];
+function mossAsset(output = "images") {
+  return { id: "moss-output", projectId: "project-1", type: "image", lineage: { sourceAssetId: "unrelated-output" }, recipe: {
+    model: mossModel.id, mode: "edit_image", prompt: "", seed: 999,
+    normalizedSettings: { width: 512, height: 512, count: 2 },
+    rawAdapterSettings: { referenceAssetIds: ["ref-0", "ref-1", "ref-0", "ref-3"], steps: 30, guidanceScale: 4, schedulerShift: 5,
+      mossImage: { acceleration: "off", max_sequence_length: 2, training_shift: 2.5 }, mossImageEdit: { reference_max_edge: 512, use_kv_cache: false },
+      mossImageAdvanced: { positive: { values: ref(positive), mask: ref(mask) }, negativePrompts: ["blur", "text"], noise: ref(noise), output },
+      mossImageSampleIndex: 3, mossImageEditExecutionReport: { base: { samples: [{ seed: 173 }] } } } } };
+}
+
+describe("background MOSS edit regeneration", () => {
+  it.each(["images", "latents"])("preserves the complete B2/count2 %s recipe without generic mask fields or output receipts", async (output) => {
+    apiFetch.mockReset().mockResolvedValueOnce({ id: "new-moss" });
+    const source = mossAsset(output), before = JSON.stringify(source), request = imageRecipeRequest(source);
+    const opts = options({ asset: source, models: [mossModel], assets: mossAssets });
+    expect(await regenerateImage(opts)).toEqual({ id: "new-moss" });
+    const body = JSON.parse(apiFetch.mock.calls[0][2].body);
+    expect(body).toMatchObject({ count: 2, seed: null, sourceAssetId: null, referenceAssetIds: ["ref-0", "ref-1", "ref-0", "ref-3"], advanced: { mossImageAdvanced: source.recipe.rawAdapterSettings.mossImageAdvanced, mossImage: { training_shift: 2.5 } } });
+    expect(request.advanced).not.toHaveProperty("mossImageSampleIndex");
+    expect(request.advanced).not.toHaveProperty("mossImageEditExecutionReport");
+    expect(JSON.stringify(source)).toBe(before);
+  });
+
+  it("replays every prompt row from a later-row image with per-prompt count", () => {
+    const source = mossAsset();source.recipe.prompt = "second row";
+    source.recipe.rawAdapterSettings.promptBatch = ["first row", "second row"];
+    delete source.recipe.rawAdapterSettings.mossImageAdvanced.positive;
+    expect(imageRecipeRequest(source)).toMatchObject({ prompt: "first row", prompts: ["first row", "second row"], count: 2, seed: null });
+  });
+
+  it.each([true, false])("keeps supplied-noise seed null for the actual original-job duplicate (noise: %s)", async (withNoise) => {
+    const source = mossAsset();source.lineage.jobId = "original";
+    if (!withNoise) delete source.recipe.rawAdapterSettings.mossImageAdvanced.noise;
+    const payload = imageRecipeRequest(source);
+    apiFetch.mockReset().mockResolvedValueOnce({ id: "original", type: "image_generate", projectId: "project-1", payload }).mockResolvedValueOnce({ id: "new-moss" });
+    await regenerateImage(options({ asset: source, models: [mossModel], assets: mossAssets }));
+    const changes = JSON.parse(apiFetch.mock.calls[1][2].body).payloadChanges;
+    expect(changes.seeds).toEqual([]);
+    if (withNoise) expect(changes.seed).toBeNull();else expect(changes.seed).toEqual(expect.any(Number));
+  });
+
+  it.each(["missing adapter", "missing reference", "missing noise"])("rejects %s before either duplicate or fallback enqueue", async (issue) => {
+    for (const originalAvailable of [true, false]) {
+      const source = mossAsset();
+      if (originalAvailable) source.lineage.jobId = "original";
+      const model = issue === "missing adapter" ? { ...mossModel, conditionalPurposes: {} } : mossModel;
+      const assets = mossAssets.filter((item) => item.id !== (issue === "missing reference" ? "ref-0" : issue === "missing noise" ? "noise" : "none"));
+      apiFetch.mockReset();
+      if (originalAvailable) apiFetch.mockResolvedValueOnce({ id: "original", type: "image_generate", projectId: "project-1", payload: imageRecipeRequest(source) });
+      const opts = options({ asset: source, models: [model], assets });
+      await expect(regenerateImage(opts)).rejects.toThrow(issue === "missing adapter" ? "exact selected MOSS component" : issue === "missing reference" ? "reference is missing" : "noise tensor is missing");
+      expect(apiFetch.mock.calls.filter((call) => call[2]?.method === "POST")).toHaveLength(0);
+      expect(opts.onCreated).not.toHaveBeenCalled();
+    }
+  });
+});

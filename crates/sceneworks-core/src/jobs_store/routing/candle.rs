@@ -60,6 +60,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandleImageLane {
     ImportedFamily,
+    MossImageEdit,
     InstantId,
     SdxlControl,
     SdxlEdit,
@@ -120,6 +121,11 @@ impl CandleImageRoute {
 }
 
 const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
+    CandleImageRoute {
+        lane: CandleImageLane::MossImageEdit,
+        models: ModelMatch::Family(crate::moss_image::is_moss),
+        shape: moss_edit_candle_eligible,
+    },
     CandleImageRoute {
         lane: CandleImageLane::InstantId,
         models: ModelMatch::Any(&["instantid_realvisxl"]),
@@ -711,6 +717,16 @@ pub(crate) fn candle_image_refusals(
 /// Eligible ⇔ no [`CANDLE_IMAGE_CHECKS`] entry refuses.
 pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     candle_image_first_refusal(model, payload).is_none()
+}
+
+fn moss_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    crate::moss_image::is_edit(payload)
+        && crate::moss_image::native_request(payload, &entry).is_ok()
 }
 
 /// Whether the request explicitly asks for on-the-fly quantization the candle backend can't do.

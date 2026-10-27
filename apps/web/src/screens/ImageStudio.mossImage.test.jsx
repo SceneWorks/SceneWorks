@@ -20,6 +20,8 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { AppContext } from "../context/AppContext.js";
+import { configure, verifyReplayForm, labelledSelect } from '../../../../scripts/lib/moss-edit-terminal-controls.mjs';
+import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
 import { ImageStudio } from "./ImageStudio.jsx";
 import { apiFetch } from "../api.js";
 
@@ -32,6 +34,7 @@ const installed = (id) => ({
   ...manifestModels.find((model) => model.id === id),
   installState: "installed",
   usable: true,
+  ...(id.startsWith("moss_image_") ? { capabilities: ["text_to_image", "edit_image"] } : {}),
 });
 
 const TURBO = { ...installed("moss_image_sft"), conditionalPurposes: { moss_dmd_unmerged_bf16: { installState: "installed" }, moss_dmd_full_fp32: { installState: "missing" } } };
@@ -188,4 +191,101 @@ describe("MOSS Image Studio", () => {
   expect(generateButton().disabled).toBe(true); apiFetch.mockRejectedValueOnce(new Error("component acquisition failed")); await click(buttonWithText("Download 8-step components")); expect(container.textContent).toContain("component acquisition failed");
   expect(apiFetch).toHaveBeenLastCalledWith(expect.stringContaining("moss_dmd_full_fp32/download"),"test-token",expect.objectContaining({method:"POST"}));
  });
+ it.each(["moss_image_base", "moss_image_sft"])("hydrates %s edit controls and exact repeated ordered slots through actual normal/batch submit", async(model)=>{
+  const editable = {...installed(model), conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+  const recipe={mode:"edit_image",model,prompt:"make image 2 blue",negativePrompt:"blur",normalizedSettings:{width:512,height:768,count:1},rawAdapterSettings:{referenceAssetIds:["ref-0","ref-1","ref-0","ref-2"],mossImageEdit:{reference_max_edge:1024,use_kv_cache:false},steps:41,guidanceScale:4.5,schedulerShift:6,mossImageEditExecutionReport:{forged:true}}};
+  const ctx=await render(baseContext({imageModels:[editable],models:[editable],studioLaunch:{id:"edit-replay",view:"Image",recipe}}));
+  await advanced(); expect(field(container,"Reference maximum edge").value).toBe("1024"); expect(field(container,"Cache reference K/V").checked).toBe(false);
+  expect(field(container,"8-step acceleration")).toBeUndefined(); expect(field(container,"Unconditional skip layers")).toBeUndefined();
+  expect(field(container,"Steps").value).toBe("41"); expect(generateButton().disabled).toBe(false);
+  await click(generateButton()); const normal=ctx.createImageJob.mock.calls.at(-1)[0];
+  expect(normal.referenceAssetIds).toEqual(recipe.rawAdapterSettings.referenceAssetIds); expect(normal.sourceAssetId).toBeUndefined();expect(normal.referenceAssetId).toBeUndefined();
+  expect(normal.advanced).toMatchObject({mossImageEdit:recipe.rawAdapterSettings.mossImageEdit,steps:41,guidanceScale:4.5,schedulerShift:6});expect(normal.advanced.mossImageEditExecutionReport).toBeUndefined();
+  await render({...ctx,studioLaunch:{id:"edit-batch",view:"Image",recipe:{...recipe,rawAdapterSettings:{...recipe.rawAdapterSettings,promptBatch:["one","two"]}}}});
+  await click(buttonWithText("Run batch"));if(container.querySelector(".batch-confirm .prompt-cta"))await click(container.querySelector(".batch-confirm .prompt-cta"));
+  await vi.waitFor(()=>expect(ctx.createImageJob.mock.calls.length).toBeGreaterThan(1));
+  const batch=ctx.createImageJob.mock.calls.at(-1)[0];expect(batch.referenceAssetIds).toEqual(normal.referenceAssetIds);expect(batch.advanced.mossImageEdit).toEqual(normal.advanced.mossImageEdit);
+ });
+ it("restores and submits a full advanced B2 count2 latent request with exact tensor identities and nullable seed",async()=>{
+  const editable={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+  const tensor=(id,shape,sha)=>({id,projectId:"project_1",type:"tensor",status:{},tensor:{dtype:"float32",shape,byteLength:shape.reduce((a,b)=>a*b,1)*4,sha256:sha.repeat(64)}});
+  const positive=tensor("positive",[2,2,4096],"a"),noise=tensor("noise",[4,128,32,32],"b");const ref=(asset)=>({assetId:asset.id,sha256:asset.tensor.sha256,metadata:asset.tensor});
+  const native={positive:{values:ref(positive)},noise:ref(noise),negativePrompts:["blur","text"],output:"latents"};
+  const recipe={model:"moss_image_base",mode:"edit_image",prompt:"",negativePrompt:"",seed:null,normalizedSettings:{width:512,height:512,count:2},rawAdapterSettings:{referenceAssetIds:["ref-0"],mossImage:{max_sequence_length:2,training_shift:2.5},mossImageAdvanced:native,mossImageSampleIndex:3}};
+  const ctx=await render(baseContext({imageModels:[editable],models:[editable],assets:[...REFS,positive,noise],studioLaunch:{id:"advanced-replay",view:"Image",recipe,replaySeed:999}}));
+  await advanced();expect(container.textContent).toContain("execution seed is null");expect(field(container,"Native output").value).toBe("latents");expect(generateButton().disabled).toBe(false);
+  await click(generateButton());expect(ctx.createImageJob).toHaveBeenCalledTimes(1);const body=ctx.createImageJob.mock.calls[0][0];expect(body).toMatchObject({prompt:"",count:2,seed:null,width:512,height:512,referenceAssetIds:["ref-0"]});expect(body.advanced.mossImageAdvanced).toEqual(native);expect(body.advanced.mossImage.training_shift).toBe(2.5);expect(body.advanced.mossImageSampleIndex).toBeUndefined();
+  await render({...ctx,assets:[...REFS,positive]});expect(generateButton().disabled).toBe(true);expect(container.textContent).toContain("exact noise tensor is missing");
+ });
+ it("keeps missing reference identities visible and blocks replay instead of reusing the output",async()=>{
+  const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+  const ctx=await render(baseContext({imageModels:[model],studioLaunch:{id:"missing-edit",view:"Image",recipe:{mode:"edit_image",model:BASE.id,prompt:"edit",rawAdapterSettings:{referenceAssetIds:["deleted-ref"],mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}}}}));
+  expect(generateButton().disabled).toBe(true);expect(container.textContent).toContain("Missing reference: deleted-ref");expect(container.textContent).toContain("missing from this project");expect(ctx.createImageJob).not.toHaveBeenCalled();
+ });
+ it.each(["images", "latents"])("submits the full text batch from a row-two %s recipe and refuses only latent inline upscale",async(output)=>{
+  const editable={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+  const native={output,negativePrompts:["blur","text"]};
+  const recipe={model:BASE.id,mode:"edit_image",prompt:"second row",negativePrompt:"",seed:72,normalizedSettings:{width:512,height:512,count:2},rawAdapterSettings:{promptBatch:["first row","second row"],referenceAssetIds:["ref-0","ref-1"],mossImageAdvanced:native,mossImageSampleIndex:2,mossImageEditExecutionReport:{base:{samples:[{seed:70},{seed:71},{seed:72},{seed:73}]}}}};
+  const ctx=await render(baseContext({imageModels:[editable],models:[editable],studioLaunch:{id:`row-two-${output}`,view:"Image",recipe,replaySeed:70}}));
+  expect(generateButton().disabled).toBe(false);
+  await click(generateButton());
+  expect(ctx.createImageJob).toHaveBeenCalledTimes(1);
+  expect(ctx.createImageJob.mock.calls[0][0]).toMatchObject({prompt:"first row",prompts:["first row","second row"],count:2,seed:70,referenceAssetIds:["ref-0","ref-1"],advanced:{mossImageAdvanced:native}});
+  expect(ctx.createImageJob.mock.calls[0][0].advanced.mossImageSampleIndex).toBeUndefined();
+  await advanced();
+  await click(field(container,"Upscale"));
+  if(output==="latents") {
+    expect(generateButton().disabled).toBe(true);
+    expect(container.textContent).toContain("Disable upscale or select images output");
+    expect(ctx.createImageJob).toHaveBeenCalledTimes(1);
+    await click(field(container,"Upscale"));
+    expect(generateButton().disabled).toBe(false);
+  } else {
+    expect(container.textContent).not.toContain("latent output cannot use inline upscale");
+  }
+ });
+
+ it("submits styled native batches consistently and replays effective rows without a second Style fold",async()=>{
+  const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+  const recipe={model:BASE.id,mode:"edit_image",prompt:"  first row  ",normalizedSettings:{width:512,height:512,count:2},rawAdapterSettings:{referenceAssetIds:["ref-0"],promptBatch:["  first row  ","second row"],mossImageAdvanced:{output:"images"},styleId:"ghibli-style",stylePrompt:"  first row  "}};
+  const ctx=await render(baseContext({imageModels:[model],models:[model],studioLaunch:{id:"styled-batch",view:"Image",recipe}}));
+  expect(generateButton().disabled).toBe(false);await click(generateButton());
+  const first=ctx.createImageJob.mock.calls[0][0];expect(first.prompt).toBe(first.prompts[0]);expect(first.prompts).toHaveLength(2);
+  for(const row of first.prompts)expect(row).toContain("Style:");
+  expect(first.advanced.promptBatch).toEqual(first.prompts);expect(first.advanced.styleId).toBe("ghibli-style");expect(first.advanced).not.toHaveProperty("stylePrompt");
+  await render({...ctx,studioLaunch:{id:"styled-batch-replay",view:"Image",recipe:{...recipe,prompt:first.prompt,rawAdapterSettings:{...first.advanced,referenceAssetIds:first.referenceAssetIds}}}});
+  expect(generateButton().disabled).toBe(false);await click(generateButton());expect(ctx.createImageJob.mock.calls[1][0].prompts).toEqual(first.prompts);
+ });
+ it("blocks an already-selected Style with positive tensors and accepts an empty carrier after clearing it",async()=>{
+  const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}},positive={id:"positive-style",type:"tensor",projectId:"project_1",tensor:{dtype:"float32",shape:[1,2,4096],byteLength:32768,sha256:"a".repeat(64)}};
+  const raw={referenceAssetIds:["ref-0"],mossImage:{max_sequence_length:2},mossImageAdvanced:{positive:{values:{assetId:positive.id,sha256:positive.tensor.sha256,metadata:positive.tensor}}},styleId:"ghibli-style",stylePrompt:""};
+  const recipe={model:BASE.id,mode:"edit_image",prompt:"",normalizedSettings:{width:512,height:512,count:1},rawAdapterSettings:raw};
+  const ctx=await render(baseContext({imageModels:[model],models:[model],assets:[...REFS,positive],studioLaunch:{id:"positive-style",view:"Image",recipe}}));
+  expect(generateButton().disabled).toBe(true);expect(container.textContent).toContain("Clear the selected Style or prompt preset");expect(ctx.createImageJob).not.toHaveBeenCalled();
+  const cleared={...raw};delete cleared.styleId;delete cleared.stylePrompt;
+  await render({...ctx,studioLaunch:{id:"positive-no-style",view:"Image",recipe:{...recipe,rawAdapterSettings:cleared}}});
+  expect(generateButton().disabled).toBe(false);await click(generateButton());expect(ctx.createImageJob.mock.calls[0][0].prompt).toBe("");
+ });
+
+ it("production terminal configures actual Full controls, repeated slots, shrink and submits exact request",async()=>{
+  const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}},ctx=await render(baseContext({imageModels:[model],models:[model],studioLaunch:{id:"terminal-full",view:"Image",recipe:{model:model.id,mode:"edit_image",prompt:"initial",rawAdapterSettings:{referenceAssetIds:["ref-0"]}}}}));
+  const page=terminalBrowserDom(container),expected={model:model.id,mode:"edit_image",prompt:"change image two",negativePrompt:"",referenceAssetIds:["ref-0","ref-1","ref-0","ref-2"],width:512,height:768,count:1,seed:173,advanced:{steps:3,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:1,max_sequence_length:4096},mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}};
+  await configure(page,expected,'full',[]);expect(await page.getByRole('group',{name:/^Ordered MOSS references/}).getByLabel('Image 1',{exact:true}).count()).toBe(0);expect(await page.getByLabel('Native output',{exact:true}).count()).toBe(0);await verifyReplayForm(page,expected,[]);await click(generateButton());let body=ctx.createImageJob.mock.calls.at(-1)[0];expect(body.referenceAssetIds).toEqual(expected.referenceAssetIds);expect(body).toMatchObject({prompt:expected.prompt,width:512,height:768,seed:173,count:1});expect(body.advanced).toMatchObject(expected.advanced);
+  expected.referenceAssetIds=["ref-2"];await configure(page,expected,'full',[]);await click(generateButton());body=ctx.createImageJob.mock.calls.at(-1)[0];expect(body.referenceAssetIds).toEqual(["ref-2"]);
+ });
+
+ it("production terminal configures native tensor roles, nullable seed, batch strings and output",async()=>{
+  const model={...BASE,conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+  const tensor=(id,shape,sha)=>({id,projectId:"project_1",type:"tensor",tensor:{dtype:"float32",shape,byteLength:shape.reduce((a,b)=>a*b,1)*4,sha256:sha.repeat(64)}});
+  const positive=tensor("positive-terminal",[1,2,4096],"a"),noise=tensor("noise-terminal",[1,128,32,32],"b"),negative=tensor("negative-terminal",[1,2,4096],"c"),mask={...tensor("mask-terminal",[1,2],"d"),tensor:{dtype:"uint8",shape:[1,2],byteLength:2,sha256:"d".repeat(64)}},ref=asset=>({assetId:asset.id,sha256:asset.tensor.sha256,metadata:asset.tensor});
+  const ctx=await render(baseContext({imageModels:[model],models:[model],assets:[...REFS,positive,negative,mask,noise],macCapabilities:{features:{imageUpscaleSeedvr2:{supported:true}}},studioLaunch:{id:"terminal-tensors",view:"Image",recipe:{model:model.id,mode:"edit_image",prompt:"initial",rawAdapterSettings:{referenceAssetIds:["ref-0"]}}}}));
+  const page=terminalBrowserDom(container),expected={model:model.id,prompt:"",referenceAssetIds:["ref-0"],width:512,height:512,count:1,seed:null,advanced:{steps:3,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:1,max_sequence_length:2},mossImageEdit:{reference_max_edge:512,use_kv_cache:false},mossImageAdvanced:{output:"latents",positive:{values:ref(positive),mask:ref(mask)},negative:{values:ref(negative),mask:ref(mask)},noise:ref(noise)}}};
+  await configure(page,expected,'full',[]);await verifyReplayForm(page,expected,[]);await click(generateButton());expect(ctx.createImageJob.mock.calls.at(-1)[0].advanced.mossImageAdvanced).toMatchObject(expected.advanced.mossImageAdvanced);
+  await page.getByLabel('Upscale',{exact:true}).setChecked(true);
+  for(const engine of ['real-esrgan','seedvr2']){expect(await page.getByLabel('Engine',{exact:true}).count()).toBe(0);await labelledSelect(page,'Engine').selectOption(engine);expect(generateButton().disabled).toBe(true);expect(container.textContent).toContain('latent output cannot use inline upscale');}
+  expect(ctx.createImageJob).toHaveBeenCalledTimes(1);await page.getByLabel('Upscale',{exact:true}).setChecked(false);
+  delete expected.advanced.mossImageAdvanced;expected.prompt="first";expected.prompts=["first","second"];expected.seed=173;expected.advanced.mossImage.max_sequence_length=4096;expected.advanced.mossImageAdvanced={output:"images",negativePrompts:["bad first","bad second"]};
+  await configure(page,expected,'full',[]);await verifyReplayForm(page,expected,[]);await click(generateButton());expect(ctx.createImageJob.mock.calls.at(-1)[0].prompts).toEqual(expected.prompts);
+ });
+
 });

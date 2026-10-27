@@ -548,8 +548,7 @@ def test_collapsed_cell_state_is_a_pure_function_of_the_published_facts():
 
 
 def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
-    """sc-22511: currency is a REPORT. A staled loader closure means the anchor needs re-extraction,
-    not that the rung stopped existing — so `anchor.current` may not partition the states."""
+    """sc-22511: currency reports capture provenance and cannot partition the states."""
     matrix = load_matrix()
     anchored = [cell for cell in matrix["cells"] if cell["anchor"] is not None]
     assert anchored
@@ -582,21 +581,39 @@ def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
     inventory = {row["id"]: row for row in matrix["anchors"]}
     for cell in anchored:
         assert cell["anchor"]["current"] == inventory[cell["anchor"]["id"]]["current"], cell["id"]
-    # And the reported staleness is the store's own, recomputed from the closure ledger.
+    assert matrix["summary"]["staleAnchors"] == sum(
+        1 for row in matrix["anchors"] if not row["current"]
+    )
+    # Historical captures keep their own currency. Judge today's generator against today's
+    # ledger separately, so a pin change cannot require a new matrix or measurement campaign.
+    live = json.loads(
+        subprocess.run(
+            ["node", "--input-type=module", "-e",
+             'import { buildMatrix } from "./scripts/generate-memory-matrix.mjs"; '
+             'const matrix = await buildMatrix(); '
+             'console.log(JSON.stringify({anchors:matrix.anchors, '
+             'cells:matrix.cells.filter(c => c.anchor).map(c => ({id:c.id,anchor:c.anchor})), '
+             'staleAnchors:matrix.summary.staleAnchors}));'],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout
+    )
+    live_anchors = live["anchors"]
+    assert live_anchors and live["cells"], "live currency validation must exercise an anchored cell"
+    live_inventory = {row["id"]: row for row in live_anchors}
+    for cell in live["cells"]:
+        assert cell["anchor"]["current"] == live_inventory[cell["anchor"]["id"]]["current"], cell["id"]
+    assert live["staleAnchors"] == sum(1 for row in live_anchors if not row["current"])
     closures = json.loads(
         (ROOT / "config/anchor-loader-closures.json").read_text(encoding="utf-8")
     )["models"]
     store = json.loads((ROOT / "config/memory-anchors.json").read_text(encoding="utf-8"))
     by_id = {anchor["id"]: anchor for anchor in store["anchors"]}
-    for row in matrix["anchors"]:
+    for row in live_anchors:
         anchor = by_id[row["id"]]
         assert row["current"] == (
             closures.get(f"{anchor['modelId']}:{anchor['backend']}", {}).get("digest")
             == anchor["source"]["loaderClosureDigest"]
         ), row["id"]
-    assert matrix["summary"]["staleAnchors"] == sum(
-        1 for row in matrix["anchors"] if not row["current"]
-    )
 
 
 def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():

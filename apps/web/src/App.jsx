@@ -23,8 +23,6 @@ import { AccessGate } from "./components/AccessGate.jsx";
 import { Logo } from "./components/Logo.jsx";
 import { StatusDot } from "./components/StatusDot.jsx";
 import { FullscreenPreview, assetSeed } from "./components/assetPanels.jsx";
-import { mossSeededRecipeReplay } from "./mossImage.js";
-import { regenerateImage } from "./regenerateImage.js";
 import { isLibraryAsset, terminalStatuses } from "./constants.js";
 import { isEditorJob } from "./jobTypes.js";
 import { LibraryScreen } from "./screens/LibraryScreen.jsx";
@@ -69,7 +67,6 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
-import { ModelLibraryDialog } from "./components/ModelLibraryDialog.jsx";
 import { ModelLibraryRestartDialog } from "./components/ModelLibraryRestartDialog.jsx";
 import {
   adoptModelLibrary,
@@ -236,6 +233,11 @@ const SimpleShell = lazyScreen(
   () => import("./simple/SimpleShell.jsx"),
   "SimpleShell",
   "Simple UI",
+);
+const ModelLibraryDialog = lazyInteraction(
+  () => import("./components/ModelLibraryDialog.jsx"),
+  "ModelLibraryDialog",
+  "Model library recovery",
 );
 const WorkflowEmbedDecisionModal = lazyInteraction(
   () => import("./components/WorkflowEmbedNotice.jsx"),
@@ -1090,7 +1092,7 @@ export function App() {
   // Latest jobs list, so the claim-release sweep can read it without re-subscribing.
   const jobsRef = useRef([]);
   const trackEditorScratchOp = useCallback(
-    (jobId, assets) => editorScratchRegistry.track(jobId, assets),
+    (jobId, assets, options) => editorScratchRegistry.track(jobId, assets, options),
     [editorScratchRegistry],
   );
   const releaseEditorScratchOp = useCallback(
@@ -2923,6 +2925,9 @@ export function App() {
     if (!asset || !recipe) {
       return;
     }
+    const launchProjectId = activeProjectRef.current?.id;
+    const { mossSeededRecipeReplay } = await import("./mossImageReplay.js");
+    if (activeProjectRef.current?.id !== launchProjectId) return;
     // Keep-seed replays THIS image's own seed for a byte-for-byte rerun (e.g. to
     // reproduce and upscale with PiD). assetSeed prefers the per-asset recipe over the
     // set's shared base seed, so reuse honors the exact image the user is viewing.
@@ -2984,6 +2989,7 @@ export function App() {
 
   // Re-Generate is a background enqueue: never close the viewer, change pages, or touch a draft.
   async function sendAssetRecipeToQueue(asset) {
+    const { regenerateImage } = await import("./regenerateImage.js");
     const projectId = activeProjectRef.current?.id;
     return regenerateImage({
       asset,
@@ -2991,6 +2997,8 @@ export function App() {
       projectName: activeProjectRef.current?.name,
       token,
       requestedGpu,
+      models,
+      assets,
       beforeCreate: confirmWorkflowEmbeddingBeforeGeneration,
       isCurrentProject: () => activeProjectRef.current?.id === projectId,
       onCreated: (job) => setJobs((items) => upsertJobNewest(items, job)),
@@ -3312,7 +3320,7 @@ export function App() {
     () =>
       assets.filter(
         (asset) =>
-          (asset.type === "image" || asset.type === "frame") &&
+          (asset.type === "image" || asset.type === "frame" || asset.type === "tensor") &&
           asset.projectId === activeProject?.id &&
           !asset.status?.trashed &&
           !asset.status?.rejected,
@@ -3329,6 +3337,7 @@ export function App() {
     () =>
       [
         ...models.map((model) => `m:${model.id}:${model.installState}`),
+        ...models.flatMap((model) => Object.entries(model.conditionalPurposes ?? {}).map(([purpose, state]) => `c:${model.id}:${purpose}:${state.installState}:${Boolean(state.blocked)}`)),
         ...loras.map((lora) => `l:${lora.id}:${lora.scope ?? ""}:${lora.installState}`),
       ].join("|"),
     [models, loras],
@@ -3364,6 +3373,7 @@ export function App() {
     // The list the studio's own picker is built from, so a substitute chosen in the panel cannot be
     // a row the picker would drop on the next render (sc-15952).
     models: imageModels,
+    assets,
     // The whole catalog, so an install requirement resolves to its real entry — including a VIDEO
     // model, which `imageModels` filters out — before the download starts (sc-17227).
     catalogModels: models,
@@ -3414,14 +3424,16 @@ export function App() {
   // disturbs the shell it renders in.
   const modelLibraryOverlays = (
     <>
-      <ModelLibraryDialog
-        autoProbePaused={modelLibraryPickerOpen}
-        canRelocate={isDesktopShell}
-        onCancel={modelLibraryGate.cancel}
-        onRelocate={chooseModelLibraryLocation}
-        onRetry={modelLibraryGate.retry}
-        state={modelLibraryState}
-      />
+      {["blocked", "retrying", "relocating"].includes(modelLibraryState?.status) ? (
+        <ModelLibraryDialog
+          autoProbePaused={modelLibraryPickerOpen}
+          canRelocate={isDesktopShell}
+          onCancel={modelLibraryGate.cancel}
+          onRelocate={chooseModelLibraryLocation}
+          onRetry={modelLibraryGate.retry}
+          state={modelLibraryState}
+        />
+      ) : null}
       <ModelLibraryRestartDialog
         canRestart={isDesktopShell}
         onLater={() => setModelLibraryRelocation(null)}
@@ -3696,6 +3708,7 @@ export function App() {
     createVideoJob,
     createVideoUpscaleJob,
     createImageJob,
+    confirmWorkflowEmbeddingBeforeGeneration,
     createVectorJob,
     createVectorPromptWorkflow,
     createAudioJob,
@@ -3849,7 +3862,7 @@ export function App() {
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
     projectFilter, setProjectFilter, projects,
-    createVideoJob, createVideoUpscaleJob, createImageJob, createVectorJob, createVectorPromptWorkflow, createAudioJob, refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
+    createVideoJob, createVideoUpscaleJob, createImageJob, confirmWorkflowEmbeddingBeforeGeneration, createVectorJob, createVectorPromptWorkflow, createAudioJob, refinePrompt, qwenRewritePrompt, magicPrompt, imageCaption, imageDescribe, compareFaceLikeness, latestVideoAssets, recentImageAssets,
     recentVideoAssets, recentAudioAssets, studioLaunch,
     editorLaunch, clearEditorLaunch, sendAssetToImageEditor, sendAssetToImageEdit,
     rememberLocalGenerationJob, personTracks, createPersonDetectionJob,

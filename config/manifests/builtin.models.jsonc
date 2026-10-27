@@ -71,6 +71,19 @@
           "componentId": "moss-shared-snapshot"
         }
       ],
+      "conditionalComponents": [
+        {
+          "provider": "huggingface",
+          "repo": "chinoll/Moss-Image-Edit",
+          "revision": "3be9c40037e1b89b17aa85ff6f8ee805872aa558",
+          "files": ["adapter_config.json", "adapter_model.safetensors"],
+          "license": "unspecified",
+          "licenseBasis": "The frozen adapter repository declares no weights license. Linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms.",
+          "weightsSha256": "17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf",
+          "componentId": "moss-image-edit",
+          "requiredFor": ["moss_image_edit"]
+        }
+      ],
       "paths": {
         "model": "${HF_CACHE}/OpenMOSS-Team/MOSS-Image-Base"
       },
@@ -237,6 +250,17 @@
         }
       },
       "conditionalComponents": [
+        {
+          "provider": "huggingface",
+          "repo": "chinoll/Moss-Image-Edit",
+          "revision": "3be9c40037e1b89b17aa85ff6f8ee805872aa558",
+          "files": ["adapter_config.json", "adapter_model.safetensors"],
+          "license": "unspecified",
+          "licenseBasis": "The frozen adapter repository declares no weights license. Linked GPLv3 code and parent Apache-2.0 weights do not establish edit-adapter weight terms.",
+          "weightsSha256": "17a48b8c605dcffdedb92a2b887d18cf316505be90802717669fb6556098dcdf",
+          "componentId": "moss-image-edit",
+          "requiredFor": ["moss_image_edit"]
+        },
         {
           "provider": "huggingface",
           "repo": "lodestones/MOSS-Image-SFT-8-steps-dmd",
