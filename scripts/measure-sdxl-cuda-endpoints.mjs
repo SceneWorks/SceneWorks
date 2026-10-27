@@ -22,6 +22,23 @@ export const ENDPOINTS = Object.freeze([
   } },
 ]);
 
+const GPU_UUID = /^GPU-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
+const LEGACY_GPU = Object.freeze({ physicalIndex: 1, uuid: "GPU-e4b79931-7be6-f216-460a-f5405cfafffe" });
+const GPU_QUERY = "index,uuid,memory.used,memory.free,utilization.gpu,utilization.memory";
+
+function validateGpu(gpu) {
+  if (![0, 1].includes(gpu?.physicalIndex) || !GPU_UUID.test(gpu?.uuid ?? "")) {
+    throw new Error("SDXL capture requires one physical GPU0/1 index and exact NVIDIA UUID");
+  }
+  return gpu;
+}
+
+export function endpointGpuEnv(env, gpu) {
+  validateGpu(gpu);
+  return { ...env, CUDA_VISIBLE_DEVICES: String(gpu.physicalIndex), SCENEWORKS_GPU_ID: String(gpu.physicalIndex),
+    SCENEWORKS_SDXL_EXPECTED_GPU_UUID: gpu.uuid };
+}
+
 export function endpointCase(plan, endpoint) {
   const planned = planAnchor(plan, "sdxl:q4:candle");
   planned.loadShape = "eager_materialization";
@@ -35,10 +52,10 @@ export function endpointCase(plan, endpoint) {
   return planned;
 }
 
-export function validateEndpoint(measurement, endpoint, expectedInferencePin) {
-  if (measurement?.endpoint !== endpoint.name || measurement.deviceUuid !== "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
+export function validateEndpoint(measurement, endpoint, expectedInferencePin, expectedUuid = LEGACY_GPU.uuid) {
+  if (!GPU_UUID.test(expectedUuid) || measurement?.endpoint !== endpoint.name || measurement.deviceUuid !== expectedUuid
       || measurement.cudaContextUuid !== measurement.deviceUuid || measurement.logicalCudaDevice !== 0) {
-    throw new Error("endpoint identity or physical GPU1 UUID differs from the requested capture");
+    throw new Error("endpoint identity or selected physical GPU UUID differs from the requested capture");
   }
   if (!/^[a-f0-9]{40}$/.test(measurement.inferencePin ?? "")
       || (expectedInferencePin && measurement.inferencePin !== expectedInferencePin)) {
@@ -205,25 +222,81 @@ export function persistedReplayAsset(job, projectId, jobId) {
   return image;
 }
 
-export function parseReplayGpuSample(stdout, at = new Date().toISOString()) {
+function parseGpuSample(stdout, at) {
   const fields = stdout.trim().split(",").map((value) => value.trim());
-  const numbers = fields.slice(1).map(Number);
-  if (fields.length !== 5 || fields[0] !== "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
-      || fields.slice(1).some((value) => !value) || numbers.some((value) => !Number.isFinite(value) || value < 0)
+  const numbers = [fields[2], fields[3], fields[4], fields[5]].map(Number);
+  if (fields.length !== 6 || !["0", "1"].includes(fields[0]) || !GPU_UUID.test(fields[1] ?? "")
+      || fields.slice(2).some((value) => !/^\d+$/.test(value))
+      || numbers.some((value) => !Number.isSafeInteger(value) || value < 0)
       || numbers[2] > 100 || numbers[3] > 100
       || !numbers.slice(0, 2).every((value) => Number.isSafeInteger(value * 1024 ** 2))) {
-    throw new Error("physical GPU1 replay telemetry identity or counters unavailable");
+    throw new Error("physical GPU telemetry identity or counters unavailable");
   }
-  return { at, uuid: fields[0], usedBytes: numbers[0] * 1024 ** 2, freeBytes: numbers[1] * 1024 ** 2,
-    gpuUtilization: numbers[2], memoryUtilization: numbers[3] };
+  return { at, physicalIndex: Number(fields[0]), uuid: fields[1], usedBytes: numbers[0] * 1024 ** 2,
+    freeBytes: numbers[1] * 1024 ** 2, gpuUtilization: numbers[2], memoryUtilization: numbers[3] };
 }
 
-// Only the manual endpoint capture waits here: at most 30 seconds per child exit.
-export async function settlePostExitGpu(probe, { timeoutMs = 30_000, pollMs = 200, now = () => performance.now(),
+export function parseReplayGpuSample(stdout, at = new Date().toISOString(), gpu = LEGACY_GPU) {
+  validateGpu(gpu);
+  const sample = parseGpuSample(stdout, at);
+  if (sample.physicalIndex !== gpu.physicalIndex || sample.uuid !== gpu.uuid) {
+    throw new Error("selected physical GPU telemetry identity or counters unavailable");
+  }
+  return sample;
+}
+
+export function parseGpuInventory(stdout, at = new Date().toISOString()) {
+  const samples = stdout.trim().split(/\r?\n/).map((line) => parseGpuSample(line, at));
+  if (samples.length !== 2 || new Set(samples.map((sample) => sample.physicalIndex)).size !== 2
+      || new Set(samples.map((sample) => sample.uuid)).size !== 2) {
+    throw new Error("GPU0/1 inventory must contain both distinct physical indices and UUIDs");
+  }
+  return samples;
+}
+
+function idleWindow(window, sample) {
+  if (sample.gpuUtilization || sample.memoryUtilization || sample.freeBytes < 16 * 1024 ** 3) return [];
+  const next = [...window, sample].slice(-5);
+  return Math.max(...next.map((item) => item.usedBytes)) - Math.min(...next.map((item) => item.usedBytes)) > 64 * 1024 ** 2 ? [sample] : next;
+}
+
+// One physical index/UUID is selected after the build and frozen for the complete endpoint pair.
+export async function selectCaptureGpu(probe, { timeoutMs = 30_000, pollMs = 200, now = () => performance.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+  const started = now(), samples = [], windows = [[], []], identities = new Map();
+  try {
+    while (now() - started < timeoutMs) {
+      const raw = await probe(timeoutMs - (now() - started));
+      let inventory;
+      try { inventory = parseGpuInventory(raw); }
+      catch (error) { samples.push({ elapsedMs: now() - started, raw, error: error.message }); throw error; }
+      samples.push({ elapsedMs: now() - started, inventory });
+      for (const sample of inventory) {
+        if (identities.has(sample.physicalIndex) && identities.get(sample.physicalIndex) !== sample.uuid) {
+          throw new Error("physical GPU UUID changed during selection");
+        }
+        identities.set(sample.physicalIndex, sample.uuid);
+        windows[sample.physicalIndex] = idleWindow(windows[sample.physicalIndex], sample);
+      }
+      const physicalIndex = [1, 0].find((index) => windows[index].length === 5);
+      if (physicalIndex !== undefined && now() - started <= timeoutMs) {
+        return { selected: Object.freeze({ physicalIndex, uuid: identities.get(physicalIndex) }),
+          inventory: samples[0].inventory, samples, stableSamples: 5, elapsedMs: now() - started };
+      }
+      const remaining = timeoutMs - (now() - started);
+      if (remaining > 0) await sleep(Math.min(pollMs, remaining));
+    }
+    throw new Error(`neither physical GPU0 nor GPU1 settled within ${timeoutMs}ms`);
+  } catch (error) { error.samples = samples; throw error; }
+}
+
+// Capture/replay may settle only its frozen physical card; it never switches or disturbs processes.
+export async function settlePostExitGpu(probe, { gpu = LEGACY_GPU, timeoutMs = 30_000, pollMs = 200, now = () => performance.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+  validateGpu(gpu);
   const started = now(); const samples = []; let stable = [];
   const fail = (reason) => {
-    const error = new Error(`${reason}; post-exit GPU1 samples: ${JSON.stringify(samples)}`);
+    const error = new Error(`${reason}; selected GPU${gpu.physicalIndex} samples: ${JSON.stringify(samples)}`);
     error.samples = samples;
     return error;
   };
@@ -231,23 +304,12 @@ export async function settlePostExitGpu(probe, { timeoutMs = 30_000, pollMs = 20
     let raw;
     try {
       raw = await probe(timeoutMs - (now() - started));
-      const fields = raw.trim().split(",").map((field) => field.trim());
-      const values = fields.map(Number);
-      if (fields.length !== 3 || fields.some((field) => !field)
-          || values.some((value) => !Number.isSafeInteger(value) || value < 0)
-          || values[1] > 100 || values[2] > 100 || !Number.isSafeInteger(values[0] * 1024 ** 2)) {
-        throw new Error("invalid physical GPU1 post-exit telemetry");
-      }
-      const sample = { elapsedMs: now() - started, usedBytes: values[0] * 1024 ** 2,
-        gpuUtilization: values[1], memoryUtilization: values[2] };
+      const sample = { ...parseReplayGpuSample(raw, new Date().toISOString(), gpu), elapsedMs: now() - started };
       samples.push(sample);
-      if (sample.gpuUtilization !== 0 || sample.memoryUtilization !== 0) stable = [];
-      else {
-        stable.push(sample);
-        if (Math.max(...stable.map((item) => item.usedBytes)) - Math.min(...stable.map((item) => item.usedBytes)) > 64 * 1024 ** 2) stable = [sample];
-        if (stable.length === 5 && now() - started <= timeoutMs) {
-          return { afterBytes: Math.max(...stable.map((item) => item.usedBytes)), samples, stableSamples: 5, elapsedMs: now() - started };
-        }
+      stable = idleWindow(stable, sample);
+      if (stable.length === 5 && now() - started <= timeoutMs) {
+        return { afterBytes: Math.max(...stable.map((item) => item.usedBytes)), samples, stableWindow: stable,
+          stableSamples: 5, elapsedMs: now() - started };
       }
     } catch (error) {
       samples.push({ elapsedMs: now() - started, raw, error: error.message });
@@ -256,13 +318,13 @@ export async function settlePostExitGpu(probe, { timeoutMs = 30_000, pollMs = 20
     const remaining = timeoutMs - (now() - started);
     if (remaining > 0) await sleep(Math.min(pollMs, remaining));
   }
-  throw fail(`physical GPU1 did not settle to five consecutive idle stable samples within ${timeoutMs}ms`);
+  throw fail(`physical GPU${gpu.physicalIndex} did not settle to five consecutive idle stable samples within ${timeoutMs}ms`);
 }
 
-export function admittedReplayEnv(env, { state, hub, workerId, port, parentPid }) {
+export function admittedReplayEnv(env, { state, hub, workerId, port, parentPid, gpu }) {
   const child = Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith("SCENEWORKS_")
     && !/TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/.test(key)));
-  return { ...child, CUDA_VISIBLE_DEVICES: "1", SCENEWORKS_GPU_ID: "1", SCENEWORKS_WORKER_CHILD: "1",
+  return { ...endpointGpuEnv(child, gpu), SCENEWORKS_WORKER_CHILD: "1",
     SCENEWORKS_PARENT_PID: String(parentPid), SCENEWORKS_WORKER_ID: workerId,
     SCENEWORKS_DATA_DIR: path.join(state, "data"), SCENEWORKS_CONFIG_DIR: path.join(state, "config"),
     SCENEWORKS_JOBS_DB_PATH: path.join(state, "data", "cache", "jobs.db"),
@@ -275,7 +337,7 @@ export function admittedReplayEnv(env, { state, hub, workerId, port, parentPid }
     HUGGINGFACE_HUB_CACHE: hub, HF_HUB_OFFLINE: "1", TRANSFORMERS_OFFLINE: "1" };
 }
 
-async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, row }) {
+async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, row, gpu, gpuPreflight }) {
   if (process.platform !== "win32") throw new Error("admitted replay requires the native Windows CUDA lane");
   const apiBinary = process.env.SDXL_REPLAY_API;
   if (!apiBinary || !path.isAbsolute(apiBinary)) throw new Error("SDXL_REPLAY_API must name the built native API/worker executable");
@@ -298,10 +360,11 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
     apiBinary: { path: apiBinary, sha256: await hashFile(apiBinary) },
     adapterBinary: { path: command[0], sha256: await hashFile(command[0]) },
     sourceRevision: (await run("git", ["rev-parse", "HEAD"])).stdout.trim(),
-    packagedEndpointSummary: summarySource, artifactInventory: inventory, workerId,
+    packagedEndpointSummary: summarySource, artifactInventory: inventory, workerId, selectedGpu: gpu, gpuPreflight,
     guardedAvailableGiB: 6, physicalEightGiBDeviceValidated: false,
     budgetSemantics: "SCENEWORKS_CUDA_VRAM_CAP_GB=6 caps available and total to six GiB on a larger physical GPU; this is not exact eight-total/six-free emulation",
-    telemetry: "sampled physical-GPU1 memory.used growth above a stable pre-request baseline; not a per-process allocator peak", cleanup: [] };
+    deviceMapping: "production SDXL uses default_device/new_cuda(0); the child CUDA_VISIBLE_DEVICES maps that logical device to selectedGpu (source contract, not worker UUID telemetry)",
+    telemetry: "sampled selected physical-GPU memory.used growth above a stable pre-request baseline; not a per-process allocator peak", cleanup: [] };
   const save = () => writeFile(path.join(workDir, "sdxl-cuda-admitted-replay.json"), JSON.stringify(receipt, null, 2) + "\n");
   const handles = [], children = []; let api, worker, sentinel, jobId, sampling = false, sampler;
   let interrupted = null; const abort = () => { interrupted = new Error("owned admitted replay interrupted"); };
@@ -326,26 +389,36 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
   };
   const wait = async (probe, seconds, label) => { const deadline = Date.now() + seconds * 1000; while (Date.now() < deadline) { alive(); const value = await probe(); if (value) return value; await delay(1000); } throw new Error(`${label} exceeded ${seconds}s`); };
   const smi = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe");
-  const gpuSample = async () => {
-    return parseReplayGpuSample((await run(smi, ["-i", "1", "--query-gpu=uuid,memory.used,memory.free,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"], { timeoutMs: 10_000 })).stdout);
+  const gpuRaw = async (remainingMs = 10_000) => (await run(smi,
+    ["-i", String(gpu.physicalIndex), `--query-gpu=${GPU_QUERY}`, "--format=csv,noheader,nounits"],
+    { env, timeoutMs: Math.min(5_000, remainingMs) })).stdout;
+  const gpuSample = async () => parseReplayGpuSample(await gpuRaw(), new Date().toISOString(), gpu);
+  const stableBaseline = async (label) => {
+    try {
+      const settled = await settlePostExitGpu(gpuRaw, { gpu });
+      receipt[`${label}Settling`] = settled;
+      return settled.stableWindow;
+    } catch (error) {
+      receipt[`${label}Settling`] = { status: "failed", error: error.message, samples: error.samples };
+      throw error;
+    }
   };
-  const stableBaseline = async () => { const samples = []; for (let index = 0; index < 5; index++) { const sample = await gpuSample(); if (sample.gpuUtilization || sample.memoryUtilization || sample.freeBytes < 16 * 1024 ** 3) throw new Error("physical GPU1 must be idle with real headroom for guarded replay"); samples.push(sample); await delay(200); } if (Math.max(...samples.map((item) => item.usedBytes)) - Math.min(...samples.map((item) => item.usedBytes)) > 64 * 1024 ** 2) throw new Error("GPU1 replay baseline is unstable"); return samples; };
   try {
-    receipt.preflightBaseline = await stableBaseline(); await save();
+    receipt.preflightBaseline = await stableBaseline("preflight"); await save();
     // This task-owned sentinel supplies the API's existing desktop parent-death graceful shutdown.
     sentinel = await launch(process.execPath, ["-e", 'process.stdin.resume();process.stdin.on("end",()=>process.exit(0));'], env, "api-parent");
-    const childEnv = admittedReplayEnv(env, { state, hub, workerId, port, parentPid: sentinel.pid });
+    const childEnv = admittedReplayEnv(env, { state, hub, workerId, port, parentPid: sentinel.pid, gpu });
     api = await launch(apiBinary, [], { ...childEnv, SCENEWORKS_RUN_UTILITY_INPROCESS: "1", SCENEWORKS_RUST_WORKER_GPU_ID: "cpu" }, "api");
     receipt.health = await wait(async () => { try { const health = await apiCall("GET", "/api/v1/health"); return health.status === "ok" && health.readiness?.status === "ready" && health; } catch { return false; } }, 180, "API readiness");
     worker = await launch(apiBinary, [], { ...childEnv, SCENEWORKS_WORKER_ONLY: "1" }, "worker");
     receipt.worker = await wait(async () => { const value = (await apiCall("GET", "/api/v1/workers")).find((item) => item.id === workerId); return value?.status === "idle" && value; }, 180, "owned CUDA worker registration");
-    if (receipt.worker.gpuId !== "1" || !receipt.worker.capabilities?.includes("image_generate")) throw new Error("owned worker did not register GPU1 image generation");
+    if (receipt.worker.gpuId !== String(gpu.physicalIndex) || !receipt.worker.capabilities?.includes("image_generate")) throw new Error("owned worker did not register selected GPU image generation");
     receipt.modelLibrary = await apiCall("GET", "/api/v1/model-library");
     const project = await apiCall("POST", "/api/v1/projects", { name: `SDXL issue 3197 admitted replay ${workerId}` }); receipt.project = project;
     const projectPath = await realpath(project.path); const relativeProject = path.relative(await realpath(state), projectPath);
     if (!relativeProject || relativeProject.startsWith("..") || path.isAbsolute(relativeProject)) throw new Error("API project escaped owned replay state");
     receipt.request = admittedReplayRequest(project.id);
-    receipt.requestBaseline = await stableBaseline();
+    receipt.requestBaseline = await stableBaseline("request");
     const baseline = Math.max(...receipt.requestBaseline.map((item) => item.usedBytes));
     receipt.samples = []; let samplerError;
     sampling = true; sampler = (async () => { try { while (sampling) { receipt.samples.push(await gpuSample()); await delay(200); } } catch (error) { samplerError = error; } })();
@@ -356,7 +429,7 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
     receipt.selection = admittedReplaySelection(await readFile(path.join(workDir, "worker.log"), "utf8"));
     receipt.selectionCoverage = assertAdmittedReplaySelection(receipt.selection);
     receipt.selectionSource = "complete emit_event payload flattened into worker.log by SceneworksJsonFormat";
-    if (!receipt.samples.some((sample) => sample.gpuUtilization > 0)) throw new Error("no physical GPU1 activity was sampled during the actual render");
+    if (!receipt.samples.some((sample) => sample.gpuUtilization > 0)) throw new Error("no selected physical GPU activity was sampled during the actual render");
     const peak = Math.max(...receipt.samples.map((sample) => sample.usedBytes));
     const observed = Math.max(0, peak - baseline);
     receipt.prediction = { predictedPeakBytes: receipt.selection.predictedPeakBytes, observedSampledGrowthBytes: observed,
@@ -400,10 +473,10 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
     }
     await Promise.all(handles.map((handle) => handle.close()));
     try {
-      receipt.postExitBaseline = await stableBaseline();
+      receipt.postExitBaseline = await stableBaseline("postExit");
       const before = Math.max(...(receipt.preflightBaseline ?? []).map((sample) => sample.usedBytes));
       const after = Math.max(...receipt.postExitBaseline.map((sample) => sample.usedBytes));
-      if (Number.isFinite(before) && after > before + 64 * 1024 ** 2) throw new Error("owned replay processes retained physical GPU1 residency after exit");
+      if (Number.isFinite(before) && after > before + 64 * 1024 ** 2) throw new Error("owned replay processes retained selected physical GPU residency after exit");
     } catch (error) { receipt.status = "failed"; receipt.error ??= error.message; }
     if ((await run("git", ["status", "--porcelain"])).stdout.trim()) { receipt.status = "failed"; receipt.error ??= "replay modified the source checkout"; }
     receipt.finishedAt = new Date().toISOString(); await save();
@@ -420,9 +493,6 @@ export async function main(argv = process.argv.slice(2)) {
   if (args.dryRun || args.list) throw new Error("endpoint capture is explicit execution only; use measure-memory-catalog.mjs --dry-run or --list for metadata");
   if (!args.adapter || !args.inferenceRepo || !args.workDir) throw new Error("--adapter, --inference-repo and --work-dir are required");
   if (args.backend && args.backend !== "candle") throw new Error("SDXL endpoints are CUDA only");
-  if (process.env.CUDA_VISIBLE_DEVICES !== "1" || process.env.SCENEWORKS_GPU_ID !== "1") {
-    throw new Error("both CUDA_VISIBLE_DEVICES=1 and SCENEWORKS_GPU_ID=1 are required");
-  }
   const workDir = path.resolve(args.workDir);
   await mkdir(workDir, { recursive: true });
   for (const repo of [ROOT, path.resolve(args.inferenceRepo)]) {
@@ -437,7 +507,7 @@ export async function main(argv = process.argv.slice(2)) {
   const row = rows[0];
   if (row?.status !== "runnable") throw new Error(`SDXL q4 cannot be captured: ${row?.status}: ${row?.reason}`);
   const inventory = await sdxlAssemblyInventory(row);
-  const env = { ...process.env, ...row.env,
+  const baseEnv = { ...process.env, ...row.env,
     SCENEWORKS_MEMORY_MODEL_BYTES: String(inventory.bytes), SCENEWORKS_MEMORY_MODEL_INVENTORY_SHA256: inventory.sha256 };
   const command = providerCommand(args.adapter);
   const sdxlCrate = path.join(args.inferenceRepo, "crates/media/candle-gen/candle-gen-sdxl");
@@ -453,22 +523,33 @@ export async function main(argv = process.argv.slice(2)) {
     sampler: /const DEFAULT_SAMPLER: &str = "([^"]+)";/.exec(pipelineSource)?.[1],
   };
   if (resolvedDefaults.steps !== 30 || resolvedDefaults.guidance !== 7 || !resolvedDefaults.sampler) throw new Error("cannot bind SDXL provider defaults at the pin");
+  const smi = process.platform === "win32"
+    ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe") : "/usr/bin/nvidia-smi";
+  let gpuPreflight;
+  try {
+    gpuPreflight = await selectCaptureGpu(async (remainingMs) => (await run(smi,
+      ["-i", "0,1", `--query-gpu=${GPU_QUERY}`, "--format=csv,noheader,nounits"],
+      { env: baseEnv, timeoutMs: Math.min(5_000, remainingMs) })).stdout);
+    await writeFile(path.join(workDir, "gpu-selection.json"), JSON.stringify({ status: "selected", ...gpuPreflight }, null, 2) + "\n");
+  } catch (error) {
+    await writeFile(path.join(workDir, "gpu-selection.json"), JSON.stringify({ status: "failed", error: error.message, samples: error.samples }, null, 2) + "\n");
+    throw error;
+  }
+  const gpu = gpuPreflight.selected;
+  const env = endpointGpuEnv(baseEnv, gpu);
   if (admittedReplay) {
-    await runAdmittedReplay({ args, workDir, env, pin, command, inventory, row });
+    await runAdmittedReplay({ args, workDir, env, pin, command, inventory, row, gpu, gpuPreflight });
     return;
   }
   const summary = { schemaVersion: 1, profile: "sdxl-cuda-endpoints", inferencePin: pin,
-    artifactInventory: inventory, stagedArtifacts: row.env, resolvedDefaults, physicalEightGiBDeviceValidated: false,
+    artifactInventory: inventory, stagedArtifacts: row.env, resolvedDefaults, selectedGpu: gpu, gpuPreflight, physicalEightGiBDeviceValidated: false,
     reserveBytes: 2 * 1024 ** 3, reserveIncludedInMeasuredPeaks: false,
     telemetry: "measured sampled physical-device growth under stable pre/post baseline; not a per-process allocator peak or mathematical upper bound",
     endpoints: [] };
-  const smi = process.platform === "win32"
-    ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "nvidia-smi.exe") : "/usr/bin/nvidia-smi";
-  const usedBytes = async () => {
-    const value = Number((await run(smi, ["-i", "1", "--query-gpu=memory.used", "--format=csv,noheader,nounits"], { env, timeoutMs: 30_000 })).stdout.trim());
-    if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid physical GPU1 cleanup telemetry");
-    return value * 1024 ** 2;
-  };
+  const gpuRaw = async (remainingMs = 10_000) => (await run(smi,
+    ["-i", String(gpu.physicalIndex), `--query-gpu=${GPU_QUERY}`, "--format=csv,noheader,nounits"],
+    { env, timeoutMs: Math.min(5_000, remainingMs) })).stdout;
+  const usedBytes = async () => parseReplayGpuSample(await gpuRaw(), new Date().toISOString(), gpu).usedBytes;
   for (const endpoint of ENDPOINTS) {
     let measurement;
     const outputPath = path.join(workDir, `${endpoint.name}.png`);
@@ -500,16 +581,14 @@ export async function main(argv = process.argv.slice(2)) {
           delete fragment.endpointMeasurement;
           let settled;
           try {
-            settled = await settlePostExitGpu(async (remainingMs) => (await run(smi,
-              ["-i", "1", "--query-gpu=memory.used,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"],
-              { env, timeoutMs: Math.min(5_000, remainingMs) })).stdout);
+            settled = await settlePostExitGpu(gpuRaw, { gpu });
           } catch (error) {
             await writeFile(path.join(workDir, `${endpoint.name}-settle.json`), JSON.stringify({ status: "failed", error: error.message, samples: error.samples }, null, 2) + "\n");
             throw error;
           }
           await writeFile(path.join(workDir, `${endpoint.name}-settle.json`), JSON.stringify({ status: "settled", ...settled }, null, 2) + "\n");
           measurement.cleanup = { beforeBytes, afterBytes: settled.afterBytes, toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true };
-          validateEndpoint(measurement, endpoint, pin);
+          validateEndpoint(measurement, endpoint, pin, gpu.uuid);
         }
         return JSON.stringify(fragment);
       },
@@ -522,7 +601,7 @@ export async function main(argv = process.argv.slice(2)) {
     const bundlePath = path.join(workDir, `${endpoint.name}-evidence.json`);
     const bundleBytes = JSON.stringify(bundle, null, 2) + "\n";
     const evidenceReference = endpointEvidenceReference(bundle, bundleBytes, {
-      inventorySha256: inventory.sha256, inferencePin: measurement.inferencePin, deviceUuid: measurement.deviceUuid,
+      inventorySha256: inventory.sha256, inferencePin: measurement.inferencePin, deviceUuid: gpu.uuid,
     });
     await writeFile(bundlePath, bundleBytes);
     summary.endpoints.push({ ...measurement, ...evidenceReference, planned, evidencePath: bundlePath });
