@@ -37,6 +37,18 @@ export function reuseCapacityBudget(bytes) {
   check(projectionBytes===R19_REUSE_CAPACITY.projectionBytes&&adapterBlobBytes===R19_REUSE_CAPACITY.adapterBlobBytes&&requiredFreeBytes===R19_REUSE_CAPACITY.requiredFreeBytes,'R19 staging arithmetic changed');
   return {...R19_REUSE_CAPACITY,projectionBytes,adapterBlobBytes,requiredFreeBytes,adapterFiles:adapters.map(item=>item.file),files};
 }
+// Historical metadata authenticates immutable package lengths, never a fresh native producer.
+export const FRESH_PACKAGE_PROJECTION_SHA256='2128eed007c64a1d1400db0f13ce67d2971e9bd99a19578f191a7b9473127922';
+export function freshCapacityBudget(files,editAdapterFiles) {
+  check(Array.isArray(files)&&files.length===43&&files.every(item=>item&&Object.keys(item).sort().join(',')==='byteLength,file,sha256'&&typeof item.file==='string'&&/^[a-f0-9]{64}$/.test(item.sha256??'')&&Number.isSafeInteger(item.byteLength)&&item.byteLength>0),'fresh CUDA requires exact43 sized sealed package entries');
+  const projectionSha256=sha(JSON.stringify(files.map(({file,sha256,byteLength})=>({byteLength,file,sha256}))));
+  check(projectionSha256===FRESH_PACKAGE_PROJECTION_SHA256,'fresh CUDA immutable package projection changed');
+  const adapters=files.filter(item=>/^hub\/models--chinoll--Moss-Image-Edit\/snapshots\/3be9c40037e1b89b17aa85ff6f8ee805872aa558\/adapter_(config\.json|model\.safetensors)$/.test(item.file));
+  check(Array.isArray(editAdapterFiles)&&JSON.stringify(editAdapterFiles.slice().sort())===JSON.stringify(adapters.map(item=>item.file).sort())&&adapters.length===2,'fresh CUDA requires exact two sealed adapters');
+  const projectionBytes=files.reduce((sum,item)=>sum+item.byteLength,0),adapterBlobBytes=adapters.reduce((sum,item)=>sum+item.byteLength,0),planningReserveBytes=R19_REUSE_CAPACITY.planningReserveBytes,requiredFreeBytes=projectionBytes+adapterBlobBytes+planningReserveBytes;
+  check(projectionBytes===R19_REUSE_CAPACITY.projectionBytes&&adapterBlobBytes===R19_REUSE_CAPACITY.adapterBlobBytes&&requiredFreeBytes===R19_REUSE_CAPACITY.requiredFreeBytes,'fresh CUDA staging arithmetic changed');
+  return {projectionSha256,packageCount:files.length,projectionBytes,adapterBlobBytes,planningReserveBytes,requiredFreeBytes};
+}
 export function hasReuseCapacity(observation,budget=R19_REUSE_CAPACITY) {
   check(observation?.drive==='D'&&['free','size'].every(key=>Number.isSafeInteger(observation[key])&&observation[key]>=0)&&observation.free<=observation.size,'actual D volume capacity required');
   return observation.free>=budget.requiredFreeBytes;
@@ -109,6 +121,15 @@ async function validateH47Invocation(env,io) {
   check(env.GITHUB_ACTIONS==='true'&&env.GITHUB_JOB==='windows-maintenance'&&env.MOSS_SOURCE_SHA===env.GITHUB_SHA&&env.MOSS_NATIVE_RUN_ID==='','H47 cleanup requires normal new-pair maintenance');
   const event=JSON.parse(await io.read(env.GITHUB_EVENT_PATH)),inputs=event.inputs??{},dispatch=inputs.moss_terminal?JSON.parse(inputs.moss_terminal):inputs;
   check(dispatch.phase==='execute'&&!(dispatch.native_run_id),'H47 cleanup requires ordinary fresh execute');
+}
+async function validateFreshInvocation(env,io) {
+  check(env.GITHUB_ACTIONS==='true'&&env.GITHUB_JOB==='windows-maintenance'&&env.MOSS_SOURCE_SHA===env.GITHUB_SHA&&env.MOSS_NATIVE_RUN_ID==='','fresh maintenance requires actual same-source Actions job without reuse');
+  const bytes=await io.read(env.GITHUB_EVENT_PATH);check(bytes.length<=65536,'bounded fresh maintenance dispatch required');
+  const inputs=JSON.parse(bytes).inputs??{},dispatch=inputs.moss_terminal?JSON.parse(inputs.moss_terminal):inputs;
+  const prior=['tooling_sha','product_sha','native_run_id','native_run_attempt','execution_run_id','review_run_id','review_artifact_id','mlx_run_id','mlx_run_attempt','mlx_artifact_id','mlx_tooling_sha','cuda_hf_run_id','cuda_hf_run_attempt','cuda_hf_artifact_id','original_inventory_path','original_inventory_sha256','retry_inventory_path','retry_inventory_sha256','retry_run_id','retry_artifact_id','mlx_candidate_id','mlx_source_sha','mlx_inference_sha'];
+  check(dispatch.phase==='execute'&&prior.every(key=>!dispatch[key])&&(!dispatch.execution_run_attempt||dispatch.execution_run_attempt==='1')&&dispatch.candidate_id===env.MOSS_CANDIDATE&&dispatch.bundle_manifest_sha256===env.MOSS_BUNDLE_SHA&&/^[a-f0-9]{64}$/.test(dispatch.bundle_manifest_sha256??'')&&[dispatch.bundle_run_id,dispatch.bundle_artifact_id].every(id=>/^[1-9][0-9]*$/.test(id??'')),'fresh maintenance requires ordinary sealed execute without prior evidence');
+  check(!env.MOSS_TOOLING_SHA&&['NATIVE_RUN_ATTEMPT','EXECUTION_RUN_ID','MLX_RUN_ID','MLX_ARTIFACT_ID','CUDA_HF_RUN_ID','CUDA_HF_ARTIFACT_ID'].every(key=>!env[`MOSS_${key}`]),'fresh maintenance environment contains prior evidence');
+  check((inputs.moss_terminal?inputs.ref:inputs.source_sha)===env.GITHUB_SHA&&inputs.inference_sha===env.MOSS_INFERENCE_SHA,'fresh maintenance dispatch source changed');
 }
 
 export async function observeH47Owner(io,runtime,metadata) {
@@ -263,6 +284,11 @@ export async function copyCacheExclusive(from,to) {
 }
 export async function maintain(env, io, {copyCache=true}={}) {
   const root = destination(env), target = path.join(root, 'target');
+  if(copyCache&&env.MOSS_MAINTENANCE_PHASE==='execute'&&!env.MOSS_NATIVE_RUN_ID) {
+    await validateFreshInvocation(env,io);
+    const receipt={version:1,kind:'sc-26752-fresh-maintenance-noop',currentRun:env.GITHUB_RUN_ID,currentSource:env.MOSS_SOURCE_SHA,currentInference:env.MOSS_INFERENCE_SHA,root,operations:[],cleanup:'not-requested-old-caches-retained',cache:'not-copied',capacity:'DEFERRED-to-fresh-CUDA-build-before-first-HF-copy'};
+    io.report({...receipt,stage:'fresh-noop'});return receipt; // No volume, old tree, process, prune or copy.
+  }
   const reuse=env.MOSS_NATIVE_RUN_ID&&env.MOSS_MAINTENANCE_PHASE!=='cuda-rebase'?await reuseInvocation(env,io):null;
   check(!reuse||copyCache,'native reuse cannot use reference-only maintenance');
   const receipt = { version: 1, kind: 'sc-26752-stopped-run-disk-recovery', currentRun: env.GITHUB_RUN_ID, currentSource: env.MOSS_SOURCE_SHA, ...(reuse?{reuse}:{}), before: await io.volume(), candidates: [], operations: [] };

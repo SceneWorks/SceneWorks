@@ -1136,3 +1136,16 @@ test('ordinary R19 reuse refreshes D capacity after browser provisioning before 
  assert.ok(main.indexOf('rehydrate.executionTooling=config.executionTooling')<main.indexOf('await rehydrateCudaPackages(rehydrate)'));
  assert.match(controller,/from '\.\/ci\/moss-owned-cache-maintenance.mjs'/);
 });
+
+// CI_IMPACT: assembled branch selection only; sized43 and live-capacity boundaries use inert IO.
+test('fresh CUDA alone requires sized sealed staging before install while Mac and historical transfer remain separate',async()=>{
+ const controller=await readFile(new URL('./moss-edit-terminal-actions.mjs',import.meta.url),'utf8');
+ const build=controller.slice(controller.indexOf('export async function buildBackend'),controller.indexOf('export async function buildCudaRebase'));
+ assert.match(build,/if\(config.reusedPrivateHf\) \{[\s\S]*await adoptStoppedCudaBuildPrivateHf[\s\S]*\} else if\(config.backend==='cuda'\)await isolateFreshCudaPackages\(config,sources\);\s*else await isolatePackages\(config,\{omitAdapter:config.installAdapter===true\}\)/);
+ assert.ok(build.indexOf("await command('cargo'")<build.indexOf('await isolateFreshCudaPackages'));
+ assert.ok(build.indexOf('await isolateFreshCudaPackages')<build.indexOf('stack=await startStack'));
+ const rehydrate=controller.slice(controller.indexOf('export async function rehydrateCudaPackages'),controller.indexOf('export async function prepareContinuationCudaPackages'));
+ assert.doesNotMatch(rehydrate,/isolateFreshCudaPackages|freshCapacityBudget/);
+ const runtime=runtimeConfig({candidateId:'fixture',sourceSha:'a'.repeat(40),inferenceSha:'b'.repeat(40),backends:{cuda:{hfHome:'/inert/shared',port:46123,installAdapter:true,editAdapterFiles:['adapter'],packageFiles:[{file:'adapter',sha256:'c'.repeat(64)}]}}},{sourceRoot:'/inert/source',inferenceRoot:'/inert/inference',root:'/inert/run',backend:'cuda',buildRoot:'/inert/build',bundleRoot:'/inert/bundle'});
+ assert.equal(runtime.packageFiles[0].byteLength,undefined); // Original R19 path/SHA schema remains valid for reuse.
+});

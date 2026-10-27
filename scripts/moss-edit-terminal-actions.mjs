@@ -17,7 +17,7 @@ import {reuseProducers,executionTooling,validateOrdinaryMlx,readOnlyStoppedPacka
 import * as protocolLibrary from './lib/moss-edit-terminal.mjs';
 import {captureControlledCudaQuality} from './lib/moss-controlled-cuda-quality.mjs';
 import {ordinaryExecutionCapture} from './lib/moss-edit-quality-amendment.mjs';
-import {H47_OWNER,reuseCapacityBudget,hasReuseCapacity,volume,inspectTree,validateTree} from './ci/moss-owned-cache-maintenance.mjs';
+import {H47_OWNER,reuseCapacityBudget,freshCapacityBudget,hasReuseCapacity,volume,inspectTree,validateTree} from './ci/moss-owned-cache-maintenance.mjs';
 
 import { sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, privateHfIntegrity, materializePrivateAdapter, exportMossEnvironment, cargoTarget, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 
@@ -393,6 +393,21 @@ export async function adapterRefusalState(config,name,specification) {
   }catch(error){if(moved)await restore();else await rmdir(backup);throw error;}
   return {observation:{candidateId:config.candidateId,file:specification.adapterFile,beforeSha256:expected.sha256,state:name,actualSha256:bytes?sha(bytes):null},restore};
 }
+export async function isolateFreshCudaPackages(config,sources,services={}) {
+  const env=services.env??process.env;
+  requireThat(config.backend==='cuda'&&!config.reusedExecution&&!config.reusedPrivateHf&&!config.executionTooling&&config.installAdapter===true,'fresh capacity requires ordinary CUDA without prior execution');
+  requireThat(env.GITHUB_ACTIONS==='true'&&env.GITHUB_REPOSITORY==='SceneWorks/SceneWorks'&&env.GITHUB_JOB==='build-native'&&/^[a-f0-9]{40}$/.test(env.GITHUB_SHA??'')&&env.GITHUB_SHA===config.sourceSha&&env.MOSS_INFERENCE_SHA===config.inferenceSha&&env.MOSS_CANDIDATE===config.candidateId&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')&&/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ATTEMPT??''),'fresh capacity requires actual same-source native build');
+  requireThat(sources.sceneworks?.head===config.sourceSha&&sources.inference?.head===config.inferenceSha&&[config.sourceSha,config.inferenceSha,sources.sceneworks.tree,sources.inference.tree].every(value=>/^[a-f0-9]{40}$/.test(value??'')),'fresh capacity source pair changed');
+  const root=win32.resolve(env.GITHUB_WORKSPACE??'', '..','moss-sc-26752',`moss-build-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}-cuda`);
+  requireThat(/^D:\\actions-runner(?:-[234])?\\_work\\SceneWorks\\SceneWorks$/i.test(env.GITHUB_WORKSPACE??'')&&config.sourceRoot===win32.resolve(env.GITHUB_WORKSPACE,'source')&&config.inferenceRoot===win32.resolve(env.GITHUB_WORKSPACE,'inference')&&config.root===root&&config.hfHome===win32.resolve(root,'hf'),'fresh capacity requires the actual confined D HF destination');
+  const budget=freshCapacityBudget(config.packageFiles,config.editAdapterFiles);
+  validateTree(await (services.inspect??inspectTree)(config.hfHome),config.hfHome);
+  const beforeCopy=await (services.volume??volume)(),admitted=hasReuseCapacity(beforeCopy,budget);
+  const receipt={...budget,operation:'fresh-build-D-capacity-before-first-HF-copy',sourceSha:config.sourceSha,inferenceSha:config.inferenceSha,sources,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT,root,hfHome:config.hfHome,target:win32.resolve(root,'target'),beforeCopy,admitted,planningReserveMeaning:'Planning reserve only; concurrent disk use can still cause ENOSPC'};
+  await (services.save??save)(win32.resolve(root,'fresh-capacity-before-copy.json'),receipt);
+  requireThat(admitted,'insufficient current D capacity before fresh private HF copy');
+  await (services.isolate??isolatePackages)(config,{omitAdapter:true});return receipt;
+}
 export async function buildBackend(config) {
   const sources=await sourceIdentity(config),out=resolve(config.buildRoot,config.backend);await mkdir(out,{recursive:true,mode:0o700});
   validatePackagePlan(config,JSON.parse(stripJsoncComments(await readFile(resolve(config.sourceRoot,'config/manifests/builtin.models.jsonc'),'utf8'))));
@@ -412,7 +427,8 @@ export async function buildBackend(config) {
     await adoptStoppedCudaBuildPrivateHf(config,artifactRoot,old,continuity,artifactIdentity);
     const receipt=await json(resolve(config.root,'cuda-rebase-hf-transfer.json'));
     requireThat(config.backend==='cuda'&&receipt.to===config.hfHome&&canonical(receipt.after.map(({file,sha256})=>({file,sha256})))===canonical(config.packageFiles.map(({file,sha256})=>({file,sha256}))),'corrected CUDA build lost authenticated installed package ownership');
-  } else await isolatePackages(config,{omitAdapter:config.installAdapter===true});
+  } else if(config.backend==='cuda')await isolateFreshCudaPackages(config,sources);
+  else await isolatePackages(config,{omitAdapter:config.installAdapter===true});
   let installation=null;
   if(config.reusedPrivateHf) {
     const from=resolve(config.reusedPrivateHf.artifactRoot,'evidence/external/raw-install-cuda'),to=resolve(out,'installation');

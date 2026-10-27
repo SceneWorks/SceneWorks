@@ -6,8 +6,10 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { win32 as path } from 'node:path';
-import { H47_OWNER, R19_REUSE_CAPACITY, reuseCapacityBudget, hasReuseCapacity, validateReuseMaintenance, H47_PROCESS_FILTER, validateH47Processes, validateH47Projection, h47SourceEntries, OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, hashMetadataFile, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
-import {isolateReusedCudaPackages} from './moss-edit-terminal-actions.mjs';
+import { H47_OWNER, R19_REUSE_CAPACITY, FRESH_PACKAGE_PROJECTION_SHA256, freshCapacityBudget, reuseCapacityBudget, hasReuseCapacity, validateReuseMaintenance, H47_PROCESS_FILTER, validateH47Processes, validateH47Projection, h47SourceEntries, OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, hashMetadataFile, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
+import {buildBackend,isolateReusedCudaPackages,isolateFreshCudaPackages,validatePackagePlan} from './moss-edit-terminal-actions.mjs';
+import {canonical,requireThat} from './lib/moss-edit-terminal.mjs';
+import {stripJsoncComments} from './lib/jsonc.mjs';
 const runtimes = await Promise.all([4, 5, 6, 10, 12, 13, 14, 15].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
 const env = { GITHUB_REPOSITORY: 'SceneWorks/SceneWorks', GITHUB_RUN_ID: '99999999999', GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKSPACE: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', MOSS_ROOT: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-99999999999-1-cuda', MOSS_SOURCE_SHA: 'a'.repeat(40), MOSS_INFERENCE_SHA: 'b'.repeat(40) };
 const state = binding => ({ id: Number(binding.run), run_attempt: 1, head_sha: binding.actionsSource ?? binding.source, status: 'completed', conclusion: 'failure' });
@@ -507,4 +509,77 @@ test('fresh pre-copy capacity binds native metadata/source and refuses disk drop
  await assert.rejects(()=>isolateReusedCudaPackages(config,inventory,{...services,inspect:async destination=>({...tree(destination),reparsePoints:1}),volume:async()=>assert.fail('reparse queried volume'),save:async()=>assert.fail('reparse saved receipt'),isolate:async()=>assert.fail('reparse copied')}),/reparse/);
  const changed=JSON.parse(bytes);changed.files[0].byteLength++;const forged=Buffer.from(JSON.stringify(changed,null,2)+'\n');const forgedInventory={...inventory,files:{packages:{sha256:createHash('sha256').update(forged).digest('hex'),byteLength:forged.length}}};
  await assert.rejects(()=>isolateReusedCudaPackages(config,forgedInventory,{...services,read:async()=>forged,isolate:async()=>assert.fail('forged metadata reached copy')}),/original R19 package metadata changed/);
+});
+
+// CI_IMPACT: tiny authenticated metadata and inert IO only; no Windows or learned execution.
+function freshMaintenanceFixture() {
+ const f=fixture(),dispatch={phase:'execute',candidate_id:'sc-26752-fixture-fresh',bundle_manifest_sha256:'e'.repeat(64),bundle_run_id:'90000000001',bundle_artifact_id:'90000000002'};
+ f.env={...env,GITHUB_ACTIONS:'true',GITHUB_JOB:'windows-maintenance',GITHUB_SHA:env.MOSS_SOURCE_SHA,GITHUB_EVENT_PATH:'inert-event.json',MOSS_MAINTENANCE_PHASE:'execute',MOSS_NATIVE_RUN_ID:'',MOSS_CANDIDATE:dispatch.candidate_id,MOSS_BUNDLE_SHA:dispatch.bundle_manifest_sha256};
+ f.inputs={ref:f.env.GITHUB_SHA,inference_sha:f.env.MOSS_INFERENCE_SHA,moss_terminal:JSON.stringify(dispatch)};
+ for(const key of ['volume','inspect','stopped','metadata','entries','processes','hash','remove','copy','ensure','write'])f.io[key]=async()=>assert.fail(`fresh no-op must not call ${key}`);
+ f.io.read=async file=>{assert.equal(file,f.env.GITHUB_EVENT_PATH);return Buffer.from(JSON.stringify({inputs:f.inputs}));};
+ return {...f,dispatch};
+}
+test('fresh maintenance retains every old cache without observing capacity, old metadata or processes',async()=>{
+ for(const free of [0,R19_REUSE_CAPACITY.requiredFreeBytes]) {
+  const f=freshMaintenanceFixture();f.io.volume=async()=>assert.fail(`must not observe ${free} free bytes`);
+  const receipt=await maintain(f.env,f.io);
+  assert.deepEqual(receipt.operations,[]);assert.equal(receipt.kind,'sc-26752-fresh-maintenance-noop');assert.equal(receipt.cleanup,'not-requested-old-caches-retained');assert.equal(receipt.cache,'not-copied');
+  assert.equal(receipt.capacity,'DEFERRED-to-fresh-CUDA-build-before-first-HF-copy');assert.equal(f.reports[0].stage,'fresh-noop');assert.equal(receipt.before,undefined);assert.deepEqual(f.mutations,[]);assert.deepEqual(f.writes,[]);
+ }
+ const direct=freshMaintenanceFixture();direct.inputs={...direct.dispatch,source_sha:direct.env.GITHUB_SHA,inference_sha:direct.env.MOSS_INFERENCE_SHA,execution_run_attempt:'1'};
+ assert.equal((await maintain(direct.env,direct.io)).kind,'sc-26752-fresh-maintenance-noop');
+});
+test('fresh no-op refuses mismatched Actions source, job, phase, bundle and prior producer identities',async()=>{
+ for(const patch of [{GITHUB_ACTIONS:'false'},{GITHUB_JOB:'build-native'},{GITHUB_SHA:'f'.repeat(40)},{MOSS_NATIVE_RUN_ID:'40349954885'},{MOSS_TOOLING_SHA:'f'.repeat(40)},{MOSS_NATIVE_RUN_ATTEMPT:'1'},{MOSS_EXECUTION_RUN_ID:'1'},{MOSS_MLX_ARTIFACT_ID:'1'},{MOSS_CUDA_HF_RUN_ID:'1'},{MOSS_ROOT:'D:\\unowned\\root'}]) {
+  const f=freshMaintenanceFixture();Object.assign(f.env,patch);await assert.rejects(()=>maintain(f.env,f.io));assert.deepEqual(f.mutations,[]);
+ }
+ for(const patch of [{phase:'verify'},{candidate_id:'other'},{bundle_manifest_sha256:'0'.repeat(64)},{bundle_run_id:'not-an-id'},{native_run_id:'1'},{mlx_run_id:'1'},{cuda_hf_run_id:'1'},{product_sha:'f'.repeat(40)},{execution_run_attempt:'2'}]) {
+  const f=freshMaintenanceFixture();f.inputs.moss_terminal=JSON.stringify({...f.dispatch,...patch});await assert.rejects(()=>maintain(f.env,f.io),/ordinary sealed execute/);
+ }
+ for(const patch of [{ref:'f'.repeat(40)},{inference_sha:'f'.repeat(40)}]) {const f=freshMaintenanceFixture();Object.assign(f.inputs,patch);await assert.rejects(()=>maintain(f.env,f.io),/dispatch source changed/);}
+});
+function freshBuildFixture() {
+ const f=freshMaintenanceFixture(),buildEnv={...f.env,GITHUB_JOB:'build-native'};
+ const packageFiles=JSON.parse(originalR19Packages()).files,root=env.MOSS_ROOT;
+ const config={backend:'cuda',installAdapter:true,candidateId:f.env.MOSS_CANDIDATE,sourceSha:env.MOSS_SOURCE_SHA,inferenceSha:env.MOSS_INFERENCE_SHA,sourceRoot:path.resolve(env.GITHUB_WORKSPACE,'source'),inferenceRoot:path.resolve(env.GITHUB_WORKSPACE,'inference'),root,hfHome:path.resolve(root,'hf'),packageFiles,editAdapterFiles:packageFiles.filter(item=>/adapter_(config.json|model.safetensors)$/.test(item.file)).map(item=>item.file)};
+ const sources={sceneworks:{head:config.sourceSha,tree:'c'.repeat(40)},inference:{head:config.inferenceSha,tree:'d'.repeat(40)}};
+ const events=[],receipts=[];
+ const services={env:buildEnv,inspect:async destination=>{events.push('confined-hf');assert.equal(destination,config.hfHome);return tree(destination,false);},volume:async()=>{events.push('fresh-volume');return {drive:'D',free:R19_REUSE_CAPACITY.requiredFreeBytes,size:1024**4};},save:async(file,receipt)=>{events.push('receipt');assert.equal(file,path.resolve(config.root,'fresh-capacity-before-copy.json'));receipts.push(receipt);},isolate:async(value,options)=>{events.push('first-copy');assert.equal(value,config);assert.deepEqual(options,{omitAdapter:true});}};
+ return {config,sources,services,events,receipts};
+}
+test('fresh sealed43 package budget includes both adapter duplicates, refuses all closure changes',()=>{
+ const {config}=freshBuildFixture(),budget=freshCapacityBudget(config.packageFiles,config.editAdapterFiles);
+ assert.equal(budget.projectionSha256,FRESH_PACKAGE_PROJECTION_SHA256);assert.equal(budget.packageCount,43);assert.equal(budget.projectionBytes,59241637664);assert.equal(budget.adapterBlobBytes,297435928);assert.equal(budget.requiredFreeBytes,63834040888);
+ for(const mutate of [x=>delete x[0].byteLength,x=>x[0].byteLength++,x=>x[0].byteLength=Infinity,x=>x[0].sha256='0'.repeat(64),x=>x[0].file+='bad',x=>x.pop(),x=>x[0]=x[1],x=>x.reverse(),x=>x[0].unexpected=true]) {
+  const files=structuredClone(config.packageFiles);mutate(files);assert.throws(()=>freshCapacityBudget(files,config.editAdapterFiles));
+ }
+ assert.throws(()=>freshCapacityBudget(config.packageFiles,config.editAdapterFiles.slice(1)),/exact two sealed adapters/);
+});
+test('fresh CUDA checks current source and confined D volume, records refusal before any weight copy',async()=>{
+ const f=freshBuildFixture(),receipt=await isolateFreshCudaPackages(f.config,f.sources,f.services);
+ assert.deepEqual(f.events,['confined-hf','fresh-volume','receipt','first-copy']);assert.equal(receipt.admitted,true);assert.equal(receipt.sourceSha,f.config.sourceSha);assert.equal(receipt.inferenceSha,f.config.inferenceSha);assert.deepEqual(receipt.sources,f.sources);assert.equal(receipt.runId,env.GITHUB_RUN_ID);assert.equal(receipt.target,path.resolve(f.config.root,'target'));assert.equal(receipt.packagesSha256,undefined); // Never relabel the historical binary producer.
+ const low=freshBuildFixture();low.services.volume=async()=>({drive:'D',free:R19_REUSE_CAPACITY.requiredFreeBytes-1,size:1024**4});low.services.isolate=async()=>assert.fail('low capacity copied weights');
+ await assert.rejects(()=>isolateFreshCudaPackages(low.config,low.sources,low.services),/insufficient current D capacity/);assert.equal(low.receipts[0].admitted,false);assert.deepEqual(low.events,['confined-hf','receipt']);
+ for(const mutate of [x=>x.packageFiles[0].byteLength++,x=>delete x.packageFiles[0].byteLength,x=>x.editAdapterFiles.pop(),x=>x.sourceSha='f'.repeat(40),x=>x.inferenceSha='f'.repeat(40),x=>x.reusedExecution={},x=>x.reusedPrivateHf={},x=>x.backend='mlx',x=>x.installAdapter=false,x=>x.root='E:\\other',x=>x.hfHome='E:\\other\\hf',x=>x.root='\\\\server\\share\\hf',x=>x.root=path.join(x.root,'..','unowned'),x=>x.sourceRoot='D:\\other']) {
+  const invalid=freshBuildFixture();mutate(invalid.config);await assert.rejects(()=>isolateFreshCudaPackages(invalid.config,invalid.sources,invalid.services));assert.deepEqual(invalid.events,[]);
+ }
+ for(const patch of [{GITHUB_JOB:'execute-cuda'},{GITHUB_SHA:'f'.repeat(40)},{GITHUB_RUN_ATTEMPT:'0'},{GITHUB_WORKSPACE:'E:\\other'},{MOSS_INFERENCE_SHA:'f'.repeat(40)}]) {
+  const invalid=freshBuildFixture();Object.assign(invalid.services.env,patch);await assert.rejects(()=>isolateFreshCudaPackages(invalid.config,invalid.sources,invalid.services));assert.deepEqual(invalid.events,[]);
+ }
+ const wrongSource=freshBuildFixture();wrongSource.sources.inference.head='f'.repeat(40);await assert.rejects(()=>isolateFreshCudaPackages(wrongSource.config,wrongSource.sources,wrongSource.services));assert.deepEqual(wrongSource.events,[]);
+ const reparse=freshBuildFixture();reparse.services.inspect=async destination=>({...tree(destination,false),reparsePoints:1});await assert.rejects(()=>isolateFreshCudaPackages(reparse.config,reparse.sources,reparse.services),/reparse/);assert.deepEqual(reparse.events,[]);
+});
+test('assembled fresh build consumes browser/web/Cargo space before fresh admission and first weight copy',async()=>{
+ const manifest=await readFile(new URL('../config/manifests/builtin.models.jsonc',import.meta.url),'utf8');
+ for(const admitted of [false,true]) {
+  const f=freshBuildFixture(),events=[];f.config.buildRoot=path.resolve(f.config.root,'builds');
+  const guardServices={...f.services,inspect:async destination=>{events.push('inspect-hf');return tree(destination,false);},volume:async()=>{events.push('volume-after-cargo');return {drive:'D',free:R19_REUSE_CAPACITY.requiredFreeBytes-(admitted?0:1),size:1024**4};},save:async()=>events.push('capacity-receipt'),isolate:async()=>{events.push('first-weight-copy');throw Error('INERT_STOP_BEFORE_INSTALLER');}};
+  // Execute the actual exported function body with inert platform dependencies. No command,
+  // filesystem copy, installer or model can execute through this fixture.
+  const dependencies={sourceIdentity:async()=>f.sources,resolve:path.resolve,mkdir:async()=>{},validatePackagePlan,stripJsoncComments,readFile:async()=>manifest,provisionBrowser:async()=>events.push('browser'),cargoTarget:()=>path.resolve(f.config.root,'target'),process:{env:{}},npmCommand:async args=>events.push(args.includes('ci')?'web-ci':'web-build'),command:async(name,args)=>{assert.equal(name,'cargo');assert.deepEqual(args,['build','--release','--locked','-p','sceneworks-rust-api','--bin','sceneworks-rust-api','--features','embed-web,backend-candle']);events.push('cargo');},requireThat,canonical,cp:async()=>events.push('retain-binary'),save:async()=>{},filesUnder:async()=>[],isolateFreshCudaPackages:(config,sources)=>isolateFreshCudaPackages(config,sources,guardServices),isolatePackages:async()=>assert.fail('fresh CUDA skipped capacity check')};
+  const actualBuild=new Function(...Object.keys(dependencies),`return (${buildBackend.toString()})`)(...Object.values(dependencies));
+  await assert.rejects(()=>actualBuild(f.config),admitted?/INERT_STOP_BEFORE_INSTALLER/:/insufficient current D capacity/);
+  assert.deepEqual(events,['browser','web-ci','web-build','cargo','retain-binary','inspect-hf','volume-after-cargo','capacity-receipt',...(admitted?['first-weight-copy']:[])]);
+ }
 });
