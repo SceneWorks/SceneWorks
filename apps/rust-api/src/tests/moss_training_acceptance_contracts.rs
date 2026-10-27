@@ -454,6 +454,52 @@ fn training_library_resolves_declared_final_file_by_filesystem_identity() {
     }
 }
 
+// CI_IMPACT: JSON descriptors/provider evidence only; no model or tensor execution.
+#[test]
+fn custom_adapter_witness_requires_exact_provider_identity_and_complete_apply_report() {
+    use super::moss_training_acceptance::require_custom_adapter_application;
+    let spec =
+        gen_core::AdapterSpec::new("custom.safetensors".into(), 1., gen_core::AdapterKind::Lora);
+    let sha = "ab".repeat(32);
+    let row = serde_json::json!({"id":"custom","path":"custom.safetensors","sha256":sha,
+        "scale":1.,"kind":"lora","applied":252,"skipped":[]});
+    let raw = serde_json::json!({"adapterApply":[row],"mossImageExecutionReport":{
+        "adapter_reports":[{"adapter_path":"accelerator.safetensors","applied":252,"skipped":[]}]}});
+    require_custom_adapter_application(&raw, "custom", &spec, &sha).unwrap();
+    assert!(require_custom_adapter_application(
+        &serde_json::json!({"mossImageExecutionReport":raw["mossImageExecutionReport"]}),
+        "custom",
+        &spec,
+        &sha
+    )
+    .is_err());
+    for (key, value) in [
+        ("id", serde_json::json!("accelerator")),
+        ("path", serde_json::json!("wrong.safetensors")),
+        ("sha256", serde_json::json!("00".repeat(32))),
+        ("scale", serde_json::json!(0.)),
+        ("kind", serde_json::json!("lokr")),
+        ("applied", serde_json::json!(0)),
+        ("applied", serde_json::Value::Null),
+        ("skipped", serde_json::json!(["projection"])),
+    ] {
+        let mut invalid = raw.clone();
+        invalid["adapterApply"][0][key] = value;
+        assert!(
+            require_custom_adapter_application(&invalid, "custom", &spec, &sha).is_err(),
+            "{key}: {invalid}"
+        );
+    }
+    let mut truncated = raw.clone();
+    truncated["adapterApply"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("skipped");
+    assert!(require_custom_adapter_application(&truncated, "custom", &spec, &sha).is_err());
+    let duplicate = serde_json::json!({"adapterApply":[row,row]});
+    assert!(require_custom_adapter_application(&duplicate, "custom", &spec, &sha).is_err());
+}
+
 // CI_IMPACT: one bounded CPU-only filesystem/catalog/API dispatcher guard before model admission.
 // No loader/tensor/GPU execution, downloads, new workflow or extra campaign command.
 #[test]
@@ -480,6 +526,7 @@ async fn pre_model_library_and_dispatch_cpu_contract() {
     use super::support::*;
     use sceneworks_worker::test_support as native;
     training_library_resolves_declared_final_file_by_filesystem_identity();
+    custom_adapter_witness_requires_exact_provider_identity_and_complete_apply_report();
     let (dispatcher_bytes, wrapper_bytes) = native::acceptance_utility_future_sizes();
     let temp = tempfile::tempdir().unwrap();
     let settings = test_settings(&temp);

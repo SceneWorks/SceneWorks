@@ -1486,6 +1486,34 @@ async fn training_library_adapter(
     Ok(entry)
 }
 
+/// The sealed MOSS execution report attests the DMD stack, not user adapters.
+/// Require the actual provider apply report joined to this exact selected custom file.
+pub(super) fn require_custom_adapter_application(
+    raw: &Value,
+    id: &str,
+    spec: &gen_core::AdapterSpec,
+    sha256: &str,
+) -> Result<()> {
+    let rows = raw["adapterApply"]
+        .as_array()
+        .ok_or("custom adapterApply evidence missing")?;
+    let selected: Vec<_> = rows.iter().filter(|row| row["id"] == id).collect();
+    require(
+        selected.len() == 1,
+        "custom adapterApply identity missing or duplicated",
+    )?;
+    let row = selected[0];
+    let kind = match spec.kind {
+        gen_core::AdapterKind::Lora => "lora",
+        gen_core::AdapterKind::Lokr => "lokr",
+    };
+    require(row["path"].as_str().is_some_and(|path| Path::new(path) == spec.path)
+        && row["sha256"] == sha256 && row["scale"].as_f64() == Some(f64::from(spec.scale))
+        && row["kind"] == kind && row["applied"].as_u64().is_some_and(|n| n > 0)
+        && row["skipped"].as_array().is_some_and(|skipped| skipped.is_empty()),
+        format!("selected CUSTOM library adapter {id} lacks exact successful provider application evidence"))
+}
+
 async fn generate(
     case: &mut Case,
     app: &axum::Router,
@@ -1595,7 +1623,12 @@ async fn generate(
                 .iter()
                 .find(|s| f64::from(s.scale) == strength)
                 .ok_or("actual production selection lost requested adapter strength")?;
-            require(data.adapter_reports.iter().any(|r|r.adapter_path.file_name()==spec.path.file_name() && r.applied>0 && r.skipped.is_empty()),format!("selected CUSTOM library adapter {} was not applied (an accelerator report is not a custom-adapter witness)",entry["id"]))?;
+            require_custom_adapter_application(
+                &asset["recipe"]["rawAdapterSettings"],
+                text(entry, "id")?,
+                spec,
+                &file_sha(&spec.path)?,
+            )?;
         } else {
             require(
                 selected.specs().iter().all(|s| s.scale == 0.0),

@@ -131,6 +131,7 @@ fn moss_pin_spec(
 fn moss_render(
     generator: &dyn Generator,
     request: &GenerationRequest,
+    adapter_identities: &[lane_controls::AdapterIdentity],
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(Vec<(i64, Image)>, JsonObject)> {
     let output = generator
@@ -164,7 +165,15 @@ fn moss_render(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    let mut facts = JsonObject::new();
+    // The sealed MOSS receipt records the published DMD stack. Custom adapters
+    // use the same provider-report/selected-identity join as the generic image lane.
+    let mut facts = lane_controls::image_facts(
+        &[],
+        adapter_identities,
+        &generator.adapter_apply_reports(),
+        None,
+    )
+    .unwrap_or_default();
     facts.insert(
         sceneworks_core::moss_image::REPORT_KEY.into(),
         serde_json::to_value(receipt).map_err(|e| WorkerError::Engine(e.to_string()))?,
@@ -390,6 +399,8 @@ async fn generate_moss_stream_using(
         spec,
         peak,
     } = prepared?;
+    let adapter_identities =
+        lane_controls::adapter_identities(api, settings, job, request, &spec.adapters).await;
     let settings_owned = settings.clone();
     let cold_settings = settings_owned.clone();
     let job_request = request.clone();
@@ -442,7 +453,8 @@ async fn generate_moss_stream_using(
                     let seed = resolve_seed(&job_request, index);
                     native.seed = Some(seed as u64);
                     let mut progress = |p| send_gen_progress(&tx, index, p);
-                    let (images, facts) = moss_render(generator, &native, &mut progress)?;
+                    let (images, facts) =
+                        moss_render(generator, &native, &adapter_identities, &mut progress)?;
                     if images.len() != 1 {
                         return Err(WorkerError::Engine(
                             "MOSS single-image output count mismatch".into(),
@@ -464,7 +476,8 @@ async fn generate_moss_stream_using(
                 native.seed = Some(seed as u64);
                 let mut progress = |p| send_gen_progress(&tx, 0, p);
                 native.preview = preview_sink_for(&tx, 0);
-                let (images, facts) = moss_render(generator, &native, &mut progress)?;
+                let (images, facts) =
+                    moss_render(generator, &native, &adapter_identities, &mut progress)?;
                 if images.len() != count {
                     return Err(WorkerError::Engine(
                         "MOSS batch output count mismatch".into(),
@@ -1033,6 +1046,7 @@ mod moss_consumer_tests {
         cancel: Cell<bool>,
         reads: Cell<usize>,
         owned_weight_bytes: Cell<u64>,
+        adapter_reports: RefCell<Vec<gen_core::AdapterApplyReport>>,
     }
     impl Probe {
         fn new() -> Self {
@@ -1053,6 +1067,7 @@ mod moss_consumer_tests {
                 cancel: Cell::new(false),
                 reads: Cell::new(0),
                 owned_weight_bytes: Cell::new(0),
+                adapter_reports: RefCell::new(vec![]),
             }
         }
     }
@@ -1065,6 +1080,9 @@ mod moss_consumer_tests {
         }
         fn moss_image_owned_weight_bytes(&self) -> Option<u64> {
             Some(self.owned_weight_bytes.get())
+        }
+        fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
+            self.adapter_reports.borrow().clone()
         }
         fn moss_image_execution_report(&self) -> Option<MossImageExecutionReport> {
             self.reads.set(self.reads.get() + 1);
@@ -1104,7 +1122,7 @@ mod moss_consumer_tests {
             ..Default::default()
         };
         let mut progress = 0;
-        let (images, facts) = moss_render(&probe, &req, &mut |_| progress += 1).unwrap();
+        let (images, facts) = moss_render(&probe, &req, &[], &mut |_| progress += 1).unwrap();
         assert_eq!(
             images[0].0, 173,
             "provider's actual seed, not requested seed"
@@ -1115,10 +1133,56 @@ mod moss_consumer_tests {
         );
         assert_eq!(progress, 1);
         probe.failure.set(true);
-        assert!(moss_render(&probe, &req, &mut |_| {}).is_err());
+        assert!(moss_render(&probe, &req, &[], &mut |_| {}).is_err());
         assert_eq!(probe.reads.get(), 1);
         assert!(probe.report.borrow().is_none());
     }
+    // CI_IMPACT: literal pixels, metadata and provider reports only; no model/tensor execution.
+    #[test]
+    fn moss_custom_application_reports_join_selected_identity_into_image_facts() {
+        let probe = Probe::new();
+        let custom_path = PathBuf::from("custom.safetensors");
+        *probe.adapter_reports.borrow_mut() = vec![gen_core::AdapterApplyReport {
+            adapter_path: custom_path.clone(),
+            applied: 252,
+            skipped: vec![],
+        }];
+        let identity = lane_controls::AdapterIdentity {
+            id: Some("selected-custom".into()),
+            path: custom_path,
+            sha256: Some("ab".repeat(32)),
+            scale: 1.,
+            kind: gen_core::AdapterKind::Lokr,
+        };
+        let req = GenerationRequest {
+            width: 16,
+            height: 16,
+            ..Default::default()
+        };
+        let (_, facts) =
+            moss_render(&probe, &req, std::slice::from_ref(&identity), &mut |_| {}).unwrap();
+        let applied = &facts[lane_controls::ADAPTER_APPLY_KEY][0];
+        assert_eq!(applied["id"], "selected-custom");
+        assert_eq!(applied["path"], "custom.safetensors");
+        assert_eq!(applied["sha256"], "ab".repeat(32));
+        assert_eq!(applied["scale"], 1.);
+        assert_eq!(applied["kind"], "lokr");
+        assert_eq!(applied["applied"], 252);
+        assert_eq!(applied["skipped"], json!([]));
+        assert!(
+            facts[sceneworks_core::moss_image::REPORT_KEY]["adapter_reports"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let wrong = lane_controls::AdapterIdentity {
+            path: PathBuf::from("other.safetensors"),
+            ..identity
+        };
+        let (_, facts) = moss_render(&probe, &req, &[wrong], &mut |_| {}).unwrap();
+        assert!(facts[lane_controls::ADAPTER_APPLY_KEY][0]["applied"].is_null());
+    }
+
     #[test]
     fn cancellation_after_output_cannot_publish_a_previous_or_current_receipt() {
         let probe = Probe::new();
@@ -1129,7 +1193,7 @@ mod moss_consumer_tests {
             ..Default::default()
         };
         assert!(matches!(
-            moss_render(&probe, &req, &mut |_| {}),
+            moss_render(&probe, &req, &[], &mut |_| {}),
             Err(WorkerError::Canceled(_))
         ));
         assert_eq!(probe.reads.get(), 0);

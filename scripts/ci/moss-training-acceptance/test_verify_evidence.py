@@ -67,6 +67,69 @@ class StaticContractTests(unittest.TestCase):
         self.assertEqual(point["prepared"]["mask"]["sha256"], "a" * 64)
         self.assertNotIn("packageId", point["prepared"])
 
+    def application_fixture(self, name="application", dmd=False):
+        # SYNTHETIC JSON ONLY: direct helper inputs, never promoted campaign evidence.
+        root = self.root / name
+        root.mkdir()
+        ctx = verifier._normalizer._Context(root)
+        sha = "a" * 64
+        parent, method = ("sft", "lokr") if dmd else ("base", "lora")
+        model = f"moss_image_{parent}"
+        report = {"adapter_reports": [{"adapter_path":"accelerator.safetensors","applied":252,"skipped":[]}] if dmd else []}
+        row = {"id":"custom", "path":"selected.safetensors", "sha256":sha,
+               "scale":1.0, "kind":method, "applied":252, "skipped":[]}
+        job = {"id":"image-job", "type":"image_generate", "status":"completed",
+               "payload":{"model":model,"loras":[{"id":"custom","weight":1.0,
+                          "baseModel":model,"networkType":method}]},
+               "result":{"assets":[{"recipe":{"model":model,"rawAdapterSettings":{
+                   "mossImageExecutionReport":report,"adapterApply":[row]}}}]}}
+        preload = {"jobId":"image-job", "error":None, "resolvedCapBytes":100,
+                   "actualSelectedHeaderDemand":{"requiredBytes":50,"adapters":[{
+                       "path":"selected.safetensors","sha256":sha,"scale":1.0}]}}
+        raw = {"caseId":f"cuda/{parent}/{method}","raw":{"devicePreflight":{"resolvedCapBytes":100},
+               "imagePreloads":{"selected":ctx.put("preload.json",preload)},
+               "images":{"selected":{"executionReceipt":ctx.put("execution.json",report),
+                                         "jobReceipt":ctx.put("job.json",job)}}}}
+        return ctx, raw, job, sha
+
+    def test_custom_application_uses_authenticated_provider_join_separate_from_dmd(self):
+        for dmd in (False, True):
+            ctx, raw, _, sha = self.application_fixture(str(dmd), dmd)
+            application, _ = verifier._normalizer._application(ctx, raw, "selected", sha)
+            self.assertEqual(application["appliedCount"], 252)
+            self.assertEqual(application["receipt"], raw["raw"]["images"]["selected"]["jobReceipt"])
+
+    def test_custom_application_rejects_dmd_only_wrong_join_and_incomplete_reports(self):
+        changes = [("id","accelerator"),("path","wrong.safetensors"),("sha256","b"*64),
+                   ("scale",0.0),("scale",True),("kind","lokr"),("applied",0),("applied",True),
+                   ("skipped",["projection"]),("skipped",None)]
+        for index, (key, value) in enumerate(changes):
+            ctx, raw, job, sha = self.application_fixture(str(index))
+            job["result"]["assets"][0]["recipe"]["rawAdapterSettings"]["adapterApply"][0][key] = value
+            raw["raw"]["images"]["selected"]["jobReceipt"] = ctx.put("changed.json",job)
+            with self.assertRaises(verifier._normalizer.NormalizationError):
+                verifier._normalizer._application(ctx,raw,"selected",sha)
+        for variant in ("dmd-only", "duplicate", "truncated", "wrong-job", "wrong-payload", "wrong-sealed"):
+            ctx, raw, job, sha = self.application_fixture(variant,True)
+            facts = job["result"]["assets"][0]["recipe"]["rawAdapterSettings"]
+            if variant == "dmd-only": del facts["adapterApply"]
+            elif variant == "duplicate": facts["adapterApply"] *= 2
+            elif variant == "truncated": del facts["adapterApply"][0]["skipped"]
+            elif variant == "wrong-job": job["id"] = "other"
+            elif variant == "wrong-payload": job["payload"]["loras"][0]["id"] = "other"
+            else: facts["mossImageExecutionReport"] = {"changed":True}
+            raw["raw"]["images"]["selected"]["jobReceipt"] = ctx.put("changed.json",job)
+            with self.assertRaises(verifier._normalizer.NormalizationError):
+                verifier._normalizer._application(ctx,raw,"selected",sha)
+
+    def test_custom_application_still_rejects_tampered_raw_job_hash(self):
+        ctx, raw, job, sha = self.application_fixture()
+        reference = raw["raw"]["images"]["selected"]["jobReceipt"]
+        job["status"] = "failed"
+        (ctx.root / reference["path"]).write_text(json.dumps(job))
+        with self.assertRaisesRegex(verifier._normalizer.NormalizationError, "artifact bytes changed"):
+            verifier._normalizer._application(ctx,raw,"selected",sha)
+
     def test_normalizer_rejects_missing_or_extra_prepared_tensor_population(self):
         for name in ("missing", "extra"):
             point = optional_diagnostic_fixture()["prepared_evaluation"]["before"]

@@ -514,16 +514,37 @@ def _application(ctx, raw, role, adapter_sha):
             == raw["raw"]["devicePreflight"]["resolvedCapBytes"], "actual generation exceeded frozen cap")
     adapters = [value for value in actual["adapters"] if value["sha256"] == adapter_sha and value["scale"] == 1.0]
     require(len(adapters) == 1, "exact trained custom adapter not present in actual selected preload")
-    report = ctx.read(raw["raw"]["images"][role]["executionReceipt"])
-    basename = _basename(adapters[0]["path"])
-    applied = [value for value in report["adapter_reports"] if _basename(value["adapter_path"]) == basename]
-    require(len(applied) == 1 and applied[0]["applied"] > 0 and not applied[0]["skipped"],
-            "actual CUSTOM adapter installation missing; a DMD-only report does not count")
     _, parent, method = raw["caseId"].split("/")
+    image = raw["raw"]["images"][role]
+    report = ctx.read(image["executionReceipt"])
+    job = ctx.read(image["jobReceipt"])
+    model = f"moss_image_{parent}"
+    require(job["type"] == "image_generate" and job["status"] == "completed"
+            and job["payload"]["model"] == model and job["id"] == preload["jobId"],
+            "custom application job/preload identity differs")
+    selected = [value for value in job["payload"]["loras"]
+                if type(value.get("weight")) in (int, float) and value["weight"] == 1.0
+                and value.get("baseModel") == model
+                and value.get("networkType") == method]
+    require(len(selected) == 1, "exact custom adapter selection missing from completed payload")
+    assets = job["result"]["assets"]
+    require(len(assets) == 1 and assets[0]["recipe"]["model"] == model,
+            "custom application asset/model identity differs")
+    facts = assets[0]["recipe"]["rawAdapterSettings"]
+    require(facts["mossImageExecutionReport"] == report, "completed asset/sealed execution report differs")
+    # The sealed report's adapter_reports describe DMD only. Custom applications
+    # are the existing worker identity/provider-report join, authenticated in the job.
+    applied = [value for value in facts.get("adapterApply", []) if value.get("id") == selected[0]["id"]]
+    require(len(applied) == 1 and applied[0].get("path") == adapters[0]["path"]
+            and applied[0].get("sha256") == adapter_sha
+            and type(applied[0].get("scale")) in (int, float) and applied[0]["scale"] == 1.0
+            and applied[0].get("kind") == method and type(applied[0].get("applied")) is int
+            and applied[0]["applied"] > 0 and applied[0].get("skipped") == [],
+            "actual CUSTOM adapter installation missing; a DMD-only report does not count")
     return {"adapterSha256": adapter_sha, "parent": parent, "method": method,
             "selectedStrength": adapters[0]["scale"], "executedStrength": adapters[0]["scale"],
             "appliedCount": applied[0]["applied"], "skippedCount": len(applied[0]["skipped"]),
-            "receipt": raw["raw"]["images"][role]["executionReceipt"]}, adapters[0]
+            "receipt": image["jobReceipt"]}, adapters[0]
 
 
 def _memory_refusal(ctx, raw):
