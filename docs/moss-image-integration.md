@@ -15,7 +15,7 @@ Training Studio exposes **MOSS-Image Base LoRA / LoKr** and **MOSS-Image SFT LoR
 | MOSS-Image SFT | LoRA | Supported | Supported |
 | MOSS-Image SFT | LoKr | Supported | Supported |
 
-Validation status, 2026-10-27: the table describes implemented combinations. Final real-weight acceptance across all eight combinations, including learning, recovery, generation and opposite-backend import, is still pending. It is not a performance or quality comparison.
+The table describes implemented training combinations. Requirements and acceptance evidence for learning, recovery, generation and opposite-backend import are tracked in [epic sc-26584](https://app.shortcut.com/trefry/epic/26584). The table makes no performance or output-quality comparison.
 
 1. Install the selected parent and its required components, then prepare images and captions in **Data Sets**. Base uses its own transformer with the shared SFT text encoder/VAE components; choosing Base does not remove those dependencies.
 2. In Training Studio, select the dataset and the exact **Target**, give the adapter a **LoRA name**, and set **Steps**, **Checkpoint cadence** and resolution. Under advanced controls, select **Network type**: LoRA or **LoKr (LyCORIS Kronecker)**. LoKr additionally exposes **LoKr factor** (`-1` selects automatic decomposition).
