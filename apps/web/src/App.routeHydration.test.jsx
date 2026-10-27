@@ -427,6 +427,37 @@ describe("route-owned App hydration (sc-14783)", () => {
     expect(container.textContent).toContain("model catalog unavailable");
   });
 
+  it("reloads project catalogs when returning to a previously loaded project", async () => {
+    installFetch({
+      "/api/v1/projects": () => Promise.resolve(response([
+        { id: "project-a", name: "Project A" },
+        { id: "project-b", name: "Project B" },
+      ])),
+      "/api/v1/projects/project-a/assets": () => Promise.resolve(response([{
+        id: "asset-a", projectId: "project-a", type: "image", displayName: "Portrait A", status: {},
+      }])),
+      "/api/v1/projects/project-b/assets": () => Promise.resolve(response([{
+        id: "asset-b", projectId: "project-b", type: "image", displayName: "Portrait B", status: {},
+      }])),
+    });
+    await renderApp();
+    expect(container.textContent).toContain("Portrait A");
+    async function switchProject(name) {
+      await act(async () => container.querySelector(".project-pill").click());
+      const option = [...container.querySelectorAll('[role="option"]')].find((item) => item.textContent.includes(name));
+      expect(option).toBeTruthy();
+      await act(async () => option.click());
+      await settle();
+    }
+    await switchProject("Project B");
+    expect(container.textContent).toContain("Portrait B");
+    await switchProject("Project A");
+    expect(container.textContent).toContain("Portrait A");
+    expect(container.textContent).not.toContain("Loading assets");
+    expect(container.textContent).not.toContain("Portrait B");
+    expect(requestCounts()["/api/v1/projects/project-a/assets"]).toBe(2);
+  });
+
   it("aborts and suppresses stale route-domain work on a project switch", async () => {
     const projectACharacters = deferred();
     let projectASignal;

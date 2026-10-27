@@ -15655,13 +15655,16 @@ fn encode_preview_data_url(frame: &gen_core::PreviewFrame) -> Option<String> {
     ))
 }
 
-/// [`streaming_result`] plus the current preview frame, when one is live.
-fn streaming_result_with_preview(
-    plan: &ImagePlan,
-    asset_writes: &[Value],
-    preview: Option<&PreviewSlot>,
-) -> JsonObject {
-    let mut result = streaming_result(plan, asset_writes);
+/// [`slim_step_result`] plus the current preview frame, when one is live — the STEP-tick
+/// result posted on every `GenEvent::Step`. Deliberately O(1): the accumulated
+/// `assetWrites`/`generationSet`/`prefixKvCache` fact sets are omitted here (streamed on the
+/// `Image` / `Decoding` / `Loading` arms instead) because the per-step cadence is
+/// steps-per-image × images per batch and the accumulated set had begun OOM-killing the
+/// WebView2 renderer mid-batch (see `streaming_result`'s RESOLVED TRADEOFF note, sc-8953).
+/// The store restores any omitted accumulation into the durable row, so a slim step tick
+/// can never regress it.
+fn slim_step_result_with_preview(plan: &ImagePlan, preview: Option<&PreviewSlot>) -> JsonObject {
+    let mut result = crate::image_jobs::slim_step_result(plan);
     if let Some(slot) = preview {
         result.insert(
             "previewFrame".to_owned(),
@@ -15854,9 +15857,11 @@ async fn consume_gen_events_with_disclosure(
                             &step_text(index, format!("step {current}/{step_total}")),
                             auto_tier_streaming,
                         ),
-                        Some(streaming_result_with_preview(
+                        // Slim on purpose (sc-8953 follow-through): the fact set does not
+                        // change on a step tick, so the accumulated asset writes must NOT
+                        // ride it — see `slim_step_result_with_preview`.
+                        Some(slim_step_result_with_preview(
                             plan,
-                            asset_writes,
                             latest_preview.as_ref(),
                         )),
                         backend,
@@ -15875,11 +15880,10 @@ async fn consume_gen_events_with_disclosure(
                         ProgressStage::Generating,
                         step_fraction(index, 1, 1, step_slices),
                         &step_text(index, "decoding".to_owned()),
-                        Some(streaming_result_with_preview(
-                            plan,
-                            asset_writes,
-                            latest_preview.as_ref(),
-                        )),
+                        // Full result (asset writes CAN change on a decode), but the
+                        // preview frame is the interim image's; the decode arm's own
+                        // result carries no frame and `streaming_result` alone is right.
+                        Some(streaming_result(plan, asset_writes)),
                         backend,
                     ),
                 )

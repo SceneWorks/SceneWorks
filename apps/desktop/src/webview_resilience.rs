@@ -184,7 +184,18 @@ pub(crate) fn install_process_failed_recovery(window: &tauri::WebviewWindow) {
                             kind.0
                         );
                         if let Some(webview) = sender {
-                            unsafe { webview.Reload() }?;
+                            // A FAILED Reload is the difference between "recovered" and
+                            // "white screen for the rest of the session" — log it as its
+                            // own event rather than propagating silently into the
+                            // handler's Ok. (And the handler must keep returning Ok: a
+                            // thrown error from a COM event callback can destabilize the
+                            // WebView2 event dispatch.)
+                            if let Err(error) = unsafe { webview.Reload() } {
+                                tracing::error!(
+                                    "webview resilience: Reload() after renderer failure FAILED (kind={} reason={reason:?}): {error}",
+                                    kind.0
+                                );
+                            }
                         }
                     } else {
                         tracing::error!(

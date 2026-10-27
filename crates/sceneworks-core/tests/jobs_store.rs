@@ -9473,6 +9473,99 @@ fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
     assert_eq!(job.result.get("other"), Some(&json!(true)));
 }
 
+/// sc-8953 follow-through (2026-10-27): the image worker posts a SLIM result on every denoise
+/// step (`image_jobs::slim_step_result`) — the accumulated `assetWrites`/`generationSet`/
+/// `prefixKvCache` fact sets ride only the per-image and terminal posts, or the per-step SSE
+/// fan-out OOM-kills the WebView2 renderer mid-batch. The result column is replaced wholesale,
+/// so a slim tick omitting them must not blank them off the durable row:
+/// `merge_progress_result_accumulations` restores each from the stored value.
+///
+/// *Mutation that reds this:* posting `Some(object(json!({})))` (an empty result) instead of the
+/// slim shape, or dropping the merge from `update_job_progress_internal`.
+#[test]
+fn slim_step_progress_results_keep_the_accumulated_fact_sets() {
+    let store = store("slim-step-keeps-accumulations");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+    let report = |result: serde_json::Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+    // A full post first (the first finished image): the fact set lands on the row.
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({
+                "generationSetId": "genset-1",
+                "generationSet": { "id": "genset-1", "count": 260 },
+                "assetWrites": [{ "id": "asset-1" }],
+                "prefixKvCache": [{ "cache": "hit" }],
+            })),
+        )
+        .expect("full progress");
+    // Then a slim STEP tick: the accumulations are absent ON PURPOSE.
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({ "generationSetId": "genset-1", "expectedCount": 260 })),
+        )
+        .expect("slim progress");
+    let job = store.get_job(&created.id).expect("job loads");
+    // The durable row keeps every accumulation the slim tick omitted...
+    assert_eq!(
+        job.result.get("generationSet"),
+        Some(&json!({ "id": "genset-1", "count": 260 }))
+    );
+    assert_eq!(
+        job.result.get("assetWrites"),
+        Some(&json!([{ "id": "asset-1" }]))
+    );
+    assert_eq!(
+        job.result.get("prefixKvCache"),
+        Some(&json!([{ "cache": "hit" }]))
+    );
+    // ...and carries the slim tick's own keys verbatim.
+    assert_eq!(job.result.get("expectedCount"), Some(&json!(260)));
+
+    // A full post that DOES carry an accumulation REPLACES the stored one (the
+    // worker is the authority; the merge is absence-only, never sticky).
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({
+                "generationSetId": "genset-1",
+                "assetWrites": [{ "id": "asset-1" }, { "id": "asset-2" }],
+            })),
+        )
+        .expect("second full progress");
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(
+        job.result.get("assetWrites"),
+        Some(&json!([{ "id": "asset-1" }, { "id": "asset-2" }]))
+    );
+    // `generationSet`/`prefixKvCache` absent from that post: still restored.
+    assert_eq!(
+        job.result.get("generationSet"),
+        Some(&json!({ "id": "genset-1", "count": 260 }))
+    );
+    assert_eq!(
+        job.result.get("prefixKvCache"),
+        Some(&json!([{ "cache": "hit" }]))
+    );
+}
+
 /// sc-25907 (epic 25899 E3): a Qwen Image 2.1 TURBO image job — plain text-to-image and an ordered
 /// reference edit — is claimed by an MLX worker and by a Candle worker, through the store's real
 /// claim path, exactly as a base 2.1 job is.

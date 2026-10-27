@@ -3963,6 +3963,19 @@ fn public_queue_summary(mut summary: QueueSummary) -> QueueSummary {
 /// job for lifecycle work. Redact at the serialization boundary so no new producer can accidentally
 /// publish the worker-private selection receipt. `jobs.snapshot` is currently built directly in the
 /// SSE bootstrap; supporting it here keeps this boundary safe if that snapshot becomes live later.
+///
+/// sc-8953 follow-through (2026-10-27): `job.updated` ALSO slims the live payload here — for a
+/// NON-terminal job, `result.assets` (the fully-built normalized asset records, KBs each, one per
+/// finished image) is dropped from the EVENT while `assetIds` stays. Every SSE tick used to carry
+/// the whole accumulated array (a 260-image batch ≈ 650 KB+ per tick, thousands of ticks), and the
+/// WebView2 renderer `JSON.parse`d every one — cumulative multi-GB allocation churn that hit V8's
+/// ~4 GB old-space ceiling and OOM-killed the renderer mid-batch (Crashpad `0xE0000008`, daily
+/// since 2026-10-24), leaving the desktop app a dead white window. The frontend resolves job
+/// outputs id-first (`jobResultAssets.js`: `assetIds` is its FIRST preference, `assets` only a
+/// pre-catalog fallback) and re-fetches the catalog on every asset-count change, so a live event
+/// without the embedded records renders identically; terminal events keep the full `assets` (the
+/// durable row's enrichment contract, `persist_reported_assets`). Snapshots stay full — bootstrap
+/// is once per connect, not per tick.
 fn redact_private_job_metadata_from_event(event: &str, value: &mut Value) {
     fn redact_job(value: &mut Value) {
         let Ok(job) = serde_json::from_value::<JobSnapshot>(value.clone()) else {
@@ -3971,7 +3984,11 @@ fn redact_private_job_metadata_from_event(event: &str, value: &mut Value) {
             *value = Value::Null;
             return;
         };
-        *value = serde_json::to_value(public_job_snapshot(job)).unwrap_or(Value::Null);
+        let mut job = public_job_snapshot(job);
+        if !sceneworks_core::jobs_store::TERMINAL_STATUSES.contains(&job.status.as_str()) {
+            job.result.remove("assets");
+        }
+        *value = serde_json::to_value(job).unwrap_or(Value::Null);
     }
 
     match event {

@@ -172,7 +172,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
         {mossEdit ? <>
           <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
           <p>The working image is Image 1. Additional slots follow it in order.</p>
-          <MossReferencePicker assets={imageAssets} assetIds={refAssetIds} onChange={setRefAssetIds} max={3} firstOrdinal={2} />
+          <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={3} firstOrdinal={2} />
           {mossEditError ? <p role="alert">{mossEditError}</p> : null}
         </> : null}
         <div hidden={mossEdit}>
@@ -640,7 +640,7 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
           {mossEdit ? <>
             <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
             <p>The baked working image is Image 1. Additional slots follow it in order.</p>
-            <MossReferencePicker assets={imageAssets} assetIds={refAssetIds} onChange={setRefAssetIds} max={3} firstOrdinal={2} />
+            <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={3} firstOrdinal={2} />
             {mossEditError ? <p role="alert">{mossEditError}</p> : null}
           </> : null}
           {editModels.length ? (

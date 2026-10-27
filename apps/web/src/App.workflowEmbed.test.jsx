@@ -314,7 +314,7 @@ describe("App - the one-time embedded-workflow choice (sc-16390)", () => {
     const surface=document.createElement('div');document.body.appendChild(surface);const surfaceRoot=createRoot(surface);let unmounted=false;
     try{
       await act(async()=>surfaceRoot.render(<AppContext.Provider value={ctx}>{kind==='full'?<ImageStudio/>:kind==='simple'?<SimpleShell accent="teal" lockedToSimple={false} onAccentChange={noop} onModeChange={noop} onSimpleDefaultChange={noop} simpleDefault/>:<ImageEditor/>}</AppContext.Provider>));await settle();
-      const page=terminalBrowserDom(surface);
+      const page=terminalBrowserDom(document.body);
       if(kind==='simple')await page.getByRole('tab',{name:'Edit',exact:true}).click();
       if(kind==='editor')await page.locator('.ie-acc-head').filter({hasText:/^AI Edit$/}).click();
       const expected={model:model.id,prompt:'Change only the blue bottle body and blue cap to deep red. Keep its silver collar, handle shape, water droplets, exact silhouette and position unchanged. Preserve both orange pieces, pale stone surface, lighting, shadows, background, framing and empty space on the left. Do not add text or objects.',negativePrompt:'',referenceAssetIds:[image.id],width:768,height:512,count:1,seed:173,advanced:{steps:30,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:1,max_sequence_length:4096},mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}};
