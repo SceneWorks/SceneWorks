@@ -129,6 +129,7 @@ on:
       - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/actions/prepare-rust-runner/**"
+      - ".github/actions/cleanup-runner-storage/**"
       - ".github/workflows/windows-candle.yml"
   pull_request:
     branches: [main]
@@ -416,6 +417,11 @@ jobs:
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Register before builds so post cleanup also covers failed/cancelled jobs.
+      - uses: ./.github/actions/cleanup-runner-storage
+      - name: Test runner storage cleanup guards
+        shell: powershell
+        run: node --test scripts/runner-storage-cleanup.test.mjs
       - name: Refuse combined manual measurement profiles
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: powershell
@@ -1525,6 +1531,7 @@ jobs:
       SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\huggingface\hub\models--Comfy-Org--Krea-2\snapshots\952f49d49653cb42e7d6cf7cbfad74738073ec7d\diffusion_models\krea2_turbo_nvfp4.safetensors'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/cleanup-runner-storage
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the imported NVFP4 smoke
         shell: powershell
@@ -1579,6 +1586,7 @@ jobs:
       YUE2_TERMINAL_STATE: 'E:\sceneworks-terminal\sc-23002-yue2\${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/cleanup-runner-storage
       - name: Validate the YuE2 terminal dispatch
         shell: powershell
         env:
@@ -1785,6 +1793,7 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/cleanup-runner-storage
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the Iris worker smoke
         shell: powershell
@@ -1889,6 +1898,7 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/cleanup-runner-storage
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the Supra2 worker smoke
         shell: powershell
