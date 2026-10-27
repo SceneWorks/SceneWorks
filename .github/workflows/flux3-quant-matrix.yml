@@ -51,6 +51,11 @@ on:
         required: false
         type: string
         default: ""
+      diagnose_only:
+        description: List the runner's HF cache layout and exit without building or measuring
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -186,6 +191,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Locate the pinned FLUX 3 snapshot
         shell: powershell
+        env:
+          DIAGNOSE_ONLY: ${{ inputs.diagnose_only }}
         run: |
           $candidates = @(
             $env:HF_HOME,
@@ -199,23 +206,34 @@ jobs:
           ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
           $hub = $null
           foreach ($candidate in $candidates) {
-            if (Test-Path (Join-Path $candidate 'models--black-forest-labs--flux-3-image-klein')) { $hub = $candidate; break }
-            if (Test-Path (Join-Path $candidate 'hub\models--black-forest-labs--flux-3-image-klein')) { $hub = Join-Path $candidate 'hub'; break }
+            Write-Host "=== $candidate"
+            Get-ChildItem $candidate -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like 'models--black-forest-labs--flux-3*' } |
+              ForEach-Object {
+                Write-Host "repo: $($_.FullName)"
+                Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty Name | ForEach-Object { Write-Host "  $_" }
+                Get-ChildItem (Join-Path $_.FullName 'snapshots') -Directory -ErrorAction SilentlyContinue |
+                  ForEach-Object { Write-Host "  snapshot: $($_.FullName)" }
+                if (Test-Path (Join-Path $_.FullName 'snapshots')) { $hub = $candidate }
+              }
           }
           if (-not $hub) {
-            Write-Host '=== drives'; Get-PSDrive -PSProvider FileSystem | Select-Object Name, Root | Format-Table | Out-String | Write-Host
             foreach ($drive in @('E:\', 'D:\')) {
               if (Test-Path $drive) {
-                Write-Host "=== $drive top-level"; Get-ChildItem $drive -Directory -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName | Write-Host
                 Write-Host "=== $drive search"
-                Get-ChildItem $drive -Directory -Recurse -Depth 3 -Filter 'models--black-forest-labs--flux-3-image-klein' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName | Write-Host
+                Get-ChildItem $drive -Directory -Recurse -Depth 4 -Filter 'models--black-forest-labs--flux-3*' -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty FullName | ForEach-Object { Write-Host $_ }
               }
             }
+            if ($env:DIAGNOSE_ONLY -eq 'true') { exit 0 }
             throw 'pinned FLUX 3 snapshot not found on this runner'
           }
           Add-Content -Path $env:GITHUB_ENV -Value "HF_HUB_CACHE=$hub"
           Write-Host "HF_HUB_CACHE=$hub"
+          if ($env:DIAGNOSE_ONLY -eq 'true') { exit 0 }
       - name: Build, convert and measure the requested Candle cells
+        if: ${{ !inputs.diagnose_only }}
         shell: powershell
         env:
           CARGO_NET_OFFLINE: "true"
