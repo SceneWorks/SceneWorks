@@ -8605,8 +8605,8 @@ fn run_sdxl_endpoint(request: &Value) -> Result<Value, String> {
         json!({})
     } else {
         json!({
-            "stageResidency": true, "decodeTileEdge": 512, "decodeOverlap": 64,
-            "attentionChunkSize": runtime_cuda::gen_core::attention_budget::CONSTRAINED_ATTN_SCORES_BUDGET,
+            "stageResidency": true, "decodeTileEdge": 256, "decodeOverlap": 64,
+            "attentionChunkSize": 16_777_216,
         })
     };
     if (width, height) != (1024, 1024) || json!(parameters) != expected_parameters {
