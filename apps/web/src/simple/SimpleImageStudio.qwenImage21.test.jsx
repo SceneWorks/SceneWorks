@@ -15,10 +15,10 @@ import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
-import { configure } from '../../../../scripts/lib/moss-edit-terminal-controls.mjs';
+import { configure, configureReferences } from '../../../../scripts/lib/moss-edit-terminal-controls.mjs';
 import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
 import { SimpleShell } from "./SimpleShell.jsx";
-import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
+import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
 
 // `setInput` drives the HTMLInputElement value setter, which jsdom refuses on a textarea.
 // Same trick, the matching prototype.
@@ -160,14 +160,11 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
   });
   it.each(["moss_image_base", "moss_image_sft"])("Simple submits %s ordered repeated edit slots with visible controls and component readiness", async (id) => {
     const model={...manifestModels.find((entry)=>entry.id===id),capabilities:["text_to_image","edit_image"],installState:"installed",conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
-    const assets=[{id:"wide",type:"image",displayName:"Wide"},{id:"tall",type:"image",displayName:"Tall"}];
+    const assets=[{id:"wide",type:"image",projectId:"project-1",displayName:"Wide"},{id:"tall",type:"image",projectId:"project-1",displayName:"Tall"}];
     const context=await openImage(baseContext({imageModels:[model],models:[model],assets,recentImageAssets:assets}));
     await click([...container.querySelectorAll('[role="tab"]')].find((tab)=>tab.textContent==="Edit"));await openAdvanced();
     const label=(text)=>[...container.querySelectorAll("label")].find((node)=>node.textContent.startsWith(text))?.querySelector("input,select");
-    const add=()=>[...container.querySelectorAll("button")].find((button)=>button.textContent==="Add reference image");
-    for(const [index,asset] of ["wide","tall","wide","tall"].entries()){
-      await click(add());await act(async()=>setSelect(label(`Image ${index+1}`),asset));
-    }
+    await configureReferences(terminalBrowserDom(document.body), ["wide","tall","wide","tall"], []);
     await act(async()=>setInput(label("Reference maximum edge"),"768"));
     await click(label("Cache reference K/V"));
     await act(async()=>setTextarea(fieldById("su-image-prompt"),"make the second image blue"));
@@ -322,10 +319,10 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
     expect(request.advanced.transparentBackground).toBe(true);
   });
   it("production terminal configures actual Simple controls and submits ordered repeated references",async()=>{
-    const model={...manifestModels.find(entry=>entry.id==='moss_image_sft'),capabilities:['text_to_image','edit_image'],installState:'installed',conditionalPurposes:{moss_image_edit:{installState:'installed'}}},assets=[{id:'wide',type:'image',displayName:'Wide'},{id:'tall',type:'image',displayName:'Tall'}];
+    const model={...manifestModels.find(entry=>entry.id==='moss_image_sft'),capabilities:['text_to_image','edit_image'],installState:'installed',conditionalPurposes:{moss_image_edit:{installState:'installed'}}},assets=[{id:'wide',type:'image',projectId:'project-1',displayName:'Wide'},{id:'tall',type:'image',projectId:'project-1',displayName:'Tall'}];
     const context=await openImage(baseContext({imageModels:[model],models:[model],assets,recentImageAssets:assets}));await click([...container.querySelectorAll('[role="tab"]')].find(tab=>tab.textContent==='Edit'));
     const expected={model:model.id,prompt:'make second blue',negativePrompt:'',referenceAssetIds:['wide','tall','wide','tall'],width:512,height:512,count:1,seed:173,advanced:{steps:3,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:1,max_sequence_length:4096},mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}};
-    await configure(terminalBrowserDom(container),expected,'simple',[]);await click(container.querySelector('.su-generate'));const body=context.createImageJob.mock.calls.at(-1)[0];expect(body.referenceAssetIds).toEqual(expected.referenceAssetIds);expect(body).toMatchObject({prompt:expected.prompt,width:512,height:512,seed:173});expect(body.advanced).toMatchObject(expected.advanced);
+    await configure(terminalBrowserDom(document.body),expected,'simple',[]);await click(container.querySelector('.su-generate'));const body=context.createImageJob.mock.calls.at(-1)[0];expect(body.referenceAssetIds).toEqual(expected.referenceAssetIds);expect(body).toMatchObject({prompt:expected.prompt,width:512,height:512,seed:173});expect(body.advanced).toMatchObject(expected.advanced);
   });
 
 });

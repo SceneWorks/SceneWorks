@@ -67,7 +67,7 @@ const DEFERRED_ROUTE_DOMAINS = Object.freeze({
 });
 
 const SIMPLE_ROUTE_DOMAINS = Object.freeze({
-  image: ["assets", "models", "loras"],
+  image: ["assets", "models", "loras", "characters"],
   video: ["assets", "models"],
   audio: ["assets", "models"],
   assets: ["assets"],

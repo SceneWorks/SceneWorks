@@ -45,7 +45,7 @@ export async function waitForModelCatalog(page,actions,timeoutMs=120000) {
 }
 export async function advanced(page, actions) {
   const simple = page.locator('details.su-advanced');
-  if (await simple.count()) { if (!(await simple.getAttribute('open') !== null)) await click(simple.locator('summary'), actions, 'Advanced disclosure'); return; }
+  if (await simple.count()) { if (!(await simple.getAttribute('open') !== null)) await click(simple.locator(':scope > summary'), actions, 'Advanced disclosure'); return; }
   const button = page.locator('.advanced-section').getByRole('button', { name: /^Advanced/ });
   if (await button.count()) { if (await button.getAttribute('aria-expanded') !== 'true') await click(button, actions, 'Advanced disclosure'); return; }
   const fallback = page.getByRole('button', { name: /^Advanced/ });
@@ -53,20 +53,29 @@ export async function advanced(page, actions) {
   await page.getByLabel('Steps', { exact: true }).waitFor({ state: 'visible' });
 }
 
-// Wrapped select labels include option text in their accessible label. Scope by the
-// source-owned visible label prefix, then target its select; preserve repeated slots.
+// Reference slots use the same Assets / Upload / Character dialog as ordinary edits.
+async function mossAdvanced(scope, actions) {
+  const details = scope.locator('details.moss-edit-advanced');
+  if (await details.count() && await details.getAttribute('open') === null) await click(details.locator('summary'), actions, 'MOSS Advanced (optional)');
+}
 export async function configureReferences(page,ids,actions) {
   requireThat(Array.isArray(ids)&&ids.length>=1&&ids.length<=4,'one through four ordered references required');
   const picks=page.getByRole('group',{name:/^Ordered MOSS references/});await picks.waitFor({state:'visible'});
-  const old=await picks.locator('select').count();
+  const old=await picks.locator('.asset-picker-field').count();
   for(let index=old;index>ids.length;index--)await click(picks.getByRole('button',{name:`Remove image ${index}`,exact:true}),actions,`Remove image ${index}`);
   for(let index=Math.min(old,ids.length);index<ids.length;index++)await click(picks.getByRole('button',{name:'Add reference image',exact:true}),actions,'Add reference image');
-  for(const [index,id]of ids.entries())await select(labelledSelect(picks,`Image ${index+1}`),id,actions,`Image ${index+1}`);
+  for(const [index,id]of ids.entries()) {
+    await click(picks.locator('.asset-picker-field').nth(index).getByRole('button',{name:/^(Select image|Change)$/}),actions,`Image ${index+1}`);
+    const dialog=page.getByRole('dialog',{name:`Choose image ${index+1}`,exact:true});
+    await click(dialog.getByRole('option').filter({has:dialog.locator(`small[title=${JSON.stringify(id)}]`)}),actions,`Reference ${id}`);
+    await click(dialog.getByRole('button',{name:'Use Selection',exact:true}),actions,'Use Selection');
+  }
 }
 
 // Verify restoration before changing any controls. A driver must not repair a broken replay.
 export async function verifyReplayForm(page, expected, actions) {
   await advanced(page, actions);
+  await mossAdvanced(page, actions);
   const actual = {}, scalars = { 'Prompt': expected.prompt, 'Variations': expected.count, 'Width override': expected.width, 'Height override': expected.height,
     'Steps': expected.advanced.steps, 'Guidance': expected.advanced.guidanceScale, 'Schedule shift': expected.advanced.schedulerShift,
     'Training shift': expected.advanced.mossImage.training_shift ?? 1, 'Context limit': expected.advanced.mossImage.max_sequence_length ?? 4096,
@@ -76,8 +85,8 @@ export async function verifyReplayForm(page, expected, actions) {
     requireThat(actual[label] === String(value), `actual replay did not restore ${label}`);
   }
   const group = page.getByRole('group', { name: /^Ordered MOSS references/ });
-  requireThat(await group.locator('select').count() === expected.referenceAssetIds.length, 'replay changed reference slot count');
-  for (const [index,id] of expected.referenceAssetIds.entries()) requireThat(await labelledSelect(group,`Image ${index + 1}`).inputValue() === id, 'replay changed original reference order');
+  requireThat(await group.locator('.asset-picker-field').count() === expected.referenceAssetIds.length, 'replay changed reference slot count');
+  for (const [index,id] of expected.referenceAssetIds.entries()) requireThat(await group.locator('.asset-picker-field').nth(index).locator('.asset-preview-chip small[title]').getAttribute('title') === id, 'replay changed original reference order');
   requireThat(await page.getByLabel('Cache reference K/V', { exact: true }).isChecked() === expected.advanced.mossImageEdit.use_kv_cache, 'replay changed K/V cache setting');
   const native = expected.advanced.mossImageAdvanced ?? { output: 'images' };
   for (const [label,value] of [['Native output',native.output],['Positive embeddings',native.positive?.values?.assetId ?? ''],['Positive attention mask',native.positive?.mask?.assetId ?? ''],['Negative embeddings',native.negative?.values?.assetId ?? ''],['Negative attention mask',native.negative?.mask?.assetId ?? ''],['Explicit initial noise',native.noise?.assetId ?? '']]) {
@@ -134,6 +143,7 @@ export async function configure(page, expected, kind, actions) {
     await advanced(page, actions);
     await configureReferences(page,expected.referenceAssetIds,actions);
   }
+  await mossAdvanced(form, actions);
   const controls = { 'Reference maximum edge': expected.advanced.mossImageEdit.reference_max_edge, 'Steps': expected.advanced.steps,
     'Guidance': expected.advanced.guidanceScale, 'Schedule shift': expected.advanced.schedulerShift, 'Training shift': expected.advanced.mossImage.training_shift ?? 1,
     'Context limit': expected.advanced.mossImage.max_sequence_length ?? 4096,

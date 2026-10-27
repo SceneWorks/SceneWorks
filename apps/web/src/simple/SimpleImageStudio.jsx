@@ -102,6 +102,7 @@ export function SimpleImageStudio() {
     createLoraDownloadJob,
     qwenRewritePrompt,
     activeProject,
+    characters = [],
     importAsset,
     token,
   } = useAppContext();
@@ -613,8 +614,12 @@ export function SimpleImageStudio() {
         ) : null}
       </div>
 
+      {mossEdit ? <MossReferencePicker assets={assets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} assetIds={orderedReferenceIds} onChange={([first, ...rest]) => { setReferenceAssetId(first ?? null); setExtraReferenceIds(rest); }} /> : null}
+
+      {mossEdit ? <MossImageEditControls model={selectedModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} advanced={mossImageAdvanced} onAdvancedChange={setMossImageAdvanced} assets={assets} importAsset={importAsset} promptBatch={mossPromptBatch} onPromptBatchChange={(batch) => { setMossPromptBatch(batch); if (batch.length) setPrompt(batch[0]); }} /> : null}
+
       <div className="su-tiles">
-        <ReferenceTile
+        {mossEdit ? null : <ReferenceTile
           asset={referenceAsset}
           assets={recentImageAssets}
           disabled={!referenceUsable}
@@ -628,7 +633,7 @@ export function SimpleImageStudio() {
           label={mode === "edit_image" ? "Source image" : "Reference"}
           onChange={setReferenceAssetId}
           required={mode === "edit_image"}
-        />
+        />}
         {qwenRewriteAvailable ? (
           <button
             className={qwenRewriteOpen ? "su-tile active" : "su-tile"}
@@ -758,8 +763,6 @@ export function SimpleImageStudio() {
         <summary className="su-advanced-summary">Advanced</summary>
         <div className="su-advanced-body">
           {mossEdit ? <>
-            <MossReferencePicker assets={assets.filter((asset) => asset.type === "image")} assetIds={orderedReferenceIds} onChange={([first, ...rest]) => { setReferenceAssetId(first ?? null); setExtraReferenceIds(rest); }} />
-            <MossImageEditControls model={selectedModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} advanced={mossImageAdvanced} onAdvancedChange={setMossImageAdvanced} assets={assets} importAsset={importAsset} promptBatch={mossPromptBatch} onPromptBatchChange={(batch) => { setMossPromptBatch(batch); if (batch.length) setPrompt(batch[0]); }} />
             <label>Training shift<input type="number" min="0" step="any" value={mossTrainingShift} onChange={(event) => setMossTrainingShift(Number(event.target.value))} /></label>
             <label>Schedule shift<input type="number" min="0" step="any" value={mossShift} onChange={(event) => setMossShift(Number(event.target.value))} /></label>
             <label>Context limit<input type="number" min="1" max="4096" value={mossContext} onChange={(event) => setMossContext(Number(event.target.value))} /></label>
