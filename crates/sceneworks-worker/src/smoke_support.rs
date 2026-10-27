@@ -458,23 +458,116 @@ pub(crate) fn flux3_footprint_png_path(
         "FLUX3_FOOTPRINT_OUT_DIR must be an absolute path outside the checkout, got {}",
         dir.display()
     );
-    std::fs::create_dir_all(&dir)
-        .unwrap_or_else(|e| panic!("create FLUX3_FOOTPRINT_OUT_DIR {}: {e}", dir.display()));
-    let canonical_dir = std::fs::canonicalize(&dir)
-        .unwrap_or_else(|e| panic!("canonicalize {}: {e}", dir.display()));
+    // Resolve the path (including any not-yet-created tail) BEFORE creating it: a bad env var must
+    // not be able to create a directory inside the worktree.
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
         .expect("crate manifest sits under the repository root");
     let canonical_repo =
         std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+    let resolved_dir = canonicalize_allow_missing(&normalize_lexically(&dir));
     assert!(
-        !canonical_dir.starts_with(&canonical_repo),
+        !resolved_dir.starts_with(&canonical_repo),
         "FLUX3_FOOTPRINT_OUT_DIR must be outside the repository ({} is inside {})",
-        canonical_dir.display(),
+        resolved_dir.display(),
         canonical_repo.display()
     );
+    std::fs::create_dir_all(&dir)
+        .unwrap_or_else(|e| panic!("create FLUX3_FOOTPRINT_OUT_DIR {}: {e}", dir.display()));
+    let canonical_dir = std::fs::canonicalize(&dir)
+        .unwrap_or_else(|e| panic!("canonicalize {}: {e}", dir.display()));
     canonical_dir.join(format!("{model}_{tier}_{backend}.png"))
+}
+
+/// Resolve `.`/`..` lexically so a not-yet-created path is compared in its normalized form. The
+/// existing prefix is then canonicalized against the real filesystem (symlinks), and the pure
+/// lexical tail is re-appended by [`canonicalize_allow_missing`].
+fn normalize_lexically(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => out.push(prefix.as_os_str()),
+            Component::RootDir => out.push(std::path::MAIN_SEPARATOR.to_string()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::Normal(name) => out.push(name),
+        }
+    }
+    out
+}
+
+/// Canonicalize the deepest existing ancestor and re-append the missing tail, so a path that does
+/// not exist yet is still resolved against the real filesystem (symlinks) before creation.
+fn canonicalize_allow_missing(path: &Path) -> std::path::PathBuf {
+    let mut missing = Vec::new();
+    let mut current = path;
+    loop {
+        match std::fs::canonicalize(current) {
+            Ok(mut base) => {
+                for component in missing.iter().rev() {
+                    base.push(component);
+                }
+                return base;
+            }
+            Err(_) => match current.parent() {
+                Some(parent) => {
+                    if let Some(name) = current.file_name() {
+                        missing.push(name.to_owned());
+                    }
+                    current = parent;
+                }
+                None => return path.to_path_buf(),
+            },
+        }
+    }
+}
+
+/// The receipt's `fit` object for a FLUX 3 campaign cell (sc-26243): the measured peak paired with
+/// the model/tier's declared minimum-memory floor from the same builtin manifest entry the cell
+/// resolves through. `lowestFitBytes` is the tighter of the two; a tier with no declared floor
+/// records `null` and a measured-peak-only basis rather than an invented one.
+pub(crate) fn flux3_fit_receipt(
+    entry: &serde_json::Value,
+    lane: &str,
+    tier: &str,
+    measured_peak_bytes: u64,
+) -> serde_json::Value {
+    let declared_gb = entry
+        .get(lane)
+        .and_then(|block| block.get("minMemoryGbByTier"))
+        .and_then(|tiers| tiers.get(tier))
+        .and_then(serde_json::Value::as_f64);
+    match declared_gb {
+        Some(gb) => {
+            let declared_bytes = (gb * crate::fit_gate::BYTES_PER_GIB).round() as u64;
+            let model = entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unknown>");
+            serde_json::json!({
+                "measuredPeakBytes": measured_peak_bytes,
+                "declaredMinMemoryBytes": declared_bytes,
+                "declaredMinSource": format!(
+                    "config/manifests/builtin.models.jsonc#models[id={model}].{lane}.minMemoryGbByTier.{tier}"
+                ),
+                "lowestFitBytes": measured_peak_bytes.max(declared_bytes),
+                "basis": format!(
+                    "max(measuredPeakBytes, {lane}.minMemoryGbByTier[{tier}] = {gb} GiB)"
+                ),
+            })
+        }
+        None => serde_json::json!({
+            "measuredPeakBytes": measured_peak_bytes,
+            "declaredMinMemoryBytes": serde_json::Value::Null,
+            "declaredMinSource": serde_json::Value::Null,
+            "lowestFitBytes": measured_peak_bytes,
+            "basis": "measured-peak-only",
+        }),
+    }
 }
 
 /// Lowercase hex SHA-256 of an on-disk artifact (the retained-PNG receipt).

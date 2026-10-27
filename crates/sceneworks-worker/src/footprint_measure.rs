@@ -55,7 +55,9 @@
 //! measurements, not ordinary CI. Every test is `#[ignore]`d and must run in its OWN process:
 //!
 //! ```text
-//! FLUX3_FOOTPRINT_OUT_DIR=/absolute/outside/the/repo //!   cargo test -p sceneworks-worker --release //!     footprint_flux3_klein_mlx_q4 -- --ignored --exact --nocapture
+//! FLUX3_FOOTPRINT_OUT_DIR=/absolute/outside/the/repo \
+//!   cargo test -p sceneworks-worker --release \
+//!     footprint_measure::footprint_flux3_klein_mlx_q4 -- --ignored --exact --nocapture
 //! ```
 //!
 //! Required environment:
@@ -81,7 +83,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
 use super::smoke_support::{
-    env_or, flux3_footprint_png_path, image_std, save_png, sha256_file_hex,
+    env_or, flux3_fit_receipt, flux3_footprint_png_path, image_std, save_png, sha256_file_hex,
     DEGENERATE_STD_FLOOR_DEFAULT,
 };
 
@@ -151,7 +153,7 @@ fn quant_for(tier: &str) -> Option<Quant> {
 }
 
 /// Run one real load + generation for `(model, tier)` at `dir`, sampling the MLX memory counters
-/// around it, and emit the machine-parseable `[[FOOTPRINT]]` line. Returns (residentBytes, peakBytes).
+/// around it, and emit the machine-parseable `[[FOOTPRINT]]` line.
 ///
 /// Sequence (mirrors the worker's per-job memory lifecycle in generator_cache.rs, and separates the
 /// steady-state weight footprint from the generation transient — the sc-8516 credibility fix):
@@ -184,6 +186,8 @@ struct FootprintArtifacts<'a> {
     png_path: &'a Path,
     measurement_scope: &'a str,
     physical_device_id: Option<&'a str>,
+    manifest_entry: &'a serde_json::Value,
+    lane: &'a str,
 }
 
 /// General measurement seam (sc-26243): the caller supplies the resolved [`LoadSpec`], the retained
@@ -303,6 +307,7 @@ fn measure_footprint_spec(
                 "seed": seed,
                 "pngSha256": png_sha256,
                 "measurementScope": artifacts.measurement_scope,
+                "fit": flux3_fit_receipt(artifacts.manifest_entry, artifacts.lane, tier, peak),
             });
             if let Some(device) = artifacts.physical_device_id {
                 receipt["physicalDeviceId"] = serde_json::Value::String(device.to_owned());
@@ -625,6 +630,8 @@ fn flux3_mlx_cell(model: &str, tier: &str) {
         png_path: &png_path,
         measurement_scope: FLUX3_MLX_SCOPE,
         physical_device_id: None,
+        manifest_entry: &entry,
+        lane: "mlx",
     };
     measure_footprint_spec(
         model,

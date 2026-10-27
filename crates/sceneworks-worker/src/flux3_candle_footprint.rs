@@ -21,7 +21,7 @@
 //! ```text
 //! FLUX3_FOOTPRINT_OUT_DIR=/absolute/outside/the/repo \
 //!   cargo test -p sceneworks-worker --release --features backend-candle \
-//!     footprint_flux3_klein_candle_q8 -- --ignored --exact --nocapture
+//!     flux3_candle_footprint::footprint_flux3_klein_candle_q8 -- --ignored --exact --nocapture
 //! ```
 //!
 //! Required environment:
@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gen_core::{GenerationOutput, GenerationRequest, LoadSpec, Quant, WeightsSource};
 
 use crate::smoke_support::{
-    env_or, flux3_footprint_png_path, image_std, save_png, sha256_file_hex,
+    env_or, flux3_fit_receipt, flux3_footprint_png_path, image_std, save_png, sha256_file_hex,
     DEGENERATE_STD_FLOOR_DEFAULT,
 };
 
@@ -245,59 +245,55 @@ fn flux3_generation_request(model: &str) -> GenerationRequest {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceComputeApp {
+    pid: u32,
+    process_name: String,
+    used_memory_bytes: Option<u64>,
+}
+
 /// `nvidia-smi` whole-device memory reader, mirroring the memory adapter's device-delta sampler.
+/// The binary is resolved from PATH, exactly as the worker's production `gpu.rs` probe does.
 struct NvidiaSmi {
-    executable: PathBuf,
     physical_id: String,
 }
 
 impl NvidiaSmi {
     fn resolve() -> Self {
-        let executable = if cfg!(windows) {
-            let system_root =
-                std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_owned());
-            PathBuf::from(system_root)
-                .join("System32")
-                .join("nvidia-smi.exe")
-        } else {
-            PathBuf::from("/usr/bin/nvidia-smi")
-        };
-        assert!(
-            executable.is_file(),
-            "nvidia-smi is required to measure whole-device CUDA memory; expected {}",
-            executable.display()
-        );
         let physical_id = std::env::var("CUDA_VISIBLE_DEVICES")
             .ok()
             .and_then(|value| value.split(',').next().map(str::trim).map(str::to_owned))
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "0".to_owned());
-        Self {
-            executable,
-            physical_id,
-        }
+        Self { physical_id }
+    }
+
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        let output = Command::new("nvidia-smi").args(args).output().unwrap_or_else(|error| {
+            panic!(
+                "nvidia-smi is required to measure whole-device CUDA memory but was not runnable from PATH: {error}"
+            )
+        });
+        assert!(
+            output.status.success(),
+            "nvidia-smi {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        output
+    }
+
+    fn id_arg(&self) -> String {
+        format!("--id={}", self.physical_id)
     }
 
     fn used_bytes(&self) -> u64 {
-        let output = Command::new(&self.executable)
-            .arg(format!("--id={}", self.physical_id))
-            .arg("--query-gpu=memory.used")
-            .arg("--format=csv,noheader,nounits")
-            .output()
-            .unwrap_or_else(|error| {
-                panic!(
-                    "start {} for device {}: {error}",
-                    self.executable.display(),
-                    self.physical_id
-                )
-            });
-        assert!(
-            output.status.success(),
-            "{} --id={} memory.used failed: {}",
-            self.executable.display(),
-            self.physical_id,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
+        let id = self.id_arg();
+        let output = self.run(&[
+            &id,
+            "--query-gpu=memory.used",
+            "--format=csv,noheader,nounits",
+        ]);
         let text = String::from_utf8_lossy(&output.stdout);
         let first = text
             .lines()
@@ -309,6 +305,103 @@ impl NvidiaSmi {
             .unwrap_or_else(|error| panic!("parse nvidia-smi memory.used {first:?}: {error}"))
             * MIB
     }
+
+    fn compute_cap(&self) -> f32 {
+        let id = self.id_arg();
+        let output = self.run(&[
+            &id,
+            "--query-gpu=compute_cap",
+            "--format=csv,noheader,nounits",
+        ]);
+        let text = String::from_utf8_lossy(&output.stdout);
+        crate::gpu::parse_selected_compute_cap(&text).unwrap_or_else(|| {
+            panic!(
+                "nvidia-smi reported no parseable compute_cap for CUDA device {}: {text:?}",
+                self.physical_id
+            )
+        })
+    }
+
+    /// Seed the production compute-cap cache before the plan resolves its device floor, exactly as
+    /// `discover_gpu` does in the worker (`crate::gpu::cache_compute_cap`).
+    fn seed_compute_cap(&self) -> f32 {
+        let cap = self.compute_cap();
+        crate::gpu::cache_compute_cap(Some(cap));
+        cap
+    }
+
+    fn compute_apps(&self) -> Vec<DeviceComputeApp> {
+        let id = self.id_arg();
+        let output = self.run(&[
+            &id,
+            "--query-compute-apps=pid,process_name,used_memory",
+            "--format=csv,noheader,nounits",
+        ]);
+        parse_compute_apps(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+fn parse_compute_apps(output: &str) -> Vec<DeviceComputeApp> {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.eq_ignore_ascii_case("No running processes found"))
+        .map(|line| {
+            let fields = line.split(',').map(str::trim).collect::<Vec<_>>();
+            let pid = fields
+                .first()
+                .and_then(|pid| pid.parse::<u32>().ok())
+                .unwrap_or_else(|| panic!("parse nvidia-smi compute app pid from {line:?}"));
+            let process_name = fields.get(1).copied().unwrap_or_default().to_owned();
+            let used_memory_bytes = fields
+                .get(2)
+                .and_then(|mib| mib.parse::<u64>().ok())
+                .map(|mib| mib * MIB);
+            DeviceComputeApp {
+                pid,
+                process_name,
+                used_memory_bytes,
+            }
+        })
+        .collect()
+}
+
+fn foreign_compute_apps(apps: &[DeviceComputeApp]) -> Vec<DeviceComputeApp> {
+    let own_pid = std::process::id();
+    apps.iter()
+        .filter(|app| app.pid != own_pid)
+        .cloned()
+        .collect()
+}
+
+fn foreign_pids(apps: &[DeviceComputeApp]) -> std::collections::BTreeSet<u32> {
+    apps.iter().map(|app| app.pid).collect()
+}
+
+fn foreign_tenants_json(apps: &[DeviceComputeApp]) -> serde_json::Value {
+    serde_json::Value::Array(
+        apps.iter()
+            .map(|app| {
+                serde_json::json!({
+                    "pid": app.pid,
+                    "processName": app.process_name,
+                    "usedMemoryBytes": app.used_memory_bytes,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn assert_device_floor(tier: &str, physical_id: &str, compute_cap: f32) {
+    let floor = match tier {
+        "fp8r" => crate::gpu::FP8R_MIN_COMPUTE_CAP,
+        "nvfp4" => crate::gpu::NVFP4_MIN_COMPUTE_CAP,
+        _ => return,
+    };
+    assert!(
+        compute_cap >= floor,
+        "CUDA device {physical_id} probed compute capability {compute_cap:.1}, below the {tier} floor {floor:.1}; refusing to measure"
+    );
 }
 
 fn sample_peak(sampler: &NvidiaSmi, peak: &mut u64) {
@@ -318,9 +411,11 @@ fn sample_peak(sampler: &NvidiaSmi, peak: &mut u64) {
 fn measure_candle_cell(
     model: &str,
     tier: &str,
+    entry: &serde_json::Value,
     spec: &LoadSpec,
     req: &GenerationRequest,
     weights_dir: &Path,
+    sampler: &NvidiaSmi,
 ) {
     assert!(
         !FOOTPRINT_RAN.swap(true, Ordering::SeqCst),
@@ -331,7 +426,14 @@ fn measure_candle_cell(
     );
 
     let png_path = flux3_footprint_png_path(model, tier, "candle");
-    let sampler = NvidiaSmi::resolve();
+    let baseline_apps = sampler.compute_apps();
+    let foreign_baseline = foreign_compute_apps(&baseline_apps);
+    assert!(
+        foreign_baseline.is_empty(),
+        "CUDA device {} already has foreign compute processes holding memory (baseline {foreign_baseline:?}); \
+         refusing to measure a whole-device delta on a shared device",
+        sampler.physical_id
+    );
     let baseline = sampler.used_bytes();
     let mut peak = baseline;
 
@@ -343,12 +445,12 @@ fn measure_candle_cell(
     );
     let generator = crate::inference_runtime::load(model, spec)
         .unwrap_or_else(|error| panic!("load {model} ({tier}): {error:?}"));
-    sample_peak(&sampler, &mut peak);
+    sample_peak(sampler, &mut peak);
 
     let mut last = String::new();
     let output = generator
         .generate(req, &mut |progress| {
-            sample_peak(&sampler, &mut peak);
+            sample_peak(sampler, &mut peak);
             let line = format!("{progress:?}");
             if line != last {
                 println!("[progress] {line}");
@@ -376,6 +478,16 @@ fn measure_candle_cell(
     );
     let after = sampler.used_bytes();
     peak = peak.max(after);
+    let after_apps = sampler.compute_apps();
+    let foreign_after = foreign_compute_apps(&after_apps);
+    let baseline_foreign_pids = foreign_pids(&foreign_baseline);
+    let after_foreign_pids = foreign_pids(&foreign_after);
+    assert_eq!(
+        after_foreign_pids, baseline_foreign_pids,
+        "CUDA device {} foreign compute processes changed during {model} {tier}: baseline pids {:?}, \
+         after pids {:?}; the whole-device delta is contaminated",
+        sampler.physical_id, baseline_foreign_pids, after_foreign_pids
+    );
 
     save_png(&image, &png_path);
     let png_sha256 = sha256_file_hex(&png_path);
@@ -402,7 +514,9 @@ fn measure_candle_cell(
         "seed": seed,
         "pngSha256": png_sha256,
         "measurementScope": FLUX3_CANDLE_SCOPE,
-        "physicalDeviceId": sampler.physical_id,
+        "physicalDeviceId": sampler.physical_id.clone(),
+        "foreignTenants": foreign_tenants_json(&foreign_after),
+        "fit": flux3_fit_receipt(entry, "candle", tier, peak),
     });
     println!("[[FOOTPRINT]] {receipt}");
     println!(
@@ -427,6 +541,13 @@ fn flux3_candle_cell(model: &str, tier: &str) {
     let entry = flux3_manifest_entry(model);
     let snapshot_root = flux3_snapshot_root(model, &entry, &settings);
     let request = flux3_image_request(model, tier, &entry);
+
+    // Production seeds this cache in `discover_gpu`; a test process never does, so a publisher tier
+    // would resolve against `None` (CPU) and be refused before load. Probe the SAME physical device
+    // and seed the SAME cache the planner reads, without bypassing the production floor.
+    let sampler = NvidiaSmi::resolve();
+    let probed_cap = sampler.seed_compute_cap();
+    assert_device_floor(tier, &sampler.physical_id, probed_cap);
 
     let expected = match tier {
         "bf16" => Some(snapshot_root.clone()),
@@ -486,7 +607,15 @@ fn flux3_candle_cell(model: &str, tier: &str) {
     }
 
     let generation = flux3_generation_request(model);
-    measure_candle_cell(model, tier, &spec, &generation, &plan.weights_dir);
+    measure_candle_cell(
+        model,
+        tier,
+        &entry,
+        &spec,
+        &generation,
+        &plan.weights_dir,
+        &sampler,
+    );
 }
 
 #[test]

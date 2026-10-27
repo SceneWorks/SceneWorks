@@ -574,7 +574,7 @@ pub(crate) const NVFP4_CAPABILITY: &str = "nvfp4";
 /// (`CUDA_COMPUTE_CAP=120` emits sm_120 SASS + compute_120 PTX, not sm_100) nor validated on it — so
 /// `10.0 < 12.0` keeps it off the tier by construction rather than by accident.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const NVFP4_MIN_COMPUTE_CAP: f32 = 12.0;
+pub(crate) const NVFP4_MIN_COMPUTE_CAP: f32 = 12.0;
 
 /// Whether a probed compute cap clears the NVFP4 sm_120 floor. `None` (no probe — CPU / non-NVIDIA /
 /// nvidia-smi absent) ⇒ ineligible, so an unprobed host never routes an FP4 load at hardware that
@@ -593,7 +593,7 @@ pub(crate) const FP8R_CAPABILITY: &str = sceneworks_core::image_request::FP8R_QU
 /// The FP8R device floor: compute capability 8.9 (Ada), mirroring the inference
 /// `DitFormat::check_device` rule for `Fp8Rowwise`.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-const FP8R_MIN_COMPUTE_CAP: f32 = 8.9;
+pub(crate) const FP8R_MIN_COMPUTE_CAP: f32 = 8.9;
 
 /// Whether this worker can run FP8R: its GPU clears the floor AND the linked FLUX 3 provider
 /// advertises the tier (only the CUDA build does). `None` (no probe) ⇒ ineligible.
