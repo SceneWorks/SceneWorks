@@ -22,6 +22,7 @@ use gen_core::{
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract, MemoryParityResult,
     MemoryRunContext, MemorySelection, MemoryStrategy, Precision, Quant,
 };
+use sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::SdxlCudaMemoryEndpoints;
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, CalibrationBinding, EvidenceQuery, EvidenceVerdict,
     Geometry as CalibrationGeometry, LoadShapeKey, QualityResult, RequiredNullable, StrategyRung,
