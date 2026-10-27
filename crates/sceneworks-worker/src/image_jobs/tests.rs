@@ -3425,9 +3425,16 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         1,
         "candle route and payload File tokens must be prepared exactly once per job"
     );
-    let route_binding = run_job
-        .find("let route = prepare_candle_image_route")
-        .expect("one route binding");
+    let route_preparation = run_job
+        .find("prepare_candle_image_route(")
+        .expect("one candle route preparation");
+    let route_binding = run_job[..route_preparation]
+        .rfind("let route = {")
+        .expect("the prepared candle route is bound once");
+    assert!(
+        run_job[route_binding..route_preparation].contains("prepare_image_route_with_progress("),
+        "candle route preparation must report real source-verification progress"
+    );
     let plan_use = run_job[route_binding..]
         .find("ImagePlan::with_count_and_adapter")
         .expect("the resolved route feeds the plan");
