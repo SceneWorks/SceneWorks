@@ -3341,6 +3341,24 @@ mod tests {
             matches!(admitted, Selection::Selected { selection, .. } if selection == minimum.selection),
             "one uncertainty charge and one reserve must be sufficient"
         );
+        assert!(
+            matches!(
+                crate::memory_strategy::select_strategy(
+                    request,
+                    &contract,
+                    Some(Budget {
+                        available_gb: 6.0,
+                        total_gb: 8.0,
+                        reclaimable_gb: 0.0,
+                        reserved_headroom_gb: crate::vram_gate::HEADROOM_GB,
+                    }),
+                    &[candidate],
+                ),
+                Selection::Selected { selection, .. } if selection == minimum.selection
+            ),
+            "the actual packaged minimum ({raw} bytes + {allowance} allowance bytes) must fit an \
+             8 GiB device with 6 GiB free while retaining the normal 2 GiB reserve"
+        );
         let mut smaller = seed.clone();
         smaller.key.geometry.width = 768;
         smaller.key.geometry.height = 768;
