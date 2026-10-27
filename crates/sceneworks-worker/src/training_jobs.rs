@@ -2551,6 +2551,18 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
                 advanced_u32(advanced, "sampleCount", DEFAULT_SAMPLE_COUNT),
             )
         },
+        // The engine's newer training knobs (sc-27092's pin advance carries the engine's
+        // aspect-ratio buckets, the latent/caption caches, and the two memory ceilings). This
+        // fixture maps the SceneWorks plan onto the engine config field-by-field — no
+        // `..Default::default()` — so every field the engine added must be stated here. The
+        // values are the engine's own defaults: no aspect-ratio buckets (the square
+        // `resolution_buckets` path is unchanged), the latent and caption caches on, and both
+        // memory ceilings unset (the device's own budget applies).
+        aspect_ratio_buckets: Vec::new(),
+        cache_latents: true,
+        cache_text_embeddings: true,
+        memory_limit_bytes: None,
+        memory_limit_fraction: None,
     }
 }
 
