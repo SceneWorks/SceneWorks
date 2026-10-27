@@ -7,6 +7,23 @@ vi.mock("../api.js",()=>({apiFetch:vi.fn()}));
 let root,container;
 afterEach(async()=>{if(root)await unmountRoot(root,container);vi.clearAllMocks();});
 describe("conditional MOSS edit package installation",()=>{
+  it("keeps optional NPY inputs collapsed without changing normal edit defaults", async () => {
+    ({root,container}=mountRoot());
+    const onAdvancedChange = vi.fn();
+    await act(async () => root.render(<MossImageEditControls
+      model={{id:"moss_image_base",conditionalPurposes:{moss_image_edit:{installState:"installed"}}}}
+      options={{reference_max_edge:512,use_kv_cache:true}} onChange={vi.fn()}
+      advanced={{output:"images"}} onAdvancedChange={onAdvancedChange} importAsset={vi.fn()}
+    />));
+    const details = container.querySelector("details");
+    expect(details.open).toBe(false);
+    expect(details.querySelector("summary").textContent).toBe("Advanced (optional)");
+    expect(container.querySelector('input[accept=".npy,application/x-npy"]').closest("details")).toBe(details);
+    expect(details.textContent).toContain("Normal editing only needs reference images and a prompt");
+    expect(details.textContent).toContain("NPY files are optional");
+    expect(details.querySelector("select").value).toBe("");
+    expect(onAdvancedChange).not.toHaveBeenCalled();
+  });
   it.each(["moss_image_base","moss_image_sft"])("installs the exact %s purpose with explicit source acknowledgment and actionable retries",async(id)=>{
     ({root,container}=mountRoot());
     const props={model:{id,conditionalPurposes:{moss_image_edit:{installState:"missing"}}},token:"owned-test",options:{reference_max_edge:512,use_kv_cache:true},onChange:vi.fn()};

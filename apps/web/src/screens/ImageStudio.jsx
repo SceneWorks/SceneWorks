@@ -3673,7 +3673,7 @@ export function ImageStudio() {
             {mode === "edit_image" ? (
               <>
                 {mossEdit ? <>
-                  <MossReferencePicker assets={editImageAssets} assetIds={referenceAssetIds} onChange={setReferenceAssetIds} />
+                  <MossReferencePicker assets={editImageAssets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} assetIds={referenceAssetIds} onChange={setReferenceAssetIds} />
                   <MossImageEditControls model={selectedModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} advanced={mossImageAdvanced} onAdvancedChange={setMossImageAdvanced} assets={assets} importAsset={importAsset} promptBatch={mossPromptBatch} onPromptBatchChange={(batch) => { setMossPromptBatch(batch); if (batch.length) setPrompt(batch[0]); }} />
                   {mossEditError ? <p role="alert">{mossEditError}</p> : null}
                 </> : multiReference ? (

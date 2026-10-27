@@ -115,6 +115,7 @@ import {
 import {
   hydrationDomainsForRoute,
   hydrationLedgerKey,
+  PROJECT_HYDRATION_DOMAINS,
   isProjectHydrationDomain,
 } from "./appHydration.js";
 import { refreshFailure, refreshSuccess } from "./refreshResult.js";
@@ -1912,6 +1913,14 @@ export function App() {
     }
     previousHydrationProjectIdRef.current = nextProjectId;
     if (previousProjectId !== null) {
+      // Discarded catalogs must reload on a return visit. Leave pending entries
+      // available for the route effect to abort their original requests.
+      for (const domain of PROJECT_HYDRATION_DOMAINS) {
+        const key = hydrationLedgerKey(domain, previousProjectId);
+        if (hydrationLedgerRef.current.get(key)?.status !== "loading") {
+          hydrationLedgerRef.current.delete(key);
+        }
+      }
       setAssets([]);
       setLoadedAssetsProjectId(null);
       setAssetLoadState({

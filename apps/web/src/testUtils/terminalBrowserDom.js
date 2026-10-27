@@ -27,7 +27,7 @@ export function terminalBrowserDom(root) {
     const api={
       locator:selector=>wrap(()=>query().flatMap(node=>select(node,selector)),`${description} ${selector}`),
       filter:({hasText,has}={})=>wrap(()=>query().filter(node=>(!hasText||matches(text(node),hasText,false))&&(!has||has.nodes().some(child=>node.contains(child)))),`${description} filtered`),
-      first:()=>wrap(()=>query().slice(0,1),`${description} first`),nodes:query,
+      first:()=>wrap(()=>query().slice(0,1),`${description} first`),nth:index=>wrap(()=>query().slice(index,index+1),`${description} index ${index}`),nodes:query,
       getByRole:(wanted,{name,exact=false}={})=>wrap(()=>query().flatMap(node=>[...node.querySelectorAll('*')]).filter(node=>role(node)===wanted&&(name===undefined||matches(wanted==='group'?text(node.querySelector('legend')):named(node),name,exact))),`role ${wanted} ${name}`),
       getByText:(wanted,{exact=false}={})=>wrap(()=>query().flatMap(node=>[...node.querySelectorAll('*')]).filter(node=>matches(text(node),wanted,exact)&&![...node.children].some(child=>matches(text(child),wanted,exact))),`text ${wanted}`),
       getByLabel:(wanted,{exact=false}={})=>wrap(()=>[...new Set(query().flatMap(node=>[...node.querySelectorAll('label')].filter(label=>matches(text(label),wanted,exact)).map(label=>label.control??label.querySelector('input,select,textarea')).concat([...node.querySelectorAll('[aria-label]')].filter(control=>matches(control.getAttribute('aria-label'),wanted,exact)))).filter(Boolean))],`label ${wanted}`),

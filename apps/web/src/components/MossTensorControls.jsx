@@ -27,9 +27,9 @@ export function MossTensorControls({ assets = [], value = mossAdvancedDefaults()
       {tensors.filter((asset) => asset.tensor?.dtype === dtype && asset.tensor?.shape?.length === rank).map((asset) => <option key={asset.id} value={asset.id}>{asset.displayName ?? asset.id} — {asset.tensor.shape.join(" × ")}</option>)}
     </select>{ref ? <small>SHA256 {ref.sha256}</small> : null}</label>;
   }
-  return <fieldset><legend>Native edit tensors</legend>
-    <p>Import inert NPY files: little-endian FP32 embeddings [B,S,4096] and noise [B×count,128,H/16,W/16], or binary U8 masks [B,S]. Maximum 512 MiB per file. Exact bytes and identities are retained for replay.</p>
-    {importAsset ? <label>Import tensor NPY<input type="file" accept=".npy,application/x-npy" onChange={async (event) => {
+  return <fieldset><legend>Optional tensor inputs</legend>
+    <p>NPY files are optional: use precomputed prompt embeddings or starting noise for advanced workflows and exact replay. Leave these inputs at None for normal editing. Maximum 512 MiB per file.</p>
+    {importAsset ? <label>Import tensor NPY (optional)<input type="file" accept=".npy,application/x-npy" onChange={async (event) => {
       const file = event.target.files?.[0]; event.target.value = "";
       if (!file) return;
       if (file.size > 512 * 1024 * 1024 + 4108) { setStatus("Tensor exceeds the 512 MiB artifact budget."); return; }
