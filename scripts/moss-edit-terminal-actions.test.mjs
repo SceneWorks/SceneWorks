@@ -10,7 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { VERSION, sha, digest, save, json, fileIdentity, Api, decodeRgbPng, createPlan, validateEditReport, reserveAttempt, resumeUiAttempt, resolveAttempt, assertDispatchClear } from './lib/moss-edit-terminal.mjs';
 import { inspectJournal, noLoadComparison, OBSERVATION_METHOD, hostBudgetHeader, hostGuardSpec, deriveHostTensorBound, hostTensorInvariant } from './lib/moss-edit-terminal-observation.mjs';
 import { nativeDevice, CUDA_UUID, CUDA_PCI, childEnvironment, utilityWorkerEnvironment, standaloneWorkerEnvironment, stackReadinessSnapshot, readyUtilityWorker, relocateRegistry, filesUnder, assertOriginalEvidence, assertH18CheckpointFiles, continuationRemainingRows, retryRemainingRows, postRowsGuardFrontier, reconcileParserRefusal, correctedDmdRequest, postDmdGuardFrontier, reconcileDmdInputCorrection, validateCompletedMlxArtifact, validateCompletedMlxHandoffSupplement, H27_HIDDEN_HANDOFF_FILES, lexicalParserRefusal, submittedCanceledRemainingRows, validateFailedUiCapture, continuationRowDisposition, checkpointDatabases, sampler, rgbPng, retainQualityPairs, command, validateDispatchEnvelope, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
-import { controlledQualityTooling, runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, compareCrossBackendHistoryJob, relocateImportedCudaModelLibrary, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
+import { smokeDevice, controlledQualityTooling, runtimeConfig, validateBundle, createBundle, inventoryReview, validateUpload, arrangeBuilds, resolveGuardAliases, prepareGuardFixtures, adapterRefusalState, isolatePackages, projectionCopyFlags, validatePackagePlan, authenticateCrossBackendHistory, compareCrossBackendHistoryJob, relocateImportedCudaModelLibrary, retainStoppedCudaSource, importCompletedMlxEvidence } from './moss-edit-terminal-actions.mjs';
 import { privateHfIntegrity, sealPrivateHf, transferPrivateHf, adoptOriginalPrivateHf, adoptStoppedExecutionPrivateHf, adoptStoppedCudaBuildPrivateHf, releasePrivateHf, materializePrivateAdapter, normalizeMossEnvironment, exportMossEnvironment, allowedPrivateParent, cargoTarget, mossArtifactRoute, MAC_MOSS_BASE } from './lib/moss-private-hf.mjs';
 import { lstat, realpath, readlink } from 'node:fs/promises';
 import { submitGuard, validatePortableCapture, validateLexicalNonfinite, validateWorkerRefusal } from './moss-edit-terminal.mjs';
@@ -29,10 +29,7 @@ test('encoder bypass is a closed fixed R19 diagnostic on the existing MLX job',a
  for(const key of Object.keys(value)){const mutant={...value,[key]:key==='phase'?'unknown':'wrong'};assert.throws(()=>validate(mutant),key);}
  for(const patch of [{native_run_attempt:'2'},{mlx_artifact_id:'123'},{upload_path:e.staged},{execution_run_id:'123'},{tooling_sha:e.sourceSha},{arbitrary:'command'}])assert.throws(()=>validate({...value,...patch}));
  assert.throws(()=>validateDispatchEnvelope(JSON.stringify(value),tooling,'f'.repeat(40),tooling));
- const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),mlx=workflow.match(/^  execute-mlx:\n([\s\S]*?)(?=^  execute-cuda:)/m)[1];
- assert.match(mlx,/always\(\).*needs\.build-native\.result == 'success'.*inputs\.phase == 'encoder-bypass'/);assert.match(mlx,/group: memory-catalog-campaign-mlx-nax/);
- assert.match(mlx,/artifact-ids: '12669886106'/);assert.match(mlx,/run-id: '40349954885'/);assert.match(mlx,/execute-encoder-bypass/);assert.match(mlx,/if: inputs\.phase == 'execute'\n\s+run: node source\/scripts\/moss-edit-terminal-actions\.mjs execute/);
- assert.doesNotMatch(mlx,/cargo |npm run build|build-native:/);
+
 });
 test('encoder bypass validates actual F32 NPY and U8 mask bytes without rounding or transposition',()=>{
  for(const [shape,dtype]of [[[1,71,4096],'float32'],[[1,10,4096],'float32'],[[1,71],'uint8'],[[1,10],'uint8'],[[1,128,32,48],'float32']]){
@@ -114,26 +111,7 @@ test('encoder bypass lifecycle stops its worker before releasing only its privat
 });
 const sourceRoot=fileURLToPath(new URL('../',import.meta.url));
 const coverage='moss_image_base+sft; bounded cache-context before bind; cache-dispatch; runtime load before media catalog; actual MOSS generate/edit calls after admission';
-test('CUDA rebase invokes the protocol from its declared source checkout, not the separate tooling checkout',async t=>{
- const root=await temporary('two-checkouts');t.after(()=>rm(root,{recursive:true,force:true}));
- for(const name of ['source','tooling']){
-  await cp(resolve(sourceRoot,'scripts'),resolve(root,name,'scripts'),{recursive:true});
-  await appendFile(resolve(root,name,'scripts/moss-edit-terminal.mjs'),`\nglobalThis.__mossProtocolOrigin = '${name}';\n`);
- }
- const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8');
- const step=workflow.match(/- name: Run fresh corrected CUDA candidate from the authenticated completed Mac handoff\n\s+if: inputs\.phase == 'cuda-rebase'\n\s+run: node (source|tooling)\/scripts\/moss-edit-terminal-actions\.mjs execute-cuda-rebase/);
- assert.ok(step,'exact corrected CUDA launch step required');
- const invokedController=resolve(root,step[1],'scripts/moss-edit-terminal-actions.mjs');
- delete globalThis.__mossProtocolOrigin;
- await import(pathToFileURL(invokedController).href);
- assert.equal(globalThis.__mossProtocolOrigin,'source','the controller loaded the protocol from the runtime-declared source checkout');
- delete globalThis.__mossProtocolOrigin;
- const reuseStep=workflow.match(/- name: Execute fresh CUDA rows using retained native builds and ordinary Mac handoff\n\s+if: inputs\.native_run_id != ''\n\s+run: node (source|tooling)\/scripts\/moss-edit-terminal-actions\.mjs execute-reused-cuda/);
- assert.ok(reuseStep,'retained-native execution must explicitly select its tooling checkout');
- await import(pathToFileURL(resolve(root,reuseStep[1],'scripts/moss-edit-terminal-actions.mjs')).href);
- assert.equal(globalThis.__mossProtocolOrigin,'tooling','the wrong checkout would load a different protocol before freeze');
- delete globalThis.__mossProtocolOrigin;
-});
+
 test('ordinary CUDA reuse separates product and tooling and rejects incomplete or historical producers',()=>{
  const product='a'.repeat(40),tooling='c'.repeat(40),pin='b'.repeat(40);
  const input={candidate_id:'ordinary-fixture',bundle_run_id:'11',bundle_artifact_id:'12',bundle_manifest_sha256:'f'.repeat(64),phase:'execute',tooling_sha:tooling,product_sha:product,native_run_id:'21',native_run_attempt:'1',mlx_run_id:'21',mlx_run_attempt:'1',mlx_artifact_id:'23',mlx_tooling_sha:product,cuda_hf_run_id:'21',cuda_hf_run_attempt:'1',cuda_hf_artifact_id:'24'};
@@ -146,26 +124,7 @@ test('ordinary CUDA reuse separates product and tooling and rejects incomplete o
  assert.equal(validate(verify).execution_run_id,'31');
  assert.throws(()=>validate({...verify,cuda_hf_run_id:'21'}));
 });
-test('ordinary MLX and CUDA artifacts retain hidden handoff metadata on the owned evidence paths',async t=>{
- const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8');
- const mlx=workflow.match(/^  execute-mlx:\n([\s\S]*?)(?=^  execute-cuda:)/m)?.[1],cuda=workflow.match(/^  execute-cuda:\n([\s\S]*?)(?=^  continue-mlx:)/m)?.[1];
- for(const [backend,job] of [['mlx',mlx],['cuda',cuda]]){
-  assert.ok(job,`ordinary ${backend} job missing`);
-  const upload=job.match(/- name: Retain complete and partial evidence; never upload HF caches, targets or credentials\n([\s\S]*?)retention-days: 90/)?.[1];
-  assert.ok(upload,`ordinary ${backend} artifact upload missing`);
-  assert.match(upload,/\$\{\{ env\.MOSS_ROOT \}\}\/handoff\//);
-  assert.match(upload,/\$\{\{ env\.MOSS_ROOT \}\}\/evidence\//);
-  assert.match(upload,/include-hidden-files: true/);
-  assert.doesNotMatch(upload,/\$\{\{ env\.MOSS_ROOT \}\}\/hf\/|\$\{\{ env\.MOSS_ROOT \}\}\/target\//);
- }
- const handoff=resolve(MAC_MOSS_BASE,'moss-execute-40198829729-1-mlx/handoff');
- if(!existsSync(resolve(handoff,'handoff.json'))){t.diagnostic('retained H27 Mac handoff absent on this host; workflow transport contract checked');return;}
- const manifest=await json(resolve(handoff,'handoff.json'));
- const hidden=manifest.files.filter(item=>item.file.split('/').some(part=>part.startsWith('.')));
- assert.equal(manifest.files.length,311);
- assert.deepEqual(hidden.map(item=>item.file).sort(),[...H27_HIDDEN_HANDOFF_FILES].sort());
- for(const item of hidden)assert.deepEqual(await fileIdentity(resolve(handoff,'data',item.file)),{byteLength:item.byteLength,sha256:item.sha256});
-});
+
 test('official pin output permits only regenerated closure facts and exact audited source population',()=>{
   const old='a'.repeat(40),next='b'.repeat(40),path='crates/media/candle-gen/candle-gen-moss-image/src/lib.rs',oldBlob='c'.repeat(40),newBlob='d'.repeat(40);
   const manifest=(sha)=>`moss = { git = "https://github.com/SceneWorks/inference", rev = "${sha}" }\n`;
@@ -646,12 +605,13 @@ test('source hooks cover both cold/warm cache routes and precede actual device/p
   const cache=await readFile(resolve(sourceRoot,'crates/sceneworks-worker/src/generator_cache.rs'),'utf8'),runtime=await readFile(resolve(sourceRoot,'crates/sceneworks-worker/src/inference_runtime.rs'),'utf8'),worker=await readFile(resolve(sourceRoot,'crates/sceneworks-worker/src/lib.rs'),'utf8'),journalSource=await readFile(resolve(sourceRoot,'crates/sceneworks-worker/src/moss_terminal_observation.rs'),'utf8');
   assert.equal((cache.match(/entry\(engine_id, "cache_context"\)\?;\s*let _backend_context = bind_backend_load_context/g)??[]).length,2);assert.equal((cache.match(/entry\(engine_id, "cache_dispatch"\)/g)??[]).length,2);assert.match(runtime,/entry\(id, "provider_load"\)[\s\S]*media\(\)\.load\(id, spec\)/);assert.ok(worker.indexOf('moss_terminal_observation::initialize')<worker.indexOf('let mut health = cuda_startup_health'));assert.match(worker,/begin_job\(&job\)/);assert.match(journalSource,/create_new\(true\)/);assert.match(journalSource,/include_bytes!\("moss_terminal_observation.rs"\)/);const moss=await readFile(resolve(sourceRoot,'crates/sceneworks-worker/src/image_jobs/moss.rs'),'utf8');assert.equal((moss.match(/moss_terminal_observation::provider_run\(\)\?;\s*let output = generator\s*\.generate/g)??[]).length,2);assert.doesNotMatch(cache,/entry\(engine_id, "provider_run"\)/);
 });
-test('Actions retains exact paired sources/builds and all phases without a fake success or hardware lock',async()=>{
-  const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),controller=await readFile(resolve(sourceRoot,'scripts/moss-edit-terminal-actions.mjs'),'utf8');
-  for(const label of ['rw-starvector','real-weights','execute-mlx:','execute-cuda:','verify-retained:','artifact-ids:','bundle_manifest_sha256:','if: always()','execution_run_attempt:'])assert.ok(workflow.includes(label),label);
-  const mlxBuild=workflow.match(/- name: Build exact embedded API, worker, web and native inventories \(MLX\)([\s\S]*?)(?=      - name:)/)?.[1],cudaBuild=workflow.match(/- name: Build exact embedded API, worker, web and native inventories \(CUDA\)([\s\S]*?)(?=      - name:)/)?.[1];
-  assert.match(mlxBuild,/if: matrix\.backend == 'mlx'/);assert.match(mlxBuild,/env:\s+CARGO_PROFILE_DEV_STRIP: none\s+CARGO_PROFILE_TEST_STRIP: none/);assert.doesNotMatch(cudaBuild,/CARGO_PROFILE_(?:DEV|TEST)_STRIP/);
-  assert.match(workflow,/needs: \[execute-mlx, windows-maintenance\]/);assert.match(workflow,/CUDA_VISIBLE_DEVICES: GPU-e4b79931-7be6-f216-460a-f5405cfafffe/);assert.doesNotMatch(workflow,/continue-on-error|pull_request:|^  push:|lease-helper|owner-token|SCENEWORKS_.*LEASE/i);assert.ok(controller.indexOf('await verifyBuild(config)')<controller.indexOf('const stack=await startStack(config,token);let stopped'));
+// CI_IMPACT: replaces obsolete campaign wiring assertions with the single manual
+// build/image contract and a mocked device probe; no model or GPU execution.
+test('manual Actions smoke builds once and retains one image without campaign obligations',async()=>{
+  const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8');
+  assert.match(workflow,/build-and-image:/);assert.match(workflow,/moss-edit-terminal-actions\.mjs smoke/);
+  assert.match(workflow,/real-weights/);assert.match(workflow,/if: always\(\)/);
+  assert.doesNotMatch(workflow,/strategy:|matrix:|finalize|execute-mlx:|execute-cuda:|verify-retained:|pull_request:|^  push:/m);
   const config=runtimeConfig({sourceSha:identity.sourceSha,inferenceSha:identity.inferenceSha,candidateId:'candidate',backends:{cuda:{hfHome:'/source/cache',port:17957,installAdapter:true,editAdapterFiles:['weights'],packageFiles:[{file:'weights',sha256:'a'.repeat(64)}]}}},{sourceRoot,inferenceRoot:'/inference',root:'/private/run',backend:'cuda',buildRoot:'/builds',bundleRoot:'/bundle'});assert.equal(config.hfHome,resolve('/private/run/hf'));assert.equal(config.packageSource,resolve('/source/cache'));
 });
 test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-ref native phases',async()=>{
@@ -705,18 +665,7 @@ test('registered MOSS dispatcher rejects ambiguous inputs before calling exact-r
   for(const backend of ['mlx','candle'])assert.ok(dispatcher.includes(`(inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == '${backend}'`));
   for(const profile of ['qwen-image-2-1-app-lifecycle','iris-mlx-real-weights','supra2-mlx-real-weights'])assert.ok(dispatcher.includes(`inputs.profile == '${profile}'`));
   assert.match(workflow,/workflow_call:/);assert.match(workflow,/SCENEWORKS_INFERENCE_READ_TOKEN:\s+required: false/);
-  assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,7);
-  const cudaContinuation=workflow.match(/^  continue-cuda:\n([\s\S]*?)(?=^  verify-retained:)/m)?.[1];
-  assert.ok(cudaContinuation);assert.doesNotMatch(cudaContinuation,/shell:\s*bash/);
-  assert.match(cudaContinuation,/name: Validate bundle and configure private execution\/build roots\s+shell: powershell/);
-  assert.match(cudaContinuation,/\$env:MOSS_REHYDRATE_ROOT/);assert.match(cudaContinuation,/\$LASTEXITCODE -ne 0/);
-  assert.match(cudaContinuation,/if \('\$\{\{ inputs\.phase \}\}' -ne 'cuda-rebase'\) \{\s+node tooling\/scripts\/moss-edit-terminal-actions\.mjs configure "\$env:MOSS_BUNDLE\/campaign\.json" "\$env:MOSS_SOURCE" "\$env:MOSS_INFERENCE" "\$env:MOSS_REHYDRATE_ROOT"/);
-  assert.match(cudaContinuation,/if: inputs\.phase == 'continue-cuda'[\s\S]*?artifact-ids: \$\{\{ inputs\.mlx_artifact_id \}\}/);
-  assert.match(cudaContinuation,/artifact-ids: \$\{\{ inputs\.cuda_hf_artifact_id \}\}[\s\S]*?prior-cuda[\s\S]*?Adopt authenticated stopped CUDA private packages/);
-  assert.match(workflow,/supplement-mlx-handoff:[\s\S]*?stage-completed-mlx-handoff[\s\S]*?include-hidden-files: true/);
-  assert.match(cudaContinuation,/needs: \[continue-mlx, supplement-mlx-handoff, build-native\][\s\S]*?needs\.supplement-mlx-handoff\.result == 'success'/);
-  assert.match(cudaContinuation,/name: moss-mlx-hidden-handoff-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
-  assert.match(workflow,/test "\$RUNNER_NAME" = nax-macos/);assert.match(workflow,/run-id: \$\{\{ inputs.review_run_id \|\| inputs.bundle_run_id \}\}/);
+  assert.match(workflow,/INFERENCE_READ_TOKEN:\s+required: false/);assert.equal((workflow.match(/secrets\.INFERENCE_READ_TOKEN \|\| secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| github\.token/g)??[]).length,1);
 });
 test('completed Mac hidden handoff supplement merges exact absent metadata and rejects changed identity or bytes',async()=>{
   const root=await temporary('hidden-handoff'),data=resolve(root,'handoff/data');
@@ -1008,7 +957,7 @@ test('HF release refuses altered bytes, wrong ownership and escaped/shared clean
 });
 test('durable MOSS storage lives outside checkout cleanup and release follows owned worker shutdown',async()=>{
   const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),controller=await readFile(resolve(sourceRoot,'scripts/moss-edit-terminal-actions.mjs'),'utf8');
-  for(const line of workflow.split('\n').filter(line=>/^\s+MOSS_(ROOT|BUILDS|BUNDLE):/.test(line)))assert.match(line,/github.workspace.*\/\.\.\/moss-sc-26752\/moss-|format\('\{0\}\/\.\.\/moss-sc-26752', github.workspace\)|\/Volumes\/Models\/sceneworks-terminal-sc-26752\/moss-/);
+  for(const line of workflow.split('\n').filter(line=>/^\s+MOSS_ROOT:/.test(line)))assert.match(line,/github.workspace.*\/\.\.\/moss-sc-26752\/moss-|format\('\{0\}\/\.\.\/moss-sc-26752', github.workspace\)|\/Volumes\/Models\/sceneworks-terminal-sc-26752\/moss-/);
   assert.match(controller,/await transferPrivateHf\(config/);assert.doesNotMatch(controller,/isolatePackages\(config,\{installedInventory/);
   assert.ok(controller.indexOf('await stack.stop();stopped=true;')<controller.indexOf('await releasePrivateHf(config)'));assert.ok(controller.indexOf("await exportState(config,resolve(config.root,'handoff'))")<controller.indexOf('await releasePrivateHf(config)'));
 });
@@ -1064,14 +1013,8 @@ test('canonical artifact environment removes dot segments and proves workspace a
   await assert.rejects(()=>normalizeMossEnvironment({...env,MOSS_ROOT:resolve(base,'unrelated/moss-build-123-1-mlx')}),/escaped/);
   await rm(resolve(workspace,'../moss-sc-26752'),{recursive:true});await mkdir(resolve(base,'unrelated'));await symlink(resolve(base,'unrelated'),resolve(workspace,'../moss-sc-26752'));await assert.rejects(()=>normalizeMossEnvironment(env),/linked ancestors/);
 });
-test('every artifact job normalizes paths before its first operation and installer materialization follows shutdown',async()=>{
-  const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8'),controller=await readFile(resolve(sourceRoot,'scripts/moss-edit-terminal-actions.mjs'),'utf8');
-  for(const name of ['upload-inputs','build-native','execute-mlx','execute-cuda','supplement-mlx-handoff','verify-retained']) {
-    // Select by job body, independently of the display name of its first artifact step.
-    const body=workflow.split(/(?=^  [a-z][a-z-]*:\n)/m).find(body=>body.startsWith(`  ${name}:`));assert.ok(body,name);
-    const artifact=body.search(/uses: actions\/(?:download|upload)-artifact/),normalize=body.indexOf('moss-edit-terminal-actions.mjs normalize-env');assert.ok(normalize>=0&&normalize<artifact,name);
-  }
-  assert.doesNotMatch(workflow,/path: \$\{\{ inputs.upload_path/);assert.match(workflow,/path: \$\{\{ env.MOSS_UPLOAD_PATH/);
+test('legacy installer materialization still follows shutdown for historical replay',async()=>{
+  const controller=await readFile(resolve(sourceRoot,'scripts/moss-edit-terminal-actions.mjs'),'utf8');
   assert.ok(controller.indexOf('}finally{await stack.stop();}')<controller.indexOf('await materializePrivateAdapter(config)'));assert.ok(controller.indexOf('await materializePrivateAdapter(config)')<controller.indexOf("await save(resolve(out,'packages.json')"));
 });
 
@@ -1148,4 +1091,14 @@ test('fresh CUDA alone requires sized sealed staging before install while Mac an
  assert.doesNotMatch(rehydrate,/isolateFreshCudaPackages|freshCapacityBudget/);
  const runtime=runtimeConfig({candidateId:'fixture',sourceSha:'a'.repeat(40),inferenceSha:'b'.repeat(40),backends:{cuda:{hfHome:'/inert/shared',port:46123,installAdapter:true,editAdapterFiles:['adapter'],packageFiles:[{file:'adapter',sha256:'c'.repeat(64)}]}}},{sourceRoot:'/inert/source',inferenceRoot:'/inert/inference',root:'/inert/run',backend:'cuda',buildRoot:'/inert/build',bundleRoot:'/inert/bundle'});
  assert.equal(runtime.packageFiles[0].byteLength,undefined); // Original R19 path/SHA schema remains valid for reuse.
+});
+
+test('manual smoke selects either physical CUDA device and rejects existing compute ownership',async()=>{
+  for(const index of ['0','1']) {
+    const uuid=`GPU-${index}abc`,execute=async(_command,args)=>({stdout:args[0].startsWith('--id=')?`${index}, ${uuid}, 00000000:C${index}:00.0, Test CUDA, 123\n`:''});
+    assert.equal((await smokeDevice(index,execute)).uuid,uuid);
+    await assert.rejects(()=>smokeDevice(index,async(command,args)=>args[0].startsWith('--id=')?execute(command,args):{stdout:`${uuid}, 1234, training, 1000`}),/compute process/);
+    await assert.rejects(()=>smokeDevice(index,async()=>({stdout:`${1-Number(index)}, ${uuid}, pci, Test CUDA, 0`})),/identity/);
+  }
+  await assert.rejects(()=>smokeDevice('2'),/select physical/);
 });

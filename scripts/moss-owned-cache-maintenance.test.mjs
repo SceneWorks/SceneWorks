@@ -108,35 +108,7 @@ test('insufficient free capacity skips cache copying and preserves original cach
   assert.equal(receipt.cache.state, 'insufficient-proved-copy-headroom-original-cache-retained');
   assert.ok(receipt.cache.requiredFreeBytes > receipt.cache.freeBeforeCopy.free);
 });
-test('action-free recovery gates native job preparation and keeps the normal fresh build', async () => {
-  const workflow = await readFile(new URL('../.github/workflows/moss-edit-terminal.yml', import.meta.url), 'utf8');
-  const recovery = workflow.slice(workflow.indexOf('  windows-maintenance:'), workflow.indexOf('  build-native:'));
-  const build = workflow.slice(workflow.indexOf('  build-native:')), step = recovery.slice(recovery.indexOf('    steps:'));
-  assert.match(recovery, /inputs.native_run_id == '40349954885' && inputs.mlx_artifact_id == '12676636780'/);
-  assert.match(build, /inputs.phase == 'execute' && inputs.native_run_id == ''/);
-  assert.match(build, /^    if: \(inputs.phase == 'execute' && inputs.native_run_id == ''\) \|\| inputs.phase == 'cuda-rebase'$/m);
-  const reused=workflow.slice(workflow.indexOf('  execute-cuda:'),workflow.indexOf('  continue-mlx:'));
-  assert.match(reused, /inputs.native_run_id != '' && inputs.mlx_artifact_id != ''/);
-  assert.match(reused, /execute-reused-cuda/);
-  assert.doesNotMatch(reused, /--moss-disk-maintenance/);
-  assert.match(recovery, /^    runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
-  assert.doesNotMatch(recovery, /\buses:/); assert.doesNotMatch(recovery, /\bneeds:/);
-  assert.match(build, /^    needs: windows-maintenance$/m);
-  assert.doesNotMatch(build, /--moss-disk-maintenance/);
-  assert.match(step, /\$helperSha = \$env:MOSS_SOURCE_SHA/);
-  assert.match(step, /\$helperSha = \$env:MOSS_TOOLING_SHA/);
-  assert.match(step, /contents\/scripts\/ci\/moss-owned-cache-maintenance.mjs\?ref=\$helperSha/);
-  assert.match(step, /\$env:MOSS_TOOLING_SHA -ne \$env:GITHUB_SHA/);
-  assert.match(step, /externals\\node24\\bin\\node.exe/); assert.match(step, /\$program \| & \$node --input-type=module - --moss-disk-maintenance/);
-  assert.doesNotMatch(step, /WriteAllText|Set-Content|npm |cargo |nvidia-smi|Remove-Item/);
-  assert.match(build, /node source\\scripts\\moss-edit-terminal-actions.mjs build/);
-  const helper = await readFile(new URL('./ci/moss-owned-cache-maintenance.mjs', import.meta.url), 'utf8');
-  assert.match(helper, /copy: copyCacheExclusive/);
-  assert.doesNotMatch(helper, /\brename\b/);
-  assert.ok(helper.indexOf('GetAttributes($entry)') < helper.indexOf('$stack.Push($entry)'));
-  assert.match(helper, /Reparse ancestor/); assert.match(helper, /Reparse descendant/);
 
-});
 
 test('fixed stopped R9 observation captures actual runtime bytes and HF capacity without authorizing mutation',async()=>{
   const runtime={candidateId:R9_DIAGNOSTIC.candidate,sourceSha:R9_DIAGNOSTIC.source,inferenceSha:R9_DIAGNOSTIC.inference,backend:'cuda',root:R9_DIAGNOSTIC.root,hfHome:path.join(R9_DIAGNOSTIC.root,'hf'),sourceRoot:path.join(R9_DIAGNOSTIC.workspace,'source'),packageSource:'E:\\sceneworks-evaluation\\moss\\sc-26322-reference-v9'},bytes=Buffer.from(JSON.stringify(runtime));
@@ -417,26 +389,12 @@ test('reuse rejects every substituted producer/source before observations or mut
   const reference=reuseFixture();await assert.rejects(()=>maintain(reference.env,reference.io,{copyCache:false}),/cannot use reference-only/);assert.deepEqual(reference.mutations,[]);
   const live=reuseFixture();live.io.processes=async()=>[{pid:45652,startedAt:'2026-10-26T23:50:37Z',executable:path.join(h47Runtime.buildRoot,'cuda','sceneworks-rust-api.exe'),commandLine:'sceneworks-rust-api.exe'}];await assert.rejects(()=>maintain(live.env,live.io),/owned H47 process/);assert.deepEqual(live.mutations,[]);
 });
-test('assembled CUDA job requires successful maintenance for fresh and reuse execution',async()=>{
-  const workflow=await readFile(new URL('../.github/workflows/moss-edit-terminal.yml',import.meta.url),'utf8');
-  const section=workflow.slice(workflow.indexOf('  execute-cuda:'),workflow.indexOf('  continue-mlx:'));
-  assert.match(section,/needs: \[execute-mlx, windows-maintenance\]/);
-  const expression=section.match(/^    if: \$\{\{ (.*) \}\}$/m)[1].replaceAll('needs.execute-mlx','needs["execute-mlx"]').replaceAll('needs.windows-maintenance','needs["windows-maintenance"]');
-  const accepts=new Function('inputs','needs','always',`return (${expression})`);
-  for(const reuse of [false,true])for(const maintenance of ['success','failure','cancelled','skipped']){
-    const inputs={phase:'execute',native_run_id:reuse?'40349954885':'',mlx_artifact_id:reuse?'12676636780':''};
-    const needs={'execute-mlx':{result:reuse?'skipped':'success'},'windows-maintenance':{result:maintenance}};
-    assert.equal(accepts(inputs,needs,()=>true),maintenance==='success');
-    assert.equal(accepts({...inputs,phase:'verify'},needs,()=>true),false);
-  }
-  assert.equal(accepts({phase:'execute',native_run_id:'',mlx_artifact_id:''},{'execute-mlx':{result:'failure'},'windows-maintenance':{result:'success'}},()=>true),false);
-});
+
 
 test('existing rebase with historical native IDs keeps the original cache path',async()=>{
  const f=fixture(),receipt=await maintain({...env,MOSS_NATIVE_RUN_ID:'40214209083',MOSS_MAINTENANCE_PHASE:'cuda-rebase'},f.io);
  assert.equal(receipt.reuse,undefined);assert.ok(f.mutations.some(item=>item[0]==='copy'));
- const workflow=await readFile(new URL('../.github/workflows/moss-edit-terminal.yml',import.meta.url),'utf8');
- assert.match(workflow,/if \(\$env:MOSS_MAINTENANCE_PHASE -eq 'execute' -and \$env:MOSS_NATIVE_RUN_ID\) \{/);
+
 });
 
 // CI_IMPACT: two inert metadata-refusal tests; no content reads or host/process calls.

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // sc-26757 native Actions controller. Imports are inert; only explicit CLI phases execute.
-import { constants } from 'node:fs';
+import { constants, createWriteStream } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, writeFile, cp, appendFile, chmod, rename, readdir, lstat, realpath, mkdtemp, unlink, rmdir, stat, copyFile } from 'node:fs/promises';
-import { execFile as callback } from 'node:child_process';
+import { execFile as callback, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { resolve, dirname, basename, win32 } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -1015,8 +1015,99 @@ export async function finalize(config) {
   }
   await harness(config,['verify-retained',launchPath],'final-verify');
 }
+// Current manual acceptance: build the product and produce one real LoRA edit PNG.
+// Legacy campaign exports above remain available for historical reproduction only.
+export async function smokeDevice(index,execute=execFile) {
+  requireThat(['0','1'].includes(String(index)),'select physical CUDA device 0 or 1');
+  const {stdout}=await execute('nvidia-smi',[`--id=${index}`,'--query-gpu=index,uuid,pci.bus_id,name,memory.used','--format=csv,noheader,nounits'],{timeout:10000,windowsHide:true});
+  const rows=stdout.trim().split(/\r?\n/);requireThat(rows.length===1,'selected CUDA device is missing');
+  const [physicalIndex,uuid,pci,name,memory]=rows[0].split(',').map(value=>value.trim());
+  requireThat(physicalIndex===String(index)&&/^GPU-[a-f0-9-]+$/i.test(uuid)&&pci&&Number.isFinite(Number(memory)),'invalid selected CUDA device identity');
+  const processes=(await execute('nvidia-smi',['--query-compute-apps=gpu_uuid,pid,process_name,used_memory','--format=csv,noheader,nounits'],{timeout:10000,windowsHide:true})).stdout;
+  const active=processes.trim()?processes.trim().split(/\r?\n/):[];
+  requireThat(active.every(row=>/^GPU-[a-f0-9-]+,\s*\d+,/i.test(row)),'CUDA compute ownership query returned unsupported or invalid data');
+  requireThat(!active.some(row=>row.split(',')[0].trim()===uuid),'selected CUDA device has a compute process; select the other available device or queue later');
+  return {physicalIndex:Number(physicalIndex),logicalIndex:0,uuid,pci,name,usedMiB:Number(memory),computeProcesses:processes.trim(),observedAt:new Date().toISOString()};
+}
+export async function smoke(env=process.env) {
+  const sourceRoot=resolve(env.MOSS_SOURCE),inferenceRoot=resolve(env.MOSS_INFERENCE),root=resolve(env.MOSS_ROOT),bundleRoot=resolve(env.MOSS_BUNDLE);
+  const config={sourceRoot,inferenceRoot,root,sourceSha:env.MOSS_SOURCE_SHA,inferenceSha:env.MOSS_INFERENCE_SHA};
+  await mkdir(dirname(root),{recursive:true});await mkdir(root,{recursive:false});
+  const sources=await sourceIdentity(config),bundleIdentity=await fileIdentity(resolve(bundleRoot,'bundle-inventory.json'));
+  requireThat(bundleIdentity.sha256===env.MOSS_BUNDLE_SHA,'input bundle inventory SHA256 differs from dispatch');
+  const inventory=await json(resolve(bundleRoot,'bundle-inventory.json'));
+  requireThat(canonical((await filesUnder(bundleRoot)).filter(item=>item.file!=='bundle-inventory.json'))===canonical(inventory.files),'input bundle bytes differ from inventory');
+  // The bundle supplies inputs only. Its original source and failed campaign
+  // results are never restamped as evidence for this newly built product.
+  const bundle=await json(resolve(bundleRoot,'campaign.json')),inputs=await json(resolve(bundleRoot,'inputs.json'));
+  const hfHome=resolve(env.MOSS_HF_HOME||bundle.backends.cuda.hfHome),target=env.CARGO_TARGET_DIR?resolve(env.CARGO_TARGET_DIR):resolve(root,'target'),logs=resolve(root,'logs');
+  const asset=inputs.assets.find(item=>item.id===inputs.single_case.references[0]);
+  requireThat(asset&&inputs.single_case.references.length===1,'one reference image is required');
+  const reference=await readFile(safePath(bundleRoot,asset.path));requireThat(sha(reference)===asset.sha256,'reference image SHA256 changed');
+  const referenceImage=protocolLibrary.pngRgbIdentity(reference);
+  // Read the existing complete package cache. Never copy, install, normalize or
+  // remove shared model files; the native stack runs offline.
+  for(const item of bundle.backends.cuda.packageFiles)requireThat((await fileIdentity(safePath(hfHome,item.file))).sha256===item.sha256,`cached model file differs: ${item.file}`);
+  const buildEnv={...env,CARGO_TARGET_DIR:target,CARGO_PROFILE_RELEASE_STRIP:'none',VITE_API_BASE_URL:''};
+  await npmCommand(['--prefix','apps/web','ci'],{cwd:sourceRoot,env:buildEnv,log:resolve(logs,'web-ci.log')});
+  await npmCommand(['--prefix','apps/web','run','build'],{cwd:sourceRoot,env:buildEnv,log:resolve(logs,'web-build.log')});
+  await command('cargo',['build','--release','--locked','-p','sceneworks-rust-api','--bin','sceneworks-rust-api','--features','embed-web,backend-candle'],{cwd:sourceRoot,env:buildEnv,log:resolve(logs,'native-build.log')});
+  // Honor the runner's configured warm target, then retain this run's binary.
+  const binary=resolve(root,'sceneworks-rust-api.exe');await copyFile(resolve(target,'release/sceneworks-rust-api.exe'),binary,constants.COPYFILE_EXCL);
+  const binaryIdentity=await fileIdentity(binary);
+  requireThat(canonical(await sourceIdentity(config))===canonical(sources),'build changed the source checkouts');
+  await save(resolve(root,'build.json'),{sources,binary:binaryIdentity,features:'embed-web,backend-candle'});
+  // Refresh ownership after compilation, immediately before native execution.
+  const device=await smokeDevice(env.MOSS_CUDA_DEVICE||'0');await save(resolve(root,'device.json'),device);
+  const state=resolve(root,'state'),port=17959,workerId=`moss-smoke-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`,token=randomBytes(32).toString('hex');
+  await mkdir(resolve(state,'data'),{recursive:true});await mkdir(resolve(state,'credentials'),{recursive:true});await cp(resolve(sourceRoot,'config'),resolve(state,'config'),{recursive:true,errorOnExist:true,force:false});
+  const childEnv={...env};for(const key of Object.keys(childEnv))if(key.startsWith('SCENEWORKS_')||/TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/.test(key))delete childEnv[key];
+  Object.assign(childEnv,{SCENEWORKS_DATA_DIR:resolve(state,'data'),SCENEWORKS_CONFIG_DIR:resolve(state,'config'),SCENEWORKS_CREDENTIALS_DIR:resolve(state,'credentials'),SCENEWORKS_JOBS_DB_PATH:resolve(state,'data/cache/jobs.db'),SCENEWORKS_ACCESS_TOKEN:token,SCENEWORKS_API_HOST:'127.0.0.1',SCENEWORKS_API_PORT:String(port),SCENEWORKS_API_URL:`http://127.0.0.1:${port}`,SCENEWORKS_WORKER_ID:workerId,SCENEWORKS_GPU_ID:String(device.physicalIndex),SCENEWORKS_BACKEND_MLX_ENABLED:'false',SCENEWORKS_BACKEND_CANDLE_ENABLED:'true',SCENEWORKS_POLL_SECONDS:'1',SCENEWORKS_HEARTBEAT_SECONDS:'2',CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:device.uuid,HF_HOME:hfHome,HF_HUB_CACHE:resolve(hfHome,'hub'),HUGGINGFACE_HUB_CACHE:resolve(hfHome,'hub'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1'});
+  const children=[],streams=[],api=new protocolLibrary.Api(childEnv.SCENEWORKS_API_URL,token);
+  const launch=(role,extra)=>{const stream=createWriteStream(resolve(logs,`${role}.log`),{flags:'wx'});streams.push(stream);const child=spawn(binary,[],{cwd:sourceRoot,env:{...childEnv,...extra},stdio:[role==='worker'?'pipe':'ignore','pipe','pipe'],windowsHide:true});child.stdout.pipe(stream,{end:false});child.stderr.pipe(stream,{end:false});child.on('error',error=>{child.startError=error;});children.push(child);};
+  try {
+    launch('api',{SCENEWORKS_RUN_UTILITY_INPROCESS:'1',SCENEWORKS_RUST_WORKER_GPU_ID:'cpu',SCENEWORKS_WORKER_ID:`${workerId}-utility`,SCENEWORKS_UTILITY_WORKERS:'1'});
+    launch('worker',{SCENEWORKS_WORKER_ONLY:'1',SCENEWORKS_WORKER_CHILD:'1'});
+    const deadline=Date.now()+180000;let ready=false;
+    while(Date.now()<deadline&&!ready) {
+      requireThat(children.every(child=>!child.startError&&child.exitCode===null),'native smoke process exited during startup');
+      try {const workers=await api.request('/api/v1/workers'),health=await api.request('/api/v1/health');ready=health.status==='ok'&&health.readiness?.status==='ready'&&workers.some(worker=>worker.id===workerId&&worker.gpuId===String(device.physicalIndex)&&worker.status==='idle');}catch{}if(!ready)await delay(500);
+    }
+    requireThat(ready,'native smoke worker failed to become ready');
+    const project=await api.request('/api/v1/projects',{method:'POST',body:{name:'MOSS Image Edit smoke'}}),form=new FormData();
+    form.append('file',new Blob([reference],{type:'image/png'}),basename(asset.path));
+    const uploaded=await api.request(`/api/v1/projects/${encodeURIComponent(project.id)}/assets`,{method:'POST',body:form});
+    requireThat(uploaded.id&&uploaded.projectId===project.id,'reference upload belongs to another project');
+    const request={projectId:project.id,model:'moss_image_base',mode:'edit_image',prompt:inputs.single_case.prompt,negativePrompt:'',width:inputs.single_case.width,height:inputs.single_case.height,count:1,seed:inputs.common.seed,referenceAssetIds:[uploaded.id],advanced:{steps:inputs.common.steps,guidanceScale:inputs.common.guidance_scale,schedulerShift:inputs.common.inference_shift,mossImage:{acceleration:'off',uncond_skip_layers:[]},mossImageEdit:{reference_max_edge:inputs.common.reference_max_edge,use_kv_cache:true}}};
+    await save(resolve(root,'request.json'),request);
+    const submitted=await api.request('/api/v1/image/jobs',{method:'POST',body:request});
+    requireThat(submitted.id,'image submission did not return a job ID');
+    const job=await waitJob(api,{},submitted.id,root,60*60*1000);await save(resolve(root,'job.json'),job);
+    requireThat(job.status==='completed'&&job.workerId===workerId&&job.result?.assets?.length===1,`image job did not complete with one output: ${job.status}`);
+    const output=await api.request(`/api/v1/projects/${encodeURIComponent(project.id)}/assets/${encodeURIComponent(job.result.assets[0].id)}`);
+    requireThat(output.projectId===project.id&&output.lineage?.jobId===job.id,'output is not owned by the smoke job');
+    const report=protocolLibrary.findEditReport(output,job),adapterFiles=bundle.backends.cuda.packageFiles;
+    requireThat(report?.adapter_repository==='chinoll/Moss-Image-Edit'&&report.adapter_sha256===adapterFiles.find(item=>item.file.endsWith('/adapter_model.safetensors')).sha256,'completed image did not report the real MOSS edit adapter');
+    await save(resolve(root,'provider-report.json'),report);
+    const path=output.file?.path??output.file?.relativePath;requireThat(typeof path==='string'&&!path.startsWith('/')&&!path.includes('..'),'invalid output asset path');
+    const bytes=await api.request(`/api/v1/projects/${encodeURIComponent(project.id)}/files/${path.split('/').map(encodeURIComponent).join('/')}`,{raw:true,max:128*1024*1024});
+    const image=protocolLibrary.pngRgbIdentity(bytes);requireThat(image.width===request.width&&image.height===request.height,'output image dimensions differ from the request');
+    await writeFile(resolve(root,'output.png'),bytes,{flag:'wx'});await save(resolve(root,'asset.json'),output);
+    await save(resolve(root,'smoke.json'),{status:'PASS',scope:'build-and-one-image-smoke-only',sources,binary:binaryIdentity,device,inputBundle:{sourceSha:bundle.sourceSha,inferenceSha:bundle.inferenceSha,inventory:bundleIdentity},model:request.model,adapter:bundle.backends.cuda.packageFiles.filter(item=>item.file.includes('models--chinoll--Moss-Image-Edit/')),reference:{...asset,...referenceImage,assetId:uploaded.id},jobId:job.id,output:{file:'output.png',sha256:sha(bytes),byteLength:bytes.length,...image}});
+  } finally {
+    // Stop only the two processes created by this invocation, even on failure.
+    const failures=[];
+    for(const child of children.slice().reverse())if(child.exitCode===null&&child.signalCode===null&&!child.startError) {
+      try {await new Promise((done,fail)=>{const timer=setTimeout(()=>{child.kill();fail(Error('owned smoke process did not stop'));},30000);child.once('exit',()=>{clearTimeout(timer);done();});if(child.stdin)child.stdin.end();else child.kill();});}catch(error){failures.push(error);}
+    }
+    for(const stream of streams)await new Promise(done=>stream.end(done));
+    if(failures.length)throw new AggregateError(failures,'owned smoke shutdown failed');
+  }
+}
+
 export async function main(args=process.argv.slice(2)) {
   const [phase,...rest]=args;
+  if(phase==='smoke'&&rest.length===0)return smoke();
   if(phase==='normalize-env'&&rest.length===0)return exportMossEnvironment(process.env);
   if(phase==='bundle'&&rest.length===3){const result=await createBundle(...rest);process.stdout.write(`${JSON.stringify(result)}\n`);return result;}
   if(phase==='inventory-review'&&rest.length===4){const result=await inventoryReview(...rest);process.stdout.write(`${JSON.stringify(result)}\n`);return result;}
