@@ -528,6 +528,9 @@ mod tests {
     const TEST_ONLY_MODEL_SURFACES: &[&str] = &[
         "crates/sceneworks-worker/src/bernini_tier_build.rs",
         "crates/sceneworks-worker/src/footprint_measure.rs",
+        // sc-27092: the imported ComfyUI-quantized (scalar fp8 / MXFP8) worker smoke — an
+        // #[ignore]d test module, the same shape as the NVFP4 smoke below.
+        "crates/sceneworks-worker/src/imported_comfy_quant_gpu_smoke.rs",
         "crates/sceneworks-worker/src/imported_nvfp4_gpu_smoke.rs",
         "crates/sceneworks-worker/src/iris_gpu_smoke.rs",
         "crates/sceneworks-worker/src/iris_training_gpu_smoke.rs",
