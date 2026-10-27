@@ -3246,6 +3246,13 @@ fn streaming_result_carries_facts_for_api_persistence() {
 /// (`assetWrites` / `generationSet` / `prefixKvCache`) on purpose — the per-step cadence is
 /// steps × images and the accumulated set had begun OOM-killing the WebView2 renderer
 /// mid-batch. The slim shape keeps every key a RUNNING job's UI consumes.
+///
+/// Gated like `slim_step_result` itself (macOS / the candle lane) so the default lane
+/// never dead-code warns and the parity lane never sees an out-of-scope symbol.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn slim_step_result_omits_the_accumulated_fact_sets() {
     // `count: 8` is the payload-sanity clamp (`MAX_COUNT`), but the assertion is on the
