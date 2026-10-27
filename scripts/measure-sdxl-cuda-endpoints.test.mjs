@@ -34,7 +34,7 @@ function receipt() {
 function replaySelection() {
   return { backend: "candle", route: "sdxl", actualTier: "q4", mode: "text_to_image", strategy: "bounded_attention",
     basis: "measured_endpoint", geometry: { width: 1024, height: 1024, batch: 1 },
-    parameters: { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 },
+    parameters: { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16_777_216 },
     predictedPeakBytes: 3_000_000_000, admittedPeakGb: 3.7, reserveGb: 1.5, availableGb: 4.5 };
 }
 
@@ -48,7 +48,8 @@ test("endpoint pair keeps one q4 artifact and renders only maximum and minimum",
   assert.equal(cases[0].target.tier, "q4");
   assert.deepEqual(cases.map((item) => item.loadShape), ["eager_materialization", "eager_materialization"]);
   assert.notEqual(cases[0].logicalCaseId, cases[1].logicalCaseId);
-  assert.deepEqual(cases[1].strategy.parameters, { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 64 * 1024 ** 2 });
+  assert.deepEqual(cases[1].strategy.parameters, { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16 * 1024 ** 2 });
+  assert.deepEqual(cases.map((item) => item.calibrationFingerprint), Array(2).fill("sdxl-candle-sdxl-staged-decode-attention-v3"));
   assert.deepEqual(plan, original);
 });
 
@@ -197,6 +198,20 @@ test("admitted replay accepts the ordinary selector's cheaper affordable SDXL co
   ]) {
     assert.equal(assertAdmittedReplaySelection({ ...selection, strategy, parameters, basis }), coverage);
   }
+  // Pure contract coverage only: these numeric combinations must describe the
+  // actual recipe the worker selected; no additional model render is planned.
+  for (const decodeTileEdge of [256, 512]) for (const attentionChunkSize of [16_777_216, 67_108_864]) for (const stageResidency of [false, true]) {
+    const measuredMinimum = stageResidency && decodeTileEdge === 256 && attentionChunkSize === 16_777_216;
+    const current = { ...selection, parameters: { ...bounded, decodeTileEdge, attentionChunkSize, stageResidency },
+      basis: measuredMinimum ? "measured_endpoint" : "anchor_derived" };
+    assert.equal(assertAdmittedReplaySelection(current), measuredMinimum ? "measured_minimum" : "estimated_intermediate");
+    assert.throws(() => assertAdmittedReplaySelection({ ...current, basis: measuredMinimum ? "anchor_derived" : "measured_endpoint" }),
+      "only the exact freshly measured minimum can claim endpoint coverage");
+  }
+  for (const decodeTileEdge of [256, 512]) for (const stageResidency of [false, true]) {
+    assert.equal(assertAdmittedReplaySelection({ ...selection, strategy: "bounded_decode", basis: "anchor_derived",
+      parameters: { ...bounded, decodeTileEdge, stageResidency } }), "estimated_intermediate");
+  }
   // availableGb is already net of reserve; an affordable 4.5-GiB admission under
   // a six-GiB free cap and 1.5-GiB reserve must not pay that reserve twice.
   assert.doesNotThrow(() => assertAdmittedReplaySelection({ ...selection, admittedPeakGb: 4.5 }));
@@ -206,6 +221,8 @@ test("admitted replay accepts the ordinary selector's cheaper affordable SDXL co
     { strategy: "staged_residency", parameters: plain },
     { strategy: "resident", parameters: { ...plain, stageResidency: true } },
     { parameters: { ...selection.parameters, decodeOverlap: 128 } },
+    { parameters: { ...selection.parameters, decodeTileEdge: 384 } },
+    { parameters: { ...selection.parameters, attentionChunkSize: 4_194_304 } },
     { parameters: { ...selection.parameters, attentionChunkSize: null } },
     { parameters: { ...selection.parameters, transformerWindowSize: 1 } },
     { parameters: { ...selection.parameters, unsupportedControl: true } },
