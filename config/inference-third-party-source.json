@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference main 78100568 for epic sc-26752: 786 provenance candidates and 117 production-Rust crate prefixes from the current rescan. PR1350 adds the independently reviewed MOSS-only gated normalization, depthwise-convolution accumulation and fused-SiLU precision boundaries, with discriminating CPU fixtures and passing required native CI. Standard Native arithmetic and cache traces remain unchanged. The earlier PR1348 precision profile and PR1347 Candle component-release correction remain included. Provider and anchor closures, provenance candidates, crate coverage and audit digest are derived from this pin; existing source-area dispositions and advisory licensing work remain preserved. Historical injected-conditioning numerical receipts retain their original revisions and do not establish normal text-encoding parity for this profile. New tensor, runtime quality, timing and memory evidence is gathered separately; CPU/source correctness is not visual acceptance. MOSS edit-adapter weights still have no declared license; linked code and parent-weight licenses do not establish adapter-weight terms. This summary is a provenance review and does not close existing advisory compliance items.",
-  "inferenceRevision": "78100568d8e5b9fb5b199872dc57cb28f5b87340",
-  "auditDigest": "e2a2580d1510962ae449a5750d545b144ab843e3ff44705a46f6e38eaa07dec1",
+  "_comment": "Audit inventory reviewed at inference revision 5d84b5d9 (issue 3197 SDXL CUDA forward-port, inference main): 786 provenance candidates and 117 production-Rust crate prefixes. This advance retains the already-shipped 81cff07c source and the main-line MOSS/H3 and native-INT8 additions, then adds the reviewed first-party SDXL lifecycle, sequential CFG execution, residency tests, bounded per-group VAE normalization and smaller declared sequential recipe. This final main pin also includes bounded CPU audit hashing and cancellation checks confined to MOSS training. No new embedded-source paths, markers or production crate prefixes were introduced by this advance. The source scan retains 786 provenance candidates and 117 production-Rust crate prefixes; existing source-area dispositions remain unchanged. The Supra2-IMG MLX and Candle provider crates are classified as native architecture reimplementations of the frozen SupraLabs/Supra2-IMG SupraDiT, with the Supra2-IMG/Flan-T5-Base Apache-2.0 and SD VAE ft-MSE MIT terms disclosed in About. The FLUX.3 crates that arrived with the main sync are left to their own epic and remain reported as open advisory items under sc-19751. Earlier MOSS-Image and body/perceptual dispositions are unchanged; other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; generated inventories and digests describe this exact source without a measurement currency claim.",
+  "inferenceRevision": "5d84b5d9b82508ba91ca7d87f0796c6622539c3c",
+  "auditDigest": "bd67a61fdf7752858e4b0e6af09f492963705e998e205e33bb8622e7074d3bba",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "78100568d8e5b9fb5b199872dc57cb28f5b87340",
+    "revision": "5d84b5d9b82508ba91ca7d87f0796c6622539c3c",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 786,
-    "populationSha256": "7a5b746495d0561b9bfb97c074b3917e3350660e3885fab07ab03875b52627fb"
+    "populationSha256": "b46abac3343795b2695f61fc65af45fab24739163be39c6d417d44f78b035e5a"
   },
   "portedSourceAreas": [
     {
@@ -994,7 +994,7 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "78100568d8e5b9fb5b199872dc57cb28f5b87340",
+    "revision": "5d84b5d9b82508ba91ca7d87f0796c6622539c3c",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
     "cratePrefixes": 117,
     "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"

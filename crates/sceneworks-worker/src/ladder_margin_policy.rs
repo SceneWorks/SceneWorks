@@ -182,6 +182,9 @@ pub fn admission_allowance(subject: AdmissionSubject) -> AdmissionAllowance {
         // The fitted per-phase laws already carry each phase's max fit/held-out residual, so what
         // remains is the recapture spread of the cell the curve was fitted through.
         CandidateBasis::EstimateFittedCurve => spread,
+        // A literal endpoint supplies its observed peak, while the existing recapture spread
+        // remains the admission uncertainty. It carries no fabricated calibration or parity.
+        CandidateBasis::EstimateMeasuredEndpoint => spread,
         // Video derivation includes its lane's uncertainty once, so do not add it again.
         CandidateBasis::EstimateAnchorDerived {
             lane: AnchorDerivationLane::Video,

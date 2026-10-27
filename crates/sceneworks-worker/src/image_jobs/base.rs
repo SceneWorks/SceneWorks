@@ -4096,6 +4096,357 @@ pub(super) fn candle_certified_load_spec(
         })
 }
 
+/// Bind the endpoint price to the complete ordinary SDXL assembly, including the shared VAE and
+/// tokenizers actually opened by Candle. ArtifactSeal's existing stat-identity memo avoids repeated
+/// multi-GB hashing; these exact tokens then participate in cache identity and guard registry load.
+/// Different base-tier members or consumed component bytes lose endpoint authority. Unused files in
+/// a shared tokenizer/VAE snapshot do not affect the price of the same loaded assembly.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn seal_sdxl_endpoint_load_spec(
+    spec: &mut LoadSpec,
+    expected: &[sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::EndpointArtifactFile],
+) -> WorkerResult<bool> {
+    use std::collections::BTreeMap;
+
+    const COMPONENTS: [(&str, &str); 3] = [
+        ("tokenizer_clip_l", "tokenizer.json"),
+        ("tokenizer_clip_bigg", "tokenizer.json"),
+        ("vae_fp16_fix", "diffusion_pytorch_model.safetensors"),
+    ];
+    // The measured assembly has one base directory and these three component sources. The stock
+    // co-requisite resolver returns File for a single literal manifest member; providers also accept
+    // its snapshot Dir. Extra encoders, controls, adapters, or imports cannot inherit this endpoint.
+    if spec.file_source_paths().len() + spec.directory_source_paths().len() != 4
+        || spec.components.len() != COMPONENTS.len()
+        || COMPONENTS
+            .iter()
+            .any(|(id, _)| !spec.components.contains_key(*id))
+    {
+        return Ok(false);
+    }
+    let WeightsSource::Dir(base) = &spec.weights else {
+        return Ok(false);
+    };
+    let mut components = Vec::new();
+    for (id, file) in COMPONENTS {
+        let path = match spec.components.get(id) {
+            Some(WeightsSource::Dir(root)) => root.join(file),
+            Some(WeightsSource::File(path))
+                if path.file_name() == Some(std::ffi::OsStr::new(file)) =>
+            {
+                path.clone()
+            }
+            _ => return Ok(false),
+        };
+        components.push((format!("components/{id}/{file}"), path));
+    }
+
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        prefix: &str,
+        files: &mut BTreeMap<String, PathBuf>,
+    ) -> WorkerResult<()> {
+        for entry in std::fs::read_dir(directory).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "SDXL endpoint inventory cannot read {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!("SDXL endpoint inventory failed: {error}"))
+                })?
+                .path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "SDXL endpoint member cannot be inspected: {error}"
+                ))
+            })?;
+            if metadata.is_dir() {
+                visit(root, &path, prefix, files)?;
+                continue;
+            }
+            // HF snapshot links to blob files are normal; directory links are not inventory roots.
+            if !std::fs::metadata(&path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "SDXL endpoint member target cannot be inspected: {error}"
+                    ))
+                })?
+                .is_file()
+            {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "SDXL endpoint member must be a file: {}",
+                    path.display()
+                )));
+            }
+            let relative = path
+                .strip_prefix(root)
+                .expect("inventory child stays below root");
+            let relative = relative
+                .iter()
+                .map(|part| part.to_str())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "SDXL endpoint member has a non-UTF-8 path".to_owned(),
+                    )
+                })?
+                .join("/");
+            files.insert(format!("{prefix}/{relative}"), path);
+        }
+        Ok(())
+    }
+
+    let mut actual = BTreeMap::new();
+    let base = std::path::absolute(base).map_err(|error| {
+        WorkerError::InvalidPayload(format!("SDXL endpoint root cannot be absolutized: {error}"))
+    })?;
+    visit(&base, &base, "base", &mut actual)?;
+    // These are the exact joins used by SDXL's resolve_tokenizer_file/resolve_vae_file. The same HF
+    // shared snapshot may contain additional CLIP weights installed for an unrelated model.
+    for (name, path) in components {
+        if !path.is_file() {
+            return Ok(false);
+        }
+        actual.insert(name, path);
+    }
+    if expected.is_empty()
+        || expected.len() != actual.len()
+        || expected.iter().any(|file| !actual.contains_key(&file.path))
+    {
+        return Ok(false);
+    }
+    let mut pins = Vec::with_capacity(expected.len());
+    for file in expected {
+        let pin = gen_core::PinnedWeightsFile::pin(&actual[&file.path])
+            .map_err(|error| crate::classify_engine_error("SDXL endpoint load pin", error))?;
+        let digest = pin
+            .content_sha256()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if pin.target_fingerprint().size != file.bytes || digest != file.sha256 {
+            return Ok(false);
+        }
+        pins.push(pin);
+    }
+    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "SDXL endpoint load preparation")?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod sdxl_endpoint_inventory_tests {
+    use super::*;
+    use sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::EndpointArtifactFile;
+    use sha2::{Digest, Sha256};
+
+    fn fixture() -> (tempfile::TempDir, LoadSpec, Vec<EndpointArtifactFile>) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for path in [
+            "base/unet/model.safetensors",
+            "base/vae/model.safetensors",
+            "components/tokenizer_clip_l/tokenizer.json",
+            "components/tokenizer_clip_bigg/tokenizer.json",
+            "components/vae_fp16_fix/diffusion_pytorch_model.safetensors",
+        ] {
+            let file = temp.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"fixture-a").unwrap();
+            files.push(EndpointArtifactFile {
+                path: path.to_owned(),
+                bytes: 9,
+                sha256: format!("{:x}", Sha256::digest(b"fixture-a")),
+            });
+        }
+        let mut spec = LoadSpec::new(WeightsSource::Dir(temp.path().join("base")));
+        for id in ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"] {
+            spec = spec.with_component(
+                id,
+                WeightsSource::Dir(temp.path().join("components").join(id)),
+            );
+        }
+        (temp, spec, files)
+    }
+
+    // CI_IMPACT: tiny filesystem fixtures and SHA-256 only; no model, learned layer, or device.
+    #[test]
+    fn sdxl_endpoint_inventory_pins_the_actual_shared_vae_and_both_tokenizers() {
+        let (_temp, mut spec, expected) = fixture();
+        assert!(seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        assert_eq!(spec.prepared_file_pins().len(), expected.len());
+        spec.validate_prepared_file_pins().unwrap();
+        let shared_vae = match &spec.components["vae_fp16_fix"] {
+            WeightsSource::Dir(root) => root.join("diffusion_pytorch_model.safetensors"),
+            _ => unreachable!(),
+        };
+        assert!(spec.prepared_file_pins().get(&shared_vae).is_some());
+        std::fs::write(shared_vae, b"fixture-b").unwrap();
+        assert!(spec.validate_prepared_file_pins().is_err());
+    }
+
+    // CI_IMPACT: actual stock co-requisite factory over four tiny cached files; no model/device calls.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn sdxl_endpoint_inventory_accepts_the_certified_stock_component_factory() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            ("SCENEWORKS_DATA_DIR", temp.path().to_str().unwrap()),
+            ("SCENEWORKS_CONFIG_DIR", temp.path().to_str().unwrap()),
+        ]);
+        let settings = Settings::from_env();
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(source)).unwrap();
+        let manifest = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "sdxl")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        let descriptor = crate::inference_runtime::media_descriptor("sdxl").unwrap();
+        let mut expected = Vec::new();
+        let mut base = None;
+        for download in manifest["downloads"].as_array().unwrap() {
+            let component = download.get("componentId").and_then(Value::as_str);
+            if component.is_some_and(|id| !descriptor.required_components.contains(&id))
+                || (component.is_none() && download["variant"] != "q4")
+            {
+                continue;
+            }
+            let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(
+                &settings.data_dir,
+                download["repo"].as_str().unwrap(),
+            )
+            .unwrap()
+            .join("snapshots")
+            .join(download["revision"].as_str().unwrap());
+            let (relative, file) = if let Some(component) = component {
+                let file = download["files"][0].as_str().unwrap();
+                (
+                    format!("components/{component}/{file}"),
+                    snapshot.join(file),
+                )
+            } else {
+                base = Some(snapshot.join("q4"));
+                (
+                    "base/fixture.bin".to_owned(),
+                    snapshot.join("q4/fixture.bin"),
+                )
+            };
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"fixture-a").unwrap();
+            expected.push(EndpointArtifactFile {
+                path: relative,
+                bytes: 9,
+                sha256: format!("{:x}", Sha256::digest(b"fixture-a")),
+            });
+        }
+        let spec =
+            load_spec(base.unwrap(), Some(Quant::Q4), Vec::new(), None).with_resolved_route("sdxl");
+        let mut spec = attach_required_components(spec, "sdxl", manifest, &settings).unwrap();
+        assert_eq!(spec.components.len(), 3);
+        assert_eq!(spec.file_source_paths().len(), 3);
+        assert_eq!(spec.directory_source_paths().len(), 1);
+        assert!(candle_certified_load_spec(
+            "sdxl", &settings, &spec, manifest, "q4"
+        ));
+        assert!(seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        assert_eq!(spec.prepared_file_pins().len(), expected.len());
+        spec.validate_prepared_file_pins().unwrap();
+        for source in spec.components.values() {
+            let WeightsSource::File(path) = source else {
+                panic!("the stock single-literal co-requisite must resolve to File");
+            };
+            assert!(spec.prepared_file_pins().get(path).is_some());
+        }
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_file_components_reject_changed_members_and_extra_sources() {
+        for changed in 0..3 {
+            let (temp, mut spec, expected) = fixture();
+            for file in &expected[2..] {
+                let component = file.path.split('/').nth(1).unwrap();
+                spec = spec
+                    .with_component(component, WeightsSource::File(temp.path().join(&file.path)));
+            }
+            let path = temp.path().join(&expected[2 + changed].path);
+            std::fs::write(&path, b"fixture-b").unwrap();
+            assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+            std::fs::remove_file(path).unwrap();
+            assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        }
+        let (temp, spec, expected) = fixture();
+        let renamed = temp.path().join("components/tokenizer_clip_l/other.json");
+        std::fs::write(&renamed, b"fixture-a").unwrap();
+        let mut renamed_spec = spec
+            .clone()
+            .with_component("tokenizer_clip_l", WeightsSource::File(renamed));
+        assert!(!seal_sdxl_endpoint_load_spec(&mut renamed_spec, &expected).unwrap());
+        for source in [
+            WeightsSource::File(temp.path().join(&expected[2].path)),
+            WeightsSource::Dir(temp.path().join("base")),
+        ] {
+            let mut extra = spec.clone().with_text_encoder(source);
+            assert!(!seal_sdxl_endpoint_load_spec(&mut extra, &expected).unwrap());
+        }
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_rejects_changed_missing_and_extra_members() {
+        // Equal-size changes in every source must lose the measured price, including shared VAE
+        // changes which a tier-root-only inventory would miss.
+        for index in 0..5 {
+            let (temp, mut spec, expected) = fixture();
+            std::fs::write(temp.path().join(&expected[index].path), b"fixture-b").unwrap();
+            assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+            assert!(!spec.prepared_file_pins().is_prepared());
+        }
+        let (temp, mut spec, expected) = fixture();
+        std::fs::remove_file(temp.path().join(&expected[0].path)).unwrap();
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+
+        let (temp, mut spec, expected) = fixture();
+        std::fs::write(temp.path().join("base/added.safetensors"), b"fixture-a").unwrap();
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+
+        let (temp, spec, expected) = fixture();
+        let mut spec =
+            spec.with_component("unexpected", WeightsSource::Dir(temp.path().join("base")));
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_ignores_unused_shared_snapshot_members() {
+        let (temp, mut spec, expected) = fixture();
+        std::fs::write(
+            temp.path()
+                .join("components/tokenizer_clip_l/model.safetensors"),
+            b"unused",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("components/vae_fp16_fix/config.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        assert_eq!(spec.prepared_file_pins().len(), expected.len());
+    }
+}
+
 /// Seal every file recursively-inventoried receipt provider can read before selector evaluation.
 /// The same finalized `LoadSpec` reaches the generator cache, so cold/warm execution cannot
 /// silently re-resolve a pathname after admission.
@@ -11215,6 +11566,21 @@ fn candle_tier_fit(
     }
 }
 
+/// A generic SDXL request has a narrower, artifact-bound staging contract than its descriptor.
+/// Bespoke edit/IP/detail lanes never reach this path. Keep the legacy tier verdict unless the
+/// exact request selector has admitted the candidate; a declaration alone grants no saving.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_tier_fit_after_shared_selection(
+    legacy: TierFit,
+    selection: Option<&crate::candle_memory_strategy::CandleMemoryEvaluation>,
+) -> TierFit {
+    if selection.is_some() {
+        TierFit::Fits
+    } else {
+        legacy
+    }
+}
+
 /// FLUX.2-dev's caption-upsample lifecycle has exact bounded high-waters only for the Q4 and Q8
 /// turnkey tiers. `predicted_peak_gb` intentionally falls back to `minMemoryGb` for legacy sparse
 /// manifests, but doing that here would admit the unmeasured 113 GB BF16 tier at the 48 GB Q4 floor.
@@ -13323,6 +13689,43 @@ async fn generate_candle_registry_stream_using(
         )));
     }
     let adapter_source_bytes = krea_adapter_bytes.unwrap_or(0);
+    // Ordinary SDXL reaches a request-scoped provider contract whose staging support is narrower
+    // than the descriptor shared with its bespoke surfaces. Price each installed candidate with
+    // that contract before the resident-only capability clamp can reject it. Other SDXL surfaces
+    // retain their existing gates; no descriptor capability is broadened here.
+    let sdxl_request_tier_admission = engine_id == "sdxl"
+        && request.model == "sdxl"
+        && matches!(request.mode.as_str(), "image_generation" | "text_to_image")
+        && edit_reference.is_none()
+        && img2img_reference.is_none()
+        && edit_refs.is_empty()
+        && edit_mask.is_none()
+        && hires_fix.is_none()
+        && !use_pid
+        && native_batch.is_none();
+    let sdxl_endpoints = if sdxl_request_tier_admission
+        && request.count == 1
+        && adapter_count == 0
+        && flash_attn
+        && lane_controls.cfg_interval.is_none()
+        && guidance_method.is_none()
+        && scheduler.is_none()
+        && scheduler_shift.is_none()
+    {
+        sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::packaged_sdxl_cuda_memory_endpoints()
+            .filter(|endpoints| {
+                endpoints.settings.get("steps").and_then(Value::as_u64) == Some(u64::from(steps))
+                    && endpoints.settings.get("guidance").and_then(Value::as_f64)
+                        == guidance.map(f64::from)
+                    && endpoints.settings.get("flashAttn").and_then(Value::as_bool) == Some(true)
+                    && sampler.as_deref().is_none_or(|sampler| {
+                        endpoints.resolved_defaults.get("sampler").and_then(Value::as_str)
+                            == Some(sampler)
+                    })
+            })
+    } else {
+        None
+    };
     // sc-10733 capability downtier: for a DEFAULT job (no explicit per-(screen,model) pick, and not the
     // bespoke ConvRot tier), if the resolved tier won't fit the live budget, step DOWN to the highest
     // installed tier that does — floored at the per-model quality floor — rejecting only when nothing
@@ -13354,13 +13757,112 @@ async fn generate_candle_registry_stream_using(
         let candidates: Vec<(&'static str, TierFit)> =
             downtier_candidate_tiers(request, settings, tier, floor)
                 .into_iter()
-                .map(|candidate| {
+                .map(|candidate| -> WorkerResult<_> {
                     let candidate_adapter_bytes = candle_adapter_resident_bytes(
                         engine_id,
                         candidate,
                         adapter_source_bytes,
                     );
-                    let fit = if krea_turbo_ladder && adapter_count == 0 {
+                    let fit = if sdxl_request_tier_admission {
+                        let legacy = candle_tier_fit(
+                            &request.model_manifest_entry,
+                            candidate,
+                            budget,
+                            sequential_capable,
+                            candidate_adapter_bytes,
+                        );
+                        let selected = if let Some(dir) =
+                            resolve_tier_dir(request, settings, candidate)
+                        {
+                            let (candidate_quant, _) = candle_quant_for_resolved_tier(
+                                request,
+                                candidate,
+                                &dir,
+                                model.supports_quant(),
+                                false,
+                            );
+                            let spec = load_spec(dir, candidate_quant, adapters.clone(), None)
+                                .with_resolved_route(request.model.clone());
+                            let spec = attach_required_components(
+                                spec,
+                                engine_id,
+                                &request.model_manifest_entry,
+                                settings,
+                            )?;
+                            let spec =
+                                attach_manifest_text_encoder(spec, engine_id, request, settings)?
+                                    .into_load_spec();
+                            let mut spec = apply_declared_candle_image_load_shape(
+                                engine_id,
+                                Some(candidate),
+                                &request.mode,
+                                &request.model_manifest_entry,
+                                spec,
+                                false,
+                            );
+                            let certified = candle_certified_load_spec(
+                                engine_id,
+                                settings,
+                                &spec,
+                                &request.model_manifest_entry,
+                                candidate,
+                            );
+                            let candidate_endpoints = match sdxl_endpoints {
+                                Some(endpoints) if certified && candidate == "q4" => {
+                                    seal_sdxl_endpoint_load_spec(&mut spec, &endpoints.artifact.files)?
+                                        .then_some(endpoints)
+                                }
+                                _ => None,
+                            };
+                            let overlay_bytes = candidate_adapter_bytes.saturating_add(
+                                lane_controls::declared_activation_overlay_bytes(
+                                    request,
+                                    None,
+                                    memory_width,
+                                    memory_height,
+                                )?,
+                            );
+                            crate::candle_memory_strategy::evaluate_shared_image_priced(
+                                engine_id,
+                                &request.model,
+                                &spec,
+                                certified,
+                                &request.model_manifest_entry,
+                                candidate,
+                                &request.mode,
+                                (adapter_count > 0).then_some("lora"),
+                                gen_core::MemoryGeometry {
+                                    width: memory_width,
+                                    height: memory_height,
+                                    batch: 1,
+                                    frames: 1,
+                                    reference_count: 0,
+                                },
+                                false,
+                                false,
+                                false,
+                                false,
+                                budget,
+                                shared_reserve_gb,
+                                crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+                                    &request.model_manifest_entry,
+                                    candidate,
+                                    overlay_bytes,
+                                ),
+                                overlay_bytes,
+                                if reclaimable_gb > 0.0 {
+                                    gen_core::MemoryCacheState::Warm
+                                } else {
+                                    gen_core::MemoryCacheState::Cold
+                                },
+                                None,
+                                candidate_endpoints,
+                            )?
+                        } else {
+                            None
+                        };
+                        candle_tier_fit_after_shared_selection(legacy, selected.as_ref())
+                    } else if krea_turbo_ladder && adapter_count == 0 {
                         let candidate_runtime = resolve_tier_dir(request, settings, candidate)
                             .and_then(|dir| {
                                 krea_runtime_evidence_context(
@@ -13431,9 +13933,9 @@ async fn generate_candle_registry_stream_using(
                             candidate_adapter_bytes,
                         )
                     };
-                    (candidate, fit)
+                    Ok((candidate, fit))
                 })
-                .collect();
+                .collect::<WorkerResult<_>>()?;
         match choose_downtier(tier, &candidates) {
             DowntierPick::Keep => {}
             DowntierPick::Downtier(chosen) => {
@@ -13700,6 +14202,13 @@ async fn generate_candle_registry_stream_using(
     );
     seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
+    let sdxl_endpoints = match sdxl_endpoints {
+        Some(endpoints) if artifact_is_certified && shared_tier == "q4" => {
+            seal_sdxl_endpoint_load_spec(&mut shared_contract_spec, &endpoints.artifact.files)?
+                .then_some(endpoints)
+        }
+        _ => None,
+    };
     // Epic 25899: the provider's prefix KV cache, priced from the linked provider for THIS request
     // (`None` for every provider without one — its admission is unchanged). The Candle surcharge
     // follows the build's production device width, not the tier.
@@ -13756,6 +14265,7 @@ async fn generate_candle_registry_stream_using(
             gen_core::MemoryCacheState::Cold
         },
         prefix_kv_cache_surcharge,
+        sdxl_endpoints,
     )?;
     let first_pass_shared_memory = if hires_fix.is_some()
         && matches!(
@@ -13841,13 +14351,23 @@ async fn generate_candle_registry_stream_using(
         }
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
+        if sdxl_request_tier_admission
+            && evaluation.context.selection.strategy == gen_core::MemoryStrategy::Resident
+        {
+            // The measured resident endpoint is literal: disable the provider's legacy automatic
+            // decode fallback by carrying an explicit all-false request memory block.
+            generation_memory = Some(gen_core::GenerationMemory::default());
+        }
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
         ideogram_warm_staged = evaluation.warm_staged;
         // Resident is the selector's conservative sentinel, not authority to reconfigure a request.
         // In particular, a later legacy low-VRAM decision may choose sequential residency; carrying a
         // Resident scope would then overwrite that request memory back to resident in configure_request.
-        selected_memory_strategy_context =
-            optimized_shared_memory_context(engine_id, evaluation.context);
+        selected_memory_strategy_context = if sdxl_request_tier_admission {
+            Some(evaluation.context)
+        } else {
+            optimized_shared_memory_context(engine_id, evaluation.context)
+        };
     }
     if let Some(evaluation) = first_pass_shared_memory {
         hires_first_pass_generation_memory = evaluation.memory;
@@ -13913,8 +14433,14 @@ async fn generate_candle_registry_stream_using(
     // Some exactly when the receipt produced a graded selection for this request, including a
     // Resident one — which is a real decision the load must honor, not an absence of one.
     let receipt_selector_authoritative = receipt_priced_selection.is_some();
+    // The generic SDXL selector validates the exact artifact, request and composition, including
+    // resident scratch-bounding rungs. The descriptor's deliberately broad staging flag and the
+    // old geometry-free resident row must not veto that same decision after it passed the tier
+    // chooser. Missing or refused selection still reaches the unchanged legacy resident gate.
+    let request_selector_authoritative = receipt_selector_authoritative
+        || (sdxl_request_tier_admission && memory_strategy_selection.is_some());
     let use_sequential =
-        if receipt_selector_authoritative {
+        if request_selector_authoritative {
             generation_memory.is_some_and(|memory| memory.stage_residency)
         } else if let Some(
             fit @ crate::vram_gate::KreaTurboFit::Resident {
@@ -14272,7 +14798,11 @@ async fn generate_candle_registry_stream_using(
     // exactly what a later swap-in reclaims after the single-slot cache evicts this model. Reached only
     // when the gate ADMITTED the load (the reject arms `return` above), so we never record a peak we
     // didn't actually attempt to allocate.
-    let incurred_peak = if use_sequential {
+    let incurred_peak = if sdxl_request_tier_admission && memory_strategy_selection.is_some() {
+        // An endpoint-priced resident/scratch-bound run must not credit the old padded resident
+        // manifest row during the next eviction. Only the admitted raw working set is reclaimable.
+        adapted_peak_gb
+    } else if use_sequential {
         adapted_peak_gb.or_else(|| {
             crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
                 &request.model_manifest_entry,

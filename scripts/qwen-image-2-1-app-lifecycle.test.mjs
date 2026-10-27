@@ -194,6 +194,11 @@ function assertDispatcherIsolation(workflow) {
       assert.deepEqual(runs("supra2-mlx-real-weights", backend, phase), ["supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
       assert.deepEqual(runs("catalog", backend, phase), [backend], "default catalog contract must remain unchanged");
       assert.deepEqual(runs("", backend, phase), [backend], "omitted profile preserves catalog behavior");
+      // CI_IMPACT: preserve main's bounded SDXL profile isolation alongside MOSS phase coverage.
+      for (const profile of ["sdxl-cuda-endpoints", "sdxl-cuda-admitted-replay"]) {
+        assert.deepEqual(runs(profile, backend, phase), ["candle"], "bounded SDXL profiles must skip all unrelated jobs");
+      }
+      assert.deepEqual(runs("sdxl-cuda-unknown", backend, phase), [], "the SDXL prefix alone must not dispatch compute");
       assert.deepEqual(runs("unknown", backend, phase), [], "unknown profiles must fail closed");
     }
   }
