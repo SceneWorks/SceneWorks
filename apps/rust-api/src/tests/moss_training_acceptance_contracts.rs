@@ -701,3 +701,87 @@ async fn pre_model_library_and_dispatch_cpu_contract() {
         "acceptance wrapper must heap-pin the production dispatcher"
     );
 }
+
+// CI_IMPACT: literal bytes and seal metadata only; no tensor/model/device work.
+#[test]
+fn preflight_checked_seal_preserves_digest_and_reuses_only_unchanged_identity() {
+    use super::moss_training_acceptance::pin_preflight_weight;
+    use sha2::{Digest, Sha256};
+    use std::time::{Duration, Instant};
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("literal.bin");
+    std::fs::write(&file, b"frozen bytes").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let first = pin_preflight_weight(&file, deadline, None, |_| {}).unwrap();
+    let expected: [u8; 32] = Sha256::digest(b"frozen bytes").into();
+    assert_eq!(first.content_sha256(), &expected);
+    assert_eq!(first.target_fingerprint().size, 12);
+    let mut acquired = Vec::new();
+    let second = pin_preflight_weight(&file, deadline, None, |p| acquired.push(p.clone())).unwrap();
+    assert_eq!(first.content_sha256(), second.content_sha256());
+    assert!(acquired.iter().any(|p| p.acquisition
+        == gen_core::runtime::ArtifactSealAcquisition::MemoryMemo
+        && p.hashed_bytes == 0));
+    std::fs::write(&file, b"different frozen bytes").unwrap();
+    assert!(first.ensure_unchanged().is_err());
+    let changed = pin_preflight_weight(&file, deadline, None, |_| {}).unwrap();
+    assert_ne!(first.content_sha256(), changed.content_sha256());
+}
+
+#[test]
+fn preflight_authentication_observes_original_deadline_and_closed_cancel_control() {
+    use super::moss_training_acceptance::pin_preflight_weight;
+    use std::time::{Duration, Instant};
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("literal.bin");
+    let cancel = root.path().join("owned.cancel");
+    std::fs::write(&file, b"literal").unwrap();
+    let future = Instant::now() + Duration::from_secs(10);
+    let expired = Instant::now() - Duration::from_millis(1);
+    assert!(pin_preflight_weight(&file, expired, None, |_| {})
+        .unwrap_err()
+        .to_string()
+        .contains("deadline"));
+    for bytes in [b"invalid".as_slice(), br#"{"cancel":"true"}"#, br#"{}"#] {
+        std::fs::write(&cancel, bytes).unwrap();
+        assert!(pin_preflight_weight(&file, future, Some(&cancel), |_| {}).is_err());
+    }
+    std::fs::write(&cancel, br#"{"cancel":true}"#).unwrap();
+    assert!(matches!(
+        pin_preflight_weight(&file, future, Some(&cancel), |_| {}),
+        Err(gen_core::Error::Canceled)
+    ));
+    std::fs::write(&cancel, br#"{"cancel":false}"#).unwrap();
+    assert!(pin_preflight_weight(&file, future, Some(&cancel), |_| {}).is_ok());
+    assert!(pin_preflight_weight(&file, future, Some(root.path()), |_| {}).is_err());
+}
+
+#[test]
+fn preflight_cancellation_interrupts_a_cold_content_read_before_acquisition() {
+    use super::moss_training_acceptance::pin_preflight_weight;
+    use std::time::{Duration, Instant};
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("literal.bin");
+    let cancel = root.path().join("owned.cancel");
+    // One existing seal read quantum plus a tail, with no tensor payload.
+    std::fs::write(&file, vec![7_u8; 8 * 1024 * 1024 + 17]).unwrap();
+    let mut progress = Vec::new();
+    let result = pin_preflight_weight(
+        &file,
+        Instant::now() + Duration::from_secs(10),
+        Some(&cancel),
+        |p| {
+            if p.acquisition == gen_core::runtime::ArtifactSealAcquisition::ColdContentRead
+                && p.hashed_bytes > 0
+            {
+                std::fs::write(&cancel, br#"{"cancel":true}"#).unwrap();
+            }
+            progress.push(p.clone());
+        },
+    );
+    assert!(matches!(result, Err(gen_core::Error::Canceled)));
+    assert!(progress.iter().any(|p| p.hashed_bytes > 0));
+    assert!(!progress
+        .iter()
+        .any(|p| p.state == gen_core::runtime::ArtifactSealProgressState::Acquired));
+}

@@ -56,6 +56,20 @@ export function fileDigest(file) {
   try { let n; while((n=readSync(fd,buffer,0,buffer.length,null))>0) hash.update(buffer.subarray(0,n)); return hash.digest('hex'); }
   finally { closeSync(fd); }
 }
+// Yield between bounded reads so owned signal cancellation is observable during full auth.
+export async function fileDigestChecked(file, check, onChunk = () => {}) {
+  check();
+  const fd=openSync(file,'r'), hash=createHash('sha256'), buffer=Buffer.allocUnsafe(1024*1024);
+  try {
+    while(true) {
+      check();const n=readSync(fd,buffer,0,buffer.length,null);
+      if(n===0)break;
+      hash.update(buffer.subarray(0,n));onChunk(n);
+      await new Promise(resolve=>setImmediate(resolve));check();
+    }
+    check();return hash.digest('hex');
+  } finally {closeSync(fd);}
+}
 // Every artifact member is bound to bytes, never just metadata or a filename glob.
 export function artifactMembers(root) {
   const members = [];
@@ -117,7 +131,7 @@ export function checkDiscovery(all, ignored, backend='mlx') {
   return expected;
 }
 
-export function validatePreflight(p, backend, source, caseId, phase = 'capture') {
+function validatePreflightFields(p, backend, source, caseId, phase = 'capture') {
   assert(p.phase === phase, 'preflight phase mismatch');
   assert(p.caseId === caseId && p.verdict === 'admitted' && p.refusalReason === null, 'exact cell must have admitted native preweight preflight');
   assert(p.modelRevisions && Object.keys(p.modelRevisions).length > 0 && Object.values(p.modelRevisions).every(r => /^[0-9a-f]{40}$/.test(r)), 'expected component revisions required');
@@ -137,19 +151,29 @@ export function validatePreflight(p, backend, source, caseId, phase = 'capture')
   assert(Array.isArray(p.weights) && p.weights.length > 0, 'cached weight headers and files required');
   for (const weight of p.weights) {
     assert(weight.present === true && path.isAbsolute(weight.path) && /^[0-9a-f]{64}$/.test(weight.sha256), 'present resolved cached weight path/hash required');
-    assert(existsSync(weight.path) && fileDigest(weight.path) === weight.sha256, `offline cached weight missing or changed: ${weight.path}`);
   }
   return p.resolvedCapBytes;
 }
 
+export function validatePreflight(p, backend, source, caseId, phase = 'capture') {
+  const cap=validatePreflightFields(p,backend,source,caseId,phase);
+  for(const weight of p.weights) assert(existsSync(weight.path) && fileDigest(weight.path)===weight.sha256,`offline cached weight missing or changed: ${weight.path}`);
+  return cap;
+}
+export async function validatePreflightChecked(p, backend, source, caseId, phase, check) {
+  const cap=validatePreflightFields(p,backend,source,caseId,phase);
+  for(const weight of p.weights) assert(await fileDigestChecked(weight.path,check)===weight.sha256,`offline cached weight missing or changed: ${weight.path}`);
+  check();return cap;
+}
+
 const windowsRows=rows=>rows&&new Map([...rows].map(([pid,r])=>[pid,{...r,birth:String(r.birthMs),executable:r.path}]));
-export const recheckWindowsRows=(pids,timeoutMs)=>windowsRows(queryWindowsProcesses({pids,timeoutMs}));
+export const recheckWindowsRows=(pids,timeoutMs,onFailure=null)=>windowsRows(queryWindowsProcesses({pids,timeoutMs,onFailure}));
 
 // Mac and Windows share pid+birth+executable identity. The Windows query is reused
 // from the CPU driver; no CPU execution function or its fixed bounds are changed.
 export function processRows(platform = process.platform, onFailure = null, run = spawnSync) {
   if (platform === 'win32') {
-    const rows = queryWindowsProcesses();
+    const rows = queryWindowsProcesses({run,onFailure});
     return windowsRows(rows);
   }
   const started=performance.now();
@@ -266,7 +290,7 @@ export async function executeSupervised(root, command, log, limitMs, state, { en
     }
   };
   const observe=(until=Math.min(deadline,cancelAt===null?Infinity:cancelAt+releaseMs))=>observeOwned(queryOwned(),known,child.pid,witness=>{state.identityFailure??=witness;},{pending,onRss:recordRss,
-    recheckWindows:pids=>recheckWindows(pids,Math.min(20_000,Math.max(0,until-Date.now()))),
+    recheckWindows:pids=>recheckWindows(pids,Math.min(20_000,Math.max(0,until-Date.now())),failure=>{state.telemetryFailure??=failure;}),
     onResolution:witness=>{state.identityResolution??=witness;}});
   try {
     while (true) {
@@ -372,7 +396,7 @@ const commandComplete=(root,args,state)=>state && !state.unsafe&&!state.cancelle
   : state.cleanup?.released===true);
 
 export async function run(options) {
-  const { root,output,backend,phase,manifest,env=process.env,execute=executeCommand,inspect=defaultInspect,preflightValidator=validatePreflight,sourceProvider=sourceFacts,cacheInventory=inventoryMossTrainingCache }=options;
+  const { root,output,backend,phase,manifest,env=process.env,execute=executeCommand,inspect=defaultInspect,preflightValidator=validatePreflightChecked,sourceProvider=sourceFacts,cacheInventory=inventoryMossTrainingCache }=options;
   const cellIndex=options['capture-cell'] === undefined ? null : CELLS.indexOf(options['capture-cell']);
   assert(cellIndex === null || (phase === 'capture' && cellIndex >= 0), 'invalid capture-cell selector');
   const continuing=cellIndex !== null && cellIndex > 0;
@@ -506,9 +530,9 @@ export async function run(options) {
         const entry={caseId:`${sourceBackend}/${cell}`,sourceCaseId:`${sourceBackend}/${cell}`,executionBackend:backend,test,caseStartedAt,caseDeadlineAt:new Date(Date.parse(caseStartedAt)+BOUNDS.case).toISOString(),rawEvidence:path.relative(output,path.join(caseOutput,'evidence.json')).split(path.sep).join('/')};receipt.cases.push(entry);
         const preflightFile=path.join(caseOutput,'devicepreflight.json');
         const cellEnv={...baseEnv,MOSS_ACCEPTANCE_CASE_ID:entry.caseId,MOSS_ACCEPTANCE_SOURCE_CASE_ID:entry.sourceCaseId,MOSS_ACCEPTANCE_EXECUTION_BACKEND:backend,MOSS_ACCEPTANCE_PHASE:phase,MOSS_ACCEPTANCE_CROSS_LOAD_STARTED_AT:phase==='cross-load'?caseStartedAt:'',MOSS_ACCEPTANCE_OUTPUT:caseOutput,MOSS_ACCEPTANCE_DEVICE_PREFLIGHT:preflightFile,MOSS_ACCEPTANCE_CASE_STARTED_AT:caseStartedAt,MOSS_ACCEPTANCE_CASE_DEADLINE_AT:entry.caseDeadlineAt};
-        const preflight=await command([executable,PREFLIGHT,'--ignored','--exact','--nocapture','--test-threads=1'],`preflight-${cell.replace('/','-')}`,Math.min(BOUNDS.list,remainingCaseMs(caseStartedAt)),{env:{...cellEnv,MOSS_ACCEPTANCE_PREFLIGHT_ONLY:'1'}});
+        const preflight=await command([executable,PREFLIGHT,'--ignored','--exact','--nocapture','--test-threads=1'],`preflight-${cell.replace('/','-')}`,remainingCaseMs(caseStartedAt),{env:{...cellEnv,MOSS_ACCEPTANCE_PREFLIGHT_ONLY:'1'}});
         parseTestResult(preflight.result.output,preflight.result.exit,PREFLIGHT,'green');
-        const capBytes=preflightValidator(json(preflightFile),backend,source,entry.caseId,phase);
+        const capBytes=await preflightValidator(json(preflightFile),backend,source,entry.caseId,phase,()=>{assert(!interrupted,'interrupted during native weight verification');remainingCaseMs(caseStartedAt);});
         const {result,state}=await command([executable,test,'--ignored','--exact','--nocapture','--test-threads=1'],`case-${cell.replace('/','-')}`,remainingCaseMs(caseStartedAt),{capBytes,env:{...cellEnv,MOSS_ACCEPTANCE_RESOLVED_CAP_BYTES:String(capBytes)}});
         entry.counts=parseTestResult(result.output,result.exit,test,'green');
         assert(state.rssFirstBytes>0&&state.rssPeakBytes<=capBytes,'missing/breached aggregate RSS observation');
@@ -523,8 +547,18 @@ export async function run(options) {
   finally {
     process.off('SIGINT',cancel);process.off('SIGTERM',cancel);
     if(interrupted){receipt.ok=false;receipt.failures.push('signal interruption');}
-    for(const member of priorMembers) if(!existsSync(path.join(output,member.path)) || fileDigest(path.join(output,member.path))!==member.sha256) {receipt.ok=false;receipt.cellComplete=false;receipt.failures.push('immutable prior raw file changed');}
-    receipt.members=artifactMembers(output).filter(m=>m.path!=='driver.json');
+    // An unclosed native writer can still mutate evidence after this function returns.
+    // Retain raw diagnostics, but do not claim an immutable member seal in that state.
+    const released=receipt.commands.every(c=>isPreparationCommand(root,c.command)
+      ? c.supervision?.completion?.scope==='root-and-stdio' && c.supervision?.completion?.completed===true && c.supervision?.completion?.stdioClosed!==false && c.supervision?.unsafe!==true
+      : c.supervision?.cleanup?.released===true && c.supervision?.unsafe!==true);
+    if(!released) {
+      receipt.ok=false;receipt.cellComplete=false;receipt.members=[];
+      receipt.failures.push('artifact members unsealed: command release/completion unproven');
+    } else {
+      for(const member of priorMembers) if(!existsSync(path.join(output,member.path)) || fileDigest(path.join(output,member.path))!==member.sha256) {receipt.ok=false;receipt.cellComplete=false;receipt.failures.push('immutable prior raw file changed');}
+      receipt.members=artifactMembers(output).filter(m=>m.path!=='driver.json');
+    }
     store(path.join(output,'driver.json'),receipt);
   }
   return receipt;

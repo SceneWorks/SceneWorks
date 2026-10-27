@@ -68,6 +68,48 @@ fn file_sha(path: &Path) -> Result<String> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
+// The original cell clock and supervisor-owned control remain authoritative during
+// cold authentication. Reuse the engine seal/memo; never trust a cache name/ETag.
+pub(super) fn check_preflight_control(
+    deadline: Instant,
+    cancel_file: Option<&Path>,
+) -> gen_core::Result<()> {
+    if Instant::now() >= deadline {
+        return Err(gen_core::Error::Msg("frozen case deadline exceeded".into()));
+    }
+    if let Some(path) = cancel_file {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        let value: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            gen_core::Error::Msg(format!("invalid owned cancellation control: {error}"))
+        })?;
+        match value.get("cancel").and_then(Value::as_bool) {
+            Some(true) => return Err(gen_core::Error::Canceled),
+            Some(false) => {}
+            None => {
+                return Err(gen_core::Error::Msg(
+                    "invalid owned cancellation boolean".into(),
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+pub(super) fn pin_preflight_weight(
+    path: &Path,
+    deadline: Instant,
+    cancel_file: Option<&Path>,
+    observe: impl FnMut(&gen_core::runtime::ArtifactSealProgress),
+) -> gen_core::Result<gen_core::PinnedWeightsFile> {
+    gen_core::PinnedWeightsFile::pin_with_progress(
+        path,
+        || check_preflight_control(deadline, cancel_file),
+        observe,
+    )
+}
 fn json_file(path: &Path) -> Result<Value> {
     serde_json::from_slice(&std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)
         .map_err(|e| format!("{}: {e}", path.display()))
@@ -554,14 +596,11 @@ pub(super) fn selected_weight_files(
 
 /// Authentication uses the linked engine's frozen acquisition manifest, NOT a
 /// directory name, cached ETag alone, fixture namespace or caller-supplied hash.
-fn weight_inventory(
-    settings: &crate::Settings,
-    parent: &str,
-    cross: bool,
-) -> Result<(Value, Value)> {
+fn weight_inventory(settings: &crate::Settings, case: &Case) -> Result<(Value, Value)> {
     let mut weights = Vec::new();
     let mut revisions = BTreeMap::new();
-    let selected = selected_weight_files(parent, cross)?;
+    let selected = selected_weight_files(&case.parent, case.cross)?;
+    let cancel_file = case.cancel_file()?;
     for identity in gen_core::moss_image::MOSS_IMAGE_ASSETS {
         if !selected.contains(&(
             identity.repository.to_owned(),
@@ -579,13 +618,24 @@ fn weight_inventory(
             .join("snapshots")
             .join(identity.revision)
             .join(identity.relative_path);
+        check_preflight_control(case.deadline, cancel_file.as_deref())
+            .map_err(|e| e.to_string())?;
         let present = path.is_file();
-        let digest = if present {
-            Some(file_sha(&path)?)
+        let pin = if present {
+            Some(
+                pin_preflight_weight(&path, case.deadline, cancel_file.as_deref(), |_| {})
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             None
         };
-        let size = std::fs::metadata(&path).ok().map(|m| m.len());
+        let digest = pin.as_ref().map(|pin| {
+            pin.content_sha256()
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        });
+        let size = pin.as_ref().map(|pin| pin.target_fingerprint().size);
         let trusted = digest.as_deref() == Some(identity.sha256) && size == Some(identity.bytes);
         weights.push(json!({"path":path,"repository":identity.repository,"revision":identity.revision,"relativePath":identity.relative_path,"present":present,"sha256":digest,"bytes":size,"expectedSha256":identity.sha256,"expectedBytes":identity.bytes,"trustedHashMatches":trusted}));
         revisions.insert(identity.repository, identity.revision);
@@ -1545,9 +1595,12 @@ async fn generate(
     let id = text(&job, "id")?.to_owned();
     let snapshot: sceneworks_core::contracts::JobSnapshot =
         serde_json::from_value(job.clone()).map_err(|e| e.to_string())?;
+    let cancel_file = case.cancel_file()?;
     let preload = (|| -> Result<Value> {
-        let value =
-            native::moss_generation_preload(worker, &snapshot).map_err(|e| e.to_string())?;
+        let value = native::moss_generation_preload_with_check(worker, &snapshot, &mut || {
+            check_preflight_control(case.deadline, cancel_file.as_deref())
+        })
+        .map_err(|e| e.to_string())?;
         require(
             value["selectedMode"] == mode && value["parent"] == case.parent,
             "actual generation preload changed selected mode/parent",
@@ -1949,6 +2002,7 @@ async fn forecast_generation(
         vec!["off"]
     } {
         case.check_clock()?;
+        let cancel_file = case.cancel_file()?;
         let payload = json!({"projectId":project,"model":case.base(),"prompt":PROMPT,"width":256,"height":256,"count":1,"seed":1789,"loras":[],"advanced":generation_advanced(mode)?});
         let (status, job) = case.api(app, "POST", "/api/v1/image/jobs", payload).await?;
         require(
@@ -1958,7 +2012,10 @@ async fn forecast_generation(
         let id = text(&job, "id")?.to_owned();
         let snapshot = serde_json::from_value(job.clone()).map_err(|e| e.to_string());
         let forecast = snapshot.and_then(|job| {
-            native::moss_generation_preload(worker, &job).map_err(|e| e.to_string())
+            native::moss_generation_preload_with_check(worker, &job, &mut || {
+                check_preflight_control(case.deadline, cancel_file.as_deref())
+            })
+            .map_err(|e| e.to_string())
         });
         // No generator is constructed and this queued forecast is never claimed.
         // The real cancellation route removes it from the owned queue even when
@@ -2117,7 +2174,7 @@ async fn body(
     settings: &crate::Settings,
     worker: &sceneworks_worker::Settings,
 ) -> Result<()> {
-    let (weights, revisions) = weight_inventory(settings, &case.parent, case.cross)?;
+    let (weights, revisions) = weight_inventory(settings, case)?;
     let (status, project) = case
         .api(
             app,

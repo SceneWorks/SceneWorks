@@ -161,6 +161,16 @@ pub fn moss_generation_preload(
     crate::image_jobs::moss_generation_preload_for_test(settings, job)
 }
 
+/// Same production forecast with synchronous owned cancellation/deadline checks.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub fn moss_generation_preload_with_check(
+    settings: &Settings,
+    job: &JobSnapshot,
+    check: &mut dyn FnMut() -> gen_core::Result<()>,
+) -> WorkerResult<serde_json::Value> {
+    crate::image_jobs::moss_generation_preload_for_test_with_check(settings, job, check)
+}
+
 pub async fn run_training_execution_using(
     settings: &Settings,
     job: &JobSnapshot,

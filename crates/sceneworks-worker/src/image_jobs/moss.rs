@@ -79,6 +79,7 @@ fn moss_pin_spec_with_adapters(
     mode: gen_core::moss_image::MossImageAcceleration,
     adapter_pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
     on_file: &mut dyn FnMut(usize, usize),
+    check: &mut dyn FnMut() -> gen_core::Result<()>,
 ) -> WorkerResult<()> {
     let mut targets = Vec::new();
     for download in entry
@@ -123,7 +124,7 @@ fn moss_pin_spec_with_adapters(
     let mut pins = Vec::with_capacity(total);
     for (done, (repo, revision, relative, path)) in targets.into_iter().enumerate() {
         on_file(done, total);
-        let pin = gen_core::PinnedWeightsFile::pin(&path).map_err(|error| crate::classify_engine_error(&format!("MOSS component {relative} missing/incomplete; install or repair the selected package"), error))?;
+        let pin = gen_core::PinnedWeightsFile::pin_with_check(&path, &mut *check).map_err(|error| crate::classify_engine_error(&format!("MOSS component {relative} missing/incomplete; install or repair the selected package"), error))?;
         if repo == gen_core::moss_image_edit::EDIT_REPOSITORY {
             let expected = if relative == "adapter_config.json" {
                 gen_core::moss_image_edit::EDIT_CONFIG_SHA256
@@ -162,7 +163,15 @@ fn moss_pin_spec(
     mode: gen_core::moss_image::MossImageAcceleration,
     on_file: &mut dyn FnMut(usize, usize),
 ) -> WorkerResult<()> {
-    moss_pin_spec_with_adapters(spec, entry, settings, mode, Vec::new(), on_file)
+    moss_pin_spec_with_adapters(
+        spec,
+        entry,
+        settings,
+        mode,
+        Vec::new(),
+        on_file,
+        &mut || Ok(()),
+    )
 }
 /// Generation and the actual provider receipt are read while the serialized cache transaction
 /// still owns the generator. Failures/cancellation cannot publish a prior successful receipt.
@@ -773,13 +782,24 @@ struct MossPreparedPreload {
 
 // Metadata-only forecast of the production NativeMossStreamRuntime preparation
 // and header demand. No generator/model tensors/device execution is created here.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 fn prepare_moss_preload(
     settings: &Settings,
     payload: &JsonObject,
     request: &ImageRequest,
     on_file: &mut dyn FnMut(usize, usize),
 ) -> WorkerResult<MossPreparedPreload> {
+    prepare_moss_preload_with_check(settings, payload, request, on_file, &mut || Ok(()))
+}
+#[cfg(any(test, feature = "test-support"))]
+fn prepare_moss_preload_with_check(
+    settings: &Settings,
+    payload: &JsonObject,
+    request: &ImageRequest,
+    on_file: &mut dyn FnMut(usize, usize),
+    check: &mut dyn FnMut() -> gen_core::Result<()>,
+) -> WorkerResult<MossPreparedPreload> {
+    check().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
     use gen_core::moss_image::{MossImageResolved, MossImageVariant};
     let native =
         sceneworks_core::moss_image::native_request(payload, &request.model_manifest_entry)
@@ -802,6 +822,7 @@ fn prepare_moss_preload(
             entry: &entry,
             settings,
             request,
+            check: Some(&mut *check),
         },
         on_file,
     )?;
@@ -815,6 +836,7 @@ fn prepare_moss_preload(
         total_count: request.image_count(),
         edit: false,
         advanced: Default::default(),
+        check: Some(&mut *check),
     })?;
     Ok(MossPreparedPreload {
         native,
@@ -832,19 +854,29 @@ pub(crate) fn moss_generation_preload_for_test(
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<Value> {
+    moss_generation_preload_for_test_with_check(settings, job, &mut || Ok(()))
+}
+#[cfg(feature = "test-support")]
+pub(crate) fn moss_generation_preload_for_test_with_check(
+    settings: &Settings,
+    job: &JobSnapshot,
+    check: &mut dyn FnMut() -> gen_core::Result<()>,
+) -> WorkerResult<Value> {
     let request = ImageRequest::from_payload(&job.payload);
-    let prepared = prepare_moss_preload(settings, &job.payload, &request, &mut |_, _| {})?;
+    let prepared =
+        prepare_moss_preload_with_check(settings, &job.payload, &request, &mut |_, _| {}, check)?;
     let provenance = if cfg!(target_os = "macos") {
         "production prepare_moss_preload -> mlx moss_memory::selected_asset_facts.base_bytes + overlay_bytes + request_workspace_bytes (exact selected request/adapter pins)"
     } else {
         "production prepare_moss_preload -> candle moss_memory::selected_preload_estimate.peak_bytes (exact selected request/adapter pins, includes owned-shard staging)"
     };
     let adapters = prepared.spec.adapters.iter().map(|adapter| {
+        check().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
         let headers = gen_core::weightsmeta::safetensors_path_tensor_headers(&adapter.path)
             .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
         let tensor_bytes = headers.iter().try_fold(0_u64, |sum, header| sum.checked_add(header.data_bytes)
             .ok_or_else(|| WorkerError::InvalidPayload("MOSS adapter header bytes overflow".into())))?;
-        let pin=gen_core::PinnedWeightsFile::pin(&adapter.path).map_err(|e|WorkerError::InvalidPayload(e.to_string()))?;
+        let pin=gen_core::PinnedWeightsFile::pin_with_check(&adapter.path, &mut *check).map_err(|e|crate::classify_engine_error("MOSS adapter preload canceled", e))?;
         let sha256=pin.content_sha256().iter().map(|byte|format!("{byte:02x}")).collect::<String>();
         pin.ensure_unchanged().map_err(|e|WorkerError::InvalidPayload(e.to_string()))?;
         Ok(json!({"path":adapter.path,"scale":adapter.scale,"tensorBytes":tensor_bytes,"sha256":sha256}))
@@ -867,6 +899,7 @@ struct MossPreparation<'a> {
     entry: &'a JsonObject,
     settings: &'a Settings,
     request: &'a ImageRequest,
+    check: Option<&'a mut dyn FnMut() -> gen_core::Result<()>>,
 }
 struct MossColdRequest<'a> {
     variant: gen_core::moss_image::MossImageVariant,
@@ -878,6 +911,7 @@ struct MossColdRequest<'a> {
     total_count: u32,
     edit: bool,
     advanced: gen_core::moss_image::MossImageAdvancedInputs<'a>,
+    check: Option<&'a mut dyn FnMut() -> gen_core::Result<()>>,
 }
 /// Private dependency boundary: production retains exact frozen seals and native admission.
 /// Injected CPU providers supply their own explicitly synthetic, pinned source contract.
@@ -907,7 +941,11 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
             entry,
             settings,
             request,
+            check,
         } = input;
+        let mut noop = || Ok(());
+        let check = check.unwrap_or(&mut noop);
+        check().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
         let root = huggingface_pinned_snapshot_dir(
             &settings.data_dir,
             variant.repository(),
@@ -956,6 +994,7 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
             mode,
             prepared_adapters.pins,
             progress,
+            check,
         )?;
         Ok(spec)
     }
@@ -970,15 +1009,31 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
             total_count,
             edit,
             advanced,
+            mut check,
         } = input;
+        let mut checked = || {
+            if native.cancel.is_cancelled() {
+                return Err(gen_core::Error::Canceled);
+            }
+            if let Some(check) = check.as_mut() {
+                check()?;
+            }
+            Ok(())
+        };
+        checked().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let _ = (resolved, total_count);
         #[cfg(target_os = "macos")]
         let peak = if edit {
             moss_edit_cold_peak(variant, spec, native, references, edit_options, advanced)?
         } else {
-            let facts = moss_memory::selected_asset_facts(variant, spec, resolved.acceleration)
-                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+            let facts = moss_memory::selected_asset_facts_with_check(
+                variant,
+                spec,
+                resolved.acceleration,
+                &mut checked,
+            )
+            .map_err(|e| crate::classify_engine_error("MOSS preload facts failed", e))?;
             let expanded = if native.prompt_batch.is_empty() {
                 1
             } else {
@@ -1016,15 +1071,17 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
         let peak = if edit {
             moss_edit_cold_peak(variant, spec, native, references, edit_options, advanced)?
         } else {
-            moss_memory::selected_preload_estimate(
+            moss_memory::selected_preload_estimate_with_check(
                 variant,
                 spec,
                 native,
                 gen_core::moss_image::MossImageAdvancedInputs::default(),
+                &mut checked,
             )
-            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?
+            .map_err(|e| crate::classify_engine_error("MOSS preload facts failed", e))?
             .peak_bytes
         };
+        checked().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
         Ok(peak)
     }
     fn budget(&self, settings: &Settings) -> WorkerResult<gen_core::MemoryBudget> {
@@ -1164,6 +1221,7 @@ async fn generate_moss_stream_with_runtime(
             entry: &entry,
             settings,
             request,
+            check: None,
         },
         &mut |done, total| {
             let _ = pin_progress.send((done, total));
@@ -1182,6 +1240,7 @@ async fn generate_moss_stream_with_runtime(
         total_count: request.image_count(),
         edit,
         advanced: advanced.inputs(),
+        check: None,
     })?;
     let peak = peak
         .checked_add(advanced.host_bytes as u64)
@@ -1408,6 +1467,32 @@ mod moss_consumer_tests {
         .as_object()
         .unwrap()
         .clone()
+    }
+
+    #[test]
+    fn checked_preload_refuses_cancellation_before_any_source_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("data"));
+        let payload = json!({"model":"not_a_moss_provider","prompt":"metadata only"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let request = ImageRequest::from_payload(&payload);
+        let mut checks = 0;
+        let error = prepare_moss_preload_with_check(
+            &settings,
+            &payload,
+            &request,
+            &mut |_, _| panic!("source lookup reached"),
+            &mut || {
+                checks += 1;
+                Err(gen_core::Error::Canceled)
+            },
+        )
+        .err()
+        .expect("cancellation must refuse");
+        assert!(matches!(error, WorkerError::Canceled(_)));
+        assert_eq!(checks, 1);
     }
 
     #[test]

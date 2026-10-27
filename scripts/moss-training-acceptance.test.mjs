@@ -12,7 +12,7 @@ import { deflateSync } from 'node:zlib';
 import { recordInspection, parseInspectionArgs } from './moss-preview-inspection.mjs';
 import { digest } from './moss-consumer-assertions.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
-import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, processRows, executeSupervised, remainingCaseMs, decodePreviewPng, run } from './moss-training-acceptance.mjs';
+import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, observeOwned, processRows, executeSupervised, remainingCaseMs, fileDigestChecked, validatePreflightChecked, decodePreviewPng, run } from './moss-training-acceptance.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const fixture=t=>{const dir=mkdtempSync(path.join(os.tmpdir(),'moss-harness-unit-'));t.after(()=>{rmSync(dir,{recursive:true,force:true});rmSync(`${dir}-selected-artifacts`,{recursive:true,force:true});});return dir;};
 const source={workflowSource:'a'.repeat(40),inferencePin:'b'.repeat(40),manifestSha256:MANIFEST_SHA256,cargoLockSha256:'c'.repeat(64),driverSha256:'d'.repeat(64),workflowSha256:'e'.repeat(64)};
@@ -48,15 +48,17 @@ test('absolute deadline charges elapsed and queue time, rejects future and expir
  assert.throws(()=>remainingCaseMs(new Date(now-BOUNDS.case).toISOString(),now),/expired/);
  assert.throws(()=>remainingCaseMs(new Date(now+1).toISOString(),now),/future/);
 });
-test('preflight uses selected actual capacity and native provenance, not env asserted cap',t=>{
+test('preflight uses selected actual capacity and native provenance, not env asserted cap',async t=>{
  const dir=fixture(t),weight=path.join(dir,'cached');writeFileSync(weight,'cached header');
  const p={...source,phase:'capture',observationSchema:{gradientObservations:true,fixedEvaluationPair:true,numericFactorDelta:true,preparedTensorSnapshots:true},backend:'mlx',caseId:'mlx/base/lora',verdict:'admitted',refusalReason:null,modelRevisions:{dit:'f'.repeat(40)},resolvedCapProvenance:'native host capacity + product rounding',headerDemandProvenance:'native estimate all phases',offline:true,weightsLoaded:false,deviceIdentity:'claimed device',gpuMemoryLimitFraction:.60,totalCapacityBytes:1000,resolvedCapBytes:600,headerDerivedDemandBytes:500,weights:[{path:weight,present:true,sha256:digest(readFileSync(weight))}]};
  assert.equal(validatePreflight(p,'mlx',source,p.caseId),600);
+ assert.equal(await validatePreflightChecked(p,'mlx',source,p.caseId,'capture',()=>{}),600);
  assert.equal(validatePreflight({...p,phase:'cross-load',observationSchema:null},'mlx',source,p.caseId,'cross-load'),600);
  assert.throws(()=>validatePreflight({...p,phase:'cross-load'},'mlx',source,p.caseId),/phase/);
  for(const patch of [{resolvedCapBytes:601},{headerDerivedDemandBytes:601},{offline:false},{weightsLoaded:true},{deviceIdentity:''},{caseId:'mlx/sft/lora'},{modelRevisions:{}},{verdict:'refused'},{resolvedCapProvenance:''},{headerDemandProvenance:''},{observationSchema:{}},{observationSchema:{gradientObservations:true,fixedEvaluationPair:true,numericFactorDelta:true,preparedTensorSnapshots:false}}])assert.throws(()=>validatePreflight({...p,...patch},'mlx',source,p.caseId));
  assert.throws(()=>validatePreflight({...p,weights:[{...p.weights[0],present:false}]},'mlx',source,p.caseId));
  writeFileSync(weight,'changed');assert.throws(()=>validatePreflight(p,'mlx',source,p.caseId),/changed/);
+ await assert.rejects(validatePreflightChecked(p,'mlx',source,p.caseId,'capture',()=>{}),/changed/);
 });
 test('owned RSS includes root, worker, grandchildren and refuses missing telemetry',()=>{
  const rows=new Map([[42,{pid:42,ppid:process.pid,birth:'one',executable:'/api',rssBytes:10}],[43,{pid:43,ppid:42,birth:'two',executable:'/worker',rssBytes:20}],[44,{pid:44,ppid:43,birth:'three',executable:'/child',rssBytes:30}],[45,{pid:45,ppid:1,birth:'other',executable:'/stranger',rssBytes:1000}]]);
@@ -721,4 +723,66 @@ test('merged dispatcher fits 25 inputs and derives exact source and finalize run
  assert.match(reusable,/run-id: \$\{\{ inputs\.moss_evidence_run_id \}\}/);
  const verifier=readFileSync(path.join(root,'scripts/ci/moss-training-acceptance/verify_evidence.py'),'utf8');
  assert.ok(verifier.includes('inspection/capture run selection mismatch'));
+});
+
+test('native authentication uses the original cell budget, not the discovery timeout',async t=>{
+ const m=mockRun(t,{previews:true}),execute=m.options.execute,RealDate=Date;let clock=RealDate.now(),preflightLimit,caseLimit;
+ globalThis.Date=class extends RealDate {constructor(...args){super(...(args.length?args:[clock]));}static now(){return clock;}};
+ try {
+  m.options.execute=async(...args)=>{
+   if(args[1].includes('--list'))assert.ok(args[3]<=BOUNDS.list);
+   if(args[1][1]===PREFLIGHT){preflightLimit=args[3];clock+=BOUNDS.list+1000;}
+   if(args[1][1]===testsFor('capture','mlx')[0])caseLimit=args[3];
+   return execute(...args);
+  };
+  const r=await run({...m.options,'capture-cell':CELLS[0]});
+  assert.equal(r.cellComplete,true,r.failures.join());assert.equal(preflightLimit,BOUNDS.case);
+  assert.equal(caseLimit,BOUNDS.case-BOUNDS.list-1000);
+  assert.equal(Date.parse(r.cases[0].caseDeadlineAt)-Date.parse(r.cases[0].caseStartedAt),BOUNDS.case);
+ } finally {globalThis.Date=RealDate;}
+});
+
+test('an unreleased native writer leaves diagnostics unsealed and blocks continuation',async t=>{
+ const m=mockRun(t),execute=m.options.execute;
+ m.options.execute=async(...args)=>{
+  const result=await execute(...args);
+  if(args[1][1]===PREFLIGHT){args[4].cleanup={released:false};args[4].unsafe=true;throw new Error('owned processes did not release');}
+  return result;
+ };
+ const r=await run(m.options);assert.equal(r.ok,false);assert.equal(r.cellComplete,false);assert.equal(m.count(),7);
+ assert.deepEqual(r.members,[]);assert.match(r.failures.join(),/owned processes did not release/);assert.match(r.failures.join(),/unsealed/);
+ // A late child write must not invalidate a claimed immutable member digest.
+ writeFileSync(path.join(m.options.output,'base','lora','late-evidence.json'),'late write');
+ assert.deepEqual(JSON.parse(readFileSync(path.join(m.options.output,'driver.json'))).members,[]);
+});
+
+test('a released native failure still seals stable failed-run diagnostics',async t=>{
+ const m=mockRun(t),execute=m.options.execute;
+ m.options.execute=async(...args)=>{const result=await execute(...args);if(args[1][1]===PREFLIGHT)result.exit=7;return result;};
+ const r=await run(m.options);assert.equal(r.ok,false);assert.ok(r.members.some(m=>m.path==='preflight-base-lora.log'));assert.doesNotMatch(r.failures.join(),/unsealed/);
+});
+
+// Literal file bytes only; callbacks run on actual bounded read/yield boundaries.
+test('independent weight hashing polls cancellation and original deadline through reads',async t=>{
+ const dir=fixture(t),file=path.join(dir,'literal');writeFileSync(file,Buffer.alloc(1024*1024+17,7));
+ assert.equal(await fileDigestChecked(file,()=>{}),digest(readFileSync(file)));
+ for(const reason of ['owned cancellation','original deadline exceeded']) {
+  let stop=false,chunks=0;
+  await assert.rejects(fileDigestChecked(file,()=>{if(stop)throw new Error(reason);},()=>{chunks++;setImmediate(()=>{stop=true;});}),new RegExp(reason));
+  assert.equal(chunks,1);
+ }
+});
+
+test('Windows native supervisor census retains the first command failure subtype',()=>{
+ const failures=[];let calls=0;
+ const rows=processRows('win32',f=>failures.push(f),()=>{calls++;return {status:7,signal:null,stdout:'',stderr:'CIM unavailable'};});
+ assert.equal(rows,null);assert.equal(calls,1);assert.equal(failures[0].category,'nonzero-status');assert.equal(failures[0].status,7);assert.equal(failures[0].stderr,'CIM unavailable');
+});
+
+test('Windows first telemetry failure survives subsequent failed cleanup queries',async t=>{
+ const dir=fixture(t),state={},child=Object.assign(new EventEmitter(),{pid:4242,stdout:new PassThrough(),stderr:new PassThrough()});let calls=0;
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),1000,state,{spawnChild:()=>child,releaseMs:5,query:(_platform,onFailure)=>{
+  onFailure({category:calls++===0?'command-error':'invalid-json',error:{code:'ETIMEDOUT'}});return null;
+ }}),/owned process telemetry unavailable/);
+ assert.ok(calls>1);assert.equal(state.telemetryFailure.category,'command-error');assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);
 });

@@ -251,7 +251,7 @@ export async function executePreparation(root, args, log, limitMs, state, { env 
 // executable path still match what we observed. There is no POSIX ps and no
 // getuid here; a bare `taskkill /T` tree is never used.
 
-export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = spawnSync} = {}) {
+export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = spawnSync, onFailure = null} = {}) {
   if (pids !== null && (!Array.isArray(pids) || !pids.length || pids.length > 64 || new Set(pids).size !== pids.length || !pids.every(pid=>Number.isSafeInteger(pid)&&pid>0))) return null;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return null;
   const filter=pids===null?"":` -Filter '${pids.map(pid=>`ProcessId = ${pid}`).join(" OR ")}'`;
@@ -263,15 +263,27 @@ export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = sp
     "  rssBytes = [long]$_.WorkingSetSize } })",
     "ConvertTo-Json -InputObject $records -Compress",
   ].join("\n");
-  const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: Math.min(20_000,timeoutMs), maxBuffer: pids===null?32*1024*1024:1024*1024 });
-  if (result.error || result.status !== 0 || !result.stdout.trim()) return null;
+  const started=performance.now(),bound=Math.min(20_000,timeoutMs);
+  const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: bound, maxBuffer: pids===null?32*1024*1024:1024*1024 });
+  const unavailable=category=>{
+    // No process stdout, command lines or environment enter the diagnostic receipt.
+    onFailure?.({command:'powershell.exe/Get-CimInstance Win32_Process',category,at:new Date().toISOString(),timeoutMs:bound,elapsedMs:performance.now()-started,
+      error:result.error?{code:result.error.code??null,message:String(result.error.message).slice(0,512)}:null,
+      status:result.status??null,signal:result.signal??null,timedOut:result.error?.code==='ETIMEDOUT',
+      stdoutBytes:typeof result.stdout==='string'?Buffer.byteLength(result.stdout):0,
+      stderr:typeof result.stderr==='string'?result.stderr.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g,'').slice(0,512):null});
+    return null;
+  };
+  if (result.error) return unavailable('command-error');
+  if (result.status !== 0) return unavailable('nonzero-status');
+  if (typeof result.stdout!=='string'||!result.stdout.trim()) return unavailable('empty-stdout');
   let parsed;
-  try { parsed=JSON.parse(result.stdout.trim()); } catch { return null; }
-  if (!Array.isArray(parsed) && (!parsed || typeof parsed!=="object")) return null;
+  try { parsed=JSON.parse(result.stdout.trim()); } catch { return unavailable('invalid-json'); }
+  if (!Array.isArray(parsed) && (!parsed || typeof parsed!=="object")) return unavailable('invalid-shape');
   const rows = new Map();
   for (const row of Array.isArray(parsed) ? parsed : [parsed]) {
     if (![row?.pid, row?.ppid, row?.birthMs, row?.rssBytes].every(Number.isSafeInteger) || row.pid<=0 || row.ppid<0 || row.birthMs<0 || row.rssBytes<0 || typeof row.path !== "string" || rows.has(row.pid) || (pids!==null&&!pids.includes(row.pid))) {
-      if(pids!==null)return null;
+      if(pids!==null)return unavailable('invalid-selected-row');
       continue;
     }
     rows.set(row.pid, { pid: row.pid, ppid: row.ppid, birthMs: row.birthMs, path: row.path.toLowerCase(), rssBytes: row.rssBytes });

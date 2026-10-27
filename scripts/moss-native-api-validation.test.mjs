@@ -742,8 +742,8 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
     }
     return rows;
   };
-  try{result=await executeSupervised(ROOT,[process.execPath,"-e",ownedCode],log,30_000,state,{query,capBytes:512*1024*1024,recheckWindows:(pids,timeoutMs)=>{
-    const rows=recheckWindowsRows(pids,timeoutMs);actualRechecks.push({pids,rows:rows?[...rows.values()]:null});return rows;
+  try{result=await executeSupervised(ROOT,[process.execPath,"-e",ownedCode],log,30_000,state,{query,capBytes:512*1024*1024,recheckWindows:(pids,timeoutMs,onFailure)=>{
+    const rows=recheckWindowsRows(pids,timeoutMs,onFailure);actualRechecks.push({pids,rows:rows?[...rows.values()]:null});return rows;
   }});}
   catch(error){t.diagnostic(JSON.stringify({kind:"owned-native-guard-failure",identities,identityFailure:state.identityFailure??null,telemetryFailure:state.telemetryFailure??null,cleanup:state.cleanup??null,unsafe:state.unsafe??null}));throw error;}
   assert.equal(result.exit,0);assert.equal(released,true);assert.ok(state.rssFirstBytes>0);assert.equal(state.cleanup.released,true);assert.notEqual(state.unsafe,true);
@@ -810,4 +810,22 @@ test('Candle MOSS output uses runner context only at step scope and uploads the 
  const upload=block.split('      - name: Upload MOSS native validation evidence\n')[1];
  assert.ok(upload.includes(`path: ${expected}\n`));
  assert.match(run,/--output "%MOSS_NATIVE_OUTPUT%"/);
+});
+
+// CI_IMPACT: injected query results only; platform test above remains the real CIM check.
+test('Windows query failures preserve bounded subtype facts without process stdout',()=>{
+ const secret='DO_NOT_LOG_PROCESS_ROWS';
+ const timeout=Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'),{code:'ETIMEDOUT'});
+ const variants=[
+  [{error:timeout,status:null,signal:'SIGTERM',stdout:secret,stderr:'x'.repeat(700)},'command-error'],
+  [{status:1,stdout:'[]',stderr:'CIM access denied'},'nonzero-status'],
+  [{status:0,stdout:' '},'empty-stdout'],[{status:0,stdout:secret},'invalid-json'],[{status:0,stdout:'null'},'invalid-shape'],
+ ];
+ for(const [result,category] of variants){
+  const facts=[];
+  assert.equal(queryWindowsProcesses({run:(_p,_a,options)=>{assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return result;},onFailure:fact=>facts.push(fact)}),null);
+  assert.equal(facts.length,1);const fact=facts[0];assert.equal(fact.category,category);assert.equal(fact.status,result.status);assert.equal(fact.timeoutMs,20000);assert.ok(fact.elapsedMs>=0);assert.equal(fact.timedOut,category==='command-error');
+  assert.ok((fact.stderr?.length??0)<=512);assert.equal(JSON.stringify(facts).includes(secret),false);
+ }
+ const facts=[];assert.equal(queryWindowsProcesses({run:()=>({status:0,stdout:'[]'}),onFailure:f=>facts.push(f)}).size,0);assert.deepEqual(facts,[]);
 });
