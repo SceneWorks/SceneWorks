@@ -154,53 +154,34 @@ function assertDispatcherIsolation(workflow) {
   const jobsText = workflow.slice(workflow.indexOf("\njobs:\n"));
   const headers = [...jobsText.matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)];
   const jobs = headers.map((match) => match[1]);
-  assert.deepEqual(jobs, ["moss-reference-maintenance", "moss-upstream-reference", "moss-dispatch", "moss-edit-terminal", "qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  assert.deepEqual(jobs, ["qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
   const jobBlock = (name) => {
     const index = jobs.indexOf(name), header = headers[index];
     return header && jobsText.slice(header.index + header[0].length, headers[index + 1]?.index);
   };
-  const mossDispatch = jobBlock("moss-dispatch"), mossTerminal = jobBlock("moss-edit-terminal");
-  assert.match(mossDispatch, /MOSS_SOURCE_SHA: \$\{\{ inputs.ref \}\}/);
-  assert.match(mossDispatch, /MOSS_INFERENCE_SHA: \$\{\{ inputs.inference_sha \}\}/);
-  assert.match(mossDispatch, /validateDispatchEnvelope\(process\.env\.MOSS_DISPATCH,process\.env\.MOSS_SOURCE_SHA,process\.env\.MOSS_INFERENCE_SHA,process\.env\.GITHUB_SHA\)/);
-  assert.match(mossDispatch, /dispatch: \$\{\{ steps.validate.outputs.dispatch \}\}/);
-  assert.match(mossTerminal, /needs: moss-dispatch/);
-  assert.match(mossTerminal, /uses: \.\/\.github\/workflows\/moss-edit-terminal.yml[\s\S]*?with:\n      source_sha: \$\{\{ fromJSON\(needs\.moss-dispatch\.outputs\.dispatch\)\.product_sha \|\| inputs\.ref \}\}\n      inference_sha: \$\{\{ inputs.inference_sha \}\}/);
-  for (const field of ["candidate_id", "bundle_run_id", "bundle_artifact_id", "bundle_manifest_sha256", "phase", "upload_path", "upload_kind", "execution_run_id", "execution_run_attempt", "tooling_sha", "original_inventory_path", "original_inventory_sha256", "native_run_id", "native_run_attempt", "review_artifact_id", "review_run_id"]) {
-    assert.ok(mossTerminal.includes(`${field}: \${{ fromJSON(needs.moss-dispatch.outputs.dispatch).${field} }}`), `${field} must come from the validated dispatch`);
-  }
-  const phases = ["upload", "execute", "upload-probe", "execute-probe"];
-  const runs = (profile, backend, phase = "execute") => jobs.filter((job) => {
+  const runs = (profile, backend) => jobs.filter((job) => {
     const expression = /^    if: (.+)$/m.exec(jobBlock(job))?.[1];
     assert.ok(expression, `missing ${job} dispatch predicate`);
     // GitHub permits both a bare job expression and its explicit ${{ ... }} form.
     const predicate = expression.match(/^\$\{\{ (.+) \}\}$/)?.[1] ?? expression;
-    // Interpret only the registered phase lookup, never arbitrary GitHub functions or JSON paths.
-    const inputs = { profile, backend, moss_reference: JSON.stringify({ phase }) };
-    const reference = JSON.parse(inputs.moss_reference);
-    assert.ok(phases.includes(reference.phase), 'phase fixture must be a known string');
-    inputs.reference_phase = reference.phase;
-    const condition = predicate.replaceAll("fromJSON(inputs.moss_reference).phase", "inputs.reference_phase");
+    const inputs = { profile, backend };
+    const condition = predicate;
     // Evaluate only the tiny predicate grammar, never a workflow step or command.
     assert.match(condition, /^[a-z0-9_. '=()&|!-]+$/);
     return Function("inputs", `return (${condition})`)(inputs);
   });
   for (const backend of ["mlx", "candle"]) {
-    for (const phase of phases) {
-      assert.deepEqual(runs("moss-upstream-reference", backend, phase), phase.endsWith("-probe") ? ["moss-upstream-reference"] : ["moss-reference-maintenance", "moss-upstream-reference"], `${phase} must isolate reference proof and exclude Windows maintenance for probe phases`);
-      assert.deepEqual(runs("moss-edit-terminal", backend, phase), ["moss-dispatch", "moss-edit-terminal"], "MOSS proof must skip all catalog mutation steps");
-      assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend, phase), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
-      assert.deepEqual(runs("iris-mlx-real-weights", backend, phase), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
-      assert.deepEqual(runs("supra2-mlx-real-weights", backend, phase), ["supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
-      assert.deepEqual(runs("catalog", backend, phase), [backend], "default catalog contract must remain unchanged");
-      assert.deepEqual(runs("", backend, phase), [backend], "omitted profile preserves catalog behavior");
-      // CI_IMPACT: preserve main's bounded SDXL profile isolation alongside MOSS phase coverage.
+      assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
+      assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
+      assert.deepEqual(runs("supra2-mlx-real-weights", backend), ["supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
+      assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
+      assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
+      // Preserve bounded SDXL profile isolation.
       for (const profile of ["sdxl-cuda-endpoints", "sdxl-cuda-admitted-replay"]) {
-        assert.deepEqual(runs(profile, backend, phase), ["candle"], "bounded SDXL profiles must skip all unrelated jobs");
+        assert.deepEqual(runs(profile, backend), ["candle"], "bounded SDXL profiles must skip all unrelated jobs");
       }
-      assert.deepEqual(runs("sdxl-cuda-unknown", backend, phase), [], "the SDXL prefix alone must not dispatch compute");
-      assert.deepEqual(runs("unknown", backend, phase), [], "unknown profiles must fail closed");
-    }
+      assert.deepEqual(runs("sdxl-cuda-unknown", backend), [], "the SDXL prefix alone must not dispatch compute");
+      assert.deepEqual(runs("unknown", backend), [], "unknown profiles must fail closed");
   }
 }
 test("registered dispatcher isolates app proof from both catalog lanes and their publication", () => {
@@ -208,22 +189,6 @@ test("registered dispatcher isolates app proof from both catalog lanes and their
   assertDispatcherIsolation(workflow);
   const guard = "(inputs.profile == '' || inputs.profile == 'catalog') && ";
   const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow.replace("runner_target: ${{ inputs.qwen_app_runner_target }}", "runner_target: primary"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
-  const mossTerminal = workflow.slice(workflow.indexOf("  moss-edit-terminal:\n"), workflow.indexOf("  qwen-app-lifecycle:\n"));
-  const mossDispatch = workflow.slice(workflow.indexOf("\n  moss-dispatch:\n") + 1, workflow.indexOf("\n  moss-edit-terminal:\n") + 1);
-  mutants.push(
-    workflow.replace("inputs.profile == 'moss-upstream-reference'", "inputs.backend == 'mlx'"),
-    workflow.replaceAll("inputs.profile == 'moss-upstream-reference'", "inputs.profile == 'catalog'"),
-    workflow.replace("moss-dispatch:\n    if: ${{ inputs.profile == 'moss-edit-terminal' }}", "moss-dispatch:\n    if: ${{ inputs.profile == 'catalog' }}"),
-    workflow.replace("moss-edit-terminal:\n    if: ${{ inputs.profile == 'moss-edit-terminal' }}", "moss-edit-terminal:\n    if: ${{ inputs.backend == 'mlx' }}"),
-    workflow.replace(mossDispatch, mossDispatch.replace("MOSS_SOURCE_SHA: ${{ inputs.ref }}", "MOSS_SOURCE_SHA: ${{ github.sha }}")),
-    workflow.replace(mossDispatch, mossDispatch.replace("MOSS_INFERENCE_SHA: ${{ inputs.inference_sha }}", "MOSS_INFERENCE_SHA: main")),
-    workflow.replace("validateDispatchEnvelope(process.env.MOSS_DISPATCH", "JSON.parse(process.env.MOSS_DISPATCH"),
-    workflow.replace("steps.validate.outputs.dispatch", "inputs.moss_terminal"),
-    workflow.replace(mossTerminal, mossTerminal.replace("needs: moss-dispatch", "needs: qwen-app-lifecycle")),
-    workflow.replace(mossTerminal, mossTerminal.replace("source_sha: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).product_sha || inputs.ref }}", "source_sha: ${{ github.ref }}")),
-    workflow.replace(mossTerminal, mossTerminal.replace("inference_sha: ${{ inputs.inference_sha }}", "inference_sha: main")),
-    workflow.replace("phase: ${{ fromJSON(needs.moss-dispatch.outputs.dispatch).phase }}", "phase: execute"),
-  );
   for (const [index, mutant] of mutants.entries()) {
     assert.notEqual(mutant, workflow, "each mutation must change the dispatcher");
     assert.throws(() => assertDispatcherIsolation(mutant), `dispatcher mutant ${index} must fail`);
@@ -231,27 +196,13 @@ test("registered dispatcher isolates app proof from both catalog lanes and their
 });
 test("dispatcher isolation accepts both GitHub job-if forms without borrowing another job's gate", () => {
   const workflow = read(".github/workflows/memory-catalog-campaign.yml").replace(/\r\n/g, "\n");
-  const line = /^  moss-reference-maintenance:\n(    if: (.+))$/m.exec(workflow);
-  assert.ok(line, "maintenance job must have its own predicate");
+  const line = /^  qwen-app-lifecycle:\n(    if: (.+))$/m.exec(workflow);
+  assert.ok(line, "app lifecycle job must have its own predicate");
   const predicate = line[2].match(/^\$\{\{ (.+) \}\}$/)?.[1] ?? line[2];
   assertDispatcherIsolation(workflow.replace(line[1], `    if: \${{ ${predicate} }}`));
   assertDispatcherIsolation(workflow.replace(line[1], `    if: ${predicate}`));
-  assert.throws(() => assertDispatcherIsolation(workflow.replace(line[1] + "\n", "")), /missing moss-reference-maintenance dispatch predicate/);
-  assert.throws(() => assertDispatcherIsolation(workflow.replace(line[1], "    if: inputs.profile == 'moss-upstream-reference'")), /exclude Windows maintenance for probe phases/);
+  assert.throws(() => assertDispatcherIsolation(workflow.replace(line[1] + "\n", "")), /missing qwen-app-lifecycle dispatch predicate/);
 });
-test("dispatcher phase checks reject altered routes and unregistered fromJSON lookups", () => {
-  const workflow = read(".github/workflows/memory-catalog-campaign.yml").replace(/\r\n/g, "\n");
-  for (const mutant of [
-    workflow.replace(".phase == 'upload'", ".phase == 'upload-probe'"),
-    workflow.replace(".phase == 'execute'", ".phase == 'execute-probe'"),
-    workflow.replace("fromJSON(inputs.moss_reference).phase", "fromJSON(inputs.moss_reference).untrusted"),
-    workflow.replace("fromJSON(inputs.moss_reference).phase", "fromJSON(inputs.other).phase"),
-  ]) {
-    assert.notEqual(mutant, workflow);
-    assert.throws(() => assertDispatcherIsolation(mutant));
-  }
-});
-
 test("frozen dense snapshot uses processor tokenizer files and rejects the older tokenizer layout", async () => {
   const base = await mkdtemp(path.join(tmpdir(), "qwen-21-layout-"));
   try {

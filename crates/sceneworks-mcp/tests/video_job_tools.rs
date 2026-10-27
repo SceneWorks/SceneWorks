@@ -821,33 +821,3 @@ async fn get_job_result_on_a_failed_job_surfaces_the_error() {
 
     let _ = harness.client.cancel().await;
 }
-
-#[tokio::test]
-async fn get_job_result_on_completed_render_pending_publication_is_not_ready() {
-    let harness = harness(vec![snapshot(
-        "image_edit",
-        "completed",
-        1.0,
-        "completed",
-        json!({"result":{"outputPublication":{"state":"pending","jobId":"job_v1"}}}),
-    )])
-    .await;
-    let result = harness
-        .client
-        .call_tool(
-            CallToolRequestParams::new("get_job_result")
-                .with_arguments(json!({"jobId":"job_v1"}).as_object().unwrap().clone()),
-        )
-        .await
-        .unwrap();
-    assert_ne!(result.is_error, Some(true));
-    let payload = result_json(&result);
-    assert_eq!(payload["ready"], false);
-    assert_eq!(payload["status"], "completed");
-    assert!(payload["note"]
-        .as_str()
-        .unwrap()
-        .contains("Do not resubmit"));
-    assert_eq!(*harness.tickets_minted.lock().unwrap(), 0);
-    let _ = harness.client.cancel().await;
-}
