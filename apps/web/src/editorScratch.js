@@ -19,7 +19,7 @@
 // The registry is a plain factory (no React) so the full survivor behaviour — including
 // "purges after the editor unmounts" — is unit-testable without mounting App.
 
-import { terminalStatuses, jobOutputsPending } from "./jobTypes.js";
+import { terminalStatuses } from "./jobTypes.js";
 
 // A terminal job's result assets as `{ id, projectId }` purge descriptors. Handles the
 // two result shapes the worker emits (`result.assets` full objects, `result.assetIds`
@@ -40,13 +40,22 @@ export function resultAssetsToPurge(job) {
   return [];
 }
 
+// Results that cannot all be represented by the editor's single working canvas stay
+// addressable with their recipe inputs. This applies to any native batch or tensor job.
+export function nonCanvasJobOutputs(job) {
+  if (job?.status !== "completed") return [];
+  const { assets = [], expectedCount = 1 } = job.result ?? {};
+  // Inline upscale may publish both the original and an upscaled copy for ONE
+  // requested image. Keep its established temporary-result behavior.
+  const upscaleCopies = job.payload?.upscale?.enabled ? 2 : 1;
+  return expectedCount > upscaleCopies || assets.some((asset) => asset.type === "tensor") ? assets : [];
+}
+
 // The full set of assets to purge for a completed editor scratch op: the tracked scratch
 // source + mask (from the registry entry) plus the job's result assets. De-duped by asset
 // id. `entry.assets` is the array of scratch/mask asset objects the editor staged.
 export function scratchOpAssetsToPurge(entry, job) {
-  // Successful native edits are durable history: their exact staged RGB input and every
-  // output remain addressable by the recorded recipe, including when the editor unmounts.
-  if (entry?.retainCompleted && job?.status === "completed") return [];
+  if (nonCanvasJobOutputs(job).length) return [];
   const out = [];
   const seen = new Set();
   const push = (asset) => {
@@ -68,7 +77,7 @@ export function createEditorScratchRegistry({ purgeAsset, isTerminal = (status) 
 
   function purgeOp(jobId, job) {
     const entry = ops.get(jobId);
-    if (!entry || jobOutputsPending(job)) return; // idempotent: whoever purges first wins
+    if (!entry) return; // idempotent: whoever purges first wins
     ops.delete(jobId);
     for (const asset of scratchOpAssetsToPurge(entry, job)) {
       if (asset?.id && asset?.projectId) {
@@ -84,9 +93,9 @@ export function createEditorScratchRegistry({ purgeAsset, isTerminal = (status) 
   return {
     // Editor starts an AI op: remember its scratch/mask assets so they can be purged even
     // if the editor unmounts before its own watcher runs.
-    track(jobId, assets, { retainCompleted = false } = {}) {
+    track(jobId, assets) {
       if (!jobId) return;
-      ops.set(jobId, { assets: (assets ?? []).filter(Boolean), retainCompleted });
+      ops.set(jobId, { assets: (assets ?? []).filter(Boolean) });
     },
     // Editor's in-component watcher loaded the result back into the canvas — hand the
     // purge (scratch + mask + result) to the registry so there's a single purge path.
@@ -111,7 +120,7 @@ export function createEditorScratchRegistry({ purgeAsset, isTerminal = (status) 
       for (const jobId of [...ops.keys()]) {
         if (claimed && claimed.has(jobId)) continue; // editor still owns this op
         const job = jobsList?.find((item) => item.id === jobId);
-        if (!job || !isTerminal(job.status) || jobOutputsPending(job)) continue;
+        if (!job || !isTerminal(job.status)) continue;
         purgeOp(jobId, job);
       }
     },

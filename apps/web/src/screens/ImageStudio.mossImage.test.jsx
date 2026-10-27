@@ -20,7 +20,7 @@ vi.mock("../api.js", async (importOriginal) => {
 });
 
 import { AppContext } from "../context/AppContext.js";
-import { configure, verifyReplayForm, labelledSelect } from '../../../../scripts/lib/moss-edit-terminal-controls.mjs';
+import { configure, verifyReplayForm, labelledSelect } from '../testUtils/imageControls.js';
 import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
 import { ImageStudio } from "./ImageStudio.jsx";
 import { apiFetch } from "../api.js";

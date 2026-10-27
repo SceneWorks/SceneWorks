@@ -170,9 +170,9 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
         ) : null}
 
         {mossEdit ? <>
-          <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
+          <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} sharedGuidance onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
           <p>The working image is Image 1. Additional slots follow it in order.</p>
-          <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={3} firstOrdinal={2} />
+          <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
           {mossEditError ? <p role="alert">{mossEditError}</p> : null}
         </> : null}
         <div hidden={mossEdit}>
@@ -460,13 +460,13 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
               <input
                 className="ie-input"
                 min={0}
-                onChange={(event) => setEditGuidance(event.target.value)}
+                onChange={(event) => mossEdit ? setMossEditSettings({ ...mossEditSettings, guidanceScale: Number(event.target.value) }) : setEditGuidance(event.target.value)}
                 placeholder={guidanceDefaultFromModel(selectedEditModel)?.toString() ?? "Default"}
                 step={0.1}
                 style={{ fontFamily: "var(--ie-mono)" }}
                 type="number"
-                value={editGuidance}
-                disabled={mossEdit}
+                value={mossEdit ? mossEditSettings.guidanceScale : editGuidance}
+                aria-label="Guidance"
               />
             </div>
           </div>
@@ -486,7 +486,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
 }, samePanelProps);
 
 export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({ scope }) {
-  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs, imageAssets, refAssetIds, setRefAssetIds } = scope;
+  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs, imageAssets, refAssetIds, setRefAssetIds, maxEditReferences } = scope;
   const { BOX_PALETTE, MAX_BOX_PALETTE, StudioUpdateBadge, StudioUpdateNotice, addPaletteColor, aiOp, boxColor, boxMetadataGaps, boxes, chooseBoxColor, clearBoxes, composedPrompt, createModelDownloadJob, deleteBox, editModel, editModels, editPrompt, removePaletteColor, runBoxEdit, selectedBox, selectedBoxGaps, selectedBoxId, selectedEditModel, setEditModel, setEditPrompt, setSelectedBoxId, updateBox, updateOptionLabel } = scope;
   const renderPanel = () => (
     <>
@@ -640,7 +640,7 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
           {mossEdit ? <>
             <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
             <p>The baked working image is Image 1. Additional slots follow it in order.</p>
-            <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={3} firstOrdinal={2} />
+            <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
             {mossEditError ? <p role="alert">{mossEditError}</p> : null}
           </> : null}
           {editModels.length ? (

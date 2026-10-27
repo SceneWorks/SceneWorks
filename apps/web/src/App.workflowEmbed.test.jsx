@@ -35,7 +35,7 @@ import { ImageStudio } from './screens/ImageStudio.jsx';
 import { SimpleShell } from './simple/SimpleShell.jsx';
 import { ImageEditor } from './screens/ImageEditor.jsx';
 import { terminalBrowserDom } from './testUtils/terminalBrowserDom.js';
-import { acknowledgeRecipeChoice, configure } from '../../../scripts/lib/moss-edit-terminal-controls.mjs';
+import { acknowledgeRecipeChoice, configure } from './testUtils/imageControls.js';
 const { App } = await import("./main.jsx");
 
 const MODAL_TITLE = "Include the recipe in generated images?";
@@ -295,7 +295,7 @@ describe("App - the one-time embedded-workflow choice (sc-16390)", () => {
     expect(document.body.querySelector(".su-group-title")?.textContent).toBe("Appearance");
     expect(document.activeElement?.textContent).toBe("Sharing");
   });
-  it.each([['full',false],['simple',false],['editor',false],['editor',true],['editor','cancel'],['editor','unmount'],['editor','gate-error']])('fresh App recipe choice gates actual %s form before one POST (error=%s)',async(kind,requestError)=>{
+  it.each([['full',false],['simple',false],['editor',false],['editor',true],['editor','cancel'],['editor','unmount'],['editor','gate-error'],['editor',false,'tensor'],['editor',false,'batch']])('fresh App recipe choice gates actual %s form before one POST (error=%s, output=%s)',async(kind,requestError,outputKind)=>{
     await renderApp({}, {workflowPuts:0,imagePostError:requestError===true});expect(hoisted.imageProject?.id).toBe('project-default');
     const manifest=JSON5.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)),'../../../config/manifests/builtin.models.jsonc'),'utf8'));
     const model={...manifest.models.find(item=>item.id==='moss_image_base'),installState:'installed',usable:true,capabilities:['text_to_image','edit_image'],conditionalPurposes:{moss_image_edit:{installState:'installed'}}};
@@ -333,10 +333,15 @@ describe("App - the one-time embedded-workflow choice (sc-16390)", () => {
       expect(await acknowledgeRecipeChoice(terminalBrowserDom(document.body),actions)).toBe(false);expect(posts()).toHaveLength(1);
       if(kind==='editor'){
         if(requestError){expect(surface.querySelector('.ie-busy')).toBeNull();expect(surface.textContent).toContain('owned CPU rejection');expect(ctx.purgeAsset).toHaveBeenCalledWith(expect.objectContaining({id:'scratch-owned'}));expect(ctx.trackEditorScratchOp).not.toHaveBeenCalled();}
-        else{expect(surface.querySelector('.ie-busy')).not.toBeNull();expect(ctx.trackEditorScratchOp).toHaveBeenCalledWith('owned-test-job',[expect.objectContaining({id:'scratch-owned'})],{retainCompleted:true});
-          const completed={id:'owned-test-job',status:'completed',result:{assets:[{...image,id:'owned-result',displayName:'CPU result',file:{path:'assets/result.png'}}]}};
+        else{expect(surface.querySelector('.ie-busy')).not.toBeNull();expect(ctx.trackEditorScratchOp).toHaveBeenCalledWith('owned-test-job',[expect.objectContaining({id:'scratch-owned'}),null]);
+          const output={...image,id:'owned-result',displayName:'CPU result',type:outputKind==='tensor'?'tensor':'image',file:{path:outputKind==='tensor'?'assets/result.npy':'assets/result.png'}};
+          const completed={id:'owned-test-job',status:'completed',result:{expectedCount:outputKind==='batch'?2:1,assets:outputKind==='batch'?[output,{...output,id:'owned-result-2'}]:[output]}};
           await act(async()=>surfaceRoot.render(<AppContext.Provider value={{...ctx,jobs:[completed]}}><ImageEditor/></AppContext.Provider>));await settle();
-          expect(surface.querySelector('.ie-busy')).toBeNull();expect(surface.querySelector('.ie-unsaved-badge')).not.toBeNull();expect(surface.querySelector('.ie-moss-results')).not.toBeNull();expect(ctx.releaseEditorScratchOp).toHaveBeenCalledWith('owned-test-job',completed);
+          expect(surface.querySelector('.ie-busy')).toBeNull();
+          expect(Boolean(surface.querySelector('.ie-unsaved-badge'))).toBe(outputKind!=='tensor');
+          expect(Boolean(surface.querySelector('.ie-native-results'))).toBe(Boolean(outputKind));
+          if(outputKind)expect(surface.querySelectorAll('.ie-native-results a[download]')).toHaveLength(outputKind==='batch'?2:1);
+          expect(ctx.releaseEditorScratchOp).toHaveBeenCalledWith('owned-test-job',completed);
         }
       }
     }finally{if(!unmounted)await act(async()=>surfaceRoot.unmount());surface.remove();}
