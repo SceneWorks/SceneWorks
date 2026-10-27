@@ -76,6 +76,52 @@ export async function validateOrdinaryExecutionCaptures(root,lock,comparison,{ex
     requireThat(canonical(capture)===canonical(expected),'ordinary capture differs from actual execution artifact, lock or binding');
   }
 }
+// CI_IMPACT: CPU-only fixed evidence authentication; no inference enters normal CI.
+export function originalReferenceContextSha256(comparison){return digest({upstream:comparison.upstream,suiteSummary:comparison.suiteSummary});}
+const CORRECTED_HEAD='6444adf801a4a3e84b1bfbc5e92d02ddfe0a955c';
+const CORRECTED_PAYLOAD='d9575dba2c1b8a07dfec9b2570ae3d31332ac44b4643f7193a7e7d45f5706088';
+const CORRECTION_ARCHIVES={
+  proof:{runId:'40438178487',artifactId:'12705670124',files:14,zip:'901d8dc6cbafe7ebdf3f22ec31d64251c9a848598b4fbaa133ed068f1df1dab8',auth:'a57d22737f46a704ca59ecd6db674b67b0b9c952da9b24094dc12bda032d3737'},
+  corrected:{runId:'40438860208',artifactId:'12708569178',files:34,zip:'85c7c7c80283fe6dbf773da39b28b2b6bb7a366caa198f6605b91649e002b338',auth:'91c47e8d1f3c54a6685702e777be51fe752106d38cb4819938a916358ac32095'},
+};
+async function fixedCorrectionArchive(root,entry,name){
+  const expected=CORRECTION_ARCHIVES[name],prefix=`quality-reference-correction/${name}`;
+  requireThat(entry?.root===prefix&&entry.archiveAuthentication?.file===`${prefix}-archive-authentication.json`&&entry.archiveAuthentication.sha256===expected.auth,'fixed reference correction archive identity changed');
+  const auth=await json(await identity(root,entry.archiveAuthentication));
+  requireThat(String(auth.runId)===expected.runId&&auth.attempt===1&&String(auth.artifactId)===expected.artifactId&&auth.head===CORRECTED_HEAD&&auth.conclusion==='success'&&auth.zipSha256===expected.zip&&auth.allOriginalFilesByteEqual===true&&auth.fileCount===expected.files&&auth.files?.length===expected.files&&new Set(auth.files.map(x=>x.path)).size===expected.files,'reference correction actual producer/archive changed');
+  for(const file of auth.files){
+    requireThat(Number.isSafeInteger(file.bytes)&&file.bytes>=0&&SHA.test(file.sha256??''),'invalid archived correction file identity');
+    requireThat(canonical(await fileIdentity(safePath(root,`${prefix}/${file.path}`)))===canonical({byteLength:file.bytes,sha256:file.sha256}),'archived reference correction bytes changed');
+  }
+  return prefix;
+}
+export async function loadReferenceCorrection(root,comparison,lock,rows,inputs){
+  requireThat(comparison.referenceCorrection?.file==='quality-reference-correction.json','fixed reference correction sidecar path required');
+  const correction=await json(await identity(root,comparison.referenceCorrection));
+  requireThat(canonical(Object.keys(correction).sort())===canonical(['version','amendmentSha256','lockSha256','originalContextSha256','proof','corrected','upstream','rows','controlledCudaComparisons'].sort())&&correction.version==='sc-26757-mps-causal-reference-correction/v1'&&correction.amendmentSha256===AMENDMENT_SHA256&&correction.lockSha256===digest(lock)&&correction.originalContextSha256===originalReferenceContextSha256(comparison),'reference correction changed approved policy, native lock or original reference context');
+  const proof=await fixedCorrectionArchive(root,correction.proof,'proof'),corrected=await fixedCorrectionArchive(root,correction.corrected,'corrected');
+  const observation=await json(resolve(root,proof,'upstream/observation.json')),host=await json(resolve(root,proof,'probe-authentication.json'));
+  requireThat(observation.runId==='40438178487'&&observation.attempt==='1'&&observation.actualToolingSha===CORRECTED_HEAD&&observation.attentionCalls===3&&observation.encoderForwards===0&&observation.nativeBuilds===0&&observation.originalMpsRepeatByteExact===true&&observation.cpuFirstTokenExactlyV0===true&&observation.interpretation?.valid===true&&host.host?.uuid==='D299B954-4C63-5322-86A5-BD5667051634','reference correction lacks actual causal-kernel proof');
+  const calls=['cpu-f32-math-causal','mps-bf16-implicit-causal','mps-bf16-explicit-bool-causal'];
+  requireThat(canonical(Object.keys(observation.actualCalls).sort())===canonical(calls.slice().sort())&&calls.every(name=>observation.actualCalls[name].status==='CAPTURED')&&observation.metrics[calls[0]].firstTokenExactlyV0===true&&observation.metrics[calls[1]].firstTokenExactlyV0===false&&observation.metrics[calls[2]].firstTokenExactlyV0===true,'causal reference correction proof substituted');
+  const auth=await json(resolve(root,corrected,'authentication.json')),summary=await json(resolve(root,corrected,'suite-summary.json'));
+  requireThat(auth.toolingSha===CORRECTED_HEAD&&auth.runId==='40438860208'&&auth.attempt==='1'&&auth.qualityCasesManifestSha256===CORRECTED_PAYLOAD&&auth.runtimeVersions?.torch==='2.9.1'&&auth.runtimeVersions.transformers==='5.5.3'&&auth.runtimeVersions.tokenizers==='0.22.2'&&summary.toolingSha===CORRECTED_HEAD&&summary.qualityCasesManifestSha256===CORRECTED_PAYLOAD&&summary.outputs?.length===4,'corrected reference runtime/suite changed');
+  requireThat(canonical(Object.keys(correction.upstream??{}).sort())===canonical(CELLS.slice().sort())&&correction.rows?.length===8&&canonical(correction.rows.map(x=>x.rowId).sort())===canonical(rows.filter(x=>x.anchors).map(x=>x.id).sort()),'corrected references require eight primary comparisons');
+  requireThat(correction.controlledCudaComparisons?.length===4&&canonical(correction.controlledCudaComparisons.map(x=>x.rowId).sort())===canonical(CELLS.map(x=>`quality-cuda-${x}`).sort()),'four separate controlled CUDA comparisons required');
+  for(const cell of CELLS){
+    const entry=correction.upstream[cell],result=await json(resolve(root,corrected,`upstream-${cell}.diagnostic.json`)),output=summary.outputs.filter(x=>x.caseId===cell),refs=cell.endsWith('four')?['B','L','P','G']:['B'];
+    requireThat(entry?.cell===cell&&String(entry.runId)==='40438860208'&&entry.attempt===1&&String(entry.artifactId)==='12708569178'&&entry.toolingSha===CORRECTED_HEAD&&entry.reviewer&&Number.isFinite(Date.parse(entry.reviewedAt))&&entry.observation?.trim(),'corrected reference actual producer/reviewer missing');
+    for(const [role,file]of Object.entries({image:`upstream-${cell}.png`,diagnostic:`upstream-${cell}.diagnostic.json`,authentication:'authentication.json'}))requireThat(entry[role]?.file===`${corrected}/${file}`&&canonical(await fileIdentity(await identity(root,entry[role])))===canonical(await fileIdentity(resolve(root,corrected,file))),'corrected reference role or bytes substituted');
+    requireThat(output.length===1&&output[0].imageSha256===entry.image.sha256&&output[0].diagnosticSha256===entry.diagnostic.sha256&&result.wrapperSha256===auth.wrapperSha256&&result.frozenFilesVerifiedAfterRun===24&&result.caseId===cell&&result.variant===cell.split('-')[0]&&result.runId==='40438860208'&&result.attempt==='1'&&result.toolingSha===CORRECTED_HEAD,'corrected reference cell/source closure changed');
+    const actual=result.result,shape=cell.endsWith('four')?[1,128,48,32]:[1,128,32,48];
+    requireThat(actual.width===(cell.endsWith('four')?512:768)&&actual.height===(cell.endsWith('four')?768:512)&&actual.seed===173&&actual.actual_steps===30&&actual.cfg===4&&actual.inference_shift===5&&actual.training_shift===1&&actual.kv_cache===true&&actual.dit_quantization==='none'&&actual.text_quantization==='none'&&result.noiseAllocations===1&&result.noiseSha256===NOISE_SHA&&entry.noiseSha256===NOISE_SHA&&canonical(result.noiseShape)===canonical(shape),'corrected reference noise/settings changed');
+    requireThat(canonical(entry.inputs?.map(x=>x.id))===canonical(refs)&&entry.inputs.every(x=>x.sha256===inputs[x.id]?.sha256)&&actual.references?.length===refs.length&&actual.references.every((file,index)=>file.endsWith(`/${refs[index]}.png`))&&actual.prompt===rows.find(x=>x.anchors&&x.variant===cell.split('-')[0]&&x.refs.length===refs.length).request.prompt&&actual.negative_prompt==='','corrected reference ordered inputs/prompt changed');
+  }
+  // Original strict reviews and primary outputs are still checked by compareQualityRow.
+  // The four controlled measurements remain separate; they never replace these eight rows.
+  return {...comparison,upstream:correction.upstream,rows:correction.rows,referenceCorrectionApplied:true,controlledCudaComparisons:correction.controlledCudaComparisons};
+}
+
 export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExecutionToolingSha,executionToolingSha,finalExecutionOrdinal,verificationToolingSha,verificationSourceRoot,cudaLockSha256,ordinary}={}){
   const file=resolve(root,'quality-upstream-comparison.json');
   const comparison=await json(file).catch(error=>{if(error.code==='ENOENT')return null;throw error;});
@@ -123,7 +169,7 @@ export async function loadQualityAmendment(root,lock,rows,inputs,{historicalExec
   const summary=await json(await identity(root,summaryEntry));
   requireThat(summary.toolingSha===suite.toolingSha&&summary.qualityCasesManifestSha256===CASES_MANIFEST_SHA256&&Array.isArray(summary.outputs)&&summary.outputs.length===3,'three-case suite result provenance changed');
   validateSuiteOutputs(summary,comparison.upstream);
-  return comparison;
+  return comparison.referenceCorrection?loadReferenceCorrection(root,comparison,lock,rows,inputs):comparison;
 }
 
 export function validateSuiteOutputs(summary,upstream){

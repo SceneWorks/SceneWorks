@@ -63,11 +63,31 @@ export async function h47SourceEntries(root) {
   for(const entry of entries){const info=await lstat(fsResolve(root,entry.path),{bigint:true});check(JSON.stringify(entryIdentity(info))===JSON.stringify(Object.fromEntries(Object.keys(entryIdentity(info)).map(key=>[key,entry[key]]))),'protected source changed during observation');entry.mtimeNs=String(info.mtimeNs);entry.ctimeNs=String(info.ctimeNs);}
   return entries;
 }
+// Only the already authenticated original R19 native/MLX/stopped-HF producers.
+export function validateReuseMaintenance(env,inputs) {
+  const dispatch=inputs.moss_terminal?JSON.parse(inputs.moss_terminal):inputs;
+  const expected={phase:'execute',candidate_id:H47_OWNER.candidate,bundle_run_id:'40349390662',bundle_artifact_id:'12663171392',bundle_manifest_sha256:'4f4adcd82b46bc9c1e57373bff835b59f05bc8846b4b71871bdf9f8f09f0daa5',native_run_id:'40349954885',native_run_attempt:'1',mlx_run_id:'40349954885',mlx_run_attempt:'1',mlx_artifact_id:'12676636780',mlx_tooling_sha:H47_OWNER.source,cuda_hf_run_id:'40349954885',cuda_hf_run_attempt:'1',cuda_hf_artifact_id:'12677781687'};
+  check(env.MOSS_MAINTENANCE_PHASE==='execute'&&env.GITHUB_ACTIONS==='true'&&env.GITHUB_JOB==='windows-maintenance'&&env.MOSS_SOURCE_SHA===H47_OWNER.source&&env.MOSS_INFERENCE_SHA===H47_OWNER.inference&&env.MOSS_CANDIDATE===H47_OWNER.candidate,'native reuse maintenance requires exact original R19 pair');
+  check(/^[a-f0-9]{40}$/.test(env.MOSS_TOOLING_SHA??'')&&env.MOSS_TOOLING_SHA===env.GITHUB_SHA&&env.MOSS_TOOLING_SHA!==env.MOSS_SOURCE_SHA&&dispatch.tooling_sha===env.MOSS_TOOLING_SHA,'native reuse maintenance requires actual separate tooling source');
+  check((dispatch.product_sha??dispatch.source_sha)===env.MOSS_SOURCE_SHA&&Object.entries(expected).every(([key,value])=>dispatch[key]===value),'native reuse maintenance producer/bundle identity changed');
+  for(const key of ['NATIVE_RUN_ID','NATIVE_RUN_ATTEMPT','MLX_RUN_ID','MLX_RUN_ATTEMPT','MLX_ARTIFACT_ID','CUDA_HF_RUN_ID','CUDA_HF_RUN_ATTEMPT','CUDA_HF_ARTIFACT_ID'])check(env[`MOSS_${key}`]===expected[key.toLowerCase()],'native reuse maintenance environment differs from dispatch');
+  if(inputs.moss_terminal){
+    check(Object.keys(dispatch).sort().join(',')===[...Object.keys(expected),'product_sha','tooling_sha'].sort().join(','),'closed native reuse maintenance dispatch required');
+    check(inputs.ref===env.GITHUB_SHA&&inputs.inference_sha===env.MOSS_INFERENCE_SHA,'native reuse maintenance outer source changed');
+  }
+  return {mode:'original-r19-native-reuse',productSha:env.MOSS_SOURCE_SHA,inferenceSha:env.MOSS_INFERENCE_SHA,toolingSha:env.MOSS_TOOLING_SHA,nativeRunId:expected.native_run_id,mlxArtifactId:expected.mlx_artifact_id,stoppedHfArtifactId:expected.cuda_hf_artifact_id};
+}
+async function reuseInvocation(env,io) {
+  const bytes=await io.read(env.GITHUB_EVENT_PATH);check(bytes.length<=65536,'bounded maintenance dispatch required');
+  return validateReuseMaintenance(env,JSON.parse(bytes).inputs??{});
+}
 async function validateH47Invocation(env,io) {
+  if(env.MOSS_MAINTENANCE_PHASE==='execute'&&env.MOSS_NATIVE_RUN_ID)return reuseInvocation(env,io);
   check(env.GITHUB_ACTIONS==='true'&&env.GITHUB_JOB==='windows-maintenance'&&env.MOSS_SOURCE_SHA===env.GITHUB_SHA&&env.MOSS_NATIVE_RUN_ID==='','H47 cleanup requires normal new-pair maintenance');
   const event=JSON.parse(await io.read(env.GITHUB_EVENT_PATH)),inputs=event.inputs??{},dispatch=inputs.moss_terminal?JSON.parse(inputs.moss_terminal):inputs;
   check(dispatch.phase==='execute'&&!(dispatch.native_run_id),'H47 cleanup requires ordinary fresh execute');
 }
+
 export async function observeH47Owner(io,runtime,metadata) {
   const runtimePath=path.join(H47_OWNER.root,'runtime.json');validateTree(await io.inspect(runtimePath),runtimePath);
   check(JSON.stringify(validateRuntime(H47_OWNER,await io.read(runtimePath)))===JSON.stringify(runtime),'H47 runtime changed during observation');
@@ -220,7 +240,9 @@ export async function copyCacheExclusive(from,to) {
 }
 export async function maintain(env, io, {copyCache=true}={}) {
   const root = destination(env), target = path.join(root, 'target');
-  const receipt = { version: 1, kind: 'sc-26752-stopped-run-disk-recovery', currentRun: env.GITHUB_RUN_ID, currentSource: env.MOSS_SOURCE_SHA, before: await io.volume(), candidates: [], operations: [] };
+  const reuse=env.MOSS_NATIVE_RUN_ID&&env.MOSS_MAINTENANCE_PHASE!=='cuda-rebase'?await reuseInvocation(env,io):null;
+  check(!reuse||copyCache,'native reuse cannot use reference-only maintenance');
+  const receipt = { version: 1, kind: 'sc-26752-stopped-run-disk-recovery', currentRun: env.GITHUB_RUN_ID, currentSource: env.MOSS_SOURCE_SHA, ...(reuse?{reuse}:{}), before: await io.volume(), candidates: [], operations: [] };
   validateTree(await io.inspect(root), root);
   receipt.r9Observation = await diagnoseR9(io);
   for (const binding of OWNED_RUNS.filter(item=>copyCache||item.run!==H47_OWNER.run)) {
@@ -265,7 +287,7 @@ export async function maintain(env, io, {copyCache=true}={}) {
     receipt.operations.push({ kind: 'remove-owned-hf', path: leaf, after: await io.volume() });
     io.report({ stage: 'hf-reclaimed', operation: receipt.operations.at(-1) });
   }
-  if(copyCache) {
+  if(copyCache&&!reuse) {
   const original = receipt.candidates.find(item => item.run === '40174802721' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40169818205' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40167292776' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40163530825' && item.cache?.exists) ?? receipt.candidates.find(item => item.run === '40155160639'), from = path.join(original.root, 'target');
   if (original.cache?.exists) {
     await io.stopped(original);
@@ -297,7 +319,7 @@ export async function maintain(env, io, {copyCache=true}={}) {
     }
   }
   if (original.cacheProbeError) receipt.cache = { state: 'unproved-cache-retained-without-copy', error: original.cacheProbeError };
-  } else receipt.cache={state:'hf-only-recovery-original-targets-retained-no-copy'};
+  } else receipt.cache={state:reuse?'native-reuse-original-targets-retained-no-copy':'hf-only-recovery-original-targets-retained-no-copy'};
   receipt.after = await io.volume();
   io.report({ ...receipt, stage: 'completed' });
   await io.ensure(root);

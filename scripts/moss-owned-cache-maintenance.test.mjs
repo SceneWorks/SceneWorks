@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { gunzipSync } from 'node:zlib';
 import { win32 as path } from 'node:path';
-import { H47_OWNER, H47_PROCESS_FILTER, validateH47Processes, validateH47Projection, h47SourceEntries, OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, hashMetadataFile, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
+import { H47_OWNER, validateReuseMaintenance, H47_PROCESS_FILTER, validateH47Processes, validateH47Projection, h47SourceEntries, OWNED_RUNS, validateHfOnlyEnvelope, copyCacheExclusive, hashMetadataFile, observeHf, hfEntries, validateHfObservation, R9_DIAGNOSTIC, diagnoseR9, destination, validateRuntime, validateTree, validateStopped, stopped, maintain } from './ci/moss-owned-cache-maintenance.mjs';
 const runtimes = await Promise.all([4, 5, 6, 10, 12, 13, 14, 15].map(async round => gunzipSync(await readFile(new URL(`./fixtures/moss-stopped-runtime/r${round}.json.gz`, import.meta.url)))));
 const env = { GITHUB_REPOSITORY: 'SceneWorks/SceneWorks', GITHUB_RUN_ID: '99999999999', GITHUB_RUN_ATTEMPT: '1', GITHUB_WORKSPACE: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', MOSS_ROOT: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-99999999999-1-cuda', MOSS_SOURCE_SHA: 'a'.repeat(40), MOSS_INFERENCE_SHA: 'b'.repeat(40) };
 const state = binding => ({ id: Number(binding.run), run_attempt: 1, head_sha: binding.actionsSource ?? binding.source, status: 'completed', conclusion: 'failure' });
@@ -109,7 +109,7 @@ test('action-free recovery gates native job preparation and keeps the normal fre
   const workflow = await readFile(new URL('../.github/workflows/moss-edit-terminal.yml', import.meta.url), 'utf8');
   const recovery = workflow.slice(workflow.indexOf('  windows-maintenance:'), workflow.indexOf('  build-native:'));
   const build = workflow.slice(workflow.indexOf('  build-native:')), step = recovery.slice(recovery.indexOf('    steps:'));
-  assert.match(recovery, /^    if: \(inputs.phase == 'execute' && inputs.native_run_id == ''\) \|\| inputs.phase == 'cuda-rebase'$/m);
+  assert.match(recovery, /inputs.native_run_id == '40349954885' && inputs.mlx_artifact_id == '12676636780'/);
   assert.match(build, /inputs.phase == 'execute' && inputs.native_run_id == ''/);
   assert.match(build, /^    if: \(inputs.phase == 'execute' && inputs.native_run_id == ''\) \|\| inputs.phase == 'cuda-rebase'$/m);
   const reused=workflow.slice(workflow.indexOf('  execute-cuda:'),workflow.indexOf('  continue-mlx:'));
@@ -120,7 +120,10 @@ test('action-free recovery gates native job preparation and keeps the normal fre
   assert.doesNotMatch(recovery, /\buses:/); assert.doesNotMatch(recovery, /\bneeds:/);
   assert.match(build, /^    needs: windows-maintenance$/m);
   assert.doesNotMatch(build, /--moss-disk-maintenance/);
-  assert.match(step, /contents\/scripts\/ci\/moss-owned-cache-maintenance.mjs\?ref=\$env:MOSS_SOURCE_SHA/);
+  assert.match(step, /\$helperSha = \$env:MOSS_SOURCE_SHA/);
+  assert.match(step, /\$helperSha = \$env:MOSS_TOOLING_SHA/);
+  assert.match(step, /contents\/scripts\/ci\/moss-owned-cache-maintenance.mjs\?ref=\$helperSha/);
+  assert.match(step, /\$env:MOSS_TOOLING_SHA -ne \$env:GITHUB_SHA/);
   assert.match(step, /externals\\node24\\bin\\node.exe/); assert.match(step, /\$program \| & \$node --input-type=module - --moss-disk-maintenance/);
   assert.doesNotMatch(step, /WriteAllText|Set-Content|npm |cargo |nvidia-smi|Remove-Item/);
   assert.match(build, /node source\\scripts\\moss-edit-terminal-actions.mjs build/);
@@ -341,7 +344,7 @@ test('H47 all ownership and live guards precede removal and repeat at the mutati
   f=>{const entries=f.io.entries;f.io.entries=async file=>{const x=await entries(file);if(file===h47Runtime.hfHome)x[0].nlink='2';return x;};},
   f=>{const entries=f.io.entries;f.io.entries=async file=>{const x=await entries(file);x[0].nlink='2';return x;};},
  ];
- const reasons=[/archived ownership record changed/,/archived ownership record changed/,/original private build owner changed/,/reparse/,/owned H47 process/,/owned H47 process/,/metadata changed before cleanup/,/protected original HF changed/,/new active run/,/normal new-pair/,/normal new-pair/,/ordinary fresh execute/,/runtime bytes changed/,/HF identity changed at removal boundary/,/protected original source ownership changed/];
+ const reasons=[/archived ownership record changed/,/archived ownership record changed/,/original private build owner changed/,/reparse/,/owned H47 process/,/owned H47 process/,/metadata changed before cleanup/,/protected original HF changed/,/new active run/,/normal new-pair/,/exact original R19 pair/,/ordinary fresh execute/,/runtime bytes changed/,/HF identity changed at removal boundary/,/protected original source ownership changed/];
  assert.equal(scenarios.length,reasons.length);
  for(const [index,setup] of scenarios.entries()){const f=h47Fixture();setup(f);await assert.rejects(()=>maintain(f.env,f.io),reasons[index]);assert.deepEqual(f.mutations,[]);}
  const reference=h47Fixture();await maintain(reference.env,reference.io,{copyCache:false});assert.deepEqual(reference.mutations,[]);assert.ok(reference.roots.has(h47Runtime.hfHome));
@@ -374,4 +377,61 @@ test('authenticated target timestamps come from bigint stat and remain bound acr
  await utimes(file,new Date('2020-01-01T00:00:00Z'),new Date('2020-01-01T00:00:00Z'));
  const [changed]=await hfEntries(root,{timestamps:true});assert.equal(changed.ino,entry.ino);assert.equal(changed.byteLength,entry.byteLength);assert.notEqual(changed.mtimeNs,entry.mtimeNs);
  await assert.rejects(()=>hashMetadataFile(file,entry),/changed before hash/);
+});
+
+// CI_IMPACT: closed R19 metadata fixture and workflow dependency matrix only; no Windows/network/inference.
+function reuseFixture() {
+  const f=h47Fixture(),tooling='c'.repeat(40);
+  const dispatch={candidate_id:H47_OWNER.candidate,bundle_manifest_sha256:'4f4adcd82b46bc9c1e57373bff835b59f05bc8846b4b71871bdf9f8f09f0daa5',phase:'execute',bundle_run_id:'40349390662',bundle_artifact_id:'12663171392',tooling_sha:tooling,product_sha:H47_OWNER.source,native_run_id:'40349954885',native_run_attempt:'1',mlx_run_id:'40349954885',mlx_run_attempt:'1',mlx_artifact_id:'12676636780',mlx_tooling_sha:H47_OWNER.source,cuda_hf_run_id:'40349954885',cuda_hf_run_attempt:'1',cuda_hf_artifact_id:'12677781687'};
+  const inputs={ref:tooling,inference_sha:H47_OWNER.inference,moss_terminal:JSON.stringify(dispatch)};
+  f.env={...f.env,GITHUB_SHA:tooling,MOSS_TOOLING_SHA:tooling,MOSS_SOURCE_SHA:H47_OWNER.source,MOSS_INFERENCE_SHA:H47_OWNER.inference,MOSS_CANDIDATE:H47_OWNER.candidate,MOSS_MAINTENANCE_PHASE:'execute'};
+  for(const key of ['native_run_id','native_run_attempt','mlx_run_id','mlx_run_attempt','mlx_artifact_id','cuda_hf_run_id','cuda_hf_run_attempt','cuda_hf_artifact_id'])f.env[`MOSS_${key.toUpperCase()}`]=dispatch[key];
+  const read=f.io.read;f.io.read=async file=>file===f.env.GITHUB_EVENT_PATH?Buffer.from(JSON.stringify({inputs})):read(file);
+  return {...f,inputs,dispatch};
+}
+test('exact retained R19 reuse reclaims H47 with all owner guards and never copies a target',async()=>{
+  const f=reuseFixture();f.roots.add(path.join(OWNED_RUNS[6].root,'target'));
+  f.io.volume=async()=>({drive:'D',free:1024**4,size:2*1024**4});f.io.copy=async()=>assert.fail('reuse must never copy a target');
+  const receipt=await maintain(f.env,f.io);
+  assert.equal(receipt.reuse.toolingSha,f.env.GITHUB_SHA);assert.equal(receipt.reuse.productSha,H47_OWNER.source);
+  assert.equal(receipt.cache.state,'native-reuse-original-targets-retained-no-copy');
+  assert.deepEqual(f.mutations,[['remove',h47Runtime.hfHome]]);assert.ok(f.roots.has(path.join(OWNED_RUNS[6].root,'target')));
+  assert.equal(receipt.candidates.at(-1).owner.processes.ownedProcessesAbsent,true);
+  assert.equal(receipt.candidates.at(-1).owner.protectedSource,JSON.parse(h47Records['cuda-package-preparation.json']).readOnlySource);
+});
+test('reuse rejects every substituted producer/source before observations or mutations',async()=>{
+  for(const key of Object.keys(reuseFixture().dispatch)){
+    const f=reuseFixture();f.inputs.moss_terminal=JSON.stringify({...f.dispatch,[key]:key==='phase'?'verify':'0'.repeat(40)});
+    f.io.volume=async()=>assert.fail('invalid dispatch must fail before volume query');
+    await assert.rejects(()=>maintain(f.env,f.io));assert.deepEqual(f.mutations,[]);
+  }
+  for(const patch of [{MOSS_MAINTENANCE_PHASE:'verify'},{GITHUB_ACTIONS:'false'},{GITHUB_JOB:'other'},{GITHUB_SHA:'d'.repeat(40)},{MOSS_TOOLING_SHA:H47_OWNER.source},{MOSS_SOURCE_SHA:'d'.repeat(40)},{MOSS_INFERENCE_SHA:'d'.repeat(40)},{MOSS_CANDIDATE:'other'},{MOSS_MLX_ARTIFACT_ID:'99999999999'},{MOSS_CUDA_HF_RUN_ATTEMPT:'2'}]){
+    const f=reuseFixture();Object.assign(f.env,patch);await assert.rejects(()=>maintain(f.env,f.io));assert.deepEqual(f.mutations,[]);
+  }
+  for(const patch of [{ref:'d'.repeat(40)},{inference_sha:'d'.repeat(40)},{moss_terminal:JSON.stringify({...reuseFixture().dispatch,path:'D:\\user'})}]){
+    const f=reuseFixture();Object.assign(f.inputs,patch);assert.throws(()=>validateReuseMaintenance(f.env,f.inputs));
+  }
+  const reference=reuseFixture();await assert.rejects(()=>maintain(reference.env,reference.io,{copyCache:false}),/cannot use reference-only/);assert.deepEqual(reference.mutations,[]);
+  const live=reuseFixture();live.io.processes=async()=>[{pid:45652,startedAt:'2026-10-26T23:50:37Z',executable:path.join(h47Runtime.buildRoot,'cuda','sceneworks-rust-api.exe'),commandLine:'sceneworks-rust-api.exe'}];await assert.rejects(()=>maintain(live.env,live.io),/owned H47 process/);assert.deepEqual(live.mutations,[]);
+});
+test('assembled CUDA job requires successful maintenance for fresh and reuse execution',async()=>{
+  const workflow=await readFile(new URL('../.github/workflows/moss-edit-terminal.yml',import.meta.url),'utf8');
+  const section=workflow.slice(workflow.indexOf('  execute-cuda:'),workflow.indexOf('  continue-mlx:'));
+  assert.match(section,/needs: \[execute-mlx, windows-maintenance\]/);
+  const expression=section.match(/^    if: \$\{\{ (.*) \}\}$/m)[1].replaceAll('needs.execute-mlx','needs["execute-mlx"]').replaceAll('needs.windows-maintenance','needs["windows-maintenance"]');
+  const accepts=new Function('inputs','needs','always',`return (${expression})`);
+  for(const reuse of [false,true])for(const maintenance of ['success','failure','cancelled','skipped']){
+    const inputs={phase:'execute',native_run_id:reuse?'40349954885':'',mlx_artifact_id:reuse?'12676636780':''};
+    const needs={'execute-mlx':{result:reuse?'skipped':'success'},'windows-maintenance':{result:maintenance}};
+    assert.equal(accepts(inputs,needs,()=>true),maintenance==='success');
+    assert.equal(accepts({...inputs,phase:'verify'},needs,()=>true),false);
+  }
+  assert.equal(accepts({phase:'execute',native_run_id:'',mlx_artifact_id:''},{'execute-mlx':{result:'failure'},'windows-maintenance':{result:'success'}},()=>true),false);
+});
+
+test('existing rebase with historical native IDs keeps the original cache path',async()=>{
+ const f=fixture(),receipt=await maintain({...env,MOSS_NATIVE_RUN_ID:'40214209083',MOSS_MAINTENANCE_PHASE:'cuda-rebase'},f.io);
+ assert.equal(receipt.reuse,undefined);assert.ok(f.mutations.some(item=>item[0]==='copy'));
+ const workflow=await readFile(new URL('../.github/workflows/moss-edit-terminal.yml',import.meta.url),'utf8');
+ assert.match(workflow,/if \(\$env:MOSS_MAINTENANCE_PHASE -eq 'execute' -and \$env:MOSS_NATIVE_RUN_ID\) \{/);
 });

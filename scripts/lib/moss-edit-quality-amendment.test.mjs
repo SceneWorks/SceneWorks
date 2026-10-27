@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import {execFileSync} from 'node:child_process';
 import {resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {copyFile,mkdir,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
+import {copyFile,cp,mkdir,mkdtemp,readFile,rm,writeFile} from 'node:fs/promises';
 import {existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {VERSION,reviewVerdict,sha,digest,fileIdentity} from './moss-edit-terminal.mjs';
 import {loadCandidateQualityAmendment} from '../moss-edit-terminal.mjs';
-import {compareQualityRow,ordinaryExecutionCapture,validateOrdinaryExecutionCaptures,validateExecutionToolingCapture,validateSuiteOutputs,loadQualityAmendment,AMENDMENT_SHA256,UPSTREAM_SUITE_TOOLING_SHA} from './moss-edit-quality-amendment.mjs';
+import {compareQualityRow,ordinaryExecutionCapture,validateOrdinaryExecutionCaptures,validateExecutionToolingCapture,validateSuiteOutputs,loadQualityAmendment,loadReferenceCorrection,originalReferenceContextSha256,AMENDMENT_SHA256,UPSTREAM_SUITE_TOOLING_SHA} from './moss-edit-quality-amendment.mjs';
 
 const hash='a'.repeat(64),reviewHash='b'.repeat(64),upstreamHash='c'.repeat(64);
 const row={id:'quality-mlx-base-single',variant:'base',refs:['B'],anchors:['Bottle color','Bottle and orange placement']};
@@ -207,3 +207,26 @@ test('complete four-cell overlay loads and actual suite summary rejects swapped 
 function comparisonForOrdinaryRow(){
   return {row,review,comparison:comparison()};
 }
+
+// CI_IMPACT: CPU evidence hashing/JSON fixtures only; retained actual archives are optional local fixtures.
+const correctionStage='/Users/michael/.codex/epic-runs/sc-26752/resume-20261026/quality-reference-correction-staging';
+test('causal reference correction keeps policy and all original primary reference context mandatory',async()=>{
+  const original={upstream:{cell:{image:{sha256:hash}}},suiteSummary:{sha256:reviewHash}},changed=structuredClone(original);changed.upstream.cell.image.sha256=upstreamHash;
+  assert.notEqual(originalReferenceContextSha256(original),originalReferenceContextSha256(changed));
+  await assert.rejects(()=>loadReferenceCorrection('/unused',{referenceCorrection:{file:'arbitrary.json'}},{},[],{}),/sidecar path/);
+});
+test('actual three-call proof and corrected four references authenticate separately without replacing primary rows',{skip:!existsSync(resolve(correctionStage,'quality-reference-correction'))},async()=>{
+  const root=await mkdtemp(resolve(tmpdir(),'moss-reference-correction-'));
+  try{
+    await cp(resolve(correctionStage,'quality-reference-correction'),resolve(root,'quality-reference-correction'),{recursive:true});
+    const frozen=JSON.parse(await readFile('/Users/michael/.codex/epic-runs/sc-26752/quality-inputs-v1/inputs.json')),inputs=Object.fromEntries(frozen.assets.map(x=>[x.id,x])),cells=['base-single','base-four','sft-single','sft-four'];
+    const rows=['mlx','cuda'].flatMap(backend=>cells.map(cell=>({id:`quality-${backend}-${cell}`,backend,variant:cell.split('-')[0],refs:cell.endsWith('four')?['B','L','P','G']:['B'],anchors:['actual anchor'],request:{prompt:frozen[cell.endsWith('four')?'four_case':'single_case'].prompt}})));
+    const record=async file=>({file,...await fileIdentity(resolve(root,file))}),original={upstream:{historical:'immutable original references'},suiteSummary:{historical:'immutable old summary'}},lock={sources:{sceneworks:{head:'a'.repeat(40)},inference:{head:'b'.repeat(40)}}};
+    const correction={version:'sc-26757-mps-causal-reference-correction/v1',amendmentSha256:AMENDMENT_SHA256,lockSha256:digest(lock),originalContextSha256:originalReferenceContextSha256(original),proof:{root:'quality-reference-correction/proof',archiveAuthentication:await record('quality-reference-correction/proof-archive-authentication.json')},corrected:{root:'quality-reference-correction/corrected',archiveAuthentication:await record('quality-reference-correction/corrected-archive-authentication.json')},upstream:{},rows:rows.map(x=>({rowId:x.id})),controlledCudaComparisons:rows.filter(x=>x.backend==='cuda').map(x=>({rowId:x.id}))};
+    for(const cell of cells){const prefix='quality-reference-correction/corrected';correction.upstream[cell]={cell,runId:'40438860208',attempt:1,artifactId:'12708569178',toolingSha:'6444adf801a4a3e84b1bfbc5e92d02ddfe0a955c',reviewer:'CPU fixture only',reviewedAt:'2026-10-27T00:00:00Z',observation:'Fixture verifies evidence, not a visual PASS',image:await record(`${prefix}/upstream-${cell}.png`),diagnostic:await record(`${prefix}/upstream-${cell}.diagnostic.json`),authentication:await record(`${prefix}/authentication.json`),noiseSha256:'92e4addfaab4f8f5738c6a29ab2da1a56e2b204726b83250721edfec09608d82',inputs:(cell.endsWith('four')?['B','L','P','G']:['B']).map(id=>({id,sha256:inputs[id].sha256}))};}
+    const file='quality-reference-correction.json',load=async value=>{await writeFile(resolve(root,file),JSON.stringify(value));return loadReferenceCorrection(root,{...original,referenceCorrection:await record(file)},lock,rows,inputs);};
+    const before=JSON.stringify(original),result=await load(correction);assert.equal(result.referenceCorrectionApplied,true);assert.equal(result.rows.length,8);assert.equal(result.controlledCudaComparisons.length,4);assert.equal(JSON.stringify(original),before);
+    for(const mutate of [x=>{x.amendmentSha256=hash;},x=>{x.originalContextSha256=hash;},x=>{x.lockSha256=hash;},x=>{x.proof.archiveAuthentication.sha256=hash;},x=>{x.rows.pop();},x=>{x.controlledCudaComparisons.pop();},x=>{x.upstream['base-single'].image=x.upstream['sft-single'].image;},x=>{x.upstream['base-four'].runId='40438860209';},x=>{x.upstream['sft-four'].inputs.reverse();},x=>{x.upstream['sft-single'].noiseSha256=hash;}]){const bad=structuredClone(correction);mutate(bad);await assert.rejects(()=>load(bad));}
+    const output=resolve(root,'quality-reference-correction/proof/upstream/mps-bf16-explicit-bool-causal.f32le');await writeFile(output,'changed');await assert.rejects(()=>load(correction),/bytes changed/);
+  }finally{await rm(root,{recursive:true,force:true});}
+});

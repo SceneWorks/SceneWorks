@@ -5,12 +5,13 @@ import { execFileSync } from 'node:child_process';
 import { readFile, mkdir, writeFile, copyFile, chmod, readdir } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { VERSION, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, verifyFrozenSources, validateAdmission, makeNpy, inspectNpy, pngRgbIdentity, validateAdvancedDigests, createPlan, validatePlan, Api, Mcp, mcpArgs, mcpJson, replaceInputs, assertRequestBinding, checkJob, findEditReport, validateEditReport, memorySummary, samplesBracketJob, reviewVerdict, isDenoiseStep, validateExportedWorkflow, mcpResultAssets, cacheComparison, assertDispatchClear, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, reconcileAttempt, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
+import { VERSION, sha, digest, canonical, requireThat, json, save, safePath, fileIdentity, treeIdentity, verifyFrozenSources, validateAdmission, makeNpy, inspectNpy, tensorData, pngRgbIdentity, validateAdvancedDigests, createPlan, validatePlan, Api, Mcp, mcpArgs, mcpJson, replaceInputs, assertRequestBinding, checkJob, findEditReport, validateEditReport, memorySummary, samplesBracketJob, reviewVerdict, isDenoiseStep, validateExportedWorkflow, mcpResultAssets, cacheComparison, assertDispatchClear, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, reconcileAttempt, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
 import { BACKEND_FILES, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource } from './lib/moss-edit-terminal.mjs';
 import { OBSERVATION_METHOD, noLoadComparison, hostTensorInvariant, hostGuardSpec, hostBudgetHeader } from './lib/moss-edit-terminal-observation.mjs';
 import { assertOriginalEvidence, assertH18CheckpointFiles, validateFailedUiCapture, postRowsGuardFrontier, postDmdGuardFrontier, correctedDmdRequest, lexicalParserRefusal, R16_ORIGINAL_INVENTORY_SHA256, H18_RETRY_TOOLING_SHA, H18_RETRY_RUN_ID, H18_RETRY_ARTIFACT_ID, H18_RETRY_INVENTORY_SHA256 } from './lib/moss-edit-terminal-actions.mjs';
 import {AMENDMENT_SHA256,loadQualityAmendment,compareQualityRow} from './lib/moss-edit-quality-amendment.mjs';
 import {cudaSourceContinuity} from './lib/moss-edit-cuda-rebase.mjs';
+import {controlledQualityRows,validateControlledReport,QUALITY_NOISE_SHA} from './lib/moss-controlled-cuda-quality.mjs';
 
 const sleep = ms => new Promise(resolveSleep => setTimeout(resolveSleep, ms));
 const encode = value => encodeURIComponent(value);
@@ -738,7 +739,48 @@ export async function validateRecoveryAdjudication(state,expectedInventorySha256
 // Shared by the assembled verifier and its ordinary-candidate regression fixtures.
 export async function loadCandidateQualityAmendment(state,mac=null){
   const dual=state.lock.scope==='corrected-cuda-only';
-  return loadQualityAmendment(state.root,mac??state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:dual?'2cd0363d59cb3eb0989bbb708000b6ffc907932a':state.config.repair?.historicalExecutionToolingSha,executionToolingSha:dual?state.lock.macProducer.toolingSha:state.config.repair?.executionToolingSha,finalExecutionOrdinal:dual?8:state.config.repair?.retryOrdinal,verificationToolingSha:dual?state.lock.sources.sceneworks.head:state.config.repair?.verificationToolingSha,verificationSourceRoot:dual?state.config.sources.sceneworks:state.config.repair?.tooling?.sourceRoot,...(dual?{cudaLockSha256:digest(state.lock)}:{}),...(!dual&&!state.config.repair&&state.lock.qualityPolicy?{ordinary:{bundleRoot:state.config.qualityBundleRoot,...state.config.qualityExecution}}:{})});
+  const comparison=await loadQualityAmendment(state.root,mac??state.lock,state.plan.rows,await json(resolve(state.root,'input-identities.json')),{historicalExecutionToolingSha:dual?'2cd0363d59cb3eb0989bbb708000b6ffc907932a':state.config.repair?.historicalExecutionToolingSha,executionToolingSha:dual?state.lock.macProducer.toolingSha:state.config.repair?.executionToolingSha,finalExecutionOrdinal:dual?8:state.config.repair?.retryOrdinal,verificationToolingSha:dual?state.lock.sources.sceneworks.head:state.config.repair?.verificationToolingSha,verificationSourceRoot:dual?state.config.sources.sceneworks:state.config.repair?.tooling?.sourceRoot,...(dual?{cudaLockSha256:digest(state.lock)}:{}),...(!dual&&!state.config.repair&&state.lock.qualityPolicy?{ordinary:{bundleRoot:state.config.qualityBundleRoot,...state.config.qualityExecution}}:{})});
+  if(comparison?.referenceCorrectionApplied)await validateControlledCudaComparisons(state,comparison);
+  return comparison;
+}
+// Existing evidence/controlled-quality transport is retained by the full evidence copy.
+// These four controls supplement, and never replace, the eight primary comparisons.
+export function validateControlledCudaProducer(measurement,result,lock,binding,producer,rows,comparisons){
+  requireThat(producer&&/^[1-9][0-9]*$/.test(producer.runId??'')&&/^[1-9][0-9]*$/.test(producer.attempt??'')&&measurement.runId===producer.runId&&measurement.attempt===producer.attempt&&measurement.toolingSha===(producer.toolingSha??lock.sources.sceneworks.head)&&measurement.originalLockSha256===digest(lock)&&measurement.originalBindingSha256===digest(binding)&&canonical(measurement.sources)===canonical(lock.sources)&&canonical(measurement.binary)===canonical(lock.artifacts.cuda.files.workerBinary)&&canonical(measurement.binary)===canonical(lock.artifacts.cuda.files.apiBinary)&&measurement.rawNoise?.sha256===QUALITY_NOISE_SHA&&measurement.rawNoise.byteLength===786432,'controlled CUDA actual producer/source/noise/binary changed');
+  requireThat(result.execution==='COMPLETE'&&result.renders===4&&result.rows?.length===4&&canonical(result.rows.map(x=>x.rowId).sort())===canonical(rows.map(x=>x.id).sort())&&comparisons?.length===4,'four actual completed CUDA controls and separate reviews required');
+  return true;
+}
+export async function validateControlledCudaComparisons(state,comparison){
+  const root=resolve(state.root,'controlled-quality'),lock=state.lock,binding=validateBinding(await json(resolve(state.root,'bindings/cuda.json')),lock,'cuda');
+  const producer=state.config.qualityExecution?.backendExecutions?.cuda??{runId:state.config.qualityExecution?.executionRunId,attempt:state.config.qualityExecution?.executionRunAttempt};
+  const measurement=await json(resolve(root,'measurement-inputs.json')),result=await json(resolve(root,'result.json'));
+  const rows=controlledQualityRows(state.plan);
+  validateControlledCudaProducer(measurement,result,lock,binding,producer,rows,comparison.controlledCudaComparisons);
+  const originalInputs=await json(resolve(state.root,'input-identities.json')),inputs=await json(resolve(root,'input-identities.json')),uploaded=await json(resolve(state.root,'uploaded-cuda.json')),noises={};
+  for(const id of ['B','L','P','G'])requireThat(inputs[id]?.sha256===originalInputs[id]?.sha256&&sha(await readFile(safePath(root,inputs[id].file)))===inputs[id].sha256,'controlled reference bytes changed');
+  for(const [name,shape]of [['qualityNoiseLandscape',[1,128,32,48]],['qualityNoisePortrait',[1,128,48,32]]]){
+    const bytes=await readFile(resolve(root,'inputs',`${name}.npy`)),record=await json(resolve(root,'inputs',`${name}.upload.json`));inspectNpy(bytes,shape);
+    requireThat(sha(tensorData(bytes))===QUALITY_NOISE_SHA&&record.sha256===sha(bytes)&&canonical(record.shape)===canonical(shape)&&record.asset?.id,'controlled uploaded noise identity changed');
+    // The upload journal retains the POST response; the capture checks GET metadata.
+    // Bind the exact retained request to its upload ID and authenticated NPY bytes.
+    noises[name]={id:record.asset.id,type:'tensor',tensor:{sha256:sha(bytes)}};
+  }
+  const verdicts=[];
+  for(const row of rows){
+    const path=resolve(root,'rows',row.id),receipt=await json(resolve(path,'receipt.json')),request=await json(resolve(path,'request.json')),job=await json(resolve(path,'terminal-job.json')),asset=await json(resolve(path,'asset-0.json')),report=await json(resolve(path,'provider-report-0.json')),admission=await json(resolve(path,'admission.json'));
+    requireThat(canonical(request)===canonical(replaceInputs(row,{...uploaded,...noises},binding.endpoint.projectId)),'controlled request changed fixed product controls');
+    checkJob(row,request,job,'1');requireThat(job.workerId===binding.endpoint.workerId&&asset.projectId===binding.endpoint.projectId&&asset.lineage?.jobId===job.id&&asset.id===job.result.assets[0].id&&asset.recipe?.rawAdapterSettings?.mossImageSampleIndex===0&&canonical(findEditReport(asset,job))===canonical(report),'controlled actual job/asset/provider lineage changed');
+    validateControlledReport(row,request,report,inputs,{validateEditReport,sha});
+    requireThat(admission.device?.uuid==='GPU-e4b79931-7be6-f216-460a-f5405cfafffe'&&admission.device.physicalIndex===1&&admission.device.logicalIndex===0&&admission.device.pciOrRegistryId?.toUpperCase()==='00000000:C1:00.0','controlled CUDA left physical GPU1');
+    requireThat(receipt.version===VERSION&&receipt.rowId===row.id&&receipt.execution==='VERIFIED'&&receipt.backend==='cuda'&&receipt.originalLockSha256===digest(lock)&&receipt.originalBindingSha256===digest(binding)&&receipt.runId===producer.runId&&receipt.attempt===producer.attempt&&receipt.toolingSha===measurement.toolingSha&&canonical(receipt.sources)===canonical(lock.sources)&&canonical(receipt.binary)===canonical(measurement.binary)&&receipt.rawNoiseSha256===QUALITY_NOISE_SHA&&receipt.jobId===job.id&&receipt.jobSha256===digest(job)&&receipt.requestSha256===digest(request)&&receipt.providerReportSha256===(await fileIdentity(resolve(path,'provider-report-0.json'))).sha256&&receipt.outputs?.length===1&&receipt.outputs[0].file==='output-0.png'&&receipt.outputs[0].assetId===asset.id,'controlled completed receipt/provenance changed');
+    const bytes=await readFile(resolve(path,'output-0.png')),image=pngRgbIdentity(bytes),completed=result.rows.find(x=>x.rowId===row.id);
+    requireThat(sha(bytes)===receipt.outputs[0].sha256&&image.width===request.width&&image.height===request.height&&completed.jobId===job.id&&completed.outputSha256===sha(bytes)&&canonical(completed.receipt)===canonical(await fileIdentity(resolve(path,'receipt.json'))),'controlled output/result bytes changed');
+    const record=comparison.controlledCudaComparisons.find(x=>x.rowId===row.id),reviewFile=`controlled-quality/rows/${row.id}/quality-review.json`;
+    requireThat(record?.controlledReview?.file===reviewFile&&canonical(record.controlledReview)===canonical({file:reviewFile,...await fileIdentity(resolve(state.root,reviewFile))}),'separate controlled CUDA visual review changed');
+    const review=await json(resolve(state.root,reviewFile)),verdict=compareQualityRow(row,review,record.controlledReview.sha256,receipt.outputs,{upstream:comparison.upstream,rows:comparison.controlledCudaComparisons});
+    requireThat(verdict==='PASS','controlled CUDA has a material native-only regression');verdicts.push({rowId:row.id,verdict,runId:receipt.runId,attempt:receipt.attempt,outputSha256:receipt.outputs[0].sha256});
+  }
+  return verdicts;
 }
 export function acceptedRecoveryFailure(acceptedRecovery,backend,name,postRowsGuard=false,postGuardDmd=false) {
   return acceptedRecovery&&backend==='mlx'&&(name==='advanced-mlx-sft.failure.json'||(postRowsGuard&&name==='guard-training-shift-nonfinite.failure.json')||(postGuardDmd&&name==='guard-edit-dmd.failure.json'));

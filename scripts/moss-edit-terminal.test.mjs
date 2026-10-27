@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Api, VERSION, digest, sha, makeNpy, inspectNpy, tensorData, validateAdmission, createPlan, validatePlan, primaryRows, replaceInputs, assertRequestBinding, checkJob, validateAdvancedDigests, memorySummary, samplesBracketJob, reviewVerdict, safePath, mcpArgs, isDenoiseStep, mcpResultAssets, validateExportedWorkflow, cacheComparison, reserveAttempt, resumeUiAttempt, resolveAttempt, failAttempt, assertDispatchClear, reconcileAttempt, json, save, fileIdentity, LATENT_UPSCALE_GUARDS, latentUpscaleGuard, validateSeededRecipeSelection } from './lib/moss-edit-terminal.mjs';
-import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, readCanceledJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure, retainOutputs } from './moss-edit-terminal.mjs';
+import { prepare, freeze, bind, frozen, submitReplay, submitGuard, measuredCacheComparison, waitJob, readCanceledJob, retainEditorSource, validateRetainedEditor, validateRecoveryAdjudication, acceptedRecoveryFailure, retainOutputs, validateControlledCudaProducer } from './moss-edit-terminal.mjs';
 import { BACKEND_FILES, treeIdentity, validateArtifactInventory, executionBinding, validateBinding, validateEditorSource, pngRgbIdentity, validateInferencePins } from './lib/moss-edit-terminal.mjs';
 import { mkdtemp, mkdir, writeFile, readFile, readdir, cp, unlink, open, rm, symlink, rename, truncate, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -667,4 +667,15 @@ test('transport failure and oversized response cannot create a replay HTTP recei
   fetch.mock.mockImplementation(async () => new Response('x'.repeat(64 * 1024 + 1), { status: 422 }));
   await assert.rejects(submitReplay(api, 'job_original', 'duplicate', dest), { status: 422 });
   assert.deepEqual(await readdir(dest), []);
+});
+
+// CI_IMPACT: pure provenance mutations; no API, learned compute, or native build.
+test('four CUDA supplements require their actual source-bound producer and do not replace eight primary rows',()=>{
+  const p=plan(),rows=p.rows.filter(x=>x.category==='quality'&&x.backend==='cuda'),primaryBefore=digest(p.rows),binary={byteLength:123,sha256:'b'.repeat(64)},lock={sources:{sceneworks:{head:'a'.repeat(40)},inference:{head:'c'.repeat(40)}},artifacts:{cuda:{files:{workerBinary:binary,apiBinary:binary}}}},binding={backend:'cuda',project:'fixture'},producer={runId:'123456',attempt:'1',toolingSha:'d'.repeat(40)};
+  const measurement={...producer,originalLockSha256:digest(lock),originalBindingSha256:digest(binding),sources:lock.sources,binary,rawNoise:{sha256:'92e4addfaab4f8f5738c6a29ab2da1a56e2b204726b83250721edfec09608d82',byteLength:786432}},result={execution:'COMPLETE',renders:4,rows:rows.map(x=>({rowId:x.id}))},comparisons=rows.map(x=>({rowId:x.id}));
+  assert.equal(validateControlledCudaProducer(measurement,result,lock,binding,producer,rows,comparisons),true);
+  for(const mutate of [x=>{x.runId='123457';},x=>{x.attempt='2';},x=>{x.toolingSha='e'.repeat(40);},x=>{x.originalLockSha256='0'.repeat(64);},x=>{x.originalBindingSha256='0'.repeat(64);},x=>{x.sources.inference.head='e'.repeat(40);},x=>{x.binary.sha256='0'.repeat(64);},x=>{x.rawNoise.sha256='0'.repeat(64);},x=>{x.rawNoise.byteLength--; }]){const bad=structuredClone(measurement);mutate(bad);assert.throws(()=>validateControlledCudaProducer(bad,result,lock,binding,producer,rows,comparisons));}
+  for(const mutate of [x=>{x.execution='FAILED';},x=>{x.renders=3;},x=>{x.rows.pop();},x=>{x.rows[1]=x.rows[0];}]){const bad=structuredClone(result);mutate(bad);assert.throws(()=>validateControlledCudaProducer(measurement,bad,lock,binding,producer,rows,comparisons));}
+  assert.throws(()=>validateControlledCudaProducer(measurement,result,lock,binding,{},rows,comparisons));assert.throws(()=>validateControlledCudaProducer(measurement,result,lock,binding,producer,rows,comparisons.slice(1)));
+  assert.equal(digest(p.rows),primaryBefore);assert.equal(p.rows.filter(x=>x.category==='quality').length,8);assert.equal(p.rows.length,50);assert.equal(p.requiredGuardCases.length*2,58);assert.equal(p.requiredExternal.length,10);
 });
