@@ -6203,10 +6203,18 @@ async fn run_linked_checkpoint_import_job(
     };
     let root_id = root_id.to_owned();
     let relative_path = relative_path.to_owned();
-    // Full-content compile streams every byte through SHA-256, so it runs off the async runtime.
-    let compiled = match tokio::task::spawn_blocking(move || {
-        store.compile_linked_with_context(&root_id, &relative_path, context)
-    })
+    // Full-content compile streams every byte through SHA-256, so it runs off the async runtime and
+    // under the job's heartbeat: a multi-GB source outlasts the 90s stale-worker sweep.
+    let compile = tokio::task::spawn_blocking(move || {
+        Ok::<_, WorkerError>(store.compile_linked_with_context(&root_id, &relative_path, context))
+    });
+    let compiled = match heartbeat_while_blocking(
+        api,
+        settings,
+        &job.id,
+        "linked checkpoint compile",
+        compile,
+    )
     .await
     {
         Ok(Ok(compiled)) => compiled,
@@ -7153,22 +7161,32 @@ pub(crate) async fn run_model_import_job(
             .await;
         }
     };
-    let install = match ingest.finalize_with_context(
-        &primary_relative,
-        declared_sha256.as_deref(),
-        context,
-    ) {
-        Ok(install) => install,
-        Err(error) => {
-            return fail_job(
-                api,
-                &job.id,
-                "Model import failed.",
-                Some(error.to_string()),
-            )
-            .await
-        }
-    };
+    // Finalize compiles the plan and streams every staged byte through SHA-256. Run inline it held
+    // a runtime thread for minutes with no heartbeat (a ~30 GB MiniMax-H3 checkpoint), so the
+    // stale-worker sweep marked the healthy import interrupted; any spawned heartbeat task queued on
+    // that thread was stranded with it. Off the async runtime, under the job's heartbeat.
+    let finalize = tokio::task::spawn_blocking(move || {
+        Ok::<_, WorkerError>(ingest.finalize_with_context(
+            &primary_relative,
+            declared_sha256.as_deref(),
+            context,
+        ))
+    });
+    let install =
+        match heartbeat_while_blocking(api, settings, &job.id, "managed import finalize", finalize)
+            .await?
+        {
+            Ok(install) => install,
+            Err(error) => {
+                return fail_job(
+                    api,
+                    &job.id,
+                    "Model import failed.",
+                    Some(error.to_string()),
+                )
+                .await
+            }
+        };
     // The commit landed where the job was told to install. `managed_install_id_for_target` already
     // proved the two agree; re-checked here against the normalized form because everything below
     // records `target_dir` as the entry's installed path.
