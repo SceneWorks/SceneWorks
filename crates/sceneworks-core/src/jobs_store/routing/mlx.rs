@@ -1299,6 +1299,68 @@ pub(crate) fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moss_edit_routes_one_to_four_ordered_reference_slots() {
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for references in [
+                json!(["ref"]),
+                json!(["ref", "other"]),
+                json!(["ref", "other", "ref"]),
+                json!(["other", "ref", "third", "ref"]),
+            ] {
+                let payload = json!({
+                    "model":model,"mode":"edit_image","prompt":"blue cup",
+                    "referenceAssetIds":references,"sourceAssetId":references[0],
+                    "referenceAssetId":references[0],
+                    "modelManifestEntry":{"limits":{"minDimension":16,"maxDimension":4096}},
+                    "advanced":{"mossImageEdit":{"use_kv_cache":false}}
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                assert_eq!(
+                    json!(crate::moss_image::edit_reference_ids(&payload).unwrap()),
+                    references
+                );
+                assert!(
+                    super::image_request_mlx_eligible(model, &payload),
+                    "{payload:?}"
+                );
+                for patch in [
+                    json!({"referenceAssetIds":[],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":null,"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other","ref","other","ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other",null],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other",3],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other","ref",""],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other"," ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":"ref"}),
+                    json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"],"referenceAssetId":null}),
+                    json!({"referenceAssetId":"conflict","referenceAssetIds":["ref"],"sourceAssetId":null}),
+                    json!({"maskAssetId":"mask"}),
+                    json!({"loras":[{"id":"custom"}]}),
+                    json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+                    json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
+                    json!({"advanced":{"mossImageEdit":{"unknown":true}}}),
+                    json!({"advanced":{"controlImage":"pose"}}),
+                    json!({"mode":"text_to_image","advanced":{}}),
+                ] {
+                    let mut invalid = payload.clone();
+                    invalid.extend(patch.as_object().unwrap().clone());
+                    assert!(
+                        !super::image_request_mlx_eligible(model, &invalid),
+                        "{invalid:?}"
+                    );
+                }
+            }
+            let ordinary = json!({"model":model,"mode":"text_to_image","prompt":"blue cup"})
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(super::image_request_mlx_eligible(model, &ordinary));
+        }
+    }
+
     use serde_json::{json, Map, Value};
 
     use super::{image_request_mlx_eligible, MLX_ROUTED_MODELS};

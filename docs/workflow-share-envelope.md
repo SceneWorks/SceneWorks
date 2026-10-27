@@ -386,6 +386,11 @@ smuggled under a scalar key.
 | Key | Shape | What it is |
 | --- | --- | --- |
 | `mossImage` | `MossImageOptions` | Requested MOSS mode, precision, context and author controls, validated through the native contract. |
+| `mossImageAdvanced` | `MossImageAdvanced` | Edit-only exact tensor SHA256/dtype/shape requirements, negative batch and images/latents output. Installation-local asset IDs are removed; replay reacquires exact artifacts. |
+| `promptBatch` | `PromptBatch` | Bounded full native text batch retained with advanced edit row bindings. |
+| `mossImageSampleIndex` | `SampleIndex` | Server-owned original output ordinal; display provenance, scrubbed before execution. |
+| `mossImageEdit` | `MossImageEditOptions` | Authored edit reference maximum edge and cache policy; emitted and restored by Studio. |
+| `mossImageEditExecutionReport` | `MossImageEditReport` | Actual native edit receipt with the frozen adapter/config identities, ordered reference dimensions and pixel/latent hashes, effective controls and cache policy. Local adapter paths are replaced with relative filenames. Imported receipts are display metadata; replay discards them before execution. |
 | `mossImageExecutionReport` | `MossImageReport` | Actual completed native MOSS execution receipt, including frozen asset hashes and adapter application. Local adapter location is replaced with its frozen relative filename. Imported receipts are display metadata; replay discards them and computes a new receipt. |
 | `resolution` | `Scalar` | The output geometry label the studio control was set to. |
 | `structuredPrompt` | `StructuredPrompt` | A structured-caption recipe, reduced to its scalar fields. The free-form `caption` object is dropped. |
@@ -772,6 +777,7 @@ If the lint says a *builder* is unaccounted for, decide whether its lane embeds.
 | File | Function | Lane |
 | --- | --- | --- |
 | `apps/web/src/imageJobAdvanced.js` | `buildImageJobAdvanced` | The Image Studio's ~30-knob builder. |
+| `apps/web/src/mossImage.js` | `buildMossEditJobAdvanced` | The shared MOSS edit controls, prompt batches and advanced tensor inputs used by Studio and Editor. |
 | `apps/web/src/regenerateImage.js` | `imageRecipeRequest` | Background image regeneration when the original job is unavailable. Replays persisted adapter inputs, removes output receipts, and feeds the image generation and inline-upscale embedding lanes without authoring new advanced controls. |
 | `apps/web/src/imageJobs.js` | `buildEditJobBody` | The Image Editor's prompt-edit body. |
 | `apps/web/src/imageJobs.js` | `buildDetailJobBody` | The standalone Detail pass. |
@@ -867,6 +873,7 @@ deferred.
 | File | Function | What it does about the chunk |
 | --- | --- | --- |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `write_image_asset` | Embeds — the one funnel every generated image is written through, for both `/image/jobs` and `/image/interleave/jobs`. |
+| `crates/sceneworks-worker/src/image_jobs/moss.rs` | `write_moss_tensor_companion` | Embeds — writes the bounded portable workflow companion for each MOSS sampled-latent output. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `upscaled_workflow_share` | Embeds — the inline-upscale sub-step's envelope: the generation payload with the applied pass overlaid. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `write_upscaled_asset` | Embeds — the inline-upscaled variant's own PNG. |
 | `crates/sceneworks-worker/src/image_jobs.rs` | `detail_workflow_share` | Embeds — the standalone detail pass's envelope. |
@@ -1116,3 +1123,11 @@ What is **not** machine-checked is the prose in the right-hand "what it is" colu
 sections. Those are read against the source, not derived from it. The version-behaviour table, the
 trust-boundary list and the setting's semantics are prose; the modules they describe are
 `workflow_share.rs`, `workflow_png.rs`, `project_store.rs` and `app_paths.rs`.
+
+### Native edit tensor artifacts
+
+Advanced MOSS edit inputs use project-owned `tensor` assets imported through the existing multipart assets route. Files are inert NumPy NPY versions 1–3, C-order little-endian FP32 or binary U8, rank 2–4; object/pickle, endian conversion, Fortran layout, nonfinite values, invalid headers/shapes, overflow, trailing bytes and files above 512 MiB are refused before materialization. Each input uses `{assetId, sha256}`; the server measures metadata and validates project ownership and exact bytes at enqueue and dispatch. The aggregate input budget is 1280 MiB plus bounded mask/header allowance; host admission additionally accounts for decode staging.
+
+`positive.values` and optional `positive.mask` carry [B,S,4096] FP32 and binary [B,S]. Negative embeddings follow the same shapes and match B; `negativePrompts` is mutually exclusive and has one string per row. Positive tensors replace both prompt carriers. Nonempty broadcast negative text cannot accompany supplied negative inputs; the native negative-batch request carries no broadcast value. `noise` is exact FP32 [B×count,128,H/16,W/16]; it yields nullable seed `null`, never a generated replacement seed. No separate input-latents or strength/dtype/quantization control is exposed. Context and positive training shift remain native scalar controls, distinct from schedule shift.
+
+Latent outputs are real FP32 NPY artifacts, one [1,128,H/16,W/16] file per ordered sample, without a preview. The full authored input batch/count remains in every recipe; the original sample ordinal and native batch shape are provenance. A bounded `.sceneworks-workflow.json` companion uses this same WorkflowShare envelope and inspect/resolution reducer. Asset metadata/API/MCP links bind the NPY and companion; it never appends a trailer to NPY. Same-library replay uses authorized original tensors. Portable replay retains identities and shape requirements, requires exact reacquisition, and never treats stale execution receipts as inputs.

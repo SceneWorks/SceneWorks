@@ -760,10 +760,13 @@ impl Default for TrainingCaptionOptions {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImageJobRequest {
     pub(crate) project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) moss_image_advanced: Option<sceneworks_core::moss_image_advanced::EditAdvanced>,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
     #[serde(default = "default_image_mode")]
     pub(crate) mode: String,
+    #[serde(default)]
     pub(crate) prompt: String,
     /// A NATIVE prompt batch (sc-25681): prompts the model renders together in one pass, only for a
     /// model declaring `image.maxPromptBatchImages` (Iris-3B). `prompt` must equal `prompts[0]`.

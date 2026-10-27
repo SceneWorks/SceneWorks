@@ -570,6 +570,12 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         CacheRole::Parameterized,
     ),
     ("rust-api", "lib.rs", "{subdir}", CacheRole::Parameterized),
+    (
+        "rust-api",
+        "startup.rs",
+        "{subdir}",
+        CacheRole::Parameterized,
+    ),
     // ---- crates/sceneworks-core/src -----------------------------------------------------------
     // Constructs `<data_dir>/cache` itself; no destination inside it.
     ("core", "app_paths.rs", "<cache-root>", CacheRole::CacheRoot),
@@ -616,20 +622,18 @@ const WEIGHTS_CACHE_DESTINATIONS_REMAINING: usize = 25;
 /// string `"cache"`.
 ///
 /// [`parameterized_cache_root_helpers_are_registered`] keeps this list honest: it rediscovers the
-/// shape structurally (a function whose body joins `"cache"` with one of its own parameters) and
-/// fails if the discovered set differs from this one. A new parameterized helper cannot be added
-/// without registering it.
-///
-/// **Known limitation, stated loudly:** a caller that forwards its *own* parameter through one of
-/// these helpers records the opaque marker `{subdir}` rather than a destination — `rust-api`'s
-/// `sweep_stale_uploads` chain does exactly that. Those are sweep/confinement paths, not write
-/// targets for weights, but the scanner cannot prove that; it can only make the opacity visible in
-/// the allow-list. A second-order forwarder that *did* stage weights would land as a `{…}` entry,
-/// which is still a new entry, and still red.
+/// shape structurally (a function whose body joins `"cache"` with one of its own parameters), then
+/// follows helpers that forward their own parameter to it until no more are found. Every such
+/// forwarder must also be registered, so its callers contribute concrete destinations even when
+/// neither the wrapper nor its callers spell `"cache"`. The forwarding call itself still contributes
+/// its opaque `{subdir}` marker to the allow-list.
 const PARAMETERIZED_CACHE_HELPERS: &[(&str, usize)] = &[
     ("normalize_app_managed_cache_path", 2),
     ("resolve_import_source_path", 3),
     ("write_upload_field_to_dir", 2),
+    ("write_upload_field_to_dir_bounded", 2),
+    ("sweep_stale_uploads", 1),
+    ("sweep_stale_uploads_cancellable", 1),
     ("sweep_stale_uploads_retaining", 1),
 ];
 
@@ -2287,7 +2291,7 @@ fn cache_destinations(code: &str, constants: &BTreeMap<String, String>) -> BTree
 /// Functions that build a cache root from one of their own parameters, as `(name, parameter index)`.
 ///
 /// Rediscovered structurally rather than listed, so [`PARAMETERIZED_CACHE_HELPERS`] cannot silently
-/// fall behind a new helper.
+/// fall behind a new helper or a wrapper that forwards its subdirectory parameter.
 fn discover_parameterized_helpers(
     files: &[SourceFile],
     constants: &BTreeMap<String, String>,
@@ -2307,6 +2311,31 @@ fn discover_parameterized_helpers(
                     out.insert(item.name.clone(), index);
                 }
             }
+        }
+    }
+    // A bounded implementation may move the actual join out of an existing helper. Keep both
+    // names visible: callers of the original wrapper still select real cache destinations.
+    let items: Vec<FnItem> = files.iter().flat_map(|file| fn_items(&file.code)).collect();
+    loop {
+        let known = out.clone();
+        for item in &items {
+            if out.contains_key(&item.name) {
+                continue;
+            }
+            for (helper, index) in &known {
+                for args in call_arguments(&item.body, helper) {
+                    let Some(argument) = args.get(*index) else {
+                        continue;
+                    };
+                    let argument = argument.trim().trim_start_matches('&').trim();
+                    if let Some(index) = item.params.iter().position(|p| p == argument) {
+                        out.insert(item.name.clone(), index);
+                    }
+                }
+            }
+        }
+        if out.len() == known.len() {
+            break;
         }
     }
     out
@@ -3231,6 +3260,57 @@ fn scanner_detects_a_new_cache_weight_destination() {
         "a new helper that joins `cache` with its own parameter must be discovered, at the right \
          parameter index"
     );
+}
+
+/// Moving a cache join into a bounded implementation must preserve callers of its old wrapper.
+#[test]
+fn scanner_tracks_parameterized_cache_forwarders() {
+    let constants = BTreeMap::new();
+    // Reverse dependency order forces more than one pass; each wrapper moves the subdir index.
+    let files = vec![
+        SourceFile {
+            rel: "outer.rs".to_owned(),
+            code: "fn outer(subdir: &str, d: &Path) -> R { middle(d, 0, subdir) }".to_owned(),
+        },
+        SourceFile {
+            rel: "middle.rs".to_owned(),
+            code: "fn middle(d: &Path, limit: usize, subdir: &str) -> R { \
+                   bounded(d, &subdir, limit) }\n\
+                   fn fixed(d: &Path) -> R { bounded(d, \"uploads\", 4) }\n\
+                   fn unrelated(subdir: &str) -> R { other(subdir) }"
+                .to_owned(),
+        },
+        SourceFile {
+            rel: "bounded.rs".to_owned(),
+            code: "fn bounded(d: &Path, subdir: &str, limit: usize) -> R { \
+                   d.join(\"cache\").join(subdir) }"
+                .to_owned(),
+        },
+    ];
+    let discovered = discover_parameterized_helpers(&files, &constants);
+    assert_eq!(
+        discovered,
+        BTreeMap::from([
+            ("bounded".to_owned(), 1),
+            ("middle".to_owned(), 2),
+            ("outer".to_owned(), 0),
+        ]),
+        "discover each forwarded parameter position, excluding fixed and unrelated calls"
+    );
+
+    // These live names must BOTH be watched. Renaming only the registry's old entry loses the
+    // existing keypoint/pose upload callers, while omitting the bounded entry loses direct calls.
+    for helper in [
+        "write_upload_field_to_dir",
+        "write_upload_field_to_dir_bounded",
+    ] {
+        let caller = format!("{helper}(state, field, \"brand-new-weights\", limit).await");
+        assert!(cache_destinations(&caller, &constants).is_empty());
+        assert!(
+            parameterized_call_destinations(&caller, &constants).contains("brand-new-weights"),
+            "both wrapper and bounded helper callers must contribute their destination: {helper}"
+        );
+    }
 }
 
 /// The three cheapest ways to spell a `<data_dir>/cache` root that a literal scan cannot see, and the

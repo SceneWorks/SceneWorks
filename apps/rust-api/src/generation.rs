@@ -132,6 +132,21 @@ pub(crate) async fn create_image_job(
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
+    if let Some(advanced) = job_payload.remove("mossImageAdvanced") {
+        let map = job_payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+        if map
+            .insert(sceneworks_core::moss_image_advanced::KEY.into(), advanced)
+            .is_some()
+        {
+            return Err(ApiError::bad_request(
+                "supply mossImageAdvanced once, not at both request boundaries",
+            ));
+        }
+    }
     job_payload.remove("requestedGpu");
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
@@ -775,7 +790,7 @@ async fn validate_vector_source_asset(
 /// Deliberately serial rather than a join: the sets are at most ten entries, the store call is a
 /// blocking task, and the first bad entry is the one the caller has to fix — reporting it in
 /// request order is more useful than reporting whichever read finished first.
-async fn validate_ordered_image_references(
+pub(crate) async fn validate_ordered_image_references(
     state: AppState,
     project_id: String,
     asset_ids: Vec<String>,

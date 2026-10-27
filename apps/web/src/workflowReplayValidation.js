@@ -31,6 +31,26 @@ import { issue } from "./validation/issues.js";
 import { macModelBlock, macModelFeatureBlock } from "./macGating.js";
 import { imageModelServesMode, supportedControlModes } from "./modelEligibility.js";
 import { workflowInputSlots } from "./workflowShare.js";
+import { isMossEdit } from "./mossImage.js";
+import { mossTensorMatches } from "./mossImageAdvanced.js";
+
+export function mossWorkflowReplayIssue({ share, report, models = [], assets = [], inputPicks = {}, macCapabilities }) {
+  if (!isMossEdit(share?.model, share?.mode)) return "";
+  const model = models.find((entry) => entry.id === (report?.model?.catalogId ?? share.model));
+  if (!model || !imageModelServesMode(model, "edit_image", macCapabilities)) return "The selected runtime does not offer MOSS editing for this model. Refresh Models or choose a supported runtime.";
+  if (!report?.components?.some((component) => component.purpose === "moss_image_edit" && component.state === "resolved")) return "Install or repair the exact pinned MOSS edit adapter before replay.";
+  const slots = workflowInputSlots(report).filter((slot) => slot.kind === "reference");
+  if (!slots.length || slots.length > 4 || workflowInputSlots(report).some((slot) => slot.kind !== "reference")) return "This MOSS workflow has invalid reference requirements. Export it again from a supported edit.";
+  for (const slot of slots) {
+    const id = inputPicks[slot.key];
+    if (!id || !assets.some((asset) => asset.id === id && asset.type === "image")) return `Reacquire ${slot.label.toLowerCase()} from this project before replay; its exact slot is missing.`;
+  }
+  for (const tensor of report?.tensors ?? []) {
+    const id = inputPicks[`tensor:${tensor.role}`];
+    if (!assets.some((asset) => asset.id === id && mossTensorMatches(asset, tensor))) return `Reacquire the exact ${tensor.role} tensor (SHA256 ${tensor.sha256}) before replay.`;
+  }
+  return "";
+}
 
 export function workflowHasPoseSelection(share) {
   return Array.isArray(share?.advanced?.poses) && share.advanced.poses.length > 0;
@@ -150,6 +170,7 @@ export function workflowReplayValidation({
   // The live-catalog/capability result for a pose-bearing workflow. Unlike the server report this
   // is recomputed in the browser whenever the studio catalog changes.
   poseReplayIssue = "",
+  mossReplayIssue = "",
   // `{ [slotKey]: assetId }` from the input-image pickers.
   inputPicks = {},
 } = {}) {
@@ -168,6 +189,10 @@ export function workflowReplayValidation({
   }
 
   const model = report.model ?? null;
+  if (mossReplayIssue) issues.push(issue.error("mossEdit", mossReplayIssue));
+  for (const component of report.components ?? []) {
+    if (component.state !== "resolved") issues.push(issue.error("component", component.detail));
+  }
   let poseIssueSurfacedAsModel = false;
   if (model && model.state !== "resolved" && !substituteModelId) {
     // Two different sentences, because the user's next move is different. An installable model has

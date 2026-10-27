@@ -1,11 +1,11 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:7e4582db20147b5bcfa291f525ccccfa359e703e2efbec87a0ac3e9ed76f1c8e",
+    "sceneWorksRevision": "source-tree:32116b98fb5da4db0a610cb4eab43dbfb5434736e6b9856e0f30a0b8327e28a6",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "7cd0d6038a0de62daaa1e3bdf45905aa77a482178e6d34924597ac538ebae758"
+        "sha256": "1a23dc6a4fc5073c787b40c1bf0e26e7d077c1494ae2718c799109835649af36"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
@@ -13,11 +13,11 @@
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "fe00a4f4ee6bc4c99a5c749f8403601ff83140acc4421c52f33e664cf9038d8c"
+        "sha256": "baa89e8c0deeb8c5af50fb4adf0903d049bb81b669cab075e2784960847d5e19"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "404860b83a23e97e6c4c5a6baf3d33b261cb8e07db40bcdada54470a9e486f35"
+        "sha256": "09a3aae6ab27daf16f91ebe3f9d9ae97b6ba3f559f76519cfffb8584cc0c7f61"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "0bc479df3a3bcd53bbc393578cb1982c40896e9f743c3b9920d9f65ccc2dd0e7"
+        "sha256": "6aa3393b2543e01eb85476c41d3224382a4b6be5836f885f1a0c36ef993dedcb"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "ad5e6c6fe5668d3a01bc7c9833f138d9f8f64d8a3a4f3a7227fafeddebdfb4a3"
+        "sha256": "a40b16cd8850479e7bcbf38a6fdfd0501029c568e1b8621b0065cf68d34e8612"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",

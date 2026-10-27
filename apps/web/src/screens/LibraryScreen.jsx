@@ -193,6 +193,7 @@ export function LibraryScreen() {
             <option value="image">Images</option>
             <option value="vector">Vectors</option>
             <option value="depth">Depth maps</option>
+            <option value="tensor">Tensor artifacts</option>
             <option value="video">Videos</option>
             <option value="audio">Audio</option>
             <option value="upload">Uploads</option>

@@ -48,7 +48,7 @@ pub(crate) struct ModelCatalogCache {
 #[derive(Default)]
 struct ModelCatalogCacheState {
     generation: u64,
-    snapshot: Option<(u64, Arc<Vec<Value>>)>,
+    snapshot: Option<(u64, &'static str, Arc<Vec<Value>>)>,
     /// Last observed resolved-cache publish key. `None` until the first observation, which is why
     /// the first reading never counts as a change — an API that has not looked yet has nothing to
     /// have gone stale against.
@@ -1507,7 +1507,7 @@ fn apply_conditional_component_state(object: &mut JsonObject, data_dir: &FsPath)
         let presence = if row
             .get("componentId")
             .and_then(Value::as_str)
-            .is_some_and(|id| id.starts_with("moss-dmd-"))
+            .is_some_and(|id| id.starts_with("moss-dmd-") || id == "moss-image-edit")
         {
             pinned_component_presence(data_dir, row)
         } else {
@@ -4975,14 +4975,17 @@ mod runtime_text_encoder_option_tests {
 }
 
 pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    let backend = crate::generation::enqueue_backend(state);
     // Before trusting the cached snapshot, check whether the resolved cache's published set moved
     // under us — the worker publishes promotions in another process, so this is the only signal
     // the API gets (sc-19712 F-4). It is a handful of stats, cheap enough to pay per read.
     crate::model_sources::note_local_tier_freshness(state);
     {
         let cache_state = state.model_catalog_cache.state.lock();
-        if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
-            if *snapshot_generation == cache_state.generation {
+        if let Some((snapshot_generation, snapshot_backend, snapshot)) =
+            cache_state.snapshot.as_ref()
+        {
+            if *snapshot_generation == cache_state.generation && *snapshot_backend == backend {
                 return Ok(snapshot.clone());
             }
         }
@@ -4996,15 +4999,21 @@ pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<V
             // Another builder may have populated the cache while this caller
             // waited for the async serializer.
             let cache_state = state.model_catalog_cache.state.lock();
-            if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
-                if *snapshot_generation == cache_state.generation {
+            if let Some((snapshot_generation, snapshot_backend, snapshot)) =
+                cache_state.snapshot.as_ref()
+            {
+                if *snapshot_generation == cache_state.generation && *snapshot_backend == backend {
                     return Ok(snapshot.clone());
                 }
             }
             cache_state.generation
         };
 
-        let snapshot = Arc::new(build_model_catalog_snapshot(state).await?);
+        let mut models = build_model_catalog_snapshot(state).await?;
+        for model in &mut models {
+            project_moss_edit_surface(model, backend);
+        }
+        let snapshot = Arc::new(models);
 
         #[cfg(test)]
         state
@@ -5014,13 +5023,34 @@ pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<V
 
         let mut cache_state = state.model_catalog_cache.state.lock();
         if cache_state.generation == generation {
-            cache_state.snapshot = Some((generation, snapshot.clone()));
+            cache_state.snapshot = Some((generation, backend, snapshot.clone()));
             return Ok(snapshot);
         }
         drop(cache_state);
         // A model writer completed while the filesystem sweep was running.
         // Keep the async serializer and rebuild at the new generation. The
         // stale result was never published or returned.
+    }
+}
+
+fn project_moss_edit_surface(model: &mut Value, backend: &str) {
+    let Some(id) = model.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    if !sceneworks_core::moss_image::is_moss(id) {
+        return;
+    }
+    let available = sceneworks_core::moss_image::edit_backend_eligible(id, backend);
+    let Some(object) = model.as_object_mut() else {
+        return;
+    };
+    let capabilities = object.entry("capabilities").or_insert_with(|| json!([]));
+    let Some(capabilities) = capabilities.as_array_mut() else {
+        return;
+    };
+    capabilities.retain(|mode| mode != "edit_image" && mode != "image_edit");
+    if available {
+        capabilities.push(json!("edit_image"));
     }
 }
 
@@ -15015,6 +15045,32 @@ mod variant_delete_tests {
     use crate::tests::support::isolate_hf_cache;
     use std::os::unix::fs::symlink;
 
+    fn fixture_repo_cache_path(data_dir: &FsPath, repo: &str) -> PathBuf {
+        let path = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        assert!(
+            path.starts_with(data_dir),
+            "fixture cache must be inside its temporary data directory before seeding or deletion: {}",
+            path.display()
+        );
+        path
+    }
+
+    #[test]
+    fn external_cache_is_refused_before_fixture_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let external_cache = tmp.path().join("outside-fixture");
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.clone(),
+            external_cache.clone(),
+        );
+        assert!(
+            std::panic::catch_unwind(|| { fixture_repo_cache_path(&data_dir, "Org/fixture") })
+                .is_err()
+        );
+        assert!(!external_cache.exists(), "refusal must precede any writes");
+    }
+
     /// Write (once) a `blobs/<etag>` file of `bytes.len()` bytes and return its path.
     fn blob(repo: &FsPath, etag: &str, bytes: &[u8]) -> PathBuf {
         let blobs = repo.join("blobs");
@@ -15523,8 +15579,12 @@ mod variant_delete_tests {
         let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_owned(),
+            data_dir.join("cache/huggingface/hub"),
+        );
         let repo_name = "SceneWorks/minimax-h3-mlx";
-        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        let repo = fixture_repo_cache_path(data_dir, repo_name);
         seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", 18780);
         seed_minimax_tier(&repo, "bf16", "bf16dit", "bf16refdit", 66280);
 
@@ -15615,7 +15675,11 @@ mod variant_delete_tests {
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();
-            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+                data_dir.to_owned(),
+                data_dir.join("cache/huggingface/hub"),
+            );
+            let repo = fixture_repo_cache_path(data_dir, "speridlabs/iris-3b");
             for (index, rel) in [
                 "config.yaml",
                 "model.safetensors",
@@ -15690,7 +15754,11 @@ mod variant_delete_tests {
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();
-            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+                data_dir.to_owned(),
+                data_dir.join("cache/huggingface/hub"),
+            );
+            let repo = fixture_repo_cache_path(data_dir, "speridlabs/iris-3b");
             for (index, rel) in generation
                 .iter()
                 .chain(depth)
@@ -15704,8 +15772,7 @@ mod variant_delete_tests {
                     seed(&repo, rel, &format!("blob{index}"), 10 + index);
                 }
             }
-            let encoder =
-                huggingface_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct").unwrap();
+            let encoder = fixture_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct");
             seed(&encoder, "config.json", "encoder-config", 5);
             let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
             remove_whole_model_artifacts(
@@ -15756,8 +15823,11 @@ mod variant_delete_tests {
         let entry = |id: &str| catalog.iter().find(|m| m["id"] == id).unwrap().clone();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let repo =
-            huggingface_repo_cache_path(data_dir, "ostris/zimage_turbo_training_adapter").unwrap();
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_owned(),
+            data_dir.join("cache/huggingface/hub"),
+        );
+        let repo = fixture_repo_cache_path(data_dir, "ostris/zimage_turbo_training_adapter");
         seed(
             &repo,
             "zimage_turbo_training_adapter_v1.safetensors",
@@ -15805,8 +15875,12 @@ mod variant_delete_tests {
         let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_owned(),
+            data_dir.join("cache/huggingface/hub"),
+        );
         let repo_name = "Org/solo-model";
-        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        let repo = fixture_repo_cache_path(data_dir, repo_name);
         seed(&repo, "q4/transformer/model.safetensors", "q4dit", 100);
         // A file NO declared scope names — only a blanket removal reaches it.
         seed(&repo, "README.md", "readme", 10);
@@ -15848,8 +15922,12 @@ mod variant_delete_tests {
         let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_owned(),
+            data_dir.join("cache/huggingface/hub"),
+        );
         let repo_name = "SceneWorks/whole-repo-pair";
-        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        let repo = fixture_repo_cache_path(data_dir, repo_name);
         seed(&repo, "model.safetensors", "dit", 100);
 
         let entry = |id: &str| {

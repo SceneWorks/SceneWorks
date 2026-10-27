@@ -580,6 +580,8 @@ string_enum! {
         // rewritten); `preview` points at a separately stored derived PNG; the sidecar's `depth`
         // block carries the value convention, preprocessing and model/config identity.
         Depth => "depth",
+        // Inert, finite FP32 or binary U8 NumPy artifact; never an image preview.
+        Tensor => "tensor",
     }
 }
 
@@ -1569,7 +1571,7 @@ pub struct Recipe {
     pub adapter: RecipeAdapter,
     pub prompt: String,
     pub negative_prompt: String,
-    pub seed: i64,
+    pub seed: Option<i64>,
     pub loras: Vec<JsonObject>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub style_preset: Option<String>,
