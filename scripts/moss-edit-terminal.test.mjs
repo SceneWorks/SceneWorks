@@ -291,6 +291,25 @@ test('portable source export keeps sanitized display provenance while the new ex
   assert.throws(()=>validateExportedWorkflow(contract.exportedWorkflow,contract.originalReport,1));
   assertRequestBinding({mode:'edit_image'},{mode:'edit_image',advanced:{mossImage:{acceleration:'off'}}});
 });
+test('retained H47 Euler sigma serialization compares exact F32 only and preserves every other provenance field', () => {
+  // Actual advanced-reentry-cuda job_e32983c669971ffd54d0187439785fcb, run40415337753/1.
+  const report=structuredClone(contract.originalReport),workflow=structuredClone(contract.exportedWorkflow);
+  report.base.sampling={kind:'euler',sigmas:[1,0.90976083278656,0.7173325419425964,0.023381737992167473,0]};report.base.resolved={guidance:4};
+  const actual=workflow.advanced.mossImageEditExecutionReport;actual.base.sampling={kind:'euler',sigmas:[1,0.9097608327865601,0.7173325419425964,0.023381737992167473,0]};actual.base.resolved={guidance:4};
+  workflow.advanced.mossImageExecutionReport=structuredClone(actual.base);
+  assert.notEqual(report.base.sampling.sigmas[1],actual.base.sampling.sigmas[1]);assert.equal(Math.fround(report.base.sampling.sigmas[1]),Math.fround(actual.base.sampling.sigmas[1]));
+  const before=JSON.stringify({report,workflow});validateExportedWorkflow(workflow,report,0);assert.equal(JSON.stringify({report,workflow}),before);
+  const next=Buffer.alloc(4);next.writeFloatLE(Math.fround(actual.base.sampling.sigmas[1]));next.writeUInt32LE(next.readUInt32LE()+1);const nextF32=next.readFloatLE();
+  const reject=change=>{const copy=structuredClone(workflow);change(copy.advanced);assert.throws(()=>validateExportedWorkflow(copy,report,0));};
+  reject(a=>{a.mossImageEditExecutionReport.base.sampling.sigmas[1]=nextF32;});reject(a=>{a.mossImageExecutionReport.sampling.sigmas[1]=nextF32;});
+  reject(a=>{a.mossImageEditExecutionReport.base.resolved.guidance=4.000000029802322;});assert.equal(Math.fround(4.000000029802322),Math.fround(4));
+  reject(a=>{a.mossImageEditExecutionReport.extra=true;});reject(a=>{a.mossImageEditExecutionReport.base.sampling.extra=true;});
+  reject(a=>{delete a.mossImageEditExecutionReport.base.sampling.kind;});reject(a=>{a.mossImageEditExecutionReport.base.sampling.sigmas.pop();});reject(a=>{a.mossImageEditExecutionReport.base.sampling.sigmas.reverse();});
+  reject(a=>{a.mossImageEditExecutionReport.adapter_revision='0'.repeat(40);});reject(a=>{a.mossImageEditExecutionReport.base.samples[0].noise_sha256='0'.repeat(64);});reject(a=>{a.mossImageSampleIndex=1;});
+  for(const bad of [NaN,Infinity,-Infinity,1e100,'0.9097608327865601',null]){reject(a=>{a.mossImageEditExecutionReport.base.sampling.sigmas[1]=bad;});const invalid=structuredClone(report);invalid.base.sampling.sigmas[1]=bad;assert.throws(()=>validateExportedWorkflow(workflow,invalid,0));}
+  reject(a=>{a.mossImageEditExecutionReport.base.sampling.sigmas={0:1};});
+  const dmdReport=structuredClone(report),dmdWorkflow=structuredClone(workflow);dmdReport.base.sampling.kind='dmd';dmdWorkflow.advanced.mossImageEditExecutionReport.base.sampling.kind='dmd';assert.throws(()=>validateExportedWorkflow(dmdWorkflow,dmdReport,0));
+});
 test('actual queue GPU-id/candle label is separate from the admitted native CUDA report device', () => {
   const row={backend:'cuda',expected:'completed',outputCount:1},request={projectId:'p'},job={id:'j',projectId:'p',payload:request,status:'completed',workerId:'native-GPU1',startedAt:'start',completedAt:'end',result:{assets:[{id:'a'}]}};
   checkJob(row,request,{...job,backend:'1'},'1');checkJob(row,request,{...job,backend:'candle'},'1');

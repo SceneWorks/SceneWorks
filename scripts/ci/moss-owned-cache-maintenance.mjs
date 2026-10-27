@@ -10,6 +10,82 @@ const check = (value, message) => { if (!value) throw Error(message); };
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const normal = value => path.normalize(value).toLowerCase();
 const native = '857f7a1996e3678a0773c3509ac0087522c19ce6';
+
+// One archived failed execution, not a new maintenance mode. Product and Actions heads differ.
+export const H47_OWNER = Object.freeze({
+  run:'40415337753',attempt:1,candidate:'sc-26752-final-r19',
+  source:'3aa58facf61fb9a2e3b6e139ce4a0a331c9f7685',actionsSource:'d41f376bdd1dfe7c36f4cfbb5fb9c402b11efc50',inference:'78100568d8e5b9fb5b199872dc57cb28f5b87340',
+  workspace:'D:\\actions-runner\\_work\\SceneWorks\\SceneWorks',root:'D:\\actions-runner\\_work\\SceneWorks\\moss-sc-26752\\moss-execute-40415337753-1-cuda',
+  runtimeSha:'c39c03be757a782ae5bff5093b4ed96fa25591a0b01b75f8e785bbd6f5348c63',metadataRequired:true,
+});
+const H47_BASE=path.dirname(H47_OWNER.root),H47_BUILD=path.join(H47_BASE,'moss-build-40415337753-1-cuda');
+const H47_SOURCE=path.join(H47_BASE,'moss-execute-40349954885-1-cuda','hf');
+const H47_BINARY=path.join(H47_BASE,'moss-builds-40415337753-1-execute-cuda','cuda','sceneworks-rust-api.exe');
+const H47_PROCESS_ROOTS=[H47_OWNER.root,H47_BUILD,path.dirname(path.dirname(H47_BINARY))];
+const H47_RECORDS=Object.freeze({'hf-transfer.json':'7ec1b9bcf39e86b69da20ce0430baadd651cce98ad4bfe359a142a2355bd1d04','cuda-package-preparation.json':'d44b6efd6f887505fbb7af3df4f588b7c410f30eb1ecc0ca0b360512e1c981fc'});
+// These are identities, never kill targets. A reused PID needs positive later-start evidence.
+const H47_PIDS=[35884,46352,45652],H47_LAST_OBSERVED=Date.parse('2026-10-26T23:51:33.348Z');
+export function validateH47Processes(processes) {
+  check(Array.isArray(processes)&&processes.length<=128,'bounded H47 process observation required');
+  const reused=[];
+  for(const item of processes) {
+    check(Number.isSafeInteger(item.pid)&&item.pid>0&&typeof item.executable==='string'&&path.isAbsolute(item.executable)&&typeof item.commandLine==='string'&&item.commandLine.length>0&&item.commandLine.length<=32768&&Number.isFinite(Date.parse(item.startedAt)),'unreadable H47 process identity');
+    const executable=normal(item.executable),command=item.commandLine.replaceAll('/','\\').toLowerCase();
+    check(!H47_PROCESS_ROOTS.some(root=>executable===normal(root)||executable.startsWith(normal(root)+'\\')||command.includes(normal(root))),'owned H47 process is still live');
+    if(H47_PIDS.includes(item.pid)){check(Date.parse(item.startedAt)>H47_LAST_OBSERVED,'H47 PID reuse is not proved');reused.push({pid:item.pid,startedAt:item.startedAt});}
+  }
+  return {observedProcesses:processes.length,reusedPids:reused,ownedProcessesAbsent:true};
+}
+export const H47_PROCESS_FILTER = ["Name='sceneworks-rust-api.exe'",...H47_PIDS.map(pid=>`ProcessId=${pid}`),...H47_PROCESS_ROOTS.flatMap(root=>[root,root.replaceAll('\\','/')].flatMap(value=>['CommandLine','ExecutablePath'].map(field=>`${field} LIKE '%${value.replaceAll('\\','\\\\')}%'`)))].join(' OR ');
+export async function h47Processes() {
+  // WMI scopes the observation to fixed owned roots, executable family and recorded PIDs.
+  const filter=Buffer.from(H47_PROCESS_FILTER).toString('base64');
+  return powershell(`$ErrorActionPreference='Stop';$filter=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${filter}'));$items=@(Get-CimInstance Win32_Process -Filter $filter | ForEach-Object {@{pid=[int]$_.ProcessId;startedAt=if($_.CreationDate){$_.CreationDate.ToUniversalTime().ToString('o')}else{$null};executable=$_.ExecutablePath;commandLine=$_.CommandLine}});ConvertTo-Json -InputObject $items -Depth 4 -Compress`);
+}
+export function validateH47Projection(observation,runtime,transfer) {
+  const proof=validateHfObservation(observation,path.join(H47_OWNER.root,'hf'),runtime);
+  check(proof.completeProjection&&runtime.packageFiles.length===43&&transfer.after.length===43,'complete H47 projection required');
+  const expected=new Map(transfer.after.map(item=>[item.file,item])),extras=new Set();
+  for(const entry of proof.entries){
+    check(entry.type==='file'&&entry.nlink==='1','H47 HF must contain exclusive regular files');
+    check(['mtimeNs','ctimeNs'].every(key=>/^[0-9]+$/.test(entry[key]??'')),'H47 authenticated timestamps required');
+    const item=expected.get(entry.path);
+    if(item)check(entry.sha256===item.sha256&&entry.byteLength===String(item.byteLength),'H47 projection bytes changed');
+    else {
+      const adapter=transfer.after.find(item=>runtime.editAdapterFiles.includes(item.file)&&item.sha256===entry.sha256&&String(item.byteLength)===entry.byteLength);
+      check(/^hub\/models--chinoll--Moss-Image-Edit\/blobs\/[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(entry.path)&&adapter&&!extras.has(adapter.file),'unexpected H47 HF extra file');extras.add(adapter.file);
+    }
+  }
+  return proof; // Exactly43 projected files plus at most the two materialized private adapter blobs.
+}
+export async function h47SourceEntries(root) {
+  const entries=await hfEntries(root);
+  for(const entry of entries){const info=await lstat(fsResolve(root,entry.path),{bigint:true});check(JSON.stringify(entryIdentity(info))===JSON.stringify(Object.fromEntries(Object.keys(entryIdentity(info)).map(key=>[key,entry[key]]))),'protected source changed during observation');entry.mtimeNs=String(info.mtimeNs);entry.ctimeNs=String(info.ctimeNs);}
+  return entries;
+}
+async function validateH47Invocation(env,io) {
+  check(env.GITHUB_ACTIONS==='true'&&env.GITHUB_JOB==='windows-maintenance'&&env.MOSS_SOURCE_SHA===env.GITHUB_SHA&&env.MOSS_NATIVE_RUN_ID==='','H47 cleanup requires normal new-pair maintenance');
+  const event=JSON.parse(await io.read(env.GITHUB_EVENT_PATH)),inputs=event.inputs??{},dispatch=inputs.moss_terminal?JSON.parse(inputs.moss_terminal):inputs;
+  check(dispatch.phase==='execute'&&!(dispatch.native_run_id),'H47 cleanup requires ordinary fresh execute');
+}
+export async function observeH47Owner(io,runtime,metadata) {
+  const runtimePath=path.join(H47_OWNER.root,'runtime.json');validateTree(await io.inspect(runtimePath),runtimePath);
+  check(JSON.stringify(validateRuntime(H47_OWNER,await io.read(runtimePath)))===JSON.stringify(runtime),'H47 runtime changed during observation');
+  const records={};
+  for(const [file,expected] of Object.entries(H47_RECORDS)){const recordPath=path.join(H47_OWNER.root,file);validateTree(await io.inspect(recordPath),recordPath);const bytes=await io.read(recordPath);check(sha(bytes)===expected,'H47 archived ownership record changed');records[file]=JSON.parse(bytes);}
+  const transfer=records['hf-transfer.json'],preparation=records['cuda-package-preparation.json'];
+  check(normal(runtime.root)===normal(H47_OWNER.root)&&normal(runtime.hfHome)===normal(path.join(H47_OWNER.root,'hf'))&&normal(transfer.from)===normal(path.join(H47_BUILD,'hf'))&&normal(transfer.to)===normal(runtime.hfHome)&&normal(preparation.readOnlySource)===normal(H47_SOURCE),'H47 ownership/source confinement changed');
+  check(transfer.operation==='same-volume-private-HF-ownership-transfer'&&preparation.mode==='rehydrated-exact-packages'&&preparation.originalRunId==='40349954885'&&preparation.originalAttempt==='1'&&JSON.stringify(transfer.before)===JSON.stringify(transfer.after),'H47 private transfer changed');
+  validateTree(await io.inspect(path.join(H47_BUILD,'hf-owner.json')),path.join(H47_BUILD,'hf-owner.json'));
+  check(await io.hash(path.join(H47_BUILD,'hf-owner.json'))===transfer.originalOwner.sha256,'H47 original private build owner changed');
+  validateH47Projection(metadata,runtime,transfer);
+  validateTree(await io.inspect(H47_SOURCE),H47_SOURCE);
+  const sourceEntries=await io.entries(H47_SOURCE);
+  check(Array.isArray(sourceEntries)&&sourceEntries.length>=43&&sourceEntries.length<=10000&&sourceEntries.every(item=>item.type==='file'&&item.nlink==='1'&&/^[0-9]+$/.test(item.mtimeNs??'')&&/^[0-9]+$/.test(item.ctimeNs??'')),'protected original source ownership changed');
+  const processes=validateH47Processes(await io.processes());
+  return {records:H47_RECORDS,protectedSource:H47_SOURCE,protectedSourceMetadataSha256:sha(JSON.stringify(sourceEntries)),processes};
+}
+
 export const OWNED_RUNS = Object.freeze([
   { run: '40145054879', candidate: 'sc-26752-final-r4', source: '37d5ad93f858025d3202a2ddcab465c67174e0c7', inference: '878f26aba50bfb6c371437da9ca7ead81052c25a', workspace: 'D:\\actions-runner\\_work\\SceneWorks\\SceneWorks', runtimeSha: '1b8948de0a9f7ede92019896359683605fe2c4e7577971520da881dda6aca710' },
   { run: '40152001538', candidate: 'sc-26752-final-r5', source: '9ac78275e2f5f536541c1790fc840232fd5bdfdd', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', runtimeSha: '7ac52e00e6e712012b907a740e96e5c9d39c72483499205f637916e286e70b43' },
@@ -19,27 +95,29 @@ export const OWNED_RUNS = Object.freeze([
   { run: '40169818205', candidate: 'sc-26752-final-r13', source: 'ba6bdd824823f01f8c4dc435f9fad50f45f97893', inference: native, workspace: 'D:\\actions-runner\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40169818205-1-cuda', runtimeSha: '76554eb462c580cd6afa7b5102aaeaa434de85049fe1b6701fe7ba2347f6d61f', cacheBinarySha256: '09088a12b26968177adf5a6ead76b088be2f791e5756224497db4fb7d20cf8fd', metadataRequired: true },
   { run: '40174802721', candidate: 'sc-26752-final-r14', source: '12e1b364360b43b28e864879be4c68bb28a696bc', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40174802721-1-cuda', runtimeSha: '4082f9c28ae31aee7dda8e850d04b197d7741a01edbc3856aa53ddac6ba8a532', cacheBinarySha256: 'ab36062090356912f9131654fa5c3ec87ed808f5e0fc0cbd32e388773edb75c2', metadataRequired: true },
   { run: '40181253824', candidate: 'sc-26752-final-r15', source: 'a0692191b09813fab859659bf382bd7c91a60140', inference: native, workspace: 'D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks', root: 'D:\\actions-runner-2\\_work\\SceneWorks\\moss-sc-26752\\moss-build-40181253824-1-cuda', runtimeSha: 'a4c17012e7143f8775809decbd72216a7c3114209bf91c3f7f0d9608f0585cc4', metadataRequired: true },
+  H47_OWNER,
 ].map(item => Object.freeze({ ...item, attempt: 1, root: item.root ?? path.join(item.workspace, `moss-build-${item.run}-1-cuda`) })));
 // Bigint identities are serialized as decimal strings; never round Windows file IDs.
 export function entryIdentity(info) {
   return {type:info.isSymbolicLink()?'symlink':info.isDirectory()?'directory':info.isFile()?'file':'other',dev:String(info.dev),ino:String(info.ino),nlink:String(info.nlink),byteLength:String(info.size)};
 }
-export async function hfEntries(root) {
+export async function hfEntries(root,{timestamps=false}={}) {
   if(process.platform==='win32')await inspectTree(root); // No Windows reparse traversal, including non-symlink tags.
   const rootInfo=await lstat(root,{bigint:true});check(rootInfo.isDirectory()&&!rootInfo.isSymbolicLink(),'HF metadata root must be a real directory');
   const entries=[];let visited=0;
   const visit=async dir=>{for(const name of (await readdir(dir)).sort()) {
-    check(++visited<=10000,'HF metadata inventory bound exceeded');const file=fsResolve(dir,name),info=await lstat(file,{bigint:true}),entry={path:fsRelative(root,file).replaceAll('\\','/'),...entryIdentity(info)};
+    check(++visited<=10000,'HF metadata inventory bound exceeded');const file=fsResolve(dir,name),info=await lstat(file,{bigint:true}),entry={path:fsRelative(root,file).replaceAll('\\','/'),...entryIdentity(info),...(timestamps?{mtimeNs:String(info.mtimeNs),ctimeNs:String(info.ctimeNs)}:{})};
     if(info.isDirectory())await visit(file);else {if(info.isSymbolicLink())entry.link=await readlink(file);entries.push(entry);}
   }};await visit(root);return entries;
 }
 export async function hashMetadataFile(file,expected) {
-  const before=entryIdentity(await lstat(file,{bigint:true}));check(before.type==='file'&&JSON.stringify(before)===JSON.stringify(Object.fromEntries(Object.keys(before).map(key=>[key,expected[key]]))),'HF metadata file changed before hash');
+  const identity=info=>({...entryIdentity(info),...(expected.mtimeNs!==undefined?{mtimeNs:String(info.mtimeNs),ctimeNs:String(info.ctimeNs)}:{})});
+  const before=identity(await lstat(file,{bigint:true}));check(before.type==='file'&&JSON.stringify(before)===JSON.stringify(Object.fromEntries(Object.keys(before).map(key=>[key,expected[key]]))),'HF metadata file changed before hash');
   const hash=createHash('sha256');for await(const chunk of createReadStream(file))hash.update(chunk);
-  check(JSON.stringify(entryIdentity(await lstat(file,{bigint:true})))===JSON.stringify(before),'HF metadata file changed during hash');return hash.digest('hex');
+  check(JSON.stringify(identity(await lstat(file,{bigint:true})))===JSON.stringify(before),'HF metadata file changed during hash');return hash.digest('hex');
 }
 export async function observeHf(runtime) {
-  const entries=await hfEntries(runtime.hfHome),adapters=new Set(runtime.editAdapterFiles),packages=new Set(runtime.packageFiles?.map(item=>item.file)??[]),blobPrefix='hub/models--chinoll--Moss-Image-Edit/blobs/';
+  const entries=await hfEntries(runtime.hfHome,{timestamps:normal(runtime.hfHome)===normal(path.join(H47_OWNER.root,'hf'))}),adapters=new Set(runtime.editAdapterFiles),packages=new Set(runtime.packageFiles?.map(item=>item.file)??[]),blobPrefix='hub/models--chinoll--Moss-Image-Edit/blobs/';
   for(const entry of entries)if(entry.type==='file'&&(entry.nlink!=='1'||packages.has(entry.path)||adapters.has(entry.path)||entry.path.startsWith(blobPrefix)))entry.sha256=await hashMetadataFile(fsResolve(runtime.hfHome,entry.path),entry);
   return {root:runtime.hfHome,entries};
 }
@@ -78,14 +156,14 @@ export function destination(env) {
   return root;
 }
 export function validateStopped(binding, latest, attempt, jobs) {
-  for (const run of [latest, attempt]) check(String(run.id) === binding.run && run.run_attempt === 1 && run.head_sha === binding.source && run.status === 'completed' && run.conclusion, 'old run identity/attempt is not stopped');
+  for (const run of [latest, attempt]) check(String(run.id) === binding.run && run.run_attempt === 1 && run.head_sha === (binding.run===H47_OWNER.run?H47_OWNER.actionsSource:binding.source) && run.status === 'completed' && run.conclusion, 'old run identity/attempt is not stopped');
   check(jobs.length > 0 && jobs.every(job => job.status === 'completed' && job.conclusion && Number(job.run_id) === Number(binding.run)), 'old run still has nonterminal jobs');
 }
 export function validateRuntime(binding, bytes) {
   check(sha(bytes) === binding.runtimeSha, 'old runtime bytes changed');
   const runtime = JSON.parse(bytes);
   check(runtime.candidateId === binding.candidate && runtime.sourceSha === binding.source && runtime.inferenceSha === binding.inference && runtime.backend === 'cuda', 'old runtime identity mismatch');
-  for (const [field, expected] of Object.entries({ root: binding.root, hfHome: path.join(binding.root, 'hf'), sourceRoot: path.join(binding.workspace, 'source'), packageSource: 'E:\\sceneworks-evaluation\\moss\\sc-26322-reference-v9' })) check(normal(runtime[field] ?? '') === normal(expected), `old runtime ${field} mismatch`);
+  for (const [field, expected] of Object.entries({ root: binding.root, hfHome: path.join(binding.root, 'hf'), sourceRoot: path.join(binding.workspace, 'source'), packageSource: binding.run===H47_OWNER.run?path.join(H47_BASE,'moss-execute-40331712229-1-cuda','hf'):'E:\\sceneworks-evaluation\\moss\\sc-26322-reference-v9' })) check(normal(runtime[field] ?? '') === normal(expected), `old runtime ${field} mismatch`);
   return runtime;
 }
 export function validateTree(snapshot, expected) {
@@ -145,7 +223,7 @@ export async function maintain(env, io, {copyCache=true}={}) {
   const receipt = { version: 1, kind: 'sc-26752-stopped-run-disk-recovery', currentRun: env.GITHUB_RUN_ID, currentSource: env.MOSS_SOURCE_SHA, before: await io.volume(), candidates: [], operations: [] };
   validateTree(await io.inspect(root), root);
   receipt.r9Observation = await diagnoseR9(io);
-  for (const binding of OWNED_RUNS) {
+  for (const binding of OWNED_RUNS.filter(item=>copyCache||item.run!==H47_OWNER.run)) {
     const stop = await io.stopped(binding), hf = path.join(binding.root, 'hf');
     const inventory = validateTree(await io.inspect(hf), hf);
     let cache = null, cacheProbeError = null;
@@ -156,7 +234,9 @@ export async function maintain(env, io, {copyCache=true}={}) {
     const runtime = inventory.exists || cache?.exists ? validateRuntime(binding, await io.read(path.join(binding.root, 'runtime.json'))) : null;
     const metadata = binding.metadataRequired && inventory.exists ? validateHfObservation(await io.metadata(runtime), hf, runtime) : null;
     if(metadata?.completeProjection)check(metadata.projectedBytes<=inventory.bytes,'HF projection exceeds measured inventory');
-    receipt.candidates.push({ ...binding, stop, inventory, metadata, cache, cacheProbeError });
+    if(binding.run===H47_OWNER.run&&inventory.exists)await validateH47Invocation(env,io);
+    const owner = binding.run===H47_OWNER.run&&inventory.exists ? await observeH47Owner(io,runtime,metadata) : null;
+    receipt.candidates.push({ ...binding, stop, inventory, metadata, cache, cacheProbeError, ...(owner?{owner}:{}) });
   }
   // The full disk may prevent any local pre-write. Emit the bounded before inventory into the
   // retained Actions log first; the same receipt is saved outside HF once space is reclaimed.
@@ -167,10 +247,19 @@ export async function maintain(env, io, {copyCache=true}={}) {
     const runtime = validateRuntime(candidate, await io.read(path.join(candidate.root, 'runtime.json')));
     const leaf = path.join(candidate.root, 'hf');
     validateTree(await io.inspect(leaf), leaf);
+    let removalMetadata;
     if(candidate.metadataRequired) {
       const metadata = validateHfObservation(await io.metadata(runtime), leaf, runtime);
-      check(JSON.stringify(metadata)===JSON.stringify(candidate.metadata),'owned HF metadata changed before cleanup');
-      io.report({stage:candidate.run==='40181253824'?'fixed-r15-readonly-metadata-before-hf-cleanup':candidate.run==='40174802721'?'fixed-r14-readonly-metadata-before-hf-cleanup':candidate.run==='40169818205'?'fixed-r13-readonly-metadata-before-hf-cleanup':candidate.run==='40167292776'?'fixed-r12-readonly-metadata-before-hf-cleanup':'fixed-r10-readonly-metadata-before-hf-cleanup',run:candidate.run,source:candidate.source,runtimeSha256:candidate.runtimeSha,metadata});
+      check(JSON.stringify(metadata)===JSON.stringify(candidate.metadata),'owned HF metadata changed before cleanup');removalMetadata=metadata;
+      io.report({stage:candidate.run===H47_OWNER.run?'fixed-h47-readonly-metadata-before-hf-cleanup':candidate.run==='40181253824'?'fixed-r15-readonly-metadata-before-hf-cleanup':candidate.run==='40174802721'?'fixed-r14-readonly-metadata-before-hf-cleanup':candidate.run==='40169818205'?'fixed-r13-readonly-metadata-before-hf-cleanup':candidate.run==='40167292776'?'fixed-r12-readonly-metadata-before-hf-cleanup':'fixed-r10-readonly-metadata-before-hf-cleanup',run:candidate.run,source:candidate.source,runtimeSha256:candidate.runtimeSha,metadata});
+    }
+    if(candidate.run===H47_OWNER.run) {
+      const owner=await observeH47Owner(io,runtime,removalMetadata);
+      check(owner.protectedSourceMetadataSha256===candidate.owner.protectedSourceMetadataSha256,'protected original HF changed before removal');
+      await io.stopped(candidate);validateTree(await io.inspect(leaf),leaf);
+      const identity=entries=>entries.map(item=>Object.fromEntries(['path','type','dev','ino','nlink','byteLength','mtimeNs','ctimeNs'].map(key=>[key,item[key]])));
+      check(JSON.stringify(identity(await io.entries(leaf)))===JSON.stringify(identity(removalMetadata.entries)),'H47 HF identity changed at removal boundary');
+      validateH47Processes(await io.processes()); // Last live check: never stop or kill anything.
     }
     await io.remove(leaf); // Exact fixed HF leaf only; no root/cache/model-source wildcard.
     receipt.operations.push({ kind: 'remove-owned-hf', path: leaf, after: await io.volume() });
@@ -227,7 +316,7 @@ if (['--moss-disk-maintenance','--moss-disk-hf-only'].includes(process.argv[2]))
   const token = process.env.MOSS_MAINTENANCE_TOKEN;
   try {
     if(process.argv[2]==='--moss-disk-hf-only')validateHfOnlyEnvelope(process.env);
-    await maintain(process.env, { volume, inspect: inspectTree, metadata: observeHf, hash: async file => hashMetadataFile(file,entryIdentity(await lstat(file,{bigint:true}))), stopped: binding => stopped(binding, route => actionsApi(token, route)), read: readFile,
+    await maintain(process.env, { volume, inspect: inspectTree, metadata: observeHf, entries: h47SourceEntries, processes: h47Processes, hash: async file => hashMetadataFile(file,entryIdentity(await lstat(file,{bigint:true}))), stopped: binding => stopped(binding, route => actionsApi(token, route)), read: readFile,
       remove: leaf => rm(leaf, { recursive: true, force: false }), copy: copyCacheExclusive, ensure: root => mkdir(root, { recursive: true }),
       write: (file, bytes) => writeFile(file, bytes, { flag: 'wx' }), report: value => console.log(JSON.stringify(value)) },{copyCache:process.argv[2]!=='--moss-disk-hf-only'});
   } catch (error) { console.error(JSON.stringify({ status: 'STOP', stage: 'owned-disk-maintenance', message: error.message })); process.exitCode = 1; }

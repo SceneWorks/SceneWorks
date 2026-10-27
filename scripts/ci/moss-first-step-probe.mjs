@@ -327,8 +327,8 @@ async function blockTraceUpstreamMain(){
  const download=resolve(env.RUNNER_TEMP,`moss-upstream-reference-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);await verifyBlockTraceUpstreamPayload(download);await cp(download,resolve(root,'payload'),{recursive:true,errorOnExist:true,force:false});await executeBlockTraceUpstream(root,resolve(root,'payload'),resolve(env.RUNNER_TEMP,`moss-native-trace-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`),env);
 }
 // Fixed same-input layer3 discriminator. The sealed overlay is test-only on native781.
-export const LAYER3_STAGED='/Users/michael/.codex/epic-runs/sc-26752/resume-20261026/encoding-layer3-discriminator-configlink-prep/payload';
-export const LAYER3_SHA='56481b5e95af21084b41349ef446123ef1f55c0da0c841675fd7f32329feab7b';
+export const LAYER3_STAGED='/Users/michael/.codex/epic-runs/sc-26752/resume-20261026/encoding-layer3-discriminator-cpuload-prep/payload';
+export const LAYER3_SHA='eaef78ecfc806692b5b221a1a1daf9d7af0a22e1206ee334c7562a519d7c0210';
 export const LAYER3_PIN=BLOCK_TRACE_PIN;
 const LAYER3_PHASES=['upload-encoding-layer3','execute-encoding-layer3'];
 const LAYER3_FILES=['capture_layer3.py','compare_layer3.py','frozen_runtime_bridge.py','historical/parent-artifact-authentication.json','historical/parent-artifact-metadata.json','historical/parent-carry-authentication.json','historical/parent-comparison.json','historical/parent-completion.json','historical/parent-native-authentication.json','historical/parent-native-trace.json','historical/parent-payload-manifest.json','historical/parent-upstream-authentication.json','historical/parent-upstream-trace.json','historical/prior-authentication-binding.json','historical/runtime-source-authentication.json','historical/upstream-positive-boundary-04.f32le','input/positive-boundary-03.f32le','layer3-contract.json','overlay/layer3_probe.rs','overlay/qwen35.rs.patch','overlay/source-identity.json'];

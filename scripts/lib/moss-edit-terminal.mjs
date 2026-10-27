@@ -406,10 +406,21 @@ export function sanitizedReport(report, edit = true) {
   else for (const adapter of result.adapter_reports ?? []) adapter.adapter_path = 'lora.safetensors';
   return result;
 }
+function portableReportComparison(report, edit) {
+  const result = structuredClone(report), sampling = (edit ? result?.base : result)?.sampling;
+  if (sampling?.kind === 'euler') {
+    requireThat(Array.isArray(sampling.sigmas), 'portable Euler sigmas must be an array');
+    sampling.sigmas = Array.from(sampling.sigmas, value => {
+      requireThat(typeof value === 'number' && Number.isFinite(value) && Number.isFinite(Math.fround(value)), 'portable Euler sigma must be finite F32');
+      return Math.fround(value);
+    });
+  }
+  return canonical(result);
+}
 export function validateExportedWorkflow(workflow, report, sampleIndex) {
   requireThat(workflow && workflow.sceneworksWorkflow && workflow.mode === 'edit_image' && workflow.advanced, 'invalid actual exported workflow envelope');
-  requireThat(canonical(workflow.advanced.mossImageEditExecutionReport) === canonical(sanitizedReport(report)), 'portable workflow provenance differs from the original sanitized native report');
-  if (workflow.advanced.mossImageExecutionReport) requireThat(canonical(workflow.advanced.mossImageExecutionReport) === canonical(sanitizedReport(report.base,false)), 'portable backbone provenance mismatch');
+  requireThat(portableReportComparison(workflow.advanced.mossImageEditExecutionReport,true) === portableReportComparison(sanitizedReport(report),true), 'portable workflow provenance differs from the original sanitized native report');
+  if (workflow.advanced.mossImageExecutionReport) requireThat(portableReportComparison(workflow.advanced.mossImageExecutionReport,false) === portableReportComparison(sanitizedReport(report.base,false),false), 'portable backbone provenance mismatch');
   requireThat(workflow.advanced.mossImageSampleIndex === sampleIndex, 'portable workflow sample provenance mismatch');
 }
 export function mcpResultAssets(result, jobId, outputs, origin) {
