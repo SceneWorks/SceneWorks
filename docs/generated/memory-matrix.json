@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:d56579dc6b2ef5bae672d7bf76a38a76097fb041536675f533f5cb2e271b7f1d",
+    "sceneWorksRevision": "source-tree:a45bcb94c8ccd4199ade6846e0997847b78a274688ba9a8fcb2b3a58a9c621b0",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "6aa3393b2543e01eb85476c41d3224382a4b6be5836f885f1a0c36ef993dedcb"
+        "sha256": "fb3fd5a3523704d38bfa6283ac87eafe1bc8bff728c2707365c4d5e63e3bfda9"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "686b3971f1e46d14409304e6e30f5e233512c3b0c42fd8c8054bc2269261f152"
+        "sha256": "49f88f85f1d504fd0ce75ff88221169aac3f71e9d8a0f05f1ba382fb09d3f945"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
