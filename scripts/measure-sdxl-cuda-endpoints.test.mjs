@@ -5,7 +5,7 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource, selectCaptureGpu, parseGpuInventory, endpointGpuEnv } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource, selectCaptureGpu, parseGpuInventory, endpointGpuEnv, replayInferenceSourceIdentity } from "./measure-sdxl-cuda-endpoints.mjs";
 import { EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
 
 // CI_IMPACT: one pure cross-module path contract; no files, build, API or model execution.
@@ -17,6 +17,36 @@ test("replay accepts the packager's dedicated summary and rejects other source p
   }
   assert.throws(() => validatePackagedEndpointSummarySource({ ...source, sha256: "bad" }));
   assert.throws(() => validatePackagedEndpointSummarySource(null));
+});
+
+// CI_IMPACT: mocked Git argv/results only; no subprocess, network, API, or inference execution.
+test("replay source advancement requires identical complete Git trees and retains both pins", async () => {
+  const capturedPin = "a".repeat(40), activePin = "b".repeat(40), tree = "c".repeat(40);
+  const same = await replayInferenceSourceIdentity(capturedPin, capturedPin, "/inference", () => assert.fail("same pin needs no Git lookup"));
+  assert.deepEqual(same, { capturedPin, activePin: capturedPin, match: "same_pin", capturedTree: null, activeTree: null, completeGitTreesEqual: null });
+  const calls = [];
+  const execute = async (command, argv, options) => {
+    calls.push(argv);
+    assert.equal(command, "git"); assert.equal(options.cwd, "/inference");
+    assert.equal(options.env.GIT_NO_LAZY_FETCH, "1");
+    assert.deepEqual(argv.slice(0, 2), ["rev-parse", "--verify"]);
+    return { stdout: `${tree}\n` };
+  };
+  const equivalent = await replayInferenceSourceIdentity(capturedPin, activePin, "/inference", execute);
+  assert.deepEqual(calls, [["rev-parse", "--verify", `${capturedPin}^{tree}`], ["rev-parse", "--verify", `${activePin}^{tree}`]]);
+  assert.deepEqual(equivalent, { capturedPin, activePin, match: "identical_complete_git_tree", capturedTree: tree, activeTree: tree, completeGitTreesEqual: true });
+  await assert.rejects(() => replayInferenceSourceIdentity(capturedPin, activePin, "/inference", async (_command, argv) =>
+    ({ stdout: argv[2].startsWith(capturedPin) ? tree : "d".repeat(40) })), /complete Git tree differs/);
+  await assert.rejects(() => replayInferenceSourceIdentity(capturedPin, activePin, "/inference", async () => {
+    throw new Error("missing tree object");
+  }), /missing tree object/);
+  for (const stdout of ["", "missing", "c".repeat(39), "C".repeat(40), `${tree}\n${tree}`]) {
+    await assert.rejects(() => replayInferenceSourceIdentity(capturedPin, activePin, "/inference", async () => ({ stdout })), /unavailable or malformed/);
+  }
+  for (const invalid of [undefined, "HEAD", "a".repeat(39), "A".repeat(40), `${capturedPin};fetch`]) {
+    await assert.rejects(() => replayInferenceSourceIdentity(invalid, activePin, "/inference", () => assert.fail("invalid pins cannot reach Git")), /canonical/);
+    await assert.rejects(() => replayInferenceSourceIdentity(capturedPin, invalid, "/inference", () => assert.fail("invalid pins cannot reach Git")), /canonical/);
+  }
 });
 
 const plan = JSON.parse(await readFile(new URL("../config/memory-calibration-plan.json", import.meta.url), "utf8"));
