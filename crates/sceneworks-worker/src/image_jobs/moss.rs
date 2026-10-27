@@ -1491,7 +1491,7 @@ mod moss_consumer_tests {
         )
         .err()
         .expect("cancellation must refuse");
-        assert!(matches!(error, WorkerError::Canceled(_)));
+        assert!(matches!(&error, WorkerError::Canceled(_)), "{error:?}");
         assert_eq!(checks, 1);
     }
 
