@@ -150,12 +150,12 @@ jobs:
       group: flux3-quant-matrix-candle-${{ inputs.runner }}
       cancel-in-progress: false
     env:
-      CARGO_NET_OFFLINE: "true"
       CUDA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
       HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:\huggingface' }}
       SCENEWORKS_DATA_DIR: D:/tmp/sc26243-quant-data
       FLUX3_FOOTPRINT_OUT_DIR: D:/tmp/sc26243-quant-evidence
+      VCVARS: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat
     steps:
       - name: Refuse a runner other than the dispatched Windows box
         shell: powershell
@@ -169,35 +169,47 @@ jobs:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 1
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
-        with:
-          toolchain: "1.97.1"
-      - name: Build the release test binary with Candle
+      # The self-hosted cuda box's `bash` is the WSL stub and the dtolnay action cannot run there.
+      # Use the repository action that resolves the real rustup bin for rust-toolchain.toml.
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable the shared sccache wrapper for this heavy lane
         shell: powershell
         run: |
-          cargo test -p sceneworks-worker --release --features backend-candle --lib --no-run
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Fetch the pinned inference release
+        shell: powershell
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: |
+          cargo fetch --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Convert missing Candle q4/q8 packages (CPU only)
-        if: ${{ inputs.prepare_derived }}
+      - name: Build, convert and measure the requested Candle cells
         shell: powershell
+        env:
+          CARGO_NET_OFFLINE: "true"
+          CELLS_INPUT: ${{ inputs.cells }}
+          PREPARE_DERIVED: ${{ inputs.prepare_derived }}
         run: |
           $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path "$env:SCENEWORKS_DATA_DIR/models/derived", "$env:FLUX3_FOOTPRINT_OUT_DIR" | Out-Null
-          foreach ($model in @('flux3_klein', 'flux3_klein_base')) {
-            $snap = Get-ChildItem "$env:HF_HOME/hub/models--black-forest-labs--$model/snapshots" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $snap) { throw "pinned $model snapshot missing under $env:HF_HOME" }
-            $env:FLUX3_CAPTURE_MODEL_ID = $model
-            $env:FLUX3_CAPTURE_SOURCE_DIR = $snap.FullName
-            $env:FLUX3_CAPTURE_OUT_DIR = "$env:SCENEWORKS_DATA_DIR/models/derived"
-            $env:FLUX3_CAPTURE_CONVERSIONS = 'flux3-candle-ggml-q4_1-v1,flux3-candle-ggml-q8_0-v1'
-            cargo test -p sceneworks-worker --release --features backend-candle --lib -- --ignored --exact local_derivation::tests::flux3_capture_conversion_artifacts --nocapture
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          function Invoke-Cargo([string[]]$CargoArgs, [string]$LogFile) {
+            $line = "call `"$env:VCVARS`" >nul && set NVCC_CCBIN=!VCToolsInstallDir!bin\Hostx64\x64 && cargo " + ($CargoArgs -join ' ')
+            if ($LogFile) { & cmd /v:on /c $line 2>&1 | Tee-Object -FilePath $LogFile } else { & cmd /v:on /c $line }
+            if ($LASTEXITCODE -ne 0) { throw "cargo failed: $line" }
           }
-      - name: Measure requested Candle cells
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path "$env:FLUX3_FOOTPRINT_OUT_DIR" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$env:SCENEWORKS_DATA_DIR/models/derived", "$env:FLUX3_FOOTPRINT_OUT_DIR" | Out-Null
+          Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--no-run')
+          if ($env:PREPARE_DERIVED -eq 'true') {
+            foreach ($model in @('flux3_klein', 'flux3_klein_base')) {
+              $snap = Get-ChildItem "$env:HF_HOME/hub/models--black-forest-labs--$model/snapshots" -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+              if (-not $snap) { throw "pinned $model snapshot missing under $env:HF_HOME" }
+              $env:FLUX3_CAPTURE_MODEL_ID = $model
+              $env:FLUX3_CAPTURE_SOURCE_DIR = $snap.FullName
+              $env:FLUX3_CAPTURE_OUT_DIR = "$env:SCENEWORKS_DATA_DIR/models/derived"
+              $env:FLUX3_CAPTURE_CONVERSIONS = 'flux3-candle-ggml-q4_1-v1,flux3-candle-ggml-q8_0-v1'
+              Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--', '--ignored', '--exact', 'local_derivation::tests::flux3_capture_conversion_artifacts', '--nocapture')
+            }
+          }
           $all = @(
             'flux3_candle_footprint::footprint_flux3_klein_candle_bf16',
             'flux3_candle_footprint::footprint_flux3_klein_candle_q4',
@@ -210,12 +222,11 @@ jobs:
             'flux3_candle_footprint::footprint_flux3_klein_base_candle_fp8r',
             'flux3_candle_footprint::footprint_flux3_klein_base_candle_nvfp4'
           )
-          $wanted = '${{ inputs.cells }}'
-          if ([string]::IsNullOrWhiteSpace($wanted)) { $selected = $all } else { $selected = $wanted.Split(',') }
+          if ([string]::IsNullOrWhiteSpace($env:CELLS_INPUT)) { $selected = $all } else { $selected = $env:CELLS_INPUT.Split(',') }
           foreach ($cell in $selected) {
             Write-Host "::group::$cell"
-            cargo test -p sceneworks-worker --release --features backend-candle --lib -- --ignored --exact $cell --nocapture 2>&1 | Tee-Object -FilePath "$env:FLUX3_FOOTPRINT_OUT_DIR/$($cell.Split('::')[-1]).log"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $log = Join-Path $env:FLUX3_FOOTPRINT_OUT_DIR ($cell.Split('::')[-1] + '.log')
+            Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--', '--ignored', '--exact', $cell, '--nocapture') $log
             Write-Host "::endgroup::"
           }
       - name: Upload PNGs, receipts and logs
