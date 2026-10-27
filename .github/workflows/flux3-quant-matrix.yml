@@ -267,6 +267,9 @@ jobs:
               Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--', '--ignored', '--exact', 'local_derivation::tests::flux3_capture_conversion_artifacts', '--nocapture')
             }
           }
+          # Native cargo output on stderr (e.g. a benign linker warning) must not abort the loop;
+          # Invoke-Cargo checks the real exit code.
+          $ErrorActionPreference = 'Continue'
           $all = @(
             'flux3_candle_footprint::footprint_flux3_klein_candle_bf16',
             'flux3_candle_footprint::footprint_flux3_klein_candle_q4',
