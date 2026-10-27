@@ -3032,7 +3032,6 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
     let mut streamed = fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]);
     streamed.phase_facts = Some(gen_core::MemoryPhaseFacts {
         architecture: None,
-        native_quant: None,
         staged_weights: gen_core::StagedWeightSchedule::TwoStage,
         transformer_stream: Some(gen_core::StreamedWeightFacts {
             resident_bytes: 0,
