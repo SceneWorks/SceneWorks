@@ -119,7 +119,7 @@ test('nonzero CPU preparation exit aborts before discovery or native execution',
  const r=await run(m.options);assert.equal(r.ok,false);assert.equal(m.count(),1);assert.equal(r.cases.length,0);assert.match(r.failures.join(),/rustc-version exited 7/);
 });
 // CI_IMPACT: mocked commands only. No native binary, model or GPU executes here.
-test('filesystem CPU contract is exact, bounded and completed before any native case',async t=>{
+test('pre-model CPU contract entry is exact, bounded and completed before any native case',async t=>{
  const m=mockRun(t),execute=m.options.execute;
  m.options.execute=async(...args)=>{
   if(args[1][1]===PRE_MODEL_CPU_TEST){assert.ok(args[3]>0&&args[3]<=BOUNDS.list);assert.equal(args[5].env.MOSS_ACCEPTANCE_CASE_ID,undefined);}

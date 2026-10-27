@@ -492,8 +492,8 @@ export async function run(options) {
       receipt.discovery=checkDiscovery(allTests,ignoredTests,backend);
       assert(allTests.filter(e=>e.kind==='test'&&e.name===PRE_MODEL_CPU_TEST).length===1
         && !ignoredTests.some(e=>e.name===PRE_MODEL_CPU_TEST), 'required unignored CPU preparation test missing or ignored');
-      // CI_IMPACT: one filesystem-only contract in the already-built API binary,
-      // once per preparation. This is not native learning/case acceptance evidence.
+      // CI_IMPACT: one CPU-only library/dispatch/future-layout entry in the already-built
+      // API binary, once per preparation. This is not native learning/case acceptance evidence.
       const cpu=await command([executable,PRE_MODEL_CPU_TEST,'--exact','--nocapture','--test-threads=1'],'pre-model-cpu',Math.min(BOUNDS.list,preparationRemaining()));
       receipt.preModelCpu={test:PRE_MODEL_CPU_TEST,log:'pre-model-cpu.log',counts:parseTestResult(cpu.result.output,cpu.result.exit,PRE_MODEL_CPU_TEST,'green')};
       assert(Date.now()-buildStart<=BOUNDS.build,'build preparation deadline exceeded');

@@ -175,10 +175,10 @@ export function selectLibTestExecutable(jsonl, statExecutable = defaultStatExecu
   return candidates[0];
 }
 
-export const PRE_MODEL_CPU_TEST = "tests::moss_training_acceptance_contracts::training_library_resolves_declared_final_file_by_filesystem_identity";
+export const PRE_MODEL_CPU_TEST = "tests::moss_training_acceptance_contracts::pre_model_library_and_dispatch_contracts";
 
-// Only source-owned compile, metadata, schema and the one filesystem-only
-// contract may use preparation completion. Model tests retain their supervisor.
+// Only source-owned compile, metadata, schema and the one pre-model CPU
+// contract entry may use preparation completion. Model tests retain their supervisor.
 export function isPreparationCommand(root, args) {
   if (!Array.isArray(args) || args.some(arg => typeof arg !== "string")) return false;
   if (args.length === 2 && ((args[0] === "rustc" && ["-Vv", "-vV"].includes(args[1])) || (args[0] === "cargo" && args[1] === "-V"))) return true;

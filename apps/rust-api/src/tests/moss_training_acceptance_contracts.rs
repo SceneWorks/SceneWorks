@@ -453,3 +453,119 @@ fn training_library_resolves_declared_final_file_by_filesystem_identity() {
         );
     }
 }
+
+// CI_IMPACT: one bounded CPU-only filesystem/API dispatcher guard before model admission.
+// No loader/tensor/GPU execution, downloads, new workflow or extra campaign command.
+#[test]
+fn pre_model_library_and_dispatch_contracts() {
+    // As in the existing CPU import contract, construct and poll the handler future
+    // on the shipped worker stack without depending on ambient RUST_MIN_STACK.
+    std::thread::Builder::new()
+        .name(sceneworks_worker::WORKER_ENTRY_THREAD_NAME.to_owned())
+        .stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("CPU dispatch runtime builds")
+                .block_on(pre_model_library_and_dispatch_cpu_contract());
+        })
+        .expect("CPU dispatch test thread spawns")
+        .join()
+        .expect("CPU dispatch test thread joins");
+}
+
+async fn pre_model_library_and_dispatch_cpu_contract() {
+    use super::moss_training_acceptance::worker_settings;
+    use super::support::*;
+    use sceneworks_worker::test_support as native;
+    training_library_resolves_declared_final_file_by_filesystem_identity();
+    let (dispatcher_bytes, wrapper_bytes) = native::acceptance_utility_future_sizes();
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    let app = create_app(settings.clone()).unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    let served = app.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, served)
+            .with_graceful_shutdown(async {
+                let _ = stopped.await;
+            })
+            .await
+    });
+    let mut worker = worker_settings(url, &settings, "cpu".into());
+    worker.backend_mlx_enabled = false;
+    worker.backend_candle_enabled = false;
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"CPU dispatcher refusal"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let source_only = settings.data_dir.join("models/imports/source-only");
+    std::fs::create_dir_all(&source_only).unwrap();
+    for invalid_image in [false, true] {
+        let (status, submitted) = request(app.clone(), "POST", "/api/v1/image/jobs",
+            json!({"projectId":project["id"],"model":"moss_image_base","prompt":"metadata-only refusal","width":256,"height":256})).await;
+        assert_eq!(status, StatusCode::CREATED, "{submitted}");
+        let id = submitted["id"].as_str().unwrap();
+        claim_job_as_worker(&app, id, &worker.worker_id, &["gpu", "image_generate"]).await;
+        let (status, claimed) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut job: sceneworks_core::contracts::JobSnapshot =
+            serde_json::from_value(claimed).unwrap();
+        // Fault injection into the claimed local snapshot only. No model data
+        // exists: the first case stops at the typed source guard; the second
+        // admits an empty confined local directory, then hits the image handler's
+        // missing-project check before every loader/tensor path.
+        job.payload.clear();
+        if invalid_image {
+            job.payload
+                .insert("model".into(), json!("cpu-only-invalid-image"));
+            job.payload.insert("modelManifestEntry".into(), json!({"id":"cpu-only-invalid-image",
+                "modelPath":source_only,"source":{"provider":"local","path":"models/imports/source-only"}}));
+        }
+        native::run_acceptance_utility_job(&worker, job).await;
+        let (status, failed) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/jobs/{id}"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(failed["status"], "failed", "{failed}");
+        let error = failed["error"].as_str().unwrap();
+        assert!(
+            error.contains(if invalid_image {
+                "Missing payload.projectId"
+            } else {
+                "no model manifest entries"
+            }),
+            "{failed}"
+        );
+        assert!(
+            failed["result"].get("assets").is_none(),
+            "refusal published model output"
+        );
+    }
+    let _ = stop.send(());
+    assert!(
+        server.await.unwrap().is_ok(),
+        "owned loopback server did not join"
+    );
+    assert!(
+        wrapper_bytes < dispatcher_bytes,
+        "acceptance wrapper must heap-pin the production dispatcher"
+    );
+}

@@ -118,14 +118,37 @@ fn require_acceptance_loopback(settings: &Settings) -> WorkerResult<()> {
 /// callers must read and validate the actual API terminal job snapshot.
 pub async fn run_acceptance_utility_job(settings: &Settings, job: JobSnapshot) {
     let api = ApiClient::new(settings);
-    crate::run_utility_job(
+    // Keep the production dispatcher out of the enclosing acceptance future
+    // layouts. Directly await the same job; no task, controller or teardown is
+    // detached, and the production worker's dispatch/stack contract is unchanged.
+    Box::pin(crate::run_utility_job(
         &api,
         settings,
         api.http_client(),
         job,
         gen_core::CancelFlag::new(),
-    )
+    ))
     .await;
+}
+
+/// Measure the actual unpolled dispatcher and acceptance-wrapper future layouts.
+/// The closures are never called: this constructs no API client, model or tensor.
+pub fn acceptance_utility_future_sizes() -> (usize, usize) {
+    fn size<A, F: std::future::Future>(_: impl FnOnce(A) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    let dispatcher = size(
+        |(api, settings, http, job): (
+            &'static ApiClient,
+            &'static Settings,
+            &'static reqwest::Client,
+            JobSnapshot,
+        )| crate::run_utility_job(api, settings, http, job, gen_core::CancelFlag::new()),
+    );
+    let wrapper = size(|(settings, job): (&'static Settings, JobSnapshot)| {
+        run_acceptance_utility_job(settings, job)
+    });
+    (dispatcher, wrapper)
 }
 
 /// Header-only forecast through the same selected spec, component/adapter pins

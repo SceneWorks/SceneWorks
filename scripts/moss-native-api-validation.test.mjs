@@ -624,12 +624,14 @@ test("preparation allowlist excludes actual native execution and learned Cargo t
   for (const command of [["cargo","test","--ignored"],["cargo","run"],["rustc","model.rs"],["/compiled/api",EXPECTED_TESTS[0],"--ignored","--exact"],["/compiled/api","--list",EXPECTED_TESTS[0]],["python3","arbitrary.py"],["python3","-I","-m","jsonschema","-i","/record","/another.schema.json"]]) assert.equal(isPreparationCommand(ROOT,command),false,command.join(" "));
 });
 
-test("preparation permits only the exact filesystem contract and fixed unignored flags", () => {
+test("preparation permits only the exact pre-model CPU entry and fixed unignored flags", () => {
+  assert.equal(PRE_MODEL_CPU_TEST, "tests::moss_training_acceptance_contracts::pre_model_library_and_dispatch_contracts");
   const command = [EXE, PRE_MODEL_CPU_TEST, "--exact", "--nocapture", "--test-threads=1"];
   assert.equal(isPreparationCommand(ROOT, command), true);
   for (const mutant of [
     command.map(value => value === PRE_MODEL_CPU_TEST ? `${value}_other` : value),
     command.map(value => value === PRE_MODEL_CPU_TEST ? EXPECTED_TESTS[0] : value),
+    command.map(value => value === PRE_MODEL_CPU_TEST ? "tests::moss_training_acceptance_contracts::training_library_resolves_declared_final_file_by_filesystem_identity" : value),
     command.filter(value => value !== "--exact"),
     command.map(value => value === "--exact" ? "--ignored" : value),
     command.map(value => value === "--test-threads=1" ? "--test-threads=2" : value),
