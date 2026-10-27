@@ -6989,6 +6989,7 @@ dependencies = [
  "fs_at",
  "getrandom 0.3.4",
  "glob",
+ "half",
  "image",
  "imagesize",
  "jsonschema",
