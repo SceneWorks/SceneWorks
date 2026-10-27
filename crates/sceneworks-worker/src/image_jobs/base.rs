@@ -11566,8 +11566,6 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // Turbo (sc-25907): the distilled weights stamp their own label for the same reason.
         "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
         "flux3_klein" | "flux3_klein_base" => "candle_flux3",
-        "moss_image_base" => "candle_moss_image_base",
-        "moss_image_sft" => "candle_moss_image_sft",
         "moss_image_base" | "moss_image_sft" => moss_adapter_label(model, "candle"),
         // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
         "supra2_img" => "candle_supra2",

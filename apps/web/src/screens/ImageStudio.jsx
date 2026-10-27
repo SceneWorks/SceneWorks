@@ -1755,6 +1755,11 @@ export function ImageStudio() {
   // Guard on a resolved model (sc-11962): before the catalog loads `resolutionOptions`
   // falls back to DEFAULT_RESOLUTION_OPTIONS, so an un-guarded snap would revert a
   // restored model-specific resolution (e.g. 1536x1536) during restart-restore.
+  //
+  // Exception: a FLUX 3 automatic-reference-sized recipe records the reference plan's
+  // resolved canvas (for example 80x64), not a user aspect choice. Snapping that value to
+  // the closest bucket would silently change the requested composition, and the automatic
+  // intent already owns the emitted axes. Fall back to the model's preferred bucket there.
   useEffect(() => {
     if (!selectedModel) {
       return;
@@ -1762,12 +1767,15 @@ export function ImageStudio() {
     if (resolutionOptions.includes(resolution)) {
       return;
     }
-    const dims = parseResolution(resolution);
+    const autoReferenceIntent = referenceDimensionIntent?.model === model &&
+      referenceDimensionIntent?.mode === mode &&
+      (referenceDimensionIntent.width === null || referenceDimensionIntent.height === null);
+    const dims = !autoReferenceIntent && parseResolution(resolution);
     setResolution(
       (dims && pickClosestResolution(dims.width, dims.height, resolutionOptions))
         || preferredResolution(selectedModel, resolutionOptions),
     );
-  }, [resolutionOptions, resolution, selectedModel]);
+  }, [resolutionOptions, resolution, selectedModel, referenceDimensionIntent, model, mode]);
   // Keep the selected quant tier valid for the active model (sc-8515). When the current tier is
   // still installed for this model, leave it; otherwise snap to the model's default selection
   // (sticky-for-this-(screen,model) → declared default → q8 base → q4 → first installed). Clears "" when

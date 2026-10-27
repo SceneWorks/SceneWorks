@@ -2176,6 +2176,7 @@ pub(crate) fn evaluate_shared_image(
         None,
         None,
         0,
+        None,
     )
 }
 
@@ -2909,6 +2910,9 @@ fn evaluate_shared_image_inner_priced_with_resources(
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
             exceeded_bounds: Vec::new(),
+            // The endpoint pair is a measured capacity capture, not an owned-process accounting
+            // observation; the ladder store carries no operating envelopes.
+            observed_operating_envelopes: Vec::new(),
         });
     let endpoint_anchors = endpoint_anchor_store
         .as_ref()
@@ -7298,6 +7302,7 @@ mod tests {
                 cache_state,
                 None,
                 Some(z_image_fixture_contract()),
+                None,
                 None,
                 None,
                 None,
