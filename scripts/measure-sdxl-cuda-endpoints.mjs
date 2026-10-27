@@ -217,6 +217,47 @@ export function parseReplayGpuSample(stdout, at = new Date().toISOString()) {
     gpuUtilization: numbers[2], memoryUtilization: numbers[3] };
 }
 
+// Only the manual endpoint capture waits here: at most 30 seconds per child exit.
+export async function settlePostExitGpu(probe, { timeoutMs = 30_000, pollMs = 200, now = Date.now,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+  const started = now(); const samples = []; let stable = [];
+  const fail = (reason) => {
+    const error = new Error(`${reason}; post-exit GPU1 samples: ${JSON.stringify(samples)}`);
+    error.samples = samples;
+    return error;
+  };
+  while (now() - started < timeoutMs) {
+    let raw;
+    try {
+      raw = await probe(timeoutMs - (now() - started));
+      const fields = raw.trim().split(",").map((field) => field.trim());
+      const values = fields.map(Number);
+      if (fields.length !== 3 || fields.some((field) => !field)
+          || values.some((value) => !Number.isSafeInteger(value) || value < 0)
+          || values[1] > 100 || values[2] > 100 || !Number.isSafeInteger(values[0] * 1024 ** 2)) {
+        throw new Error("invalid physical GPU1 post-exit telemetry");
+      }
+      const sample = { elapsedMs: now() - started, usedBytes: values[0] * 1024 ** 2,
+        gpuUtilization: values[1], memoryUtilization: values[2] };
+      samples.push(sample);
+      if (sample.gpuUtilization !== 0 || sample.memoryUtilization !== 0) stable = [];
+      else {
+        stable.push(sample);
+        if (Math.max(...stable.map((item) => item.usedBytes)) - Math.min(...stable.map((item) => item.usedBytes)) > 64 * 1024 ** 2) stable = [sample];
+        if (stable.length === 5 && now() - started <= timeoutMs) {
+          return { afterBytes: Math.max(...stable.map((item) => item.usedBytes)), samples, stableSamples: 5, elapsedMs: now() - started };
+        }
+      }
+    } catch (error) {
+      samples.push({ elapsedMs: now() - started, raw, error: error.message });
+      throw fail(error.message);
+    }
+    const remaining = timeoutMs - (now() - started);
+    if (remaining > 0) await sleep(Math.min(pollMs, remaining));
+  }
+  throw fail(`physical GPU1 did not settle to five consecutive idle stable samples within ${timeoutMs}ms`);
+}
+
 export function admittedReplayEnv(env, { state, hub, workerId, port, parentPid }) {
   const child = Object.fromEntries(Object.entries(env).filter(([key]) => !key.startsWith("SCENEWORKS_")
     && !/TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/.test(key)));
@@ -427,18 +468,6 @@ export async function main(argv = process.argv.slice(2)) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid physical GPU1 cleanup telemetry");
     return value * 1024 ** 2;
   };
-  const settledUsedBytes = async () => {
-    const samples = [];
-    for (let index = 0; index < 5; index++) {
-      const values = (await run(smi, ["-i", "1", "--query-gpu=memory.used,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"], { env, timeoutMs: 30_000 })).stdout.trim().split(",").map((value) => Number(value.trim()));
-      if (values.length !== 3 || values.some((value) => !Number.isSafeInteger(value) || value < 0)
-          || values[1] !== 0 || values[2] !== 0) throw new Error("post-exit physical GPU1 is not idle or observable");
-      samples.push(values[0] * 1024 ** 2);
-      if (index < 4) await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-    if (Math.max(...samples) - Math.min(...samples) > 64 * 1024 ** 2) throw new Error("post-exit physical GPU1 baseline is unstable");
-    return Math.max(...samples);
-  };
   for (const endpoint of ENDPOINTS) {
     let measurement;
     const outputPath = path.join(workDir, `${endpoint.name}.png`);
@@ -463,9 +492,22 @@ export async function main(argv = process.argv.slice(2)) {
         await writeFile(path.join(workDir, `${endpoint.name}-${request.action}.log`), result.stderr);
         const fragment = JSON.parse(result.stdout);
         if (request.action === "sdxl_endpoint") {
+          // Retain the exact adapter response even if post-exit validation fails.
+          // This diagnostic is never packaged as validated endpoint evidence.
+          await writeFile(path.join(workDir, `${endpoint.name}-response.json`), JSON.stringify(fragment, null, 2) + "\n");
           measurement = fragment.endpointMeasurement;
           delete fragment.endpointMeasurement;
-          measurement.cleanup = { beforeBytes, afterBytes: await settledUsedBytes(), toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true };
+          let settled;
+          try {
+            settled = await settlePostExitGpu(async (remainingMs) => (await run(smi,
+              ["-i", "1", "--query-gpu=memory.used,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"],
+              { env, timeoutMs: Math.min(5_000, remainingMs) })).stdout);
+          } catch (error) {
+            await writeFile(path.join(workDir, `${endpoint.name}-settle.json`), JSON.stringify({ status: "failed", error: error.message, samples: error.samples }, null, 2) + "\n");
+            throw error;
+          }
+          await writeFile(path.join(workDir, `${endpoint.name}-settle.json`), JSON.stringify({ status: "settled", ...settled }, null, 2) + "\n");
+          measurement.cleanup = { beforeBytes, afterBytes: settled.afterBytes, toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true };
           validateEndpoint(measurement, endpoint, pin);
         }
         return JSON.stringify(fragment);
