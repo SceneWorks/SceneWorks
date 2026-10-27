@@ -42,7 +42,7 @@ export default defineConfig({
   // the specific key keeps it lint-safe (no bare global) under no-undef.
   define: {
     "import.meta.env.VITE_APP_VERSION": JSON.stringify(pkg.version),
-    "import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS": JSON.stringify(loadSdxlCudaMemoryProjection()),
+    "import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS": JSON.stringify(JSON.stringify(loadSdxlCudaMemoryProjection())),
   },
   // react-konva pulls its own react-reconciler; without deduping, Vite's dep
   // optimizer can hand it a second React copy, tripping "Invalid hook call /

@@ -9,6 +9,11 @@ const root = pathToFileURL(`${resolve(dirname(fileURLToPath(import.meta.url)), "
 const read = (path) => readFileSync(new URL(path, root), "utf8");
 
 describe("SDXL CUDA browser evidence projection", () => {
+  it("delivers the same projection through Vite's string-valued environment seam", () => {
+    expect(JSON.parse(import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS)).toEqual(loadSdxlCudaMemoryProjection());
+    expect(JSON.parse(import.meta.env.VITE_SDXL_CUDA_MEMORY_ENDPOINTS)).not.toBeNull();
+  });
+
   it("projects both shipped observations without exposing capture paths or device identifiers", () => {
     const projection = loadSdxlCudaMemoryProjection();
     const config = JSON.parse(read("config/sdxl-cuda-memory-endpoints.json"));
