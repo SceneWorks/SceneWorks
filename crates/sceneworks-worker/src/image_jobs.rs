@@ -36,6 +36,11 @@ use sceneworks_core::workflow_share::{
 };
 use std::sync::Arc;
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+mod load_progress;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+use load_progress::message as load_activity_message;
+
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
 // bundle explicitly owns its provider catalog; this product module names only contract types and
 // the few bespoke utility APIs that do not implement the general registry traits.
@@ -589,7 +594,14 @@ async fn run_image_generate_job_unexplained(
     // the plan so the generation set + streamed `expectedCount` match what lands in
     // the gallery.
     #[cfg(target_os = "macos")]
-    let route = prepare_image_route(&request, settings)?;
+    let route = {
+        let request = request.clone();
+        let route_settings = settings.clone();
+        prepare_image_route_with_progress(api, settings, &job.id, move || {
+            prepare_image_route(&request, &route_settings)
+        })
+        .await?
+    };
     // Whether — and from what — every image this job writes embeds its sanitized workflow
     // (sc-15948). Resolved once here so the base write and the inline-upscale write share one
     // answer, and read live off the config dir so flipping the Settings toggle takes effect on the
@@ -615,7 +627,14 @@ async fn run_image_generate_job_unexplained(
     // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let route = prepare_candle_image_route(&request, settings)?;
+    let route = {
+        let request = request.clone();
+        let route_settings = settings.clone();
+        prepare_image_route_with_progress(api, settings, &job.id, move || {
+            prepare_candle_image_route(&request, &route_settings)
+        })
+        .await?
+    };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let plan = ImagePlan::with_count_and_adapter(
         &request,

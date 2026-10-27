@@ -492,7 +492,17 @@ fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
         .compile_linked(&root.root_id, "kreamania.safetensors")
         .unwrap();
 
-    let resolved = fx.store.resolve(&compiled.checkpoint_id).unwrap();
+    let mut verification = Vec::new();
+    let resolved = fx
+        .store
+        .resolve_with_verification(&compiled.checkpoint_id, |path| {
+            verification.push(path.map(Path::to_path_buf));
+        })
+        .unwrap();
+    assert!(
+        verification.is_empty(),
+        "trusted stamps must not claim to hash files"
+    );
     assert_eq!(resolved.checkpoint_id, compiled.checkpoint_id);
     assert_eq!(resolved.plan, compiled.plan);
     assert_eq!(resolved.family(), "krea_2");
@@ -517,9 +527,23 @@ fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
     let staging = fx.library_dir.join("kreamania.safetensors.staging");
     fs::write(&staging, &bytes).unwrap();
     fs::rename(&staging, &file).unwrap();
-    let rehashed = settled_store.resolve(&compiled.checkpoint_id).unwrap();
+    let rehashed = settled_store
+        .resolve_with_verification(&compiled.checkpoint_id, |path| {
+            verification.push(path.map(Path::to_path_buf));
+        })
+        .unwrap();
+    assert_eq!(verification, [Some(file.clone()), None]);
+    verification.clear();
     assert!(rehashed.layers[0].rehashed, "a new entry must be re-hashed");
-    let again = settled_store.resolve(&compiled.checkpoint_id).unwrap();
+    let again = settled_store
+        .resolve_with_verification(&compiled.checkpoint_id, |path| {
+            verification.push(path.map(Path::to_path_buf));
+        })
+        .unwrap();
+    assert!(
+        verification.is_empty(),
+        "warm verification must remain silent"
+    );
     assert!(!again.layers[0].rehashed, "the stamp was refreshed");
 
     // Same size, different bytes with a changed stamp (an in-place edit or a retargeted root):
@@ -542,7 +566,17 @@ fn resolve_verifies_stamps_and_refuses_drifted_or_missing_sources() {
         bound_modified,
         "the drift fixture must actually change the resolver's stamp"
     );
-    match fx.store.resolve(&compiled.checkpoint_id) {
+    let drifted = fx
+        .store
+        .resolve_with_verification(&compiled.checkpoint_id, |path| {
+            verification.push(path.map(Path::to_path_buf));
+        });
+    assert_eq!(
+        verification,
+        [Some(file.clone()), None],
+        "failed verification must also end its progress scope"
+    );
+    match drifted {
         Err(CheckpointPlanError::SourceDrifted {
             checkpoint_id,
             relative_path,
