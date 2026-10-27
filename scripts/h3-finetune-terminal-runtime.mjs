@@ -203,7 +203,7 @@ export async function executeFixture(p,c,swRoot,inferenceRoot,dir,deps={}) {
   const e={status:'executed',proof_kind:proof.proof_kind,caseId:c.id,backend:c.backend,sceneworks:p.sceneworks,inference:p.inference,hardware:await(deps.hardware??hardware)(c.backend,c.fixtureProof.deviceId),testInputSha256:c.inputs[0].sha256,files:['assertions.log','assertion-proof.json']};
   await save(path.join(dir,c.evidence),e);if(!fake){await sourcePair(p,swRoot,inferenceRoot);await verifyInputs(c,await allowedInputRoots(p,swRoot,inferenceRoot));}return {evidence:e,proof,log};
 }
-function spawnOwned(argv,env,cwd,logPath) {
+export function spawnOwned(argv,env,cwd,logPath) {
   const child=spawn(argv[0],argv.slice(1),{env,cwd,stdio:['pipe','pipe','pipe'],shell:false});
   const chunks=[]; let failure;
   const output=createWriteStream(logPath,{flags:'wx'});output.on('error',e=>{failure=e;});
@@ -211,7 +211,8 @@ function spawnOwned(argv,env,cwd,logPath) {
   child.on('error',e=>{failure=e;});
   const exited=new Promise(resolve=>child.on('close',(code,signal)=>resolve({code,signal})));
   for(const stream of [child.stdout,child.stderr]) stream.on('data',b=>chunks.push(Buffer.from(b)));
-  return {pid:child.pid,exitCode:()=>child.exitCode,stdin:child.stdin,signal:s=>child.kill(s),exit:async()=>{const result=await exited;await new Promise(resolve=>output.end(resolve));if(failure)throw failure;return result;},log:()=>Buffer.concat(chunks).toString('utf8')};
+  return {pid:child.pid,exitCode:()=>child.exitCode??child.signalCode, // A signal death (SIGABRT on a stack overflow) has a null exitCode.
+    stdin:child.stdin,signal:s=>child.kill(s),exit:async()=>{const result=await exited;await new Promise(resolve=>output.end(resolve));if(failure)throw failure;return result;},log:()=>Buffer.concat(chunks).toString('utf8')};
 }
 async function requireFreePort(port) {
   const socket=net.createServer();
@@ -373,14 +374,19 @@ export class OwnedService {
     await save(path.join(this.dir,log),records);this.drainRecords.push(log);this.jobs.clear();return records;
   }
   async stop() {
-    if(this.stopped)return;await this.assertOwner();await this.drain();
-    // No signal until every owned submitted job is terminal. Never signal arbitrary PIDs.
+    if(this.stopped)return;await this.assertOwner();
+    // No signal until every owned submitted job is terminal. Never signal arbitrary PIDs. A dead
+    // owned API cannot drain or cancel anything: its jobs end with it, so the owned worker and
+    // guardian still get their graceful shutdown request. Without it they outlived the case and
+    // held the lane open until the job timeout.
+    let drainError;try{await this.drain();}catch(error){if(this.api.exitCode()===null)throw error;drainError=error;}
     if((this.deps.platform??process.platform)==='win32')this.worker.stdin.end();else this.worker.signal('SIGTERM');
     const bounded=async proc=>{let timer;try{return await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned graceful exit timeout; no forced kill')),120000);})]);}finally{clearTimeout(timer);}};
     const workerExit=await bounded(this.worker);
     this.guardian.stdin.end();await bounded(this.guardian); // Existing API parent-death watchdog -> graceful drain, on BOTH OSes.
     const apiExit=await bounded(this.api);this.stopped=true;
-    await save(path.join(this.dir,`exits-${this.generation}.json`),{workerExit,apiExit,ended:new Date().toISOString()});
+    await save(path.join(this.dir,`exits-${this.generation}.json`),{workerExit,apiExit,ended:new Date().toISOString(),...(drainError?{drainError:drainError.message}:{})});
+    if(drainError)throw drainError;
     assert.equal(workerExit.code,0,'owned worker did not exit gracefully');assert.equal(apiExit.code,0,'owned API did not exit gracefully');
   }
   async checkStep(step,captures) {

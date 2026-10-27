@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat } from 'node:fs/promises';
-import { cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
+import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
 import { assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
@@ -182,6 +182,30 @@ test('every Windows cargo target is a short run-owned sibling, and only the nati
   assert.equal(assertOwnedNativeBinary(output,path.join(output,'native-target','x')),path.join(output,'native-target','x'));
   assert.equal(assertOwnedNativeBinary(output,path.join(parent,'7-2-native','debug','deps','x')),path.join(parent,'7-2-native','debug','deps','x'));
   for(const foreign of [path.join(parent,'7-2-fixture','x'),path.join(parent,'other','x'),path.join(os.tmpdir(),'x')])assert.throws(()=>assertOwnedNativeBinary(output,foreign),/outside the run-owned output|escapes/);
+});
+test('a crashed owned API still gets its worker and guardian a graceful shutdown request',async t=>{
+  // The MLX API aborted on a stack overflow mid-import. drain() could not reach it, stop() threw
+  // before any shutdown request, and the live worker/guardian held the lane open for hours.
+  const f=await fixture(t),fake=fakeRuntime(f);const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  service.jobs.add('import-1');fake.children.find(c=>c.kind==='api').close();
+  await assert.rejects(service.stop(),/not owned|listener|equal/);
+  const worker=fake.children.find(c=>c.kind==='worker'),guardian=fake.children.find(c=>c.kind==='guardian');
+  assert.ok(fake.calls.some(c=>c[0]==='signal'&&c[1]==='worker'),'worker must get its graceful SIGTERM');
+  assert.ok(fake.calls.some(c=>c[0]==='end'&&c[1]==='guardian'),'guardian must get its stdin end');
+  assert.equal(worker.exitCode(),0);assert.equal(guardian.exitCode(),0);
+  const exits=JSON.parse(await readFile(path.join(f.dir,`exits-${service.generation}.json`),'utf8'));assert.ok(exits.drainError);
+});
+test('a live owned API that cannot drain is never bypassed by a worker signal',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f,{wrongListener:false});const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  service.drain=async()=>{throw new Error('cooperative cancel did not complete; do not signal native worker');};
+  await assert.rejects(service.stop(),/cooperative cancel/);
+  assert.ok(!fake.calls.some(c=>c[0]==='signal'&&c[1]==='worker'));
+  service.drain=OwnedService.prototype.drain;await service.stop();
+});
+test('a real owned child that dies by signal reports as exited',{skip:process.platform==='win32'},async t=>{
+  const dir=await mkdtemp(path.join(os.tmpdir(),'sc26691-signal-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  const child=spawnOwned([process.execPath,'-e',"process.kill(process.pid,'SIGABRT')"],process.env,dir,path.join(dir,'child.log'));
+  assert.equal((await child.exit()).signal,'SIGABRT');assert.equal(child.exitCode(),'SIGABRT');
 });
 test('foreign listener is never contacted or signalled',async t=>{
   const f=await fixture(t),fake=fakeRuntime(f,{wrongListener:true});
