@@ -24,7 +24,7 @@ pub const PACKAGED_SDXL_CUDA_MEMORY_ENDPOINTS: &str =
 // in the ordinary anchor extractor: a fully bounded endpoint is not its unbounded derivation row.
 const PACKAGED_ENDPOINT_SOURCES: &[(&str, &str)] = &[];
 const GPU_UUID: &str = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
-const FINGERPRINT: &str = "sdxl-candle-sdxl-staged-decode-attention-v2";
+const FINGERPRINT: &str = "sdxl-candle-sdxl-staged-decode-attention-v3";
 const FIXTURE: &str = "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps";
 const PROMPT: &str = "a photorealistic red apple on a wooden table, studio lighting";
 const RGB_BYTES: u64 = 1024 * 1024 * 3;
@@ -559,7 +559,7 @@ fn expected_strategy(name: &str) -> Value {
     if name == "resident" {
         json!({"rung":"resident","engagedRungs":["resident"],"parameters":{}})
     } else {
-        json!({"rung":"bounded_attention","engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention"],"parameters":{"stageResidency":true,"decodeTileEdge":512,"decodeOverlap":64,"attentionChunkSize":67_108_864}})
+        json!({"rung":"bounded_attention","engagedRungs":["resident","staged_residency","bounded_decode","bounded_attention"],"parameters":{"stageResidency":true,"decodeTileEdge":256,"decodeOverlap":64,"attentionChunkSize":16_777_216}})
     }
 }
 
@@ -806,6 +806,8 @@ mod tests {
         );
         assert_eq!(pair.resident_load_peak_bytes, 1_000_000_000);
         assert_eq!(pair.sequential_parameters["stageResidency"], true);
+        assert_eq!(pair.sequential_parameters["decodeTileEdge"], 256);
+        assert_eq!(pair.sequential_parameters["attentionChunkSize"], 16_777_216);
         assert_eq!(
             pair.resident.load_shape,
             AnchorLoadShape::EagerMaterialization
@@ -819,6 +821,29 @@ mod tests {
             assert_eq!(bundle["records"][0]["predictedPeakBytes"], Value::Null);
             assert_eq!(bundle["records"][0]["quality"]["result"], "not_run");
         }
+    }
+
+    // CI_IMPACT: tiny JSON validation only; no device, model, build or timeout expansion.
+    #[test]
+    fn sdxl_endpoint_rejects_previous_minimum_and_fingerprint_even_when_resealed() {
+        let mut old_minimum = fixture();
+        let mut strategy = expected_strategy("sequential");
+        strategy["parameters"]["decodeTileEdge"] = json!(512);
+        strategy["parameters"]["attentionChunkSize"] = json!(67_108_864);
+        old_minimum.bundles[1]["records"][0]["strategy"] = strategy.clone();
+        old_minimum.summary["endpoints"][1]["planned"]["strategy"] = strategy;
+        assert!(old_minimum.load().is_err());
+
+        let mut old_fingerprint = fixture();
+        for (index, name) in ["resident", "sequential"].into_iter().enumerate() {
+            let fingerprint = json!("sdxl-candle-sdxl-staged-decode-attention-v2");
+            old_fingerprint.bundles[index]["records"][0]["calibrationFingerprint"] =
+                fingerprint.clone();
+            old_fingerprint.summary["endpoints"][index]["planned"]["calibrationFingerprint"] =
+                fingerprint.clone();
+            old_fingerprint.config["pair"][name]["source"]["calibrationFingerprint"] = fingerprint;
+        }
+        assert!(old_fingerprint.load().is_err());
     }
 
     #[test]

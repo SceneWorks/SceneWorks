@@ -17,7 +17,7 @@ export const ENDPOINTS = Object.freeze([
   { name: "sequential", strategy: {
     rung: "bounded_attention",
     engagedRungs: ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-    parameters: { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 },
+    parameters: { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16_777_216 },
   } },
 ]);
 
@@ -26,7 +26,7 @@ export function endpointCase(plan, endpoint) {
   planned.loadShape = "eager_materialization";
   planned.target.geometry = { width: 1024, height: 1024, batch: 1, frames: 1 };
   planned.strategy = structuredClone(endpoint.strategy);
-  planned.calibrationFingerprint = "sdxl-candle-sdxl-staged-decode-attention-v2";
+  planned.calibrationFingerprint = "sdxl-candle-sdxl-staged-decode-attention-v3";
   // Existing SDXL fixture validation accepts the five-rung prefix; the settings are separately
   // recorded from the actual GenerationRequest, with provider-default sampler and step count.
   planned.fixture = "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps";
@@ -137,16 +137,20 @@ export function validatePackagedEndpointSummarySource(source) {
 export function assertAdmittedReplaySelection(selection) {
   const parameters = selection?.parameters;
   const noDecode = parameters?.decodeTileEdge == null && parameters?.decodeOverlap == null;
-  const boundedDecode = parameters?.decodeTileEdge === 512 && parameters?.decodeOverlap === 64;
+  const boundedDecode = [256, 512].includes(parameters?.decodeTileEdge) && parameters?.decodeOverlap === 64;
   const noAttention = parameters?.attentionChunkSize == null;
   const recipe = typeof parameters?.stageResidency === "boolean" && parameters.transformerWindowSize == null
     && Object.keys(parameters).every((key) => ["stageResidency", "decodeTileEdge", "decodeOverlap", "attentionChunkSize", "transformerWindowSize"].includes(key))
     && (selection.strategy === "resident" && !parameters.stageResidency && noDecode && noAttention
       || selection.strategy === "staged_residency" && parameters.stageResidency && noDecode && noAttention
       || selection.strategy === "bounded_decode" && boundedDecode && noAttention
-      || selection.strategy === "bounded_attention" && boundedDecode && parameters.attentionChunkSize === 67_108_864);
+      || selection.strategy === "bounded_attention" && boundedDecode && [16_777_216, 67_108_864].includes(parameters.attentionChunkSize));
+  const minimum = ENDPOINTS[1].strategy.parameters;
+  const measuredMinimum = selection?.strategy === "bounded_attention" && parameters?.stageResidency === true
+    && parameters.decodeTileEdge === minimum.decodeTileEdge && parameters.decodeOverlap === minimum.decodeOverlap
+    && parameters.attentionChunkSize === minimum.attentionChunkSize;
   const coverage = selection?.strategy === "resident" ? "measured_resident"
-    : selection?.strategy === "bounded_attention" && parameters?.stageResidency ? "measured_minimum" : "estimated_intermediate";
+    : measuredMinimum ? "measured_minimum" : "estimated_intermediate";
   // availableGb is the selector's pool AFTER subtracting its reserve. Compare the
   // widened admission to that pool, and account for the reserve once against the
   // six-GiB guard. The selector canonicalizes decimal GiB ceilings to whole bytes.
