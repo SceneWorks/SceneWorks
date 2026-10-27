@@ -282,8 +282,26 @@ fn recovery_safetensors_streaming_checks_the_final_payload_chunk() {
 
 // CI_IMPACT: loopback API, production CPU utility registration/dispatcher and one literal
 // safetensors float. No model construction, tensor execution, GPU query or external download.
-#[tokio::test]
-async fn adapter_import_uses_cpu_utility_identity_and_preserves_exact_library_bytes() {
+#[test]
+fn adapter_import_uses_cpu_utility_identity_and_preserves_exact_library_bytes() {
+    // Match the shipped worker entry and the real-utility-worker test pattern. Construct the
+    // handler future on this thread too: its unoptimized platform handlers exceed libtest's stack.
+    std::thread::Builder::new()
+        .name(sceneworks_worker::WORKER_ENTRY_THREAD_NAME.to_owned())
+        .stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("CPU import runtime builds")
+                .block_on(adapter_import_cpu_contract());
+        })
+        .expect("CPU import test thread spawns")
+        .join()
+        .expect("CPU import test thread joins");
+}
+
+async fn adapter_import_cpu_contract() {
     use super::moss_training_acceptance::worker_settings;
     use super::support::*;
     use futures_util::FutureExt;
