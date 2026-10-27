@@ -15,7 +15,7 @@
           {
             "parameter": "attentionChunkSize",
             "testedValues": [
-              67108864
+              16777216
             ]
           },
           {
@@ -27,16 +27,16 @@
           {
             "parameter": "decodeTileEdge",
             "testedValues": [
-              512
+              256
             ]
           }
         ],
         "cases": [
           {
             "parameters": {
-              "attentionChunkSize": 67108864,
+              "attentionChunkSize": 16777216,
               "decodeOverlap": 64,
-              "decodeTileEdge": 512,
+              "decodeTileEdge": 256,
               "stageResidency": true
             },
             "result": "passed"
@@ -94,18 +94,18 @@
           "reclaimableBytes": 0
         },
         "denoise": {
-          "activeBytes": 4367319040,
-          "allocatorBytes": 4367319040,
+          "activeBytes": 3562012672,
+          "allocatorBytes": 3562012672,
           "reclaimableBytes": 0
         },
         "decode": {
-          "activeBytes": 6615465984,
-          "allocatorBytes": 6615465984,
+          "activeBytes": 3260022784,
+          "allocatorBytes": 3260022784,
           "reclaimableBytes": 0
         },
         "overall": {
-          "activeBytes": 6615465984,
-          "allocatorBytes": 6615465984,
+          "activeBytes": 3562012672,
+          "allocatorBytes": 3562012672,
           "reclaimableBytes": 0
         }
       },
@@ -132,17 +132,17 @@
           {
             "name": "denoiseDevicePeakDelta",
             "unit": "bytes",
-            "value": 4367319040
+            "value": 3562012672
           },
           {
             "name": "decodeDevicePeakDelta",
             "unit": "bytes",
-            "value": 6615465984
+            "value": 3260022784
           },
           {
             "name": "overallDevicePeakDelta",
             "unit": "bytes",
-            "value": 6615465984
+            "value": 3562012672
           },
           {
             "name": "referenceImages",
@@ -151,7 +151,7 @@
           }
         ]
       },
-      "capturedAt": "2026-10-27T00:10:41Z",
+      "capturedAt": "2026-10-27T01:49:06Z",
       "strategy": {
         "rung": "bounded_attention",
         "engagedRungs": [
@@ -161,26 +161,26 @@
           "bounded_attention"
         ],
         "parameters": {
-          "attentionChunkSize": 67108864,
+          "attentionChunkSize": 16777216,
           "decodeOverlap": 64,
-          "decodeTileEdge": 512,
+          "decodeTileEdge": 256,
           "stageResidency": true
         }
       },
       "loadShape": "eager_materialization",
-      "logicalCaseId": "implan-8861652e1826b6933b7e",
+      "logicalCaseId": "implan-7757e5e8867a4d83281c",
       "evidenceScope": "authoritative",
       "backend": "candle",
       "repositories": {
         "sceneWorks": {
-          "revision": "09b7189569a36e5efbe7765949f4075bbd6e00c2",
+          "revision": "0b274ad7be91ea92805978d4100781674efd2add",
           "dirty": false,
-          "matrixSourceRevision": "source-tree:c410c51eeb60ee7c14330105bf6a26f3a3c564aa282979798157c8514d91e2ac"
+          "matrixSourceRevision": "source-tree:915bb70f8d562f169c14e211dab95edf9d9c9cd733471f86dbf631f941107cdd"
         },
         "inference": {
-          "revision": "6a60ff234b0823027e8defc7fc69b6450d25f991",
+          "revision": "2f09626718e4d03628e3b7411e8cdc1c3acfbd4e",
           "dirty": false,
-          "closureDigest": "0be09095e365bda3fb633d5dc4d8a7c652019d6e50f6c02a2cfe01c83cf3aa3b"
+          "closureDigest": "a3fde658c141e778950270feeb76b5fe85f8485297a5ee8e75020f1c723e8ea8"
         }
       },
       "hardware": {
@@ -205,10 +205,10 @@
           "frames": 1
         }
       },
-      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v2",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v3",
       "fixture": "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps",
       "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-c15b17b62ecdffa6b545"
+      "id": "imc-c8dc3c697ce89d3342c7"
     }
   ]
 }

@@ -75,13 +75,13 @@
           "reclaimableBytes": 0
         },
         "decode": {
-          "activeBytes": 9467592704,
-          "allocatorBytes": 9467592704,
+          "activeBytes": 10004463616,
+          "allocatorBytes": 10004463616,
           "reclaimableBytes": 0
         },
         "overall": {
-          "activeBytes": 9467592704,
-          "allocatorBytes": 9467592704,
+          "activeBytes": 10004463616,
+          "allocatorBytes": 10004463616,
           "reclaimableBytes": 0
         }
       },
@@ -113,12 +113,12 @@
           {
             "name": "decodeDevicePeakDelta",
             "unit": "bytes",
-            "value": 9467592704
+            "value": 10004463616
           },
           {
             "name": "overallDevicePeakDelta",
             "unit": "bytes",
-            "value": 9467592704
+            "value": 10004463616
           },
           {
             "name": "referenceImages",
@@ -127,7 +127,7 @@
           }
         ]
       },
-      "capturedAt": "2026-10-27T00:10:02Z",
+      "capturedAt": "2026-10-27T01:48:25Z",
       "strategy": {
         "rung": "resident",
         "engagedRungs": [
@@ -136,19 +136,19 @@
         "parameters": {}
       },
       "loadShape": "eager_materialization",
-      "logicalCaseId": "implan-2b56531c950fd99f5b81",
+      "logicalCaseId": "implan-52ca34a7f0b169be8830",
       "evidenceScope": "authoritative",
       "backend": "candle",
       "repositories": {
         "sceneWorks": {
-          "revision": "09b7189569a36e5efbe7765949f4075bbd6e00c2",
+          "revision": "0b274ad7be91ea92805978d4100781674efd2add",
           "dirty": false,
-          "matrixSourceRevision": "source-tree:c410c51eeb60ee7c14330105bf6a26f3a3c564aa282979798157c8514d91e2ac"
+          "matrixSourceRevision": "source-tree:915bb70f8d562f169c14e211dab95edf9d9c9cd733471f86dbf631f941107cdd"
         },
         "inference": {
-          "revision": "6a60ff234b0823027e8defc7fc69b6450d25f991",
+          "revision": "2f09626718e4d03628e3b7411e8cdc1c3acfbd4e",
           "dirty": false,
-          "closureDigest": "0be09095e365bda3fb633d5dc4d8a7c652019d6e50f6c02a2cfe01c83cf3aa3b"
+          "closureDigest": "a3fde658c141e778950270feeb76b5fe85f8485297a5ee8e75020f1c723e8ea8"
         }
       },
       "hardware": {
@@ -173,10 +173,10 @@
           "frames": 1
         }
       },
-      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v2",
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v3",
       "fixture": "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps",
       "harnessVersion": "sceneworks-memory-v5",
-      "id": "imc-f49bf69009f7f30c7c45"
+      "id": "imc-915cfc33efc058c5060d"
     }
   ]
 }
