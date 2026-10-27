@@ -508,7 +508,7 @@ class SpeechStageTests(unittest.TestCase):
 
     def test_production_guard_accepts_approved_runners(self):
         for env in (
-            {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos-2"},
+            {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos"},
             {"RUNNER_OS": "Windows", "RUNNER_NAME": "cuda-windows"},
             {"RUNNER_OS": "Windows", "RUNNER_NAME": "cuda-windows-2"},
         ):
@@ -519,6 +519,7 @@ class SpeechStageTests(unittest.TestCase):
         base = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch", "RUNNER_TEMP": "/tmp"}
         cases = [
             {"RUNNER_OS": "macOS", "RUNNER_NAME": "michaels-dev-mac"},
+            {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos-2"},
             {"RUNNER_OS": "Windows", "RUNNER_NAME": "cuda-windows-3"},
             {"RUNNER_OS": "Linux", "RUNNER_NAME": "ubuntu-latest"},
             {},
