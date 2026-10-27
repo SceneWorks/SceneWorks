@@ -113,7 +113,8 @@
         ],
         "minDimension": 16,
         "maxDimension": 4096,
-        "requiresDimensionsMultipleOf": 16
+        "requiresDimensionsMultipleOf": 16,
+        "maxReferenceAssets": 4
       },
       "mlx": {},
       "candle": {
@@ -121,6 +122,7 @@
       },
       "ui": {
         "label": "MOSS-Image Base",
+        "multiReference": true,
         "description": "Native text-to-image with multilingual prose, tags and JSON/layout prompts; BF16 transformer/text encoder and FP32 sampler/VAE. 50-step author Euler by default. SFT 8-step acceleration is explicitly enabled and downloaded separately.",
         "recommendedFor": [
           "text_to_image"
@@ -226,7 +228,8 @@
         ],
         "minDimension": 16,
         "maxDimension": 4096,
-        "requiresDimensionsMultipleOf": 16
+        "requiresDimensionsMultipleOf": 16,
+        "maxReferenceAssets": 4
       },
       "mlx": {},
       "candle": {
@@ -234,6 +237,7 @@
       },
       "ui": {
         "label": "MOSS-Image SFT",
+        "multiReference": true,
         "description": "Native text-to-image with multilingual prose, tags and JSON/layout prompts; BF16 transformer/text encoder and FP32 sampler/VAE. 50-step author Euler by default. SFT 8-step acceleration is explicitly enabled and downloaded separately.",
         "recommendedFor": [
           "text_to_image"

@@ -3425,9 +3425,16 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         1,
         "candle route and payload File tokens must be prepared exactly once per job"
     );
-    let route_binding = run_job
-        .find("let route = prepare_candle_image_route")
-        .expect("one route binding");
+    let route_preparation = run_job
+        .find("prepare_candle_image_route(")
+        .expect("one candle route preparation");
+    let route_binding = run_job[..route_preparation]
+        .rfind("let route = {")
+        .expect("the prepared candle route is bound once");
+    assert!(
+        run_job[route_binding..route_preparation].contains("prepare_image_route_with_progress("),
+        "candle route preparation must report real source-verification progress"
+    );
     let plan_use = run_job[route_binding..]
         .find("ImagePlan::with_count_and_adapter")
         .expect("the resolved route feeds the plan");
@@ -22353,7 +22360,7 @@ mod preview_stream_tests {
                     ..
                 } => {
                     assert_eq!(index, expected_index);
-                    assert_eq!(actual_seed, seed);
+                    assert_eq!(actual_seed, Some(seed));
                     assert_eq!(face_likeness.unwrap()["score"], likeness);
                 }
                 other => panic!("expected a scored image, got {}", gen_event_name(&other)),
@@ -22437,7 +22444,7 @@ mod preview_stream_tests {
             other => panic!("expected a step event, got {}", gen_event_name(&other)),
         }
         match rx.try_recv().expect("image 0 completes") {
-            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, 70)),
+            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, Some(70))),
             other => panic!("expected an image event, got {}", gen_event_name(&other)),
         }
         assert!(
@@ -22452,11 +22459,12 @@ mod preview_stream_tests {
             GenEvent::Step { .. } => "Step",
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
+            GenEvent::LoadActivity { .. } => "LoadActivity",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::ImageFacts { .. } => "ImageFacts",
-            GenEvent::MossAssets(..) => "MossAssets",
+            GenEvent::AssetWritten { .. } => "AssetWritten",
             GenEvent::Image { .. } => "Image",
         }
     }
@@ -22541,8 +22549,8 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         .expect("the Preview arm of consume_gen_events");
     let arm_end = arm_start
         + base[arm_start..]
-            .find("\n            GenEvent::Image {")
-            .expect("the Preview arm is followed by the Image arm");
+            .find("\n            GenEvent::")
+            .expect("the Preview arm is followed by another event arm");
     let arm = &base[arm_start..arm_end];
     assert!(
         !arm.contains("update_job("),
@@ -29725,7 +29733,7 @@ async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_res
         for (index, seed) in [(0_usize, 5_i64), (1, 6)] {
             let _ = tx.blocking_send(GenEvent::Image {
                 index,
-                seed,
+                seed: Some(seed),
                 width: 64,
                 height: 64,
                 pixels: stub_rgb8(64, 64, seed),

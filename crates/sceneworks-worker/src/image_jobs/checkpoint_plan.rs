@@ -29,6 +29,18 @@ use sceneworks_core::checkpoint_plan_store::{
     CheckpointPlanError, CheckpointPlanStore, ResolvedCheckpointV1, ResolvedLayerV1,
 };
 
+fn resolve_checkpoint_plan_with_progress(
+    store: &CheckpointPlanStore,
+    checkpoint_id: &str,
+) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+    let mut verification = None;
+    store.resolve_with_verification(checkpoint_id, |path| {
+        verification = path.map(|_| {
+            gen_core::LoadActivityScope::enter(gen_core::LoadActivity::VerifyingFiles)
+        });
+    })
+}
+
 /// The adapter/engine id recorded on assets rendered through the plan-driven route.
 #[cfg(target_os = "macos")]
 const CHECKPOINT_PLAN_ENGINE: &str = "mlx_checkpoint_plan";
@@ -1110,7 +1122,8 @@ fn prepare_checkpoint_plan_sources(
     let store = CheckpointPlanStore::open(&settings.data_dir);
     // Integrity: never declined, always fatal. A drifted, missing, or tampered plan must not fall
     // through to a lane that would load the same bytes unverified.
-    let resolved = store.resolve(checkpoint_id).map_err(checkpoint_plan_refusal)?;
+    let resolved = resolve_checkpoint_plan_with_progress(&store, checkpoint_id)
+        .map_err(checkpoint_plan_refusal)?;
     let family = resolved.family().to_owned();
     // Family truth, in the order a planner needs it: is there an adapter at all, is this backend
     // eligible for it, and what on-disk shape do its dialects describe. All three come from the
@@ -1464,8 +1477,7 @@ pub(crate) fn checkpoint_plan_bespoke_tree(
     }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
-    let resolved = store
-        .resolve(&checkpoint_id)
+    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id)
         .map_err(checkpoint_plan_refusal)?;
     checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
     let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;
@@ -1578,8 +1590,7 @@ pub(crate) fn checkpoint_plan_bespoke_roles(
     }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
-    let resolved = store
-        .resolve(&checkpoint_id)
+    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id)
         .map_err(checkpoint_plan_refusal)?;
     if resolved.family() != family {
         return Err(WorkerError::InvalidPayload(format!(
@@ -1630,8 +1641,7 @@ fn checkpoint_plan_bespoke_primary(
     }
     let checkpoint_id = checkpoint_id.to_owned();
     let store = CheckpointPlanStore::open(&settings.data_dir);
-    let resolved = store
-        .resolve(&checkpoint_id)
+    let resolved = resolve_checkpoint_plan_with_progress(&store, &checkpoint_id)
         .map_err(checkpoint_plan_refusal)?;
     checkpoint_plan_family_matches(&resolved, &checkpoint_id, family)?;
     let adapter = checkpoint_plan_adapter(family, &checkpoint_id)?;

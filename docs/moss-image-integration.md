@@ -103,9 +103,9 @@ The final reviewed web profile totals 2,897,898 / 862,405 / 736,096 bytes (raw/g
 ## Training acceptance dispatch
 
 The existing `memory-catalog-campaign.yml` dispatcher keeps training acceptance isolated from
-catalog, edit and upstream-reference profiles. Dispatch the exact reviewed source with `--ref`,
+catalog and the other model profiles. Dispatch the exact reviewed source with `--ref`,
 `run_moss_training_acceptance=true`, an explicitly eligible `moss_runner_label`, and
-`moss_phase=capture`; leave `moss_terminal` and `moss_reference` as their empty `{}` defaults.
+`moss_phase=capture`.
 The source is the actual dispatched GitHub SHA. There is no separate `workflowSource` input.
 
 For `moss_phase=finalize`, supply the existing `moss_inspection_json` document. Its positive

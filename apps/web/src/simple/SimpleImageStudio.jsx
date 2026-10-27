@@ -305,8 +305,8 @@ export function SimpleImageStudio() {
   // reduced to a single image in this shell. The plural list is kept ALONGSIDE the existing single
   // tile rather than replacing it: every other edit model in Simple takes one source image, and the
   // tile is how the design surfaces it.
-  const maxSimpleReferences = mossEdit ? 4 : maxReferencesForModel(selectedModel, 1);
-  const supportsOrderedReferences = mossEdit || (maxSimpleReferences > 1 && Boolean(selectedModel?.ui?.multiReference));
+  const maxSimpleReferences = maxReferencesForModel(selectedModel, 1);
+  const supportsOrderedReferences = maxSimpleReferences > 1 && Boolean(selectedModel?.ui?.multiReference);
   // Drop extras when the model cannot use them, so the rail never shows what will not be sent.
   useEffect(() => {
     if (!supportsOrderedReferences && extraReferenceIds.length) {
@@ -615,7 +615,7 @@ export function SimpleImageStudio() {
         ) : null}
       </div>
 
-      {mossEdit ? <MossReferencePicker assets={assets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} assetIds={orderedReferenceIds} onChange={([first, ...rest]) => { setReferenceAssetId(first ?? null); setExtraReferenceIds(rest); }} /> : null}
+      {mossEdit ? <MossReferencePicker assets={assets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} max={maxSimpleReferences} assetIds={orderedReferenceIds} onChange={([first, ...rest]) => { setReferenceAssetId(first ?? null); setExtraReferenceIds(rest); }} /> : null}
 
       {mossEdit ? <MossImageEditControls model={selectedModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} advanced={mossImageAdvanced} onAdvancedChange={setMossImageAdvanced} assets={assets} importAsset={importAsset} promptBatch={mossPromptBatch} onPromptBatchChange={(batch) => { setMossPromptBatch(batch); if (batch.length) setPrompt(batch[0]); }} /> : null}
 

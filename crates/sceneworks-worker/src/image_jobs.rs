@@ -36,6 +36,11 @@ use sceneworks_core::workflow_share::{
 };
 use std::sync::Arc;
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+mod load_progress;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+use load_progress::message as load_activity_message;
+
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
 // bundle explicitly owns its provider catalog; this product module names only contract types and
 // the few bespoke utility APIs that do not implement the general registry traits.
@@ -589,7 +594,14 @@ async fn run_image_generate_job_unexplained(
     // the plan so the generation set + streamed `expectedCount` match what lands in
     // the gallery.
     #[cfg(target_os = "macos")]
-    let route = prepare_image_route(&request, settings)?;
+    let route = {
+        let request = request.clone();
+        let route_settings = settings.clone();
+        prepare_image_route_with_progress(api, settings, &job.id, move || {
+            prepare_image_route(&request, &route_settings)
+        })
+        .await?
+    };
     // Whether — and from what — every image this job writes embeds its sanitized workflow
     // (sc-15948). Resolved once here so the base write and the inline-upscale write share one
     // answer, and read live off the config dir so flipping the Settings toggle takes effect on the
@@ -615,7 +627,14 @@ async fn run_image_generate_job_unexplained(
     // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let route = prepare_candle_image_route(&request, settings)?;
+    let route = {
+        let request = request.clone();
+        let route_settings = settings.clone();
+        prepare_image_route_with_progress(api, settings, &job.id, move || {
+            prepare_candle_image_route(&request, &route_settings)
+        })
+        .await?
+    };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
@@ -1747,21 +1766,9 @@ async fn run_image_generate_job_unexplained(
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
     let warnings: Vec<String> = Vec::new();
-    let mut message = format!("Generated {} image(s).", plan.image_count);
+    let mut message = format!("Generated {} output(s).", plan.image_count);
     if !warnings.is_empty() {
         message.push_str(&format!(" Warning: {}", warnings.join(" ")));
-    }
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    let moss_batch = { plan.moss_staged.lock().expect("MOSS staging lock").take() };
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    if let Some(batch) = moss_batch {
-        return publish_moss_batch(api, job, &plan, backend, &asset_writes, batch).await;
     }
     update_job(
         api,
@@ -1878,11 +1885,6 @@ pub(crate) struct ImagePlan {
     /// Worker-resolved LoRAs in inference order. Names come from exact filenames, weights use the
     /// same parser as the engine adapter specs, and hashes come from those exact files.
     pub(crate) loras: Vec<WorkflowLora>,
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    moss_staged: Arc<std::sync::Mutex<Option<MossOutputBatch>>>,
 }
 
 /// Resolve the exact single-file checkpoint for an imported Krea/SDXL route. The adapter label is
@@ -2670,11 +2672,6 @@ impl ImagePlan {
             workflow_source,
             model_hash: None,
             loras: Vec::new(),
-            #[cfg(any(
-                target_os = "macos",
-                all(not(target_os = "macos"), feature = "backend-candle")
-            ))]
-            moss_staged: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -2869,6 +2866,22 @@ pub(crate) fn reattach_alpha(
 /// every image of the batch so reopening any one restores the batch.
 pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
 
+fn moss_input_parents(raw: &JsonObject) -> WorkerResult<Vec<String>> {
+    let mut parents = sceneworks_core::moss_image::edit_reference_slots(raw)
+        .map_err(WorkerError::InvalidPayload)?;
+    if let Some(value) = raw.get(sceneworks_core::moss_image_advanced::KEY) {
+        let options: sceneworks_core::moss_image_advanced::EditAdvanced =
+            serde_json::from_value(value.clone())
+                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        for reference in sceneworks_core::moss_image_advanced::references(&options) {
+            if !parents.contains(&reference.asset_id) {
+                parents.push(reference.asset_id.clone());
+            }
+        }
+    }
+    Ok(parents)
+}
+
 /// Save image `index` (its engine `pixels`, 3- or 4-channel) under `assets/images/` and return the
 /// flat fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
@@ -2971,23 +2984,12 @@ pub(crate) fn write_image_asset(
         plan.slug,
         index + 1
     );
-    let namespace =
-        if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
-            "moss-edit/"
-        } else {
-            ""
-        };
-    let media_rel = format!("assets/images/{namespace}{}/{filename}", plan.genset_id);
+    let media_rel = format!("assets/images/{}/{filename}", plan.genset_id);
     let media_path = project_path.join(&media_rel);
     if let Some(parent) = media_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let temp_path = media_path.with_extension("tmp.png");
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    let mut moss_files = moss_stage_image_files(plan, &temp_path, &media_path)?;
     // The one funnel every generated image goes through, and therefore the one place the sanitized
     // workflow needs embedding (epic 15945, sc-15948). `None` — embedding off, or no payload to
     // describe — routes through the same `save_with_format` call this used to make, byte for byte.
@@ -3045,9 +3047,7 @@ pub(crate) fn write_image_asset(
                     share.advanced.insert("steps".into(), steps.clone());
                 }
                 if raw_settings.contains_key(sceneworks_core::moss_image_advanced::KEY) {
-                    share.seed = report
-                        .pointer("/base/samples/0/seed")
-                        .and_then(Value::as_i64);
+                    share.seed = seed;
                 }
                 share
                     .advanced
@@ -3130,12 +3130,12 @@ pub(crate) fn write_image_asset(
         "sourceAssetId": source_asset_id,
         "rawAdapterSettings": raw_settings,
     });
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
-    moss_files.commit();
-    Ok(fact.as_object().cloned().expect("json! object literal"))
+    let mut fact = fact.as_object().cloned().expect("json! object literal");
+    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+        fact.insert("parents".into(), json!(moss_input_parents(&raw_settings)?));
+        fact.insert("batchIndex".into(), json!(index));
+    }
+    Ok(fact)
 }
 
 /// Normalise the UI's upscale engine id to the canonical worker id. SeedVR2 stays itself;
@@ -3458,14 +3458,7 @@ fn write_upscaled_asset(
         plan.slug,
         index + 1
     );
-    let namespace = if sceneworks_core::moss_image::is_moss(&plan.request.model)
-        && plan.request.mode == "edit_image"
-    {
-        "moss-edit/"
-    } else {
-        ""
-    };
-    let media_rel = format!("assets/images/{namespace}{}/{filename}", plan.genset_id);
+    let media_rel = format!("assets/images/{}/{filename}", plan.genset_id);
     let media_path = project_path.join(&media_rel);
     if let Some(parent) = media_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -3488,7 +3481,6 @@ fn write_upscaled_asset(
     };
 
     let temp_path = media_path.with_extension("tmp.png");
-    let mut moss_files = moss_stage_image_files(plan, &temp_path, &media_path)?;
     // The upscaled variant is the asset users share most, so it carries the workflow that produced
     // IT rather than a stale base-generation envelope (sc-15948) — see `upscaled_workflow_share`.
     let mut share = plan
@@ -3566,7 +3558,6 @@ fn write_upscaled_asset(
     }
     extra.insert("engine".to_owned(), json!(engine_id));
     fact.insert("extra".to_owned(), Value::Object(extra));
-    moss_files.commit();
     Ok(fact)
 }
 

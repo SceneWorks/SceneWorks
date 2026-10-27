@@ -2,11 +2,7 @@
 //! Values are never pickled, converted to a lower precision, or rewritten on import.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    fs::File,
-    io::{Read, Seek, SeekFrom},
-    path::Path,
-};
+use std::{fs::File, io::Read, path::Path};
 
 pub const MIME: &str = "application/x-npy";
 pub const MAX_DATA_BYTES: usize = 512 * 1024 * 1024;
@@ -22,7 +18,7 @@ pub struct TensorMetadata {
     pub sha256: String,
 }
 
-fn header(file: &mut File) -> Result<(TensorMetadata, usize), String> {
+fn header(file: &mut File) -> Result<(TensorMetadata, usize, Vec<u8>), String> {
     let stat = file.metadata().map_err(|e| e.to_string())?;
     if !stat.is_file() || stat.len() < 10 {
         return Err("tensor must be a nonempty regular NPY file".into());
@@ -36,11 +32,13 @@ fn header(file: &mut File) -> Result<(TensorMetadata, usize), String> {
     if &prefix[..6] != b"\x93NUMPY" || prefix[7] != 0 {
         return Err("expected inert NPY version 1, 2 or 3".into());
     }
+    let mut encoded_header = prefix.to_vec();
     let (n, start) = match prefix[6] {
         1 => (u16::from_le_bytes([prefix[8], prefix[9]]) as usize, 10),
         2 | 3 => {
             let mut tail = [0; 2];
             file.read_exact(&mut tail).map_err(|e| e.to_string())?;
+            encoded_header.extend_from_slice(&tail);
             (
                 u32::from_le_bytes([prefix[8], prefix[9], tail[0], tail[1]]) as usize,
                 12,
@@ -53,6 +51,7 @@ fn header(file: &mut File) -> Result<(TensorMetadata, usize), String> {
     }
     let mut bytes = vec![0; n];
     file.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+    encoded_header.extend_from_slice(&bytes);
     let text = std::str::from_utf8(&bytes).map_err(|_| "NPY header must be ASCII text")?;
     if !text.is_ascii() || !text.ends_with('\n') {
         return Err("NPY header must be an ASCII dictionary ending in newline".into());
@@ -175,25 +174,18 @@ fn header(file: &mut File) -> Result<(TensorMetadata, usize), String> {
             sha256: String::new(),
         },
         offset,
+        encoded_header,
     ))
 }
 
 /// Header/shape/byte bounds precede payload reads; finite/binary checks stream in fixed memory.
 pub fn inspect(path: &Path) -> Result<TensorMetadata, String> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
-    let (mut metadata, offset) = header(&mut file)?;
-    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
+    let (mut metadata, _, header) = header(&mut file)?;
     let mut hash = Sha256::new();
+    hash.update(&header);
     let mut buffer = [0u8; 65536];
-    let mut remaining = offset;
-    while remaining > 0 {
-        let n = remaining.min(buffer.len());
-        file.read_exact(&mut buffer[..n])
-            .map_err(|e| e.to_string())?;
-        hash.update(&buffer[..n]);
-        remaining -= n;
-    }
-    remaining = metadata.byte_length;
+    let mut remaining = metadata.byte_length;
     while remaining > 0 {
         let n = remaining.min(buffer.len());
         file.read_exact(&mut buffer[..n])
@@ -221,29 +213,47 @@ pub fn inspect(path: &Path) -> Result<TensorMetadata, String> {
     Ok(metadata)
 }
 
-pub fn read_data(path: &Path, expected: &TensorMetadata) -> Result<Vec<u8>, String> {
-    if &inspect(path)? != expected {
-        return Err("tensor identity changed; reacquire the exact artifact".into());
-    }
+/// Materialize a tensor in one checked read, retaining the exact metadata and data bytes.
+/// Header bounds precede allocation; the digest covers the same bytes whose values are checked.
+pub fn read_checked(
+    path: &Path,
+    max_payload_bytes: usize,
+) -> Result<(TensorMetadata, Vec<u8>), String> {
     let mut file = File::open(path).map_err(|e| e.to_string())?;
-    let (meta, offset) = header(&mut file)?;
-    if meta.shape != expected.shape
-        || meta.dtype != expected.dtype
-        || meta.byte_length != expected.byte_length
-    {
-        return Err("tensor header changed".into());
+    let (mut metadata, offset, header) = header(&mut file)?;
+    if metadata.byte_length > max_payload_bytes {
+        return Err("tensor payload exceeds the remaining request budget".into());
     }
-    let mut bytes = Vec::with_capacity(offset + meta.byte_length);
-    file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-    file.take((offset + meta.byte_length + 1) as u64)
+    let mut bytes = Vec::with_capacity(offset + metadata.byte_length);
+    bytes.extend_from_slice(&header);
+    file.take((metadata.byte_length + 1) as u64)
         .read_to_end(&mut bytes)
         .map_err(|e| e.to_string())?;
-    if bytes.len() != offset + meta.byte_length
-        || format!("{:x}", Sha256::digest(&bytes)) != expected.sha256
-    {
-        return Err("tensor identity changed while loading".into());
+    if bytes.len() != offset + metadata.byte_length {
+        return Err("tensor changed while reading".into());
     }
-    Ok(bytes.split_off(offset))
+    let data = &bytes[offset..];
+    let valid = if metadata.dtype == "float32" {
+        data.as_chunks::<4>()
+            .0
+            .iter()
+            .all(|b| f32::from_le_bytes(*b).is_finite())
+    } else {
+        data.iter().all(|b| *b <= 1)
+    };
+    if !valid {
+        return Err("tensor values must be finite float32 or binary uint8".into());
+    }
+    metadata.sha256 = format!("{:x}", Sha256::digest(&bytes));
+    Ok((metadata, bytes.split_off(offset)))
+}
+
+pub fn read_data(path: &Path, expected: &TensorMetadata) -> Result<Vec<u8>, String> {
+    let (metadata, bytes) = read_checked(path, MAX_DATA_BYTES)?;
+    if &metadata != expected {
+        return Err("tensor identity changed; reacquire the exact artifact".into());
+    }
+    Ok(bytes)
 }
 
 pub fn encode_f32(shape: &[usize], values: &[f32]) -> Result<Vec<u8>, String> {
@@ -293,7 +303,10 @@ mod tests {
         assert_eq!(meta.shape, [1, 1, 2, 2]);
         assert_eq!(meta.dtype, "float32");
         assert_eq!(meta.sha256, format!("{:x}", Sha256::digest(&bytes)));
-        let raw = read_data(&path, &meta).unwrap();
+        assert!(read_checked(&path, meta.byte_length - 1).is_err());
+        let (checked_meta, raw) = read_checked(&path, meta.byte_length).unwrap();
+        assert_eq!(checked_meta, meta);
+        assert_eq!(read_data(&path, &meta).unwrap(), raw);
         assert_eq!(
             raw,
             values
@@ -342,8 +355,28 @@ mod tests {
             bytes.extend([0; 8]);
             std::fs::write(&path, bytes).unwrap();
             assert!(inspect(&path).is_err());
+            assert!(read_checked(&path, MAX_DATA_BYTES).is_err());
         }
     }
+    #[test]
+    fn checked_materialization_requires_binary_masks() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("mask.npy");
+        let header = b"{'descr': '|u1', 'fortran_order': False, 'shape': (1,2), }\n";
+        let mut bytes = b"\x93NUMPY\x01\x00".to_vec();
+        bytes.extend((header.len() as u16).to_le_bytes());
+        bytes.extend(header);
+        bytes.extend([0, 1]);
+        std::fs::write(&path, &bytes).unwrap();
+        let (metadata, data) = read_checked(&path, 2).unwrap();
+        assert_eq!(metadata, inspect(&path).unwrap());
+        assert_eq!(data, [0, 1]);
+        *bytes.last_mut().unwrap() = 2;
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(inspect(&path).is_err());
+        assert!(read_checked(&path, 2).is_err());
+    }
+
     #[test]
     fn malformed_headers_dtypes_order_nonfinite_lengths_and_budget_fail_closed() {
         let temp = tempfile::tempdir().unwrap();
@@ -374,6 +407,7 @@ mod tests {
         ] {
             std::fs::write(&path, bytes).unwrap();
             assert!(inspect(&path).is_err());
+            assert!(read_checked(&path, MAX_DATA_BYTES).is_err());
         }
         let file = File::create(&path).unwrap();
         file.set_len((MAX_DATA_BYTES + MAX_HEADER_BYTES + 13) as u64)

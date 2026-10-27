@@ -12,7 +12,7 @@ mod dispatch_transaction_tests {
         Fail,
         CancelAfterOutput,
         MissingReport,
-        InvalidReport,
+        WrongReferenceReceipt,
         NoOutput,
         ApiCancel,
     }
@@ -31,6 +31,7 @@ mod dispatch_transaction_tests {
         jobs: Mutex<std::collections::HashMap<String, Value>>,
         expected_references: Mutex<Vec<(u32, u32, Vec<u8>)>>,
         use_kv_cache: AtomicBool,
+        recording_request: Mutex<Option<Value>>,
     }
     impl Control {
         fn new() -> Self {
@@ -54,10 +55,71 @@ mod dispatch_transaction_tests {
                 jobs: Mutex::new(Default::default()),
                 expected_references: Mutex::new(vec![(48, 16, vec![73; 48 * 16 * 3])]),
                 use_kv_cache: false.into(),
+                recording_request: Mutex::new(None),
             }
         }
         fn committed(&self, bytes: u64) {
             self.budget.lock().unwrap().committed_bytes = bytes;
+        }
+        fn check_recording_request(
+            &self,
+            request: &GenerationRequest,
+            inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
+            render: bool,
+        ) -> gen_core::Result<bool> {
+            let expected = self.recording_request.lock().unwrap();
+            let Some(expected) = expected.as_ref() else {
+                return Ok(false);
+            };
+            let actual = inputs
+                .references
+                .iter()
+                .map(|image| (image.width, image.height, image.pixels.clone()))
+                .collect::<Vec<_>>();
+            if actual != *self.expected_references.lock().unwrap() {
+                return Err(gen_core::Error::Unsupported(
+                    "selected water-bottle reference bytes changed".into(),
+                ));
+            }
+            assert_eq!(request.prompt, expected["prompt"].as_str().unwrap());
+            assert_eq!(
+                json!([request.width, request.height, request.count]),
+                json!([expected["width"], expected["height"], expected["count"]])
+            );
+            assert_eq!(
+                request.steps.map(u64::from),
+                expected["advanced"]["steps"].as_u64()
+            );
+            assert_eq!(
+                request.guidance.map(f64::from),
+                expected["advanced"]["guidanceScale"].as_f64()
+            );
+            assert_eq!(
+                request.scheduler_shift.map(f64::from),
+                expected["advanced"]["schedulerShift"].as_f64()
+            );
+            let options: gen_core::moss_image::MossImageOptions =
+                serde_json::from_value(expected["advanced"]["mossImage"].clone()).unwrap();
+            assert_eq!(
+                request.moss_image.as_ref().unwrap(),
+                &options,
+                "all authored native options"
+            );
+            assert_eq!(
+                json!({"reference_max_edge":inputs.reference_max_edge,"use_kv_cache":inputs.use_kv_cache}),
+                expected["advanced"]["mossImageEdit"]
+            );
+            assert!(
+                inputs.advanced.positive.is_none()
+                    && inputs.advanced.negative.is_none()
+                    && inputs.advanced.noise.is_none()
+                    && inputs.advanced.negative_prompts.is_none()
+            );
+            assert_eq!(inputs.advanced.output, MossImageOutputKind::Images);
+            if render {
+                assert_eq!(request.seed, expected["seed"].as_u64());
+            }
+            Ok(true)
         }
         fn assert_references(&self, references: &[Image], use_kv_cache: bool) {
             assert_eq!(
@@ -109,6 +171,23 @@ mod dispatch_transaction_tests {
             input.spec.validate_prepared_file_pins().unwrap();
             assert_eq!(input.resolved.acceleration, MossImageAcceleration::Off);
             assert_eq!(input.total_count, 1);
+            if self
+                .control
+                .check_recording_request(
+                    input.native,
+                    gen_core::moss_image_edit::MossImageEditInputs {
+                        references: input.references,
+                        reference_max_edge: input.edit_options.reference_max_edge,
+                        use_kv_cache: input.edit_options.use_kv_cache,
+                        advanced: input.advanced,
+                    },
+                    false,
+                )
+                .map_err(|e| crate::classify_engine_error("recording reference admission", e))?
+            {
+                self.control.cold.fetch_add(1, Ordering::SeqCst);
+                return Ok(73);
+            }
             if input.edit {
                 assert_eq!(
                     input.advanced.negative_prompts.unwrap(),
@@ -159,6 +238,13 @@ mod dispatch_transaction_tests {
             request: &GenerationRequest,
             inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
         ) -> gen_core::Result<u64> {
+            if self
+                .control
+                .check_recording_request(request, inputs, false)?
+            {
+                self.control.warm.fetch_add(1, Ordering::SeqCst);
+                return Ok(73);
+            }
             assert_eq!(
                 inputs.advanced.negative_prompts.unwrap(),
                 &["fixture negative"]
@@ -187,6 +273,15 @@ mod dispatch_transaction_tests {
             inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
             progress: &mut dyn FnMut(Progress),
         ) -> gen_core::Result<MossImageAdvancedOutput> {
+            if self
+                .control
+                .check_recording_request(request, inputs, true)?
+            {
+                self.control.renders.fetch_add(1, Ordering::SeqCst);
+                return Err(gen_core::Error::Unsupported(
+                    "recorded native edit boundary; no inference executed".into(),
+                ));
+            }
             assert_eq!(
                 inputs.advanced.negative_prompts.unwrap(),
                 &["fixture negative"]
@@ -202,13 +297,14 @@ mod dispatch_transaction_tests {
                 .generate_moss_image_edit(request, inputs, progress)?;
             match attempt {
                 Attempt::MissingReport => *self.inner.edit_report.borrow_mut() = None,
-                Attempt::InvalidReport => {
+                Attempt::WrongReferenceReceipt => {
                     self.inner
                         .edit_report
                         .borrow_mut()
                         .as_mut()
                         .unwrap()
-                        .applied_projections = 0
+                        .references[0]
+                        .original_dimensions[0] += 1
                 }
                 Attempt::NoOutput => output = MossImageAdvancedOutput::Images(vec![]),
                 Attempt::ApiCancel => {
@@ -327,7 +423,6 @@ mod dispatch_transaction_tests {
         control: Arc<Control>,
     ) -> (WorkerResult<()>, Vec<Value>, String) {
         let model = variant.provider_id();
-        let backend = control.backend;
         let manifest = json!({"limits":{"minDimension":16},"conditionalComponents":[{
         "provider":"huggingface","repo":"synthetic/moss-edit-dispatch-fixture","revision":"synthetic",
         "componentId":"moss-image-edit","requiredFor":["moss_image_edit"],"files":["fixture.bin"]}]});
@@ -340,6 +435,19 @@ mod dispatch_transaction_tests {
                 json!({"negativePrompts":["fixture negative"]});
             payload["advanced"]["mossImageEdit"] = json!({"reference_max_edge":32,"use_kv_cache":control.use_kv_cache.load(Ordering::SeqCst)});
         }
+        dispatch_payload(settings, project_path, payload, variant, runtime, control).await
+    }
+
+    async fn dispatch_payload(
+        settings: &Settings,
+        project_path: &Path,
+        payload: Value,
+        variant: MossImageVariant,
+        runtime: Arc<FixtureRuntime>,
+        control: Arc<Control>,
+    ) -> (WorkerResult<()>, Vec<Value>, String) {
+        let model = variant.provider_id();
+        let backend = control.backend;
         let id = format!("moss-dispatch-{}", Uuid::new_v4());
         control
             .jobs
@@ -347,10 +455,17 @@ mod dispatch_transaction_tests {
             .unwrap()
             .insert(id.clone(), payload.clone());
         let mut job = crate::tests::job_snapshot_json(&id, false);
-        job["projectId"] = json!(project);
+        job["projectId"] = payload["projectId"].clone();
         job["payload"] = payload.clone();
         let job: JobSnapshot = serde_json::from_value(job).unwrap();
-        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        let mut request = ImageRequest::from_payload(payload.as_object().unwrap());
+        if request.model_manifest_entry.is_empty() {
+            // Test-owned source metadata stays separate from the shared submitted request.
+            request.model_manifest_entry = json!({"limits":{"minDimension":16},"conditionalComponents":[{
+                "provider":"huggingface","repo":"synthetic/moss-edit-dispatch-fixture","revision":"synthetic",
+                "componentId":"moss-image-edit","requiredFor":["moss_image_edit"],"files":["fixture.bin"]
+            }]}).as_object().unwrap().clone();
+        }
         let plan = ImagePlan::with_count_and_adapter(
             &request,
             1,
@@ -400,27 +515,133 @@ mod dispatch_transaction_tests {
         })
         .await
         .expect("bounded actual dispatch/cache/event transaction");
-        // Mirror the actual outer worker boundary: staged edits publish only after the native
-        // task/event consumer succeeded; the shared publication helper owns the acknowledgment.
-        let batch = { plan.moss_staged.lock().unwrap().take() };
-        let result = match (result, batch) {
-            (Ok(()), Some(batch)) => {
-                publish_moss_batch(
-                    &ApiClient::new(settings),
-                    &job,
-                    &plan,
-                    backend,
-                    &writes,
-                    batch,
-                )
-                .await
-            }
-            (result, batch) => {
-                drop(batch);
-                result
-            }
-        };
         (result, writes, id)
+    }
+
+    /// Linked to the UI/API request fixture; this checks the actual worker decode and native edit
+    /// dispatch boundary. The provider records inputs and returns a sentinel before any inference.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn water_bottle_request_reaches_native_edit_with_exact_selected_photo() {
+        use sha2::{Digest, Sha256};
+        const PHOTO: &[u8] = include_bytes!("../../../../tests/fixtures/images/water-bottle.png");
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/water-bottle-edit-request.json"
+        ))
+        .unwrap();
+        assert_eq!(
+            format!("{:x}", Sha256::digest(PHOTO)),
+            "c6ec194e6d7e04a2893449e530cf51d064c6adfd9847f0b028921b21e1c1bcb5"
+        );
+        let expected_photo = image::load_from_memory(PHOTO).unwrap().to_rgb8();
+        let temp = tempfile::tempdir().unwrap();
+        let control = Arc::new(Control {
+            backend: "mlx",
+            ..Control::new()
+        });
+        control.committed(0);
+        *control.recording_request.lock().unwrap() = Some(fixture.clone());
+        *control.expected_references.lock().unwrap() = vec![(
+            expected_photo.width(),
+            expected_photo.height(),
+            expected_photo.into_raw(),
+        )];
+        control.use_kv_cache.store(true, Ordering::SeqCst);
+        let (url, server) = transaction_api(control.clone()).await;
+        let mut settings = Settings::for_test(temp.path().join("worker"));
+        settings.api_url = url;
+        settings.access_token = None;
+        let store = ProjectStore::new(settings.data_dir.clone(), "test");
+        let project = store
+            .create_project("Water bottle linked contract")
+            .unwrap();
+        let source = settings.data_dir.join("water-bottle.png");
+        std::fs::write(&source, PHOTO).unwrap();
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: "water-bottle.png".into(),
+                    content_type: Some("image/png".into()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .unwrap();
+        let mut payload = fixture.clone();
+        payload["projectId"] = json!(project.id);
+        payload["referenceAssetIds"] = json!([asset["id"]]);
+        let mut normalized = payload.clone();
+        normalized.as_object_mut().unwrap().remove("projectId");
+        normalized["referenceAssetIds"] = fixture["referenceAssetIds"].clone();
+        assert_eq!(
+            normalized, fixture,
+            "only owned project/asset identifiers are substituted"
+        );
+        std::fs::write(
+            settings.data_dir.join("synthetic-provider.bin"),
+            b"recording-provider-source",
+        )
+        .unwrap();
+        let (cache, join) = crate::generator_cache::GeneratorCacheHandle::isolated();
+        let runtime = Arc::new(FixtureRuntime {
+            control: control.clone(),
+            cache: cache.clone(),
+        });
+        let run = |payload| {
+            dispatch_payload(
+                &settings,
+                Path::new(&project.path),
+                payload,
+                MossImageVariant::Sft,
+                runtime.clone(),
+                control.clone(),
+            )
+        };
+        let (result, writes, _) = run(payload.clone()).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("recorded native edit boundary; no inference executed"));
+        assert!(writes.is_empty());
+        assert_eq!(control.renders.load(Ordering::SeqCst), 1);
+        assert_eq!(control.ordinary.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            control.reads.load(Ordering::SeqCst),
+            0,
+            "recording does not fabricate a successful receipt"
+        );
+        let owned = store
+            .project_file(&project.id, asset["file"]["path"].as_str().unwrap())
+            .unwrap()
+            .path;
+        let mut changed = image::open(&owned).unwrap().to_rgb8();
+        changed.get_pixel_mut(0, 0).0[0] ^= 1;
+        changed.save(&owned).unwrap();
+        let (result, writes, _) = run(payload.clone()).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("selected water-bottle reference bytes changed"));
+        assert!(writes.is_empty());
+        payload["referenceAssetIds"] = json!([]);
+        let (result, writes, _) = run(payload).await;
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("one to four ordered reference slots"));
+        assert!(writes.is_empty());
+        assert_eq!(
+            control.renders.load(Ordering::SeqCst),
+            1,
+            "changed/empty inputs refuse before native edit"
+        );
+        assert_eq!(control.ordinary.load(Ordering::SeqCst), 0);
+        drop(runtime);
+        drop(cache);
+        join.join().unwrap();
+        server.abort();
+        let _ = server.await;
     }
 
     /// Removing the MOSS diversion from generate_candle_stream_using makes this fail on both hosts:
@@ -540,7 +761,7 @@ mod dispatch_transaction_tests {
                 Attempt::Fail,
                 Attempt::CancelAfterOutput,
                 Attempt::MissingReport,
-                Attempt::InvalidReport,
+                Attempt::WrongReferenceReceipt,
                 Attempt::NoOutput,
                 Attempt::ApiCancel,
             ] {

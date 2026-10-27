@@ -23,10 +23,13 @@ test('Windows workflows register post cleanup before cache uploads are registere
     const workflow = await readFile(join(repo, '.github/workflows/windows-candle.yml'), 'utf8');
     assert.ok(workflow.indexOf('uses: ./.github/actions/cleanup-runner-storage') >= 0);
     assert.ok(workflow.indexOf('uses: ./.github/actions/cleanup-runner-storage') < workflow.indexOf('uses: ./.github/actions/prepare-rust-runner'));
-    const moss = await readFile(join(repo, '.github/workflows/moss-edit-terminal.yml'), 'utf8');
-    assert.match(moss, /ref: \$\{\{ github.workflow_sha \}\}\s+path: runner-storage-tooling\s+sparse-checkout: \.github\/actions\/cleanup-runner-storage/);
-    assert.ok(moss.indexOf('uses: ./runner-storage-tooling/.github/actions/cleanup-runner-storage') < moss.indexOf('node source\\scripts\\moss-edit-terminal-actions.mjs smoke'));
-    assert.match(moss, /cleanup-runner-storage\s+with:\s+moss: 'true'/);
+    const mossPath = join(repo, '.github/workflows/moss-edit-terminal.yml');
+    if (existsSync(mossPath)) {
+      const moss = await readFile(mossPath, 'utf8');
+      assert.match(moss, /ref: \$\{\{ github.workflow_sha \}\}\s+path: runner-storage-tooling\s+sparse-checkout: \.github\/actions\/cleanup-runner-storage/);
+      assert.ok(moss.indexOf('uses: ./runner-storage-tooling/.github/actions/cleanup-runner-storage') < moss.indexOf('node source\\scripts\\moss-edit-terminal-actions.mjs smoke'));
+      assert.match(moss, /cleanup-runner-storage\s+with:\s+moss: 'true'/);
+    }
   } else {
     const workflow = await readFile(join(repo, '.github/workflows/ci.yml'), 'utf8');
     for (const name of ['windows-cuda-check', 'windows-cuda']) {

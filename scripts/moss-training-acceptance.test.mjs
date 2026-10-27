@@ -612,7 +612,7 @@ test('MOSS dispatcher deliberately accepts cached primary real-weights and prese
  assert.match(workflow,/options: \[unspecified, real-weights, rw-llm, rw-mage, rw-krea\]/);
  assert.match(workflow,/moss_runner_label:[\s\S]*?default: unspecified/);
  for(const label of ['real-weights','rw-llm','rw-mage','rw-krea','unspecified','','nax']) {
-  const result=spawnSync(process.execPath,['--input-type=module','-e',guard],{encoding:'utf8',env:{...process.env,GITHUB_OUTPUT:path.join(fixture(t),'output'),SELECTORS:JSON.stringify({moss_runner_label:label,moss_phase:'capture',moss_reference:'{}',moss_terminal:'{}'}),DISPATCH_SHA:source.workflowSource,DISPATCH_EVENT:'workflow_dispatch',DISPATCH_REPOSITORY:'SceneWorks/SceneWorks'}});
+  const result=spawnSync(process.execPath,['--input-type=module','-e',guard],{encoding:'utf8',env:{...process.env,GITHUB_OUTPUT:path.join(fixture(t),'output'),SELECTORS:JSON.stringify({moss_runner_label:label,moss_phase:'capture'}),DISPATCH_SHA:source.workflowSource,DISPATCH_EVENT:'workflow_dispatch',DISPATCH_REPOSITORY:'SceneWorks/SceneWorks'}});
   assert.equal(result.status,['real-weights','rw-llm','rw-mage','rw-krea'].includes(label)?0:1,result.stderr);
  }
  const reusable=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
@@ -690,16 +690,17 @@ test('every supervised native entry uses the production 8 MiB stack despite ambi
  }
 });
 
-test('merged dispatcher fits 25 inputs and derives exact source and finalize run without redundant selectors',t=>{
+test('current dispatcher fits 25 inputs and derives exact source and finalize run without retired selectors',t=>{
  const workflow=readFileSync(path.join(root,'.github/workflows/memory-catalog-campaign.yml'),'utf8');
  const inputs=workflow.split('    inputs:\n')[1].split('\n# `gh pr create`')[0];
  const names=[...inputs.matchAll(/^      ([A-Za-z_]+):$/gm)].map(match=>match[1]);
- assert.equal(names.length,25);assert.equal(new Set(names).size,25);
+ assert.equal(names.length,23);assert.equal(new Set(names).size,23);assert.ok(names.length<=25);
+ assert.equal(names.includes('moss_reference'),false);assert.equal(names.includes('moss_terminal'),false);
  assert.equal(names.includes('workflowSource'),false);assert.equal(names.includes('moss_evidence_run_id'),false);
  assert.match(workflow,/workflowSource: \$\{\{ github\.sha \}\}/);
  assert.match(workflow,/moss_evidence_run_id: \$\{\{ needs\.moss-selector-preflight\.outputs\.capture_run_id \}\}/);
  const guard=workflow.split('      - name: Reject conflicting selectors before compiler or device jobs')[1].split("node --input-type=module <<'JS'\n")[1].split('          JS')[0].replace(/^          /gm,'');
- const base={moss_runner_label:'real-weights',moss_phase:'capture',moss_reference:'{}',moss_terminal:'{}'};
+ const base={moss_runner_label:'real-weights',moss_phase:'capture'};
  const invoke=(changes={},environment={})=>{
   const output=path.join(fixture(t),'output');
   const result=spawnSync(process.execPath,['--input-type=module','-e',guard],{encoding:'utf8',env:{...process.env,GITHUB_OUTPUT:output,SELECTORS:JSON.stringify({...base,...changes}),DISPATCH_SHA:source.workflowSource,DISPATCH_EVENT:'workflow_dispatch',DISPATCH_REPOSITORY:'SceneWorks/SceneWorks',...environment}});
@@ -713,7 +714,7 @@ test('merged dispatcher fits 25 inputs and derives exact source and finalize run
  }
  for(const moss_inspection_json of ['', '{}', '[]', 'null', '{malformed'])assert.equal(invoke({moss_phase:'finalize',moss_inspection_json}).status,1);
  assert.equal(invoke({moss_inspection_json:inspection}).status,1);
- for(const key of ['moss_terminal','moss_reference'])for(const value of ['null','[]','broken',JSON.stringify({phase:'execute'})])assert.equal(invoke({[key]:value}).status,1);
+ for(const key of ['anchors','models'])assert.equal(invoke({[key]:'conflicting'}).status,1);
  for(const DISPATCH_SHA of ['', 'main', 'A'.repeat(40)])assert.equal(invoke({}, {DISPATCH_SHA}).status,1);
  assert.equal(invoke({ref:'b'.repeat(40)}).status,1);
  assert.equal(invoke({}, {DISPATCH_EVENT:'push'}).status,1);

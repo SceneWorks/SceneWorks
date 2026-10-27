@@ -1179,7 +1179,7 @@ export function ImageStudio() {
   // Whether the model supports multi-image reference editing (sc-6211) — edit_image mode shows a
   // multi-select reference picker (plural `referenceAssetIds`) instead of the single source picker.
   // FLUX.2-dev only (its DiT sequence-gated chunking keeps the multi-reference edit under 96 GB).
-  const multiReference = mossEdit || Boolean(selectedModel?.ui?.multiReference);
+  const multiReference = Boolean(selectedModel?.ui?.multiReference);
   // Mage Edit keeps its required source distinct from its optional ordered reference set. Unlike
   // `multiReference`, this never replaces `sourceAssetId`; it adds `referenceAssetIds` alongside it.
   const sourceWithMultiReference = Boolean(selectedModel?.ui?.sourceWithMultiReference);
@@ -1190,7 +1190,7 @@ export function ImageStudio() {
   // Counted over DISTINCT ids, as the enqueue gate counts them (`qwen_image_2_1_reference_ids`
   // de-duplicates, first occurrence kept) — a restored recipe can carry a repeated id, and blocking a
   // request the API accepts would be a client stricter than the gate.
-  const maxStudioReferences = mossEdit ? 4 : multiReference ? maxReferencesForModel(selectedModel, null) : null;
+  const maxStudioReferences = multiReference ? maxReferencesForModel(selectedModel, null) : null;
   const distinctReferenceCount = mossEdit ? referenceAssetIds.length : new Set(referenceAssetIds).size;
   let mossEditError = "";
   if (mossEdit) {
@@ -3673,7 +3673,7 @@ export function ImageStudio() {
             {mode === "edit_image" ? (
               <>
                 {mossEdit ? <>
-                  <MossReferencePicker assets={editImageAssets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} assetIds={referenceAssetIds} onChange={setReferenceAssetIds} />
+                  <MossReferencePicker assets={editImageAssets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} assetIds={referenceAssetIds} onChange={setReferenceAssetIds} max={maxStudioReferences} />
                   <MossImageEditControls model={selectedModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} advanced={mossImageAdvanced} onAdvancedChange={setMossImageAdvanced} assets={assets} importAsset={importAsset} promptBatch={mossPromptBatch} onPromptBatchChange={(batch) => { setMossPromptBatch(batch); if (batch.length) setPrompt(batch[0]); }} />
                   {mossEditError ? <p role="alert">{mossEditError}</p> : null}
                 </> : multiReference ? (

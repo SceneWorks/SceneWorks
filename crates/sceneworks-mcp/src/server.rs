@@ -685,7 +685,7 @@ impl SceneWorksMcp {
             reporter.report(&job).await;
             let status = job.get("status").and_then(Value::as_str).unwrap_or("");
             match status {
-                "completed" if !output_publication_pending(&job) => break job,
+                "completed" => break job,
                 "failed" => {
                     let detail = job_error_detail(&job);
                     return tool_error(format!("Image job {job_id} failed: {detail}"));
@@ -960,12 +960,6 @@ impl SceneWorksMcp {
             .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
             .await
             .map_err(api_error)?;
-        if output_publication_pending(&job) {
-            let mut snapshot = compact_job_status(&job);
-            snapshot["ready"] = json!(false);
-            snapshot["note"] = json!("Output publication is pending; poll this job until canonical assets are ready. Do not resubmit generation.");
-            return json_result(snapshot);
-        }
         match job.get("status").and_then(Value::as_str).unwrap_or("") {
             "completed" => {}
             "failed" => {
@@ -1799,12 +1793,6 @@ pub(crate) fn video_job_body(args: &SubmitVideoJobArgs) -> Result<Value, String>
 /// The compact, job-type-agnostic status view of a JobSnapshot the polling
 /// tools return: identity + status/stage/progress/eta plus the error when the
 /// job failed. Works identically for video and image jobs.
-fn output_publication_pending(job: &Value) -> bool {
-    job.pointer("/result/outputPublication/state")
-        .and_then(Value::as_str)
-        == Some("pending")
-}
-
 pub(crate) fn compact_job_status(job: &Value) -> Value {
     let mut out = Map::new();
     if let Some(id) = job.get("id").filter(|id| !id.is_null()) {
@@ -1831,13 +1819,6 @@ pub(crate) fn compact_job_status(job: &Value) -> Value {
         if out.get(key).and_then(Value::as_str) == Some("") {
             out.remove(key);
         }
-    }
-    if output_publication_pending(job) {
-        out.insert("ready".into(), json!(false));
-        out.insert(
-            "outputPublication".into(),
-            job["result"]["outputPublication"].clone(),
-        );
     }
     let (percent, _) = job_progress(job);
     out.insert("progressPercent".to_owned(), json!(percent));

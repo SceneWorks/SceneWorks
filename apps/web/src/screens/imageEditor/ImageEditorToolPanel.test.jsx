@@ -247,7 +247,7 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
       EDIT_OUTPUT_ASPECTS: [{ key: "match", label: "Match" }],
       EditorLoraPanel: () => null,
       FitModeControl: () => null,
-      MAX_EDIT_REFERENCES: 3,
+      maxEditReferences: 4,
       StudioUpdateBadge: () => null,
       StudioUpdateNotice: () => null,
       aiOp: null,
@@ -328,6 +328,11 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     const scope=editScope({editModel:model.id,editModels:[model],selectedEditModel:model,mossEdit:true,mossEditReady:false,mossEditError:"",mossImageEdit:{reference_max_edge:768,use_kv_cache:false},mossEditSettings:{width:512,height:768,steps:41,guidanceScale:4.5,schedulerShift:6,max_sequence_length:2048,negativePrompt:"blur"},setMossImageEdit,setMossEditSettings,setRefAssetIds,refAssetIds:["a","a","b"],imageAssets:[{id:"a",displayName:"Wide"},{id:"b",displayName:"Tall"}],editPrompt:"blue cup",multiRefCapable:true});
     await act(async()=>root.render(<ImageEditorEditPanel scope={scope}/>));
     expect(container.textContent).toContain("working image is Image 1");
+    const guidance = container.querySelectorAll('input[aria-label="Guidance"]');
+    expect(guidance).toHaveLength(1);
+    expect(guidance[0].disabled).toBe(false);
+    expect(guidance[0].value).toBe("4.5");
+
     expect(container.textContent).toContain("Ordered MOSS references (2–4)");
     expect([...container.querySelectorAll("label")].find((label)=>label.textContent==="Reference maximum edge").querySelector("input").value).toBe("768");
     expect([...container.querySelectorAll("button")].find((button)=>button.textContent==="Generate edit").disabled).toBe(true);

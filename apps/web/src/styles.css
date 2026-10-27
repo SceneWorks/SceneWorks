@@ -20011,7 +20011,7 @@ pre.yue2-abc,
   justify-self: start;
 }
 
-.ie-moss-results {
+.ie-native-results {
   position: absolute;
   left: 12px;
   bottom: 12px;
@@ -20024,7 +20024,7 @@ pre.yue2-abc,
   background: var(--ie-panel, #222);
   border-radius: 8px;
 }
-.ie-moss-results span { display: flex; gap: 12px; }
+.ie-native-results span { display: flex; gap: 12px; }
 
 /* Compact Advanced navigation stays beside the workspace on smaller screens. */
 .sidebar-toggle { flex-shrink: 0; align-self: flex-end; }
