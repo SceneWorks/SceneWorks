@@ -151,7 +151,7 @@ jobs:
       cancel-in-progress: false
     defaults:
       run:
-        shell: pwsh
+        shell: powershell
     env:
       CARGO_NET_OFFLINE: "true"
       CUDA_VISIBLE_DEVICES: "1"
