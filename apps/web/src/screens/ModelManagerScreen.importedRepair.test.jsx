@@ -3,6 +3,8 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
 import { useModelsAndLoras } from "../hooks/useModelsAndLoras.js";
+// Preload the request builder the hook imports on first use, so a submit settles inside one act().
+import "../modelImportRequest.js";
 import { ModelManagerScreen } from "./ModelManagerScreen.jsx";
 
 const IMPORT = {
