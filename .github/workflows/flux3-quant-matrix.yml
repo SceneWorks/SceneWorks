@@ -1,0 +1,215 @@
+# sc-26243 (epic 26233): the FLUX 3 quant/quality/memory terminal matrix.
+#
+# Dispatch-only, never a per-change gate. This is the separate real-weight validation
+# workflow required by the inference-compute policy: it runs real learned generation
+# and memory measurement, so it must never be a normal push/PR/merge check.
+#
+# One cell per process (the MLX/device counters are process-global):
+#   distilled + base x MLX bf16/q4/q8 x Candle/CUDA bf16/q4/q8/fp8r/nvfp4 = 16 cells.
+#
+# Each cell retains one PNG and prints a [[FOOTPRINT]] receipt with measured resident,
+# measured peak, the declared manifest floor and the resulting lowest fit. Missing
+# q4/q8 packages are converted offline first (CPU-only) from the pinned dense snapshot.
+name: FLUX3 quant matrix
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact SceneWorks source commit (40 hex) to test
+        required: true
+        type: string
+      backend:
+        description: mlx (Mac) | candle (Windows CUDA)
+        required: true
+        type: choice
+        options:
+          - mlx
+          - candle
+        default: mlx
+      runner:
+        description: mlx -> nax-macos (primary/dataset) | nax-macos-2; candle -> cuda-windows | cuda-windows-2
+        required: true
+        type: choice
+        options:
+          - nax-macos
+          - nax-macos-2
+          - cuda-windows
+          - cuda-windows-2
+        default: nax-macos
+      cells:
+        description: "Optional comma-separated test names; empty = every cell for the backend"
+        required: false
+        type: string
+        default: ""
+      prepare_derived:
+        description: Convert the missing q4/q8 packages on this host before measuring
+        required: false
+        type: boolean
+        default: true
+      hf_home:
+        description: "Hugging Face home on the runner (empty = lane default)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  mlx:
+    if: ${{ inputs.backend == 'mlx' }}
+    runs-on: ${{ inputs.runner == 'nax-macos-2' && fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') || fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') }}
+    timeout-minutes: 720
+    concurrency:
+      group: flux3-quant-matrix-mlx-${{ inputs.runner }}
+      cancel-in-progress: false
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: "none"
+      CARGO_NET_OFFLINE: "true"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
+      HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || '/Volumes/Models/huggingface' }}
+      SCENEWORKS_DATA_DIR: ${{ github.workspace }}/../sc26243-quant-data
+      FLUX3_FOOTPRINT_OUT_DIR: ${{ github.workspace }}/../sc26243-quant-evidence
+    steps:
+      - name: Refuse a runner other than the dispatched Mac
+        run: '[[ "$RUNNER_NAME" == "${{ inputs.runner }}" ]] || { echo "::error::dispatched for ${{ inputs.runner }}, running on $RUNNER_NAME"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - name: Fetch Release libmlx or use its source build
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Build the release test binary
+        run: cargo test -p sceneworks-worker --release --lib --no-run
+      - name: Convert missing MLX q4/q8 packages (CPU only)
+        if: ${{ inputs.prepare_derived }}
+        run: |
+          set -euo pipefail
+          for model in flux3_klein flux3_klein_base; do
+            snap=$(ls -d "$HF_HOME/hub/models--black-forest-labs--$model"/snapshots/* 2>/dev/null | head -1)
+            [[ -n "$snap" ]] || { echo "::error::pinned $model snapshot missing under $HF_HOME"; exit 1; }
+            FLUX3_CAPTURE_MODEL_ID="$model" FLUX3_CAPTURE_SOURCE_DIR="$snap" \
+            FLUX3_CAPTURE_OUT_DIR="$SCENEWORKS_DATA_DIR/models/derived" \
+            FLUX3_CAPTURE_CONVERSIONS="flux3-mlx-affine-q4-g64-v1,flux3-mlx-affine-q8-g64-v1" \
+              cargo test -p sceneworks-worker --release --lib -- \
+                --ignored --exact local_derivation::tests::flux3_capture_conversion_artifacts --nocapture
+          done
+      - name: Measure requested MLX cells
+        run: |
+          set -euo pipefail
+          mkdir -p "$FLUX3_FOOTPRINT_OUT_DIR"
+          all="footprint_measure::footprint_flux3_klein_mlx_bf16
+          footprint_measure::footprint_flux3_klein_mlx_q4
+          footprint_measure::footprint_flux3_klein_mlx_q8
+          footprint_measure::footprint_flux3_klein_base_mlx_bf16
+          footprint_measure::footprint_flux3_klein_base_mlx_q4
+          footprint_measure::footprint_flux3_klein_base_mlx_q8"
+          wanted="${{ inputs.cells }}"
+          if [[ -z "$wanted" ]]; then selected="$all"; else selected=$(tr ',' '\n' <<< "$wanted"); fi
+          for cell in $selected; do
+            echo "::group::$cell"
+            cargo test -p sceneworks-worker --release --lib -- \
+              --ignored --exact "$cell" --nocapture 2>&1 | tee "$FLUX3_FOOTPRINT_OUT_DIR/$(basename "$cell").log"
+            echo "::endgroup::"
+          done
+      - name: Retain PNGs, receipts and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: flux3-quant-matrix-mlx-${{ inputs.runner }}-${{ github.run_id }}
+          path: ${{ github.workspace }}/../sc26243-quant-evidence/**
+          if-no-files-found: warn
+          retention-days: 30
+
+  candle:
+    if: ${{ inputs.backend == 'candle' }}
+    runs-on: ${{ inputs.runner == 'cuda-windows-2' && fromJSON('["self-hosted","Windows","X64","cuda","cuda-windows-2"]') || fromJSON('["self-hosted","Windows","X64","cuda","cuda-windows"]') }}
+    timeout-minutes: 720
+    concurrency:
+      group: flux3-quant-matrix-candle-${{ inputs.runner }}
+      cancel-in-progress: false
+    env:
+      CARGO_PROFILE_RELEASE_STRIP: "none"
+      CARGO_NET_OFFLINE: "true"
+      CUDA_VISIBLE_DEVICES: "1"
+      SCENEWORKS_GPU_ID: "1"
+      HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:/huggingface' }}
+      SCENEWORKS_DATA_DIR: ${{ github.workspace }}/../sc26243-quant-data
+      FLUX3_FOOTPRINT_OUT_DIR: ${{ github.workspace }}/../sc26243-quant-evidence
+    steps:
+      - name: Refuse a runner other than the dispatched Windows box
+        run: '[[ "$RUNNER_NAME" == "${{ inputs.runner }}" ]] || { echo "::error::dispatched for ${{ inputs.runner }}, running on $RUNNER_NAME"; exit 1; }'
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.97.1"
+      - name: Build the release test binary with Candle
+        run: cargo test -p sceneworks-worker --release --features backend-candle --lib --no-run
+      - name: Convert missing Candle q4/q8 packages (CPU only)
+        if: ${{ inputs.prepare_derived }}
+        run: |
+          set -euo pipefail
+          for model in flux3_klein flux3_klein_base; do
+            snap=$(ls -d "$HF_HOME/hub/models--black-forest-labs--$model"/snapshots/* 2>/dev/null | head -1)
+            [[ -n "$snap" ]] || { echo "::error::pinned $model snapshot missing under $HF_HOME"; exit 1; }
+            FLUX3_CAPTURE_MODEL_ID="$model" FLUX3_CAPTURE_SOURCE_DIR="$snap" \
+            FLUX3_CAPTURE_OUT_DIR="$SCENEWORKS_DATA_DIR/models/derived" \
+            FLUX3_CAPTURE_CONVERSIONS="flux3-candle-ggml-q4_1-v1,flux3-candle-ggml-q8_0-v1" \
+              cargo test -p sceneworks-worker --release --features backend-candle --lib -- \
+                --ignored --exact local_derivation::tests::flux3_capture_conversion_artifacts --nocapture
+          done
+      - name: Measure requested Candle cells
+        run: |
+          set -euo pipefail
+          mkdir -p "$FLUX3_FOOTPRINT_OUT_DIR"
+          all="flux3_candle_footprint::footprint_flux3_klein_candle_bf16
+          flux3_candle_footprint::footprint_flux3_klein_candle_q4
+          flux3_candle_footprint::footprint_flux3_klein_candle_q8
+          flux3_candle_footprint::footprint_flux3_klein_candle_fp8r
+          flux3_candle_footprint::footprint_flux3_klein_candle_nvfp4
+          flux3_candle_footprint::footprint_flux3_klein_base_candle_bf16
+          flux3_candle_footprint::footprint_flux3_klein_base_candle_q4
+          flux3_candle_footprint::footprint_flux3_klein_base_candle_q8
+          flux3_candle_footprint::footprint_flux3_klein_base_candle_fp8r
+          flux3_candle_footprint::footprint_flux3_klein_base_candle_nvfp4"
+          wanted="${{ inputs.cells }}"
+          if [[ -z "$wanted" ]]; then selected="$all"; else selected=$(tr ',' '\n' <<< "$wanted"); fi
+          for cell in $selected; do
+            echo "::group::$cell"
+            cargo test -p sceneworks-worker --release --features backend-candle --lib -- \
+              --ignored --exact "$cell" --nocapture 2>&1 | tee "$FLUX3_FOOTPRINT_OUT_DIR/$(basename "$cell").log"
+            echo "::endgroup::"
+          done
+      - name: Upload PNGs, receipts and logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: flux3-quant-matrix-candle-${{ inputs.runner }}-${{ github.run_id }}
+          path: ${{ github.workspace }}/../sc26243-quant-evidence/**
+          if-no-files-found: warn
+          retention-days: 30
