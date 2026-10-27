@@ -11509,6 +11509,14 @@ impl ResolutionLever {
     /// explains away. The rule is "name a knob only when the gate priced it", never "don't mention
     /// resolution": the lane that CAN price a smaller geometry (Krea Turbo's calibrated ladder)
     /// resolves a concrete `krea_turbo_smaller_fit_with_runtime` target and offers that size.
+    fn for_selector(selector_priced: bool) -> Self {
+        if selector_priced {
+            Self::Priced
+        } else {
+            Self::Blind
+        }
+    }
+
     fn clause(self) -> &'static str {
         match self {
             Self::Blind => {
@@ -12246,9 +12254,10 @@ fn krea_turbo_capability_reject_message(
 /// installed tier in `[floor, default]` has been scored by [`candle_tier_fit`] and none fits.
 ///
 /// `smallest_tier` is the least-demanding tier that was evaluated, so a smaller tier is not an
-/// escape — and neither is a smaller output, because `candle_tier_fit` prices a manifest row and
-/// never reads the request geometry ([`ResolutionLever::Blind`]). The card is the only lever left,
-/// and that is all this message offers. Kept pure so the contract is testable without a GPU, exactly
+/// escape. Whether a smaller output is one depends on `lever`: `candle_tier_fit` prices a manifest
+/// row and never reads the request geometry ([`ResolutionLever::Blind`]), but the SDXL admission
+/// path overrides that verdict with the shared selector, which prices the geometry
+/// ([`ResolutionLever::Priced`]). Kept pure so the contract is testable without a GPU, exactly
 /// like [`krea_turbo_capability_reject_message`] beside it.
 ///
 /// It also says WHAT the number covers, in `video_peak_too_big_error`'s established spelling. #3197's
@@ -12264,15 +12273,19 @@ fn candle_capability_reject_message(
     needed_gb: f64,
     available_gb: f64,
     gpu_id: &str,
+    lever: ResolutionLever,
 ) -> String {
+    let (_, leading) = lever.levers();
+    let mut action = leading.to_owned();
+    action[..1].make_ascii_uppercase();
     format!(
         "{model} needs ~{needed} GB of VRAM even at the smallest installed tier it can run \
          ({smallest_tier}) — the peak of the whole render, the resident weights plus the denoise and \
          VAE-decode transient, not the tier's on-disk size — but GPU {gpu_id} has ~{available} GB \
-         available. Run on a card with more VRAM.{note}",
+         available. {action}{note}",
         needed = needed_gb.round() as i64,
         available = available_gb.round() as i64,
-        note = ResolutionLever::Blind.clause(),
+        note = lever.clause(),
     )
 }
 
@@ -14114,6 +14127,10 @@ async fn generate_candle_registry_stream_using(
                         needed_gb,
                         available_gb,
                         &settings.gpu_id,
+                        // The SDXL admission path scores each candidate through the shared
+                        // selector, which prices the request geometry: a smaller output can
+                        // bring it inside what the measured endpoints cover.
+                        ResolutionLever::for_selector(sdxl_request_tier_admission),
                     ),
                 ));
             }
@@ -14532,6 +14549,12 @@ async fn generate_candle_registry_stream_using(
     // chooser. Missing or refused selection still reaches the unchanged legacy resident gate.
     let request_selector_authoritative = receipt_selector_authoritative
         || (sdxl_request_tier_admission && memory_strategy_selection.is_some());
+    // The plain gate's legacy rows are geometry-blind, but a request the shared selector priced
+    // (or that SDXL admission scored against the measured endpoints) can pass at a smaller output;
+    // only a request that never reached the selector is truly resolution-blind (issue #3197).
+    let plain_gate_lever = ResolutionLever::for_selector(
+        sdxl_request_tier_admission || memory_strategy_selection.is_some(),
+    );
     let use_sequential =
         if request_selector_authoritative {
             generation_memory.is_some_and(|memory| memory.stage_residency)
@@ -14825,10 +14848,7 @@ async fn generate_candle_registry_stream_using(
                             seq = seq_gb.round() as i64,
                             available = available_gb.round() as i64,
                             gpu = settings.gpu_id,
-                            tail = vram_reject_tail(
-                                &installed_smaller,
-                                ResolutionLever::Blind,
-                            ),
+                            tail = vram_reject_tail(&installed_smaller, plain_gate_lever),
                         )));
                     }
                 }
@@ -14882,7 +14902,7 @@ async fn generate_candle_registry_stream_using(
                     needed = needed_gb.round() as i64,
                     available = available_gb.round() as i64,
                     gpu = settings.gpu_id,
-                    tail = vram_reject_tail(&installed_smaller, ResolutionLever::Blind),
+                    tail = vram_reject_tail(&installed_smaller, plain_gate_lever),
                 )));
             }
             _ => false,
@@ -16633,7 +16653,14 @@ mod candle_label_tests {
     #[test]
     fn capability_reject_offers_only_truthful_escapes() {
         // SDXL Q4 on the reporter's 8 GB card: the q4 row (12) + HEADROOM_GB (2) against ~6 GB free.
-        let message = candle_capability_reject_message("sdxl", "q4", 14.0, 6.0, "0");
+        let message = candle_capability_reject_message(
+            "sdxl",
+            "q4",
+            14.0,
+            6.0,
+            "0",
+            ResolutionLever::Blind,
+        );
         assert!(
             message.starts_with(
                 "sdxl needs ~14 GB of VRAM even at the smallest installed tier it can run (q4)"
@@ -16644,7 +16671,7 @@ mod candle_label_tests {
         // #3197 read that ~14 GB against Model Manager's 2.5 GiB q4 row: say which number is which.
         assert!(message.contains("not the tier's on-disk size"), "{message}");
         assert!(
-            message.contains("Run on a card with more VRAM."),
+            message.contains("Run on a GPU with more VRAM."),
             "the one lever that can change the verdict: {message}"
         );
         assert!(
@@ -16659,6 +16686,12 @@ mod candle_label_tests {
             !message.contains("Select a smaller"),
             "q4 IS the smallest tier the clamp scored: {message}"
         );
+
+        // The SDXL admission path prices geometry through the shared selector, so the knob is real.
+        let priced = candle_capability_reject_message("sdxl", "q4", 14.0, 6.0, "0", ResolutionLever::Priced);
+        assert!(priced.contains("Lower the output resolution or run on a GPU with more VRAM."), "{priced}");
+        assert!(!priced.contains("will not help"), "{priced}");
+        assert!(priced.contains("not the tier's on-disk size"), "{priced}");
     }
 }
 
