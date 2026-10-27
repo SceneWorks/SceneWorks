@@ -1,7 +1,9 @@
+import { mossPositivePromptIssue } from "./mossImageAdvancedValidation.js";
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
 import { effectiveFitMode } from "./fitMode.js";
 import { upscaleEngineHasSoftness, upscaleEngineIsRestoration } from "./upscaleEngines.js";
 import { irisRestoreControls } from "./irisRestore.js";
+import { isMossEdit, mossEditReferenceIds } from "./mossImage.js";
 import { composeStyledPrompt } from "./styleComposer.js";
 import { injectStyleIntoCaption, isCaption, parseCaption, serializeCaption } from "./ideogramCaption.js";
 
@@ -43,6 +45,8 @@ export function composeImageJobPrompt({ promptToSend, sendStructured, styleText 
 }
 
 export function buildImageJobRequest(state) {
+  const mossEdit = isMossEdit(state.model, state.mode);
+  const mossReferences = mossEdit ? mossEditReferenceIds(state) : null;
   const {
     // Prompt / resolution overrides — the one legitimate single-vs-batch difference.
     promptToSend,
@@ -179,13 +183,22 @@ export function buildImageJobRequest(state) {
     styleText,
   });
 
+  const mossPrompts = mossEdit && state.mossPromptBatch?.length
+    ? state.mossPromptBatch.map((text) => composeImageJobPrompt({ promptToSend: text, sendStructured: false, styleText }).prompt)
+    : undefined;
+  const effectivePrompt = mossPrompts?.[0] ?? composedPrompt;
+  if (mossEdit) {
+    const issue = mossPositivePromptIssue(state.mossImageAdvanced, { prompt: promptToSend ?? "", prompts: state.mossPromptBatch ?? [], effectivePrompt });
+    if (issue) throw new Error(issue);
+  }
   return {
     mode,
-    prompt: composedPrompt,
+    prompt: effectivePrompt,
+    ...(mossPrompts ? { prompts: mossPrompts } : {}),
     negativePrompt,
     model,
     count: posePayload.length ? 1 : count,
-    seed: seed === "" ? null : Number(seed),
+    seed: mossEdit && state.mossImageAdvanced?.noise || seed === "" ? null : Number(seed),
     // A per-prompt [WxH] directive (sc-10063) overrides the studio resolution for this job.
     width: resolutionOverride?.width ?? width,
     height: resolutionOverride?.height ?? height,
@@ -200,7 +213,7 @@ export function buildImageJobRequest(state) {
     // stacked fragments — the server can't reconstruct a stack from one recipePresetId), so it
     // sends the composed prompt verbatim and this flag tells the server to skip its own
     // prefix/suffix fold (epic 11949, mirrors presetLorasResolvedClientSide).
-    presetPromptResolvedClientSide: presetPromptResolvedClientSide || styleApplied || undefined,
+    presetPromptResolvedClientSide: presetPromptResolvedClientSide || styleApplied || (mossEdit && Boolean(mossPrompts || state.mossImageAdvanced?.positive)) || undefined,
     characterId: mode === "character_image" ? characterId || null : null,
     characterLookId: mode === "character_image" ? characterLookId || null : null,
     // edit_image: a single source image, except for a multi-reference model (sc-6211,
@@ -209,7 +222,7 @@ export function buildImageJobRequest(state) {
     // uploaded control image here as the source the worker auto-derives the map FROM
     // (strict_control.rs `resolve_control_source`). Passthrough mode uses `advanced.controlImage`.
     sourceAssetId:
-      mode === "edit_image" && !multiReference
+      mossEdit ? undefined : mode === "edit_image" && !multiReference
         ? // A two-reference edit sends the ordered [image1, image2] pair as referenceAssetIds instead
           // (epic 10871 P1.3), so the single sourceAssetId is dropped when a second image is chosen.
           editSecondPair
@@ -221,24 +234,24 @@ export function buildImageJobRequest(state) {
     // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit). The Krea
     // two-reference edit (epic 10871 P1.3) reuses this channel with the ordered [image1, image2] pair.
     referenceAssetIds:
-      mode === "edit_image" && multiReference && referenceAssetIds.length
+      mossEdit ? mossReferences : mode === "edit_image" && multiReference && referenceAssetIds.length
         ? referenceAssetIds
         : mode === "edit_image" && sourceWithMultiReference && referenceAssetIds.length
           ? referenceAssetIds
           : (editSecondPair ?? undefined),
     // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
     // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
-    fitMode: mode === "edit_image" ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
+    fitMode: mode === "edit_image" && !mossEdit ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
     // character_image: the IP-Adapter identity reference. Otherwise, on an img2img-capable model
     // (Krea 2 Turbo, sc-8593), the reference picked in the "Start from an image" panel — sent so the
     // worker's krea arm routes it to img2img latent-init (advanced.strength below).
     referenceAssetId:
-      mode === "character_image"
+      mossEdit ? undefined : mode === "character_image"
         ? referenceAssetId || null
         : supportsImg2img
           ? img2imgReferenceAssetId || null
           : null,
-    loras,
+    loras: mossEdit ? [] : loras,
     ...(upscaleEnabled
       ? {
           upscale: upscaleEngineIsRestoration(upscaleEngine)
@@ -254,7 +267,7 @@ export function buildImageJobRequest(state) {
               },
         }
       : {}),
-    ...(hiresFixEnabled
+    ...(hiresFixEnabled && !mossEdit
       ? {
           hiresFix: {
             enabled: true,
@@ -274,6 +287,9 @@ export function buildImageJobRequest(state) {
     advanced: buildImageJobAdvanced({
       model,
       mossImage: state.mossImage,
+      mossImageEdit: state.mossImageEdit,
+      mossImageAdvanced: mossEdit ? state.mossImageAdvanced : undefined,
+      mossPromptBatch: mossPrompts,
       mossDmdSteps: state.mossDmdSteps,
       mossOrdinarySettings: state.mossOrdinarySettings,
       resolution: resolutionOverride
@@ -344,7 +360,7 @@ export function buildImageJobRequest(state) {
       //    to be a string so the round-trip re-selects the picker (see ImageStudio replay), so we
       //    store "" — the raw prompt lives in the caption blob, not here.
       styleId: styleApplied ? styleId : undefined,
-      styleUserPrompt: styleApplied ? (structuredInjected ? "" : promptToSend) : undefined,
+      styleUserPrompt: styleApplied ? (mossPrompts ? null : structuredInjected ? "" : promptToSend) : undefined,
       // Krea 2 multi-phase denoise (epic 13879 S5, sc-13885): the resolved gate + the editor's phase
       // list. buildImageJobAdvanced emits `advanced.phases` only when active + non-empty.
       multiPhaseActive,

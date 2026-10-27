@@ -59,6 +59,9 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "mlxQuantizeExplicit",
     // MOSS-Image's own wire objects (`imageJobAdvanced.js` / the MCP image tool).
     "mossImage",
+    "mossImageEdit",
+    "mossImageAdvanced",
+    "promptBatch",
     "mossOrdinarySettings",
     // The character lane's Angle Set / Key Point Library extras (`characterPanels.jsx`).
     "angleSet",

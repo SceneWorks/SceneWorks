@@ -1624,6 +1624,7 @@ async fn run_image_generate_job_unexplained(
                 // an edit without its required source can never fall through as plain T2I; both variants
                 // use the same generic stream once their request shapes are resolved.
                 CandleImageRoute::MageEdit
+                | CandleImageRoute::MossImageEdit
                 | CandleImageRoute::QwenImage21Edit
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit
@@ -1750,6 +1751,18 @@ async fn run_image_generate_job_unexplained(
     if !warnings.is_empty() {
         message.push_str(&format!(" Warning: {}", warnings.join(" ")));
     }
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let moss_batch = { plan.moss_staged.lock().expect("MOSS staging lock").take() };
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    if let Some(batch) = moss_batch {
+        return publish_moss_batch(api, job, &plan, backend, &asset_writes, batch).await;
+    }
     update_job(
         api,
         &job.id,
@@ -1860,6 +1873,11 @@ pub(crate) struct ImagePlan {
     /// Worker-resolved LoRAs in inference order. Names come from exact filenames, weights use the
     /// same parser as the engine adapter specs, and hashes come from those exact files.
     pub(crate) loras: Vec<WorkflowLora>,
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    moss_staged: Arc<std::sync::Mutex<Option<MossOutputBatch>>>,
 }
 
 /// Resolve the exact single-file checkpoint for an imported Krea/SDXL route. The adapter label is
@@ -2630,6 +2648,11 @@ impl ImagePlan {
             workflow_source,
             model_hash: None,
             loras: Vec::new(),
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            moss_staged: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -2831,7 +2854,7 @@ pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
 pub(crate) fn write_image_asset(
     plan: &ImagePlan,
     index: usize,
-    seed: i64,
+    seed: impl Into<Option<i64>>,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
@@ -2839,6 +2862,7 @@ pub(crate) fn write_image_asset(
     mut raw_settings: JsonObject,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
+    let seed = seed.into();
     let request = &plan.request;
     // The three checkpoint facts (sc-21484, epic 11037), stamped here because EVERY generated image
     // asset funnels through this one function — so the source codec a checkpoint stores, the host's
@@ -2892,6 +2916,21 @@ pub(crate) fn write_image_asset(
     if !request.prompts.is_empty() {
         raw_settings.insert(PROMPT_BATCH_KEY.to_owned(), json!(request.prompts));
     }
+    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+        // Lineage anchors the first source only. History needs every semantic slot, including
+        // repeated identities; never trust a stale reference vector supplied inside `advanced`.
+        let carriers = json!({"referenceAssetIds":request.reference_asset_ids,"sourceAssetId":request.source_asset_id,"referenceAssetId":request.reference_asset_id});
+        let ids = sceneworks_core::moss_image::edit_reference_slots(
+            carriers.as_object().expect("carriers object"),
+        )
+        .map_err(WorkerError::InvalidPayload)?;
+        if ids.is_empty() || ids.len() > 4 {
+            return Err(WorkerError::InvalidPayload(
+                "MOSS history requires 1–4 ordered reference slots".to_owned(),
+            ));
+        }
+        raw_settings.insert("referenceAssetIds".to_owned(), json!(ids));
+    }
 
     // Typed by the engine's channel count, not assumed to be three (sc-24111). See
     // `GeneratedPixels` for why this is the load-bearing line rather than the writer below.
@@ -2910,12 +2949,23 @@ pub(crate) fn write_image_asset(
         plan.slug,
         index + 1
     );
-    let media_rel = format!("assets/images/{}/{filename}", plan.genset_id);
+    let namespace =
+        if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+            "moss-edit/"
+        } else {
+            ""
+        };
+    let media_rel = format!("assets/images/{namespace}{}/{filename}", plan.genset_id);
     let media_path = project_path.join(&media_rel);
     if let Some(parent) = media_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let temp_path = media_path.with_extension("tmp.png");
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    let mut moss_files = moss_stage_image_files(plan, &temp_path, &media_path)?;
     // The one funnel every generated image goes through, and therefore the one place the sanitized
     // workflow needs embedding (epic 15945, sc-15948). `None` — embedding off, or no payload to
     // describe — routes through the same `save_with_format` call this used to make, byte for byte.
@@ -2927,7 +2977,7 @@ pub(crate) fn write_image_asset(
                 prompt: prompt.clone(),
                 negative_prompt: request.negative_prompt.clone(),
                 // THIS image's seed, not the batch base the payload carries.
-                seed,
+                seed: seed.unwrap_or_default(),
                 width: Some(width),
                 height: Some(height),
             },
@@ -2942,6 +2992,15 @@ pub(crate) fn write_image_asset(
             share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
         if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(index) = raw_settings
+                .get("mossImageSampleIndex")
+                .and_then(Value::as_u64)
+                .filter(|index| *index < 8)
+            {
+                share
+                    .advanced
+                    .insert("mossImageSampleIndex".into(), json!(index));
+            }
             if let Some(report) = raw_settings
                 .get(sceneworks_core::moss_image::REPORT_KEY)
                 .and_then(sceneworks_core::workflow_share::sanitize_moss_execution_report)
@@ -2953,6 +3012,24 @@ pub(crate) fn write_image_asset(
                 share
                     .advanced
                     .insert(sceneworks_core::moss_image::REPORT_KEY.to_owned(), report);
+            }
+        }
+        if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(report) = raw_settings
+                .get(sceneworks_core::moss_image::EDIT_REPORT_KEY)
+                .and_then(sceneworks_core::workflow_share::sanitize_moss_edit_execution_report)
+            {
+                if let Some(steps) = report.pointer("/base/resolved/steps") {
+                    share.advanced.insert("steps".into(), steps.clone());
+                }
+                if raw_settings.contains_key(sceneworks_core::moss_image_advanced::KEY) {
+                    share.seed = report
+                        .pointer("/base/samples/0/seed")
+                        .and_then(Value::as_i64);
+                }
+                share
+                    .advanced
+                    .insert(sceneworks_core::moss_image::EDIT_REPORT_KEY.into(), report);
             }
         }
         share.model_hash = plan.model_hash.clone();
@@ -3031,6 +3108,11 @@ pub(crate) fn write_image_asset(
         "sourceAssetId": source_asset_id,
         "rawAdapterSettings": raw_settings,
     });
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    moss_files.commit();
     Ok(fact.as_object().cloned().expect("json! object literal"))
 }
 
@@ -3354,7 +3436,14 @@ fn write_upscaled_asset(
         plan.slug,
         index + 1
     );
-    let media_rel = format!("assets/images/{}/{filename}", plan.genset_id);
+    let namespace = if sceneworks_core::moss_image::is_moss(&plan.request.model)
+        && plan.request.mode == "edit_image"
+    {
+        "moss-edit/"
+    } else {
+        ""
+    };
+    let media_rel = format!("assets/images/{namespace}{}/{filename}", plan.genset_id);
     let media_path = project_path.join(&media_rel);
     if let Some(parent) = media_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -3377,6 +3466,7 @@ fn write_upscaled_asset(
     };
 
     let temp_path = media_path.with_extension("tmp.png");
+    let mut moss_files = moss_stage_image_files(plan, &temp_path, &media_path)?;
     // The upscaled variant is the asset users share most, so it carries the workflow that produced
     // IT rather than a stale base-generation envelope (sc-15948) — see `upscaled_workflow_share`.
     let mut share = plan
@@ -3454,6 +3544,7 @@ fn write_upscaled_asset(
     }
     extra.insert("engine".to_owned(), json!(engine_id));
     fact.insert("extra".to_owned(), Value::Object(extra));
+    moss_files.commit();
     Ok(fact)
 }
 

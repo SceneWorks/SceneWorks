@@ -322,6 +322,19 @@ describe("ImageEditorEditPanel quick edit instructions", () => {
     });
     expect(setEditPrompt).toHaveBeenCalledWith("correct the colors of this photo");
   });
+  it("renders all MOSS edit controls and repeated ordinal slots while gating a missing adapter",async()=>{
+    const model={id:"moss_image_sft",name:"MOSS SFT",conditionalPurposes:{moss_image_edit:{installState:"missing"}}};
+    const setMossImageEdit=vi.fn(),setMossEditSettings=vi.fn(),setRefAssetIds=vi.fn();
+    const scope=editScope({editModel:model.id,editModels:[model],selectedEditModel:model,mossEdit:true,mossEditReady:false,mossEditError:"",mossImageEdit:{reference_max_edge:768,use_kv_cache:false},mossEditSettings:{width:512,height:768,steps:41,guidanceScale:4.5,schedulerShift:6,max_sequence_length:2048,negativePrompt:"blur"},setMossImageEdit,setMossEditSettings,setRefAssetIds,refAssetIds:["a","a","b"],imageAssets:[{id:"a",displayName:"Wide"},{id:"b",displayName:"Tall"}],editPrompt:"blue cup",multiRefCapable:true});
+    await act(async()=>root.render(<ImageEditorEditPanel scope={scope}/>));
+    expect(container.textContent).toContain("working image is Image 1");
+    expect(container.textContent).toContain("Ordered MOSS references (2–4)");
+    expect([...container.querySelectorAll("label")].find((label)=>label.textContent==="Reference maximum edge").querySelector("input").value).toBe("768");
+    expect([...container.querySelectorAll("button")].find((button)=>button.textContent==="Generate edit").disabled).toBe(true);
+    await act(async()=>container.querySelector('button[aria-label="Move Image 4 earlier"]').click());expect(setRefAssetIds).toHaveBeenCalledWith(["a","b","a"]);
+    await act(async()=>root.render(<ImageEditorEditPanel scope={{...scope,mossEditReady:true,selectedEditModel:{...model,conditionalPurposes:{moss_image_edit:{installState:"installed"}}}}}/>));
+    expect([...container.querySelectorAll("button")].find((button)=>button.textContent==="Generate edit").disabled).toBe(false);
+  });
 
   // sc-24114: the editor exposes the Studio's transparency toggle for an alpha-capable model, and
   // offers the prompt wording when it is on. *Mutation that reds this:* removing the toggle.

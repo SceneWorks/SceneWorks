@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 
 import { LoraKeywordSummary } from "./LoraKeywordSummary.jsx";
 import { Icon } from "./Icons.jsx";
 import { StudioUpdateBadge, StudioUpdateNotice } from "./StudioUpdateNotice.jsx";
-import { terminalStatuses } from "../jobTypes.js";
+import { jobOutputsPending, terminalStatuses } from "../jobTypes.js";
 import {
   modelLibraryContextForModel,
   raiseModelLibraryPrompt,
@@ -325,7 +325,7 @@ export function selectStackedJobs(trackedLocalJobs, resultRendered) {
     if (job.status === "canceled") {
       return false;
     }
-    if (!terminalStatuses.has(job.status)) {
+    if (!terminalStatuses.has(job.status) || jobOutputsPending(job)) {
       return true;
     }
     if (successorStarted(job)) {
