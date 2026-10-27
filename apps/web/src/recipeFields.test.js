@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   finiteRecipeNumber,
+  recipeImageDimensionIntent,
   recipeLoraSelection,
   recipeRequestedResolution,
   recipeResolution,
@@ -66,6 +67,26 @@ describe("recipeRequestedResolution", () => {
 
   it("returns null when the recipe carries neither", () => {
     expect(recipeRequestedResolution({})).toBeNull();
+  });
+});
+
+describe("recipeImageDimensionIntent", () => {
+  it.each(["flux3_klein", "flux3_klein_base"])("reads %s requested nullable sides independently of actual size", (model) => {
+    const recipe = { model, normalizedSettings: { width: 80, height: 64 },
+      rawAdapterSettings: { flux3ReferenceEditing: { output: {
+        requestedWidth: null, requestedHeight: 48, actualSize: { width: 80, height: 64 },
+      } } } };
+    expect(recipeImageDimensionIntent(recipe)).toEqual({ width: null, height: 48 });
+    expect(recipeImageDimensionIntent({ ...recipe, model: "flux2_dev" })).toBeNull();
+  });
+
+  it("does not treat missing legacy fields or output dimensions as authored omissions", () => {
+    expect(recipeImageDimensionIntent({ model: "flux3_klein", normalizedSettings: { width: 80, height: 64 },
+      rawAdapterSettings: { flux3ReferenceEditing: { output: { actualSize: { width: 80, height: 64 } } } },
+    })).toBeNull();
+    for (const width of [undefined, "", "16", 0, -16, 1.5]) {
+      expect(recipeImageDimensionIntent({ model: "flux3_klein", uiDimensionIntent: { width, height: null } })).toBeNull();
+    }
   });
 });
 

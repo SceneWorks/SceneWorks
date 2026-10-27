@@ -844,6 +844,24 @@ pub(crate) struct ImageJobRequest {
     // (sc-6358). Mirrors VideoJobRequest.reference_asset_ids.
     #[serde(default)]
     pub(crate) reference_asset_ids: Vec<String>,
+    // Keep these carriers visible to family validation. FLUX.3 must refuse unsupported strength,
+    // not let serde erase it and enqueue a different request (including an explicit 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) strength: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) reference_strength: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) denoising_strength: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) image_strength: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) ip_adapter_scale: Option<Value>,
+    #[serde(
+        default,
+        rename = "ip_adapter_scale",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub(crate) ip_adapter_scale_snake: Option<Value>,
     // Optional inpaint mask asset (sc-2476): white = edit region. Honored only by
     // inpaint-capable models (the `image_inpaint` capability, SDXL family); others
     // ignore it and run the whole-image edit. Threaded to the worker payload as-is.

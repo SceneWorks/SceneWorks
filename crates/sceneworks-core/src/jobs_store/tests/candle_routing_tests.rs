@@ -10,6 +10,54 @@ fn object(value: Value) -> Map<String, Value> {
 }
 
 #[test]
+fn flux3_ordered_references_have_an_explicit_native_lane_without_widening_controls() {
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        for count in [1, 10] {
+            let payload = json!({"model":model,"mode":"edit_image","referenceAssetIds":vec!["same-owned-asset";count]});
+            assert_eq!(
+                image_job_candle_lane(&image_edit_job(payload.clone())),
+                Some(CandleImageLane::Flux3Reference)
+            );
+            assert!(image_request_mlx_eligible(model, &object(payload)));
+        }
+        for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
+            let payload = object(
+                json!({"model":model, "mode":"edit_image", "sourceAssetId":"a",
+                "referenceAssetIds":["a","b"], "width":48, "advanced":{"quantTier":tier},
+                "loras":[{"id":"identity-checked-at-worker","weight":0.375}]}),
+            );
+            assert_eq!(
+                image_job_candle_lane(&image_edit_job(Value::Object(payload.clone()))),
+                Some(CandleImageLane::Flux3Reference),
+                "{model}/{tier}"
+            );
+            assert_eq!(
+                image_request_mlx_eligible(model, &payload),
+                !matches!(tier, "fp8r" | "nvfp4"),
+                "{model}/{tier}"
+            );
+        }
+        for extra in [
+            json!({"referenceAssetIds":vec!["same";11]}),
+            json!({"referenceAssetIds":["a",null]}),
+            json!({"maskAssetId":"mask"}),
+            json!({"advanced":{"referenceStrength":1.0}}),
+            json!({"advanced":{"poses":[{"assetId":"pose"}]}}),
+            json!({"hiresFix":{"enabled":true}}),
+        ] {
+            let mut payload =
+                object(json!({"model":model,"mode":"edit_image","referenceAssetId":"ref"}));
+            payload.extend(object(extra));
+            assert!(!image_request_mlx_eligible(model, &payload), "{payload:?}");
+            assert_ne!(
+                image_job_candle_lane(&image_edit_job(Value::Object(payload))),
+                Some(CandleImageLane::Flux3Reference)
+            );
+        }
+    }
+}
+
+#[test]
 fn minimax_h3_candle_surface_is_user_routed_per_partition() {
     assert!(video_request_candle_eligible(
         "minimax_h3",
@@ -254,6 +302,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
             CandleImageLane::IdeogramImg2Img,
             CandleImageLane::BooguEdit,
             CandleImageLane::MageEdit,
+            CandleImageLane::Flux3Reference,
             CandleImageLane::QwenImage21Edit,
             CandleImageLane::BooguImg2Img,
             CandleImageLane::KreaEdit,
@@ -339,6 +388,8 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
         // sc-24110: Qwen-Image 2.1 reference / local editing. `qwen_image_2_1` is ALSO a candle
         // txt2img id, so both the edit shape and the Character-Studio reference shape must be
         // claimed by this bespoke lane before the generic gate can refuse them.
+        (edit("flux3_klein"), CandleImageLane::Flux3Reference),
+        (edit("flux3_klein_base"), CandleImageLane::Flux3Reference),
         (edit("qwen_image_2_1"), CandleImageLane::QwenImage21Edit),
         (
             character("qwen_image_2_1"),
@@ -5873,6 +5924,230 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
         ),
         None
     );
+}
+
+/// sc-26241: every package the FLUX 3 provider advertises routes on the backend that serves it —
+/// bf16 / q4 / q8 on both lanes, the publisher FP8R / NVFP4 on Candle only — while a malformed or
+/// conflicting precision request, or FP8R on any other model, is refused by name on both lanes
+/// instead of rendering at a precision the request did not name.
+#[test]
+fn flux3_tiers_route_to_the_backends_that_serve_them() {
+    let flux3 = |advanced: Value| {
+        object(json!({
+            "model": "flux3_klein", "mode": "text_to_image", "prompt": "a red lighthouse",
+            "sourceAssetId": null, "referenceAssetId": null, "maskAssetId": null,
+            "advanced": advanced
+        }))
+    };
+    for advanced in [
+        json!({}),
+        json!({"mlxQuantize": 0}),
+        json!({"mlxQuantize": 4}),
+        json!({"mlxQuantize": 8, "mlxQuantizeExplicit": true}),
+        json!({"quantTier": "q8"}),
+    ] {
+        let payload = flux3(advanced.clone());
+        assert!(
+            image_request_candle_eligible("flux3_klein", &payload),
+            "{advanced}"
+        );
+        assert!(
+            image_request_mlx_eligible("flux3_klein", &payload),
+            "{advanced}"
+        );
+    }
+    for tier in ["fp8r", "nvfp4"] {
+        let payload = flux3(json!({ "quantTier": tier }));
+        assert!(
+            image_request_candle_eligible("flux3_klein", &payload),
+            "{tier}"
+        );
+        assert!(
+            !image_request_mlx_eligible("flux3_klein", &payload),
+            "{tier}"
+        );
+        // The rest of the FLUX 3 surface is still judged with the tier present.
+        let mut with_controls = payload.clone();
+        with_controls.insert("controls".into(), json!([{}]));
+        assert_eq!(
+            candle_image_first_refusal("flux3_klein", &with_controls),
+            Some(CandleImageRefusal::Flux3Surface),
+            "{tier}"
+        );
+    }
+    for advanced in [
+        json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+        json!({"quantTier": "fp8r", "convRot": true}),
+        json!({"mlxQuantize": 6}),
+        json!({"quantTier": "int8-convrot"}),
+    ] {
+        let payload = flux3(advanced.clone());
+        assert!(
+            !image_request_candle_eligible("flux3_klein", &payload),
+            "{advanced}"
+        );
+        assert!(
+            !image_request_mlx_eligible("flux3_klein", &payload),
+            "{advanced}"
+        );
+    }
+    // Off FLUX 3 the label names a package the model does not ship: refused on both lanes, with a
+    // typed reason that names the tier, rather than the dense family running silently.
+    let other = object(json!({
+        "model": "z_image_turbo", "mode": "text_to_image", "prompt": "a red lighthouse",
+        "advanced": {"quantTier": "fp8r"}
+    }));
+    assert_eq!(
+        candle_image_first_refusal("z_image_turbo", &other),
+        Some(CandleImageRefusal::Fp8rTier)
+    );
+    assert!(!image_request_mlx_eligible("z_image_turbo", &other));
+    let reason = classify_candle_image_gap(&other);
+    assert!(reason.detail.contains("fp8r"), "{reason:?}");
+    assert!(reason.detail.contains("z_image_turbo"), "{reason:?}");
+    let mut plain = other.clone();
+    plain.remove("advanced");
+    assert!(image_request_candle_eligible("z_image_turbo", &plain));
+}
+
+/// sc-26241: a precision request the model cannot load never reaches a specialized lane either —
+/// the lane resolver refuses it before matching any conditioned route.
+#[test]
+fn a_refused_precision_tier_reaches_no_candle_lane() {
+    for (model, advanced) in [
+        ("z_image_turbo", json!({"quantTier": "fp8r"})),
+        ("krea_2_turbo", json!({"quantTier": "fp8r"})),
+        (
+            "flux3_klein",
+            json!({"quantTier": "fp8r", "mlxQuantize": 4}),
+        ),
+    ] {
+        let job = image_generate_job(
+            json!({"model": model, "mode": "text_to_image", "prompt": "p", "advanced": advanced}),
+        );
+        assert_eq!(image_job_candle_lane(&job), None, "{model} {advanced}");
+    }
+}
+
+/// sc-26241: an FP8R / NVFP4 FLUX 3 job requires the device-floor marker, so only a worker whose
+/// GPU clears it (and whose provider advertises the tier) can claim it; every other tier keeps the
+/// ordinary job-type capability.
+#[test]
+fn flux3_publisher_tiers_require_the_worker_device_marker() {
+    let job = |advanced: Value| {
+        image_generate_job(
+            json!({"model": "flux3_klein", "mode": "text_to_image", "prompt": "p", "advanced": advanced}),
+        )
+    };
+    let with_marker = |marker: &'static str| {
+        let mut caps = CANDLE_CAPS.to_vec();
+        caps.push(marker);
+        gpu_worker(&caps)
+    };
+    for tier in ["fp8r", "nvfp4"] {
+        let publisher = job(json!({ "quantTier": tier }));
+        assert!(
+            !worker_supports_job(&gpu_worker(CANDLE_CAPS), &publisher),
+            "{tier} without its marker"
+        );
+        assert!(
+            worker_supports_job(
+                &with_marker(if tier == "nvfp4" { "flux3_nvfp4" } else { tier }),
+                &publisher
+            ),
+            "{tier} with its marker"
+        );
+    }
+    // The other marker does not stand in for this one.
+    assert!(!worker_supports_job(
+        &with_marker("nvfp4"),
+        &job(json!({"quantTier": "fp8r"}))
+    ));
+    for advanced in [
+        json!({}),
+        json!({"mlxQuantize": 4}),
+        json!({"mlxQuantize": 8}),
+    ] {
+        assert!(
+            worker_supports_job(&gpu_worker(CANDLE_CAPS), &job(advanced.clone())),
+            "{advanced}"
+        );
+    }
+}
+
+/// sc-26235: one public request contract, two native lanes. Removing either the Candle catalog
+/// row or its family-specific refusal must fail this test.
+#[test]
+fn flux3_candle_routes_base_distilled_and_lora_but_refuses_unimplemented_carriers() {
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        assert!(CANDLE_ROUTED_MODELS.contains(&model));
+        let request = object(
+            json!({"model":model,"mode":"text_to_image","prompt":"a red lighthouse","width":768,"height":512,"steps":7,"seed":123}),
+        );
+        assert!(image_request_candle_eligible(model, &request));
+        assert!(image_request_mlx_eligible(model, &request));
+        let mut adapted = request.clone();
+        adapted.insert("loras".into(), json!([{"id":"adapter","weight":0.375}]));
+        for tier in ["bf16", "q4", "q8", "fp8r", "nvfp4"] {
+            let mut tiered = request.clone();
+            tiered.insert("advanced".into(), json!({"quantTier":tier}));
+            assert!(
+                image_request_candle_eligible(model, &tiered),
+                "{model}/{tier}"
+            );
+            let mut quant_lora = adapted.clone();
+            quant_lora.insert(
+                "advanced".into(),
+                match tier {
+                    "q4" => json!({"quantTier":tier,"mlxQuantize":4}),
+                    "q8" => json!({"quantTier":tier,"mlxQuantize":8}),
+                    _ => json!({"quantTier":tier}),
+                },
+            );
+            assert!(
+                image_request_candle_eligible(model, &quant_lora),
+                "{model}/{tier} LoRA"
+            );
+            assert_eq!(
+                image_request_mlx_eligible(model, &quant_lora),
+                matches!(tier, "bf16" | "q4" | "q8")
+            );
+        }
+        assert!(image_request_candle_eligible(model, &adapted));
+        assert!(image_request_mlx_eligible(model, &adapted));
+        for extra in [
+            json!({"mode":"edit_image"}),
+            json!({"referenceAssetIds":["one",null]}),
+            json!({"controls":[{}]}),
+            json!({"loras":[{}]}),
+            json!({"advanced":{"mlxQuantize":6}}),
+            json!({"advanced":{"quantTier":"int8-convrot"}}),
+            json!({"hiresFix":{"enabled":true}}),
+        ] {
+            let mut payload = request.clone();
+            payload.extend(object(extra.clone()));
+            assert!(
+                !image_request_candle_eligible(model, &payload),
+                "{model}: {extra}"
+            );
+            assert!(
+                !image_request_mlx_eligible(model, &payload),
+                "{model}: {extra}"
+            );
+            let reason = classify_candle_image_gap(&payload);
+            assert!(
+                !reason.feature.contains("unsupported image model"),
+                "{reason:?}"
+            );
+        }
+        let controls = object(json!({"model":model,"controls":[{}]}));
+        assert_eq!(
+            candle_image_first_refusal(model, &controls),
+            Some(CandleImageRefusal::Flux3Surface)
+        );
+        let reason = classify_candle_image_gap(&controls);
+        assert!(reason.detail.contains("pinned checkpoint"), "{reason:?}");
+    }
 }
 
 /// sc-24214: Supra2-IMG routes to the generic Candle txt2img lane for plain 256x256 text-to-image and

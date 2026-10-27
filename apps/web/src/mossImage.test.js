@@ -12,6 +12,13 @@ describe("MOSS product transport", () => {
   }
  });
  it("never emits stale MOSS options for another model", () => { expect(buildImageJobRequest(state({model:"iris_3b",mossImage:{acceleration:"full_fp32"}})).advanced).not.toHaveProperty("mossImage"); });
+ it("keeps the integrated FLUX3 and MOSS transports independent without dropping reference or nullable-axis intent", () => {
+  const layout={version:1,boxes:[{id:"remove",desc:"vase",from:"ref_image_0",reference_id:"slot-a",src_bbox:[0,0,0.5,0.5],tgt_bbox:null}]};
+  const flux=buildImageJobRequest(state({model:"flux3_klein",mode:"edit_image",multiReference:true,supportsImg2img:false,width:null,height:1024,referenceAssetIds:["same-asset","same-asset"],flux3ReferenceIds:["slot-a","slot-b"],flux3Layout:layout,mossImage:{acceleration:"full_fp32"}}));
+  expect(flux.referenceAssetIds).toEqual(["same-asset","same-asset"]);expect(flux.advanced.flux3_reference_ids).toEqual(["slot-a","slot-b"]);expect(flux.advanced.flux3_layout).toEqual(layout);expect(flux).not.toHaveProperty("width");expect(flux.height).toBe(1024);expect(flux.advanced).not.toHaveProperty("mossImage");expect(flux.advanced).not.toHaveProperty("img2imgStrength");
+  const moss=buildImageJobRequest(state({mossImage:{acceleration:"full_fp32"},mossDmdSteps:6,flux3Layout:layout,flux3ReferenceIds:["slot-a","slot-b"]}));
+  expect(moss.advanced.mossImage.acceleration).toBe("full_fp32");expect(moss.advanced.steps).toBe(6);expect(moss.advanced).not.toHaveProperty("flux3_layout");expect(moss.advanced).not.toHaveProperty("flux3_reference_ids");
+ });
  it.each([0, 100])("uses saved batch base %i when Keep seed selects a nonfirst MOSS image", (base) => {
   const recipe={model:"moss_image_sft",prompt:"cat",seed:base,normalizedSettings:{count:2},rawAdapterSettings:{promptBatch:["cat","dog"]}};
   const asset={recipe:{prompt:"dog",seed:base+2},generationSet:{recipe}};

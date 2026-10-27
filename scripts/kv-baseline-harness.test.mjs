@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { promisify } from "node:util";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { pathToFileURL } from "node:url";
+import { assertFixtureChildSucceeded } from "./test-platform-capabilities.mjs";
 import path from "node:path";
 import test from "node:test";
 // Every receipt records the checked-in contract's statistics block verbatim (contract v5).
 const CONTRACT_STATISTICS=JSON.parse(readFileSync("config/kv-baseline-quality-contract.json","utf8")).statistics;
 import { FORCED_CONTINUATION_TOKENS, MULTI_TURN_PROMPT_CACHE_METHOD, measurementPaths, qualityGateFromRepeats, qualityGateSummary, sealedRepeatQualityMetrics, validateSealedQualityGate, campaignQualityGatePassed, GREEDY_AGREEMENT_METHOD, POST_RELEASE_MLX_SLACK_FLOOR_BYTES, POST_RELEASE_PHYS_FOOTPRINT_TOLERANCE_BYTES, campaignHostStateVaried, hostStateThrottled, pmsetCpuSpeedLimit, postReleaseMlxSlackBytes, SC20671_COVERING_SCHEDULE, SC20671_MODEL_CONTRACTS, buildReceipt, checkContract, renderComparisonMarkdown, validateAdmissionPolicy, validateFixtureOutcomes, validatePrimaryDiscrimination, validateRepeatDiscrimination, sameWeightsFixtureReference, buildVerifiedReceipt, campaignPolicySha256, campaignResumeIdentitySha256, canonicalJson, cancellationSafe, compareReceipts, detectFullCacheTemporary, inventoryModelArtifact, kernelPathValid, numericSemanticSha256, readCampaignSet, readDarwinMemory, readReceiptSet, renderReceiptMarkdown, sha256, validateCampaign, validateFixtureArtifact, validateReceipt, writeCampaignSet, writeReceiptSet, writeSealedJson } from "./kv-baseline-harness.mjs";
-const run = promisify(execFile);
+// Direct invocation: a failed child is reported before reading any receipt.
+async function run(command, args) {
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 60_000 });
+  assertFixtureChildSucceeded(result);
+  return result;
+}
 const phases = ["process-start","weights-loaded","prefill-peak","first-token","decode-steady","prompt-cache-reuse","cancellation-cleanup","post-run-release"];
 const qualityFixtures = ["kernel-fp32-reference","structured-tool-call","long-context-needle","multi-turn-prompt-cache"];
 const lifecycle = Object.fromEntries(["append","chunkedPrefill","singleShotPrefill","promptCacheReuse","trim","rollback","clear","cancel","clone","batchSplit","batchMerge","prefixCopyOnWrite","pageImport","pageExport","serialization","restore","denseFallback","postRunRelease"].map(k => [k,true]));
@@ -346,8 +353,9 @@ async function writeCoveringCampaign(root, policy = safetyPolicy, { rowPolicy = 
     await writeReceiptSet(receiptDirectory, receipt);
     const names = (await readdir(receiptDirectory, { recursive: true, withFileTypes: true }))
       .filter((entry) => entry.isFile() && !entry.name.endsWith(".sha256"))
-      .map((entry) => path.relative(receiptDirectory, path.join(entry.parentPath, entry.name)))
+      .map((entry) => path.relative(receiptDirectory, path.join(entry.parentPath, entry.name)).split(path.sep).join("/"))
       .sort();
+    assert.ok(names.every((name) => !name.includes("\\")), "campaign manifest names are portable forward-slash paths");
     const files = await Promise.all(names.map(async (name) => ({
       name,
       sha256: sha256(await readFile(path.join(receiptDirectory, name))),
@@ -585,7 +593,8 @@ test("sealed inference model contracts reject revision family and reference subs
 test("session/cache evidence rejects omission and warm-state mutation",()=>{const base=fixture("dense",{processTemperature:"warm"});assert.throws(()=>fixture("dense",{processTemperature:"warm"},{provenance:(({campaignSessionId,...rest})=>rest)(base.provenance)}),/schema validation|keys/);assert.throws(()=>fixture("dense",{processTemperature:"warm"},{provenance:(({coordinateOperationSha256,...rest})=>rest)(base.provenance)}),/schema validation|keys/);assert.throws(()=>fixture("dense",{processTemperature:"warm"},{warmup:{...base.warmup,sessionId:"d".repeat(64)}}),/warmup session/);assert.throws(()=>fixture("dense",{processTemperature:"warm"},{warmup:{...base.warmup,cacheStateVersion:3}}),/warmup session/);});
 test("fixture receipt evidence binds exact artifact and sidecar names",()=>{const quality=structuredClone(fixture().quality);quality.fixtureEvidence["kernel-fp32-reference"].artifactName="fixtures/wrong.json";assert.throws(()=>fixture("dense",{},{quality}),/schema validation|artifact name/);const second=structuredClone(fixture().quality);second.fixtureEvidence["kernel-fp32-reference"].artifactSidecarSha256="0".repeat(64);assert.throws(()=>fixture("dense",{},{quality:second}),/sidecar binding/);});
 test("verified record hashes model and fixture artifacts and publishes one receipt set",async()=>{
-  const dir=await mkdtemp("/tmp/kv20671-record-"),model=path.join(dir,"model.safetensors"),input=path.join(dir,"input.json"),out=path.join(dir,"dense.receipt");
+  const dir=await mkdtemp(path.join(tmpdir(), "kv20671 record 雪-")),model=path.join(dir,"model.safetensors"),input=path.join(dir,"input.json"),out=path.join(dir,"dense.receipt");
+  assert.equal(path.dirname(dir), tmpdir(), "record fixture lives under the host temporary directory");
   await writeFile(model,"weights");
   const raw=fixture();
   for(const key of ["schemaVersion","harnessVersion","contractHash","receiptSha256"])delete raw[key];
@@ -796,10 +805,10 @@ test("fixture artifacts record both arms' tool and needle outcomes as booleans",
   assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:0,total:1,candidateValid:false,referenceValid:true,outputsMatch:false,discriminating:false},metrics},"structured-tool-call",row));
 });
 test("fixture artifacts accept zero raw matches but reject aggregate or wrong-shape evidence",()=>{const cacheEvidence={matches:1,total:1,method:MULTI_TURN_PROMPT_CACHE_METHOD,freeRunningFirstDivergence:null,matchedPrefixTokens:0,turns:{candidate:MULTI_TURN_TURNS,reference:MULTI_TURN_TURNS}};const row={independentReference:"ref"},metrics={parityMaxError:0,perplexityDelta:0,greedyTokenAgreement:0,structuredToolAgreement:1,needleRetrieval:1,multiTurnPromptCache:0};assert.doesNotThrow(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,matches:0,total:8},metrics},"multi-turn-prompt-cache",row));assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,matches:-1,total:8},metrics},"multi-turn-prompt-cache",row),/non-negative/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,matches:0,total:0},metrics},"multi-turn-prompt-cache",row),/positive/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{matches:0,total:8},metrics},"multi-turn-prompt-cache",row),/lacks method/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,method:"free-running"},metrics},"multi-turn-prompt-cache",row),/not teacher-forced on a cache-hit turn 2/);assert.throws(()=>validateFixtureArtifact({fixture:"multi-turn-prompt-cache",independentReference:"ref",evidence:{...cacheEvidence,turns:{...cacheEvidence.turns,reference:{...MULTI_TURN_TURNS,turn2:{...MULTI_TURN_TURNS.turn2,cacheHit:false,reusedPrefixTokens:0}}}},metrics},"multi-turn-prompt-cache",row),/did not serve turn 2/);assert.throws(()=>validateFixtureArtifact({fixture:"structured-tool-call",independentReference:"ref",evidence:{matches:1},metrics:{}},"structured-tool-call",row),/must be finite/);assert.throws(()=>validateFixtureArtifact({fixture:"long-context-needle",independentReference:"other",evidence:{matches:1,total:1},metrics:{...metrics,greedyTokenAgreement:1,multiTurnPromptCache:1}},"long-context-needle",row),/reference mismatch/);});
-test("sharded model identity covers every resolved snapshot file",async()=>{const dir=await mkdtemp("/tmp/kv20671-snapshot-"),snapshot=path.join(dir,"snapshot");await mkdir(path.join(snapshot,"nested"),{recursive:true});await writeFile(path.join(snapshot,"config.json"),"config");await writeFile(path.join(snapshot,"nested","model-00001-of-00002.safetensors"),"first");await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"second");const first=await inventoryModelArtifact(snapshot);assert.equal(first.bytes,17);assert.equal(first.files,3);await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"changed");const second=await inventoryModelArtifact(snapshot);assert.notEqual(first.sha256,second.sha256);await writeFile(path.join(snapshot,"empty.safetensors"),"");await assert.rejects(inventoryModelArtifact(snapshot),/empty or unsupported/);await rm(dir,{recursive:true,force:true});});
-test("receipt sets reject mixed generations and CLI comparison preserves inputs",async()=>{const dir=await mkdtemp("/tmp/kv20671-"),dense=path.join(dir,"dense"),compressed=path.join(dir,"compressed"),out=path.join(dir,"comparison.json");const denseReceipt=await verifiedFixture(path.join(dir,"dense-source")),compressedReceipt=await verifiedFixture(path.join(dir,"compressed-source"),"compressed");await writeReceiptSet(dense,denseReceipt);await writeReceiptSet(compressed,compressedReceipt);const before=await readFile(path.join(compressed,"receipt.json"),"utf8");await run(process.execPath,["scripts/kv-baseline-harness.mjs","compare",dense,compressed,out]);assert.equal(await readFile(path.join(compressed,"receipt.json"),"utf8"),before);assert.match(await readFile(path.join(dir,"comparison.md"),"utf8"),/Persistent KV reduction: 25.00%/);await writeFile(path.join(dense,"receipt.md"),"# forged\n");await assert.rejects(readReceiptSet(dense),/sidecar hash mismatch|not bound/);await rm(dir,{recursive:true,force:true});});
+test("sharded model identity covers every resolved snapshot file",async()=>{const dir=await mkdtemp(path.join(tmpdir(), "kv20671-snapshot-")),snapshot=path.join(dir,"snapshot");await mkdir(path.join(snapshot,"nested"),{recursive:true});await writeFile(path.join(snapshot,"config.json"),"config");await writeFile(path.join(snapshot,"nested","model-00001-of-00002.safetensors"),"first");await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"second");const first=await inventoryModelArtifact(snapshot);assert.equal(first.bytes,17);assert.equal(first.files,3);await writeFile(path.join(snapshot,"nested","model-00002-of-00002.safetensors"),"changed");const second=await inventoryModelArtifact(snapshot);assert.notEqual(first.sha256,second.sha256);await writeFile(path.join(snapshot,"empty.safetensors"),"");await assert.rejects(inventoryModelArtifact(snapshot),/empty or unsupported/);await rm(dir,{recursive:true,force:true});});
+test("receipt sets reject mixed generations and CLI comparison preserves inputs",async()=>{const dir=await mkdtemp(path.join(tmpdir(), "kv20671-")),dense=path.join(dir,"dense"),compressed=path.join(dir,"compressed"),out=path.join(dir,"comparison.json");const denseReceipt=await verifiedFixture(path.join(dir,"dense-source")),compressedReceipt=await verifiedFixture(path.join(dir,"compressed-source"),"compressed");await writeReceiptSet(dense,denseReceipt);await writeReceiptSet(compressed,compressedReceipt);const before=await readFile(path.join(compressed,"receipt.json"),"utf8");await run(process.execPath,["scripts/kv-baseline-harness.mjs","compare",dense,compressed,out]);assert.equal(await readFile(path.join(compressed,"receipt.json"),"utf8"),before);assert.match(await readFile(path.join(dir,"comparison.md"),"utf8"),/Persistent KV reduction: 25.00%/);await writeFile(path.join(dense,"receipt.md"),"# forged\n");await assert.rejects(readReceiptSet(dense),/sidecar hash mismatch|not bound/);await rm(dir,{recursive:true,force:true});});
 test("published inference fixture bundles are required and bind cold probe evidence exactly",async()=>{
-  const dir=await mkdtemp("/tmp/kv20671-fixtures-"),published=path.join(dir,"published"),receipt=await verifiedFixture(path.join(dir,"source"),"dense",{}, {inferenceShaped:true});
+  const dir=await mkdtemp(path.join(tmpdir(), "kv20671-fixtures-")),published=path.join(dir,"published"),receipt=await verifiedFixture(path.join(dir,"source"),"dense",{}, {inferenceShaped:true});
   await writeReceiptSet(published,receipt);
   const loaded=await readReceiptSet(published);
   assert.doesNotThrow(()=>validateReceipt(loaded));
@@ -925,7 +934,7 @@ test("campaign policy and resume identity seals match the Rust canonical parity 
   assert.throws(() => campaignResumeIdentitySha256({ ...identity, coordinates: identity.coordinates.slice(1) }, policySeal), /schedule/);
 });
 test("v2 campaign reader binds every row and artifact to trusted policy and resume inputs", async () => {
-  const root = await mkdtemp("/tmp/kv20671-covering-");
+  const root = await mkdtemp(path.join(tmpdir(), "kv20671-covering-"));
   try {
     const { directory, manifest, resumeIdentity } = await writeCoveringCampaign(root, safetyPolicy);
     const trusted = { safetyPolicy, resumeIdentity };
@@ -1031,7 +1040,7 @@ test("v2 campaign reader binds every row and artifact to trusted policy and resu
   }
 });
 test("full 64-coordinate dense campaign and invalid sets",()=>{const rows=[];for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])rows.push(fixture("dense",{family,contextBand,requestMode,prefillMode,processTemperature}));rows.forEach((row,index)=>{rows[index]=withCampaignPid(row,index+10);});assert.equal(validateCampaign(rows, { scheduleVersion: 1 }).coordinates,64);assert.throws(()=>validateCampaign([rows[0]], { scheduleVersion: 1 }),/incomplete/);assert.throws(()=>validateCampaign([fixture("compressed")], { scheduleVersion: 1 }),/incomplete|non-dense/);assert.throws(()=>validateCampaign([...rows,rows[0]], { scheduleVersion: 1 }),/incomplete|duplicate/);});
-test("complete campaign publication is one atomic 64-coordinate set",async()=>{const root=await mkdtemp("/tmp/kv20671-campaign-"),inputs=path.join(root,"workers"),destination=path.join(root,"published"),coordinates=[];await mkdir(inputs);for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])coordinates.push({family,contextBand,requestMode,prefillMode,processTemperature});const sets=[];for(let index=0;index<coordinates.length;index+=1){const source=path.join(inputs,`source-${index}`),set=path.join(inputs,String(index)),receipt=await verifiedFixture(source,"dense",coordinates[index],{pid:index+10});await writeReceiptSet(set,receipt);sets.push(set);}await assert.rejects(writeCampaignSet(destination,sets.slice(1)),/exactly 64/);assert.equal((await rm(destination,{recursive:true,force:true})),undefined);await writeCampaignSet(destination,sets);const manifest=JSON.parse(await readFile(path.join(destination,"campaign.json"),"utf8"));assert.equal(manifest.schemaVersion,1);assert.equal(manifest.coordinates.length,64);assert.equal((await readCampaignSet(destination,{allowLegacy:true})).summary.coordinates,64);await assert.rejects(readCampaignSet(destination),/legacy/);assert.equal(await readFile(path.join(destination,"campaign.json.sha256"),"utf8"),`${sha256(await readFile(path.join(destination,"campaign.json"),"utf8"))}  campaign.json\n`);await rm(root,{recursive:true,force:true});});
+test("complete campaign publication is one atomic 64-coordinate set",async()=>{const root=await mkdtemp(path.join(tmpdir(), "kv20671-campaign-")),inputs=path.join(root,"workers"),destination=path.join(root,"published"),coordinates=[];await mkdir(inputs);for(const family of ["llama","qwen"])for(const contextBand of ["short","medium","memory-material","fit-boundary"])for(const requestMode of ["single","supported-batch"])for(const prefillMode of ["chunked","single-shot"])for(const processTemperature of ["cold","warm"])coordinates.push({family,contextBand,requestMode,prefillMode,processTemperature});const sets=[];for(let index=0;index<coordinates.length;index+=1){const source=path.join(inputs,`source-${index}`),set=path.join(inputs,String(index)),receipt=await verifiedFixture(source,"dense",coordinates[index],{pid:index+10});await writeReceiptSet(set,receipt);sets.push(set);}await assert.rejects(writeCampaignSet(destination,sets.slice(1)),/exactly 64/);assert.equal((await rm(destination,{recursive:true,force:true})),undefined);await writeCampaignSet(destination,sets);const manifest=JSON.parse(await readFile(path.join(destination,"campaign.json"),"utf8"));assert.equal(manifest.schemaVersion,1);assert.equal(manifest.coordinates.length,64);assert.equal((await readCampaignSet(destination,{allowLegacy:true})).summary.coordinates,64);await assert.rejects(readCampaignSet(destination),/legacy/);assert.equal(await readFile(path.join(destination,"campaign.json.sha256"),"utf8"),`${sha256(await readFile(path.join(destination,"campaign.json"),"utf8"))}  campaign.json\n`);await rm(root,{recursive:true,force:true});});
 
 test("output-role concat coexistence participates in transient reconciliation",()=>{
   const base=fixture();
@@ -1333,7 +1342,7 @@ test("SC-20671 compressed quality misses are recorded as a failed gate, never a 
   assert.equal(qualityGateSummary(clean.quality.qualityGate), "passed");
 });
 test("schedule-v2 campaigns stay readable against their own schedule and are never read as v3", async () => {
-  const root = await mkdtemp("/tmp/kv20671-v2-");
+  const root = await mkdtemp(path.join(tmpdir(), "kv20671-v2-"));
   try {
     const { directory, manifest, resumeIdentity } = await writeCoveringCampaign(root, safetyPolicy, { scheduleVersion: 2 });
     const { summary } = await readCampaignSet(directory, { safetyPolicy, resumeIdentity });
@@ -1359,7 +1368,7 @@ test("schedule-v2 campaigns stay readable against their own schedule and are nev
   }
 });
 test("SC-20671 compressed campaign completes with every row and reports a failed gate verdict", async () => {
-  const root = await mkdtemp("/tmp/kv20671-qgate-");
+  const root = await mkdtemp(path.join(tmpdir(), "kv20671-qgate-"));
   try {
     const { directory, manifest, resumeIdentity } = await writeCoveringCampaign(root, safetyPolicy, {
       mode: "compressed", continuations: { 0: forcedContinuation(1022) },
@@ -1429,4 +1438,29 @@ test("contract v4/v5 multiTurnPromptCache is teacher-forced on a cache-hit turn 
   const v3 = structuredClone(fixture());
   v3.contractHash = "58eaa007c35084c8acac2b35b5a2a1dff5af55832a7533557741d43a05944b49";
   assert.throws(() => validateReceipt(v3), /quality contract hash mismatch/);
+});
+
+
+test("CLI entrypoint executes from a space/Unicode path and imports without running main", async () => {
+  // Normal Node dependency resolution finds the repository dependencies. Copy
+  // only the actual module and its static inputs, not any CLI implementation.
+  const root = await mkdtemp(path.join(path.resolve("scripts"), "kv CLI 雪-"));
+  try {
+    for (const file of ["scripts/kv-baseline-harness.mjs", "config/kv-baseline-quality-contract.json",
+      "config/kv-baseline-quality-contract.json.sha256", "packages/schemas/kv-baseline-receipt.schema.json"]) {
+      const destination = path.join(root, file);
+      await mkdir(path.dirname(destination), { recursive: true });
+      await cp(file, destination);
+    }
+    const script = path.join(root, "scripts/kv-baseline-harness.mjs");
+    const invalid = spawnSync(process.execPath, [script, "not-a-command"], { encoding: "utf8" });
+    assert.equal(invalid.error, undefined);
+    assert.equal(invalid.signal, null);
+    assert.equal(invalid.status, 2, "actual CLI main must reject an invalid command, never silently exit zero");
+    assert.match(invalid.stderr, /usage: kv-baseline-harness/);
+    const imported = await run(process.execPath, ["--input-type=module", "--eval",
+      `await import(${JSON.stringify(pathToFileURL(script).href)}); console.log("import-only");`]);
+    assert.equal(imported.stdout.trim(), "import-only");
+    assert.equal(imported.stderr, "", "import with undefined argv[1] must not execute main");
+  } finally { await rm(root, { recursive: true, force: true }); }
 });

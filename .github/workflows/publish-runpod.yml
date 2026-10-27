@@ -104,6 +104,14 @@ jobs:
           done < <(node scripts/anchor-loader-closure.mjs --anchor-revisions)
           git -C "$RUNNER_TEMP/inference" checkout -q "$pin"
 
+      # Strict historical lock-provenance tests need this immutable SceneWorks fixture;
+      # fetching one commit supplies Git evidence, not a generation or measurement run.
+      - name: Fetch the immutable historical lock-provenance fixture
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 7090f742a7d2973dc3cc1c144aa8a272cdc293c9
+          test "$(git rev-parse 7090f742a7d2973dc3cc1c144aa8a272cdc293c9:Cargo.lock)" = 93b2c6e0634b1493ae8621f85e5154fc25ca2aab
+
       # Do the cheap repository invariants before spending runner time on nvcc.
       # The Dockerfile itself performs the web + embed-web/backend-candle release
       # builds, so repeating those host compilations here would double the cost.

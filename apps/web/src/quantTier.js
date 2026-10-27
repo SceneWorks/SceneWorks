@@ -65,6 +65,26 @@ export function isConvRotTier(tier) {
 // reads.
 export const NVFP4_TIER = "nvfp4";
 
+// Rotated FP8 is a distinct native numeric format, never an mlxQuantize bit count.
+export const FP8R_TIER = "fp8r";
+
+export function isFp8rTier(tier) {
+  return tier === FP8R_TIER;
+}
+
+// Engine availability alone does not imply format support. FLUX 3's packed provider has
+// stricter NVFP4 requirements than legacy models; the worker advertises that contract separately.
+export function nativeTierEligibility(model, workers = []) {
+  const has = (cap) => workers.some((worker) => worker?.status !== "offline" &&
+    Array.isArray(worker?.capabilities) && worker.capabilities.includes(cap));
+  const flux3 = model?.id === "flux3_klein" || model?.id === "flux3_klein_base";
+  return {
+    convRotEligible: has("int8_convrot"),
+    nvfp4Eligible: has(flux3 ? "flux3_nvfp4" : "nvfp4"),
+    fp8rEligible: has("fp8r"),
+  };
+}
+
 // Whether a tier key names the candle NVFP4 tier.
 export function isNvfp4Tier(tier) {
   return tier === NVFP4_TIER;
@@ -84,6 +104,7 @@ const TIER_LABELS = {
   // Candle-only (Windows/Linux, Blackwell sm_120+). FP4 tensor-core tier (sc-11042). Named distinctly
   // from Q4 on purpose — it is a different numeric regime, not a faster q4.
   [NVFP4_TIER]: "NVFP4 (candle, Blackwell sm_120+)",
+  [FP8R_TIER]: "FP8R (candle, sm_89+)",
 };
 
 // Display order (smallest → largest); tiers not in this list sort after, alphabetically. int8-convrot
@@ -91,7 +112,7 @@ const TIER_LABELS = {
 // nvfp4 sits just above q4: ~4.5 effective bits/weight vs q4's 4, with weight accuracy measured at
 // roughly the int4 tier's (spike sc-11038: rel-RMS ~0.094) — so it is the nearest neighbour above q4
 // and below the int8 tier by footprint.
-const TIER_ORDER = ["q4", NVFP4_TIER, INT8_CONVROT_TIER, "q8", "bf16"];
+const TIER_ORDER = ["q4", NVFP4_TIER, INT8_CONVROT_TIER, FP8R_TIER, "q8", "bf16"];
 
 // Map a tier key to its `advanced.mlxQuantize` value, or null when the key isn't a known quant
 // tier (e.g. "default" on a single-variant model — such models never render the picker).
@@ -150,7 +171,7 @@ export function effectiveTierLabel(tier, model) {
 // (which returns null for both non-bits tiers because they have no mlxQuantize value — they still
 // select, via `advanced.convRot` / `advanced.quantTier`).
 export function isSelectableTier(tier) {
-  return tierQuantize(tier) !== null || isConvRotTier(tier) || isNvfp4Tier(tier);
+  return tierQuantize(tier) !== null || isConvRotTier(tier) || isNvfp4Tier(tier) || isFp8rTier(tier);
 }
 
 // Whether a tier survives the per-host capability gates: the candle-only tiers are hidden when no live
@@ -161,8 +182,9 @@ export function isSelectableTier(tier) {
 // and (sc-15400) `tierSuggestion`'s per-tier memory floor, which must not size a host against a tier
 // that host cannot serve.
 export function tierHostEligible(tier, options = {}) {
-  const { convRotEligible = true, nvfp4Eligible = true } = options;
-  return (convRotEligible || !isConvRotTier(tier)) && (nvfp4Eligible || !isNvfp4Tier(tier));
+  const { convRotEligible = true, nvfp4Eligible = true, fp8rEligible = false } = options;
+  return (convRotEligible || !isConvRotTier(tier)) &&
+    (nvfp4Eligible || !isNvfp4Tier(tier)) && (fp8rEligible || !isFp8rTier(tier));
 }
 
 // The installed, selectable quant tiers of a model, in display order. A tier is selectable when it is
@@ -198,6 +220,12 @@ function sortByTierOrder(a, b) {
 }
 
 export function installedTiers(model, options = {}) {
+  return selectModelTiers(model, options, true);
+}
+
+// Installed and displayed tiers use the same source precedence and host gates. Only the
+// installed-only predicate differs; keep it here so the two public views cannot drift.
+function selectModelTiers(model, options, installedOnly) {
   const hostEligible = (tier) => tierHostEligible(tier, options);
   // Imported same-shape providers can quantize the caller-owned checkpoint at load without a
   // separate downloaded tier. The API projects exactly the provider descriptor's supported set;
@@ -215,7 +243,7 @@ export function installedTiers(model, options = {}) {
           variant &&
           isSelectableTier(variant.variant) &&
           hostEligible(variant.variant) &&
-          variant.installState === "installed",
+          (!installedOnly || variant.installState === "installed"),
       )
       .map((variant) => variant.variant)
       .sort(sortByTierOrder);
@@ -233,7 +261,7 @@ export function installedTiers(model, options = {}) {
           state &&
           isSelectableTier(state.tier) &&
           hostEligible(state.tier) &&
-          state.installState === "installed",
+          (!installedOnly || state.installState === "installed"),
       )
       .map((state) => state.tier)
       .sort(sortByTierOrder);
@@ -288,30 +316,7 @@ function tierStateLookup(model) {
 //    than regressing to an empty picker.
 // Returns [] when the model exposes no tier information at all.
 export function allPossibleTiers(model, options = {}) {
-  const hostEligible = (tier) => tierHostEligible(tier, options);
-  if (Array.isArray(model?.runtimeQuantTiers) && model.runtimeQuantTiers.length > 0) {
-    return model.runtimeQuantTiers
-      .filter((tier) => isSelectableTier(tier) && hostEligible(tier))
-      .sort(sortByTierOrder);
-  }
-  if (model?.hasVariantMatrix && Array.isArray(model.variants)) {
-    return model.variants
-      .filter(
-        (variant) => variant && isSelectableTier(variant.variant) && hostEligible(variant.variant),
-      )
-      .map((variant) => variant.variant)
-      .sort(sortByTierOrder);
-  }
-  if (Array.isArray(model?.mlxTierStates) && model.mlxTierStates.length > 0) {
-    return model.mlxTierStates
-      .filter((state) => state && isSelectableTier(state.tier) && hostEligible(state.tier))
-      .map((state) => state.tier)
-      .sort(sortByTierOrder);
-  }
-  if (Array.isArray(model?.mlxTiers) && model.mlxTiers.length > 0) {
-    return model.mlxTiers.filter((tier) => isSelectableTier(tier) && hostEligible(tier)).sort(sortByTierOrder);
-  }
-  return [];
+  return selectModelTiers(model, options, false);
 }
 
 // The studio tier-picker option list: every POSSIBLE tier as `{ tier, label, disabled }`, in display

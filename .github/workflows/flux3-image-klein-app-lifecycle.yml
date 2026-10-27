@@ -1,0 +1,80 @@
+# sc-26234 / epic26233: one real ordinary application T2I + saved-library-asset proof.
+# Manual registered dispatcher only; NOT a per-change gate or memory campaign.
+name: FLUX3 Image Klein MLX app lifecycle
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact clean SceneWorks source commit, identical to dispatch GITHUB_SHA (40 hex)
+        required: true
+        type: string
+      inference_sha:
+        description: Exact inference revision already pinned by source_sha (40 hex); never overrides it
+        required: true
+        type: string
+      runner_target:
+        description: secondary=rw-mage/nax-macos-2, primary=rw-starvector/nax-macos
+        required: false
+        type: string
+        default: secondary
+permissions:
+  contents: read
+jobs:
+  app-lifecycle:
+    runs-on: ${{ inputs.runner_target == 'secondary' && fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') || fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') }}
+    timeout-minutes: 180
+    concurrency:
+      group: flux3-app-lifecycle-${{ inputs.runner_target }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
+    env:
+      FLUX3_APP_SOURCE_SHA: ${{ inputs.source_sha }}
+      FLUX3_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      FLUX3_APP_RUNNER_TARGET: ${{ inputs.runner_target }}
+      # Preserve unstripped Mach-O proc-macro dylibs on the pinned 1.98.0 toolchain.
+      CARGO_PROFILE_RELEASE_STRIP: "none"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Refuse wrong source/pin/Mac/auth before build or model installation
+        run: node scripts/flux3-image-klein-app-lifecycle.mjs --preflight-only
+        env:
+          FLUX3_APP_OUTPUT: ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+      - name: Fetch Release libmlx or use its source build
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Release --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Install pinned package and run ordinary typed API to saved project-library image
+        run: node scripts/flux3-image-klein-app-lifecycle.mjs
+        env:
+          FLUX3_APP_OUTPUT: ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Retain redacted receipt, generated image and sidecar only
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
+        with:
+          name: flux3-image-klein-mlx-app-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/receipt.json
+            ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/saved-asset.png
+            ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}/evidence/saved-asset.sceneworks.json
+          if-no-files-found: error
+          retention-days: 30

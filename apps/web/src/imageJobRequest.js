@@ -44,6 +44,29 @@ export function composeImageJobPrompt({ promptToSend, sendStructured, styleText 
   };
 }
 
+// Canonical emitted references, also used by Studio geometry eligibility. Hidden picker state
+// must never grant a reference-only sizing policy to a request that does not emit that input.
+export function imageJobReferences({ model, mode, multiReference, orderedCharacterReferences = false, sourceWithMultiReference, editSecondPair,
+  sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
+  supportsImg2img, img2imgReferenceAssetId, mossEdit = false, mossReferences = null }) {
+  if (mossEdit) {
+    return { sourceAssetId: undefined, referenceAssetIds: mossReferences, referenceAssetId: undefined };
+  }
+  if (mode === "character_image" && orderedCharacterReferences &&
+      (model === "flux3_klein" || model === "flux3_klein_base")) {
+    return { sourceAssetId: null, referenceAssetIds, referenceAssetId: null };
+  }
+  const edit = mode === "edit_image";
+  return {
+    sourceAssetId: edit && !multiReference
+      ? editSecondPair ? null : sourceAssetId || null : controlPreprocessSourceId,
+    referenceAssetIds: edit && (multiReference || sourceWithMultiReference) && referenceAssetIds.length
+      ? referenceAssetIds : editSecondPair ?? undefined,
+    referenceAssetId: mode === "character_image" ? referenceAssetId || null
+      : supportsImg2img ? img2imgReferenceAssetId || null : null,
+  };
+}
+
 export function buildImageJobRequest(state) {
   const mossEdit = isMossEdit(state.model, state.mode);
   const mossReferences = mossEdit ? mossEditReferenceIds(state) : null;
@@ -78,12 +101,6 @@ export function buildImageJobRequest(state) {
     styleId,
     characterId,
     characterLookId,
-    multiReference,
-    sourceWithMultiReference,
-    editSecondPair,
-    sourceAssetId,
-    controlPreprocessSourceId,
-    referenceAssetIds,
     fitMode,
     editInpaintCapable,
     referenceAssetId,
@@ -200,8 +217,10 @@ export function buildImageJobRequest(state) {
     count: posePayload.length ? 1 : count,
     seed: mossEdit && state.mossImageAdvanced?.noise || seed === "" ? null : Number(seed),
     // A per-prompt [WxH] directive (sc-10063) overrides the studio resolution for this job.
-    width: resolutionOverride?.width ?? width,
-    height: resolutionOverride?.height ?? height,
+    ...Object.fromEntries([
+      ["width", resolutionOverride?.width ?? width],
+      ["height", resolutionOverride?.height ?? height],
+    ].filter(([, side]) => side != null)),
     recipePresetId,
     // The studio seeds a selected preset's LoRAs straight into the visible `loras` above
     // (generationStudio's preset-LoRA seed effect), so the client — not the server — is
@@ -221,36 +240,17 @@ export function buildImageJobRequest(state) {
     // text_to_image strict-control (sc-8245): canny/depth in preprocess (derive) mode send the
     // uploaded control image here as the source the worker auto-derives the map FROM
     // (strict_control.rs `resolve_control_source`). Passthrough mode uses `advanced.controlImage`.
-    sourceAssetId:
-      mossEdit ? undefined : mode === "edit_image" && !multiReference
-        ? // A two-reference edit sends the ordered [image1, image2] pair as referenceAssetIds instead
-          // (epic 10871 P1.3), so the single sourceAssetId is dropped when a second image is chosen.
-          editSecondPair
-          ? null
-          : sourceAssetId || null
-        : controlPreprocessSourceId,
+    ...imageJobReferences({ ...state, mossEdit, mossReferences }),
     // Multi-reference edit (sc-6211): the plural reference set the FLUX.2-dev edit conditions on.
     // Only sent in edit_image mode for a multiReference model; the worker routes a non-empty list
     // to Conditioning::MultiReference (one image ⇒ a normal single-reference edit). The Krea
     // two-reference edit (epic 10871 P1.3) reuses this channel with the ordered [image1, image2] pair.
-    referenceAssetIds:
-      mossEdit ? mossReferences : mode === "edit_image" && multiReference && referenceAssetIds.length
-        ? referenceAssetIds
-        : mode === "edit_image" && sourceWithMultiReference && referenceAssetIds.length
-          ? referenceAssetIds
-          : (editSecondPair ?? undefined),
     // Fit mode applies to edits only; coerced so a stale "outpaint" never reaches a
     // non-inpaint model (epic 2551). Omitted for non-edit modes (worker default crop).
     fitMode: mode === "edit_image" && !mossEdit ? effectiveFitMode(fitMode, editInpaintCapable) : undefined,
     // character_image: the IP-Adapter identity reference. Otherwise, on an img2img-capable model
     // (Krea 2 Turbo, sc-8593), the reference picked in the "Start from an image" panel — sent so the
     // worker's krea arm routes it to img2img latent-init (advanced.strength below).
-    referenceAssetId:
-      mossEdit ? undefined : mode === "character_image"
-        ? referenceAssetId || null
-        : supportsImg2img
-          ? img2imgReferenceAssetId || null
-          : null,
     loras: mossEdit ? [] : loras,
     ...(upscaleEnabled
       ? {
@@ -286,6 +286,8 @@ export function buildImageJobRequest(state) {
     // lives in imageJobAdvanced.js and is covered by imageJobAdvanced.test.js.
     advanced: buildImageJobAdvanced({
       model,
+      flux3Layout: state.flux3Layout,
+      flux3ReferenceIds: state.flux3ReferenceIds,
       mossImage: state.mossImage,
       mossImageEdit: state.mossImageEdit,
       mossImageAdvanced: mossEdit ? state.mossImageAdvanced : undefined,

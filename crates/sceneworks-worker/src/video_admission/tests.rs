@@ -4675,6 +4675,7 @@ fn wan_i2v_candle_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchor
         }],
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        observed_operating_envelopes: Vec::new(),
         exceeded_bounds: Vec::new(),
     }
 }
@@ -5083,6 +5084,7 @@ fn bernini_bound_store(
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        observed_operating_envelopes: Vec::new(),
         exceeded_bounds: vec![anchor::ExceededBound {
             id: "exceeded:bernini:mlx:q8:base:base:fp:exc-0".to_owned(),
             model_id: "bernini".to_owned(),

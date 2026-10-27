@@ -1,31 +1,31 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:a45bcb94c8ccd4199ade6846e0997847b78a274688ba9a8fcb2b3a58a9c621b0",
+    "sceneWorksRevision": "source-tree:5c86ebee2368855083d2dc4500cbca7d88d4a78bd89234292307e6d153f0347a",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "1a23dc6a4fc5073c787b40c1bf0e26e7d077c1494ae2718c799109835649af36"
+        "sha256": "4816a919e43fb25fdf86e9e995fd6fb25abdadf347ab47176ff8df25f7d828e2"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "efcd393df0977f30f9ed95ca375df4f8c3da334bb5c39c7edb5c513efecbc8d3"
+        "sha256": "4b187436bf26dc9db1ef0b8acf950f88b3c5b0d7e82b8714db9ff54b84f2924c"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "a9a4ceed4ebc36b22cbbb9d60e90b2a7b21fe3b528d9f28b344bd30091fb9abb"
+        "sha256": "b3a1494e9e33ba804bff85974f71f41ec615e53bef9b08d61276273f5ad4ad20"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "ec8ba5ada63dfd30a3eac25e5360b9088779c2283b54c0b648f8dd1c018c3a53"
+        "sha256": "b80ba8af21a192221746713f86b77d187923d20c70e36ac23724de0e99c9fc65"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "efee30667978d3624ac86a34fec51dcfa0bcdfa139e32d6002151fd456d24497"
+        "sha256": "970c9c02164802fd0e1f4a1fab0f1d2bb1a5d0cfeb44f07e76e4089f87c5dbc2"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "fb3fd5a3523704d38bfa6283ac87eafe1bc8bff728c2707365c4d5e63e3bfda9"
+        "sha256": "dbf3340ed5ca7fcf6ed8aa6f54cb6b851c582ec4cdaba57b4d3a00fc18bd9e81"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,11 +57,11 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "af23e6e9cd0bcde3d281d9856beb174ba311b44a95edd0efd1e84210d47b9d43"
+        "sha256": "f870527b86a04245b6b07f50f5332c8c825e78508c3a05e5a4c475a7fd8a791e"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "159d9ced96a7d80a9299e6a42d02196438586b3ebdf32249816634c1130eda86"
+        "sha256": "34a204ca7425c2eb945f45f663d4448a32aa4b8eba040dbaa751c199650161aa"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,15 +69,15 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "2fa84ddec270226a0bd3365811db56764375337064fff705d51377194e4a49c7"
+        "sha256": "27383c2876fc277b9b6762aae69c8be47661b5bc83dde0cc4c5cdba240778e98"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "49f88f85f1d504fd0ce75ff88221169aac3f71e9d8a0f05f1ba382fb09d3f945"
+        "sha256": "add2ec29f9d7768d14162fd79e8aaaae8e53829e5fc3c95ed2c6c94f6942c39d"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "f2cc0e39e8d9f5a72111e41379b392277bec7c06cbf0b4b8aa35cbea8f160166"
+        "sha256": "afe1c9a1f21d866989e652aa465f0697caa789165bb8f9565822b0082cb6b7b4"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -85,15 +85,15 @@
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "7a4487c758a9d18e4e294130b34ce0784ac68b42c7e6c79875d44374c31eac87"
+        "sha256": "3f293dcd1fdd4b4b1725c168c9f4d7b0aaa5366213e430bd44cb446048c28a0b"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "ad10f6db2271c09a2bef66ae9b15779a41260d0eab3510461e2f1181bf39e085"
+        "sha256": "79f6f7640da5c3a82650bab6b5b7311b30875ea448b6e57f681a96cdc5477a2d"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "7a9a8c71b7f812eca8c25f1755f316cfa7206756faf02a05c702aa102a80b758"
+        "sha256": "ef370884a4c18032def5ccaa2995802755c9fea9f0ceb89b5d2fd9625c8ec3a1"
       }
     }
   },
@@ -132,21 +132,21 @@
     "anchor"
   ],
   "summary": {
-    "catalogEntries": 70,
+    "catalogEntries": 72,
     "catalogEntriesByModality": {
-      "image": 59,
+      "image": 61,
       "video": 11
     },
-    "cells": 9810,
+    "cells": 11010,
     "publishedCells": 3988,
-    "elidedCells": 5822,
+    "elidedCells": 7022,
     "elidedByState": {
-      "Implemented": 1238,
-      "Missing": 4584
+      "Implemented": 1598,
+      "Missing": 5424
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
-    "mlxStagedStaticCoverage": 50,
-    "mlxStagedStaticCoverageDenominator": 59,
+    "mlxStagedStaticCoverage": 52,
+    "mlxStagedStaticCoverageDenominator": 61,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 11,
     "unroutedEntries": [],
@@ -175,7 +175,7 @@
       }
     ],
     "anchors": 259,
-    "analyticOnlyCells": 104,
+    "analyticOnlyCells": 124,
     "anchoredCells": 3988,
     "staleAnchors": 259,
     "attestedAnchors": 0,
@@ -1363,6 +1363,168 @@
         "candle": {
           "tiers": [
             "default"
+          ],
+          "modes": [
+            "character_image",
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "flux3_klein",
+      "name": "FLUX 3 Image Klein",
+      "modality": "image",
+      "familyGroup": 26233,
+      "family": "flux3",
+      "resolvedRoute": "flux3_klein",
+      "resolvedRoutes": {
+        "mlx": "flux3_klein",
+        "candle": "flux3_klein"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 26233,
+        "candle": 26241
+      },
+      "owningModelStories": {
+        "mlx": 26234,
+        "candle": 26235
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "fp8r",
+            "nvfp4",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "character_image",
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "fp8r",
+            "nvfp4",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "character_image",
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "flux3_klein_base",
+      "name": "FLUX 3 Image Klein Base",
+      "modality": "image",
+      "familyGroup": 26233,
+      "family": "flux3",
+      "resolvedRoute": "flux3_klein_base",
+      "resolvedRoutes": {
+        "mlx": "flux3_klein_base",
+        "candle": "flux3_klein_base"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 26233,
+        "candle": 26241
+      },
+      "owningModelStories": {
+        "mlx": 26239,
+        "candle": 26239
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "fp8r",
+            "nvfp4",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "character_image",
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "fp8r",
+            "nvfp4",
+            "q4",
+            "q8"
           ],
           "modes": [
             "character_image",
@@ -12873,6 +13035,246 @@
           "lora": 0,
           "none": 12
         }
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
       }
     },
     {
@@ -251364,6 +251766,8 @@
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:staged_residency"
     ],
     "flux2_klein_9b_true_v2": [],
+    "flux3_klein": [],
+    "flux3_klein_base": [],
     "ideogram_4": [
       "ideogram_4:ideogram_4:candle:bf16:edit_image:lora:bounded_attention",
       "ideogram_4:ideogram_4:candle:bf16:edit_image:lora:bounded_decode",

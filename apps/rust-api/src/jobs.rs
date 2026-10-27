@@ -527,6 +527,40 @@ async fn apply_training_retry_resume(
             "Only a failed, canceled or interrupted training job can be resumed.",
         ));
     }
+    let source_is_flux3 = job
+        .payload
+        .get("plan")
+        .and_then(|plan| plan.pointer("/target/kernel"))
+        .and_then(Value::as_str)
+        .is_some_and(|kernel| sceneworks_core::training::flux3::KERNELS.contains(&kernel));
+    let effective_resume = resume.unwrap_or_else(|| {
+        plan.get("config")
+            .and_then(|config| config.pointer("/advanced/resume"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+    if source_is_flux3 && effective_resume {
+        let original = job
+            .payload
+            .get("plan")
+            .and_then(Value::as_object)
+            .ok_or_else(|| {
+                ApiError::bad_request("FLUX.3 resume requires the original stored training plan.")
+            })?;
+        let normalize = |plan: &JsonObject| {
+            let mut value = Value::Object(plan.clone());
+            if let Some(advanced) = value
+                .pointer_mut("/config/advanced")
+                .and_then(Value::as_object_mut)
+            {
+                advanced.remove("resume");
+            }
+            value
+        };
+        if normalize(original) != normalize(&plan) {
+            return Err(ApiError::bad_request("FLUX.3 checkpoint identity mismatch: resume must keep the original model, options, dataset and output. Start a new training run to change them."));
+        }
+    }
     let output_dir = plan
         .get("output")
         .and_then(|output| output.get("outputDir"))
@@ -656,14 +690,26 @@ pub(crate) async fn duplicate_job(
     if let Some(fresh_output) = fresh_output {
         payload.payload_changes.extend(fresh_output);
     }
+    let fresh_job_id = if let Some((id, owned_output)) =
+        crate::training::fresh_flux3_training_duplicate(&state, &job_id, &payload.payload_changes)
+            .await?
+    {
+        // Merge server-owned bindings last: even a complete caller-supplied plan cannot restore the
+        // old output directory, manifest id or resume flag after freshening this duplicate.
+        payload.payload_changes.extend(owned_output);
+        Some(id)
+    } else {
+        None
+    };
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.duplicate_job(
-            &job_id,
-            DuplicateJob {
-                payload_changes: payload.payload_changes,
-                requested_gpu: payload.requested_gpu,
-            },
-        )
+        let request = DuplicateJob {
+            payload_changes: payload.payload_changes,
+            requested_gpu: payload.requested_gpu,
+        };
+        match fresh_job_id {
+            Some(id) => store.duplicate_job_with_id(id, &job_id, request),
+            None => store.duplicate_job(&job_id, request),
+        }
     })
     .await?;
     publish(&state, "job.updated", &public_job_snapshot(job.clone()));
@@ -981,6 +1027,12 @@ async fn validate_and_canonicalize_merged_generation_payload(
             &mut merged,
         )
         .await?;
+        crate::generation::validate_flux3_reference_payload(
+            state.clone(),
+            project_id.as_deref(),
+            &merged,
+        )
+        .await?;
         validate_prompt_enhancement_payload(&merged)?;
 
         // Retry and duplicate are image-job creation boundaries too. The canonicalizer above
@@ -1209,6 +1261,21 @@ pub(crate) async fn canonicalize_image_model_payload(
         return Err(ApiError::bad_request(format!(
             "image_detail model '{model_id}' was not found in the model catalog"
         )));
+    }
+
+    // Tier capability does not certify an installable artifact. This check is shared by create,
+    // retry and duplicate after resolving the authoritative catalog (never caller metadata).
+    let empty = JsonObject::new();
+    let advanced = payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    if let Some(reason) = sceneworks_core::image_request::flux3_catalog_tier_refusal(
+        &model_id,
+        advanced,
+        &model_manifest_entry,
+    ) {
+        return Err(ApiError::bad_request(reason));
     }
 
     // Every image entry point reaches this post-expansion/post-merge seam.

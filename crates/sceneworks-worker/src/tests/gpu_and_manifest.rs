@@ -84,7 +84,7 @@ fn selected_compute_capability_never_borrows_a_later_gpu_row() {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[test]
 fn nvfp4_gate_floors_at_blackwell_sm_120() {
-use crate::gpu::compute_cap_meets_nvfp4;
+    use crate::gpu::compute_cap_meets_nvfp4;
 
     // Consumer Blackwell (RTX PRO 6000 / RTX 50-series = 12.0) — the epic's target, and eligible.
     assert!(compute_cap_meets_nvfp4(Some(12.0)));
@@ -134,10 +134,13 @@ fn auto_worker_ids_and_child_environment_match_python_supervisor() {
     // credential fixture. The assertion never prints or logs its contents.
     settings.access_token = Some(format!("{}-{}", env!("CARGO_PKG_NAME"), std::process::id()));
 
-    let gpu_env = child_environment(&settings, &WorkerSpec {
-        worker_id: "worker-gpu-auto-1".to_owned(),
-        gpu_id: "1".to_owned(),
-    });
+    let gpu_env = child_environment(
+        &settings,
+        &WorkerSpec {
+            worker_id: "worker-gpu-auto-1".to_owned(),
+            gpu_id: "1".to_owned(),
+        },
+    );
     assert_eq!(gpu_env["SCENEWORKS_UTILITY_JOBS"], "0");
     assert_eq!(gpu_env["CUDA_VISIBLE_DEVICES"], "1");
     assert_eq!(
@@ -145,10 +148,13 @@ fn auto_worker_ids_and_child_environment_match_python_supervisor() {
         settings.access_token.as_ref()
     );
 
-    let cpu_env = child_environment(&settings, &WorkerSpec {
-        worker_id: "worker-gpu-auto-cpu".to_owned(),
-        gpu_id: "cpu".to_owned(),
-    });
+    let cpu_env = child_environment(
+        &settings,
+        &WorkerSpec {
+            worker_id: "worker-gpu-auto-cpu".to_owned(),
+            gpu_id: "cpu".to_owned(),
+        },
+    );
     assert_eq!(cpu_env["SCENEWORKS_UTILITY_JOBS"], "1");
     assert_eq!(cpu_env["CUDA_VISIBLE_DEVICES"], "");
     assert_eq!(
@@ -157,10 +163,13 @@ fn auto_worker_ids_and_child_environment_match_python_supervisor() {
     );
 
     settings.access_token = None;
-    let no_token_env = child_environment(&settings, &WorkerSpec {
-        worker_id: "worker-gpu-auto-cpu".to_owned(),
-        gpu_id: "cpu".to_owned(),
-    });
+    let no_token_env = child_environment(
+        &settings,
+        &WorkerSpec {
+            worker_id: "worker-gpu-auto-cpu".to_owned(),
+            gpu_id: "cpu".to_owned(),
+        },
+    );
     assert!(!no_token_env.contains_key("SCENEWORKS_ACCESS_TOKEN"));
 }
 
@@ -524,6 +533,10 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         ("mage_flow_edit_turbo", false, false),
         // Iris-3B (sc-25679): CFG against a negative prompt (default ""), cfg_scale = guidance.
         ("iris_3b", true, true),
+        // FLUX 3 Image Klein, distilled (sc-26234): a flow map — no CFG, no negative prompt.
+        ("flux3_klein", false, false),
+        // S6: the independent base CFG checkpoint owns both conditioning axes.
+        ("flux3_klein_base", true, true),
         // sc-26325: native MOSS Base/SFT both expose real CFG and negative conditioning.
         ("moss_image_base", true, true),
         ("moss_image_sft", true, true),
@@ -584,6 +597,113 @@ pub(crate) fn builtin_model_entry(id: &str) -> Value {
         .unwrap_or_else(|| panic!("{id} present in builtin.models.jsonc"))
 }
 
+/// The REAL released FLUX 3 DiT `model.safetensors` header structure
+/// (`tests/fixtures/flux3-dit-header-structure.json`, captured read-only from base 1469d27c and
+/// distilled 8454017f): `(name, dtype, shape)` for the 357 base tensors, plus the two flow-map
+/// `ref_time_in` tensors when `distilled`.
+pub(crate) fn flux3_dit_header_structure(distilled: bool) -> Vec<(String, String, Vec<u64>)> {
+    let fixture: Value = serde_json::from_str(
+        &std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../tests/fixtures/flux3-dit-header-structure.json"),
+        )
+        .expect("read flux3-dit-header-structure.json"),
+    )
+    .expect("parse flux3-dit-header-structure.json");
+    let mut rows: Vec<&Value> = fixture["base"].as_array().unwrap().iter().collect();
+    if distilled {
+        rows.extend(fixture["distilledAdditional"].as_array().unwrap());
+    }
+    rows.into_iter()
+        .map(|row| {
+            (
+                row[0].as_str().unwrap().to_owned(),
+                row[1].as_str().unwrap().to_owned(),
+                row[2]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|d| d.as_u64().unwrap())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// A tiny, internally consistent FLUX 3 DiT `model.safetensors` in `dir`: the REAL released tensor
+/// NAMES and dtypes, each with a rank-preserving all-ones shape and actual zero-filled payload, so
+/// every `data_offsets` range lies within the file. No real weights. Checkpoint identity (flow map)
+/// is the presence of `ref_time_in`, never these placeholder shapes. Returns the file length.
+pub(crate) fn write_flux3_dit_stub(dir: &Path, distilled: bool) -> u64 {
+    let mut header = serde_json::Map::new();
+    header.insert(
+        "__metadata__".into(),
+        json!({"format": "pt", "model": "f3-image-small", "dtype": "bfloat16"}),
+    );
+    let mut offset = 0_u64;
+    for (name, dtype, shape) in flux3_dit_header_structure(distilled) {
+        assert_eq!(dtype, "BF16", "released DiT tensors are bf16");
+        let end = offset + 2; // one bf16 element per tensor
+        header.insert(
+            name,
+            json!({"dtype": dtype, "shape": vec![1_u64; shape.len()], "data_offsets": [offset, end]}),
+        );
+        offset = end;
+    }
+    let header = serde_json::to_vec(&Value::Object(header)).unwrap();
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend(&header);
+    bytes.resize(bytes.len() + offset as usize, 0);
+    std::fs::write(dir.join("model.safetensors"), &bytes).unwrap();
+    bytes.len() as u64
+}
+
+#[test]
+fn flux3_dit_header_structure_matches_the_released_checkpoints_and_config_geometry() {
+    let base = flux3_dit_header_structure(false);
+    let distilled = flux3_dit_header_structure(true);
+    assert_eq!((base.len(), distilled.len()), (357, 359));
+    let names = |rows: &[(String, String, Vec<u64>)]| {
+        rows.iter()
+            .map(|(name, _, _)| name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let extra: Vec<_> = names(&distilled).difference(&names(&base)).cloned().collect();
+    assert_eq!(
+        extra,
+        ["ref_time_in.in_layer.weight", "ref_time_in.out_layer.weight"],
+        "distilled is exactly base plus the flow-map ref_time_in tensors"
+    );
+    assert!(!names(&base).iter().any(|n| n.starts_with("ref_time_in.")));
+    assert!(distilled.iter().all(|(_, dtype, _)| dtype == "BF16"));
+    // Block indices agree with the real released config (`dit.depth` 5, `dit.depth_single` 28).
+    let blocks = |prefix: &str| {
+        names(&base)
+            .iter()
+            .filter_map(|n| n.strip_prefix(prefix)?.split('.').next()?.parse::<usize>().ok())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(blocks("txt_mode_blocks."), (0..5).collect());
+    assert_eq!(blocks("single_blocks."), (0..28).collect());
+    // The stub is internally consistent: every range within the file, payload actually present.
+    let dir = tempfile::tempdir().unwrap();
+    for (distilled, tensors) in [(false, 357_usize), (true, 359)] {
+        let len = write_flux3_dit_stub(dir.path(), distilled);
+        let bytes = std::fs::read(dir.path().join("model.safetensors")).unwrap();
+        assert_eq!(bytes.len() as u64, len);
+        let header_len = u64::from_le_bytes(bytes[..8].try_into().unwrap()) as usize;
+        let header: Value = serde_json::from_slice(&bytes[8..8 + header_len]).unwrap();
+        let header = header.as_object().unwrap();
+        assert_eq!(header.len() - 1, tensors);
+        assert_eq!(header.contains_key("ref_time_in.in_layer.weight"), distilled);
+        let payload = bytes.len() - 8 - header_len;
+        assert_eq!(payload, tensors * 2);
+        assert!(header.iter().filter(|(k, _)| *k != "__metadata__").all(|(_, v)| {
+            v["data_offsets"][1].as_u64().unwrap() as usize <= payload
+        }));
+    }
+}
+
 /// sc-20754: the three MiniMax-H3 Candle tiers were measured in separate idle CUDA processes at the
 /// shipped 1344x768 / 124-frame / 50-NFE workload. Pin the evidence as one atomic manifest fact so
 /// dropping a tier, reverting `measured`, or falling back to the old absent gate is immediately red.
@@ -597,9 +717,7 @@ fn minimax_h3_candle_vram_rows_are_the_three_measured_cuda_receipts() {
     assert_eq!(candle.get("measured").and_then(Value::as_bool), Some(true));
     assert_eq!(candle.get("minMemoryGb").and_then(Value::as_u64), Some(43));
     assert_eq!(
-        candle
-            .get("vramMeasuredPixels")
-            .and_then(Value::as_u64),
+        candle.get("vramMeasuredPixels").and_then(Value::as_u64),
         Some(1_032_192)
     );
 
@@ -613,7 +731,10 @@ fn minimax_h3_candle_vram_rows_are_the_three_measured_cuda_receipts() {
             .get(tier)
             .and_then(Value::as_f64)
             .unwrap_or_else(|| panic!("minimax_h3 measured {tier} row"));
-        assert!((actual - peak_gb).abs() < f64::EPSILON * 8.0, "{tier}: {actual}");
+        assert!(
+            (actual - peak_gb).abs() < f64::EPSILON * 8.0,
+            "{tier}: {actual}"
+        );
     }
 }
 
@@ -920,7 +1041,9 @@ fn default_tier_key_mirrors_the_production_resolver() {
     let no_advanced = serde_json::Map::new();
     for model in builtin_models_manifest() {
         let id = model.get("id").and_then(Value::as_str).unwrap_or("<no id>");
-        let entry = model.as_object().expect("manifest entries are JSON objects");
+        let entry = model
+            .as_object()
+            .expect("manifest entries are JSON objects");
         assert_eq!(
             default_tier_key(&model),
             crate::vram_gate::requested_tier_key(&no_advanced, entry, false),
@@ -959,9 +1082,18 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     // caption-aware captures do not prove a lower sequential peak, so both rows remain 44.7 GB.
     let q4_res = predicted_peak_gb(dev_entry, "q4").expect("q4 resident predicted");
     let q4_seq = predicted_sequential_peak_gb(dev_entry, "q4").expect("q4 sequential predicted");
-    assert!((q4_res - 44.7).abs() < 1e-6, "q4 resident 42.7 + 2 headroom, got {q4_res}");
-    assert!((q4_seq - 44.7).abs() < 1e-6, "q4 sequential 42.7 + 2 headroom, got {q4_seq}");
-    assert_eq!(q4_seq, q4_res, "no smaller caption-aware sequential peak is claimed");
+    assert!(
+        (q4_res - 44.7).abs() < 1e-6,
+        "q4 resident 42.7 + 2 headroom, got {q4_res}"
+    );
+    assert!(
+        (q4_seq - 44.7).abs() < 1e-6,
+        "q4 sequential 42.7 + 2 headroom, got {q4_seq}"
+    );
+    assert_eq!(
+        q4_seq, q4_res,
+        "no smaller caption-aware sequential peak is claimed"
+    );
 
     // The conservative supported tier is 48 GB and fits q4 resident outright.
     assert_eq!(dev_entry["candle"]["minMemoryGb"], 48);
@@ -971,8 +1103,14 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     // A 40 GB card cannot fit either row. Offload is attempted, then fails closed on the same
     // caption-aware high-water rather than falling through to an obsolete v2 ladder rung.
     let card40 = apply_vram_cap(None, Some(40.0));
-    let at40 = resolve_offload(fit_decision(Some(q4_res), card40), /* sequential_capable */ true);
-    assert!(matches!(at40, FitDecision::Offload { .. }), "40 GB → offload, got {at40:?}");
+    let at40 = resolve_offload(
+        fit_decision(Some(q4_res), card40),
+        /* sequential_capable */ true,
+    );
+    assert!(
+        matches!(at40, FitDecision::Offload { .. }),
+        "40 GB → offload, got {at40:?}"
+    );
     assert_eq!(
         sequential_overflow_gb(Some(q4_seq), card40),
         Some(q4_seq),
@@ -982,7 +1120,10 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     // A 30 GB card is also rejected before load.
     let card30 = apply_vram_cap(None, Some(30.0));
     let at30 = resolve_offload(fit_decision(Some(q4_res), card30), true);
-    assert!(matches!(at30, FitDecision::Offload { .. }), "30 GB → offload attempt, got {at30:?}");
+    assert!(
+        matches!(at30, FitDecision::Offload { .. }),
+        "30 GB → offload attempt, got {at30:?}"
+    );
     assert_eq!(
         sequential_overflow_gb(Some(q4_seq), card30),
         Some(q4_seq),
@@ -1008,10 +1149,12 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
         crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "q8")
             .is_ok()
     );
-    assert!(
-        crate::image_jobs::validate_candle_tier_memory_evidence("flux2_dev", dev_entry, "bf16")
-            .is_err()
-    );
+    assert!(crate::image_jobs::validate_candle_tier_memory_evidence(
+        "flux2_dev",
+        dev_entry,
+        "bf16"
+    )
+    .is_err());
 
     // klein carries a candle block so ITS fit-gate is live: on a 16 GB epic-target card klein rejects
     // even sequentially (the ~32 GB F32-resident Qwen3 TE is the sequential floor). q4 sequential is the
@@ -1019,7 +1162,10 @@ fn flux2_candle_blocks_drive_the_fit_gate_and_reject() {
     let klein = builtin_model_entry("flux2_klein_9b");
     let klein_entry = klein.as_object().expect("flux2_klein_9b entry object");
     assert!(
-        klein_entry.get("candle").and_then(Value::as_object).is_some(),
+        klein_entry
+            .get("candle")
+            .and_then(Value::as_object)
+            .is_some(),
         "flux2_klein_9b candle block present"
     );
     let klein_seq =
@@ -1066,13 +1212,19 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     let bf16 = predicted_peak_gb(entry, "bf16").expect("bf16 peak measured");
     assert!((q4 - 14.1).abs() < 1e-6, "q4 12.1 + 2 headroom, got {q4}");
     assert!((q8 - 14.1).abs() < 1e-6, "q8 12.1 + 2 headroom, got {q8}");
-    assert!((bf16 - 16.5).abs() < 1e-6, "bf16 14.5 + 2 headroom, got {bf16}");
+    assert!(
+        (bf16 - 16.5).abs() < 1e-6,
+        "bf16 14.5 + 2 headroom, got {bf16}"
+    );
     // Under sequential offload the peak is the tier-blind denoise attention transient, NOT the weights,
     // so q4 and q8 (each measured in its own process) land on the SAME pool high-water — their code-size
     // delta shows only in steady residency — and only the dense bf16 DiT lifts the peak. The ladder is
     // non-strict and tiny (~2.4 GB q4→bf16) — where the RESIDENT ladder spanned ~8 GB, because there the
     // still-resident TE + VAE dwarfed the DiT delta.
-    assert!(q4 <= q8 && q8 < bf16, "q4 == q8 <= bf16 (denoise-transient peak; only dense bf16 heavier)");
+    assert!(
+        q4 <= q8 && q8 < bf16,
+        "q4 == q8 <= bf16 (denoise-transient peak; only dense bf16 heavier)"
+    );
     assert!(
         (q8 - q4).abs() < 1e-6,
         "q4 and q8 are the same denoise-transient peak under offload, got a {} GB gap",
@@ -1138,7 +1290,7 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
     // The expectations below pin what SHIPS, so drift still goes red; they do not certify the small-card fit.
     let card48 = apply_vram_cap(None, Some(48.0));
     let card32 = apply_vram_cap(None, Some(32.0)); // an RTX 5090 — epic sc-12732's small-card target
-    // card16 is already bound above (the 5B section) and reused here.
+                                                   // card16 is already bound above (the 5B section) and reused here.
     for (id, q4_peak, q8_peak, bf16_peak) in [
         ("wan_2_2_t2v_14b", 22.13, 27.95, 38.56),
         ("wan_2_2_i2v_14b", 22.20, 28.02, 38.62),
@@ -1148,12 +1300,27 @@ fn wan_candle_blocks_drive_the_video_fit_gate_and_reject() {
         let q4 = predicted_peak_gb(a14b, "q4").expect("a14b q4 measured");
         let q8 = predicted_peak_gb(a14b, "q8").expect("a14b q8 measured");
         let bf16 = predicted_peak_gb(a14b, "bf16").expect("a14b bf16 measured");
-        assert!((q4 - (q4_peak + 2.0)).abs() < 1e-6, "{id} q4 {q4_peak} + 2 headroom, got {q4}");
-        assert!((q8 - (q8_peak + 2.0)).abs() < 1e-6, "{id} q8 {q8_peak} (live) + 2 headroom, got {q8}");
-        assert!((bf16 - (bf16_peak + 2.0)).abs() < 1e-6, "{id} bf16 {bf16_peak} (measured) + 2, got {bf16}");
+        assert!(
+            (q4 - (q4_peak + 2.0)).abs() < 1e-6,
+            "{id} q4 {q4_peak} + 2 headroom, got {q4}"
+        );
+        assert!(
+            (q8 - (q8_peak + 2.0)).abs() < 1e-6,
+            "{id} q8 {q8_peak} (live) + 2 headroom, got {q8}"
+        );
+        assert!(
+            (bf16 - (bf16_peak + 2.0)).abs() < 1e-6,
+            "{id} bf16 {bf16_peak} (measured) + 2, got {bf16}"
+        );
         assert!(q4 < q8 && q8 < bf16, "{id}: heavier tier ⇒ heavier peak");
-        assert!(q4 < 32.0 && q8 < 32.0, "{id}: q4 AND q8 (measured) now fit a 32 GB card");
-        assert!(bf16 > 32.0, "{id}: bf16 stays above a 32 GB card (admits 48)");
+        assert!(
+            q4 < 32.0 && q8 < 32.0,
+            "{id}: q4 AND q8 (measured) now fit a 32 GB card"
+        );
+        assert!(
+            bf16 > 32.0,
+            "{id}: bf16 stays above a 32 GB card (admits 48)"
+        );
 
         // The live gate. q4 + q8 are ADMITTED on the 96 GB box they were measured rendering on
         // (wall-rejecting q4 would be the sc-12179 regression) AND on a 32 GB RTX 5090 — the point of the
@@ -1221,8 +1388,7 @@ fn krea_candle_block_drives_the_registry_and_second_stage_gate() {
 
     // Manifest values plus the generic gate's fixed 2 GB runtime headroom.
     let q4_resident = predicted_peak_gb(entry, "q4").expect("q4 resident peak");
-    let q4_sequential =
-        predicted_sequential_peak_gb(entry, "q4").expect("q4 sequential peak");
+    let q4_sequential = predicted_sequential_peak_gb(entry, "q4").expect("q4 sequential peak");
     assert!((q4_resident - 27.7).abs() < 1e-6);
     assert!((q4_sequential - 23.9).abs() < 1e-6);
     assert!((predicted_sequential_peak_gb(entry, "q8").unwrap() - 31.4).abs() < 1e-6);
@@ -1280,7 +1446,8 @@ fn z_image_turbo_candle_block_admits_q4_on_eight_gb() {
     );
 
     let q4_resident = predicted_peak_gb(entry, "q4").expect("q4 resident peak + reserve");
-    let q8_resident = predicted_peak_gb(entry, "q8").expect("real hosted q8 resident peak + reserve");
+    let q8_resident =
+        predicted_peak_gb(entry, "q8").expect("real hosted q8 resident peak + reserve");
     let bf16_resident = predicted_peak_gb(entry, "bf16").expect("bf16 resident peak + reserve");
     assert!((q4_resident - 20.4).abs() < 1e-6);
     assert!((q8_resident - 26.2).abs() < 1e-6);
@@ -1406,7 +1573,10 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
     // (tier-independent), speed-only, byte-identical output, and unaffected by the branch repack.
     let chunk = chunk_attn_save_gb(entry);
     let chunk_save = chunk.expect("chunkAttnSaveGb shipped (the sc-11745 chunking rung)");
-    assert!(chunk_save > 0.0, "chunking must recover VRAM, got {chunk_save}");
+    assert!(
+        chunk_save > 0.0,
+        "chunking must recover VRAM, got {chunk_save}"
+    );
 
     // The common small-card install: q4 base with its shipping q8 branch. Both direct measurements gain
     // only the standard 2 GB admission headroom.
@@ -1593,12 +1763,9 @@ fn krea_control_candle_block_drives_the_fit_ladder() {
         vec!["q4", "q8", "bf16", "int8-convrot"],
         "the shipped control block must price every reachable tier"
     );
+    assert!((predicted_control_peak_gb(entry, "int8-convrot").unwrap() - 52.7).abs() < 1e-6);
     assert!(
-        (predicted_control_peak_gb(entry, "int8-convrot").unwrap() - 52.7).abs() < 1e-6
-    );
-    assert!(
-        (predicted_control_sequential_peak_gb(entry, "int8-convrot").unwrap() - 37.5).abs()
-            < 1e-6
+        (predicted_control_sequential_peak_gb(entry, "int8-convrot").unwrap() - 37.5).abs() < 1e-6
     );
     for tier in ["some-future-tier"] {
         assert!(
@@ -1737,7 +1904,10 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
     // `predicted_*` take the MODEL ENTRY (they read `.candle` internally), not the candle sub-object.
     let edit_entry = edit.as_object().expect("qwen_image_edit_2511 entry object");
     assert!(
-        edit_entry.get("candle").and_then(Value::as_object).is_some(),
+        edit_entry
+            .get("candle")
+            .and_then(Value::as_object)
+            .is_some(),
         "qwen_image_edit_2511 candle block present (absent ⇒ edit fit-gate inert)"
     );
 
@@ -1761,7 +1931,10 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
     // A 48 GB card: resident 58.7 won't fit, but sequential 38.9 does → OFFLOAD, run sequentially.
     let card48 = apply_vram_cap(None, Some(48.0));
     let at48 = resolve_offload(fit_decision(Some(q4_res), card48), true);
-    assert!(matches!(at48, FitDecision::Offload { .. }), "48 GB → offload");
+    assert!(
+        matches!(at48, FitDecision::Offload { .. }),
+        "48 GB → offload"
+    );
     assert_eq!(
         sequential_overflow_gb(Some(q4_seq), card48),
         None,
@@ -1771,7 +1944,10 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
     // A 30 GB card: even the sequential 38.9 peak won't fit → REJECT-before-OOM (sc-10856 gate).
     let card30 = apply_vram_cap(None, Some(30.0));
     let at30 = resolve_offload(fit_decision(Some(q4_res), card30), true);
-    assert!(matches!(at30, FitDecision::Offload { .. }), "30 GB → offload attempt");
+    assert!(
+        matches!(at30, FitDecision::Offload { .. }),
+        "30 GB → offload attempt"
+    );
     assert_eq!(
         sequential_overflow_gb(Some(q4_seq), card30),
         Some(q4_seq),
@@ -1804,7 +1980,10 @@ fn qwen_edit_candle_blocks_drive_the_fit_gate_and_reject() {
     let lightning = builtin_model_entry("qwen_image_edit_2511_lightning");
     let lightning_entry = lightning.as_object().expect("lightning entry object");
     assert!(
-        lightning_entry.get("candle").and_then(Value::as_object).is_some(),
+        lightning_entry
+            .get("candle")
+            .and_then(Value::as_object)
+            .is_some(),
         "qwen_image_edit_2511_lightning candle block present"
     );
     let l_seq = predicted_sequential_peak_gb(lightning_entry, "q4").expect("lightning q4 seq");
@@ -2400,7 +2579,11 @@ fn kolors_manifest_entry_gates_correctly() {
         .and_then(Value::as_array)
         .map(|a| a.iter().filter_map(Value::as_str).collect())
         .unwrap_or_default();
-    assert_eq!(lora_families, vec!["kolors"], "kolors loraCompatibility.families");
+    assert_eq!(
+        lora_families,
+        vec!["kolors"],
+        "kolors loraCompatibility.families"
+    );
 }
 
 /// sc-9942 (epic 8506): the Wan2.2 T2V-A14B builtin entry ships the macOS quant matrix as per-tier
@@ -2460,7 +2643,12 @@ fn wan_t2v_14b_manifest_ships_the_quant_matrix() {
         let files: Vec<String> = tier
             .get("files")
             .and_then(Value::as_array)
-            .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
+            .map(|f| {
+                f.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         assert_eq!(
             files,
@@ -2547,7 +2735,12 @@ fn wan_i2v_14b_manifest_ships_the_quant_matrix() {
         let files: Vec<String> = tier
             .get("files")
             .and_then(Value::as_array)
-            .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
+            .map(|f| {
+                f.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         assert_eq!(
             files,
@@ -2628,8 +2821,12 @@ fn wan_ti2v_5b_manifest_ships_the_quant_matrix() {
         .map(|d| {
             (
                 d.get("repo").and_then(Value::as_str).unwrap_or_default(),
-                d.get("revision").and_then(Value::as_str).unwrap_or_default(),
-                d.get("required").and_then(Value::as_str).unwrap_or_default(),
+                d.get("revision")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                d.get("required")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
                 d.get("files").cloned().unwrap_or_default(),
             )
         })
@@ -2675,7 +2872,12 @@ fn wan_ti2v_5b_manifest_ships_the_quant_matrix() {
         let files: Vec<String> = tier
             .get("files")
             .and_then(Value::as_array)
-            .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
+            .map(|f| {
+                f.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
             .unwrap_or_default();
         assert_eq!(
             files,
@@ -2720,7 +2922,11 @@ fn bernini_manifest_ships_the_quant_matrix() {
             Some("bernini"),
             "{id} family"
         );
-        assert_eq!(entry.get("type").and_then(Value::as_str), Some(ty), "{id} type");
+        assert_eq!(
+            entry.get("type").and_then(Value::as_str),
+            Some(ty),
+            "{id} type"
+        );
         let downloads = entry
             .get("downloads")
             .and_then(Value::as_array)
@@ -2753,7 +2959,12 @@ fn bernini_manifest_ships_the_quant_matrix() {
             let files: Vec<String> = tier
                 .get("files")
                 .and_then(Value::as_array)
-                .map(|f| f.iter().filter_map(Value::as_str).map(String::from).collect())
+                .map(|f| {
+                    f.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
                 .unwrap_or_default();
             assert_eq!(
                 files,
@@ -2969,13 +3180,19 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
     // too — they are advertised eligibility for a GPU this worker cannot reach, so they must be
     // withheld as well.
     let compute_cap = Some(12.0);
-    let descriptor = || crate::gpu::parse_nvidia_smi_gpus("0, Test GPU, 98304, 1024, 97280, 3")
-        .into_iter()
-        .next()
-        .expect("one parsed descriptor");
+    let descriptor = || {
+        crate::gpu::parse_nvidia_smi_gpus("0, Test GPU, 98304, 1024, 97280, 3")
+            .into_iter()
+            .next()
+            .expect("one parsed descriptor")
+    };
 
-    let healthy =
-        with_candle_capabilities(descriptor(), &settings, compute_cap, &crate::GpuHealth::Usable);
+    let healthy = with_candle_capabilities(
+        descriptor(),
+        &settings,
+        compute_cap,
+        &crate::GpuHealth::Usable,
+    );
     let unusable = with_candle_capabilities(
         descriptor(),
         &settings,
@@ -2992,7 +3209,9 @@ fn an_unusable_gpu_withholds_every_candle_capability() {
         healthy.capabilities
     );
     assert!(
-        healthy.capabilities.contains(&WorkerCapability::ImageGenerate),
+        healthy
+            .capabilities
+            .contains(&WorkerCapability::ImageGenerate),
         "the healthy baseline must include image_generate, else this test proves nothing"
     );
     for capability in [
@@ -3076,8 +3295,9 @@ fn gpu_health_reports_usability_and_carries_the_remedy() {
 fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
     use crate::preflight::cuda_preflight_message;
 
-    let classify =
-        |underlying: &str| crate::classify_probe_outcome(Err(cuda_preflight_message(underlying)), "0");
+    let classify = |underlying: &str| {
+        crate::classify_probe_outcome(Err(cuda_preflight_message(underlying)), "0")
+    };
 
     // A clean probe is usable, obviously — but pin it so an inverted check can't pass the rest.
     assert!(crate::classify_probe_outcome(Ok(()), "0").is_usable());
@@ -3121,7 +3341,6 @@ fn only_a_driver_class_probe_failure_makes_the_worker_unhealthy() {
         );
     }
 }
-
 
 /// sc-24109/sc-24112 — the INPUTS the two fit gates read for `qwen_image_2_1`, pinned on a lane
 /// that can actually RUN (`vram_gate` itself is `cfg(backend-candle)`, so
@@ -3193,7 +3412,8 @@ fn qwen_image_2_1_declares_derived_per_tier_memory_floors_and_no_measured_row() 
          evidence flag. The epic's terminal measurement story adds them"
     );
     assert!(
-        entry["candle"].get("measured").is_none() && entry["candle"].get("sequentialPeakGb").is_none(),
+        entry["candle"].get("measured").is_none()
+            && entry["candle"].get("sequentialPeakGb").is_none(),
         "the sibling evidence keys must be absent for the same reason"
     );
 }
@@ -3249,10 +3469,10 @@ fn qwen_image_2_1_declares_the_admission_envelope_the_gate_needs() {
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn qwen_image_2_1_reference_cap_and_envelope_come_from_the_linked_provider() {
-    #[cfg(target_os = "macos")]
-    use runtime_macos::providers::qwen_image_2_1 as provider;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     use runtime_cuda::providers::qwen_image_2_1 as provider;
+    #[cfg(target_os = "macos")]
+    use runtime_macos::providers::qwen_image_2_1 as provider;
 
     let models = builtin_models_manifest();
     let entry = models
@@ -3410,8 +3630,14 @@ fn qwen_image_2_1_sampler_menu_is_the_providers_curated_menu() {
             .map(str::to_owned)
             .collect();
         let published: BTreeSet<String> = engine.iter().map(|name| name.to_string()).collect();
-        assert!(!published.is_empty(), "the provider publishes a curated {key} menu");
-        assert_eq!(declared, published, "limits.{key} must be the provider's curated menu");
+        assert!(
+            !published.is_empty(),
+            "the provider publishes a curated {key} menu"
+        );
+        assert_eq!(
+            declared, published,
+            "limits.{key} must be the provider's curated menu"
+        );
         assert!(
             entry["limits"][key]
                 .as_array()
@@ -3452,8 +3678,16 @@ fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
             ["minMemoryGb", "minMemoryGbByTier"].into_iter().collect(),
             "{backend}: every floor key must have a worker source"
         );
-        for key in ["vramGbByTier", "measured", "sequentialPeakGb", "calibrations"] {
-            assert!(entry[backend].get(key).is_none(), "{backend}.{key} is measured evidence");
+        for key in [
+            "vramGbByTier",
+            "measured",
+            "sequentialPeakGb",
+            "calibrations",
+        ] {
+            assert!(
+                entry[backend].get(key).is_none(),
+                "{backend}.{key} is measured evidence"
+            );
         }
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
@@ -3466,8 +3700,8 @@ fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
     }
     #[cfg(target_os = "macos")]
     {
-        use runtime_macos::providers::qwen_image_2_1 as provider;
         use provider::memory_strategy::derived;
+        use runtime_macos::providers::qwen_image_2_1 as provider;
         const GIB: f64 = (1_u64 << 30) as f64;
         let floor = |bytes: u64| (bytes as f64 / GIB * 1.25).ceil() as u64;
         let base = models
@@ -3480,7 +3714,8 @@ fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
                 provider::quant::Tier::Q8 => "q8",
                 provider::quant::Tier::Q4 => "q4",
             };
-            let turbo_peak = derived::default_path_peak_max_bytes_for(provider::Variant::Turbo, tier);
+            let turbo_peak =
+                derived::default_path_peak_max_bytes_for(provider::Variant::Turbo, tier);
             assert_eq!(
                 entry["mlx"]["minMemoryGbByTier"][name].as_u64(),
                 Some(floor(turbo_peak)),
@@ -3510,11 +3745,11 @@ fn qwen_image_2_1_turbo_every_floor_key_the_ui_reads_has_a_worker_source() {
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider() {
-    use std::collections::BTreeSet;
-    #[cfg(target_os = "macos")]
-    use runtime_macos::providers::qwen_image_2_1 as provider;
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     use runtime_cuda::providers::qwen_image_2_1 as provider;
+    #[cfg(target_os = "macos")]
+    use runtime_macos::providers::qwen_image_2_1 as provider;
+    use std::collections::BTreeSet;
 
     let models = builtin_models_manifest();
     let entry = models
@@ -3537,7 +3772,11 @@ fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider
         ("pixelsPerToken", engine.pixels_per_token),
         ("maxBatch", u64::from(engine.max_batch)),
     ] {
-        assert_eq!(geometry[key].as_u64(), Some(value), "admissionGeometry.{key}");
+        assert_eq!(
+            geometry[key].as_u64(),
+            Some(value),
+            "admissionGeometry.{key}"
+        );
     }
     #[cfg(target_os = "macos")]
     {
@@ -3568,7 +3807,10 @@ fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider
             .map(str::to_owned)
             .collect();
         let published: BTreeSet<String> = engine.iter().map(|name| name.to_string()).collect();
-        assert_eq!(declared, published, "limits.{key} must be the Turbo provider's curated menu");
+        assert_eq!(
+            declared, published,
+            "limits.{key} must be the Turbo provider's curated menu"
+        );
     }
     assert!(
         capabilities.supports_alpha_output,
@@ -3580,5 +3822,57 @@ fn qwen_image_2_1_turbo_envelope_menu_and_revision_come_from_the_linked_provider
             .prefix_kv_cache
             .accepts(gen_core::PrefixKvCacheMode::Cached),
         "the Turbo descriptor declares the prefix-KV-cache domain the worker prices"
+    );
+}
+
+/// sc-26241: FLUX 3's per-tier floors are DERIVED, not measured, by one rule — the dense floor with
+/// its DiT term replaced by the tier's DiT as the provider memory contract prices it — and the
+/// Candle gate reads them, so an FP8R / NVFP4 / q4 / q8 request is no longer sized against the
+/// dense 32 GB scalar. The arithmetic lives in the manifest comment; the numbers are pinned here.
+#[test]
+fn flux3_klein_tier_floors_are_derived_from_the_provider_dit_pricing() {
+    let entry = builtin_model_entry("flux3_klein");
+    // ceil(32 - (10.335 - tier DiT GiB)), DiT per provider `native_dit_bytes`.
+    let candle = [
+        ("bf16", 32),
+        ("q8", 29),
+        ("q4", 27),
+        ("fp8r", 28),
+        ("nvfp4", 27),
+    ];
+    for (tier, floor) in candle {
+        assert_eq!(
+            entry["candle"]["minMemoryGbByTier"][tier], floor,
+            "candle/{tier}: changing a floor changes which cards are refused"
+        );
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        assert_eq!(
+            crate::vram_gate::predicted_peak_gb(entry.as_object().unwrap(), tier),
+            Some(floor as f64),
+            "candle/{tier}: the gate reads the derived per-tier floor, not the dense scalar"
+        );
+    }
+    assert_eq!(
+        entry["candle"]["minMemoryGbByTier"]
+            .as_object()
+            .map(serde_json::Map::len),
+        Some(candle.len()),
+        "a row per shipped Candle tier and no other"
+    );
+    for (tier, floor) in [("bf16", 32), ("q8", 28), ("q4", 26)] {
+        assert_eq!(entry["mlx"]["minMemoryGbByTier"][tier], floor, "mlx/{tier}");
+    }
+    assert!(
+        entry["mlx"]["minMemoryGbByTier"].get("fp8r").is_none()
+            && entry["mlx"]["minMemoryGbByTier"].get("nvfp4").is_none(),
+        "MLX ships no publisher tier"
+    );
+    assert_eq!(
+        entry["candle"]["minMemoryGb"], 32,
+        "the scalar is the densest tier's floor"
+    );
+    assert!(
+        entry["candle"].get("vramGbByTier").is_none(),
+        "nothing is measured yet (sc-26243)"
     );
 }

@@ -636,6 +636,8 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
         let quant = match *tier {
             "q4" => Some(gen_core::Quant::Q4),
             "q8" => Some(gen_core::Quant::Q8),
+            "fp8r" => Some(gen_core::Quant::Fp8Rowwise),
+            "nvfp4" => Some(gen_core::Quant::Nvfp4),
             "bf16" => None,
             other => panic!("planned {lane} lane {provider}/{mode} names unknown tier {other}"),
         };

@@ -385,6 +385,8 @@ smuggled under a scalar key.
 
 | Key | Shape | What it is |
 | --- | --- | --- |
+| `flux3_layout` | `Flux3Layout` | FLUX.3 caption-only soft spatial guidance: version, ordered labeled placement/source/target boxes, null removals, coordinate spaces and attachment-instance selection. Public row fields retain their original precision; unknown provenance fields are withheld. |
+| `flux3_reference_ids` | `StringList` | Up to ten unique attachment-instance identities in submitted reference order, including distinct slots for duplicate assets. Asset paths and identifiers remain separately withheld. |
 | `mossImage` | `MossImageOptions` | Requested MOSS mode, precision, context and author controls, validated through the native contract. |
 | `mossImageAdvanced` | `MossImageAdvanced` | Edit-only exact tensor SHA256/dtype/shape requirements, negative batch and images/latents output. Installation-local asset IDs are removed; replay reacquires exact artifacts. |
 | `promptBatch` | `PromptBatch` | Bounded full native text batch retained with advanced edit row bindings. |

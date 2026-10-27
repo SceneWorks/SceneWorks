@@ -48,10 +48,11 @@ export function resolveSimpleTier(model, screen, options = {}) {
   const {
     convRotEligible = false,
     nvfp4Eligible = false,
+    fp8rEligible = false,
     unifiedMemoryGb = null,
     backend = "mlx",
   } = options;
-  const tierOptions = { convRotEligible, nvfp4Eligible };
+  const tierOptions = { convRotEligible, nvfp4Eligible, fp8rEligible };
   const available = installedTiers(model, tierOptions);
   if (available.length === 0) {
     return { quantTier: "", tierExplicit: false };

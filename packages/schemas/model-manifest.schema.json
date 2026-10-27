@@ -395,8 +395,8 @@
     },
     "quantVariantKey": {
       "type": "string",
-      "enum": ["bf16", "q8", "q4", "int8-convrot", "training"],
-      "description": "Download variant identifier. bf16/q8/q4 are standard quant-matrix tiers; int8-convrot is Krea's hosted ConvRot tier; training selects the dedicated Lens training artifact."
+      "enum": ["bf16", "q8", "q4", "int8-convrot", "nvfp4", "fp8r", "training"],
+      "description": "Download variant identifier. bf16/q8/q4 are standard quant-matrix tiers; int8-convrot is Krea's hosted ConvRot tier; nvfp4/fp8r are publisher NVFP4 / FP8-rowwise packages a provider loads as shipped on CUDA (sc-26241: FLUX 3 Image Klein's `variants/<tier>`); training selects the dedicated Lens training artifact."
     },
     "variantFootprint": {
       "type": "object",
@@ -1151,6 +1151,9 @@
             "properties": {
               "families": { "type": "array", "items": { "type": "string" } },
               "types": { "type": "array", "items": { "type": "string" } },
+              "baseModel": { "type": "string", "minLength": 1, "description": "Exact training-base identity required by this model's adapter contract; FLUX3 uses the canonical upstream repository, not a SceneWorks model-id alias." },
+              "baseRevision": { "type": "string", "pattern": "^[0-9a-f]{40}$", "description": "Exact training-base commit required by the adapter contract, never the adapter download source revision." },
+              "adapterKinds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 }, "description": "Explicitly admitted adapter algorithms. Unknown or absent adapter kind fails closed when this field is declared." },
               "irisTask": {
                 "type": "string",
                 "enum": ["generation", "depth", "restoration"],

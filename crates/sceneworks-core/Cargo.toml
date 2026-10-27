@@ -86,6 +86,9 @@ libc = "0.2"
 rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
+# Adversarial PNG fixtures choose compression explicitly, independent of the workspace's
+# unified miniz/zlib-rs backend. Already locked transitively; never a production dependency.
+flate2 = "1.1"
 # sc-20635: the checkpoint plan store's cross-process lock is an `fs2` advisory file lock, and the
 # integration test stands in for the other process by taking the SAME lock on its own descriptor.
 fs2 = "0.4"

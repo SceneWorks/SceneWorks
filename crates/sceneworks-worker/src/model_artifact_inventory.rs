@@ -522,12 +522,15 @@ mod tests {
         ("apps/rust-api/src/lib.rs", "API state and module wiring"),
     ];
 
-    // These exact modules are compiled only behind `cfg(all(test, target_os = "macos"))` and are
-    // ignored real-weight/build harnesses, never production runtime consumers. Keep the list exact:
-    // a newly added harness or production file must still be classified by this audit.
+    // These exact modules are compiled only behind a test-only cfg (the macOS footprint harnesses,
+    // the Candle/CUDA sibling, and the other ignored real-weight/build harnesses) and are never
+    // production runtime consumers. Keep the list exact: a newly added harness or production file
+    // must still be classified by this audit.
     const TEST_ONLY_MODEL_SURFACES: &[&str] = &[
         "crates/sceneworks-worker/src/bernini_tier_build.rs",
         "crates/sceneworks-worker/src/footprint_measure.rs",
+        // sc-26243: off-Mac sibling compiled only under cfg(all(test, not(macos), backend-candle)).
+        "crates/sceneworks-worker/src/flux3_candle_footprint.rs",
         // sc-27092: the imported ComfyUI-quantized (scalar fp8 / MXFP8) worker smoke — an
         // #[ignore]d test module, the same shape as the NVFP4 smoke below.
         "crates/sceneworks-worker/src/imported_comfy_quant_gpu_smoke.rs",

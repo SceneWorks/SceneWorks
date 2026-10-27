@@ -572,6 +572,8 @@ export function useWorkflowDrop({
       // click, and a substitute the studio's list no longer offers would seed a blank control.
       substituteModelId: keptSubstituteModelId(fixes.substituteModelId, substituteModels),
       referenceAssetIds: pickedReferenceAssetIds(current.report, fixes.inputPicks),
+      // Geometry intent depends on the real source binding too; source-only edits have no plural refs.
+      sourceAssetId: pickedSourceAssetId(current.report, fixes.inputPicks) || null,
       tensorPicks: fixes.inputPicks,
       assets,
     });
