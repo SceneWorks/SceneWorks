@@ -123,17 +123,32 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      # The Windows lane installs a pinned CPython 3.12 through setup-python. The macOS lane uses
-      # the reviewed python3.12 already present on the self-hosted Mac: setup-python installs into
-      # the HOSTED runner's tool cache, "/Users/runner", which does not exist on a self-hosted Mac
-      # whose home is the operator's, so the action cannot create its cache there and the job dies
-      # before any model work. The selection is the repository's existing macOS python selector,
-      # which requires an absolute CPython 3.12 arm64 interpreter.
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      # BOTH lanes SELECT the reviewed CPython 3.12 already on the runner rather than installing
+      # one, through each platform's own verified selector in this repository.
+      #
+      # Neither platform can install one here. setup-python installs into the HOSTED runner's tool
+      # cache, "/Users/runner", which does not exist on a self-hosted Mac whose home is the
+      # operator's, so the action cannot create its cache and the job dies before any model work.
+      # On Windows the same action removes the existing install and its HKLM registry entries, and
+      # the runner account cannot do the registry part ("Requested registry access is not allowed"),
+      # so the install fails there too — and it deletes the tool-cache interpreter on the way out.
+      #
+      # The macOS selector requires an absolute CPython 3.12 arm64 interpreter; the Windows probe
+      # checks the interpreter is CPython 3.12, AMD64 and 64-bit.
+      - name: Select the reviewed Windows CPython 3.12
         if: ${{ runner.os == 'Windows' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
         id: speech_python_windows
-        with:
-          python-version: "3.12"
+        shell: powershell
+        working-directory: sceneworks
+        run: |
+          . (Join-Path $PWD 'scripts\select-starvector-windows-python.ps1')
+          $candidates = @()
+          $onPath = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if ($onPath) { $candidates += $onPath }
+          $candidates += @(Get-ChildItem (Join-Path $env:RUNNER_TOOL_CACHE 'Python') -Filter 'python.exe' -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '3\.12\.\d+\\x64\\python\.exe$' } | ForEach-Object { $_.FullName })
+          $bootstrap = Select-StarVectorBootstrapPython -CandidatePaths @($candidates) -ExpectedVersion @(3, 12)
+          "python-path=$($bootstrap.Executable)" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Select the reviewed macOS CPython 3.12
         if: ${{ runner.os == 'macOS' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
         id: speech_python_macos

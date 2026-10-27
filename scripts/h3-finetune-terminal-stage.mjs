@@ -790,9 +790,11 @@ async function runTool(argv, { execute, cwd, env, timeoutMs }) {
   }
 }
 function probeArgv(ffprobe, kind, outputName) {
+  // codec_type is REQUESTED because the result is checked for it: ffprobe reports only the
+  // entries named here, so a check that reads an unrequested field always misses.
   const entries = kind === 'image'
-    ? 'stream=codec_name,width,height,nb_read_frames'
-    : kind === 'video' ? 'stream=codec_name,width,height,nb_read_frames,duration,avg_frame_rate,r_frame_rate' : 'stream=codec_name,sample_rate,channels,duration,nb_read_frames';
+    ? 'stream=codec_type,codec_name,width,height,nb_read_frames'
+    : kind === 'video' ? 'stream=codec_type,codec_name,width,height,nb_read_frames,duration,avg_frame_rate,r_frame_rate' : 'stream=codec_type,codec_name,sample_rate,channels,duration,nb_read_frames';
   return [ffprobe, '-v', 'error', '-select_streams', kind === 'audio' ? 'a:0' : 'v:0', '-count_frames', '-show_entries', entries, '-of', 'json', outputName];
 }
 function decodeArgv(ffmpeg, kind, outputName) {

@@ -631,7 +631,26 @@ function referenceExecute({ failAsset = null } = {}) {
     if (args.includes('-version')) return { code: 0, stdout: `unit_fake ${path.basename(file)} 1.0\n`, stderr: '' };
     if (path.basename(file) === 'ffprobe') {
       const audio = args.includes('a:0');
-      return { code: 0, stdout: JSON.stringify({ streams: [{ codec_type: kindFor(args), codec_name: 'unit_fake', width: '576', height: '320', nb_read_frames: '1', duration: '0.1', sample_rate: '32000', channels: 1 }] }), stderr: '' };
+      // The mock answers with EXACTLY the fields the probe asked for, the way the real ffprobe
+      // does: a field the probe did not request is absent from the output. A mock that invents
+      // an extra field hides a production check that reads it.
+      const askedIndex = args.indexOf('-show_entries');
+      const asked = askedIndex >= 0 ? String(args[askedIndex + 1] ?? '').replace(/^stream=/, '') : '';
+      const values = {
+        codec_type: kindFor(args),
+        codec_name: 'unit_fake',
+        width: '576',
+        height: '320',
+        nb_read_frames: '1',
+        duration: '0.1',
+        avg_frame_rate: '24/1',
+        r_frame_rate: '24/1',
+        sample_rate: '32000',
+        channels: 1,
+      };
+      const stream = {};
+      for (const key of asked.split(',').filter(Boolean)) if (key in values) stream[key] = values[key];
+      return { code: 0, stdout: JSON.stringify({ streams: [stream] }), stderr: '' };
     }
     const outputName = args.at(-1);
     if (outputName && !args.includes('null') && outputName !== '-') {

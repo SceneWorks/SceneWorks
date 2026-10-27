@@ -149,21 +149,21 @@ test('API assertions fail on dropped selected-model propagation and external ser
   await assert.rejects(runScenario(s, { fetchImpl: async () => response({ id: 'wrong-job' }, 201) }));
   assert.throws(() => pointer({}, '/missing'), /missing/);
 });
-test('the macOS terminal lane selects a reviewed CPython 3.12 instead of the hosted tool cache', async () => {
+test('both terminal lanes select a reviewed CPython 3.12 instead of installing one', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
-  // setup-python installs into the HOSTED runner's tool cache, "/Users/runner", which does not
-  // exist on a self-hosted Mac whose home is the operator's: the action cannot create its cache
-  // there and the job dies before any model work. The macOS lane therefore selects the reviewed
-  // CPython 3.12 already on the runner, through the repository's own selector.
-  const setupPython = /- uses: actions\/setup-python@\S+[^\n]*\n\s+if: ([^\n]+)\n\s+id: (\w+)/.exec(workflow);
-  assert.ok(setupPython, 'the setup-python step is still declared');
-  assert.match(setupPython[1], /runner\.os == 'Windows'/, 'setup-python must be Windows-only');
-  assert.equal(setupPython[2], 'speech_python_windows');
+  // setup-python cannot install on either self-hosted platform here. On macOS it writes to the
+  // HOSTED runner's tool cache, "/Users/runner", which does not exist on a self-hosted Mac whose
+  // home is the operator's, so the job dies before any model work. On Windows the same action
+  // removes the existing install and its HKLM registry entries, and the runner account cannot do
+  // the registry part ("Requested registry access is not allowed") — and it deletes the
+  // tool-cache interpreter on the way out. Both lanes therefore select an interpreter ALREADY on
+  // the runner, through each platform's own verified selector in this repository.
+  assert.doesNotMatch(workflow, /actions\/setup-python@/);
+  assert.match(workflow, /id: speech_python_windows/);
+  assert.match(workflow, /Select-StarVectorBootstrapPython -CandidatePaths/);
   assert.match(workflow, /id: speech_python_macos/);
   assert.match(workflow, /select-starvector-macos-python\.mjs select \/opt\/homebrew\/bin\/python3\.12/);
   assert.match(workflow, /SPEECH_BASE_PYTHON: \$\{\{ steps\.speech_python_windows\.outputs\.python-path \|\| steps\.speech_python_macos\.outputs\.python-path \}\}/);
-  // The macOS lane must never reach the hosted-tool-cache action at all.
-  assert.doesNotMatch(workflow, /- uses: actions\/setup-python@\S+[^\n]*\n\s+if: \$\{\{ fromJSON/);
 });
 test('the Windows terminal lane selects the exact listener the request names', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
@@ -322,7 +322,11 @@ test('CPU bridge provisions its pinned private interpreter before model assets a
   const source=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),start=source.indexOf('      - name: Prepare private CPU-only conditioning and source-variant tools'),assets=source.indexOf('      - name: Ensure selected assets and conditioning in this terminal route');
   assert.ok(start>0&&start<assets,'import/help failure must precede massive model downloads');const setup=source.slice(start,assets);
   for(const token of ['torch==2.9.1','https://download.pytorch.org/whl/cpu','H3_PROBE_PYTHON','cpu-tools-freeze.txt','cpu-tools.json','cpu-bridge-help.txt','--help','sys.version_info[:2]==(3,12)','"-I","-B"'])assert.ok(setup.includes(token),token);
-  assert.ok(source.includes('python-version: "3.12"'));assert.doesNotMatch(setup,/--no-deps|PYTHONPATH|einops|diffusers/);assert.ok(setup.includes('numericProof:false'));
+  // The bridge's interpreter is a PINNED CPython 3.12 SELECTED from the runner (each platform's
+  // own verified selector), not one an action installs: neither platform can install one here.
+  assert.ok(source.includes('ExpectedVersion @(3, 12)'));
+  assert.ok(source.includes('select-starvector-macos-python.mjs select'));
+  assert.doesNotMatch(source,/actions\/setup-python@/);assert.doesNotMatch(setup,/--no-deps|PYTHONPATH|einops|diffusers/);assert.ok(setup.includes('numericProof:false'));
   const adapter=await readFile(new URL('./h3-finetune-terminal-artifact-probe.mjs',import.meta.url),'utf8');assert.ok(adapter.includes("process.env.H3_PROBE_PYTHON"));assert.ok(adapter.includes("const producerCommand=[python,'-I','-B'"));
 });
 test('asset staging is folded into the terminal delivery and runs the reduced 25/backend inventory',async()=>{
