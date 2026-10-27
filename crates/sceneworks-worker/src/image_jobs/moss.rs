@@ -756,6 +756,13 @@ fn emit_moss_advanced_outputs(
     Ok(())
 }
 #[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    all(test, not(feature = "test-support")),
+    expect(
+        dead_code,
+        reason = "Unit tests inspect pre-load refusals; successful fields are read only by the test-support inspector."
+    )
+)]
 struct MossPreparedPreload {
     native: gen_core::GenerationRequest,
     variant: gen_core::moss_image::MossImageVariant,
