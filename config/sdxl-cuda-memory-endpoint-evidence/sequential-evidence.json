@@ -1,0 +1,214 @@
+{
+  "schemaVersion": 6,
+  "harnessVersion": "sceneworks-memory-v5",
+  "records": [
+    {
+      "status": "gated",
+      "artifact": {
+        "repository": "SceneWorks/sdxl-base-mlx",
+        "resolvedRevision": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+        "variant": "q4",
+        "inventorySha256": "91483a1af351aa68c02270dc7401cb255f840d88382098df8bdb007eda0f3af9"
+      },
+      "sweep": {
+        "axes": [
+          {
+            "parameter": "attentionChunkSize",
+            "testedValues": [
+              67108864
+            ]
+          },
+          {
+            "parameter": "decodeOverlap",
+            "testedValues": [
+              64
+            ]
+          },
+          {
+            "parameter": "decodeTileEdge",
+            "testedValues": [
+              512
+            ]
+          }
+        ],
+        "cases": [
+          {
+            "parameters": {
+              "attentionChunkSize": 67108864,
+              "decodeOverlap": 64,
+              "decodeTileEdge": 512,
+              "stageResidency": true
+            },
+            "result": "passed"
+          }
+        ],
+        "rangeVerified": false
+      },
+      "scenarios": [
+        {
+          "name": "exact_fit",
+          "result": "not_run",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        },
+        {
+          "name": "unknown_budget",
+          "result": "not_run",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        },
+        {
+          "name": "stale_evidence",
+          "result": "not_run",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        },
+        {
+          "name": "warm_repeat",
+          "result": "not_run",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        },
+        {
+          "name": "cancel",
+          "result": "not_run",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        },
+        {
+          "name": "error",
+          "result": "not_run",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        },
+        {
+          "name": "loadability",
+          "result": "not_run",
+          "reason": "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        },
+        {
+          "name": "overlay",
+          "result": "not_applicable",
+          "reason": "the calibration target declares overlay \"none\"; the Candle SDXL base-only text-to-image path executes no overlay, so this record has no second resident network to measure"
+        }
+      ],
+      "predictedPeakBytes": null,
+      "observedMemory": {
+        "conditioning": {
+          "activeBytes": 2721054720,
+          "allocatorBytes": 2721054720,
+          "reclaimableBytes": 0
+        },
+        "denoise": {
+          "activeBytes": 4367319040,
+          "allocatorBytes": 4367319040,
+          "reclaimableBytes": 0
+        },
+        "decode": {
+          "activeBytes": 6615465984,
+          "allocatorBytes": 6615465984,
+          "reclaimableBytes": 0
+        },
+        "overall": {
+          "activeBytes": 6615465984,
+          "allocatorBytes": 6615465984,
+          "reclaimableBytes": 0
+        }
+      },
+      "quality": {
+        "result": "not_run"
+      },
+      "negativeMutation": null,
+      "loadability": {
+        "result": "passed",
+        "resolvedPathFingerprint": "SceneWorks/sdxl-base-mlx@36699bb8a6353e61c920e3bf19f0e6f8e4151c55:q4"
+      },
+      "diagnostics": {
+        "adapter": "memory-candle-adapter:sdxl-five-rung-reference",
+        "execution": "executed",
+        "blockers": [
+          "five-rung oracle capture measures exact per-rung memory and strategy identity for SC-16059; it intentionally remains gated because this run does not repeat the full promotion-quality, negative-mutation, and lifecycle scenario suite"
+        ],
+        "measurements": [
+          {
+            "name": "conditioningDevicePeakDelta",
+            "unit": "bytes",
+            "value": 2721054720
+          },
+          {
+            "name": "denoiseDevicePeakDelta",
+            "unit": "bytes",
+            "value": 4367319040
+          },
+          {
+            "name": "decodeDevicePeakDelta",
+            "unit": "bytes",
+            "value": 6615465984
+          },
+          {
+            "name": "overallDevicePeakDelta",
+            "unit": "bytes",
+            "value": 6615465984
+          },
+          {
+            "name": "referenceImages",
+            "unit": "count",
+            "value": 0
+          }
+        ]
+      },
+      "capturedAt": "2026-10-27T00:10:41Z",
+      "strategy": {
+        "rung": "bounded_attention",
+        "engagedRungs": [
+          "resident",
+          "staged_residency",
+          "bounded_decode",
+          "bounded_attention"
+        ],
+        "parameters": {
+          "attentionChunkSize": 67108864,
+          "decodeOverlap": 64,
+          "decodeTileEdge": 512,
+          "stageResidency": true
+        }
+      },
+      "loadShape": "eager_materialization",
+      "logicalCaseId": "implan-8861652e1826b6933b7e",
+      "evidenceScope": "authoritative",
+      "backend": "candle",
+      "repositories": {
+        "sceneWorks": {
+          "revision": "09b7189569a36e5efbe7765949f4075bbd6e00c2",
+          "dirty": false,
+          "matrixSourceRevision": "source-tree:c410c51eeb60ee7c14330105bf6a26f3a3c564aa282979798157c8514d91e2ac"
+        },
+        "inference": {
+          "revision": "6a60ff234b0823027e8defc7fc69b6450d25f991",
+          "dirty": false,
+          "closureDigest": "0be09095e365bda3fb633d5dc4d8a7c652019d6e50f6c02a2cfe01c83cf3aa3b"
+        }
+      },
+      "hardware": {
+        "probe": "C:\\WINDOWS\\System32\\nvidia-smi.exe selected through CUDA_VISIBLE_DEVICES",
+        "memoryBytes": 102641958912,
+        "deviceId": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+        "name": "NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition",
+        "computeCapability": "12.0",
+        "driverVersion": "596.36",
+        "runtimeVersion": "12.9"
+      },
+      "target": {
+        "provider": "sdxl",
+        "modelId": "sdxl",
+        "tier": "q4",
+        "mode": "text_to_image",
+        "overlay": "none",
+        "geometry": {
+          "width": 1024,
+          "height": 1024,
+          "batch": 1,
+          "frames": 1
+        }
+      },
+      "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v2",
+      "fixture": "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps",
+      "harnessVersion": "sceneworks-memory-v5",
+      "id": "imc-c15b17b62ecdffa6b545"
+    }
+  ]
+}

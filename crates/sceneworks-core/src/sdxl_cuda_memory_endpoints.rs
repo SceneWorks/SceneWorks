@@ -22,7 +22,20 @@ pub const PACKAGED_SDXL_CUDA_MEMORY_ENDPOINTS: &str =
 
 // Populated only with actual retained captures. These resources intentionally do not participate
 // in the ordinary anchor extractor: a fully bounded endpoint is not its unbounded derivation row.
-const PACKAGED_ENDPOINT_SOURCES: &[(&str, &str)] = &[];
+const PACKAGED_ENDPOINT_SOURCES: &[(&str, &str)] = &[
+    (
+        "config/sdxl-cuda-memory-endpoint-evidence/resident-evidence.json",
+        include_str!("../../../config/sdxl-cuda-memory-endpoint-evidence/resident-evidence.json"),
+    ),
+    (
+        "config/sdxl-cuda-memory-endpoint-evidence/sequential-evidence.json",
+        include_str!("../../../config/sdxl-cuda-memory-endpoint-evidence/sequential-evidence.json"),
+    ),
+    (
+        "config/sdxl-cuda-memory-endpoint-evidence/sdxl-cuda-endpoints.json",
+        include_str!("../../../config/sdxl-cuda-memory-endpoint-evidence/sdxl-cuda-endpoints.json"),
+    ),
+];
 const GPU_UUID: &str = "GPU-e4b79931-7be6-f216-460a-f5405cfafffe";
 const FINGERPRINT: &str = "sdxl-candle-sdxl-staged-decode-attention-v2";
 const FIXTURE: &str = "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps";

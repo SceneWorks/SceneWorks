@@ -1,4 +1,99 @@
 {
   "schemaVersion": 1,
-  "pair": null
+  "pair": {
+    "resident": {
+      "id": "sdxl:candle:q4:resident:imc-f49bf69009f7f30c7c45",
+      "modelFamily": "sdxl",
+      "modelId": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": false,
+        "transformerWindowed": false,
+        "staged": false,
+        "attentionChunked": false
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 3559915520,
+        "denoise": 9467592704,
+        "decode": 9467592704
+      },
+      "overallAllocatorEnvelopeBytes": 9467592704,
+      "source": {
+        "path": "config/sdxl-cuda-memory-endpoint-evidence/resident-evidence.json",
+        "sha256": "73664583fc82251cd27a2f1057f10e6c3d5de7397622278db8bf56f051be52a6",
+        "recordId": "imc-f49bf69009f7f30c7c45",
+        "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v2",
+        "loaderClosureDigest": "14231b5b47eb9896c38417a487b3239de76a13b6beb5805ee695d1023b94bef4"
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 3559915520,
+        "denoise": 9467592704,
+        "decode": 9467592704
+      }
+    },
+    "sequential": {
+      "id": "sdxl:candle:q4:sequential:imc-c15b17b62ecdffa6b545",
+      "modelFamily": "sdxl",
+      "modelId": "sdxl",
+      "route": "sdxl",
+      "provider": "sdxl",
+      "backend": "candle",
+      "tier": "q4",
+      "transformerVariant": null,
+      "decoder": null,
+      "mode": "text_to_image",
+      "overlay": null,
+      "referenceCount": 0,
+      "loadShape": "eager_materialization",
+      "measuredRegime": {
+        "decodeTiled": true,
+        "transformerWindowed": false,
+        "staged": true,
+        "attentionChunked": true
+      },
+      "geometry": {
+        "width": 1024,
+        "height": 1024,
+        "frames": 1,
+        "fps": null
+      },
+      "phaseActivePeakBytes": {
+        "conditioning": 2721054720,
+        "denoise": 4367319040,
+        "decode": 6615465984
+      },
+      "overallAllocatorEnvelopeBytes": 6615465984,
+      "source": {
+        "path": "config/sdxl-cuda-memory-endpoint-evidence/sequential-evidence.json",
+        "sha256": "382cfe7a1c014634c06326a7acf44366ec11158aed65bfc4e8925bc6030207ac",
+        "recordId": "imc-c15b17b62ecdffa6b545",
+        "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v2",
+        "loaderClosureDigest": "14231b5b47eb9896c38417a487b3239de76a13b6beb5805ee695d1023b94bef4"
+      },
+      "phaseAllocatorEnvelopeBytes": {
+        "conditioning": 2721054720,
+        "denoise": 4367319040,
+        "decode": 6615465984
+      }
+    },
+    "summary": {
+      "path": "config/sdxl-cuda-memory-endpoint-evidence/sdxl-cuda-endpoints.json",
+      "sha256": "c2e4c75349d882352b84e342242f4f75b5d90371c417e8a51b4ef238f43699fb"
+    }
+  }
 }
