@@ -2,8 +2,8 @@
 
 Generated 2026-10-27. Source of truth: `docs/testing/sc-26243-quant-matrix-evidence.json`.
 
-- Final feature head: `8d0bcc9302c4734695b4330f78b1cf1c5a3f2ff2`
-- Inference pin: `da7534d5ea663ee42234422cf717bf5f62f922c1` (on inference `main`)
+- Feature integration head: `0058de93cdbb3e7a1fafd26b1d4c284bd5ac8de9`
+- Inference pin: `6f9bc0f23fe74a223e843a5c76208e8541c2a2ff` (on inference `main`), moved from tested pin `da7534d5ea663ee42234422cf717bf5f62f922c1` during the final main integration. The FLUX3 runtime closure is unchanged between them (only `UPSTREAM.md` and `pup_parity.rs` in the FLUX3 crate), so the measurements remain valid at the final pin.
 - Harness source: MLX `819a80a1f0922956ec9188eafbc4025389dd9431`; Candle `0e5f40732490f3eae9b301b47dcf92608f3fa16f`
 - Request: 1024x1024, count 1, seed 26243, fixed prompt; distilled 16 steps, base 50 steps / CFG 3.5
 - Candle campaign: workflow run [40553173175](https://github.com/SceneWorks/SceneWorks/actions/runs/40553173175) on `cuda-windows-2` (physical GPU1)

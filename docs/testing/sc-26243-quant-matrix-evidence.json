@@ -3,13 +3,15 @@
   "kind": "sc-26243-flux3-quant-matrix-evidence",
   "generatedAt": "2026-10-27",
   "source": {
-    "sceneWorksFinalFeatureSha": "8d0bcc9302c4734695b4330f78b1cf1c5a3f2ff2",
+    "sceneWorksFinalFeatureSha": "0058de93cdbb3e7a1fafd26b1d4c284bd5ac8de9",
     "harnessSourceShas": {
       "mlx": "819a80a1f0922956ec9188eafbc4025389dd9431",
       "candle": "0e5f40732490f3eae9b301b47dcf92608f3fa16f"
     },
-    "inferencePin": "da7534d5ea663ee42234422cf717bf5f62f922c1",
-    "inferencePinOnMain": true
+    "inferencePin": "6f9bc0f23fe74a223e843a5c76208e8541c2a2ff",
+    "inferencePinOnMain": true,
+    "testedInferencePin": "da7534d5ea663ee42234422cf717bf5f62f922c1",
+    "pinClosure": "The pin moved from da7534d5 to 6f9bc0f2 during the final main integration. The FLUX3 runtime closure is unchanged: the only FLUX3 crate changes between the two revisions are candle-gen-flux3/UPSTREAM.md and tests/pup_parity.rs (documentation/test only). The measured cells therefore remain valid at the final pin; no re-measurement was required."
   },
   "request": {
     "width": 1024,
