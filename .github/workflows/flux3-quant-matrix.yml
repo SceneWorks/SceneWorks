@@ -154,7 +154,7 @@ jobs:
       CARGO_NET_OFFLINE: "true"
       CUDA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
-      HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:\huggingface' }}
+      HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:/huggingface' }}
       SCENEWORKS_DATA_DIR: ${{ github.workspace }}/../sc26243-quant-data
       FLUX3_FOOTPRINT_OUT_DIR: ${{ github.workspace }}/../sc26243-quant-evidence
     steps:
