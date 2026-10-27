@@ -218,6 +218,9 @@ test('the Windows terminal lane activates the MSVC host compiler for nvcc before
   assert.ok(job.includes('NVCC_CCBIN=%VCToolsInstallDir%bin\\Hostx64\\x64'));
   assert.ok(job.includes('if not exist "%NVCC_CCBIN%\\cl.exe" exit /b 1'), 'a missing host compiler must refuse loudly');
   assert.ok(job.includes('$env:GITHUB_ENV'), 'the MSVC environment must reach the later bash/node build steps');
+  // Git Bash's coreutils link.exe shadows MSVC's inside bash steps, so the linker is named exactly.
+  assert.ok(job.includes('CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=%NVCC_CCBIN%\\link.exe'));
+  assert.ok(job.includes("'NVCC_CCBIN','CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER')"), 'the exact linker must be exported to the later build steps');
 });
 
 test('the Windows terminal lane selects Git Bash before its first bash step', async () => {

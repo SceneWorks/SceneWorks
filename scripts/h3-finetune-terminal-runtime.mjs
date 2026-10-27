@@ -305,7 +305,18 @@ export class OwnedService {
       assert.ok(Date.now()<deadline,'owned API listener timeout');await (this.deps.sleep??sleep)(100);
     }
     this.baseUrl=`http://127.0.0.1:${this.c.runtime.port}`;
-    const health=await this.request('GET','/api/v1/health');assert.equal(health.service,'sceneworks-api');assert.equal(health.status,'ok');
+    // The API binds a bootstrap health surface first and reports `starting` until its
+    // readiness-critical startup completes, then the ready app answers `ok`. Wait for readiness
+    // within the same deadline; only `starting` is an acceptable in-between state, and the owned
+    // API exiting is still an immediate failure.
+    let health;
+    for(;;){
+      assert.equal(this.api.exitCode(),null,'new API exited before readiness');
+      health=await this.request('GET','/api/v1/health');assert.equal(health.service,'sceneworks-api');
+      if(health.status==='ok')break;
+      assert.equal(health.status,'starting','API health must be starting or ok');
+      assert.ok(Date.now()<deadline,'owned API readiness timeout');await (this.deps.sleep??sleep)(100);
+    }
     // Preserve, rather than reuse, a previous owned worker's cumulative counter across restart.
     try{await rename(path.join(this.runDir,'config','gpu_telemetry.json'),path.join(this.runDir,'config',`gpu_telemetry.before-${epoch}.json`));}catch(error){if(error.code!=='ENOENT')throw error;}
     this.workerId=env.SCENEWORKS_WORKER_ID;

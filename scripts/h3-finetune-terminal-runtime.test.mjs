@@ -27,7 +27,8 @@ async function fixture(t,group='capability',check='image',backend='mlx') {
 async function replaceScenario(f,c,executions,parameters=f.parameters){
   Object.assign(f.c,c);f.c.declaredSourceBindings=executions;f.scenario=buildScenario(f.c,parameters,executions);await writeFile(f.c.runtime.scenario,JSON.stringify(f.scenario));f.c.inputs.find(v=>v.role==='scenario').sha256=await hashFile(f.c.runtime.scenario);return f.scenario;
 }
-function fakeRuntime(f,{wrongListener=false,backend='mlx'}={}) {
+function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok']}={}) {
+  let healthCalls=0;
   let pid=7000,jobNo=0,nativeLoadCount=0,serviceDir,activeWorker,heartbeat=Date.now();const children=[],calls=[],jobs=new Map(),assets=new Map();
   const preparationCancel=f.c.id.endsWith('.generation-source-prep-cancel');
   const prepSpan=jobId=>({jobId,checkpointId:'unit_fake_source',phase:'source-and-normalization'});
@@ -46,7 +47,7 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx'}={}) {
     sample:async service=>({at:new Date().toISOString(),pid:service.worker.pid,host:100,device:200,deviceCounterAt:new Date().toISOString(),method:backend==='mlx'?'mlx-allocator-cumulative-high-water':'sampled-device-used',deviceId:'unit_fake_device'}),
     fetch:async(url,options)=>{
       calls.push(['request',url.pathname,options.method]);assert.ok(options.headers['X-SceneWorks-Token']);let value,status=200;
-      if(url.pathname==='/api/v1/health')value={status:'ok',service:'sceneworks-api'};
+      if(url.pathname==='/api/v1/health')value={status:health[Math.min(healthCalls++,health.length-1)],service:'sceneworks-api'};
       else if(url.pathname==='/api/v1/workers'){const active=[...jobs.values()].find(j=>!['completed','canceled','failed','interrupted'].includes(j.status));value=[{id:activeWorker.env.SCENEWORKS_WORKER_ID,status:active?'busy':'idle',currentJobId:active?.id??null,lastSeenAt:new Date(++heartbeat).toISOString()}];}
       else if(url.pathname==='/api/v1/models/library-roots')value={roots:[{rootId:'unit_fake_root',path:f.root}]};
       else if(url.pathname==='/api/v1/models/import'){const body=JSON.parse(options.body);const id=`import-${++jobNo}`;value={id,status:'queued',payload:body};const actual=body.expectedSha256&&body.sourcePath?await hashFile(body.sourcePath):null,mismatch=actual&&actual!==body.expectedSha256;jobs.set(id,{id,status:mismatch?'failed':'queued',payload:body,result:mismatch?{}:{modelId:body.modelId},...(mismatch?{error:`Imported model failed its integrity check (sha256 ${actual}, source declares ${body.expectedSha256})`}:{})});status=201;}
@@ -149,6 +150,13 @@ test('self-contained restart campaign scenario creates baseline, restarts owned 
   await writeFile(f.c.runtime.scenario,JSON.stringify(s));f.c.inputs.find(i=>i.role==='scenario').sha256=await hashFile(f.c.runtime.scenario);f.c.declaredSourceBindings=[f.execution];
   const fake=fakeRuntime(f),r=await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps),bundle=JSON.parse(await readFile(path.join(f.dir,'source-job-output.json'),'utf8'));
   assert.equal(bundle.epochs.length,2);assert.equal(bundle.bindings.length,2);assert.equal(bundle.actions[0].kind,'restart');assert.ok(fake.calls.some(v=>v[0]==='request'&&v[1].endsWith('/duplicate')));assert.ok(fake.children.every(v=>v.exitCode()===0));assert.equal(r.evidence.metrics,undefined,'multi-process restart is not a fictional single-PID peak');
+});
+test('owned API startup waits through the bootstrap `starting` health state and refuses any other',async t=>{
+  // The API binds a bootstrap health surface that reports `starting` until its readiness-critical
+  // startup completes. The first real case read health once, caught `starting`, and failed.
+  {const f=await fixture(t),fake=fakeRuntime(f,{health:['starting','starting','ok']});const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+   assert.ok(fake.calls.filter(c=>c[0]==='request'&&c[1]==='/api/v1/health').length>=3,'startup must poll health until ready');await service.stop();}
+  {const f=await fixture(t),fake=fakeRuntime(f,{health:['degraded']});await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize(),/starting or ok/);}
 });
 test('foreign listener is never contacted or signalled',async t=>{
   const f=await fixture(t),fake=fakeRuntime(f,{wrongListener:true});

@@ -106,7 +106,12 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           set "NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64"
           if not exist "%NVCC_CCBIN%\cl.exe" exit /b 1
-          powershell -NoProfile -Command "foreach ($n in 'PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','VCINSTALLDIR','VCToolsVersion','WindowsSdkDir','WindowsSDKVersion','WindowsSdkBinPath','UCRTVersion','UniversalCRTSdkDir','VSCMD_ARG_TGT_ARCH','VSCMD_ARG_HOST_ARCH','NVCC_CCBIN') { $v = [Environment]::GetEnvironmentVariable($n); if ($v) { ($n + '=' + $v) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append } }" || exit /b 1
+          rem Name the MSVC linker exactly. Git Bash puts its own usr\bin first on PATH inside every
+          rem bash step, and its coreutils `link.exe` then shadows MSVC's, so rustc invoked the wrong
+          rem binary ("/usr/bin/link: extra operand"). An absolute linker is immune to PATH order.
+          set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=%NVCC_CCBIN%\link.exe"
+          if not exist "%CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER%" exit /b 1
+          powershell -NoProfile -Command "foreach ($n in 'PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','VCINSTALLDIR','VCToolsVersion','WindowsSdkDir','WindowsSDKVersion','WindowsSdkBinPath','UCRTVersion','UniversalCRTSdkDir','VSCMD_ARG_TGT_ARCH','VSCMD_ARG_HOST_ARCH','NVCC_CCBIN','CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER') { $v = [Environment]::GetEnvironmentVariable($n); if ($v) { ($n + '=' + $v) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append } }" || exit /b 1
       - name: Record the original terminal job start
         shell: bash
         run: echo "H3_TERMINAL_JOB_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
