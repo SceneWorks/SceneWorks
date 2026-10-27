@@ -152,6 +152,28 @@ export function validatePackagedEndpointSummarySource(source) {
   return source;
 }
 
+// Replay may advance only commit metadata: complete Git trees must remain byte-identical.
+// The capture keeps its historical pin; this comparison is neither a recapture nor certification.
+export async function replayInferenceSourceIdentity(capturedPin, activePin, inferenceRepo, execute = run) {
+  if (![capturedPin, activePin].every((pin) => typeof pin === "string" && /^[a-f0-9]{40}$/.test(pin))) {
+    throw new Error("replay requires canonical captured and active inference pins");
+  }
+  if (capturedPin === activePin) {
+    return { capturedPin, activePin, match: "same_pin", capturedTree: null, activeTree: null, completeGitTreesEqual: null };
+  }
+  const readTree = async (pin) => {
+    const { stdout } = await execute("git", ["rev-parse", "--verify", `${pin}^{tree}`], {
+      cwd: inferenceRepo, env: { ...process.env, GIT_NO_LAZY_FETCH: "1" }, timeoutMs: 10_000,
+    });
+    const tree = stdout.trim();
+    if (!/^[a-f0-9]{40}$/.test(tree)) throw new Error("inference Git tree identity is unavailable or malformed");
+    return tree;
+  };
+  const [capturedTree, activeTree] = await Promise.all([readTree(capturedPin), readTree(activePin)]);
+  if (capturedTree !== activeTree) throw new Error("active inference complete Git tree differs from the packaged capture");
+  return { capturedPin, activePin, match: "identical_complete_git_tree", capturedTree, activeTree, completeGitTreesEqual: true };
+}
+
 export function assertAdmittedReplaySelection(selection) {
   const parameters = selection?.parameters;
   const noDecode = parameters?.decodeTileEdge == null && parameters?.decodeOverlap == null;
@@ -347,7 +369,8 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
   const summaryBytes = await readFile(path.join(ROOT, summarySource.path));
   if (createHash("sha256").update(summaryBytes).digest("hex") !== summarySource.sha256) throw new Error("packaged endpoint summary digest mismatch");
   const captured = JSON.parse(summaryBytes);
-  if (captured.inferencePin !== pin || captured.artifactInventory?.sha256 !== inventory.sha256) throw new Error("replay source pin or actual assembly differs from the packaged measurement");
+  if (captured.artifactInventory?.sha256 !== inventory.sha256) throw new Error("replay actual assembly differs from the packaged measurement");
+  const inferenceSource = await replayInferenceSourceIdentity(captured.inferencePin, pin, path.resolve(args.inferenceRepo));
   const hub = path.dirname(path.dirname(path.dirname(path.dirname(row.tierRoot))));
   for (const key of ["SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L", "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG", "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX"]) {
     if (path.dirname(path.dirname(path.dirname(row.env[key]))) !== hub) throw new Error("ordinary worker replay requires all staged inputs in the same existing HF hub");
@@ -357,6 +380,7 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
   const workerId = `sdxl-replay-${process.env.GITHUB_RUN_ID ?? process.pid}-${process.env.GITHUB_RUN_ATTEMPT ?? "1"}`;
   const hashFile = async (file) => { const digest = createHash("sha256"); for await (const bytes of createReadStream(file)) digest.update(bytes); return digest.digest("hex"); };
   const receipt = { schemaVersion: 1, profile: "sdxl-cuda-admitted-replay", status: "running", inferencePin: pin,
+    inferenceSource,
     apiBinary: { path: apiBinary, sha256: await hashFile(apiBinary) },
     adapterBinary: { path: command[0], sha256: await hashFile(command[0]) },
     sourceRevision: (await run("git", ["rev-parse", "HEAD"])).stdout.trim(),
