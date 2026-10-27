@@ -2550,10 +2550,25 @@ fn map_training_config(config: &sceneworks_core::training::TrainingConfig) -> Tr
         aspect_ratio_buckets: map_aspect_ratio_buckets(advanced),
         cache_latents: advanced_bool(advanced, "cacheLatents", true),
         cache_text_embeddings: advanced_bool(advanced, "cacheTextEmbeddings", true),
-        // The global operational cap is supplied where Settings is available, not
-        // from the free-form advanced bag or the numerical recovery identity.
-        memory_limit_bytes: None,
-        memory_limit_fraction: None,
+        // Preserve explicit caps, including invalid present values for the engine's validation:
+        // zero bytes and a non-finite fraction refuse rather than silently disabling a caller cap.
+        memory_limit_bytes: technique_value(advanced, "memoryLimitBytes").map(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+                .unwrap_or(0)
+        }),
+        memory_limit_fraction: technique_value(advanced, "memoryLimitFraction").map(|value| {
+            // Check the source value before f32 conversion: a fraction just above 1 can round
+            // down to 1.0f32 and otherwise bypass the engine's range validation.
+            value
+                .as_f64()
+                .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+                .filter(|fraction| fraction.is_finite() && *fraction > 0.0 && *fraction <= 1.0)
+                .map(|fraction| fraction as f32)
+                .filter(|fraction| *fraction > 0.0)
+                .unwrap_or(f32::NAN)
+        }),
         // Epic 2123 depth anchoring (sc-2125) starts off here; `apply_depth_anchoring` (which owns
         // the strict parse and the auxiliary-model resolution, and so can fail) fills it in when
         // the plan enables it.
@@ -2642,6 +2657,24 @@ fn map_resolution_buckets(advanced: &JsonObject) -> Vec<gen_core::ResolutionBuck
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn map_aspect_ratio_buckets(advanced: &JsonObject) -> Vec<gen_core::AspectRatioBucket> {
+    // Preserve main's explicit rectangular key alongside the canonical product key. Two present
+    // forms are ambiguous, so refuse rather than silently discarding either caller's geometry.
+    if let Some(value) = technique_value(advanced, "aspectRatioBuckets") {
+        if technique_value(advanced, "resolutionBuckets").is_some() {
+            return vec![gen_core::AspectRatioBucket {
+                width: 0,
+                height: 0,
+                repeats: 0,
+            }];
+        }
+        return serde_json::from_value(value.clone()).unwrap_or_else(|_| {
+            vec![gen_core::AspectRatioBucket {
+                width: 0,
+                height: 0,
+                repeats: 0,
+            }]
+        });
+    }
     match parse_resolution_bucket_config(advanced) {
         Ok(None | Some(ResolutionBucketConfig::Legacy(_))) => Vec::new(),
         Ok(Some(ResolutionBucketConfig::AspectRatio(buckets))) => buckets
@@ -6405,6 +6438,112 @@ mod tests {
             sceneworks_core::training::RESOLUTION_BUCKETS_MAX,
             gen_core::MAX_RESOLUTION_BUCKETS
         );
+    }
+
+    // CI_IMPACT: pure plan-to-config mapping, with no files, model load, training, or device work.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn map_training_config_preserves_cache_geometry_and_memory_limits() {
+        let mut config = parse(plan_json(
+            Path::new("unused-training-fixture"),
+            "z_image_lora",
+            "z_image_turbo",
+            "lora",
+            &[],
+        ))
+        .config;
+        let defaults = map_training_config(&config);
+        assert!(defaults.aspect_ratio_buckets.is_empty());
+        assert!(defaults.cache_latents);
+        assert!(defaults.cache_text_embeddings);
+        assert_eq!(defaults.memory_limit_bytes, None);
+        assert_eq!(defaults.memory_limit_fraction, None);
+
+        config.advanced.extend(
+            json!({
+                "aspectRatioBuckets": [
+                    { "width": 768, "height": 1024, "repeats": 3 },
+                    { "width": 1024, "height": 768, "repeats": 5 }
+                ],
+                "cacheLatents": false,
+                "cacheTextEmbeddings": false,
+                "memoryLimitBytes": 9_876_543_210u64,
+                "memoryLimitFraction": 0.75
+            })
+            .as_object()
+            .unwrap()
+            .clone(),
+        );
+        let explicit = map_training_config(&config);
+        assert_eq!(
+            explicit.aspect_ratio_buckets,
+            vec![
+                gen_core::AspectRatioBucket {
+                    width: 768,
+                    height: 1024,
+                    repeats: 3
+                },
+                gen_core::AspectRatioBucket {
+                    width: 1024,
+                    height: 768,
+                    repeats: 5
+                },
+            ]
+        );
+        assert!(!explicit.cache_latents);
+        assert!(!explicit.cache_text_embeddings);
+        assert_eq!(explicit.memory_limit_bytes, Some(9_876_543_210));
+        assert_eq!(explicit.memory_limit_fraction, Some(0.75));
+        assert_eq!(explicit.model_options, config.advanced);
+
+        // CI_IMPACT: pure merge compatibility regression; both geometry keys must not silently
+        // override one another. The canonical rectangle parser remains covered independently.
+        config.advanced.insert(
+            "resolutionBuckets".into(),
+            json!([{ "width": 512, "height": 768, "repeats": 1 }]),
+        );
+        assert_eq!(
+            map_training_config(&config).aspect_ratio_buckets[0].width,
+            0
+        );
+        config.advanced.remove("resolutionBuckets");
+
+        config
+            .advanced
+            .insert("memoryLimitFraction".into(), json!("0.75"));
+        assert_eq!(
+            map_training_config(&config).memory_limit_fraction,
+            Some(0.75)
+        );
+        for value in [json!(1.00000001), json!("1.00000001")] {
+            config.advanced.insert("memoryLimitFraction".into(), value);
+            assert!(map_training_config(&config)
+                .memory_limit_fraction
+                .unwrap()
+                .is_nan());
+        }
+
+        config
+            .advanced
+            .insert("memoryLimitBytes".into(), json!("9876543210"));
+        assert_eq!(
+            map_training_config(&config).memory_limit_bytes,
+            Some(9_876_543_210)
+        );
+        config
+            .advanced
+            .insert("aspectRatioBuckets".into(), json!([{ "width": "invalid" }]));
+        config.advanced.insert("memoryLimitBytes".into(), json!(-1));
+        config
+            .advanced
+            .insert("memoryLimitFraction".into(), json!("invalid"));
+        let invalid = map_training_config(&config);
+        assert_eq!(invalid.aspect_ratio_buckets[0].width, 0);
+        assert_eq!(invalid.memory_limit_bytes, Some(0));
+        assert!(invalid.memory_limit_fraction.unwrap().is_nan());
     }
 
     /// sc-2127 (epic 2123 E3): the shared dry/real preflight refuses a malformed bucket list, and
