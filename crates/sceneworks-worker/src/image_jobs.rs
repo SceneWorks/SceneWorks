@@ -1811,6 +1811,11 @@ async fn generate_stub_stream(
                 ProgressStage::Generating,
                 progress,
                 &format!("Generated image {}/{}.", index + 1, request.count),
+                // Full fact set on the per-image tick: this is the stub lane's
+                // `Image`-equivalent arm (the fact set JUST grew by this image), and
+                // the count tick is O(images), not O(images² · steps) — the next image's
+                // POST is what re-streams it. Kept as `streaming_result` so the durable
+                // row keeps every accumulated write.
                 Some(streaming_result(plan, asset_writes)),
                 backend,
             ),
@@ -3460,12 +3465,19 @@ fn write_upscaled_asset(
 /// The job-result shape the API streams from: `assetWrites` + the `generationSet`
 /// fact drive `persist_reported_assets` (idempotent per progress update).
 ///
-/// ACCEPTED TRADEOFF (sc-8953 / F-151): this deep-clones the whole `asset_writes` vec into the
-/// result on every call, and the generation loop calls it on each `GenEvent::Step` — so the total
-/// serialization work is O(images² · steps) as `asset_writes` grows one entry per finished image.
-/// At current image counts (a handful per set) and step counts this is negligible next to the
-/// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
-/// `Decoding` events (where the fact set actually changes) rather than on every step.
+/// RESOLVED TRADEOFF (sc-8953 / F-151, 2026-10-27): the original comment accepted an
+/// O(images² · steps) deep-clone of the whole `asset_writes` vec on every `GenEvent::Step`
+/// because image counts were small. Real batches grew (260-image angle sets), and the
+/// accumulated fact set — each finished image's full normalized sidecar, several KB — rode
+/// every per-step POST to the API, which re-published the full snapshot to every SSE
+/// subscriber on every tick (~5,200 ticks ≈ multi-GB cumulative `JSON.parse` churn in the
+/// WebView2 renderer). V8 old-space hit its ~4 GB ceiling and Chromium killed the renderer
+/// (managed OOM exception 0xE0000008; daily Crashpad dumps since 2026-10-24), leaving the
+/// desktop app a dead white window mid-batch. The step ticks now post
+/// [`slim_step_result`] instead: the fact set streams ONLY where it actually changes
+/// (`Image` / `Decoding` / `Loading` events and every terminal post), and the store
+/// (`jobs_store::merge_progress_result_accumulations`) restores an omitted accumulation
+/// from the previous stored result so a slim tick never regresses the durable row.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     let mut result = json!({
         "generationSetId": plan.genset_id,
@@ -3506,6 +3518,33 @@ fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
                 .cloned()
         })
         .collect()
+}
+
+/// The STEP-tick job-result shape (sc-8953 follow-through, 2026-10-27): the small identity keys
+/// plus the live preview frame, WITHOUT the accumulated `assetWrites` / `generationSet` /
+/// `prefixKvCache` fact sets. See [`streaming_result`] for why the per-step cadence must stay
+/// O(1) in the finished-image count. Everything a RUNNING job's UI consumes stays present —
+/// `previewFrame` (live denoise), `generationSetId` / `expectedCount` (skeleton cells, refresh
+/// triggering), `adapter` / `model` (the architecture pill) — and the durable row keeps its
+/// accumulated facts via the store-side merge, so nothing a later Image-event post or a terminal
+/// post needs is lost.
+///
+/// Gated like its only callers (the `include!`d `base.rs` step arm, reached on macOS and the
+/// candle lane) so the default lane never dead-code warns.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn slim_step_result(plan: &ImagePlan) -> JsonObject {
+    json!({
+        "generationSetId": plan.genset_id,
+        "expectedCount": plan.image_count,
+        "adapter": plan.adapter,
+        "model": plan.request.model,
+    })
+    .as_object()
+    .cloned()
+    .expect("json! object literal")
 }
 
 /// Request-only fallback used by test plans and the backend-less stub plan. Production MLX/candle

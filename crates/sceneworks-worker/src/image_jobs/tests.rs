@@ -3242,6 +3242,40 @@ fn streaming_result_carries_facts_for_api_persistence() {
     assert_eq!(result["adapter"], json!(plan.adapter));
 }
 
+/// sc-8953 follow-through (2026-10-27): the STEP-tick result omits the accumulated fact sets
+/// (`assetWrites` / `generationSet` / `prefixKvCache`) on purpose — the per-step cadence is
+/// steps × images and the accumulated set had begun OOM-killing the WebView2 renderer
+/// mid-batch. The slim shape keeps every key a RUNNING job's UI consumes.
+#[test]
+fn slim_step_result_omits_the_accumulated_fact_sets() {
+    // `count: 8` is the payload-sanity clamp (`MAX_COUNT`), but the assertion is on the
+    // PLAN's field, not the literal — a large real batch (a 260-image angle set) streams
+    // the same shape with a bigger `expectedCount`.
+    let plan = ImagePlan::new(&request(
+        json!({ "projectId": "p", "prompt": "x", "count": 8 }),
+    ));
+    let result = slim_step_result(&plan);
+    // The accumulated sets the API would otherwise re-serialize and re-broadcast
+    // per step — all absent.
+    assert!(
+        !result.contains_key("assetWrites"),
+        "slim step result must not deep-clone the accumulated asset writes"
+    );
+    assert!(
+        !result.contains_key("generationSet"),
+        "slim step result must not carry the generation-set fact"
+    );
+    assert!(
+        !result.contains_key("prefixKvCache"),
+        "slim step result must not carry the prefix-KV-cache summary"
+    );
+    // The running-UI identity keys stay present.
+    assert_eq!(result["generationSetId"], json!(plan.genset_id));
+    assert_eq!(result["expectedCount"], json!(plan.image_count));
+    assert_eq!(result["adapter"], json!(plan.adapter));
+    assert_eq!(result["model"], json!(plan.request.model));
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -22360,11 +22394,13 @@ mod preview_stream_tests {
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
     }
 
-    /// The frame rides `result.previewFrame` as a single slot on the EXISTING streaming result —
+    /// The frame rides `result.previewFrame` as a single slot on the SLIM STEP result —
     /// `result` is replaced wholesale per accepted POST, so a result built without the slot (the
-    /// final/terminal posts) is what clears it. Both halves are pinned here.
+    /// full Image/Decoding posts and every terminal post) is what clears it. Both halves are
+    /// pinned here, plus the sc-8953 follow-through contract: the step result carries NO
+    /// accumulated fact sets.
     #[test]
-    fn streaming_result_carries_the_preview_slot_and_omits_it_when_cleared() {
+    fn slim_step_result_carries_the_preview_slot_and_omits_it_when_cleared() {
         let plan = ImagePlan::new(&request(
             json!({ "projectId": "p", "prompt": "x", "count": 1 }),
         ));
@@ -22374,7 +22410,7 @@ mod preview_stream_tests {
             total: 20,
             data_url: "data:image/jpeg;base64,QQ==".to_owned(),
         };
-        let with = streaming_result_with_preview(&plan, &[], Some(&slot));
+        let with = slim_step_result_with_preview(&plan, Some(&slot));
         let frame = with
             .get("previewFrame")
             .and_then(Value::as_object)
@@ -22387,13 +22423,13 @@ mod preview_stream_tests {
             Some("data:image/jpeg;base64,QQ==")
         );
 
-        let without = streaming_result_with_preview(&plan, &[], None);
+        let without = slim_step_result_with_preview(&plan, None);
         assert!(
             !without.contains_key("previewFrame"),
             "a result built with no live slot must omit the key entirely"
         );
-        // Every other key matches the plain streaming result — the preview is strictly additive.
-        assert_eq!(without, streaming_result(&plan, &[]));
+        // Every other key matches the plain slim step result — the preview is strictly additive.
+        assert_eq!(without, slim_step_result(&plan));
     }
 }
 
@@ -22429,7 +22465,7 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
     let arm = &base[arm_start..arm_end];
     assert!(
         !arm.contains("update_job("),
-        "GenEvent::Preview must NOT post — the frame rides the next Step/Decoding update, which is \
+        "GenEvent::Preview must NOT post — the frame rides the next Step update, which is \
          why the first `generating` POST carries no previewFrame and why previewSupport.js holds \
          its placeholder across denoise step 1. Arm:\n{arm}"
     );
@@ -22437,14 +22473,24 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         arm.contains("latest_preview = Some(slot)"),
         "the Preview arm must park the frame in the single latest-wins slot for the next POST"
     );
-    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked.
+    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked
+    // on the SLIM step result (sc-8953 follow-through — no accumulated fact sets per step).
     let step_start = base
         .find("GenEvent::Step {")
         .expect("the Step arm of consume_gen_events");
-    let step_arm = &base[step_start..(step_start + 2000).min(base.len())];
+    let step_arm = &base[step_start..(step_start + 2600).min(base.len())];
     assert!(
-        step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
-        "the Step arm is the POST that carries the parked frame"
+        step_arm.contains("update_job(") && step_arm.contains("slim_step_result_with_preview("),
+        "the Step arm is the POST that carries the parked frame on the slim step result"
+    );
+    // And the full fact set streams on the arms where it can actually change.
+    let image_start = base
+        .find("GenEvent::Image {")
+        .expect("the Image arm of consume_gen_events");
+    let image_arm = &base[image_start..(image_start + 6000).min(base.len())];
+    assert!(
+        image_arm.contains("streaming_result(plan, asset_writes)"),
+        "the Image arm must post the FULL result (the fact set just grew by this image)"
     );
 }
 

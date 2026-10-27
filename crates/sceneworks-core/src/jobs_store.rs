@@ -3112,6 +3112,13 @@ impl JobsStore {
             // Reuse the result we already read above (same transaction/row) rather
             // than re-selecting result_json each update (sc-4274 / F-CORE-14).
             merge_training_sample_history(Some(&current.result), result);
+            // Same wholesale-replace hazard, image lane (sc-8953 follow-through,
+            // 2026-10-27): the worker posts a SLIM result on every denoise step
+            // (`slim_step_result` — the accumulated `assetWrites`/`generationSet`/
+            // `prefixKvCache` ride only the per-image / terminal posts, or the
+            // per-step SSE fan-out OOM-kills the WebView2 renderer mid-batch). A slim
+            // tick omitting them must not blank them off the durable row.
+            merge_progress_result_accumulations(Some(&current.result), result);
         }
         transaction.execute(
             "
@@ -4198,6 +4205,35 @@ fn persist_claim_routing_facts(
         ],
     )?;
     Ok(())
+}
+
+/// Progress-result keys whose ABSENCE from an incoming result means "keep the
+/// stored value" rather than "delete it" (the result column is replaced
+/// wholesale, sc-8953 follow-through). These are the image lane's accumulated
+/// fact sets — grown per finished image, streamed on the per-image / terminal
+/// posts, and deliberately omitted from every per-step tick
+/// (`image_jobs::slim_step_result`) so the step cadence stays O(1).
+const PROGRESS_RESULT_ACCUMULATION_KEYS: [&str; 3] =
+    ["assetWrites", "generationSet", "prefixKvCache"];
+
+/// Merge the image lane's accumulated fact keys into an incoming progress
+/// result, mirroring [`merge_training_sample_history`]: a worker result that
+/// omits an accumulation key keeps the stored value instead of clearing it.
+/// The worker only ever APPENDS to these (one `assetWrites` entry per finished
+/// image; `generationSet` is fixed per job), so the stored value is always at
+/// least as current as anything a slim tick would carry — and the full posts
+/// that DO carry them land after every append, keeping the row in step.
+fn merge_progress_result_accumulations(
+    existing_result: Option<&Map<String, Value>>,
+    incoming: &mut Map<String, Value>,
+) {
+    for key in PROGRESS_RESULT_ACCUMULATION_KEYS {
+        if !incoming.contains_key(key) {
+            if let Some(value) = existing_result.and_then(|result| result.get(key)) {
+                incoming.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
 }
 
 /// Merge accumulated `trainingSamples` history into an incoming progress

@@ -67,16 +67,63 @@ pub fn init_logging_with_buffer(buffer: &'static SessionLog) {
     install(Some(buffer));
 }
 
+/// Install the logging subscriber for a GUI process whose stdout is DISCARDED —
+/// on Windows a `windows_subsystem = "windows"` build has no console, so a
+/// stdout-only layer would silently throw every line away (the 2026-10 white-screen
+/// recurrences: the WebView2 resilience handler's `tracing::error!`s of the kill /
+/// reload outcomes all vanished, leaving the incident undiagnosable). This adds a
+/// file layer writing the same envelope to `path`, so the next incident is
+/// diagnosable. Idempotent, fail-soft: an unopenable path logs a line to stdout
+/// (best-effort) and leaves the stdout-only subscriber in place.
+///
+/// Only the DESKTOP SHELL needs this; sidecars keep their stdout captured (into
+/// `%LOCALAPPDATA%\SceneWorks\logs\api.log` etc. by `setup.rs`).
+pub fn init_logging_with_file(path: &std::path::Path) {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path);
+    match file {
+        Ok(file) => install_with_file(Some(file), None),
+        Err(error) => {
+            // Fail-soft: keep the stdout subscriber rather than losing all logging.
+            eprintln!(
+                "sceneworks: could not open log file {}; staying on stdout-only logging: {error}",
+                path.display()
+            );
+            install(None);
+        }
+    }
+}
+
+/// The stdout (+ optional session buffer) installer. See [`install_with_file`] —
+/// the file layer is only added through that entry point.
 fn install(buffer: Option<&'static SessionLog>) {
+    install_with_file(None::<std::fs::File>, buffer);
+}
+
+/// The shared installer: stdout + optional session buffer + optional file layer.
+/// `INIT` gates the whole setup — the first call wins and later calls are no-ops
+/// — so each process picks ONE shape at startup (the API adds the session
+/// buffer; the desktop shell adds the file layer; sidecars are stdout-only).
+fn install_with_file(file: Option<std::fs::File>, buffer: Option<&'static SessionLog>) {
     INIT.call_once(|| {
         let filter =
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
         let session_layer = buffer.map(|buffer| SessionLogLayer { buffer });
 
         // Two arms because the JSON and pretty stdout layers are different types;
-        // the EnvFilter and the optional session-log layer are shared.
+        // the EnvFilter, the optional session layer, and a same-format file layer
+        // are built per arm (a `Format`-typed file layer cannot stack under a
+        // JSON stdout layer and vice versa — the Layer impl is per-formatter).
         match resolve_format() {
             OutputFormat::Json => {
+                let file_layer = file.map(|file| {
+                    fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(std::sync::Mutex::new(file))
+                        .event_format(SceneworksJsonFormat)
+                });
                 let _ = tracing_subscriber::registry()
                     .with(filter)
                     .with(
@@ -85,13 +132,20 @@ fn install(buffer: Option<&'static SessionLog>) {
                             .event_format(SceneworksJsonFormat),
                     )
                     .with(session_layer)
+                    .with(file_layer)
                     .try_init();
             }
             OutputFormat::Pretty => {
+                let file_layer = file.map(|file| {
+                    fmt::layer()
+                        .with_ansi(false)
+                        .with_writer(std::sync::Mutex::new(file))
+                });
                 let _ = tracing_subscriber::registry()
                     .with(filter)
                     .with(fmt::layer())
                     .with(session_layer)
+                    .with(file_layer)
                     .try_init();
             }
         }
