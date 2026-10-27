@@ -176,8 +176,9 @@ jobs:
         env:
           MOSS_PHASE: ${{ inputs.phase }}
         run: |
-          if ($env:MOSS_PHASE -and $env:MOSS_PHASE -ne 'smoke') {
-            throw 'Legacy campaign phases are retired. Dispatch this workflow directly for build and one image.'
+          # The registered memory-catalog wrapper uses execute for this same one-image job.
+          if ($env:MOSS_PHASE -and $env:MOSS_PHASE -notin @('smoke', 'execute')) {
+            throw 'Legacy campaign phases are retired. Use smoke or the registered wrapper execute phase for build and one image.'
           }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

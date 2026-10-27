@@ -611,6 +611,7 @@ test('manual Actions smoke builds once and retains one image without campaign ob
   const workflow=await readFile(resolve(sourceRoot,'.github/workflows/moss-edit-terminal.yml'),'utf8');
   assert.match(workflow,/build-and-image:/);assert.match(workflow,/moss-edit-terminal-actions\.mjs smoke/);
   assert.match(workflow,/real-weights/);assert.match(workflow,/if: always\(\)/);
+  assert.match(workflow,/\$env:MOSS_PHASE -notin @\('smoke', 'execute'\)/);
   assert.doesNotMatch(workflow,/strategy:|matrix:|finalize|execute-mlx:|execute-cuda:|verify-retained:|pull_request:|^  push:/m);
   const config=runtimeConfig({sourceSha:identity.sourceSha,inferenceSha:identity.inferenceSha,candidateId:'candidate',backends:{cuda:{hfHome:'/source/cache',port:17957,installAdapter:true,editAdapterFiles:['weights'],packageFiles:[{file:'weights',sha256:'a'.repeat(64)}]}}},{sourceRoot,inferenceRoot:'/inference',root:'/private/run',backend:'cuda',buildRoot:'/builds',bundleRoot:'/bundle'});assert.equal(config.hfHome,resolve('/private/run/hf'));assert.equal(config.packageSource,resolve('/source/cache'));
 });
