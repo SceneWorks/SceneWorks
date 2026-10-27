@@ -376,6 +376,17 @@ export function admittedReplayWorker(workers, workerId, gpu) {
     && Array.isArray(value.capabilities) && value.capabilities.includes("image_generate") ? value : false;
 }
 
+export function assertAdmittedReplayCompletion(job, workerId, gpu) {
+  validateGpu(gpu);
+  // Image-job progress uses backend_label(settings.gpu_id), so backend is the physical GPU ID.
+  // The result adapter separately identifies the actual inference implementation.
+  if (job?.status !== "completed" || job.workerId !== workerId
+      || job.backend !== String(gpu.physicalIndex) || job.assignedGpu !== String(gpu.physicalIndex)
+      || job.result?.adapter !== "candle_sdxl") {
+    throw new Error("completed SDXL image was not rendered by the owned worker on the selected CUDA GPU");
+  }
+}
+
 async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, row, gpu, gpuPreflight }) {
   if (process.platform !== "win32") throw new Error("admitted replay requires the native Windows CUDA lane");
   const apiBinary = process.env.SDXL_REPLAY_API;
@@ -471,7 +482,7 @@ async function runAdmittedReplay({ args, workDir, env, pin, command, inventory, 
     const accepted = await apiCall("POST", "/api/v1/image/jobs", receipt.request); jobId = accepted.id; receipt.acceptedJob = accepted; await save();
     receipt.completedJob = await wait(async () => { const job = await apiCall("GET", `/api/v1/jobs/${jobId}`); if (["failed", "canceled"].includes(job.status)) throw new Error(`ordinary worker job ${job.status}: ${job.error ?? job.message}`); return job.status === "completed" && job; }, 3600, "ordinary admitted image render");
     sampling = false; await sampler; if (samplerError) throw samplerError;
-    if (receipt.completedJob.workerId !== workerId || receipt.completedJob.backend !== "candle") throw new Error("completed image was not rendered by the owned CUDA worker");
+    assertAdmittedReplayCompletion(receipt.completedJob, workerId, gpu);
     receipt.selection = admittedReplaySelection(await readFile(path.join(workDir, "worker.log"), "utf8"));
     receipt.selectionCoverage = assertAdmittedReplaySelection(receipt.selection);
     receipt.selectionSource = "complete emit_event payload flattened into worker.log by SceneworksJsonFormat";
