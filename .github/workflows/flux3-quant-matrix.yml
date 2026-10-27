@@ -69,10 +69,10 @@ jobs:
     env:
       CARGO_PROFILE_RELEASE_STRIP: "none"
       CARGO_NET_OFFLINE: "true"
-      CARGO_TARGET_DIR: ${{ runner.temp }}/sc26243-quant-target
+      CARGO_TARGET_DIR: /tmp/sc26243-quant-target
       HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || '/Volumes/Models/huggingface' }}
-      SCENEWORKS_DATA_DIR: ${{ runner.temp }}/sc26243-quant-data
-      FLUX3_FOOTPRINT_OUT_DIR: ${{ runner.temp }}/sc26243-quant-evidence
+      SCENEWORKS_DATA_DIR: /tmp/sc26243-quant-data
+      FLUX3_FOOTPRINT_OUT_DIR: /tmp/sc26243-quant-evidence
     steps:
       - name: Refuse a runner other than the dispatched Mac
         run: '[[ "$RUNNER_NAME" == "${{ inputs.runner }}" ]] || { echo "::error::dispatched for ${{ inputs.runner }}, running on $RUNNER_NAME"; exit 1; }'
@@ -138,7 +138,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: flux3-quant-matrix-mlx-${{ inputs.runner }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/sc26243-quant-evidence/**
+          path: /tmp/sc26243-quant-evidence/**
           if-no-files-found: warn
           retention-days: 30
 
@@ -157,8 +157,8 @@ jobs:
       CUDA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
       HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:\huggingface' }}
-      SCENEWORKS_DATA_DIR: ${{ runner.temp }}/sc26243-quant-data
-      FLUX3_FOOTPRINT_OUT_DIR: ${{ runner.temp }}/sc26243-quant-evidence
+      SCENEWORKS_DATA_DIR: D:/tmp/sc26243-quant-data
+      FLUX3_FOOTPRINT_OUT_DIR: D:/tmp/sc26243-quant-evidence
     steps:
       - name: Refuse a runner other than the dispatched Windows box
         run: |
@@ -222,6 +222,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: flux3-quant-matrix-candle-${{ inputs.runner }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/sc26243-quant-evidence/**
+          path: D:/tmp/sc26243-quant-evidence/**
           if-no-files-found: warn
           retention-days: 30
