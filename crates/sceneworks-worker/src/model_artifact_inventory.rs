@@ -476,6 +476,10 @@ mod tests {
 
     const INFRASTRUCTURE_SURFACES: &[(&str, &str)] = &[
         (
+            "crates/sceneworks-worker/src/converted_install.rs",
+            "post-failure verification of an installed convert-at-install model (sc-24216), not a model loader",
+        ),
+        (
             "crates/sceneworks-worker/src/downloads.rs",
             "source-library transfer implementation",
         ),
@@ -527,6 +531,9 @@ mod tests {
         "crates/sceneworks-worker/src/footprint_measure.rs",
         // sc-26243: off-Mac sibling compiled only under cfg(all(test, not(macos), backend-candle)).
         "crates/sceneworks-worker/src/flux3_candle_footprint.rs",
+        // sc-27092: the imported ComfyUI-quantized (scalar fp8 / MXFP8) worker smoke — an
+        // #[ignore]d test module, the same shape as the NVFP4 smoke below.
+        "crates/sceneworks-worker/src/imported_comfy_quant_gpu_smoke.rs",
         "crates/sceneworks-worker/src/imported_nvfp4_gpu_smoke.rs",
         "crates/sceneworks-worker/src/iris_gpu_smoke.rs",
         "crates/sceneworks-worker/src/iris_training_gpu_smoke.rs",

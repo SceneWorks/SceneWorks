@@ -14,7 +14,7 @@ pub(crate) async fn list_jobs(
         let jobs = store.list_jobs(
             query.project_id.as_deref(),
             query.status.as_deref(),
-            query.limit.unwrap_or(100),
+            query.limit.unwrap_or(MAX_LISTED_JOBS),
         );
         Ok((sweep, jobs))
     })
@@ -119,7 +119,7 @@ pub(crate) async fn create_job(
         })
     })
     .await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
@@ -395,7 +395,7 @@ pub(crate) async fn cancel_job(
     })
     .await?;
     crate::generation::cascade_cancel_vector_prompt_workflow(&state, &job).await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok(Json(public_job_snapshot(job)))
 }
@@ -441,7 +441,7 @@ pub(crate) async fn retry_job(
         )
     })
     .await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
@@ -712,7 +712,7 @@ pub(crate) async fn duplicate_job(
         }
     })
     .await?;
-    publish(&state, "job.updated", &job);
+    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     publish_queue(&state).await?;
     Ok((StatusCode::CREATED, Json(public_job_snapshot(job))))
 }
@@ -916,6 +916,16 @@ async fn validate_and_canonicalize_merged_generation_payload(
     // A replay model switch resets inherited MOSS controls. Explicit new advanced controls still
     // reach validation, so headless clients cannot silently drop a conflicting authored setting.
     if merged.get("model") != persisted.get("model")
+        && !(sceneworks_core::moss_image::is_edit(&persisted)
+            && sceneworks_core::moss_image::is_edit(&merged)
+            && persisted
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::moss_image::is_moss)
+            && merged
+                .get("model")
+                .and_then(Value::as_str)
+                .is_some_and(sceneworks_core::moss_image::is_moss))
         && (persisted
             .get("model")
             .and_then(Value::as_str)
@@ -939,6 +949,26 @@ async fn validate_and_canonicalize_merged_generation_payload(
             ] {
                 advanced.remove(key);
             }
+        }
+    }
+    // Edit options are server-defaulted and compatible across Base/SFT, but must not leak into
+    // another model or ordinary generation. An explicit advanced replacement remains authored
+    // input and reaches strict validation unchanged.
+    let is_moss_edit = |payload: &JsonObject| {
+        payload
+            .get("model")
+            .and_then(Value::as_str)
+            .is_some_and(sceneworks_core::moss_image::is_moss)
+            && sceneworks_core::moss_image::is_edit(payload)
+    };
+    if !payload_changes.contains_key("advanced")
+        && is_moss_edit(&persisted)
+        && !is_moss_edit(&merged)
+    {
+        if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
+            advanced.remove(sceneworks_core::moss_image::EDIT_OPTIONS_KEY);
+            advanced.remove(sceneworks_core::moss_image_advanced::KEY);
+            advanced.remove("promptBatch");
         }
     }
     let canonical_model_entry =
@@ -1038,6 +1068,25 @@ async fn validate_and_canonicalize_merged_generation_payload(
                 &manifest_entry,
             )?;
             merged.insert("modelManifestEntry".to_owned(), manifest_entry);
+            // Hires.fix (sc-26644): the same shared core gate `create_image_job` runs, applied to
+            // the merged object the queue transaction will persist — a retry/duplicate's
+            // `payload_changes` (a shallow merge) could otherwise carry a `hiresFix` block to a
+            // model that refuses it, or switch the model out from under a stored block, and only
+            // fail at the worker instead of being refused at this creation boundary.
+            {
+                let request = sceneworks_core::image_request::ImageRequest::from_payload(&merged);
+                let family = merged
+                    .get("modelManifestEntry")
+                    .and_then(|entry| entry.get("family"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .unwrap_or_default();
+                if let Some(message) =
+                    sceneworks_core::image_request::hires_fix_request_error(&request, family)
+                {
+                    return Err(ApiError::bad_request(message));
+                }
+            }
             validate_merged_job_loras(
                 state,
                 project_id.as_deref(),
@@ -1232,9 +1281,85 @@ pub(crate) async fn canonicalize_image_model_payload(
     // Every image entry point reaches this post-expansion/post-merge seam.
     sceneworks_core::moss_image::scrub_reports(payload);
     if let Some(entry) = model_manifest_entry.as_object() {
+        // Artifact hashing/validation can stream hundreds of MiB. Keep that bounded host I/O
+        // off the async request executor, and persist only the fully validated result.
+        let data_dir = state.settings.data_dir.clone();
+        let tensor_entry = entry.clone();
+        let mut tensor_payload = payload.clone();
+        *payload = tokio::task::spawn_blocking(move || {
+            let tensor_store = ProjectStore::new(data_dir, "api");
+            sceneworks_core::moss_image_advanced::canonicalize(
+                &tensor_store,
+                &mut tensor_payload,
+                &tensor_entry,
+            )?;
+            Ok::<_, String>(tensor_payload)
+        })
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+        .map_err(ApiError::bad_request)?;
+        // sc-24215: Supra2-IMG's published interface (text-to-image, 256x256, prompt / seed /
+        // guidance / steps / count) — anything else is a 400 here, before a job exists.
+        sceneworks_core::supra2::validate_request(payload, entry).map_err(ApiError::bad_request)?;
         if let Some(request) = sceneworks_core::moss_image::native_request(payload, entry)
             .map_err(ApiError::bad_request)?
         {
+            if sceneworks_core::moss_image::is_edit(payload) {
+                let project_id = payload
+                    .get("projectId")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| ApiError::bad_request("MOSS edit requires projectId"))?
+                    .to_owned();
+                let ids = sceneworks_core::moss_image::edit_reference_ids(payload)
+                    .map_err(ApiError::bad_request)?;
+                crate::generation::validate_ordered_image_references(
+                    state.clone(),
+                    project_id,
+                    ids,
+                )
+                .await?;
+                payload
+                    .entry("width".to_owned())
+                    .or_insert(json!(request.width));
+                payload
+                    .entry("height".to_owned())
+                    .or_insert(json!(request.height));
+                payload
+                    .entry("negativePrompt".to_owned())
+                    .or_insert_with(|| json!(request.negative_prompt.as_deref().unwrap_or("")));
+                // Null records an authored random seed; egress replaces it with the actual
+                // per-image seed in the persisted recipe, as it does for every generation.
+                payload.entry("seed".to_owned()).or_insert(Value::Null);
+                let controls =
+                    sceneworks_core::moss_image::edit_effective_controls(&model_id, &request)
+                        .map_err(ApiError::bad_request)?;
+                let advanced = payload
+                    .entry("advanced".to_owned())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+                for (key, value) in controls {
+                    advanced.entry(key).or_insert(value);
+                }
+                let edit = sceneworks_core::moss_image::edit_options(
+                    payload
+                        .get("advanced")
+                        .and_then(Value::as_object)
+                        .unwrap_or(&JsonObject::new()),
+                )
+                .map_err(ApiError::bad_request)?;
+                payload
+                    .entry("advanced".to_owned())
+                    .or_insert_with(|| json!({}))
+                    .as_object_mut()
+                    .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?
+                    .insert(
+                        sceneworks_core::moss_image::EDIT_OPTIONS_KEY.into(),
+                        serde_json::to_value(edit)
+                            .map_err(|e| ApiError::internal(e.to_string()))?,
+                    );
+            }
             let options = request
                 .moss_image
                 .as_ref()
@@ -1254,7 +1379,7 @@ pub(crate) async fn canonicalize_image_model_payload(
                     serde_json::to_value(options).map_err(|e| ApiError::internal(e.to_string()))?,
                 );
 
-            if let Some(purpose) = sceneworks_core::moss_image::purpose(options) {
+            if let Some(purpose) = sceneworks_core::moss_image::request_purpose(payload, options) {
                 let rows = sceneworks_core::model_usage_policy::conditional_component_downloads(
                     &model_manifest_entry,
                     purpose,
@@ -1268,8 +1393,11 @@ pub(crate) async fn canonicalize_image_model_payload(
                 }
             }
             model_manifest_entry = Value::Object(
-                sceneworks_core::moss_image::selected_components(entry, options)
-                    .map_err(ApiError::bad_request)?,
+                sceneworks_core::moss_image::selected_components_for_purpose(
+                    entry,
+                    sceneworks_core::moss_image::request_purpose(payload, options),
+                )
+                .map_err(ApiError::bad_request)?,
             );
         }
     }
@@ -1841,7 +1969,7 @@ pub(crate) async fn update_job_progress(
                 // transition occurs. A later retry/recovery has no status change,
                 // so it publishes only the augmented job snapshot below.
                 if status_changed {
-                    publish(&state, "job.updated", &job);
+                    publish(&state, "job.updated", &public_job_snapshot(job.clone()));
                     if let Err(queue_error) = publish_queue(&state).await {
                         tracing::error!(
                             event = "terminal_progress_queue_publish_failed",
@@ -1860,7 +1988,7 @@ pub(crate) async fn update_job_progress(
         job = apply_progress_side_effects(&state, job, false).await?;
     }
     if publish_job_update {
-        publish(&state, "job.updated", &job);
+        publish(&state, "job.updated", &public_job_snapshot(job.clone()));
     }
     // sc-4203 (F-API-5): workers POST progress per inference step. The queue summary
     // is a full SQLite aggregation plus a stale-worker sweep, serialized and
@@ -2063,7 +2191,7 @@ pub(crate) async fn recover_pending_terminal_progress_side_effects_as_of(
     for job_id in ids {
         match process_pending_terminal_progress_side_effects(state, &job_id).await {
             Ok(Some(job)) => {
-                publish(state, "job.updated", &job);
+                publish(state, "job.updated", &public_job_snapshot(job.clone()));
                 recovered += 1;
             }
             Ok(None) => {}

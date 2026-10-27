@@ -33,7 +33,7 @@ jobs:
       FLUX3_APP_SOURCE_SHA: ${{ inputs.source_sha }}
       FLUX3_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}
       FLUX3_APP_RUNNER_TARGET: ${{ inputs.runner_target }}
-      # Preserve unstripped Mach-O proc-macro dylibs on the pinned 1.97.1 toolchain.
+      # Preserve unstripped Mach-O proc-macro dylibs on the pinned 1.98.0 toolchain.
       CARGO_PROFILE_RELEASE_STRIP: "none"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -50,7 +50,7 @@ jobs:
           FLUX3_APP_OUTPUT: ${{ runner.temp }}/flux3-app-${{ github.run_id }}-${{ github.run_attempt }}
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Fetch Release libmlx or use its source build
         run: |
           set +e

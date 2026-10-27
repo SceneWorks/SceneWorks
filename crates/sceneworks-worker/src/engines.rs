@@ -263,6 +263,19 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 3.5,
         adapter_label: "mlx_flux3",
     },
+    // Supra2-IMG (sc-24213, epic 24212) — `mlx-gen-supra2` registers `supra2_img`. The weights dir
+    // is the locally converted bundle (convert-at-install, injected `modelPath`); Flan-T5-Base and
+    // SD VAE ft-MSE are catalog co-requisites the descriptor declares (`text_encoder`, `vae`), staged
+    // by the generic `attach_required_components`. Defaults are the release's own
+    // (`gen_core::supra2::DEFAULT_STEPS` / `DEFAULT_GUIDANCE`).
+    ModelRow {
+        sceneworks_id: "supra2_img",
+        engine_id: "supra2_img",
+        default_repo: "SupraLabs/Supra2-IMG",
+        default_steps: 50,
+        default_guidance: 3.0,
+        adapter_label: "mlx_supra2",
+    },
     // Qwen-Image-Edit (sc-3397) — the three base edit ids all resolve to the engine's
     // single `qwen_image_edit` model (Reference/MultiReference, true CFG, LoRA/LoKr, Q4/Q8);
     // `qwen_image_edit`/`_2509` alias to the 2511 weights (Python MODEL_TARGETS, sc-2160).
@@ -1849,6 +1862,7 @@ mod tests {
         "flux3_klein",
         "flux3_klein_base",
         "iris_3b",
+        "supra2_img",
         "moss_image_base",
         "moss_image_sft",
         "mage_flow_base",
@@ -1988,6 +2002,9 @@ mod tests {
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
             // Both frozen FLUX3 checkpoints share the pinned packed-token grid, not weights.
             "flux3_klein" | "flux3_klein_base" => gen_core::flux3::DOWNSAMPLING_RATIO,
+            // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
+            // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
+            "supra2_img" => 256,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2041,6 +2058,9 @@ mod tests {
             // An ASSERTION-only literal on this lane: no Candle provider exists until sc-26235,
             // which replaces it with that provider's constant.
             "flux3_klein" | "flux3_klein_base" => 16,
+            // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
+            // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
+            "supra2_img" => 256,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
             "bernini" => p::wan::config::SIZE_MULTIPLE_14B,
@@ -2307,6 +2327,7 @@ mod tests {
             ("iris_3b", 16),
             ("flux3_klein", 16),
             ("flux3_klein_base", 16),
+            ("supra2_img", 256),
             ("z_image_turbo", 16),
             ("bernini", 16),
         ];

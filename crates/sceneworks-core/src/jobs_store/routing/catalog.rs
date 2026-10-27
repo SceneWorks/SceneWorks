@@ -1174,6 +1174,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // native precision packages. Missing base converted pins never become a dense fallback.
     ModelCaps::new("flux3_klein", true, true, false, false, true),
     ModelCaps::new("flux3_klein_base", true, true, false, false, true),
+    // Supra2-IMG (sc-24213 MLX / sc-24214 Candle, epic 24212): `candle-gen-supra2` registers the SAME
+    // engine id `supra2_img` as `mlx-gen-supra2`, so the one plain text-to-image contract that routes
+    // to MLX on a Mac routes off-Mac too, through the generic candle txt2img lane. No quant tier, no
+    // adapters; `CandleImageRefusal::Supra2Surface` holds the candle gate to exactly the MLX arm's
+    // shape (`supra2_mlx_eligible`).
+    ModelCaps::new("supra2_img", true, true, false, false, false),
 ];
 
 /// The one-row-per-model VIDEO routing table (sc-9495) — the single source the video list constants
@@ -2437,6 +2443,7 @@ mod tests {
         "flux3_klein_base",
         "moss_image_base",
         "moss_image_sft",
+        "supra2_img",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
@@ -2505,6 +2512,7 @@ mod tests {
         "iris_3b",
         "moss_image_base",
         "moss_image_sft",
+        "supra2_img",
     ];
 
     // sc-9983: Krea joins Lens as a BOTH-quant-and-LoRA candle family (sc-9607 flipped its

@@ -1,10 +1,19 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
+import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
+import { composeStyledPrompt } from "../styleComposer.js";
+import { styleTextForId } from "../data/styleCatalog.js";
+import { mossAdvancedIssue } from "../mossImageAdvancedValidation.js";
+import { isMossEdit, mossEditDefaults, mossComponentState, mossEditWireOptions, mossEditReferenceIds, mossEditControlsError } from "../mossImage.js";
+import { MossImageEditControls } from "../components/MossImageEditControls.jsx";
+import { MossReferencePicker } from "../components/MossReferencePicker.jsx";
+import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { EditPromptTemplates } from "../components/EditPromptTemplates.jsx";
 import { useAppContext } from "../context/AppContext.js";
 import { imageModelServesMode } from "../modelEligibility.js";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
+import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { useHostMemory } from "../hooks/useHostMemory.js";
 import { hostMemoryGbForBackend } from "../hostMemory.js";
 import { resultGridColumns } from "./breakpoint.js";
@@ -32,7 +41,13 @@ import {
   modelDimensionConstraints,
 } from "../resolutionOverride.js";
 import { minStepsForModel } from "../videoModelLimits.js";
-import { maxStepsForModel, negativePromptInertAtGuidance, patchGridHint } from "../samplerOptions.js";
+import {
+  maxStepsForModel,
+  nativeResolutionHint,
+  negativePromptInertAtGuidance,
+  patchGridHint,
+  promptTokenLimitHint,
+} from "../samplerOptions.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import {
   qwenRewriterAppliesTo,
@@ -88,6 +103,9 @@ export function SimpleImageStudio() {
     createLoraDownloadJob,
     qwenRewritePrompt,
     activeProject,
+    characters = [],
+    importAsset,
+    token,
   } = useAppContext();
   const { breakpoint, openSheet, closeSheet, openGuide, toast, referenceRequest, clearReferenceRequest } =
     useSimpleUi();
@@ -127,6 +145,13 @@ export function SimpleImageStudio() {
   const [widthOverride, setWidthOverride] = useStudioState("image", "widthOverride", "");
   const [heightOverride, setHeightOverride] = useStudioState("image", "heightOverride", "");
   const [extraReferenceIds, setExtraReferenceIds] = useStudioState("image", "extraReferenceIds", []);
+  const [mossImageEdit, setMossImageEdit] = useStudioState("image", "mossImageEdit", mossEditDefaults());
+  const [mossShift, setMossShift] = useStudioState("image", "mossEditShift", 5);
+  const [mossContext, setMossContext] = useStudioState("image", "mossEditContext", 4096);
+  const [mossTrainingShift, setMossTrainingShift] = useStudioState("image", "mossTrainingShift", 1);
+  const [mossImageAdvanced, setMossImageAdvanced] = useStudioState("image", "mossImageAdvanced", mossAdvancedDefaults());
+  const [mossPromptBatch, setMossPromptBatch] = useStudioState("image", "mossPromptBatch", []);
+  const mossEdit = isMossEdit(model, mode);
   const [submitting, setSubmitting] = useState(false);
 
   // Models that serve the active tab, under the same capability + Mac-gating predicate
@@ -167,8 +192,24 @@ export function SimpleImageStudio() {
       backend: memoryBackend,
       tier: tier.quantTier,
     });
-    return gated.length ? gated : declared;
-  }, [selectedModel, unifiedMemoryGb, memoryBackend, tier.quantTier]);
+    return mossEdit ? [...new Set(["512x512", ...(gated.length ? gated : declared)])] : gated.length ? gated : declared;
+  }, [selectedModel, unifiedMemoryGb, memoryBackend, tier.quantTier, mossEdit]);
+  const mossModeSnapshot = useRef({ active: mossEdit, ordinary: null });
+  useEffect(() => {
+    const snapshot = mossModeSnapshot.current;
+    if (snapshot.active === mossEdit) return;
+    snapshot.active = mossEdit;
+    if (mossEdit) {
+      snapshot.ordinary = { resolution, steps, guidance, widthOverride, heightOverride };
+      setResolution("512x512"); setSteps(30); setGuidance(4); setWidthOverride(""); setHeightOverride("");
+      setMossShift(5); setMossImageEdit(mossEditDefaults());
+    } else if (snapshot.ordinary) {
+      const previous = snapshot.ordinary;
+      setResolution(previous.resolution); setSteps(previous.steps); setGuidance(previous.guidance);
+      setWidthOverride(previous.widthOverride); setHeightOverride(previous.heightOverride); snapshot.ordinary = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mossEdit]);
 
   // Seed from the model's DECLARED default, not `limits.resolutions[0]` — for 16 shipped
   // image models those differ (z_image declares 1024², its list leads with 768²), so [0]
@@ -183,9 +224,15 @@ export function SimpleImageStudio() {
       return;
     }
     if (resolutions.length && !resolutions.includes(resolution)) {
-      setResolution(preferredResolution(selectedModel, resolutions));
+      const dims = parseResolution(resolution);
+      setResolution(
+        mossEdit
+          ? "512x512"
+          : (dims && pickClosestResolution(dims.width, dims.height, resolutions))
+            || preferredResolution(selectedModel, resolutions),
+      );
     }
-  }, [resolutions, resolution, selectedModel, setResolution]);
+  }, [resolutions, resolution, selectedModel, setResolution, mossEdit]);
 
   // Resolved against the FULL catalog, not just the picker's recent-20 list: a reference
   // routed in from the Assets preview ("Use as reference") can be any library asset.
@@ -203,14 +250,14 @@ export function SimpleImageStudio() {
   // edit mode stays submittable and sends a dangling reference the job then fails on.
   const restoredReferenceValidated = useRef(false);
   useEffect(() => {
-    if (restoredReferenceValidated.current || !assets.length) {
+    if (mossEdit || restoredReferenceValidated.current || !assets.length) {
       return;
     }
     restoredReferenceValidated.current = true;
     setReferenceAssetId((current) =>
       current && !assets.some((asset) => asset.id === current) ? null : current,
     );
-  }, [assets, setReferenceAssetId]);
+  }, [assets, setReferenceAssetId, mossEdit]);
 
   // "Use as reference" from an asset preview lands here. Keyed on the request token so a
   // repeat pick of the SAME asset still re-arms after the user cleared it.
@@ -292,12 +339,15 @@ export function SimpleImageStudio() {
   });
   const dimensionError = dimensionConstraintMessage(dimensionEval);
   const patchGridNotice = patchGridHint(selectedModel, dimensionEval.width, dimensionEval.height);
+  // sc-24215: the same native-size and prompt-token statements Image Studio shows.
+  const nativeResolutionNotice = nativeResolutionHint(selectedModel);
+  const promptTokenNotice = promptTokenLimitHint(selectedModel);
 
   // The ORDERED list the render conditions on: the armed reference first (it is the one the tile
   // shows), then the extras in the order the user arranged them.
   const orderedReferenceIds = useMemo(
-    () => (referenceAssetId ? [referenceAssetId, ...extraReferenceIds] : [...extraReferenceIds]),
-    [referenceAssetId, extraReferenceIds],
+    () => ((mossEdit ? referenceAssetId != null : Boolean(referenceAssetId)) ? [referenceAssetId, ...extraReferenceIds] : [...extraReferenceIds]),
+    [referenceAssetId, extraReferenceIds, mossEdit],
   );
 
   // sc-24113 — which Qwen rewriter this request selects, and whether it is installed. Selected by
@@ -368,10 +418,20 @@ export function SimpleImageStudio() {
     });
 
   const latestJob = newestLocalJob(imageLocalJobs);
+  const mossComponents = mossEdit ? mossComponentState(selectedModel, null, mode) : { ready: true };
+  let mossEditError = "";
+  if (mossEdit) {
+    try {
+      mossEditWireOptions(mossImageEdit); mossEditReferenceIds({ referenceAssetIds: orderedReferenceIds });
+      mossEditError = mossEditControlsError({ steps, guidanceScale: guidance, schedulerShift: mossShift, max_sequence_length: mossContext, training_shift: mossTrainingShift });
+      mossEditError ||= mossAdvancedIssue(mossImageAdvanced, { assets, prompt, effectivePrompt: composeStyledPrompt({ userPrompt: prompt, styleText: styleTextForId(styleId) }), prompts: mossPromptBatch, negativePrompt, count: variations, width: Number(widthOverride || resolution.split("x")[0]), height: Number(heightOverride || resolution.split("x")[1]), context: mossContext });
+      if (orderedReferenceIds.some((id) => !assets.some((asset) => asset.id === id && (assetCanRenderAsImage(asset) || asset.type === "frame")))) mossEditError = "A MOSS reference is missing. Reacquire the exact ordered slot before editing.";
+    } catch (error) { mossEditError = error.message; }
+  }
   const busy = submitting || jobIsRunning(latestJob);
   const needsSource = mode === "edit_image" && !referenceAssetId;
   const canGenerate =
-    Boolean(prompt.trim()) &&
+    (Boolean(prompt.trim()) || (mossEdit && Boolean(mossImageAdvanced.positive))) &&
     Boolean(model) &&
     Boolean(resolution) &&
     !busy &&
@@ -382,7 +442,7 @@ export function SimpleImageStudio() {
     !dimensionEval.invalid &&
     // A required edit LoRA that isn't downloaded blocks the run HERE rather than letting the
     // worker reject it — the job would fail with an error the studio never surfaces.
-    !editLoraMissing;
+    !editLoraMissing && mossComponents.ready && !mossEditError;
 
   async function generate() {
     if (!canGenerate) {
@@ -395,7 +455,7 @@ export function SimpleImageStudio() {
     setSubmitting(true);
     try {
       const request = buildSimpleImageRequest({
-        prompt: prompt.trim(),
+        prompt: mossEdit ? prompt : prompt.trim(),
         mode,
         model,
         resolution,
@@ -407,6 +467,12 @@ export function SimpleImageStudio() {
         // sc-24113 — the ORDERED list, for a model that takes more than one. Passed only when the
         // model declares the surface, so every other model's payload is byte-identical.
         referenceAssetIds: supportsOrderedReferences ? orderedReferenceIds : [],
+        mossImageEdit,
+        mossImageAdvanced: mossEdit ? mossImageAdvanced : undefined,
+        mossPromptBatch: mossEdit ? mossPromptBatch : undefined,
+        trainingShift: mossTrainingShift,
+        schedulerShift: mossEdit ? mossShift : null,
+        maxSequenceLength: mossContext,
         // The advanced fold's knobs. Empty string means "the model default", exactly as the full
         // studio's overrides do, so an untouched control adds nothing to the payload.
         // Sent only for a model that shows the fold, so a sticky value never leaks elsewhere.
@@ -496,6 +562,11 @@ export function SimpleImageStudio() {
           placeholder="Describe the image you want…"
           value={prompt}
         />
+        {promptTokenNotice ? (
+          <span className="field-hint" role="note">
+            {promptTokenNotice}
+          </span>
+        ) : null}
         {/* Edit tab only: the built-in edit recipes. Text mode has the Style strip for the
             same job; an instruction like "deblur this image" means nothing to text-to-image. */}
         {mode === "edit_image" ? <EditPromptTemplates onApply={setPrompt} variant="simple" /> : null}
@@ -543,8 +614,12 @@ export function SimpleImageStudio() {
         ) : null}
       </div>
 
+      {mossEdit ? <MossReferencePicker assets={assets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} max={maxSimpleReferences} assetIds={orderedReferenceIds} onChange={([first, ...rest]) => { setReferenceAssetId(first ?? null); setExtraReferenceIds(rest); }} /> : null}
+
+      {mossEdit ? <MossImageEditControls model={selectedModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} advanced={mossImageAdvanced} onAdvancedChange={setMossImageAdvanced} assets={assets} importAsset={importAsset} promptBatch={mossPromptBatch} onPromptBatchChange={(batch) => { setMossPromptBatch(batch); if (batch.length) setPrompt(batch[0]); }} /> : null}
+
       <div className="su-tiles">
-        <ReferenceTile
+        {mossEdit ? null : <ReferenceTile
           asset={referenceAsset}
           assets={recentImageAssets}
           disabled={!referenceUsable}
@@ -558,7 +633,7 @@ export function SimpleImageStudio() {
           label={mode === "edit_image" ? "Source image" : "Reference"}
           onChange={setReferenceAssetId}
           required={mode === "edit_image"}
-        />
+        />}
         {qwenRewriteAvailable ? (
           <button
             className={qwenRewriteOpen ? "su-tile active" : "su-tile"}
@@ -624,6 +699,11 @@ export function SimpleImageStudio() {
               {patchGridNotice}
             </span>
           ) : null}
+          {nativeResolutionNotice ? (
+            <span className="field-hint" role="note">
+              {nativeResolutionNotice}
+            </span>
+          ) : null}
         </div>
         <Chips label="Variations" onChange={setVariations} options={variationOptions} value={variations} />
         {/* sc-24113 — native transparency. Simple exposes the model, so it exposes the toggle; it
@@ -682,7 +762,12 @@ export function SimpleImageStudio() {
       >
         <summary className="su-advanced-summary">Advanced</summary>
         <div className="su-advanced-body">
-          {supportsOrderedReferences ? (
+          {mossEdit ? <>
+            <label>Training shift<input type="number" min="0" step="any" value={mossTrainingShift} onChange={(event) => setMossTrainingShift(Number(event.target.value))} /></label>
+            <label>Schedule shift<input type="number" min="0" step="any" value={mossShift} onChange={(event) => setMossShift(Number(event.target.value))} /></label>
+            <label>Context limit<input type="number" min="1" max="4096" value={mossContext} onChange={(event) => setMossContext(Number(event.target.value))} /></label>
+            {mossEditError ? <p role="alert">{mossEditError}</p> : null}
+          </> : supportsOrderedReferences ? (
             <div className="su-field">
               <label htmlFor="su-image-add-reference">
                 References (up to {maxSimpleReferences}, in order)
@@ -740,7 +825,7 @@ export function SimpleImageStudio() {
               min={String(minStepsForModel(selectedModel))}
               max={String(maxStepsForModel(selectedModel))}
               onChange={(event) => setSteps(event.target.value)}
-              placeholder={String(selectedModel?.defaults?.steps ?? "")}
+              placeholder={String(mossEdit ? 30 : selectedModel?.defaults?.steps ?? "")}
               type="number"
               value={steps}
             />
@@ -754,6 +839,7 @@ export function SimpleImageStudio() {
               placeholder="Random"
               type="number"
               value={seed}
+              disabled={mossEdit && Boolean(mossImageAdvanced.noise)}
             />
           </div>
           {supportsGuidance ? (
@@ -765,7 +851,7 @@ export function SimpleImageStudio() {
                 min="0"
                 max="30"
                 onChange={(event) => setGuidance(event.target.value)}
-                placeholder={String(selectedModel?.defaults?.guidanceScale ?? "")}
+                placeholder={String(mossEdit ? 4 : selectedModel?.defaults?.guidanceScale ?? "")}
                 step="0.1"
                 type="number"
                 value={guidance}
@@ -846,6 +932,7 @@ export function SimpleImageStudio() {
       {needsSource ? (
         <p className="su-empty">Pick the image you want to edit to start a run.</p>
       ) : null}
+      {mossEdit && !mossComponents.ready ? <p role="status">The exact MOSS edit adapter is {mossComponents.state}. Open Advanced to install or repair it before editing.</p> : null}
       {/* The managed edit LoRA isn't downloaded yet. The worker would reject the run outright
           ("the source-image conditioning is inert"), so offer the one-click fetch instead of
           letting the user discover it as a failed job. */}

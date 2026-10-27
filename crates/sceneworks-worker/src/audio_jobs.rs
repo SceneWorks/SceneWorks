@@ -1462,9 +1462,8 @@ impl SynthesisProgress {
     fn engine(&mut self, progress: Progress) -> Option<SynthesisUpdate> {
         let (stage, candidate, message) = match progress {
             // Image prompt upsampling is not an audio synthesis phase.
-            Progress::PromptUpsamplingComplete
-            | Progress::ConditioningComplete
-            | Progress::Upsampling { .. } => return None,
+            Progress::PromptUpsamplingComplete => return None,
+            Progress::ConditioningComplete | Progress::Upsampling { .. } => return None,
             Progress::Step { current, total } => {
                 if total == 0 {
                     return None;
@@ -2347,12 +2346,16 @@ fn read_wav(path: &Path, want: WavSamples) -> WorkerResult<gen_core::AudioTrack>
     })?;
     let samples: Vec<f32> = match want {
         WavSamples::Pcm16 => bytes[start..end]
-            .chunks_exact(2)
-            .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32_768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c) as f32 / 32_768.0)
             .collect(),
         WavSamples::Float32 => bytes[start..end]
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c))
             .collect(),
     };
     if samples.is_empty() {
@@ -6412,7 +6415,7 @@ mod yue_job_surface_tests {
         assert_eq!((audio.sample_rate, audio.channels), (44_100, 2));
         assert_eq!(audio.samples.len(), frames * 2);
         assert!(audio.stems.is_empty());
-        for frame in audio.samples.chunks_exact(2) {
+        for frame in audio.samples.as_chunks::<2>().0 {
             assert!((frame[0] - 0.5).abs() < 1e-3 && (frame[1] + 0.25).abs() < 1e-3);
         }
     }

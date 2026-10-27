@@ -65,6 +65,11 @@ const MIN_COUNT: u32 = 1;
 /// measured against.
 pub(crate) const MAX_COUNT: u32 = 8;
 
+/// The historical ceiling on `advanced.steps` the generic image lane forwards (raised to a model's
+/// own default where that is higher). The worker clamps above it; Image Studio's Steps input
+/// mirrors it (`BASE_MAX_STEPS`), and Supra2's request boundary refuses above it (sc-24215).
+pub const BASE_MAX_IMAGE_STEPS: u32 = 80;
+
 /// The maximum number of strict poses one image-generation job may render.
 ///
 /// A pose set is not ordinary batch metadata: every entry becomes a separate generated image and
@@ -208,8 +213,24 @@ impl ImageRequest {
 
     /// The images this request produces: `count`, or `prompts × count` for a native prompt batch.
     pub fn image_count(&self) -> u32 {
-        self.count
-            .saturating_mul(u32::try_from(self.prompts.len().max(1)).unwrap_or(u32::MAX))
+        let embedding_batch =
+            if crate::moss_image::is_moss(&self.model) && self.mode == "edit_image" {
+                self.advanced
+                    .get(crate::moss_image_advanced::KEY)
+                    .and_then(|v| v.get("positive"))
+                    .and_then(|v| v.get("values"))
+                    .and_then(|v| v.get("metadata"))
+                    .and_then(|v| v.get("shape"))
+                    .and_then(|v| v.get(0))
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n <= 8)
+                    .unwrap_or(1) as usize
+            } else {
+                1
+            };
+        self.count.saturating_mul(
+            u32::try_from(self.prompts.len().max(embedding_batch).max(1)).unwrap_or(u32::MAX),
+        )
     }
 
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:
@@ -306,6 +327,110 @@ fn parse_hires_fix(payload: &JsonObject) -> HiresFixRequest {
         .cloned()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or_default()
+}
+
+/// The shared Hires.fix preflight gate (sc-26644): `None` admits, `Some(message)` refuses with a
+/// caller-facing message. Hires.fix is a plain text-to-image second pass: existing edit/control
+/// inputs, PiD, multi-phase sampling, and the separate post-generation upscaler are intentionally
+/// mutually exclusive rather than being silently dropped by a provider.
+///
+/// Lives in core so the two boundaries that must agree cannot drift: the worker re-applies it
+/// before any model load, and the API applies it at image-job enqueue (the typed route used to
+/// drop the web's top-level `hiresFix` entirely, so a request for a model that should refuse it
+/// returned 201 and the worker-side refusal never fired). `family` is resolved by the caller —
+/// the worker falls back to the generators registry on macOS, the API reads the canonicalized
+/// manifest entry.
+pub fn hires_fix_request_error(request: &ImageRequest, family: &str) -> Option<String> {
+    if request.hires_fix.is_disabled() {
+        return None;
+    }
+    if request.mode != "text_to_image" {
+        return Some("Hires.fix is only available for text-to-image generation.".to_owned());
+    }
+    if request.upscale.enabled {
+        return Some(
+            "Hires.fix and the post-generation Upscale option are mutually exclusive.".to_owned(),
+        );
+    }
+    let advertises_img2img = request
+        .model_manifest_entry
+        .get("ui")
+        .and_then(|ui| ui.get("img2img"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if family != "sdxl" && !advertises_img2img {
+        return Some(format!(
+            "Hires.fix requires an img2img-capable model; '{}' does not advertise that capability.",
+            request.model
+        ));
+    }
+    let has_edit_or_control_input = request.source_asset_id.is_some()
+        || request.reference_asset_id.is_some()
+        || !request.reference_asset_ids.is_empty()
+        || request.mask_asset_id.is_some()
+        || request.character_id.is_some()
+        || request.character_look_id.is_some()
+        || request
+            .advanced
+            .get("poses")
+            .and_then(Value::as_array)
+            .is_some_and(|poses| !poses.is_empty())
+        || request
+            .advanced
+            .get("controlImage")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty());
+    if has_edit_or_control_input {
+        return Some(
+            "Hires.fix cannot be combined with image-edit, reference, character, mask, or strict-control inputs."
+                .to_owned(),
+        );
+    }
+    if request
+        .advanced
+        .get("usePid")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("Hires.fix and PiD super-resolution are mutually exclusive.".to_owned());
+    }
+    if request
+        .advanced
+        .get("phases")
+        .and_then(Value::as_array)
+        .is_some_and(|phases| !phases.is_empty())
+    {
+        return Some("Hires.fix cannot be combined with multi-phase sampling.".to_owned());
+    }
+    let acceleration_sampler = request
+        .advanced
+        .get("sampler")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|sampler| matches!(sampler.as_str(), "lightning" | "lcm" | "hyper"));
+    if request.model == "realvisxl_lightning" || acceleration_sampler {
+        return Some(
+            "Hires.fix is not supported by Lightning, LCM, or Hyper acceleration samplers because they do not accept the required img2img second pass."
+                .to_owned(),
+        );
+    }
+    let upscale_by = request.hires_fix.effective_upscale_by();
+    let target_width = hires_fix_target_dimension(request.width, upscale_by);
+    let target_height = hires_fix_target_dimension(request.height, upscale_by);
+    if target_width > 4096 || target_height > 4096 {
+        return Some(format!(
+            "Hires.fix target {}x{} exceeds the 4096px image limit; lower the base resolution or Upscale by value.",
+            target_width, target_height
+        ));
+    }
+    None
+}
+
+/// The post-first-pass target side: `dimension × upscale_by`, rounded. Shared by the enqueue
+/// gate above and the worker's HiresFixPlan.
+pub fn hires_fix_target_dimension(dimension: u32, upscale_by: f32) -> u32 {
+    (dimension as f64 * upscale_by as f64).round() as u32
 }
 
 pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {

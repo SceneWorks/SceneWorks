@@ -178,6 +178,82 @@ const CANDLE_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "candle"];
 const TORCH_CAPS: &[&str] = &["gpu", "image_generate", "image_edit", "image_detail"];
 
 #[test]
+fn moss_edit_candle_named_lane_and_claim_share_ordered_reference_contract() {
+    let worker = gpu_worker(CANDLE_CAPS);
+    for model in ["moss_image_base", "moss_image_sft"] {
+        for reference in [
+            json!({"sourceAssetId":"ref"}),
+            json!({"referenceAssetId":"ref"}),
+            json!({"referenceAssetIds":["ref"],"sourceAssetId":"ref"}),
+            json!({"referenceAssetIds":["ref","other"]}),
+            json!({"referenceAssetIds":["ref","other","ref"],"referenceAssetId":"ref"}),
+            json!({"referenceAssetIds":["other","ref","third","ref"],"sourceAssetId":"other","referenceAssetId":"other"}),
+        ] {
+            let mut payload = object(
+                json!({"model":model,"mode":"edit_image","prompt":"make it blue",
+                "advanced":{"mossImageEdit":{"reference_max_edge":256,"use_kv_cache":false}}}),
+            );
+            payload.extend(object(reference));
+            if payload.contains_key("referenceAssetIds") {
+                assert_eq!(
+                    json!(crate::moss_image::edit_reference_ids(&payload).unwrap()),
+                    payload["referenceAssetIds"]
+                );
+            }
+            for job in [
+                image_generate_job(json!(payload)),
+                image_edit_job(json!(payload)),
+            ] {
+                assert_eq!(
+                    image_job_candle_lane(&job),
+                    Some(CandleImageLane::MossImageEdit)
+                );
+                assert!(worker_supports_job(&worker, &job));
+            }
+            assert!(crate::moss_image::edit_backend_eligible(model, "candle"));
+            assert!(crate::moss_image::edit_backend_eligible(model, "mlx"));
+            assert!(!crate::moss_image::edit_backend_eligible(model, "unknown"));
+            for patch in [
+                json!({"referenceAssetIds":[] ,"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":null,"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other","ref","other","ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other",null],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other",3],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other","ref",""],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":["ref","other"," ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                json!({"referenceAssetIds":"ref"}),
+                json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"],"referenceAssetId":null}),
+                json!({"referenceAssetId":"conflict","referenceAssetIds":["ref"],"sourceAssetId":null}),
+                json!({"maskAssetId":"mask"}),
+                json!({"loras":[{"id":"custom"}]}),
+                json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+                json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
+                json!({"advanced":{"mossImageEdit":{"unknown":true}}}),
+                json!({"advanced":{"controlImage":"pose"}}),
+                json!({"mode":"text_to_image","advanced":{}}),
+            ] {
+                let mut invalid = payload.clone();
+                invalid.extend(object(patch));
+                let job = image_edit_job(json!(invalid));
+                assert_eq!(image_job_candle_lane(&job), None, "{invalid:?}");
+                assert!(!worker_supports_job(&worker, &job), "{invalid:?}");
+            }
+        }
+        // Ordinary generation remains a distinct generic lane and acquires no edit conditioning.
+        let ordinary = image_generate_job(json!({"model":model,"mode":"text_to_image"}));
+        assert_eq!(
+            image_job_candle_lane(&ordinary),
+            Some(CandleImageLane::TextToImage)
+        );
+        assert!(worker_supports_job(&worker, &ordinary));
+    }
+    assert!(!crate::moss_image::edit_backend_eligible(
+        "krea_2_raw",
+        "candle"
+    ));
+}
+
+#[test]
 fn candle_marker_detection_parses_exact_capability_membership() {
     assert!(encoded_worker_has_capability(
         r#"["gpu","image_generate","candle"]"#,
@@ -212,6 +288,7 @@ fn candle_image_dispatch_reports_named_lane_and_preserves_precedence() {
     assert_eq!(
         candle_image_route_lanes(),
         vec![
+            CandleImageLane::MossImageEdit,
             CandleImageLane::InstantId,
             CandleImageLane::SdxlControl,
             CandleImageLane::SdxlEdit,
@@ -6071,4 +6148,108 @@ fn flux3_candle_routes_base_distilled_and_lora_but_refuses_unimplemented_carrier
         let reason = classify_candle_image_gap(&controls);
         assert!(reason.detail.contains("pinned checkpoint"), "{reason:?}");
     }
+}
+
+/// sc-24214: Supra2-IMG routes to the generic Candle txt2img lane for plain 256x256 text-to-image and
+/// refuses EXACTLY the list the MLX arm refuses (`supra2_routes_plain_text_to_image_only` in the MLX
+/// tests) — the candle gate delegates to `supra2_mlx_eligible`, and this pins both the delegation and
+/// the claim. Same engine id on both lanes, so the off-Mac worker claims the very request a Mac does.
+#[test]
+fn supra2_routes_to_candle_for_plain_text_to_image_only() {
+    use crate::jobs_store::routing::gaps::classify_candle_image_gap;
+    use crate::jobs_store::routing::mlx::image_request_mlx_eligible;
+
+    assert!(CANDLE_ROUTED_MODELS.contains(&"supra2_img"));
+    assert!(!candle_family_serves_lora("supra2_img") && !candle_family_serves_quant("supra2_img"));
+    let eligible = |payload: Value| image_request_candle_eligible("supra2_img", &object(payload));
+    assert!(eligible(
+        json!({ "model": "supra2_img", "mode": "text_to_image" })
+    ));
+    assert!(eligible(json!({
+        "model": "supra2_img",
+        "advanced": { "steps": 50, "guidanceScale": 3.0, "resolution": "256x256" }
+    })));
+    // The API normalizes every unset carrier to null; a real submission must still route.
+    let normalized = json!({
+        "model": "supra2_img",
+        "mode": "text_to_image",
+        "sourceAssetId": null,
+        "referenceAssetId": null,
+        "maskAssetId": null,
+        "loras": [],
+        "hiresFix": { "enabled": false }
+    });
+    assert!(eligible(normalized.clone()));
+    assert!(image_request_mlx_eligible(
+        "supra2_img",
+        &object(normalized)
+    ));
+    let candle = gpu_worker(CANDLE_CAPS);
+    assert!(worker_supports_job(
+        &candle,
+        &image_generate_job(json!({ "model": "supra2_img", "prompt": "a red fox in snow" }))
+    ));
+    for refused in [
+        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+        json!({ "mode": "image_to_image", "sourceAssetId": "a" }),
+        json!({ "referenceAssetId": "a" }),
+        json!({ "referenceAssetIds": ["a"] }),
+        json!({ "maskAssetId": "a" }),
+        json!({ "controls": [{}] }),
+        json!({ "advanced": { "poses": [{}] } }),
+        json!({ "loras": [{ "id": "l", "weight": 0.8 }] }),
+        json!({ "advanced": { "mlxQuantize": 8 } }),
+        json!({ "advanced": { "quantTier": "q4" } }),
+        json!({ "hiresFix": { "enabled": true } }),
+    ] {
+        let mut payload = refused.clone();
+        payload["model"] = json!("supra2_img");
+        assert!(!eligible(payload.clone()), "candle must refuse {refused}");
+        assert!(
+            !image_request_mlx_eligible("supra2_img", &object(payload.clone())),
+            "the MLX lane refuses {refused} too — one refused list for both lanes"
+        );
+        let job = image_generate_job(payload.clone());
+        if refused.pointer("/advanced/poses").is_some() {
+            // A pose set on a candle family with no pose lane is OWNED-TO-REJECT (sc-5968).
+            assert!(image_job_candle_pose_reject(&job), "{refused}");
+            assert_eq!(image_job_candle_lane(&job), None, "{refused}");
+        } else {
+            assert!(
+                !worker_supports_job(&candle, &job),
+                "the candle worker must not claim {refused}"
+            );
+        }
+        // Every refusal is reported with a cause, never the unrouted-family wording.
+        let reason = classify_candle_image_gap(&object(payload));
+        assert!(
+            !reason.feature.contains("unsupported image model"),
+            "{refused}: {reason:?}"
+        );
+    }
+    // The carriers ONLY the Supra2 check closes are named by it.
+    for supra2_only in [
+        json!({ "model": "supra2_img", "controls": [{}] }),
+        json!({ "model": "supra2_img", "advanced": { "quantTier": "q4" } }),
+        json!({ "model": "supra2_img", "hiresFix": { "enabled": true } }),
+    ] {
+        assert_eq!(
+            candle_image_first_refusal("supra2_img", &object(supra2_only.clone())),
+            Some(CandleImageRefusal::Supra2Surface),
+            "{supra2_only}"
+        );
+        let reason = classify_candle_image_gap(&object(supra2_only.clone()));
+        assert!(
+            reason.feature.contains("Supra2-IMG") && reason.detail.contains("Re-submit"),
+            "{supra2_only}: {reason:?}"
+        );
+    }
+    // The Supra2 check never touches another family.
+    assert_eq!(
+        candle_image_first_refusal(
+            "iris_3b",
+            &object(json!({ "loras": [{ "id": "l", "weight": 0.8 }] }))
+        ),
+        None
+    );
 }

@@ -64,6 +64,9 @@ use sha2::{Digest, Sha256};
 
 use crate::memory_calibration::{Ltx25Decoder, Ltx25TransformerVariant};
 
+#[path = "sdxl_cuda_memory_endpoints.rs"]
+pub mod sdxl_cuda_memory_endpoints;
+
 pub const MEMORY_ANCHOR_SCHEMA_VERSION: u32 = 1;
 
 /// The checked-in anchor store.
@@ -1397,6 +1400,14 @@ const PACKAGED_MEMORY_ANCHOR_SOURCES: &[(&str, &str)] = &[
     (
         "docs/calibration/sc-24114/qwen-image-2-1-q8-mlx-evidence.json",
         include_str!("../../../docs/calibration/sc-24114/qwen-image-2-1-q8-mlx-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-24217/supra2-img-bf16-candle-evidence.json",
+        include_str!("../../../docs/calibration/sc-24217/supra2-img-bf16-candle-evidence.json"),
+    ),
+    (
+        "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
+        include_str!("../../../docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json"),
     ),
     (
         "docs/calibration/sc-25690/iris-3b-bf16-candle-evidence.json",
@@ -3282,6 +3293,13 @@ fn validate_analytic_evidence(id: &str, evidence: &AnalyticOnlyEvidence) -> Resu
 
 /// One anchor's extraction handshake against the compiled-in retained evidence.
 fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
+    validate_anchor_with_sources(anchor, PACKAGED_MEMORY_ANCHOR_SOURCES)
+}
+
+fn validate_anchor_with_sources(
+    anchor: &MemoryAnchor,
+    sources: &[(&str, &str)],
+) -> Result<(), String> {
     if anchor.geometry.width == 0 || anchor.geometry.height == 0 || anchor.geometry.frames == 0 {
         return Err(format!(
             "memory anchor {} has a degenerate geometry",
@@ -3305,10 +3323,7 @@ fn validate_anchor(anchor: &MemoryAnchor) -> Result<(), String> {
         ));
     }
     validate_currency_attestation("memory anchor", &anchor.id, &anchor.source)?;
-    let Some((_, source_raw)) = PACKAGED_MEMORY_ANCHOR_SOURCES
-        .iter()
-        .find(|(path, _)| *path == anchor.source.path)
-    else {
+    let Some((_, source_raw)) = sources.iter().find(|(path, _)| *path == anchor.source.path) else {
         return Err(format!(
             "memory anchor {} cites source {} which is not a compiled retained-evidence file",
             anchor.id, anchor.source.path

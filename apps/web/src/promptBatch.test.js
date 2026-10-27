@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import JSON5 from "json5";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -373,6 +377,75 @@ describe("firstResolvedPrompt", () => {
 });
 
 describe("parsePromptResolution", () => {
+  const options = ["1024x1024", "1280x1024", "1600x1280", "1536x1024", "1920x1080", "768x1024"];
+
+  it.each([
+    ["10:8", 1600, 1280],
+    ["4:3", 1600, 1280],
+    ["16:9", 1920, 1080],
+    ["3:4", 768, 1024],
+    ["1:1", 1024, 1024],
+  ])("resolves [%s] to the largest closest-aspect model bucket", (ratio, width, height) => {
+    expect(parsePromptResolution(`[ ${ratio} ] landscape`, options)).toEqual({
+      prompt: "landscape", resolution: { width, height },
+    });
+  });
+
+  it("prioritizes aspect over pixel count and adapts to the available model options", () => {
+    expect(parsePromptResolution("[16:9] wide", ["4096x4096", "1280x720"]).resolution)
+      .toEqual({ width: 1280, height: 720 });
+    expect(parsePromptResolution("[16:9] wide", ["1024x1024"]).resolution)
+      .toEqual({ width: 1024, height: 1024 });
+    expect(parsePromptResolution("[16:9] wide", ["default"])).toEqual({ prompt: "wide", resolution: null });
+  });
+
+  it.each(["krea_2_turbo", "krea_2_raw"])("uses the highest close-enough shipped %s bucket", (id) => {
+    const manifest = JSON5.parse(readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "../../../config/manifests/builtin.models.jsonc"), "utf8"));
+    const model = (Array.isArray(manifest) ? manifest : manifest.models).find((entry) => entry.id === id);
+    const resolutions = model.limits.resolutions;
+    for (const ordered of [resolutions, [...resolutions].reverse()]) {
+      expect(parsePromptResolution("[3:4] portrait", ordered).resolution)
+        .toEqual({ width: 1408, height: 2048 });
+      expect(parsePromptResolution("[4:3] landscape", ordered).resolution)
+        .toEqual({ width: 2048, height: 1408 });
+    }
+  });
+
+  it("uses only available buckets after device filtering", () => {
+    expect(parsePromptResolution("[3:4] portrait", ["768x1024", "896x1152", "2048x2048"]).resolution)
+      .toEqual({ width: 896, height: 1152 });
+  });
+
+  it("does not prefer a larger bucket outside the ratio tolerance", () => {
+    expect(parsePromptResolution("[3:4] portrait", ["768x1024", "2048x3072", "4096x4096"]).resolution)
+      .toEqual({ width: 768, height: 1024 });
+    // With nothing close enough, closest ratio still wins over pixel count.
+    expect(parsePromptResolution("[3:4] portrait", ["1024x1536", "4096x4096"]).resolution)
+      .toEqual({ width: 1024, height: 1536 });
+  });
+
+  it("includes the 10% boundary symmetrically, but excludes buckets beyond it", () => {
+    expect(parsePromptResolution("[1:1] square", ["1000x1000", "2200x2000", "4402x4000"]).resolution)
+      .toEqual({ width: 2200, height: 2000 });
+    expect(parsePromptResolution("[1:1] square", ["1000x1000", "2000x2200", "4000x4402"]).resolution)
+      .toEqual({ width: 2000, height: 2200 });
+  });
+
+  it("keeps explicit dimensions exact even when larger options are available", () => {
+    expect(parsePromptResolution("[768x1024] portrait", ["1408x2048"]).resolution)
+      .toEqual({ width: 768, height: 1024 });
+  });
+
+  it("resolves a ratio produced by template expansion", () => {
+    const expanded = expandBatch(["[{{ratio}}] scene"], [{ key: "ratio", values: ["16:9", "3:4"] }]);
+    expect(expanded.map(({ prompt }) => parsePromptResolution(prompt, options).resolution))
+      .toEqual([{ width: 1920, height: 1080 }, { width: 768, height: 1024 }]);
+  });
+
+  it.each(["[0:8] invalid", "[4:0] invalid", "[-4:3] invalid", "scene [4:3]"])("leaves invalid or nonleading ratios literal: %s", (prompt) => {
+    expect(parsePromptResolution(prompt, options)).toEqual({ prompt, resolution: null });
+  });
+
   it("strips a leading [WxH] and returns the parsed size", () => {
     expect(parsePromptResolution("[832x1216] a portrait")).toEqual({
       prompt: "a portrait",

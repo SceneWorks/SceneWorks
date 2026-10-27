@@ -51,7 +51,7 @@ const workerCargoToml = readRepositoryFile("crates/sceneworks-worker/Cargo.toml"
 const factsDeclarationSource = readRepositoryFile(
   "crates/sceneworks-worker/src/engine_capability_facts.rs",
 );
-import { fallbackModels } from "../constants.js";
+import { fallbackModels } from "../modelCatalog.js";
 
 // DISCOVERED, never listed. The generator globs this directory so a newly dumped backend is picked
 // up with no edit; a guard that hardcodes `capabilities.candle.json` would then fail the moment the

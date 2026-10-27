@@ -482,6 +482,7 @@ mod krea_control_fit;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 mod conditioning_fit;
 use supervisor::*;
+mod converted_install;
 mod model_jobs;
 pub use model_jobs::recover_stranded_model_conversions;
 // The convert pre-flight the rust-api calls before queueing a `model_convert` job, so a convert
@@ -704,6 +705,12 @@ mod flux2_dev_gpu_smoke;
 // the resulting asset carries the engine's measured mixed/native checkpointWeightFacts receipt.
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod imported_nvfp4_gpu_smoke;
+// Real-weight end-to-end worker smoke for a LINKED imported Krea 2 checkpoint stored in a ComfyUI
+// descriptor-gated quant — scalar-scaled fp8 (E4M3FN) or Kitchen MXFP8 (sc-27092). Same shape as the
+// NVFP4 smoke: model_import + image_generate through the checkpoint-plan route, asserting the
+// manifest's classification and the asset's measured dense-fallback receipt.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod imported_comfy_quant_gpu_smoke;
 // Real-weight end-to-end worker smoke for Iris-3B on Candle/CUDA (sc-25680): one production
 // `image_generate` job through the shipped catalog entry and the generic text_encoder seam. The
 // native prompt-batch smoke (sc-25681) also runs on the macOS/MLX lane.
@@ -1899,6 +1906,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
         utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
         generator_cache::apply_gpu_memory_limit,
     )?;
+    // sc-26610: keep proven weight-seal digests across worker restarts, so a restart does not
+    // re-hash every multi-GB weight file before its next load.
+    gen_core::ArtifactSeal::persist_proven_digests_in(
+        settings.data_dir.join("cache").join("seal-digests"),
+    );
     // sc-7825 (epic 7819): on the MLX GPU worker only, publish live MLX memory telemetry to the
     // shared config dir for the Settings readout. Gated to `mlx` so the CPU utility workers (which
     // do no MLX work) don't clobber the file with zeros.

@@ -6838,6 +6838,139 @@ async fn progress_ticks_only_republish_queue_on_status_change() {
     );
 }
 
+/// sc-8953 follow-through (2026-10-27): the live `job.updated` payload for a NON-terminal
+/// job drops `result.assets` (the accumulated normalized asset records — KBs each, one
+/// per finished image) and keeps `assetIds`, so a 260-image batch's thousands of per-step
+/// SSE ticks stop carrying the whole array into every WebView2 renderer's `JSON.parse`
+/// (the cumulative multi-GB allocation churn that OOM-killed the renderer mid-batch,
+/// Crashpad `0xE0000008`, daily since 2026-10-24). A TERMINAL event keeps the full
+/// `assets` — the durable row's enrichment contract (`persist_reported_assets`) and the
+/// frontend's pre-catalog fallback both need it. The frontend resolves job outputs
+/// id-first (`jobResultAssets.js`), so a live event without the embedded records
+/// renders identically.
+#[tokio::test]
+async fn live_job_events_drop_result_assets_on_running_ticks_but_not_terminal() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, state) = create_app_with_state(test_settings(&temp_dir)).expect("app creates");
+
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/workers/register",
+        json!({
+            "workerId": "worker-1",
+            "gpuId": "gpu-0",
+            "gpuName": "GPU 0",
+            "capabilities": ["image_detail"],
+            "loadedModels": []
+        }),
+    )
+    .await;
+    let (_, created) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs",
+        json!({
+            "type": "image_detail",
+            "projectId": "project-1",
+            "projectName": "Project 1",
+            "payload": { "prompt": "mist" },
+            "requestedGpu": "auto"
+        }),
+    )
+    .await;
+    let job_id = created["id"].as_str().expect("job id is string").to_owned();
+    request(
+        app.clone(),
+        "POST",
+        "/api/v1/jobs/claim",
+        json!({ "workerId": "worker-1" }),
+    )
+    .await;
+
+    let mut events = state.events.subscribe();
+    // A running tick whose result carries BOTH `assets` and `assetIds` (the worker's
+    // accumulated fact set, post-enrichment shape): the EVENT must drop `assets`.
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "running",
+            "stage": "running",
+            "progress": 0.5,
+            "message": "halfway",
+            "workerId": "worker-1",
+            "result": {
+                "assetIds": ["asset-1"],
+                "assets": [{ "id": "asset-1", "type": "image" }]
+            }
+        }),
+    )
+    .await;
+    let tick = tokio::time::timeout(Duration::from_secs(1), events.next())
+        .await
+        .expect("running tick job.updated arrives")
+        .expect("event stream remains open");
+    assert_eq!(tick.event, "job.updated");
+    let tick_job: serde_json::Value = serde_json::from_str(&tick.data).expect("tick event parses");
+    let tick_result = tick_job
+        .get("result")
+        .and_then(serde_json::Value::as_object)
+        .expect("tick event carries a result");
+    assert!(
+        !tick_result.contains_key("assets"),
+        "a running tick's live payload must drop result.assets: {tick_result:?}"
+    );
+    assert!(
+        tick_result.contains_key("assetIds"),
+        "a running tick keeps the id list (the frontend resolves outputs id-first): {tick_result:?}"
+    );
+
+    // The terminal transition keeps the FULL assets on the event.
+    request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed",
+            "stage": "completed",
+            "progress": 1,
+            "message": "done",
+            "workerId": "worker-1",
+            "result": {
+                "assetIds": ["asset-1"],
+                "assets": [{ "id": "asset-1", "type": "image" }]
+            }
+        }),
+    )
+    .await;
+    // The terminal transition keeps the FULL assets on its `job.updated` event. The
+    // same request also republishes `queue.updated` (a status transition); skip any
+    // interleaved events until the job event lands.
+    let mut terminal = None;
+    for _ in 0..4 {
+        let event = tokio::time::timeout(Duration::from_secs(1), events.next())
+            .await
+            .expect("terminal events arrive")
+            .expect("event stream remains open");
+        if event.event == "job.updated" {
+            terminal = Some(event);
+            break;
+        }
+    }
+    let terminal = terminal.expect("the terminal transition emits job.updated");
+    let terminal_job: serde_json::Value =
+        serde_json::from_str(&terminal.data).expect("terminal event parses");
+    assert!(
+        terminal_job
+            .get("result")
+            .and_then(|result| result.get("assets"))
+            .is_some(),
+        "a terminal event keeps the full result.assets (the durable row's enrichment contract)"
+    );
+}
+
 #[tokio::test]
 async fn cleared_terminal_noop_retry_is_owner_checked_and_emits_no_events() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -12586,6 +12719,155 @@ async fn image_steps_under_the_models_hard_floor_is_rejected() {
         status,
         StatusCode::CREATED,
         "a model with no declared floor must still admit 1 step: {body}"
+    );
+}
+
+/// sc-26644: the typed `ImageJobRequest` DTO had no `hiresFix` field, so serde silently dropped the
+/// web client's top-level `hiresFix` before a job existed — the worker's `parse_hires_fix` never saw
+/// the block (the second pass never ran) and its refusals never fired (a POST for a model that
+/// should refuse it returned 201). Three halves asserted, the same shape as the floor/menu gates:
+/// a capable model is admitted and the block travels VERBATIM to the job payload; a model that
+/// neither is SDXL nor advertises `ui.img2img` is refused at enqueue with a 400 naming the model;
+/// and a request with no `hiresFix` block creates a payload without the key.
+#[tokio::test]
+async fn image_hires_fix_is_forwarded_for_capable_models_and_refused_for_others() {
+    std::env::set_var("SCENEWORKS_DISABLE_MODEL_SIZE_ESTIMATE", "1");
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+    std::fs::write(
+        config_dir.join("builtin.models.jsonc"),
+        r#"
+        {
+          "schemaVersion": 1,
+          "models": [
+            {
+              "id": "img2img_image",
+              "name": "Img2Img",
+              "family": "krea_2",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/img2img", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "Img2Img", "img2img": true }
+            },
+            {
+              "id": "plain_image",
+              "name": "Plain",
+              "family": "z-image",
+              "type": "image",
+              "adapter": "z_image_diffusers",
+              "capabilities": ["text_to_image"],
+              "downloads": [
+                { "provider": "huggingface", "repo": "owner/plain", "files": ["*.safetensors"], "default": true }
+              ],
+              "paths": {},
+              "defaults": {},
+              "limits": {},
+              "ui": { "label": "Plain" }
+            }
+          ]
+        }
+        "#,
+    )
+    .expect("builtin models writes");
+    std::fs::write(
+        config_dir.join("user.models.jsonc"),
+        r#"{ "schemaVersion": 1, "models": [] }"#,
+    )
+    .expect("user models writes");
+
+    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "Hires Fix Project" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id");
+
+    // A capable model: admitted, and the block travels VERBATIM to the job payload — the DTO
+    // forwards it rather than re-shaping it, so the worker parses the same request the web sent.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "img2img_image",
+            "prompt": "a lighthouse",
+            "hiresFix": {
+                "enabled": true,
+                "steps": 12,
+                "denoisingStrength": 0.6,
+                "upscaleBy": 1.5
+            }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an img2img-capable model must admit Hires.fix: {body}"
+    );
+    assert_eq!(body["payload"]["hiresFix"]["enabled"], true);
+    assert_eq!(body["payload"]["hiresFix"]["steps"], 12);
+    assert_eq!(body["payload"]["hiresFix"]["denoisingStrength"], 0.6);
+    assert_eq!(body["payload"]["hiresFix"]["upscaleBy"], 1.5);
+    assert!(
+        body["payload"]["hiresFix"].get("cfgScale").is_none(),
+        "an omitted optional control is not minted: {body}"
+    );
+
+    // A model that neither is SDXL nor advertises `ui.img2img`: refused at enqueue, naming the
+    // model and the missing capability — the 201-instead-of-refusal the drop produced.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "plain_image",
+            "prompt": "a lighthouse",
+            "hiresFix": { "enabled": true }
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a non-img2img model must refuse Hires.fix at enqueue: {body}"
+    );
+    let detail = body["detail"].as_str().unwrap_or_default();
+    assert!(detail.contains("plain_image"), "names the model: {detail}");
+    assert!(
+        detail.contains("img2img-capable"),
+        "names the missing capability: {detail}"
+    );
+
+    // An absent block: the payload carries no `hiresFix` key, so every model without the toggle is
+    // byte-for-byte unchanged.
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/image/jobs",
+        json!({
+            "projectId": project_id,
+            "model": "plain_image",
+            "prompt": "a lighthouse"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "no block, no gate: {body}");
+    assert!(
+        body["payload"].get("hiresFix").is_none(),
+        "an omitted hiresFix is not minted into the payload: {body}"
     );
 }
 

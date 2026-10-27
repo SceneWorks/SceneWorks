@@ -3,6 +3,7 @@ import { installJobStatusLabel } from "../yue2Policy.js";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
+import { ModelComponentDetails } from "../components/ModelComponentDetails.jsx";
 import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
@@ -50,6 +51,7 @@ import {
   lightestInstallableTier,
   suggestTier,
   tierFits,
+  sdxlCudaMemoryEstimate,
 } from "../tierSuggestion.js";
 import { RETIRED_MODEL_CAPABILITIES, capabilityLabel } from "../modelCapabilities.js";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
@@ -402,6 +404,7 @@ function ModelTierDownloadPanel({
           // (e.g. bf16 on a small Mac) is flagged. Advisory only — SUGGEST-NEVER-WITHHOLD (epic 8506
           // decision 1) keeps every tier's checkbox enabled regardless.
           const overBudget = !tierFits(variant, unifiedMemoryGb, { backend, model });
+          const endpoint = sdxlCudaMemoryEstimate(model, tier, backend);
           // A torn tier: the cache holds SOME of this tier's declared files but not all. Distinct from
           // both "installed" and "not installed" (sc-12279).
           const incomplete = !installed && variant.cacheState === "incomplete";
@@ -452,12 +455,17 @@ function ModelTierDownloadPanel({
                 <span className="model-tier-label">
                   {tierLabel(tier)}
                   {isSuggested ? <span className="model-tier-suggested-badge">Suggested</span> : null}
+                  {endpoint ? (
+                    <span className="model-tier-suggested-badge" title={endpoint.description}>
+                      {endpoint.label}{Number.isFinite(unifiedMemoryGb) && !overBudget ? " · can fit with optimizations" : ""}
+                    </span>
+                  ) : null}
                   {/* Distinct class (NOT `.status-badge`) so it never collides with the per-row
                       install-state status badge query/rendering — this is a separate RAM advisory. */}
                   {overBudget ? (
                     <span
                       className="model-tier-memory-warning"
-                      title={`This tier's peak memory is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB. It can still install, but may run out of memory during generation.`}
+                      title={endpoint?.description ?? `This tier's peak memory is estimated above this machine's ~${Math.round(unifiedMemoryGb)} GB. It can still install, but may run out of memory during generation.`}
                     >
                       may exceed memory
                     </span>
@@ -1537,6 +1545,9 @@ export function ModelManagerScreen() {
             gateVisible={licenseGateApplies}
           />
         ) : null}
+        {/* Per-component installation details + supported limits (sc-24216). Collapsed by default;
+            renders only for an entry that declares per-download licences or a prompt limit. */}
+        {!cleanupOnly ? <ModelComponentDetails model={model} totalSizeText={model.downloadSizeLabel ? downloadSize : null} /> : null}
         {incomplete ? (
           <p className="inline-warning">
             Cached files are incomplete
@@ -1575,6 +1586,25 @@ export function ModelManagerScreen() {
               ) : null}
             </div>
             <p>{mlxStatusText(model)}</p>
+            {/* A conversion that left files the engine would refuse (sc-24216): the catalog reports
+                it as needing conversion and names the engine's reason. */}
+            {model.mlxConversionProblem ? (
+              <div className="inline-warning" role="alert">
+                <p>The converted files are damaged or incomplete, so this model cannot load. Convert again to rebuild them from the downloaded checkpoint; if that fails, delete the model and download it again.</p>
+                <details className="model-conversion-problem">
+                  <summary>Details</summary>
+                  <p>{model.mlxConversionProblem}</p>
+                </details>
+              </div>
+            ) : null}
+            {/* The last conversion's failure, so "Retry Conversion" is never offered without the
+                reason it failed (sc-24216). */}
+            {!convertJob && failedConvert && mlxState !== "converted" && (failedConvert.error || failedConvert.message) ? (
+              <p className="inline-warning" role="alert">
+                Conversion {failedConvert.status === "canceled" ? "was canceled" : "failed"}
+                {failedConvert.error ? `: ${failedConvert.error}` : failedConvert.message ? `: ${failedConvert.message}` : "."}
+              </p>
+            ) : null}
             {!mlxEnoughMemory && !hasTierMatrix ? (
               <p className="inline-warning">
                 Needs ≥ {mlxMinGb} GB unified memory; this Mac has ~{Math.round(unifiedMemoryGb)} GB. It may run out of memory.
@@ -1617,7 +1647,9 @@ export function ModelManagerScreen() {
                     ? "Converted"
                     : failedConvert
                       ? "Retry Conversion"
-                      : "Convert"}
+                      : model.mlxConversionProblem
+                        ? "Convert again"
+                        : "Convert"}
               </button>
             ) : null}
           </div>

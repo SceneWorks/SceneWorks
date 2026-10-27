@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { historyRequirements } from "./prepare-inference-history.mjs";
 import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 import { bindQwenPersistentCache } from "./ci/memory-catalog/bind-qwen-persistent-cache.mjs";
 
@@ -53,18 +54,22 @@ function workflowStep(job, name) {
 
 test("RunPod validation provisions the same inference fixtures as PR scaffold checks", async () => {
   const publish = workflowJob(await source(".github/workflows/publish-runpod.yml"), "publish");
-  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-scaffold");
+  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-history");
   const fetchName = "Fetch the pinned inference source for the anchor-closure suite";
   const fetch = workflowStep(publish, fetchName);
-  const shellBody = (step) => step.split("\n").filter((line) => /^ {10}\S|^ {12}/.test(line)).join("\n");
-  assert.equal(shellBody(fetch), shellBody(workflowStep(scaffold, fetchName)));
+  const requirements = historyRequirements(process.cwd());
+  assert.ok(fetch.includes('--anchor-revisions'));
+  assert.ok(fetch.includes('checkout -q "$pin"'));
+  assert.ok(scaffold.includes('node scripts/prepare-inference-history.mjs'));
+  assert.ok(scaffold.includes('node scripts/scaffold-test-selection.mjs --history'));
   const validation = workflowStep(publish, "Validate scaffold and RunPod publication contracts");
   assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
   assert.ok(validation.includes("npm run check"));
   assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
   const terminalFetchName = "Fetch the exact public inference terminal contract";
   const terminalFetch = workflowStep(publish, terminalFetchName);
-  assert.equal(shellBody(terminalFetch), shellBody(workflowStep(scaffold, terminalFetchName)));
+  assert.ok(terminalFetch.includes(`fetch --depth=2 origin ${requirements.terminal}`));
+  assert.ok(terminalFetch.includes(`rev-parse HEAD)" = ${requirements.terminal}`));
   assert.ok(terminalFetch.includes('echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"'));
   assert.ok(publish.indexOf(terminalFetch) < publish.indexOf(validation));
   const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
@@ -117,7 +122,8 @@ function assertAdvisoryGate(workflow) {
 
   const parity = workflowJob(workflow, "parity");
   assert.match(parity, /needs: \[[^\]]*supply-chain[^\]]*\]/);
-  assert.match(parity, /if \[ "\$count" -lt 5 \]; then/);
+  assert.match(parity, /run: node scripts\/check-job-relevance\.mjs --assert-results/);
+  assert.match(parity, /needs: \[[^\]]*changes[^\]]*\]/);
 }
 
 test("required parity fails closed over an unconditional advisory gate", async () => {
@@ -890,19 +896,14 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
   // probe while another gained a second, still green. Naming the owner closes both. The only probe
   // that does not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves
   // idleness on its own rendered baseline instead because that arm renders first.
-  const owners = [];
-  let owner = null;
-  for (const line of adapter.split("\n")) {
-    const fn = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z_0-9]+)/.exec(line);
-    if (fn) owner = fn[1];
-    const probe = /let mut vram\s*=\s*([^;]+);/.exec(line);
-    if (probe) owners.push([owner, probe[1].trim()]);
-  }
+  const nameAt = enclosingFunctions(adapter);
+  const owners = [...adapter.matchAll(/let mut vram\s*=\s*([^;]+);/g)]
+    .map((match) => [nameAt(match.index), match[1].trim().replace(/\s+/g, " ")]);
   assert.deepEqual(
     owners.sort(([a], [b]) => a.localeCompare(b)),
     [
       // Krea five-rung reference (and the registry-loaded providers that ride it).
-      ["load_five_rung_generator", "certifying_vram_probe()"],
+      ["load_five_rung_generator", 'if request.get("sdxlEndpoint").is_some() { endpoint_vram_probe()? } else { certifying_vram_probe() }'],
       // The Mage-Flow loader (sc-22733 — its own loader because a Mage load binds two artifact triples).
       ["load_mage_generator", "certifying_vram_probe()"],
       // The inline Krea arm.
@@ -949,6 +950,92 @@ function enclosingFunctions(source) {
   return (index) => starts.filter((entry) => entry.at <= index).at(-1)?.name ?? "(top level)";
 }
 
+// CI_IMPACT: pure source-contract checks for one dispatch-only probe; no CUDA or model execution.
+function assertSdxlEndpointProbeGuards(adapter) {
+  const body = (name) => {
+    const at = adapter.indexOf(`fn ${name}(`);
+    assert.ok(at >= 0, `${name} exists`);
+    const next = adapter.slice(at + 1).search(/^fn /m);
+    return adapter.slice(at, next < 0 ? undefined : at + 1 + next);
+  };
+  const binding = body("validate_sdxl_endpoint_binding");
+  assert.match(binding, /!matches!\(visible, "0" \| "1"\) \|\| visible != physical \|\| !valid_sdxl_gpu_uuid\(uuid\)/);
+  const uuid = body("valid_sdxl_gpu_uuid");
+  assert.match(uuid, /strip_prefix\("GPU-"\)/);
+  assert.match(uuid, /uuid\.len\(\) == 36/);
+  assert.match(uuid, /\[8, 13, 18, 23\]/);
+  assert.match(uuid, /byte\.is_ascii_digit\(\) \|\| \(b'a'\.\.=b'f'\)\.contains/);
+  const expected = body("sdxl_endpoint_expected_uuid");
+  for (const variable of ["CUDA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID", "SCENEWORKS_SDXL_EXPECTED_GPU_UUID"]) {
+    assert.match(expected, new RegExp(`protocol::required_env\\("${variable}"\\)\\?`));
+  }
+  assert.match(expected, /validate_sdxl_endpoint_binding\(&visible, &physical, &expected\)\?/);
+  const probe = body("endpoint_vram_probe");
+  assert.match(probe, /let expected = sdxl_endpoint_expected_uuid\(\)\?/);
+  assert.match(probe, /query_bounded\("uuid", Duration::from_secs\(5\)\)\?/);
+  assert.match(probe, /if physical_uuid != expected/);
+  assert.match(probe, /Instant::now\(\)/);
+  assert.match(probe, /wait_for_sdxl_idle\(/);
+  assert.match(probe, /memory\.used,memory\.free,utilization\.gpu,utilization\.memory/);
+  assert.match(probe, /\|\| started\.elapsed\(\)/);
+  assert.match(probe, /sdxl_endpoint_context_uuid\(\)\?/);
+  assert.match(probe, /if uuid != expected/);
+  assert.doesNotMatch(probe, /pure_compute|assert_idle|assert_stable_idle/, "unused contexts remain part of the measured baseline");
+  const idle = body("wait_for_sdxl_idle");
+  assert.match(idle, /let timeout = Duration::from_secs\(30\)/);
+  assert.match(idle, /while elapsed\(\) < timeout/);
+  assert.match(idle, /saturating_sub\(elapsed\(\)\)[\s\S]*?\.min\(Duration::from_secs\(5\)\)/);
+  assert.match(idle, /parse::<u64>\(\)/);
+  assert.match(idle, /values\.len\(\) != 4[\s\S]*?values\[2\] > 100[\s\S]*?values\[3\] > 100/);
+  assert.match(idle, /values\[1\] < 16 \* 1024 \|\| values\[2\] != 0 \|\| values\[3\] != 0/);
+  assert.match(idle, /used\.iter\(\)\.max\(\)\.unwrap\(\) - used\.iter\(\)\.min\(\)\.unwrap\(\) > 64/);
+  assert.match(idle, /used\.clear\(\)/);
+  assert.match(idle, /used\.len\(\) == 5 && elapsed\(\) <= timeout/);
+  assert.match(idle, /Duration::from_millis\(200\)\.min\(timeout\.saturating_sub\(elapsed\(\)\)\)/);
+  assert.match(idle, /samples=\{samples:\?\}/);
+  const context = body("sdxl_endpoint_context_uuid");
+  assert.match(context, /candle_gen::default_device\(\)/);
+  assert.match(context, /\.as_cuda_device\(\)/);
+  assert.match(context, /\.cuda_stream\(\)[\s\S]*?\.context\(\)[\s\S]*?\.uuid\(\)/);
+  for (const name of ["run_sdxl_endpoint", "probe_sdxl_endpoint"]) {
+    const endpoint = body(name);
+    assert.match(endpoint, /let expected = sdxl_endpoint_expected_uuid\(\)\?/);
+    assert.match(endpoint, /query_bounded\("uuid", Duration::from_secs\(5\)\)\?/);
+    assert.match(endpoint, /if uuid != expected/);
+  }
+  const endpoint = body("run_sdxl_endpoint");
+  assert.match(endpoint, /if context_uuid != expected/);
+  assert.match(endpoint, /planned_provider\(request\)\? != SDXL_ID/);
+  assert.match(endpoint, /planned_tier\(request\)\? != "q4"/);
+}
+
+test("manual SDXL probe exception rejects missing activity, headroom, stability or actual-device guards", async () => {
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  assertSdxlEndpointProbeGuards(adapter);
+  for (const [owner, from, to] of [
+    ["wait_for_sdxl_idle", "Duration::from_secs(30)", "Duration::from_secs(31)"],
+    ["wait_for_sdxl_idle", "while elapsed() < timeout", "while true"],
+    ["wait_for_sdxl_idle", "values[1] < 16 * 1024", "values[1] < 1"],
+    ["wait_for_sdxl_idle", "values[2] != 0", "values[2] > 100"],
+    ["wait_for_sdxl_idle", "values[3] != 0", "values[3] > 100"],
+    ["wait_for_sdxl_idle", "used.len() == 5", "used.len() == 1"],
+    ["wait_for_sdxl_idle", "elapsed() <= timeout", "true"],
+    ["endpoint_vram_probe", 'sdxl_endpoint_context_uuid()?', 'String::from("unverified")'],
+    ["endpoint_vram_probe", "if uuid != expected", "if false"],
+    ["endpoint_vram_probe", 'query_bounded("uuid", Duration::from_secs(5))?', 'query_bounded("uuid", Duration::from_secs(30))?'],
+    ["validate_sdxl_endpoint_binding", "visible != physical", "false"],
+    ["sdxl_endpoint_expected_uuid", "SCENEWORKS_SDXL_EXPECTED_GPU_UUID", "UNVERIFIED_UUID"],
+    ["run_sdxl_endpoint", "if context_uuid != expected", "if false"],
+  ]) {
+    const start = adapter.indexOf(`fn ${owner}(`);
+    const next = adapter.slice(start + 1).search(/^fn /m);
+    const end = next < 0 ? adapter.length : start + 1 + next;
+    const original = adapter.slice(start, end);
+    assert.ok(original.includes(from), `${owner} owns the mutated guard`);
+    assert.throws(() => assertSdxlEndpointProbeGuards(adapter.slice(0, start) + original.replace(from, to) + adapter.slice(end)), `${owner}: ${from}`);
+  }
+});
+
 function assertEveryVramProbeIsCertifying(adapter) {
   const nameAt = enclosingFunctions(adapter);
   // Every probe CONSTRUCTION in the file, whichever spelling it uses.
@@ -961,6 +1048,11 @@ function assertEveryVramProbeIsCertifying(adapter) {
     // The certifying constructor's own definition is the one place `start_rendered` may appear
     // without being a capture arm's ad-hoc probe.
     if (site.fn === "certifying_vram_probe") continue;
+    if (site.fn === "endpoint_vram_probe") {
+      assert.equal(site.text, "VramProbe::start_rendered()", "manual endpoint probe construction changed");
+      assertSdxlEndpointProbeGuards(adapter);
+      continue;
+    }
     if (site.text.startsWith("certifying_vram_probe")) {
       certifying.add(site.fn);
       continue;
@@ -1041,7 +1133,7 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   );
   assert.ok(
     candleWorker.includes(
-      "      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda) && 'real-weights' || github.run_id }}",
+      "      group: windows-candle-gpu-${{ github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference || inputs.run_ltx_eros_acceptance || inputs.run_epic_20738_terminal_cuda || inputs.run_imported_nvfp4_worker_smoke) && 'real-weights' || github.run_id }}",
     ),
     "real-weight dispatch profiles must share the GPU lock while ordinary runs remain unique",
   );
@@ -1238,9 +1330,13 @@ test("windows-candle runs the imported NVFP4 worker acceptance on the real-weigh
   assert.match(job, /^ {6}group: windows-candle-gpu-real-weights$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
-  assert.match(job, /github\.event_name == 'push'/);
-  assert.match(job, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
-  assert.doesNotMatch(job, /github\.event_name == 'workflow_dispatch'/);
+  const select = workflowExpression(job);
+  for (const event of ["push", "pull_request", "workflow_dispatch"]) {
+    assert.equal(evaluateWorkflow(select, event), false, `${event} must not run without opt-in`);
+    assert.equal(evaluateWorkflow(select, event, { run_imported_nvfp4_worker_smoke: true }), event === "workflow_dispatch");
+  }
+  assert.equal(evaluateWorkflow(select, "workflow_dispatch", { run_imported_nvfp4_worker_smoke: true, capability_facts_only: true }), false);
+  assert.match(workflow, /run_imported_nvfp4_worker_smoke:\n[\s\S]*?type: boolean\n        default: false/);
   assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
   assert.match(
     job,
@@ -1271,6 +1367,7 @@ test("automatic Windows Candle jobs select physical GPU 1, never the owner's GPU
     assert.equal(evaluateWorkflow(route, event), expected, event);
     assert.equal(evaluateWorkflow(route, event, { capability_facts_only: false }), expected, event);
   }
+  assert.equal(evaluateWorkflow(route, "workflow_dispatch", { run_imported_nvfp4_worker_smoke: true }), "1");
   assert.match(imported, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
   assert.match(imported, /^ {6}CUDA_VISIBLE_DEVICES: "1"$/m);
 
@@ -1836,11 +1933,15 @@ test("the PR-reachable candle lane typechecks the memory adapter's TESTS, not ju
   assert.match(await source("package.json"), /"rust:check:candle": "node scripts\/check-candle-build\.mjs"/);
 });
 
-test("Docker relevance gate paginates and checks for truncated file lists", async () => {
+test("Docker relevance step consumes the exhaustive shared diff and fails safe on missing selection", async () => {
   const workflow = await source(".github/workflows/check.yml");
-  assert.match(workflow, /gh api --paginate/);
-  assert.match(workflow, /docker-smoke-relevance\.mjs --expected-count/);
-  assert.doesNotMatch(workflow, /gh pr view .*--json files/);
+  const gate = workflowStep(workflowJob(workflow, "parity-docker"), "Decide whether to run the Docker runtime smoke");
+  assert.match(gate, /SELECTED: \$\{\{ needs.changes.outputs.docker \}\}/);
+  assert.match(gate, /if \[ "\$SELECTED" = "false" \]; then/);
+  assert.match(gate, /else\n            echo "run=true"/);
+  const selector = await source("scripts/check-job-relevance.mjs");
+  assert.match(selector, /"--name-only", "--no-renames", "-z"/);
+  assert.match(selector, /dockerSmokeDecision\(files.length, files\)/);
 });
 
 test("every release job is confined to refs/tags/v", async () => {
@@ -2492,38 +2593,14 @@ test("the Rust gate verifies tier integrity without gating the epic-end memory m
   assert.equal(scripts["check:rust-derived-docs"], "npm run check:tier-integrity");
   assert.doesNotMatch(scripts["check:rust-derived-docs"], /check:memory-matrix/);
   assert.match(scripts["rust:check"], /\bcheck:rust-derived-docs\b/);
-  assert.match(await source("scripts/git-hooks/pre-push"), /npm run --silent check:rust-derived-docs/);
 });
 
-test("the pre-push derived-docs trigger is scoped to tier integrity, not memory evidence", async () => {
-  const hook = await source("scripts/git-hooks/pre-push");
-  const pattern = hook.match(/'(\^\(config\/manifests[^']+)'/)?.[1];
-  assert.ok(pattern, "the derived-docs trigger pattern is still a single-quoted ERE in the hook");
-  const trigger = new RegExp(pattern);
-  for (const relative of [
-    "config/manifests/builtin.models.jsonc",
-    "config/tier-integrity.jsonc",
-    "packages/schemas/tier-integrity.schema.json",
-    "scripts/check-tier-integrity.mjs",
-    "scripts/tier-integrity-measurement-receipts.mjs",
-    "scripts/lib/jsonc.mjs",
-    "docs/generated/tier-integrity.json",
-    "docs/generated/tier-integrity.md",
-  ]) {
-    assert.ok(trigger.test(relative), `${relative} must trigger the tier-integrity check`);
-  }
-  for (const epicEndArtifact of [
-    "config/inference-provider-closures.json",
-    "config/rung4-contract-prerequisites.json",
-    "docs/generated/memory-matrix.json",
-    "docs/generated/memory-calibration-evidence.json",
-  ]) {
-    assert.equal(
-      trigger.test(epicEndArtifact),
-      false,
-      `${epicEndArtifact} must not wire the memory-matrix freshness gate back into pre-push`,
-    );
-  }
+test("pushes have no preflight hook while Rust checks remain available manually", async () => {
+  await assert.rejects(source("scripts/git-hooks/pre-push"), { code: "ENOENT" });
+  const scripts = JSON.parse(await source("package.json")).scripts;
+  assert.equal(scripts["rust:check:neither"], "node scripts/check-neither-build.mjs");
+  assert.equal(scripts["rust:check:candle"], "node scripts/check-candle-build.mjs");
+  assert.match(await source("scripts/git-hooks/pre-commit"), /npm run rust:fmt/);
 });
 
 test("macOS lanes lint every crate they ship, in the configuration they ship it", async () => {
@@ -2867,7 +2944,7 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
 test("Windows facts-only capture rejects mixed profiles and cannot escape through terminal always steps or other GPU jobs", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const worker = workflowJob(workflow, "candle-worker");
-  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke"];
+  const flags = ["run_five_rung_reference", "provision_snapshot", "run_ltx_eros_acceptance", "run_epic_20738_terminal_cuda", "run_yue2_terminal_cuda", "yue2_acceptance_only", "yue2_fp8_profile_only", "run_iris_worker_smoke", "run_supra2_worker_smoke", "run_imported_nvfp4_worker_smoke"];
   const validation = workflowStep(worker, "Refuse combined manual measurement profiles");
   const refusal = validation.slice(validation.indexOf("if ($env:CAPABILITY_FACTS_ONLY"), validation.indexOf("if ($env:YUE2_ACCEPTANCE_ONLY"));
   assert.match(refusal, /-contains 'true'/);
@@ -2879,7 +2956,7 @@ test("Windows facts-only capture rejects mixed profiles and cannot escape throug
   const mixed = { capability_facts_only: true, ...Object.fromEntries(flags.map(flag => [flag, true])) };
   // Even a conflicting YuE2 flag reaches the fatal validator, while its separate GPU job cannot run.
   assert.equal(evaluateWorkflow(workflowExpression(worker), "workflow_dispatch", mixed), true);
-  for (const name of ["yue2-terminal-cuda", "iris-worker-smoke", "imported-nvfp4-worker-smoke"]) {
+  for (const name of ["yue2-terminal-cuda", "iris-worker-smoke", "supra2-worker-smoke", "imported-nvfp4-worker-smoke"]) {
     assert.equal(evaluateWorkflow(workflowExpression(workflowJob(workflow, name)), "workflow_dispatch", mixed), false, name);
   }
   const terminal = worker.split(/\n {6}- /).filter(block => /if: .*always\(\).*inputs\.run_epic_20738_terminal_cuda/.test(block));
@@ -3005,6 +3082,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
         ".cargo/config.toml", // git-fetch-with-cli, without which the token-injected inference fetch breaks
         ".github/actions/prepare-rust-runner/**", // the job's own first step
+        ".github/actions/cleanup-runner-storage/**", // registered post action; Windows guard tests exercise its Cargo locks and path checks
         ".github/workflows/windows-candle.yml", // the lane itself
       ],
     },
@@ -5554,5 +5632,13 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
       mutation.expected,
       `${mutation.name} must be killed by the acceptance contract`,
     );
+  }
+});
+
+
+test("hosted macOS aligns dev/test and proc-macro debug settings", async () => {
+  const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
+  for (const profile of ["DEV", "TEST", "DEV_BUILD_OVERRIDE", "TEST_BUILD_OVERRIDE"]) {
+    assert.ok(hosted.includes(`CARGO_PROFILE_${profile}_DEBUG: line-tables-only`), profile);
   }
 });

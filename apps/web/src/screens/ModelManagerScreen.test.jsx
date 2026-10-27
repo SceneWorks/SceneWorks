@@ -1875,6 +1875,20 @@ describe("ModelManagerScreen quant-tier download panel (sc-8509)", () => {
     return [...container.querySelectorAll(".model-tier-row")];
   }
 
+  // CI_IMPACT: two catalog-only DOM states, above/below the same measured budget; no compute.
+  it.each([[8, true], [5.3, false]])("shows SDXL Q4 optimized fit honestly on a %s GiB host", async (memory, fits) => {
+    hostPlatform = "windows";
+    hostMemoryGb = memory;
+    await render([{ ...matrixModel(), id: "sdxl", name: "SDXL",
+      candle: { measured: false, minMemoryGb: 12, vramGbByTier: { q4: 12, q8: 16, bf16: 24 } },
+    }]);
+    const q4 = tierRows().find((row) => row.querySelector(".model-tier-label").textContent.includes("Q4"));
+    expect(q4.textContent).toContain("Q4 optimized ~5.4 GiB");
+    expect(q4.textContent.includes("can fit with optimizations")).toBe(fits);
+    expect(Boolean(q4.querySelector(".model-tier-memory-warning"))).toBe(!fits);
+    expect(q4.querySelector('[title*="Measured CUDA peaks"]').title).toContain("resident 9.32 GiB");
+  });
+
   it("uses Candle tier evidence for a dedicated-VRAM host", async () => {
     hostPlatform = "windows";
     hostMemoryGb = 12;
@@ -2212,10 +2226,10 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
     vi.restoreAllMocks();
   });
 
-  async function render(models) {
+  async function render(models, jobs = []) {
     const value = {
       activeProject: null,
-      jobs: [],
+      jobs,
       loras: [],
       models,
       presets: [],
@@ -2276,6 +2290,54 @@ describe("ModelManagerScreen convert-at-install Update button", () => {
         `${state}: conversion copy must not name MLX — this block renders on Windows/Linux too (got ${JSON.stringify(block.textContent)})`,
       ).toBe(false);
     }
+  });
+
+  // sc-24216: a marked conversion that fails the engine's pin contract arrives as needs_conversion
+  // + `mlxConversionProblem`. The card must say the files are damaged, keep the engine's reason
+  // behind a collapsed Details, and offer "Convert again" — which queues the convert.
+  it("surfaces a damaged conversion with its reason and a Convert again action", async () => {
+    await render([
+      convertModel({
+        installState: "missing",
+        mlxInstallState: "missing",
+        mlxConversionState: "needs_conversion",
+        mlxConversionProblem: "unsupported: supra2: bundle file denoiser.safetensors does not match its manifest",
+        updateAvailable: false,
+      }),
+    ]);
+    await selectTab(container, "Video Models");
+    const block = container.querySelector(".mlx-status");
+    expect(block.textContent).toContain("converted files are damaged or incomplete");
+    const details = block.querySelector("details.model-conversion-problem");
+    expect(details).toBeTruthy();
+    expect(details.open).toBe(false);
+    expect(details.textContent).toContain("does not match its manifest");
+    const convert = mlxButtons().find((button) => button.textContent === "Convert again");
+    expect(convert).toBeTruthy();
+    expect(convert.disabled).toBe(false);
+    await click(convert);
+    expect(createModelConvertJob).toHaveBeenCalled();
+  });
+
+  // sc-24216: "Retry Conversion" is never offered without the reason the last conversion failed.
+  it("shows the failed conversion's error next to Retry Conversion", async () => {
+    await render(
+      [convertModel({ installState: "missing", mlxInstallState: "missing", mlxConversionState: "needs_conversion", updateAvailable: false })],
+      [
+        {
+          id: "cv-failed",
+          type: "model_convert",
+          status: "failed",
+          payload: { modelId: "ltx_2_3_eros" },
+          error: "Flan-T5-Base text encoder failed verification: sha256 mismatch",
+          createdAt: "2026-10-20T00:00:00Z",
+        },
+      ],
+    );
+    await selectTab(container, "Video Models");
+    const block = container.querySelector(".mlx-status");
+    expect(block.textContent).toContain("Conversion failed: Flan-T5-Base text encoder failed verification");
+    expect(mlxButtons().some((button) => button.textContent === "Retry Conversion")).toBe(true);
   });
 
   it("shows and runs the update action for a usable stale non-converted model", async () => {

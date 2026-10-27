@@ -341,11 +341,17 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') }}
     runs-on: macos-26
     env:
+      # Match inference's hosted Metal build. Keep line tables for useful backtraces while
+      # avoiding full DWARF for this large workspace; apply consistently to proc-macro builds.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only
       # See the WHY 15.0 block above. Provisional, pending the `is_nax_available()` trial.
       MACOSX_DEPLOYMENT_TARGET: "15.0"
     # Well above the observed warm 6-14 min, sized for a cold MLX-from-source build on a
     # hosted image rather than on an M5 Max. Re-size from the first ten runs.
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate hosted-only dispatch intent
@@ -365,7 +371,7 @@ jobs:
           done
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
           components: clippy
       # Keyed by job + rustc version + lockfile by default, which is what we want: the MLX pin
       # moves with `Cargo.lock`, so a pin bump invalidates the native build rather than
@@ -590,7 +596,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
           components: clippy
       - name: Fetch prebuilt MLX (sc-21382)
         # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on every cache miss; this self-hosted runner keeps the extracted tarball in ~/.cache/pmetal/prebuilt across runs

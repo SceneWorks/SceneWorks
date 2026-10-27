@@ -1,4 +1,9 @@
 enum GenEvent {
+    /// An output already encoded by its producing lane, persisted through shared assetWrites.
+    AssetWritten {
+        index: usize,
+        fact: JsonObject,
+    },
     Step {
         index: usize,
         current: u32,
@@ -15,6 +20,10 @@ enum GenEvent {
     Loading {
         index: usize,
         phase: LoadPhase,
+    },
+    LoadActivity {
+        index: usize,
+        pending: Arc<std::sync::Mutex<load_progress::PendingLoadActivity>>,
     },
     /// One latent-resolution preview frame of image `index`'s developing render (epic 16624,
     /// sc-16904). Forwarded from a [`gen_core::PreviewSink`] by [`preview_sink_for`]; engines
@@ -66,7 +75,7 @@ enum GenEvent {
     },
     Image {
         index: usize,
-        seed: i64,
+        seed: Option<i64>,
         width: u32,
         height: u32,
         pixels: Vec<u8>,
@@ -151,9 +160,61 @@ fn prompt_enhancement_event_sink_for(
     }
 }
 
+fn observe_image_load_activity(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+) -> gen_core::LoadActivityObserver {
+    let tx = tx.clone();
+    load_progress::observe(move |pending| {
+        let _ = tx.blocking_send(GenEvent::LoadActivity { index, pending });
+    })
+}
+
+/// Route preparation can hash a changed checkpoint before a generator exists. Run that
+/// read-only work off the async runtime and report only observed hash work; warm source stamps
+/// remain silent. The existing helper keeps heartbeats alive throughout a large file read.
+async fn prepare_image_route_with_progress<T: Send + 'static>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    prepare: impl FnOnce() -> WorkerResult<T> + Send + 'static,
+) -> WorkerResult<T> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::task::spawn_blocking(move || {
+        let _observer = gen_core::LoadActivityObserver::new(move |activity| {
+            let _ = tx.send(activity);
+        });
+        prepare()
+    });
+    let pending = heartbeat_while_blocking(api, settings, job_id, "image source preparation", task);
+    tokio::pin!(pending);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            // Drain the ordered observations before returning a completed prepared route.
+            biased;
+            activity = rx.recv(), if open => {
+                let Some(activity) = activity else { open = false; continue; };
+                update_job(api, job_id, progress_payload(
+                    JobStatus::LoadingModel, ProgressStage::LoadingModel, 0.0,
+                    &format!("{}.", load_activity_message(activity)),
+                    None, None, None,
+                )).await?;
+            }
+            result = &mut pending => return result,
+        }
+    }
+}
+
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
-    if matches!(progress, Progress::PromptUpsamplingComplete | Progress::ConditioningComplete) {
+    if matches!(progress, Progress::ConditioningComplete) {
+        return;
+    }
+    // The prompt-upsampling COMPLETION boundary has no consumer on this lane and stays internal
+    // exactly like the conditioning boundary. Incremental token counts DO reach the job wire: the
+    // FLUX 3 prompt-enhancement surface renders them (sc-26233).
+    if matches!(progress, Progress::PromptUpsamplingComplete) {
         return;
     }
     let event = match progress {
@@ -162,7 +223,9 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             current,
             total,
         },
-        Progress::PromptUpsamplingComplete | Progress::ConditioningComplete => unreachable!("internal boundary filtered above"),
+        Progress::ConditioningComplete | Progress::PromptUpsamplingComplete => {
+            unreachable!("internal boundary filtered above")
+        }
         Progress::Decoding => GenEvent::Decoding { index },
         Progress::Loading(phase) => GenEvent::Loading { index, phase },
         Progress::Upsampling { tokens, max_tokens } => GenEvent::Upsampling { index, tokens, max_tokens },
@@ -178,7 +241,7 @@ fn send_generated_image(
     let (seed, width, height, pixels) = image;
     tx.blocking_send(GenEvent::Image {
         index,
-        seed,
+        seed: Some(seed),
         width,
         height,
         pixels,
@@ -196,7 +259,7 @@ fn send_scored_generated_image(
     let (seed, width, height, pixels, face_likeness) = image;
     tx.blocking_send(GenEvent::Image {
         index,
-        seed,
+        seed: Some(seed),
         width,
         height,
         pixels,
@@ -221,6 +284,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
@@ -263,6 +327,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
             index,
@@ -314,6 +379,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
@@ -347,6 +413,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
             index,
@@ -390,6 +457,7 @@ where
     ) -> WorkerResult<(Vec<(u32, u32, Vec<u8>)>, Option<JsonObject>)>,
 {
     let _cache_release = RequestCacheRelease;
+    let _load_observer = observe_image_load_activity(&tx, 0);
     let mut on_progress = |progress| send_gen_progress(&tx, 0, progress);
     let (images, facts) = generate(preview_sink_for(&tx, 0), &mut on_progress)?;
     if images.len() != expected {
@@ -414,17 +482,56 @@ where
 #[test]
 fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    send_gen_progress(&tx, 2, Progress::PromptUpsamplingComplete);
     send_gen_progress(&tx, 2, Progress::ConditioningComplete);
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
-    send_gen_progress(&tx, 2, Progress::Step { current: 1, total: 4 });
+    send_gen_progress(
+        &tx,
+        2,
+        Progress::Step {
+            current: 1,
+            total: 4,
+        },
+    );
     assert!(matches!(
         rx.try_recv(),
-        Ok(GenEvent::Step { index: 2, current: 1, total: 4 })
+        Ok(GenEvent::Step {
+            index: 2,
+            current: 1,
+            total: 4
+        })
     ));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+/// Incremental prompt-upsampling token counts DO reach the FLUX 3 surface; only the completion
+/// boundary stays internal (no event, no synthesized step).
+#[cfg(test)]
+#[test]
+fn prompt_upsampling_tokens_are_emitted_but_completion_stays_internal() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    send_gen_progress(
+        &tx,
+        0,
+        Progress::Upsampling {
+            tokens: 3,
+            max_tokens: 8,
+        },
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(GenEvent::Upsampling {
+            index: 0,
+            tokens: 3,
+            max_tokens: 8
+        })
+    ));
+    send_gen_progress(&tx, 0, Progress::PromptUpsamplingComplete);
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -736,22 +843,29 @@ where
         adapter_count,
         spec,
         load_error_context,
-        load_generator,
+        CachedGeneratorFactory {
+            cache: crate::generator_cache::GeneratorCacheHandle::global(),
+            load: load_generator,
+        },
         move |generator, state, policy, warm, external, _owned, tx, cancel| {
             drive(generator, state, policy, warm, external, tx, cancel)
         },
     )
 }
 
-fn start_cached_gen_stream_with_request_state_using_owned<D>(
+/// The cache owner and loader form one private dependency for the existing stream transaction.
+struct CachedGeneratorFactory<L> {
+    cache: crate::generator_cache::GeneratorCacheHandle,
+    load: L,
+}
+
+fn start_cached_gen_stream_with_request_state_using_owned<D, L>(
     job_id: String,
     engine_id: &'static str,
     adapter_count: usize,
     spec: LoadSpec,
     load_error_context: String,
-    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
-        + Send
-        + 'static,
+    factory: CachedGeneratorFactory<L>,
     drive: D,
 ) -> (
     CancelFlag,
@@ -759,6 +873,7 @@ fn start_cached_gen_stream_with_request_state_using_owned<D>(
     tokio::task::JoinHandle<WorkerResult<()>>,
 )
 where
+    L: FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>> + Send + 'static,
     D: FnOnce(
             &dyn Generator,
             gen_core::MemoryCacheState,
@@ -782,11 +897,12 @@ where
             engine_id,
             adapter_count,
         );
-        crate::generator_cache::with_cached_generator_for_request_using(
+        crate::generator_cache::with_cached_generator_for_request_using_cache(
+            factory.cache,
             engine_id,
             spec,
             load_error_context,
-            load_generator,
+            factory.load,
             move |generator,
                   cache_state,
                   loaded_policy,

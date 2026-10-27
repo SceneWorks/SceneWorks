@@ -200,9 +200,8 @@ fn mochi_mlx_gpu_smoke() {
                 }
                 Progress::Decoding => saw_decoding = true,
                 Progress::Loading(_) => {}
-                Progress::PromptUpsamplingComplete
-                | Progress::ConditioningComplete
-                | Progress::Upsampling { .. } => {}
+                Progress::PromptUpsamplingComplete => {}
+                Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
             })
             .expect("mochi generate");
         assert!(last_step > 0, "engine emitted no denoise Step progress");

@@ -48,7 +48,7 @@ pub(crate) struct ModelCatalogCache {
 #[derive(Default)]
 struct ModelCatalogCacheState {
     generation: u64,
-    snapshot: Option<(u64, Arc<Vec<Value>>)>,
+    snapshot: Option<(u64, &'static str, Arc<Vec<Value>>)>,
     /// Last observed resolved-cache publish key. `None` until the first observation, which is why
     /// the first reading never counts as a change — an API that has not looked yet has nothing to
     /// have gone stale against.
@@ -1326,7 +1326,7 @@ fn apply_conditional_component_state(object: &mut JsonObject, data_dir: &FsPath)
         let presence = if row
             .get("componentId")
             .and_then(Value::as_str)
-            .is_some_and(|id| id.starts_with("moss-dmd-"))
+            .is_some_and(|id| id.starts_with("moss-dmd-") || id == "moss-image-edit")
         {
             pinned_component_presence(data_dir, row)
         } else {
@@ -3180,6 +3180,7 @@ fn import_source_supported(source: &FsPath) -> Result<(), ApiError> {
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) async fn create_model_import_job(
     State(state): State<AppState>,
     request: AxumRequest,
@@ -4390,14 +4391,17 @@ mod runtime_text_encoder_option_tests {
 }
 
 pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<Value>>, ApiError> {
+    let backend = crate::generation::enqueue_backend(state);
     // Before trusting the cached snapshot, check whether the resolved cache's published set moved
     // under us — the worker publishes promotions in another process, so this is the only signal
     // the API gets (sc-19712 F-4). It is a handful of stats, cheap enough to pay per read.
     crate::model_sources::note_local_tier_freshness(state);
     {
         let cache_state = state.model_catalog_cache.state.lock();
-        if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
-            if *snapshot_generation == cache_state.generation {
+        if let Some((snapshot_generation, snapshot_backend, snapshot)) =
+            cache_state.snapshot.as_ref()
+        {
+            if *snapshot_generation == cache_state.generation && *snapshot_backend == backend {
                 return Ok(snapshot.clone());
             }
         }
@@ -4411,15 +4415,21 @@ pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<V
             // Another builder may have populated the cache while this caller
             // waited for the async serializer.
             let cache_state = state.model_catalog_cache.state.lock();
-            if let Some((snapshot_generation, snapshot)) = cache_state.snapshot.as_ref() {
-                if *snapshot_generation == cache_state.generation {
+            if let Some((snapshot_generation, snapshot_backend, snapshot)) =
+                cache_state.snapshot.as_ref()
+            {
+                if *snapshot_generation == cache_state.generation && *snapshot_backend == backend {
                     return Ok(snapshot.clone());
                 }
             }
             cache_state.generation
         };
 
-        let snapshot = Arc::new(build_model_catalog_snapshot(state).await?);
+        let mut models = build_model_catalog_snapshot(state).await?;
+        for model in &mut models {
+            project_moss_edit_surface(model, backend);
+        }
+        let snapshot = Arc::new(models);
 
         #[cfg(test)]
         state
@@ -4429,13 +4439,34 @@ pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<V
 
         let mut cache_state = state.model_catalog_cache.state.lock();
         if cache_state.generation == generation {
-            cache_state.snapshot = Some((generation, snapshot.clone()));
+            cache_state.snapshot = Some((generation, backend, snapshot.clone()));
             return Ok(snapshot);
         }
         drop(cache_state);
         // A model writer completed while the filesystem sweep was running.
         // Keep the async serializer and rebuild at the new generation. The
         // stale result was never published or returned.
+    }
+}
+
+fn project_moss_edit_surface(model: &mut Value, backend: &str) {
+    let Some(id) = model.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    if !sceneworks_core::moss_image::is_moss(id) {
+        return;
+    }
+    let available = sceneworks_core::moss_image::edit_backend_eligible(id, backend);
+    let Some(object) = model.as_object_mut() else {
+        return;
+    };
+    let capabilities = object.entry("capabilities").or_insert_with(|| json!([]));
+    let Some(capabilities) = capabilities.as_array_mut() else {
+        return;
+    };
+    capabilities.retain(|mode| mode != "edit_image" && mode != "image_edit");
+    if available {
+        capabilities.push(json!("edit_image"));
     }
 }
 
@@ -5063,14 +5094,57 @@ mod import_gate_tests {
     }
 
     #[test]
+    fn krea2_scalar_fp8_upload_is_accepted() {
+        // A ComfyUI `ModelSave` of an fp8-scaled Krea 2 DiT: `F8_E4M3` weights with an `F32`
+        // per-tensor `.weight_scale` and a `.comfy_quant` descriptor per projection. Before
+        // sc-27092 this classified as `ComfyQuantPacked` — the fp4/mxfp4 bucket — and was refused
+        // with a reason naming a format the file does not use.
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("krea2_fp8_scaled.safetensors");
+        let mut names = Vec::new();
+        for index in 0..6 {
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.weight"),
+                "F8_E4M3",
+            ));
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.weight_scale"),
+                "F32",
+            ));
+            names.push((
+                format!("model.diffusion_model.blocks.{index}.attn.wq.comfy_quant"),
+                "U8",
+            ));
+        }
+        names.push(("model.diffusion_model.blocks.0.mod.lin".to_owned(), "BF16"));
+        names.push((
+            "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+            "F32",
+        ));
+        let entries: Vec<(&str, &str)> = names
+            .iter()
+            .map(|(name, dtype)| (name.as_str(), *dtype))
+            .collect();
+        write_safetensors(&file, &entries);
+
+        assert!(
+            import_source_supported(&file).is_ok(),
+            "a Krea 2 scalar-fp8 DiT upload must pass the import gate"
+        );
+    }
+
+    #[test]
     fn krea2_packed_quant_upload_is_refused_with_reason() {
-        // Same family/component but `.comfy_quant` packed int8 → no loader yet → 400 with a reason.
+        // Same family/component but `.comfy_quant` fp4/mxfp4-packed — nibble-packed `U8` weights
+        // with no `I8` weight anywhere → the refuse bucket → 400 with a reason. (The fixture is
+        // genuinely packed: sc-27092 replaced the old "bulk `I8` or it is packed" proxy with a
+        // per-projection reading, so a file that really is packed must say so in its dtypes.)
         let temp = tempfile::tempdir().unwrap();
         let file = temp.path().join("kreamania_variant4.safetensors");
         write_safetensors(
             &file,
             &[
-                ("model.diffusion_model.blocks.0.attn.wq.weight", "I8"),
+                ("model.diffusion_model.blocks.0.attn.wq.weight", "U8"),
                 ("model.diffusion_model.blocks.0.attn.wq.comfy_quant", "U8"),
                 ("model.diffusion_model.blocks.0.mod.lin", "BF16"),
                 (
@@ -7606,6 +7680,57 @@ mod download_receipt_tests {
         }
     }
 
+    /// sc-24214: Supra2-IMG is served on Candle too, under the same engine id, so the running OS's
+    /// `retain_downloads_for_os` filter keeps the IDENTICAL install on Windows and Linux as on macOS:
+    /// the pinned `model_final_ema.pt` primary and both pinned co-requisites (`text_encoder`, `vae`).
+    #[test]
+    fn supra2_installs_the_same_three_components_on_every_platform() {
+        let base = builtin_models_entry("supra2_img");
+        assert_eq!(base.get("macOnly").and_then(Value::as_bool), Some(false));
+        let retained = |os: &str| {
+            let mut model = base.clone();
+            retain_downloads_for_os(&mut model, os);
+            model
+        };
+        let mac = retained("macos");
+        for os in ["windows", "linux"] {
+            let model = retained(os);
+            assert_eq!(
+                model["downloads"], mac["downloads"],
+                "{os}: same downloads as macOS"
+            );
+            let components: Vec<_> = model_co_requisite_downloads(&model)
+                .iter()
+                .map(|row| {
+                    (
+                        row["componentId"].as_str().unwrap().to_owned(),
+                        row["repo"].as_str().unwrap().to_owned(),
+                        row["revision"].as_str().unwrap().to_owned(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                components,
+                [
+                    (
+                        "text_encoder".to_owned(),
+                        "google/flan-t5-base".to_owned(),
+                        "7bcac572ce56db69c1ea7c8af255c5d7c9672fc2".to_owned()
+                    ),
+                    (
+                        "vae".to_owned(),
+                        "stabilityai/sd-vae-ft-mse".to_owned(),
+                        "31f26fdeee1355a5c34592e401dd41e45d25a493".to_owned()
+                    ),
+                ],
+                "{os}"
+            );
+            let context = model_download_context(&model).unwrap().unwrap();
+            assert_eq!(context.repo, "SupraLabs/Supra2-IMG", "{os}");
+            assert_eq!(context.files, ["model_final_ema.pt"], "{os}");
+        }
+    }
+
     /// sc-25682 (E4): Iris-3B DEPTH is its own task install — exactly the three `depth/` export files
     /// at the pinned revision, NO co-requisite (no text encoder, no generation backbone), installed
     /// only when all three are present. Same on every platform (both lanes serve it).
@@ -9931,8 +10056,9 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
     // and its per-tier state from the Studio on macOS for directories that are genuinely present.
     //
     // Off macOS the probe is NARROWED, not skipped (sc-20529). A convert-at-install model whose
-    // converter has a real off-Mac (candle) implementation — `CANDLE_NATIVE_CONVERTERS`, today just
-    // `flux2_klein_diffusers` / `flux2_klein_9b_true_v2` — needs the same convert affordance and the
+    // converter has a real off-Mac implementation — `CANDLE_NATIVE_CONVERTERS`, today
+    // `flux2_klein_diffusers` / `flux2_klein_9b_true_v2` and the backend-neutral `supra2_img`
+    // (sc-24214) — needs the same convert affordance and the
     // same converted/needs_conversion/needs_source states on Windows and Linux that macOS gets: the
     // candle converter (sc-7459) is real, `POST /models/{id}/convert` is not platform-gated, and
     // `inject_converted_model_path` already reads the converted dir on every platform. Without these
@@ -9989,6 +10115,19 @@ fn apply_mac_and_mlx_fields(object: &mut JsonObject, data_dir: &FsPath) {
             "mlxConversionState".to_owned(),
             Value::String(status.conversion_state.to_owned()),
         );
+        // The engine's reason a marked conversion would not load (sc-24216); absent otherwise so
+        // every other model's catalog shape is unchanged.
+        match status.conversion_problem.as_deref() {
+            Some(problem) => {
+                object.insert(
+                    "mlxConversionProblem".to_owned(),
+                    Value::String(problem.to_owned()),
+                );
+            }
+            None => {
+                object.remove("mlxConversionProblem");
+            }
+        }
         object.insert(
             "mlxConvertedPath".to_owned(),
             status
@@ -12143,6 +12282,12 @@ pub(crate) struct MlxCatalogStatus {
     /// is NOT present in the `convertSourceRepo` cache (the installed converted dir carries no
     /// version stamp, so the source cache is the proxy — see `convert_source_file_cached`).
     pub(crate) update_available: bool,
+    /// Why a converted artifact that carries the install marker would still be refused at load
+    /// (sc-24216): the engine's own pin-contract reason, from
+    /// [`sceneworks_core::converted_artifacts`]. `Some` only for a converter with a declared
+    /// contract whose marked output fails it — the status then reads as needing conversion, so the
+    /// Model Manager offers Convert again instead of a model that cannot load.
+    pub(crate) conversion_problem: Option<String>,
 }
 
 /// Whether the named source `file` is present in any cached snapshot of `repo` — the proxy for
@@ -12186,9 +12331,23 @@ pub(crate) fn mlx_catalog_status(
         // mlx-video converters write a top-level config.json; the FLUX.2-klein
         // diffusers converter (sc-2235) writes a diffusers model_index.json. Either
         // marks a finished local MLX artifact.
-        if converted_dir.join("config.json").is_file()
-            || converted_dir.join("model_index.json").is_file()
-        {
+        let marked = converted_dir.join("config.json").is_file()
+            || converted_dir.join("model_index.json").is_file();
+        // A marked artifact from a converter with an engine pin contract must also satisfy it
+        // (manifest, pins, file sizes — metadata reads only); a truncated, edited or half-written
+        // bundle is reported with the engine's reason rather than as installed (sc-24216).
+        let conversion_problem = if marked {
+            sceneworks_core::converted_artifacts::converted_artifact_problem(
+                mlx.get("converter")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                &converted_dir,
+                sceneworks_core::converted_artifacts::ArtifactCheck::Sizes,
+            )
+        } else {
+            None
+        };
+        if marked && conversion_problem.is_none() {
             // The converted artifact records no source version, so use the source cache as the
             // proxy: if the manifest's current `convertSourceFile` is NOT cached, this install was
             // built from an older source → an update is available. A dir-based converter with no
@@ -12207,6 +12366,7 @@ pub(crate) fn mlx_catalog_status(
                 conversion_state: "converted",
                 converted_path: Some(converted_dir),
                 update_available,
+                conversion_problem: None,
             });
         }
         let source_present = mlx
@@ -12222,6 +12382,7 @@ pub(crate) fn mlx_catalog_status(
             },
             converted_path: None,
             update_available: false,
+            conversion_problem,
         })
     } else {
         let repo_installed = mlx
@@ -12246,6 +12407,7 @@ pub(crate) fn mlx_catalog_status(
             converted_path: local_installed.then_some(local_dir),
             // Turnkey models have no local conversion to go stale (they track their repo directly).
             update_available: false,
+            conversion_problem: None,
         })
     }
 }
@@ -12254,6 +12416,14 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
     let mut paths = Vec::new();
     if let Some(path) = model_manifest_installed_path(model, data_dir) {
         paths.push(path);
+    }
+    // A convert-at-install model's converted output (`<data>/models/mlx/<id>`, the `outputDir` every
+    // convert job is given) is owned by this entry alone, so a whole-model delete reclaims it with
+    // the source checkpoint (sc-24216). Before this the delete removed the source only and the
+    // marker left behind kept the model reading as installed. Co-requisites (shared components such
+    // as a text encoder or VAE) are never listed here — see `is_co_requisite_download`.
+    if let Some(converted) = converted_artifact_dir(model, data_dir) {
+        paths.push(converted);
     }
     let cleanup_downloads = model_download(model).into_iter().collect::<Vec<_>>();
     if model.get("platformCleanupOnly").and_then(Value::as_bool) == Some(true) {
@@ -12292,6 +12462,28 @@ pub(crate) fn model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<Path
         paths.extend(checkpoint_dirs);
     }
     unique_paths(paths)
+}
+
+/// The converted-artifact dir a `mlx.requiresConversion` entry owns: `<data>/models/mlx/<id>`, the
+/// convert job's `outputDir`. `None` for every other entry, and for an id that is not one plain path
+/// component (never joined outside the conversion root).
+fn converted_artifact_dir(model: &Value, data_dir: &FsPath) -> Option<PathBuf> {
+    let requires_conversion = model
+        .get("mlx")
+        .and_then(|mlx| mlx.get("requiresConversion"))
+        .and_then(Value::as_bool)
+        == Some(true);
+    if !requires_conversion {
+        return None;
+    }
+    let id = model.get("id").and_then(Value::as_str)?;
+    let mut components = FsPath::new(id).components();
+    match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(_)), None) => {
+            Some(data_dir.join("models").join("mlx").join(id))
+        }
+        _ => None,
+    }
 }
 
 fn cleanup_with_model_artifact_paths(model: &Value, data_dir: &FsPath) -> Vec<PathBuf> {
@@ -12729,6 +12921,261 @@ mod variant_install_tests {
         assert!(states[0].installed_path.is_some());
     }
 
+    fn supra2_convert_entry() -> serde_json::Map<String, Value> {
+        json!({
+            "id": "supra2_img",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "supra2_img",
+                "convertSourceRepo": "SupraLabs/Supra2-IMG",
+                "convertSourceFile": "model_final_ema.pt"
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    /// sc-24216: a Supra2 dir that carries the install marker but fails the engine's pin contract
+    /// (here: no bundle manifest at all — what an interrupted or pre-contract convert leaves) reads
+    /// as NEEDING CONVERSION with the engine's reason, never as installed, so the Model Manager
+    /// offers Convert again and no `modelPath` is injected for a bundle that cannot load. A
+    /// converter with no declared contract keeps the marker-only verdict.
+    #[test]
+    fn a_marked_but_broken_supra2_bundle_reads_as_needing_conversion_with_the_reason() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = supra2_convert_entry();
+        seed_cache(data_dir, "SupraLabs/Supra2-IMG", &["model_final_ema.pt"]);
+        let dir = data_dir.join("models").join("mlx").join("supra2_img");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model_index.json"), b"{}").unwrap();
+
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "needs_conversion");
+        assert!(
+            status.converted_path.is_none(),
+            "no modelPath for a broken bundle"
+        );
+        let problem = status
+            .conversion_problem
+            .expect("the engine's refusal reason");
+        assert!(
+            problem.contains("is not a converted Supra2 bundle"),
+            "{problem}"
+        );
+
+        // Same marker-only shape for a converter WITHOUT a contract: unchanged, installed.
+        let mut other = model.clone();
+        other.insert("id".to_owned(), json!("other_convert"));
+        other["mlx"]["converter"] = json!("flux2_klein_diffusers");
+        seed_converted(data_dir, "other_convert");
+        let status = mlx_catalog_status(&other, data_dir).expect("status");
+        assert_eq!(status.install_state, "installed");
+        assert!(status.conversion_problem.is_none());
+    }
+
+    /// sc-24216: a whole-model delete of a convert-at-install entry reclaims its converted dir along
+    /// with the source checkpoint, but never the shared co-requisite components (Supra2's
+    /// Flan-T5-Base and SD VAE may serve other models).
+    #[test]
+    fn whole_model_delete_paths_cover_the_converted_dir_but_not_shared_components() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = json!({
+            "id": "supra2_img",
+            "mlx": { "requiresConversion": true, "converter": "supra2_img" },
+            "downloads": [
+                { "provider": "huggingface", "repo": "SupraLabs/Supra2-IMG", "default": true,
+                  "files": ["model_final_ema.pt"] },
+                { "provider": "huggingface", "repo": "google/flan-t5-base", "coRequisite": true,
+                  "componentId": "text_encoder", "files": ["config.json"] },
+                { "provider": "huggingface", "repo": "stabilityai/sd-vae-ft-mse",
+                  "coRequisite": true, "componentId": "vae", "files": ["config.json"] }
+            ]
+        });
+        let paths = model_artifact_paths(&model, data_dir);
+        assert!(paths.contains(&data_dir.join("models").join("mlx").join("supra2_img")));
+        assert!(
+            paths.contains(&huggingface_repo_cache_path(data_dir, "SupraLabs/Supra2-IMG").unwrap())
+        );
+        for shared in ["google/flan-t5-base", "stabilityai/sd-vae-ft-mse"] {
+            let cache = huggingface_repo_cache_path(data_dir, shared).unwrap();
+            assert!(
+                !paths.contains(&cache),
+                "{shared} is shared and must survive"
+            );
+            assert!(!paths.contains(&data_dir.join("models").join(safe_download_dir(shared))));
+        }
+        // A turnkey entry owns no converted dir; an id that is not one path component is never
+        // joined under the conversion root.
+        let turnkey = json!({ "id": "turnkey", "mlx": { "repo": "org/turnkey" } });
+        assert!(!model_artifact_paths(&turnkey, data_dir)
+            .iter()
+            .any(|path| path.starts_with(data_dir.join("models").join("mlx"))));
+        let escaping = json!({ "id": "../escape", "mlx": { "requiresConversion": true } });
+        assert_eq!(converted_artifact_dir(&escaping, data_dir), None);
+    }
+
+    /// sc-24216 review: the converted-dir reclaim applies to EVERY `requiresConversion` entry, not
+    /// only Supra2. An Anima-shaped converted root (marker + one subdir per quant tier) is removed
+    /// whole and the catalog drops back to not-installed.
+    #[tokio::test]
+    async fn whole_model_delete_reclaims_an_anima_shaped_converted_root() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        // An Anima-shaped convert-at-install entry: the converted root holds the marker plus one
+        // subdir per quant tier, and the source repo is the shared `circlestone-labs/Anima`.
+        let model = json!({
+            "id": "anima_base",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "anima_quant",
+                "convertSourceRepo": "circlestone-labs/Anima"
+            },
+            "downloads": [
+                { "provider": "huggingface", "repo": "circlestone-labs/Anima", "default": true,
+                  "files": ["split_files/diffusion_models/anima-base.safetensors"] }
+            ]
+        });
+        seed_cache(
+            data_dir,
+            "circlestone-labs/Anima",
+            &["split_files/diffusion_models/anima-base.safetensors"],
+        );
+        let converted = data_dir.join("models").join("mlx").join("anima_base");
+        for tier in ["bf16", "q8", "q4"] {
+            let dm = converted.join(tier).join("diffusion_models");
+            std::fs::create_dir_all(&dm).unwrap();
+            std::fs::write(dm.join("dit.safetensors"), b"weights").unwrap();
+        }
+        std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+        let status = mlx_catalog_status(model.as_object().unwrap(), data_dir).expect("status");
+        assert_eq!(status.install_state, "installed");
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        remove_whole_model_artifacts(
+            std::slice::from_ref(&model),
+            "anima_base",
+            &model,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("delete succeeds");
+        assert!(
+            !converted.exists(),
+            "every tier and the marker are reclaimed"
+        );
+        let status = mlx_catalog_status(model.as_object().unwrap(), data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "needs_source");
+    }
+
+    /// sc-24216 review: a SAME-SIZE corruption passes the catalog's cheap check, so the card read
+    /// "Converted" (Convert disabled) while every job was refused. Once a failed load's full
+    /// verification records the fault (what the worker's `explain_failed_load` does), the catalog
+    /// reports `needs_conversion` + `mlxConversionProblem`, which enables "Convert again".
+    #[test]
+    fn a_recorded_digest_failure_flips_a_same_size_corrupt_bundle_to_needs_conversion() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = supra2_convert_entry();
+        seed_cache(data_dir, "SupraLabs/Supra2-IMG", &["model_final_ema.pt"]);
+        let bundle = data_dir.join("models").join("mlx").join("supra2_img");
+        sceneworks_core::converted_artifacts::write_same_size_corrupt_supra2_bundle(&bundle)
+            .unwrap();
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(
+            status.conversion_state, "converted",
+            "sizes alone cannot see it — the gap the record closes"
+        );
+
+        let problem = sceneworks_core::converted_artifacts::converted_artifact_problem(
+            "supra2_img",
+            &bundle,
+            sceneworks_core::converted_artifacts::ArtifactCheck::Digests,
+        )
+        .expect("the digests catch the corruption");
+        sceneworks_core::converted_artifacts::record_verification_failure(&bundle, &problem)
+            .unwrap();
+        let status = mlx_catalog_status(&model, data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "needs_conversion");
+        assert!(status.converted_path.is_none());
+        assert_eq!(status.conversion_problem.as_deref(), Some(problem.as_str()));
+    }
+
+    /// sc-24216, end to end through the whole-model delete's removal: the converted bundle and the
+    /// source checkpoint go, the installed co-requisites (shareable with other models) stay, and
+    /// the catalog no longer reads the model as converted.
+    #[tokio::test]
+    async fn whole_model_delete_reclaims_the_converted_bundle_and_keeps_shared_components() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let model = json!({
+            "id": "supra2_img",
+            "mlx": {
+                "requiresConversion": true,
+                "converter": "supra2_img",
+                "convertSourceRepo": "SupraLabs/Supra2-IMG",
+                "convertSourceFile": "model_final_ema.pt"
+            },
+            "downloads": [
+                { "provider": "huggingface", "repo": "SupraLabs/Supra2-IMG", "default": true,
+                  "files": ["model_final_ema.pt"] },
+                { "provider": "huggingface", "repo": "google/flan-t5-base", "coRequisite": true,
+                  "componentId": "text_encoder", "files": ["config.json"] },
+                { "provider": "huggingface", "repo": "stabilityai/sd-vae-ft-mse",
+                  "coRequisite": true, "componentId": "vae", "files": ["config.json"] }
+            ]
+        });
+        seed_cache(data_dir, "SupraLabs/Supra2-IMG", &["model_final_ema.pt"]);
+        seed_cache(data_dir, "google/flan-t5-base", &["config.json"]);
+        seed_cache(data_dir, "stabilityai/sd-vae-ft-mse", &["config.json"]);
+        let converted = data_dir.join("models").join("mlx").join("supra2_img");
+        std::fs::create_dir_all(&converted).unwrap();
+        std::fs::write(converted.join("model_index.json"), b"{}").unwrap();
+        std::fs::write(converted.join("denoiser.safetensors"), b"weights").unwrap();
+
+        let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
+        let removal = remove_whole_model_artifacts(
+            std::slice::from_ref(&model),
+            "supra2_img",
+            &model,
+            data_dir,
+            &allowed_roots,
+            true,
+        )
+        .await
+        .expect("delete succeeds");
+        assert!(!removal.removed_paths.is_empty());
+        assert!(!converted.exists(), "the converted bundle is reclaimed");
+        assert!(
+            !huggingface_repo_cache_path(data_dir, "SupraLabs/Supra2-IMG")
+                .unwrap()
+                .exists()
+        );
+        for shared in ["google/flan-t5-base", "stabilityai/sd-vae-ft-mse"] {
+            assert!(
+                huggingface_repo_cache_path(data_dir, shared)
+                    .unwrap()
+                    .exists(),
+                "{shared} survives the delete"
+            );
+        }
+        let status = mlx_catalog_status(model.as_object().unwrap(), data_dir).expect("status");
+        assert_eq!(status.install_state, "missing");
+        assert_eq!(status.conversion_state, "needs_source");
+    }
+
     /// Mark a convert-at-install model "converted" by writing its local MLX `config.json`.
     fn seed_converted(data_dir: &FsPath, model_id: &str) {
         let dir = data_dir.join("models").join("mlx").join(model_id);
@@ -12916,6 +13363,66 @@ mod variant_install_tests {
             .get("mlxConvertedPath")
             .and_then(Value::as_str)
             .is_some_and(|path| path.ends_with("flux2_klein_9b_true_v2")));
+    }
+
+    /// sc-24214: Supra2-IMG's converter is backend-neutral and `candle-gen-supra2` loads the bundle it
+    /// writes, so the shipped entry reports its conversion state on EVERY platform: `needs_conversion`
+    /// with the pinned `.pt` cached but unconverted, `converted` + the bundle path once the convert ran
+    /// — the Windows/Linux Model Manager offers the same convert step macOS does.
+    ///
+    /// sc-24216: "once the convert ran" means a bundle that satisfies the engine's pin contract, not
+    /// a bare install marker. A marker-only dir (an interrupted or pre-contract convert) therefore
+    /// stays `needs_conversion` with the engine's reason on EVERY platform; the positive `converted`
+    /// path needs the real pinned conversion and is proven by the nax-macos-2 real-weight profile
+    /// (`supra2-mlx-real-weights`).
+    #[test]
+    fn supra2_reports_its_conversion_state_on_every_platform() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path();
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, contents)| *contents)
+            .expect("builtin.models.jsonc present");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let shipped = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == "supra2_img")
+            .and_then(Value::as_object)
+            .cloned()
+            .expect("supra2_img is in the builtin catalog");
+        assert!(entry_requires_converted_artifact_here(&shipped));
+
+        seed_cache(data_dir, "SupraLabs/Supra2-IMG", &["model_final_ema.pt"]);
+        let mut model = shipped.clone();
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("needs_conversion"),
+            "a downloaded but unconverted Supra2 checkpoint must say so on every platform"
+        );
+        assert_eq!(
+            model.get("mlxInstallState").and_then(Value::as_str),
+            Some("missing")
+        );
+
+        seed_converted(data_dir, "supra2_img");
+        let mut model = shipped;
+        apply_mac_and_mlx_fields(&mut model, data_dir);
+        assert_eq!(
+            model.get("mlxConversionState").and_then(Value::as_str),
+            Some("needs_conversion"),
+            "a marker without a pin-contract bundle must not read as converted"
+        );
+        assert!(model
+            .get("mlxConversionProblem")
+            .and_then(Value::as_str)
+            .is_some_and(|problem| problem.contains("is not a converted Supra2 bundle")));
+        assert_eq!(model.get("mlxConvertedPath"), Some(&Value::Null));
     }
 
     /// The Anima non-regression (sc-20529). Off macOS, Anima must keep reporting NO mlx status:
@@ -14186,6 +14693,32 @@ mod variant_delete_tests {
     use super::*;
     use std::os::unix::fs::symlink;
 
+    fn fixture_repo_cache_path(data_dir: &FsPath, repo: &str) -> PathBuf {
+        let path = huggingface_repo_cache_path(data_dir, repo).unwrap();
+        assert!(
+            path.starts_with(data_dir),
+            "fixture cache must be inside its temporary data directory before seeding or deletion: {}",
+            path.display()
+        );
+        path
+    }
+
+    #[test]
+    fn external_cache_is_refused_before_fixture_writes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let data_dir = tmp.path().join("data");
+        let external_cache = tmp.path().join("outside-fixture");
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.clone(),
+            external_cache.clone(),
+        );
+        assert!(
+            std::panic::catch_unwind(|| { fixture_repo_cache_path(&data_dir, "Org/fixture") })
+                .is_err()
+        );
+        assert!(!external_cache.exists(), "refusal must precede any writes");
+    }
+
     /// Write (once) a `blobs/<etag>` file of `bytes.len()` bytes and return its path.
     fn blob(repo: &FsPath, etag: &str, bytes: &[u8]) -> PathBuf {
         let blobs = repo.join("blobs");
@@ -14693,8 +15226,12 @@ mod variant_delete_tests {
     async fn whole_model_delete_on_a_shared_repo_keeps_the_sibling_entrys_partitions() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_owned(),
+            data_dir.join("cache/huggingface/hub"),
+        );
         let repo_name = "SceneWorks/minimax-h3-mlx";
-        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        let repo = fixture_repo_cache_path(data_dir, repo_name);
         seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", 18780);
         seed_minimax_tier(&repo, "bf16", "bf16dit", "bf16refdit", 66280);
 
@@ -14784,7 +15321,11 @@ mod variant_delete_tests {
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();
-            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+                data_dir.to_owned(),
+                data_dir.join("cache/huggingface/hub"),
+            );
+            let repo = fixture_repo_cache_path(data_dir, "speridlabs/iris-3b");
             for (index, rel) in [
                 "config.yaml",
                 "model.safetensors",
@@ -14858,7 +15399,11 @@ mod variant_delete_tests {
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();
-            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+                data_dir.to_owned(),
+                data_dir.join("cache/huggingface/hub"),
+            );
+            let repo = fixture_repo_cache_path(data_dir, "speridlabs/iris-3b");
             for (index, rel) in generation
                 .iter()
                 .chain(depth)
@@ -14872,8 +15417,7 @@ mod variant_delete_tests {
                     seed(&repo, rel, &format!("blob{index}"), 10 + index);
                 }
             }
-            let encoder =
-                huggingface_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct").unwrap();
+            let encoder = fixture_repo_cache_path(data_dir, "Qwen/Qwen3-VL-4B-Instruct");
             seed(&encoder, "config.json", "encoder-config", 5);
             let allowed_roots = vec![data_dir.join("models"), huggingface_hub_cache_dir(data_dir)];
             remove_whole_model_artifacts(
@@ -14923,8 +15467,11 @@ mod variant_delete_tests {
         let entry = |id: &str| catalog.iter().find(|m| m["id"] == id).unwrap().clone();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let repo =
-            huggingface_repo_cache_path(data_dir, "ostris/zimage_turbo_training_adapter").unwrap();
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_owned(),
+            data_dir.join("cache/huggingface/hub"),
+        );
+        let repo = fixture_repo_cache_path(data_dir, "ostris/zimage_turbo_training_adapter");
         seed(
             &repo,
             "zimage_turbo_training_adapter_v1.safetensors",
@@ -14971,8 +15518,12 @@ mod variant_delete_tests {
     async fn whole_model_delete_on_an_exclusive_repo_still_removes_the_repo_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_owned(),
+            data_dir.join("cache/huggingface/hub"),
+        );
         let repo_name = "Org/solo-model";
-        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        let repo = fixture_repo_cache_path(data_dir, repo_name);
         seed(&repo, "q4/transformer/model.safetensors", "q4dit", 100);
         // A file NO declared scope names — only a blanket removal reaches it.
         seed(&repo, "README.md", "readme", 10);
@@ -15013,8 +15564,12 @@ mod variant_delete_tests {
     async fn whole_model_delete_keeps_the_blanket_path_for_an_unscoped_shared_claim() {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
+        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_owned(),
+            data_dir.join("cache/huggingface/hub"),
+        );
         let repo_name = "SceneWorks/whole-repo-pair";
-        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        let repo = fixture_repo_cache_path(data_dir, repo_name);
         seed(&repo, "model.safetensors", "dit", 100);
 
         let entry = |id: &str| {
@@ -15908,9 +16463,15 @@ mod managed_predictor_queue_tests {
             .1;
         let catalog: Value =
             serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        // The H3 Veda predictor's own identity, selected by repo: the catalog carries more than one
+        // managed single-file pin (sc-24213's Supra2-IMG checkpoint is another), so "the first"
+        // is not a stable way to name it.
         let pin = sceneworks_core::managed_file::builtin_identities()
             .unwrap()
-            .first()
+            .iter()
+            .find(|identity| {
+                identity.repo == "Veda-Sparse/Minimax-H3-T2VA-Veda-8NFE-600Step-Preview"
+            })
             .unwrap();
         for id in ["minimax_h3", "minimax_h3_ref"] {
             let model = catalog["models"]

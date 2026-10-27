@@ -130,16 +130,18 @@ describe("Create from Prompt disclosure", () => {
     await act(async () => {
       root.render(
         <AppContext.Provider value={{
-          activeProject: { id: "p1", name: "Vectors" },
+          activeProject: overrides.activeProject ?? { id: "p1", name: "Vectors" },
           assets: overrides.assets ?? [],
-          jobs: [],
+          assetsLoading: overrides.assetsLoading ?? false,
+          jobs: overrides.jobs ?? [],
           models,
           macCapabilities: { platform: "macos" },
           macCapabilitiesAuthoritative: true,
           createVectorJob: overrides.createVectorJob ?? vi.fn(),
           createVectorPromptWorkflow,
           createModelDownloadJob: vi.fn(),
-          setActiveView: vi.fn(),
+          setActiveView: overrides.setActiveView ?? vi.fn(),
+          setSelectedAssetId: overrides.setSelectedAssetId ?? vi.fn(),
           studioLaunch: overrides.studioLaunch,
         }}>
           <VectorStudio key={overrides.renderKey} />
@@ -348,7 +350,109 @@ describe("Create from Prompt disclosure", () => {
       prompt: "a geometric fox",
       rasterModel: "flux_schnell",
       vectorModel: "starvector_1b",
-      detailBudget: vectorDetailBudget(VECTOR_DETAIL_PRESETS.standard, vectorModel()),
+      detailBudget: vectorDetailBudget(VECTOR_DETAIL_PRESETS.detailed, vectorModel()),
     }));
+  });
+
+  it("defaults both fresh modes to the selected model's full Detailed budget", async () => {
+    const convert = vi.fn(async () => ({}));
+    const create = vi.fn(async () => ({}));
+    await render([rasterModel(), vectorModel()], create, { assets: [source], createVectorJob: convert, studioLaunch: { view: "VectorStudio", assetId: source.id } });
+    expect(container.querySelector('[aria-label="Vector detail"]').value).toBe("detailed");
+    expect(container.textContent).toContain("Selected vector budget: 7,933 tokens · 300s");
+    await submit();
+    expect(convert).toHaveBeenLastCalledWith(expect.objectContaining({ detailBudget: vectorDetailBudget(VECTOR_DETAIL_PRESETS.detailed, vectorModel()) }));
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Create from Prompt").click());
+    const prompt = container.querySelector('[aria-label="Vector prompt"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set.call(prompt, "a geometric fox");
+      prompt.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await submit();
+    expect(create).toHaveBeenLastCalledWith(expect.objectContaining({ detailBudget: vectorDetailBudget(VECTOR_DETAIL_PRESETS.detailed, vectorModel()) }));
+  });
+
+  it("retains only this project's terminal outcomes and opens a published safe vector result in Assets", async () => {
+    const setActiveView = vi.fn();
+    const setSelectedAssetId = vi.fn();
+    const result = {
+      id: "vector-result",
+      projectId: "p1",
+      type: "vector",
+      displayName: "geometric-fox.svg",
+      file: { path: "assets/vector-result/vector.svg", mimeType: "image/svg+xml" },
+      preview: { path: "assets/vector-result/preview.png", mimeType: "image/png" },
+      status: {},
+    };
+    const completed = { id: "job-p1", projectId: "p1", type: "vector_generate", status: "completed", result: { assetWrites: [{ id: result.id }] } };
+    const foreign = { id: "job-p2", projectId: "p2", type: "vector_generate", status: "completed", result: { assetWrites: [{ id: result.id }] } };
+    await render([vectorModel()], undefined, { assets: [result], jobs: [foreign, completed], setActiveView, setSelectedAssetId });
+    expect(container.textContent).toContain("Saved geometric-fox.svg");
+    expect(container.querySelector("img").src).toContain("preview.png");
+    expect(container.querySelector('a[download]').href).toContain("vector.svg");
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "View in Assets").click());
+    expect(setSelectedAssetId).toHaveBeenCalledWith(result.id);
+    expect(setActiveView).toHaveBeenCalledWith("Library");
+  });
+
+  it("does not mark incomplete, failed, or cancelled terminal jobs as saved results", async () => {
+    const missingAsset = { id: "job-saving", projectId: "p1", type: "vector_generate", status: "completed", result: { assetWrites: [{ id: "not-yet-published" }] } };
+    await render([vectorModel()], undefined, { jobs: [missingAsset], assetsLoading: true });
+    expect(container.textContent).toContain("Loading the saved SVG result");
+    expect(container.textContent).not.toContain("View in Assets");
+    await render([vectorModel()], undefined, { jobs: [missingAsset], assetsLoading: false });
+    expect(container.textContent).toContain("SVG result unavailable");
+    expect(container.textContent).not.toContain("Loading the saved SVG result");
+    expect(container.querySelector('a[download]')).toBeNull();
+  });
+
+  it("shows a removed completed result as unavailable rather than saving forever", async () => {
+    const result = { id: "purged-vector", projectId: "p1", type: "vector", displayName: "removed.svg" };
+    const completed = { id: "job-purged", projectId: "p1", type: "vector_generate", status: "completed", result: { assets: [result] } };
+    await render([vectorModel()], undefined, { assets: [result], jobs: [completed] });
+    expect(container.textContent).toContain("Saved removed.svg");
+    await render([vectorModel()], undefined, { assets: [], jobs: [completed] });
+    expect(container.textContent).toContain("SVG result unavailable");
+    expect(container.textContent).not.toContain("Saved removed.svg");
+    expect(container.querySelector('a[download]')).toBeNull();
+  });
+
+  it("keeps incomplete recorded budgets recoverable without crashing or rewriting them", async () => {
+    const incompleteBudget = { maxSvgBytes: 262144, maxWallTimeMs: 300000 };
+    const convert = vi.fn();
+    await render([vectorModel()], undefined, {
+      assets: [source], createVectorJob: convert,
+      studioLaunch: { view: "VectorStudio", assetId: source.id, recipe: { mode: "image_to_svg", detailBudget: incompleteBudget } },
+    });
+    expect(container.textContent).toContain("Invalid recorded budget");
+    expect(container.querySelector('[role="alert"]').textContent).toContain("This recipe cannot run");
+    await submit();
+    expect(convert).not.toHaveBeenCalled();
+  });
+
+  it("keeps failed and cancelled project jobs visible without treating either as a result", async () => {
+    const failed = { id: "job-failed", projectId: "p1", type: "vector_generate", status: "failed", error: "SVG sanitizer rejected the output" };
+    const cancelled = { id: "job-cancelled", projectId: "p1", type: "vector_generate", status: "canceled" };
+    await render([vectorModel()], undefined, { jobs: [failed] });
+    expect(container.textContent).toContain("Failed");
+    expect(container.textContent).toContain("SVG sanitizer rejected the output");
+    expect(container.textContent).not.toContain("Saved SVG result");
+    await render([vectorModel()], undefined, { jobs: [cancelled] });
+    expect(container.textContent).toContain("Cancelled");
+    expect(container.textContent).not.toContain("Saved SVG result");
+  });
+
+  it("shows rejected submissions locally without changing exact replay inputs", async () => {
+    const convert = vi.fn(async () => { throw new Error("provider refused this request"); });
+    await render([vectorModel({ id: "starvector_8b", vector: { ...vectorModel().vector, maxNewTokens: 9000 } })], undefined, {
+      assets: [source],
+      createVectorJob: convert,
+      studioLaunch: { view: "VectorStudio", assetId: source.id, recipe: { mode: "image_to_svg", model: "starvector_8b", sampling, detailBudget: budget } },
+    });
+    await submit();
+    expect(container.querySelector('[role="alert"]').textContent).toContain("provider refused this request");
+    await submit();
+    expect(convert).toHaveBeenCalledTimes(2);
+    expect(convert).toHaveBeenLastCalledWith(expect.objectContaining({ sampling, detailBudget: budget }));
   });
 });

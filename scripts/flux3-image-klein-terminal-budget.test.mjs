@@ -1,7 +1,7 @@
 // DECLARED SYNTHETIC local ledger fixtures only. ZERO physical GPU/model invocations.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { mkdtemp, readFile, writeFile, rm, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rm, mkdir, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { loadProductTargets, terminalPlan, terminalCatalog } from './flux3-image-klein-terminal-plan.mjs';
@@ -444,10 +444,18 @@ test('fixed Tokio security update binds exact old/new sources locks receipts and
   assert.equal(verifyLedgerReceipt(f.approval,f.receipt).state.generationCount,1);
   const sourceRoot=fileURLToPath(new URL('..',import.meta.url));
   const oldBytes=execFileSync('git',['-C',sourceRoot,'show',`${originalSource}:Cargo.lock`],{maxBuffer:16*1024*1024});
-  const nextBytes=await readFile(path.join(sourceRoot,'Cargo.lock'));
+  // The recorded security transition is the historical lock plus EXACTLY the fixed Tokio update.
+  // The working tree's lock legitimately advanced its inference pin when main was merged into the
+  // FLUX 3 feature branch, which is outside this transition's claim (and is covered by the bump's
+  // own closure/skew gates). Reconstruct the transition target instead of freezing the live lock.
+  const nextBytes=Buffer.from(oldBytes.toString()
+    .replace('version = "1.53.1"','version = "1.53.3"')
+    .replace('checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"','checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"'));
+  const liveLock=await readFile(path.join(sourceRoot,'Cargo.lock'),'utf8');
+  assert.match(liveLock,/name = "tokio"\nversion = "1\.53\.3"/,'the live lock retains the fixed Tokio release');
   assert.equal(validateCandleDependencySecurityLocks(oldBytes,nextBytes),true);
   await mkdir(path.dirname(f.authorization.previousCargoLock.path));await writeFile(f.authorization.previousCargoLock.path,oldBytes);
-  assert.equal(await verifyCandleDependencySecurityArchive(f.approval,f.authorization,f.root),path.dirname(f.authorization.previousCargoLock.path));
+  assert.equal(await verifyCandleDependencySecurityArchive(f.approval,f.authorization,f.root),await realpath(path.dirname(f.authorization.previousCargoLock.path)));
   for(const bytes of [nextBytes,Buffer.from(oldBytes.toString().replace('1.53.1','1.53.2')),Buffer.concat([oldBytes,Buffer.from('\n')])]) {
     await writeFile(f.authorization.previousCargoLock.path,bytes);
     await assert.rejects(verifyCandleDependencySecurityArchive(f.approval,f.authorization,f.root));

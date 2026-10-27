@@ -2189,6 +2189,16 @@ impl CheckpointPlanStore {
         &self,
         checkpoint_id: &str,
     ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        self.resolve_with_verification(checkpoint_id, |_| {})
+    }
+
+    /// Observe actual content verification. `Some(path)` brackets a hash read and `None`
+    /// ends it, including failed reads. Trusted source stamps emit no verification events.
+    pub fn resolve_with_verification(
+        &self,
+        checkpoint_id: &str,
+        mut observe: impl FnMut(Option<&Path>),
+    ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
         let record = self.record(checkpoint_id)?;
         let plan = self.plan(checkpoint_id, &record.plan.plan_id)?;
         record
@@ -2287,6 +2297,7 @@ impl CheckpointPlanStore {
                 // that landed between the two — the hash reads the replacement and refuses on the
                 // digest. The refreshed observation is later than the one it replaces, so a file
                 // that stops changing leaves the racy window after one tick and stays cheap.
+                observe(Some(&path));
                 let verified_stamp = verify_source_and_capture_stamp(
                     checkpoint_id,
                     relative_path,
@@ -2294,7 +2305,9 @@ impl CheckpointPlanStore {
                     fingerprint,
                     current,
                     || {},
-                )?;
+                );
+                observe(None);
+                let verified_stamp = verified_stamp?;
                 bindings
                     .stamps
                     .insert(layer.layer_id.clone(), verified_stamp);

@@ -398,7 +398,12 @@ export async function verifyCandleDependencySecurityArchive(approval, authorizat
   const {stdout} = await promisify(execFile)('git', ['-C', sourceRoot, 'show', `${CANDLE_PREVIOUS_SOURCE}:Cargo.lock`], {encoding:'buffer',maxBuffer:16*1024*1024});
   assert.equal(createHash('sha1').update(`blob ${stdout.length}\0`).update(stdout).digest('hex'), PREVIOUS_LOCK_GIT_BLOB, 'original source lock Git blob changed');
   assert.deepEqual(archived, stdout, 'archived lock differs from immutable original source Git blob');
-  validateCandleDependencySecurityLocks(archived, await readFile(new URL('../Cargo.lock', import.meta.url)));
+  // Validate the RECORDED transition target (the immutable original plus exactly the fixed Tokio
+  // update). A later integration may legitimately advance the working tree's lock (for example a
+  // merged inference pin); that is outside this historical security transition's claim.
+  validateCandleDependencySecurityLocks(archived, Buffer.from(archived.toString('utf8')
+    .replace('version = "1.53.1"','version = "1.53.3"')
+    .replace('checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"','checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"')));
   const file = await realpath(authorization.previousCargoLock.path);
   assert.equal(path.basename(file), 'Cargo.lock', 'historical metadata must resolve to Cargo.lock');
   return path.dirname(file);

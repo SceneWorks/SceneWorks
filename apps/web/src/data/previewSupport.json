@@ -277,6 +277,10 @@
     "stable_audio_3_small_sfx_base": {
       "candle": false
     },
+    "supra2_img": {
+      "candle": false,
+      "mlx": false
+    },
     "yue2": {
       "candle": false
     },

@@ -1100,6 +1100,73 @@ fn convert_anima_prequant(
     )
 }
 
+/// The one upstream file the Supra2-IMG convert reads (`gen_core::supra2::SUPRA2_SOURCE`); the
+/// manifest's `mlx.convertSourceFile` and its primary `downloads[].files` name exactly this file.
+const SUPRA2_SOURCE_FILE: &str = "model_final_ema.pt";
+
+/// Diffusers-style marker written beside the Supra2 bundle so `mlx_catalog_status` (which looks for a
+/// top-level `config.json` / `model_index.json`) reports the converted artifact as installed and
+/// injects its `modelPath`. Same mechanism as the Anima converter's marker; the engine itself reads
+/// only `supra2_bundle.json` and the files it lists.
+const SUPRA2_MARKER: &str = "{\n  \"_class_name\": \"Supra2ImgBundle\"\n}\n";
+
+/// Supra2-IMG convert-at-install (sc-24213, epic 24212). Everything substantive is inference-owned
+/// and backend-neutral (`gen_core::supra2`): the two co-requisite snapshots are re-verified against
+/// their pinned sizes + SHA-256 (`FLAN_T5_BASE` / `SD_VAE`), then `convert_pinned_checkpoint`
+/// verifies the pinned `model_final_ema.pt` SHA-256, validates the exact state dict and writes the
+/// native bundle (`denoiser.safetensors`, optional `conditioning.safetensors`, and
+/// `supra2_bundle.json` last), and `read_pinned_bundle` re-reads it under the provider's pin
+/// contract (pinned denoiser + conditioning digests). SceneWorks re-implements none of it; it only
+/// surfaces the failure.
+/// The marker goes in after the bundle, so a failed convert never leaves a dir the catalog reads as
+/// installed (the caller also converts into a temp sibling and promotes it atomically).
+pub(crate) fn convert_supra2_bundle(
+    source_file: &Path,
+    text_encoder_dir: &Path,
+    vae_dir: &Path,
+    out_dir: &Path,
+) -> Result<(), String> {
+    use gen_core::supra2::{
+        convert_pinned_checkpoint, read_pinned_bundle, BundleCheck, FLAN_T5_BASE, SD_VAE,
+    };
+    FLAN_T5_BASE
+        .verify(text_encoder_dir)
+        .map_err(|error| format!("Flan-T5-Base text encoder failed verification: {error}"))?;
+    SD_VAE
+        .verify(vae_dir)
+        .map_err(|error| format!("SD VAE ft-MSE failed verification: {error}"))?;
+    std::fs::create_dir_all(out_dir).map_err(|error| error.to_string())?;
+    convert_pinned_checkpoint(source_file, out_dir)
+        .map_err(|error| format!("Supra2-IMG checkpoint conversion failed: {error}"))?;
+    // Hold the written bundle to the provider's own pin contract (source identity, geometry,
+    // component revisions and the pinned denoiser/conditioning digests) before marking it
+    // installed, so a bundle the engine would refuse at load never reads as installed.
+    read_pinned_bundle(out_dir, BundleCheck::Digests)
+        .map_err(|error| format!("Supra2-IMG bundle failed its pin contract: {error}"))?;
+    std::fs::write(out_dir.join("model_index.json"), SUPRA2_MARKER)
+        .map_err(|error| error.to_string())
+}
+
+/// The pinned co-requisite snapshot a Supra2 convert verifies: the exact `snapshots/<revision>/`
+/// the catalog row pins (never `refs/main`), or a typed refusal naming the install to make.
+fn supra2_component_snapshot(
+    settings: &Settings,
+    model_id: &str,
+    label: &str,
+    repo: &str,
+    revision: &str,
+) -> Result<PathBuf, ConvertPlanError> {
+    huggingface_pinned_snapshot_dir(&settings.data_dir, repo, revision).ok_or_else(|| {
+        ConvertPlanError {
+            message: "Supra2-IMG components are not installed.",
+            detail: format!(
+                "The {label} ({repo}@{revision}) is not in the local cache. Install {model_id} from \
+                 the Model Manager (it downloads this component) before converting."
+            ),
+        }
+    })
+}
+
 /// The base `Lightricks/LTX-2.3` latent upsampler the LTX loader hard-requires (emitted as
 /// `upsampler.safetensors` in the converted dir). Neither the eros nor the base single-file
 /// checkpoint bundles it, so the converter merges it from the base repo at convert time.
@@ -1171,6 +1238,13 @@ enum ConvertPlan {
         vae_source: PathBuf,
         dit_filename: String,
         group_size: i32,
+    },
+    /// Supra2-IMG `model_final_ema.pt` -> the native bundle (sc-24213), after re-verifying the two
+    /// pinned co-requisite snapshots it is loaded beside (`text_encoder`, `vae`).
+    Supra2 {
+        source_file: PathBuf,
+        text_encoder_dir: PathBuf,
+        vae_dir: PathBuf,
     },
 }
 
@@ -1403,6 +1477,55 @@ async fn resolve_convert_plan(
                 vae_source,
                 dit_filename,
                 group_size,
+            }
+        }
+        // Supra2-IMG (epic 24212, sc-24213) — the pinned upstream `.pt` is the only source file;
+        // the Flan-T5-Base and SD VAE ft-MSE co-requisites are the exact pinned snapshots the
+        // engine loads beside the bundle, verified here at install time so generation stays offline.
+        "supra2_img" => {
+            let source_file_name = required_payload_string(&job.payload, "sourceFile")?.to_owned();
+            if source_file_name != SUPRA2_SOURCE_FILE {
+                return Ok(Err(ConvertPlanError {
+                    message: "Unknown Supra2-IMG source checkpoint.",
+                    detail: format!(
+                        "sourceFile '{source_file_name}' is not the pinned Supra2-IMG checkpoint \
+                         ({SUPRA2_SOURCE_FILE})."
+                    ),
+                }));
+            }
+            let source_file = checkpoint_dir.join(SUPRA2_SOURCE_FILE);
+            if !source_file.is_file() {
+                return Ok(Err(ConvertPlanError {
+                    message: "Supra2-IMG source checkpoint is missing.",
+                    detail: format!("Expected {SUPRA2_SOURCE_FILE} in {source_repo}."),
+                }));
+            }
+            let text_encoder = gen_core::supra2::FLAN_T5_BASE;
+            let vae = gen_core::supra2::SD_VAE;
+            let text_encoder_dir = match supra2_component_snapshot(
+                settings,
+                model_id,
+                "Flan-T5-Base text encoder",
+                text_encoder.repo,
+                text_encoder.revision,
+            ) {
+                Ok(dir) => dir,
+                Err(error) => return Ok(Err(error)),
+            };
+            let vae_dir = match supra2_component_snapshot(
+                settings,
+                model_id,
+                "SD VAE ft-MSE decoder",
+                vae.repo,
+                vae.revision,
+            ) {
+                Ok(dir) => dir,
+                Err(error) => return Ok(Err(error)),
+            };
+            ConvertPlan::Supra2 {
+                source_file,
+                text_encoder_dir,
+                vae_dir,
             }
         }
         "" => {
@@ -1688,6 +1811,18 @@ pub(crate) async fn run_model_convert_job(
                 .map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
+            })
+        }
+        ConvertPlan::Supra2 {
+            source_file,
+            text_encoder_dir,
+            vae_dir,
+        } => {
+            let backend = backend.clone();
+            tokio::task::spawn_blocking(move || {
+                convert_supra2_bundle(&source_file, &text_encoder_dir, &vae_dir, &temp).map_err(
+                    |detail| WorkerError::Engine(format!("{backend} conversion failed. {detail}")),
+                )
             })
         }
     };
@@ -6865,6 +7000,317 @@ mod flux2_convert_tests {
         // Root missing the borrowed components → None.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(resolve_flux2_klein_base_dir(empty.path(), None), None);
+    }
+}
+
+#[cfg(test)]
+mod supra2_convert_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn settings_at(data_dir: PathBuf) -> Settings {
+        Settings {
+            api_url: "http://127.0.0.1:0".to_owned(),
+            access_token: None,
+            data_dir,
+            config_dir: PathBuf::from("config"),
+            worker_id: "sc-24213".to_owned(),
+            gpu_id: "cpu".to_owned(),
+            is_child_worker: true,
+            poll_seconds: 1,
+            heartbeat_seconds: 5,
+            shutdown_timeout_seconds: 1,
+            huggingface_base_url: "http://127.0.0.1:0".to_owned(),
+            huggingface_token: None,
+            credentials: Vec::new(),
+            max_lora_url_bytes: 0,
+            max_model_url_bytes: 0,
+            allow_private_lora_urls: false,
+            utility_workers: 1,
+            backend_mlx_enabled: true,
+            backend_candle_enabled: false,
+            gpu_memory_limit_bytes: 0,
+            external_model_roots: Vec::new(),
+        }
+    }
+
+    fn isolate_hf_cache() -> crate::test_env::EnvVars {
+        crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+        ])
+    }
+
+    /// The payload `POST /models/supra2_img/convert` builds from the shipped catalog row.
+    fn supra2_job(source_file: &str) -> JobSnapshot {
+        serde_json::from_value(json!({
+            "id": "job-supra2-convert",
+            "type": "model_convert",
+            "status": "running",
+            "projectId": null,
+            "projectName": null,
+            "payload": {
+                "modelId": "supra2_img",
+                "sourceRepo": "SupraLabs/Supra2-IMG",
+                "converter": "supra2_img",
+                "sourceFile": source_file,
+                "outputDir": "/unused"
+            },
+            "result": {},
+            "requestedGpu": "auto",
+            "assignedGpu": null,
+            "workerId": null,
+            "progress": 0.0,
+            "stage": "queued",
+            "message": "",
+            "error": null,
+            "etaSeconds": null,
+            "elapsedSeconds": null,
+            "attempts": 0,
+            "sourceJobId": null,
+            "duplicateOfJobId": null,
+            "cancelRequested": false,
+            "createdAt": "2026-10-20T00:00:00Z",
+            "updatedAt": "2026-10-20T00:00:00Z",
+            "startedAt": null,
+            "finishedAt": null
+        }))
+        .expect("valid convert job snapshot")
+    }
+
+    /// Stage `files` (placeholder bytes) in `repo`'s cached snapshot at exactly `revision`.
+    fn stage_snapshot(data_dir: &Path, repo: &str, revision: &str, files: &[&str]) -> PathBuf {
+        let snapshot = huggingface_repo_cache_path(data_dir, repo)
+            .expect("repo cache path resolves")
+            .join("snapshots")
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).expect("create snapshot dir");
+        for file in files {
+            std::fs::write(snapshot.join(file), b"weights").expect("write staged file");
+        }
+        snapshot
+    }
+
+    async fn plan(
+        settings: &Settings,
+        checkpoint_dir: &Path,
+        source_file: &str,
+    ) -> Result<ConvertPlan, ConvertPlanError> {
+        let api = ApiClient::new(settings);
+        resolve_convert_plan(
+            &api,
+            settings,
+            &supra2_job(source_file),
+            checkpoint_dir,
+            None,
+        )
+        .await
+        .expect("resolver runs without an infra error")
+    }
+
+    /// The shipped catalog row and the converter agree on the one pinned source file, and the
+    /// component pins the converter verifies are the exact co-requisite rows the install downloads
+    /// (a drift here would verify one revision and load another).
+    #[test]
+    fn shipped_catalog_row_matches_the_converter_and_component_pins() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+                .expect("builtin manifest parses");
+        let entry = manifest["models"]
+            .as_array()
+            .expect("models array")
+            .iter()
+            .find(|model| model["id"] == "supra2_img")
+            .expect("supra2_img is in the shipped catalog");
+        let mlx = &entry["mlx"];
+        assert_eq!(mlx["requiresConversion"], true);
+        assert_eq!(mlx["converter"], "supra2_img");
+        assert_eq!(mlx["convertSourceFile"], SUPRA2_SOURCE_FILE);
+        let source = gen_core::supra2::SUPRA2_SOURCE;
+        assert_eq!(mlx["convertSourceRepo"], source.repo);
+        let downloads = entry["downloads"].as_array().expect("downloads");
+        let primary = downloads
+            .iter()
+            .find(|download| download["coRequisite"] != true)
+            .expect("primary download");
+        assert_eq!(primary["repo"], source.repo);
+        assert_eq!(primary["revision"], source.revision);
+        assert_eq!(primary["files"], json!([SUPRA2_SOURCE_FILE]));
+        assert_eq!(primary["expectedSizeBytes"], source.files[0].bytes);
+        assert_eq!(primary["expectedSha256"], source.files[0].sha256);
+        // sc-24216: the per-component licence the Model Manager lists is the engine pin's own, and
+        // the prompt limit it states is the engine's Flan-T5 context.
+        assert_eq!(primary["license"], source.license);
+        assert_eq!(
+            entry["image"]["maxPromptTokens"],
+            gen_core::supra2::MAX_PROMPT_TOKENS
+        );
+        for (component, pin) in [
+            ("text_encoder", gen_core::supra2::FLAN_T5_BASE),
+            ("vae", gen_core::supra2::SD_VAE),
+        ] {
+            let row = downloads
+                .iter()
+                .find(|download| download["componentId"] == component)
+                .unwrap_or_else(|| panic!("{component} co-requisite row"));
+            assert_eq!(row["license"], pin.license, "{component}");
+        }
+        for (component, pin) in [
+            ("text_encoder", gen_core::supra2::FLAN_T5_BASE),
+            ("vae", gen_core::supra2::SD_VAE),
+        ] {
+            let row = downloads
+                .iter()
+                .find(|download| download["componentId"] == component)
+                .unwrap_or_else(|| panic!("{component} co-requisite row"));
+            assert_eq!(row["coRequisite"], true, "{component}");
+            assert_eq!(row["repo"], pin.repo, "{component}");
+            assert_eq!(row["revision"], pin.revision, "{component}");
+            let files: Vec<&str> = pin.files.iter().map(|file| file.path).collect();
+            assert_eq!(row["files"], json!(files), "{component}");
+            assert_eq!(
+                row["estimatedSizeBytes"],
+                pin.download_bytes(),
+                "{component}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn supra2_plan_refuses_a_foreign_source_file() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = settings_at(tmp.path().join("data"));
+        let error = plan(&settings, tmp.path(), "model.safetensors")
+            .await
+            .err()
+            .expect("a foreign source file is refused");
+        assert_eq!(error.message, "Unknown Supra2-IMG source checkpoint.");
+    }
+
+    #[tokio::test]
+    async fn supra2_plan_refuses_a_missing_checkpoint() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let settings = settings_at(tmp.path().join("data"));
+        let error = plan(&settings, tmp.path(), SUPRA2_SOURCE_FILE)
+            .await
+            .err()
+            .expect("a missing checkpoint is refused");
+        assert_eq!(error.message, "Supra2-IMG source checkpoint is missing.");
+    }
+
+    /// The co-requisites are resolved at their exact pinned revision, never `refs/main`: a snapshot
+    /// of another revision does not satisfy the convert, and the refusal names the install to make.
+    #[tokio::test]
+    async fn supra2_plan_resolves_only_the_pinned_component_snapshots() {
+        let _env = isolate_hf_cache();
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let data_dir = tmp.path().join("data");
+        let settings = settings_at(data_dir.clone());
+        let checkpoint = tmp.path().join("checkpoint");
+        std::fs::create_dir_all(&checkpoint).expect("checkpoint dir");
+        std::fs::write(checkpoint.join(SUPRA2_SOURCE_FILE), b"pt").expect("checkpoint");
+        let t5 = gen_core::supra2::FLAN_T5_BASE;
+        let vae = gen_core::supra2::SD_VAE;
+
+        // Neither component installed.
+        let error = plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE)
+            .await
+            .err()
+            .expect("missing components are refused");
+        assert_eq!(error.message, "Supra2-IMG components are not installed.");
+        assert!(error.detail.contains(t5.repo), "{}", error.detail);
+
+        // The text encoder at a DIFFERENT revision does not count.
+        stage_snapshot(
+            &data_dir,
+            t5.repo,
+            "0000000000000000000000000000000000000000",
+            &["config.json"],
+        );
+        let error = plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE)
+            .await
+            .err()
+            .expect("an unpinned text encoder snapshot is refused");
+        assert!(error.detail.contains(t5.revision), "{}", error.detail);
+
+        let t5_dir = stage_snapshot(&data_dir, t5.repo, t5.revision, &["config.json"]);
+        let error = plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE)
+            .await
+            .err()
+            .expect("a missing VAE is refused");
+        assert!(error.detail.contains(vae.repo), "{}", error.detail);
+
+        let vae_dir = stage_snapshot(&data_dir, vae.repo, vae.revision, &["config.json"]);
+        match plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE).await {
+            Ok(ConvertPlan::Supra2 {
+                source_file,
+                text_encoder_dir,
+                vae_dir: resolved_vae_dir,
+            }) => {
+                assert_eq!(source_file, checkpoint.join(SUPRA2_SOURCE_FILE));
+                assert_eq!(text_encoder_dir, t5_dir);
+                assert_eq!(resolved_vae_dir, vae_dir);
+            }
+            Ok(_) => panic!("supra2_img must resolve the Supra2 plan"),
+            Err(error) => panic!("unexpected refusal: {} {}", error.message, error.detail),
+        }
+    }
+
+    /// A component that fails its pinned size/SHA-256 check stops the convert before the bundle is
+    /// written, with the inference verifier's reason surfaced, and leaves no install marker.
+    #[test]
+    fn supra2_convert_surfaces_component_verification_failure_and_writes_nothing() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let t5 = tmp.path().join("t5");
+        let vae = tmp.path().join("vae");
+        for dir in [&t5, &vae] {
+            std::fs::create_dir_all(dir).expect("component dir");
+            std::fs::write(dir.join("config.json"), b"{}").expect("config");
+        }
+        let out = tmp.path().join("out");
+        let error = convert_supra2_bundle(&tmp.path().join("missing.pt"), &t5, &vae, &out)
+            .expect_err("unverified components are refused");
+        assert!(
+            error.starts_with("Flan-T5-Base text encoder failed verification:"),
+            "{error}"
+        );
+        assert!(
+            !out.exists(),
+            "nothing is written before the components verify"
+        );
+    }
+
+    /// Real-weight install-time conversion from the local HF cache (CPU only: SHA-256 + tensor
+    /// validation + safetensors write). `HF_HUB_CACHE=~/.cache/huggingface/hub cargo test -p
+    /// sceneworks-worker supra2_real_weight_convert -- --ignored` with the three pinned snapshots in
+    /// that hub (the resolver reads the env-selected hub, else the data dir's library).
+    #[test]
+    #[ignore = "needs HF_HUB_CACHE holding the pinned Supra2-IMG, Flan-T5-Base and SD VAE snapshots"]
+    fn supra2_real_weight_convert_writes_a_loadable_bundle() {
+        let data_dir = tempfile::tempdir().expect("temp data dir");
+        let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            huggingface_pinned_snapshot_dir(data_dir.path(), pin.repo, pin.revision)
+                .unwrap_or_else(|| panic!("{}@{} is not cached", pin.repo, pin.revision))
+        };
+        let source = snapshot(gen_core::supra2::SUPRA2_SOURCE).join(SUPRA2_SOURCE_FILE);
+        let t5 = snapshot(gen_core::supra2::FLAN_T5_BASE);
+        let vae = snapshot(gen_core::supra2::SD_VAE);
+        // `SUPRA2_BUNDLE_OUT` keeps the bundle for the acceptance matrix, which a LATER process
+        // loads as `SUPRA2_BUNDLE_DIR` (the real-weight lanes convert once, in this separate step).
+        let out = std::env::var_os("SUPRA2_BUNDLE_OUT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.path().join("bundle"));
+        convert_supra2_bundle(&source, &t5, &vae, &out).expect("real conversion succeeds");
+        let bundle =
+            gen_core::supra2::read_pinned_bundle(&out, gen_core::supra2::BundleCheck::Digests)
+                .expect("the bundle reads back under the pin contract");
+        assert_eq!(bundle.manifest.provider_id, "supra2_img");
+        assert!(
+            out.join("model_index.json").is_file(),
+            "install marker written"
+        );
     }
 }
 

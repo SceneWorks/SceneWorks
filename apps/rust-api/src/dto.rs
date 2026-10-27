@@ -760,10 +760,13 @@ impl Default for TrainingCaptionOptions {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImageJobRequest {
     pub(crate) project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) moss_image_advanced: Option<sceneworks_core::moss_image_advanced::EditAdvanced>,
     #[serde(default)]
     pub(crate) project_name: Option<String>,
     #[serde(default = "default_image_mode")]
     pub(crate) mode: String,
+    #[serde(default)]
     pub(crate) prompt: String,
     /// A NATIVE prompt batch (sc-25681): prompts the model renders together in one pass, only for a
     /// model declaring `image.maxPromptBatchImages` (Iris-3B). `prompt` must equal `prompts[0]`.
@@ -874,6 +877,13 @@ pub(crate) struct ImageJobRequest {
     pub(crate) requested_gpu: String,
     #[serde(default, skip_serializing_if = "ImageUpscaleRequest::is_disabled")]
     pub(crate) upscale: ImageUpscaleRequest,
+    /// The Image Studio "Hires.fix" toggle (epic 15983): an A1111-style second pass. The web sends
+    /// it top-level (`imageJobRequest.js`), so — like `upscale` — it MUST be a typed field: without
+    /// one, serde dropped the unknown key on deserialize and `to_json_object` never forwarded it,
+    /// so the worker's `parse_hires_fix` never saw the block (the second pass silently never ran,
+    /// and the worker's refusals never fired, sc-26644).
+    #[serde(default, skip_serializing_if = "HiresFixRequest::is_disabled")]
+    pub(crate) hires_fix: HiresFixRequest,
     #[serde(default)]
     pub(crate) advanced: JsonObject,
     /// Server-authored link for a disclosed composed workflow. Public callers cannot use this to

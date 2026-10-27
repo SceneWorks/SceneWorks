@@ -1035,6 +1035,7 @@ pub(crate) fn normalize_lora_entry(
     Ok(lora)
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) async fn create_lora_import_job(
     State(state): State<AppState>,
     request: AxumRequest,

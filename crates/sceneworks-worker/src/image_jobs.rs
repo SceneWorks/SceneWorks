@@ -36,6 +36,11 @@ use sceneworks_core::workflow_share::{
 };
 use std::sync::Arc;
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+mod load_progress;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+use load_progress::message as load_activity_message;
+
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
 // bundle explicitly owns its provider catalog; this product module names only contract types and
 // the few bespoke utility APIs that do not implement the general registry traits.
@@ -580,12 +585,37 @@ fn validate_flux3_layout_request(request: &ImageRequest) -> WorkerResult<()> {
     Ok(())
 }
 
+/// Run one image generate/edit job. A failure on a convert-at-install model with an engine pin
+/// contract is explained (and a damaged converted bundle recorded for the catalog) by
+/// [`crate::converted_install::explain_job_result`] — sc-24216: same-size corruption of the bundle
+/// or of a shared co-requisite only surfaces as the engine's own load error.
 pub(crate) async fn run_image_generate_job(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
 ) -> WorkerResult<()> {
+    let result = run_image_generate_job_unexplained(api, settings, job).await;
+    crate::converted_install::explain_job_result(settings, &job.payload, result).await
+}
+
+async fn run_image_generate_job_unexplained(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<()> {
     sceneworks_core::moss_image::native_request(
+        &job.payload,
+        &job.payload
+            .get("modelManifestEntry")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default(),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    // sc-24215: Supra2-IMG's published interface, re-applied before load (the API refuses the same
+    // request before the job exists), so a replayed or hand-built payload never reaches the engine
+    // with an input the generic lane would silently drop.
+    sceneworks_core::supra2::validate_request(
         &job.payload,
         &job.payload
             .get("modelManifestEntry")
@@ -679,7 +709,14 @@ pub(crate) async fn run_image_generate_job(
     // the plan so the generation set + streamed `expectedCount` match what lands in
     // the gallery.
     #[cfg(target_os = "macos")]
-    let route = prepare_image_route(&request, settings)?;
+    let route = {
+        let request = request.clone();
+        let route_settings = settings.clone();
+        prepare_image_route_with_progress(api, settings, &job.id, move || {
+            prepare_image_route(&request, &route_settings)
+        })
+        .await?
+    };
     // Whether — and from what — every image this job writes embeds its sanitized workflow
     // (sc-15948). Resolved once here so the base write and the inline-upscale write share one
     // answer, and read live off the config dir so flipping the Settings toggle takes effect on the
@@ -705,7 +742,14 @@ pub(crate) async fn run_image_generate_job(
     // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let route = prepare_candle_image_route(&request, settings)?;
+    let route = {
+        let request = request.clone();
+        let route_settings = settings.clone();
+        prepare_image_route_with_progress(api, settings, &job.id, move || {
+            prepare_candle_image_route(&request, &route_settings)
+        })
+        .await?
+    };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
@@ -1714,6 +1758,7 @@ pub(crate) async fn run_image_generate_job(
                 // an edit without its required source can never fall through as plain T2I; both variants
                 // use the same generic stream once their request shapes are resolved.
                 CandleImageRoute::MageEdit
+                | CandleImageRoute::MossImageEdit
                 | CandleImageRoute::QwenImage21Edit
                 | CandleImageRoute::Flux3Reference
                 | CandleImageRoute::SenseNovaEdit
@@ -1837,7 +1882,7 @@ pub(crate) async fn run_image_generate_job(
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
     let warnings: Vec<String> = Vec::new();
-    let mut message = format!("Generated {} image(s).", plan.image_count);
+    let mut message = format!("Generated {} output(s).", plan.image_count);
     if !warnings.is_empty() {
         message.push_str(&format!(" Warning: {}", warnings.join(" ")));
     }
@@ -1902,6 +1947,11 @@ async fn generate_stub_stream(
                 ProgressStage::Generating,
                 progress,
                 &format!("Generated image {}/{}.", index + 1, request.count),
+                // Full fact set on the per-image tick: this is the stub lane's
+                // `Image`-equivalent arm (the fact set JUST grew by this image), and
+                // the count tick is O(images), not O(images² · steps) — the next image's
+                // POST is what re-streams it. Kept as `streaming_result` so the durable
+                // row keeps every accumulated write.
                 Some(streaming_result(plan, asset_writes)),
                 backend,
             ),
@@ -2905,6 +2955,22 @@ pub(crate) fn reattach_alpha(
 /// every image of the batch so reopening any one restores the batch.
 pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
 
+fn moss_input_parents(raw: &JsonObject) -> WorkerResult<Vec<String>> {
+    let mut parents = sceneworks_core::moss_image::edit_reference_slots(raw)
+        .map_err(WorkerError::InvalidPayload)?;
+    if let Some(value) = raw.get(sceneworks_core::moss_image_advanced::KEY) {
+        let options: sceneworks_core::moss_image_advanced::EditAdvanced =
+            serde_json::from_value(value.clone())
+                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        for reference in sceneworks_core::moss_image_advanced::references(&options) {
+            if !parents.contains(&reference.asset_id) {
+                parents.push(reference.asset_id.clone());
+            }
+        }
+    }
+    Ok(parents)
+}
+
 /// Save image `index` (its engine `pixels`, 3- or 4-channel) under `assets/images/` and return the
 /// flat fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
@@ -2912,7 +2978,7 @@ pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
 pub(crate) fn write_image_asset(
     plan: &ImagePlan,
     index: usize,
-    seed: i64,
+    seed: impl Into<Option<i64>>,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
@@ -2920,6 +2986,7 @@ pub(crate) fn write_image_asset(
     mut raw_settings: JsonObject,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
+    let seed = seed.into();
     let request = &plan.request;
     // The three checkpoint facts (sc-21484, epic 11037), stamped here because EVERY generated image
     // asset funnels through this one function — so the source codec a checkpoint stores, the host's
@@ -2973,6 +3040,21 @@ pub(crate) fn write_image_asset(
     if !request.prompts.is_empty() {
         raw_settings.insert(PROMPT_BATCH_KEY.to_owned(), json!(request.prompts));
     }
+    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+        // Lineage anchors the first source only. History needs every semantic slot, including
+        // repeated identities; never trust a stale reference vector supplied inside `advanced`.
+        let carriers = json!({"referenceAssetIds":request.reference_asset_ids,"sourceAssetId":request.source_asset_id,"referenceAssetId":request.reference_asset_id});
+        let ids = sceneworks_core::moss_image::edit_reference_slots(
+            carriers.as_object().expect("carriers object"),
+        )
+        .map_err(WorkerError::InvalidPayload)?;
+        if ids.is_empty() || ids.len() > 4 {
+            return Err(WorkerError::InvalidPayload(
+                "MOSS history requires 1–4 ordered reference slots".to_owned(),
+            ));
+        }
+        raw_settings.insert("referenceAssetIds".to_owned(), json!(ids));
+    }
 
     // Typed by the engine's channel count, not assumed to be three (sc-24111). See
     // `GeneratedPixels` for why this is the load-bearing line rather than the writer below.
@@ -3008,7 +3090,7 @@ pub(crate) fn write_image_asset(
                 prompt: prompt.clone(),
                 negative_prompt: request.negative_prompt.clone(),
                 // THIS image's seed, not the batch base the payload carries.
-                seed,
+                seed: seed.unwrap_or_default(),
                 width: Some(width),
                 height: Some(height),
             },
@@ -3023,6 +3105,15 @@ pub(crate) fn write_image_asset(
             share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
         if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(index) = raw_settings
+                .get("mossImageSampleIndex")
+                .and_then(Value::as_u64)
+                .filter(|index| *index < 8)
+            {
+                share
+                    .advanced
+                    .insert("mossImageSampleIndex".into(), json!(index));
+            }
             if let Some(report) = raw_settings
                 .get(sceneworks_core::moss_image::REPORT_KEY)
                 .and_then(sceneworks_core::workflow_share::sanitize_moss_execution_report)
@@ -3034,6 +3125,22 @@ pub(crate) fn write_image_asset(
                 share
                     .advanced
                     .insert(sceneworks_core::moss_image::REPORT_KEY.to_owned(), report);
+            }
+        }
+        if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(report) = raw_settings
+                .get(sceneworks_core::moss_image::EDIT_REPORT_KEY)
+                .and_then(sceneworks_core::workflow_share::sanitize_moss_edit_execution_report)
+            {
+                if let Some(steps) = report.pointer("/base/resolved/steps") {
+                    share.advanced.insert("steps".into(), steps.clone());
+                }
+                if raw_settings.contains_key(sceneworks_core::moss_image_advanced::KEY) {
+                    share.seed = seed;
+                }
+                share
+                    .advanced
+                    .insert(sceneworks_core::moss_image::EDIT_REPORT_KEY.into(), report);
             }
         }
         share.model_hash = plan.model_hash.clone();
@@ -3114,7 +3221,12 @@ pub(crate) fn write_image_asset(
         "sourceAssetId": source_asset_id,
         "rawAdapterSettings": raw_settings,
     });
-    Ok(fact.as_object().cloned().expect("json! object literal"))
+    let mut fact = fact.as_object().cloned().expect("json! object literal");
+    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+        fact.insert("parents".into(), json!(moss_input_parents(&raw_settings)?));
+        fact.insert("batchIndex".into(), json!(index));
+    }
+    Ok(fact)
 }
 
 /// Normalise the UI's upscale engine id to the canonical worker id. SeedVR2 stays itself;
@@ -3543,12 +3655,19 @@ fn write_upscaled_asset(
 /// The job-result shape the API streams from: `assetWrites` + the `generationSet`
 /// fact drive `persist_reported_assets` (idempotent per progress update).
 ///
-/// ACCEPTED TRADEOFF (sc-8953 / F-151): this deep-clones the whole `asset_writes` vec into the
-/// result on every call, and the generation loop calls it on each `GenEvent::Step` — so the total
-/// serialization work is O(images² · steps) as `asset_writes` grows one entry per finished image.
-/// At current image counts (a handful per set) and step counts this is negligible next to the
-/// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
-/// `Decoding` events (where the fact set actually changes) rather than on every step.
+/// RESOLVED TRADEOFF (sc-8953 / F-151, 2026-10-27): the original comment accepted an
+/// O(images² · steps) deep-clone of the whole `asset_writes` vec on every `GenEvent::Step`
+/// because image counts were small. Real batches grew (260-image angle sets), and the
+/// accumulated fact set — each finished image's full normalized sidecar, several KB — rode
+/// every per-step POST to the API, which re-published the full snapshot to every SSE
+/// subscriber on every tick (~5,200 ticks ≈ multi-GB cumulative `JSON.parse` churn in the
+/// WebView2 renderer). V8 old-space hit its ~4 GB ceiling and Chromium killed the renderer
+/// (managed OOM exception 0xE0000008; daily Crashpad dumps since 2026-10-24), leaving the
+/// desktop app a dead white window mid-batch. The step ticks now post
+/// [`slim_step_result`] instead: the fact set streams ONLY where it actually changes
+/// (`Image` / `Decoding` / `Loading` events and every terminal post), and the store
+/// (`jobs_store::merge_progress_result_accumulations`) restores an omitted accumulation
+/// from the previous stored result so a slim tick never regresses the durable row.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     let mut result = json!({
         "generationSetId": plan.genset_id,
@@ -3589,6 +3708,33 @@ fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
                 .cloned()
         })
         .collect()
+}
+
+/// The STEP-tick job-result shape (sc-8953 follow-through, 2026-10-27): the small identity keys
+/// plus the live preview frame, WITHOUT the accumulated `assetWrites` / `generationSet` /
+/// `prefixKvCache` fact sets. See [`streaming_result`] for why the per-step cadence must stay
+/// O(1) in the finished-image count. Everything a RUNNING job's UI consumes stays present —
+/// `previewFrame` (live denoise), `generationSetId` / `expectedCount` (skeleton cells, refresh
+/// triggering), `adapter` / `model` (the architecture pill) — and the durable row keeps its
+/// accumulated facts via the store-side merge, so nothing a later Image-event post or a terminal
+/// post needs is lost.
+///
+/// Gated like its only callers (the `include!`d `base.rs` step arm, reached on macOS and the
+/// candle lane) so the default lane never dead-code warns.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn slim_step_result(plan: &ImagePlan) -> JsonObject {
+    json!({
+        "generationSetId": plan.genset_id,
+        "expectedCount": plan.image_count,
+        "adapter": plan.adapter,
+        "model": plan.request.model,
+    })
+    .as_object()
+    .cloned()
+    .expect("json! object literal")
 }
 
 /// Request-only fallback used by test plans and the backend-less stub plan. Production MLX/candle
@@ -3644,106 +3790,13 @@ fn resolve_family(request: &ImageRequest) -> String {
     String::new()
 }
 
-fn hires_fix_target_dimension(dimension: u32, upscale_by: f32) -> u32 {
-    (dimension as f64 * upscale_by as f64).round() as u32
-}
-
-/// Reject unsupported Hires.fix request shapes before any model load. Hires.fix is a plain
-/// text-to-image second pass: existing edit/control inputs, PiD, multi-phase sampling, and the
-/// separate post-generation upscaler are intentionally mutually exclusive rather than being
-/// silently dropped by a provider.
+/// Reject unsupported Hires.fix request shapes before any model load. The checks live in
+/// sceneworks-core (`image_request::hires_fix_request_error`, sc-26644) so the API's enqueue gate
+/// and this pre-model-load refusal are the SAME list; only the family resolution is worker-local
+/// (the generators-registry fallback below).
 fn validate_hires_fix_request(request: &ImageRequest) -> WorkerResult<()> {
-    if request.hires_fix.is_disabled() {
-        return Ok(());
-    }
-    if request.mode != "text_to_image" {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix is only available for text-to-image generation.".to_owned(),
-        ));
-    }
-    if request.upscale.enabled {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix and the post-generation Upscale option are mutually exclusive.".to_owned(),
-        ));
-    }
-    let family = resolve_family(request);
-    let advertises_img2img = request
-        .model_manifest_entry
-        .get("ui")
-        .and_then(|ui| ui.get("img2img"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if family != "sdxl" && !advertises_img2img {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Hires.fix requires an img2img-capable model; '{}' does not advertise that capability.",
-            request.model
-        )));
-    }
-    let has_edit_or_control_input = request.source_asset_id.is_some()
-        || request.reference_asset_id.is_some()
-        || !request.reference_asset_ids.is_empty()
-        || request.mask_asset_id.is_some()
-        || request.character_id.is_some()
-        || request.character_look_id.is_some()
-        || request
-            .advanced
-            .get("poses")
-            .and_then(Value::as_array)
-            .is_some_and(|poses| !poses.is_empty())
-        || request
-            .advanced
-            .get("controlImage")
-            .and_then(Value::as_str)
-            .is_some_and(|id| !id.trim().is_empty());
-    if has_edit_or_control_input {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix cannot be combined with image-edit, reference, character, mask, or strict-control inputs."
-                .to_owned(),
-        ));
-    }
-    if request
-        .advanced
-        .get("usePid")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix and PiD super-resolution are mutually exclusive.".to_owned(),
-        ));
-    }
-    if request
-        .advanced
-        .get("phases")
-        .and_then(Value::as_array)
-        .is_some_and(|phases| !phases.is_empty())
-    {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix cannot be combined with multi-phase sampling.".to_owned(),
-        ));
-    }
-    let acceleration_sampler = request
-        .advanced
-        .get("sampler")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .is_some_and(|sampler| matches!(sampler.as_str(), "lightning" | "lcm" | "hyper"));
-    if request.model == "realvisxl_lightning" || acceleration_sampler {
-        return Err(WorkerError::InvalidPayload(
-            "Hires.fix is not supported by Lightning, LCM, or Hyper acceleration samplers because they do not accept the required img2img second pass."
-                .to_owned(),
-        ));
-    }
-    let upscale_by = request.hires_fix.effective_upscale_by();
-    let target_width = hires_fix_target_dimension(request.width, upscale_by);
-    let target_height = hires_fix_target_dimension(request.height, upscale_by);
-    if target_width > 4096 || target_height > 4096 {
-        return Err(WorkerError::InvalidPayload(format!(
-            "Hires.fix target {}x{} exceeds the 4096px image limit; lower the base resolution or Upscale by value.",
-            target_width, target_height
-        )));
-    }
-    Ok(())
+    sceneworks_core::image_request::hires_fix_request_error(request, &resolve_family(request))
+        .map_or(Ok(()), |message| Err(WorkerError::InvalidPayload(message)))
 }
 
 /// Resolve the seed for image `index`, matching the Python worker's `resolve_seed`:
@@ -3885,6 +3938,15 @@ include!("image_jobs/stream.rs");
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 mod iris;
+
+// Supra2-IMG (sc-24213 MLX / sc-24214 Candle): pins the generic image lane's wiring for
+// `supra2_img` (bundle + co-requisite staging) on whichever backend the build links, and carries the
+// real-weight worker renders (the MLX arm on macOS, the production Candle job on CUDA).
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod supra2;
 
 // The generic image lane's request controls beyond the positional knobs (CFG interval,
 // caption-overflow policy, CFG-bound negative prompt) and the per-image provenance facts (engine

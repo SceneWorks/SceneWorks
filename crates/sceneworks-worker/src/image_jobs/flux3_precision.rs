@@ -969,23 +969,14 @@ mod tests {
         assert!(format!("{error:?}").contains("reinstall"), "{error:?}");
     }
 
-    /// The text from `declaration` to the end of its body.
+    /// The text from `declaration` to its top-level closing brace. The render lane's body carries
+    /// format strings full of braces, so a raw brace count is not a reliable delimiter; every
+    /// top-level `fn` closes with `}` in column 0.
     fn function_body(source: &'static str, declaration: &str) -> &'static str {
-        let body = &source[source.find(declaration).expect(declaration)..];
-        let mut depth = 0_usize;
-        for (offset, byte) in body.bytes().enumerate().skip(body.find('{').expect("body")) {
-            match byte {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return &body[..=offset];
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("unbalanced body for {declaration}");
+        let start = source.find(declaration).expect(declaration);
+        let body = &source[start..];
+        let end = body.find("\n}\n").expect("function end") + 3;
+        &body[..end]
     }
 
     fn position(body: &str, needle: &str, lane: &str) -> usize {
@@ -1000,9 +991,9 @@ mod tests {
     fn the_candle_lane_consumes_every_flux3_plan_seam_in_order() {
         let body = function_body(
             include_str!("base.rs"),
-            "async fn generate_candle_stream_using(",
+            "async fn generate_candle_registry_stream_using(",
         );
-        let lane = "generate_candle_stream_using";
+        let lane = "generate_candle_registry_stream_using";
         let plan = position(
             body,
             "let flux3_plan = flux3_precision::candle_flux3_plan(",
@@ -1024,7 +1015,11 @@ mod tests {
             "shared_contract_spec = plan.attach_components(shared_contract_spec);",
             lane,
         );
-        let encoder = position(body, "attach_manifest_text_encoder(", lane);
+        let encoder = position(
+            body,
+            "let attached_shared_contract_spec = attach_manifest_text_encoder(",
+            lane,
+        );
         assert!(
             plan < dir && dir < gate_key,
             "the package directory is the gated directory"

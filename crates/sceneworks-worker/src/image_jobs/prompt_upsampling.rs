@@ -874,7 +874,7 @@ mod tests {
                         GenEvent::Decoding { index: 0 },
                         GenEvent::Image {
                             index: 0,
-                            seed: 17,
+                            seed: Some(17),
                             width: 64,
                             height: 64,
                             pixels: vec![128; 64 * 64 * 3],
@@ -1004,7 +1004,7 @@ mod tests {
                 .unwrap();
                 tx.blocking_send(GenEvent::Image {
                     index: 0,
-                    seed: 17,
+                    seed: Some(17),
                     width: 64,
                     height: 64,
                     pixels: vec![128; 64 * 64 * 3],

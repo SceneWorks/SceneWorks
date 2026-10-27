@@ -3,8 +3,8 @@ use super::{
     instantid_mlx_eligible, model_mac_support, qwen_edit_mlx_eligible, qwen_image_2_1_mlx_eligible,
     qwen_mlx_eligible, realvisxl_lightning_mlx_lane, sdxl_control_mlx_candidate, sdxl_mlx_eligible,
     sdxl_mlx_lane, video_job_is_mlx_eligible, video_mode_is_mlx_eligible, worker_supports_job,
-    z_image_mlx_eligible, JobSnapshot, MlxSdxlLane, WorkerSnapshot, CANDLE_VIDEO_ROUTED_MODELS,
-    MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
+    z_image_mlx_eligible, JobSnapshot, MlxSdxlLane, WorkerSnapshot, CANDLE_ROUTED_MODELS,
+    CANDLE_VIDEO_ROUTED_MODELS, MLX_ROUTED_MODELS, VIDEO_MLX_ROUTED_MODELS,
 };
 use serde_json::{json, Map, Value};
 
@@ -2217,6 +2217,43 @@ fn flux3_routes_base_and_distilled_text_to_image_with_explicit_lora() {
         assert!(support.supported);
         assert!(support.features.edit && support.features.reference && !support.features.pose);
     }
+}
+
+/// sc-24213: Supra2-IMG routes to MLX only as plain text-to-image. Every carrier the `supra2_img`
+/// engine has no input for (source/reference/mask/control/pose, adapters, a quant tier, a hires-fix
+/// img2img pass) keeps the job off the lane. Off-Mac the same engine id routes to Candle (sc-24214,
+/// `supra2_routes_to_candle_for_plain_text_to_image_only`).
+#[test]
+fn supra2_routes_plain_text_to_image_only() {
+    assert!(MLX_ROUTED_MODELS.contains(&"supra2_img"));
+    assert!(CANDLE_ROUTED_MODELS.contains(&"supra2_img"));
+    let eligible = |payload: Value| image_request_mlx_eligible("supra2_img", &object(payload));
+    assert!(eligible(
+        json!({ "model": "supra2_img", "mode": "text_to_image" })
+    ));
+    assert!(eligible(json!({
+        "model": "supra2_img",
+        "advanced": { "steps": 50, "guidanceScale": 3.0, "resolution": "256x256" }
+    })));
+    assert!(eligible(json!({ "hiresFix": { "enabled": false } })));
+    for refused in [
+        json!({ "mode": "edit_image", "sourceAssetId": "a" }),
+        json!({ "mode": "image_to_image", "sourceAssetId": "a" }),
+        json!({ "referenceAssetId": "a" }),
+        json!({ "referenceAssetIds": ["a"] }),
+        json!({ "maskAssetId": "a" }),
+        json!({ "controls": [{}] }),
+        json!({ "advanced": { "poses": [{}] } }),
+        json!({ "loras": [{ "id": "l", "weight": 0.8 }] }),
+        json!({ "advanced": { "mlxQuantize": 8 } }),
+        json!({ "advanced": { "quantTier": "q4" } }),
+        json!({ "hiresFix": { "enabled": true } }),
+    ] {
+        assert!(!eligible(refused.clone()), "{refused}");
+    }
+    let support = model_mac_support("supra2_img", "image", Some("supra2"));
+    assert!(support.supported);
+    assert!(!support.features.edit && !support.features.reference && !support.features.pose);
 }
 
 /// sc-2126: `dataset_subject_mask` has no capability of its own — it requires the SAM3

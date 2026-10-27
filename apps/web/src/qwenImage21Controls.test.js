@@ -35,7 +35,8 @@ import {
   modelDimensionConstraints,
 } from "./resolutionOverride.js";
 import { minStepsForModel } from "./videoModelLimits.js";
-import { fallbackModels, QWEN_IMAGE_2_1_MODEL_ID } from "./constants.js";
+import { QWEN_IMAGE_2_1_MODEL_ID } from "./constants.js";
+import { fallbackModels } from "./modelCatalog.js";
 import { buildImageJobAdvanced } from "./imageJobAdvanced.js";
 import { OrderedReferenceList } from "./components/OrderedReferenceList.jsx";
 

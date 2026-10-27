@@ -476,6 +476,10 @@ function sharedAdvancedKeysFromTheContract() {
 // A plausible value per key, so one envelope can carry the whole table.
 function sampleValueFor(key) {
   switch (key) {
+    case "mossImageAdvanced":
+      return { output: "images" };
+    case "promptBatch":
+      return ["one", "two"];
     case "poses":
       return [{ keypoints: [1, 2] }, { keypoints: [3, 4] }];
     case "phases":
@@ -600,7 +604,9 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "imageGuidanceScale",
       "lightning",
       "ltxPipeline",
+      "mossImageEditExecutionReport",
       "mossImageExecutionReport",
+      "mossImageSampleIndex",
       "motion",
       "structuredPrompt",
       "systemMessage",

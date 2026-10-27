@@ -295,6 +295,13 @@ export function contractIsLoraOnly(model, backend, baseProvider) {
  * engine contracts and its calibration plan rows name `bf16`). Left on the `default` pseudo-tier,
  * the first measured `iris_3b:bf16:mlx` capture was refused at ingest as a corpus that reaches no
  * catalog cell (campaign run 38398326210).
+ *
+ * Supra2-IMG is the converter-backed twin of that shape (sc-24217, epic 24212): its one download is
+ * the upstream `.pt` with no `variant` and no `quantize` marker, and the install converts it into a
+ * single dense bundle that both engines load at the dense tier only (`LoadSpec::precision` `Bf16`,
+ * which is what the worker's `plan_tier_key` and both engines' contract surfaces call `bf16`; the
+ * loaders refuse every other precision and any quantization). On the `default` pseudo-tier the
+ * `supra2_img:bf16:*` anchors would reach no catalog cell, exactly as Iris's first capture did.
  */
 export const CONVERTER_TIER_OVERRIDES = new Map([
   ["anima_base:mlx", ["bf16", "q4", "q8"]],
@@ -303,6 +310,8 @@ export const CONVERTER_TIER_OVERRIDES = new Map([
   ["flux2_klein_9b_true_v2:mlx", ["bf16"]],
   ["iris_3b:mlx", ["bf16"]],
   ["iris_3b:candle", ["bf16"]],
+  ["supra2_img:mlx", ["bf16"]],
+  ["supra2_img:candle", ["bf16"]],
 ]);
 
 /**

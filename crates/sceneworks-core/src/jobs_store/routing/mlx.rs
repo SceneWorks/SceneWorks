@@ -122,6 +122,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
         }
         "iris_3b" => iris_mlx_eligible(payload),
         "flux3_klein" | "flux3_klein_base" => flux3_mlx_eligible(payload),
+        "supra2_img" => supra2_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
         _ => false,
@@ -563,6 +564,26 @@ pub(crate) fn flux3_surface_eligible(payload: &Map<String, Value>) -> bool {
                     })
                 })
         })
+}
+
+/// Supra2-IMG (sc-24213) is plain text-to-image at 256x256: the `supra2_img` engine takes no source,
+/// reference, mask, control or pose, and refuses adapters, quantization and conditioning by name.
+/// So `loras`, an `mlxQuantize`/`quantTier` carrier or an enabled hires fix (an img2img second pass)
+/// keeps the job off MLX — an `mlx_unsupported` affordance — instead of reaching an engine that
+/// would refuse it after load.
+pub(crate) fn supra2_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    let hires_fix_enabled = payload
+        .get("hiresFix")
+        .and_then(Value::as_object)
+        .and_then(|hires| hires.get("enabled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    !hires_fix_enabled
+        && mage_flow_mlx_eligible(payload)
+        && !has_nonempty_array(payload, "loras")
+        && !["mlxQuantize", "quantTier"]
+            .iter()
+            .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
 }
 
 /// Mage-Flow Edit requires a real primary source image. Optional plural references augment that
@@ -1356,6 +1377,68 @@ pub(crate) fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moss_edit_routes_one_to_four_ordered_reference_slots() {
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for references in [
+                json!(["ref"]),
+                json!(["ref", "other"]),
+                json!(["ref", "other", "ref"]),
+                json!(["other", "ref", "third", "ref"]),
+            ] {
+                let payload = json!({
+                    "model":model,"mode":"edit_image","prompt":"blue cup",
+                    "referenceAssetIds":references,"sourceAssetId":references[0],
+                    "referenceAssetId":references[0],
+                    "modelManifestEntry":{"limits":{"minDimension":16,"maxDimension":4096}},
+                    "advanced":{"mossImageEdit":{"use_kv_cache":false}}
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                assert_eq!(
+                    json!(crate::moss_image::edit_reference_ids(&payload).unwrap()),
+                    references
+                );
+                assert!(
+                    super::image_request_mlx_eligible(model, &payload),
+                    "{payload:?}"
+                );
+                for patch in [
+                    json!({"referenceAssetIds":[],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":null,"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other","ref","other","ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other",null],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other",3],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other","ref",""],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other"," ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":"ref"}),
+                    json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"],"referenceAssetId":null}),
+                    json!({"referenceAssetId":"conflict","referenceAssetIds":["ref"],"sourceAssetId":null}),
+                    json!({"maskAssetId":"mask"}),
+                    json!({"loras":[{"id":"custom"}]}),
+                    json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+                    json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
+                    json!({"advanced":{"mossImageEdit":{"unknown":true}}}),
+                    json!({"advanced":{"controlImage":"pose"}}),
+                    json!({"mode":"text_to_image","advanced":{}}),
+                ] {
+                    let mut invalid = payload.clone();
+                    invalid.extend(patch.as_object().unwrap().clone());
+                    assert!(
+                        !super::image_request_mlx_eligible(model, &invalid),
+                        "{invalid:?}"
+                    );
+                }
+            }
+            let ordinary = json!({"model":model,"mode":"text_to_image","prompt":"blue cup"})
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(super::image_request_mlx_eligible(model, &ordinary));
+        }
+    }
+
     use serde_json::{json, Map, Value};
 
     use super::{image_request_mlx_eligible, MLX_ROUTED_MODELS};

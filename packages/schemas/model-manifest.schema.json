@@ -1065,6 +1065,11 @@
           },
           "conditionalComponents": {
             "type": "array",
+            "x-sceneworks-readers": [
+              { "path": "apps/rust-api/src/workflows.rs", "anchor": "fn moss_edit_component_entry" },
+              { "path": "apps/web/src/mossImage.js", "anchor": "export function mossComponentState" },
+              { "path": "crates/sceneworks-mcp/src/server.rs", "anchor": "mossImageEditControls" }
+            ],
             "description": "Pinned components a model needs ONLY for a specific purpose (sc-22998: YuE2's SheetSage2 + MERT-v2-FullSong source-recording transcription, needed for covers only, epic sc-22988 E7). They are deliberately NOT `downloads[]` rows, so no install, tier selection or co-requisite resolution fetches them for base generation. `sceneworks_core::model_usage_policy::conditional_component_downloads` is the only acquisition seam (`POST /api/v1/models/:id/conditional-components/:purpose/download`, sc-23002): it returns the pinned rows for a purpose, and REFUSES while any of them carries `blocked`, naming the reason and the unblock condition. The rows ride the declaring entry's licence acknowledgment: the repo-keyed download doors allow them only with it.",
             "items": {
               "type": "object",
@@ -1080,7 +1085,7 @@
                   "type": "array",
                   "minItems": 1,
                   "uniqueItems": true,
-                  "items": { "enum": ["cover", "moss_dmd_unmerged_bf16", "moss_dmd_full_fp32"] },
+                  "items": { "enum": ["cover", "moss_dmd_unmerged_bf16", "moss_dmd_full_fp32", "moss_image_edit"] },
                   "description": "The purposes that need the component. Base generation is never one of them."
                 },
                 "provider": { "enum": ["huggingface"] },
@@ -1233,6 +1238,13 @@
                 "x-sceneworks-allow-undeclared": true,
                 "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_min_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/video_jobs/mod.rs", "anchor": "steps_limit_error(&request.model, steps" }],
                 "description": "Hard FLOOR on `advanced.steps` (denoise / sampling steps); API and worker reject rather than raise the count. The sampling-axis sibling of hardMinDuration. THE UNIT IS MODEL EVALUATIONS (NFE) — the same unit `defaults.steps`, `advanced.steps` and a turbo adapter's `sampling.steps` carry: MiniMax-H3's engine builds its sigma grid as linspace(1, 0, steps + 1), appending the terminal 0 ITSELF (`JointSchedule::with_shifts(evaluations + 1, ..)`), so nothing in SceneWorks adds or subtracts one and `steps: 1` is a legal 2-point grid that RENDERS — as noise, because one evaluation is a single Euler jump from pure randomness. H3's floor of 2, the smallest schedule with an intermediate sigma, is therefore a PRODUCT judgement rather than an engine limit (sc-19426, corrected sc-18726); the retracted \"N steps drive N-1 model evaluations, so 1 is unrenderable\" reading described diffusers' `num_inference_steps` grid-point convention, which is NOT what this key counts. Enforced at enqueue on BOTH the video and image paths, plus the worker's video lane — the gates named in x-sceneworks-readers are the only per-model rejection seams in the app. The image enqueue reader was added by sc-24108 for Qwen-Image 2.1, the first image model with a real sampling floor (its engine refuses steps < 2); before that this key was video-only and an image declaration would have been inert. The `apps/rust-api` anchor matches both call sites. ABSENT MEANS NO FLOOR, so every model that declares nothing is byte-for-byte unchanged, the same never-block-without-evidence posture hardMinDuration takes. A declared floor must not exceed the model's own defaults.steps."
+              },
+              "hardMaxSteps": {
+                "type": "integer", "minimum": 1,
+                "x-sceneworks-contract": "binding",
+                "x-sceneworks-allow-undeclared": true,
+                "x-sceneworks-readers": [{ "path": "crates/sceneworks-core/src/video_request.rs", "anchor": "pub fn hard_max_steps" }, { "path": "apps/rust-api/src/generation.rs", "anchor": "if let Some(message) = steps_limit_error(" }, { "path": "crates/sceneworks-worker/src/image_jobs/base.rs", "anchor": "sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)" }, { "path": "crates/sceneworks-core/src/supra2.rs", "anchor": "crate::video_request::hard_max_steps(entry)" }],
+                "description": "Hard CEILING on `advanced.steps` (sc-24215), the sibling of hardMinSteps in the same unit (model evaluations). API enqueue (steps_limit_error) and the model's own worker boundary REJECT a request above it rather than clamping it; the generic image lane's historical clamp (80, or defaults.steps when higher) is replaced by this value for a model that declares it. Supra2-IMG declares gen-core's shared sanity cap (100000) because upstream has no steps limit. ABSENT MEANS NO DECLARED CEILING: every other model keeps exactly its previous behaviour. A declared ceiling must not be below the model's own defaults.steps."
               },
               "maxPixels": {
                 "type": "integer", "minimum": 1,
@@ -1992,6 +2004,15 @@
                 "type": "integer",
                 "minimum": 2,
                 "description": "The engine renders a LIST of prompts as one batched pass (upstream Iris-3B `generate(prompts=[…])`, sc-25681): a job's top-level `prompts` (with `prompt` = `prompts[0]`) renders `prompts × count` images in prompt-minor order on seeds seed, seed+1, …, at most this many per job (the engine's max_count). ABSENT MEANS NONE: the API refuses `prompts`, and Image Studio's prompt batch stays one job per prompt. When present, Image Studio packs its prompt batch into native jobs of up to floor(this / count) prompts."
+              },
+              "maxPromptTokens": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The engine's prompt context in text-encoder tokens (the linked descriptor's `max_prompt_tokens`; Supra2-IMG's Flan-T5 context is 128, sc-24216). A longer prompt is truncated by the engine and reported as a `prompt_truncated` warning, never refused. The Model Manager states it among the model's supported limits. ABSENT MEANS UNDECLARED."
+              },
+              "nativeCountBatch": {
+                "type": "boolean",
+                "description": "The engine renders a job's `count` images of its ONE prompt in a single call (GenerationRequest::count), image k on seed seed + k (Supra2-IMG's published multi-image generation, sc-24215). The worker sends one native call through the native-batch driver, bounded by the engine's max_count; a per-image lane feature (hires fix, a reference, prompt enhancement) is refused before load. ABSENT MEANS FALSE: one engine call per image."
               }
             }
           },
@@ -2197,6 +2218,11 @@
                   "type": "string",
                   "pattern": "^[0-9a-f]{40}$",
                   "description": "Optional pinned 40-hex git commit SHA — the F-029 pin authority for this download (sc-13659). When present the download job forwards it so the worker fetches that exact IMMUTABLE commit into snapshots/<sha>/; absent means the worker resolves `main` at install time, so the ~200 existing non-pinned models need no migration. MUST be a full 40-char lowercase-hex commit: a branch/tag/short SHA is rejected by the pattern above because it resolves online but hard-fails the offline pinned-SHA resolver (hf_get_pinned reads snapshots/<sha>/). REQUIRED on coRequisite: true entries — the F-029 guarantee that a companion weight (e.g. chatterbox_tts's ve/perth) installs to a deterministic, offline-resolvable snapshot; that conditional is enforced by tests/test_builtin_manifest_audit.py and crates/sceneworks-core/src/builtin_manifests.rs rather than JSON Schema, which cannot grandfather the sc-13591 pin migration still in flight. See sc-13541, sc-13591."
+                },
+                "license": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "SPDX identifier of THIS download's own licence, for an entry assembled from components under different licences (sc-24216: Supra2-IMG's denoiser and Flan-T5-Base are Apache-2.0, its SD VAE ft-MSE decoder is MIT). The Model Manager lists it beside the component's repo, pinned revision and size. The entry-level `license` stays the whole-model summary; absent means the row carries no separate declaration."
                 },
                 "componentId": {
                   "type": "string",

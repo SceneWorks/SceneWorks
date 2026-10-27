@@ -68,7 +68,7 @@ jobs:
       FLUX3_TERMINAL_SOURCE_SHA: ${{ inputs.source_sha }}
       FLUX3_TERMINAL_INFERENCE_SHA: ${{ inputs.inference_sha }}
       CUDA_VISIBLE_DEVICES: "-1"
-      # Preserve unstripped Mach-O proc-macro dylibs on the pinned 1.97.1 toolchain.
+      # Preserve unstripped Mach-O proc-macro dylibs on the pinned 1.98.0 toolchain.
       CARGO_PROFILE_RELEASE_STRIP: "none"
     steps:
       - name: Refuse a runner other than the dispatched host before checkout
@@ -84,7 +84,7 @@ jobs:
           node-version: 22
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
-          toolchain: "1.97.1"
+          toolchain: "1.98.0"
       - name: Fetch Release libmlx or use its source build
         run: |
           set +e

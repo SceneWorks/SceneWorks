@@ -14,8 +14,8 @@ use crate::jobs_store::routing::catalog::{
 };
 use crate::jobs_store::routing::mlx::{
     flux3_payload_tier, flux3_surface_eligible, instantid_mlx_eligible, iris_mlx_eligible,
-    pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible, upscale_job_is_mlx_eligible,
-    video_upscale_job_is_mlx_eligible,
+    pulid_flux_mlx_eligible, qwen_image_2_1_mlx_eligible, supra2_mlx_eligible,
+    upscale_job_is_mlx_eligible, video_upscale_job_is_mlx_eligible,
 };
 use crate::jobs_store::routing::{
     conditioned_reference_count, has_malformed_optional_nested_number, has_nonempty_array,
@@ -62,6 +62,7 @@ pub(crate) const CANDLE_VIDEO_LORA_MODELS: &[&str] = &[
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CandleImageLane {
     ImportedFamily,
+    MossImageEdit,
     InstantId,
     SdxlControl,
     SdxlEdit,
@@ -124,6 +125,11 @@ impl CandleImageRoute {
 }
 
 const CANDLE_IMAGE_ROUTES: &[CandleImageRoute] = &[
+    CandleImageRoute {
+        lane: CandleImageLane::MossImageEdit,
+        models: ModelMatch::Family(crate::moss_image::is_moss),
+        shape: moss_edit_candle_eligible,
+    },
     CandleImageRoute {
         lane: CandleImageLane::InstantId,
         models: ModelMatch::Any(&["instantid_realvisxl"]),
@@ -427,6 +433,11 @@ pub(crate) enum CandleImageRefusal {
     IrisSurface,
     /// Distilled FLUX 3 has the same text-to-image-only surface on both native backends.
     Flux3Surface,
+    /// Supra2-IMG (sc-24214): anything outside the plain text-to-image surface the MLX arm admits —
+    /// a non-`text_to_image` mode, controls, a user LoRA, a quant carrier (`mlxQuantize` /
+    /// `quantTier`) or an enabled hires fix. Delegates to [`supra2_mlx_eligible`] so the two lanes
+    /// refuse exactly the same list.
+    Supra2Surface,
 }
 
 impl CandleImageRefusal {
@@ -450,6 +461,7 @@ impl CandleImageRefusal {
             Self::Flux3Surface => {
                 "a carrier outside distilled FLUX 3's plain text-to-image surface"
             }
+            Self::Supra2Surface => "a carrier outside Supra2-IMG's plain text-to-image surface",
         }
     }
 }
@@ -494,6 +506,10 @@ const CANDLE_IMAGE_CHECKS: &[(CandleImageRefusal, CandleImageCheck)] = &[
         CandleImageRefusal::Flux3Surface,
         candle_refuses_flux3_surface,
     ),
+    (
+        CandleImageRefusal::Supra2Surface,
+        candle_refuses_supra2_surface,
+    ),
 ];
 
 /// Iris-3B (sc-25680) serves ONE request shape on both lanes: text-to-image with no source,
@@ -537,6 +553,15 @@ fn candle_image_quant_tier_refusal(model: &str, payload: &Map<String, Value>) ->
         Some(Value::Object(advanced)) => image_quant_tier_refusal(model, advanced).is_some(),
         Some(_) => FLUX3_TIERED_MODEL_IDS.contains(&model),
     }
+}
+
+/// Supra2-IMG (sc-24214) serves ONE request shape on both lanes: plain 256x256 text-to-image with no
+/// source, reference, mask, control, pose, user LoRA, quant carrier or hires fix. Like the Iris check
+/// it DELEGATES to the MLX predicate instead of restating it, so the Candle and MLX lanes can never
+/// disagree about what Supra2 accepts; last in the table so a carrier the generic checks name is
+/// reported by them.
+fn candle_refuses_supra2_surface(model: &str, payload: &Map<String, Value>) -> bool {
+    model == "supra2_img" && !supra2_mlx_eligible(payload)
 }
 
 /// sc-18475: the SANA specialized route above owns the only accepted reference shape. If the
@@ -755,6 +780,16 @@ pub(crate) fn candle_image_refusals(
 /// Eligible ⇔ no [`CANDLE_IMAGE_CHECKS`] entry refuses.
 pub(crate) fn image_request_candle_eligible(model: &str, payload: &Map<String, Value>) -> bool {
     candle_image_first_refusal(model, payload).is_none()
+}
+
+fn moss_edit_candle_eligible(payload: &Map<String, Value>) -> bool {
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    crate::moss_image::is_edit(payload)
+        && crate::moss_image::native_request(payload, &entry).is_ok()
 }
 
 /// Whether the request explicitly asks for on-the-fly quantization the candle backend can't do.

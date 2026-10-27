@@ -247,11 +247,13 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys).
   // sc-26234's whole-repo FLUX 3 entry adds no selective row; main's honest evidence re-record
   // and digest are retained. The Illustrious
+  // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys), plus sc-24213's three pinned
+  // Supra2-IMG components (150 keys). The Illustrious
   // file censuses below are
   // the real subject of this test and did NOT move — which is the point of asserting them beside the
   // digest.
   assert.equal(current.downloadEvidenceSha256,
-    "0bce144d4d816b3fda122c2460177c3ea6192f531bd496f3949a81dfb54b320c");
+    "95cde218e352097d3e314d0f9bb5891a219f9c01b84965c6af4abc56ac591d82");
   assert.equal(current.artifactExpectedFiles["illustrious-v1-q4"].length, 19);
   assert.equal(current.artifactExpectedFiles["illustrious-v2-q4"].length, 19);
 
@@ -4236,6 +4238,6 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.equal(packageJson.devDependencies.ajv, "8.20.0");
   assert.equal(packageJson.devDependencies["ajv-formats"], "3.0.1");
   assert.equal(packageLock.packages[""].devDependencies.ajv, "8.20.0");
-  assert.match(checks, /parity-scaffold:[\s\S]*?npm ci --ignore-scripts[\s\S]*?npm run check/);
+  assert.match(checks, /parity-scaffold:[\s\S]*?npm ci --ignore-scripts[\s\S]*?node scripts\/scaffold-test-selection\.mjs --portable/);
   assert.match(workflow, /name: Upload every epic-20738 terminal receipt[\s\S]*?if: \$\{\{ always\(\)/);
 });

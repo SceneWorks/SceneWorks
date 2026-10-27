@@ -65,6 +65,7 @@ pub const IMPORTED_WORKFLOW_KEY: &str = "importedWorkflow";
 
 pub const PROJECT_FOLDERS: &[&str] = &[
     "assets/images",
+    "assets/tensors",
     "assets/videos",
     "assets/uploads",
     "assets/frames",
@@ -3097,6 +3098,23 @@ impl ProjectStore {
             .map(str::to_owned)
             .or(guessed_mime)
             .unwrap_or_else(|| "application/octet-stream".to_owned());
+        let content_type = if Path::new(&upload.filename)
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.eq_ignore_ascii_case("npy"))
+        {
+            crate::tensor_artifact::MIME.to_owned()
+        } else {
+            content_type
+        };
+        let tensor = if content_type == crate::tensor_artifact::MIME {
+            Some(
+                crate::tensor_artifact::inspect(&upload.source_path)
+                    .map_err(ProjectStoreError::BadRequest)?,
+            )
+        } else {
+            None
+        };
         // SVG is active document syntax, not a generic upload format. Vector assets may enter
         // only through the worker-owned `vector_generate` sanitizer/rasterizer boundary, which
         // writes a canonical SVG plus a bounded PNG preview together (sc-22251).
@@ -3113,6 +3131,7 @@ impl ProjectStore {
         if !content_type.starts_with("image/")
             && !content_type.starts_with("video/")
             && !content_type.starts_with("audio/")
+            && content_type != crate::tensor_artifact::MIME
         {
             return Err(ProjectStoreError::BadRequest(
                 "Only image, video and audio uploads are supported".to_owned(),
@@ -3234,6 +3253,10 @@ impl ProjectStore {
                 "jobId": Value::Null
             }
         });
+        if let Some(tensor) = tensor {
+            asset["tensor"] = serde_json::to_value(&tensor)?;
+            asset["file"]["contentHash"] = json!(format!("sha256:{}", tensor.sha256));
+        }
         // Provenance (e.g. the Image Editor edit chain) rides the same top-level
         // `extra` slot generated assets use, so the Library/lineage UI can read it.
         //
@@ -6326,6 +6349,17 @@ fn build_generated_asset_sidecar(
             }
         }
     }
+    if media_type == "tensor" {
+        if let Some(tensor) = fact.get("tensor") {
+            asset["tensor"] = tensor.clone();
+            if let Some(hash) = tensor.get("sha256").and_then(Value::as_str) {
+                asset["file"]["contentHash"] = json!(format!("sha256:{hash}"));
+            }
+        }
+        if let Some(index) = fact.get("batchIndex") {
+            asset["batchIndex"] = index.clone();
+        }
+    }
     if media_type == "depth" {
         if let Some(depth) = fact.get("depth") {
             if let Some(object) = asset.as_object_mut() {
@@ -7628,6 +7662,9 @@ fn safe_filename(value: &str, fallback: &str) -> String {
 /// `build_generated_asset_sidecar` dispatches on for an Audio Studio render, so an imported clip and
 /// a rendered one are one asset kind rather than two.
 fn media_type_for_mime(mime_type: &str) -> ProjectStoreResult<&'static str> {
+    if mime_type == crate::tensor_artifact::MIME {
+        return Ok("tensor");
+    }
     if mime_type.starts_with("image/") {
         return Ok("image");
     }
@@ -7643,6 +7680,13 @@ fn media_type_for_mime(mime_type: &str) -> ProjectStoreResult<&'static str> {
 }
 
 fn guess_mime_from_filename(filename: &str) -> Option<String> {
+    if Path::new(filename)
+        .extension()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.eq_ignore_ascii_case("npy"))
+    {
+        return Some(crate::tensor_artifact::MIME.to_owned());
+    }
     mime_guess::from_path(filename)
         .first_raw()
         .map(str::to_owned)
@@ -7710,6 +7754,9 @@ fn is_safe_upload_extension(extension: &str) -> bool {
 /// A `video/mp4` upload named `evil.html` therefore stores `.mp4` (rule 1); a genuinely unknown
 /// mime with a dangerous extension neutralizes to `.bin` (rule 3).
 fn upload_extension(filename: &str, mime_type: &str) -> String {
+    if mime_type == crate::tensor_artifact::MIME {
+        return ".npy".to_owned();
+    }
     // 1. Prefer the extension the declared/sniffed mime canonically maps to, so the stored file's
     //    serve mime round-trips back to the type we actually accepted. mime_guess lists candidates;
     //    take the first one that is on our media allow-list.

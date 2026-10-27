@@ -307,9 +307,12 @@ test("current source derives one exact inference pin without a workflow input", 
   const sealed = campaign.inference_contract.validator_source.revision;
   assert.match(sealed, /^[a-f0-9]{40}$/);
   const checkWorkflow = await readFile(path.join(root, ".github/workflows/check.yml"), "utf8");
-  const fetch = checkWorkflow.slice(checkWorkflow.indexOf("      - name: Fetch the exact public inference terminal contract"));
-  assert.match(fetch, new RegExp(`git -C \\"\\$inference_root\\" fetch --depth=2 origin ${sealed}`));
-  assert.match(fetch, new RegExp(`rev-parse HEAD\\)\\" = ${sealed}`));
+  const { historyRequirements } = await import("./prepare-inference-history.mjs");
+  const required = historyRequirements(root);
+  assert.equal(required.terminal, sealed);
+  assert.ok(required.revisions.includes(campaign.inference_contract.validator_source.base_revision));
+  assert.match(checkWorkflow, /name: Fetch and verify all immutable inference history\n        run: node scripts\/prepare-inference-history\.mjs/);
+
 });
 
 test("diagnostic stops only at three accepted or three rejected across the five remaining cases", () => {

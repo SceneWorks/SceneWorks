@@ -6393,8 +6393,10 @@ mod timeline_audio_mix_tests {
             .expect("ffmpeg decodes the export");
         output
             .stdout
-            .chunks_exact(2)
-            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f64 / 32768.0)
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| i16::from_le_bytes(*pair) as f64 / 32768.0)
             .collect()
     }
 
@@ -6430,8 +6432,10 @@ mod timeline_audio_mix_tests {
             .expect("ffmpeg decodes the export");
         output
             .stdout
-            .chunks_exact(2)
-            .map(|pair| (i16::from_le_bytes([pair[0], pair[1]]) as f64 / 32768.0).abs())
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| (i16::from_le_bytes(*pair) as f64 / 32768.0).abs())
             .fold(0.0_f64, f64::max)
     }
 

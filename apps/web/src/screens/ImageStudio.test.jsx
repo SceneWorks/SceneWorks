@@ -18,7 +18,7 @@ import {
   parseMagicPromptCaption,
   serializeCaption,
 } from "../ideogramCaption.js";
-import { PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
+import { MAX_LISTED_JOBS, PROMPT_REFINE_MODEL_ID, VISION_CAPTION_MODEL_ID } from "../constants.js";
 import { ImageStudio } from "./ImageStudio.jsx";
 
 const Z_IMAGE = {
@@ -110,6 +110,24 @@ describe("ImageStudio Save as Preset", () => {
     });
     await act(async () => {}); // flush mount effects (pose loaders, etc.)
   }
+
+  it("previews and submits ratio batches at the largest closest model bucket", async () => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true,
+      batchPromptsText: "[10:8] first prompt\n[16:9] second prompt\n[832x1216] exact prompt\n[3:4] large portrait",
+    }));
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `ratio-${sequence++}` }));
+    await render(baseContext({ createImageJob, imageModels: [{ ...Z_IMAGE, limits: {
+      resolutions: ["1024x1024", "1280x1024", "1600x1280", "1920x1080", "768x1024", "896x1152", "1408x2048"],
+    } }] }));
+    expect(container.querySelector(".batch-preview-res")?.textContent).toBe("1600×1280");
+    expect(container.querySelector(".batch-preview-text")?.textContent).toBe("first prompt");
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    expect(createImageJob).toHaveBeenCalledTimes(4);
+    expect(createImageJob.mock.calls.map(([payload]) => [payload.prompt, payload.width, payload.height]))
+      .toEqual([["first prompt", 1600, 1280], ["second prompt", 1920, 1080], ["exact prompt", 832, 1216], ["large portrait", 1408, 2048]]);
+  });
 
   // The Advanced disclosure belongs INSIDE the work-panel, not floating beneath it:
   // the Purpose zone is one elevated card. It shipped detached in sc-10476 and was
@@ -314,7 +332,11 @@ describe("Image Studio batch cardinality admission", () => {
     expect(createImageJob).not.toHaveBeenCalled();
   });
 
-  it("keeps a confirmed run's active queue bounded while preserving its submitted count", async () => {
+  // The in-flight window must not throttle an ordinary confirmed run: every resolved
+  // prompt queues the moment the run is confirmed, instead of trickling in as earlier
+  // jobs settle (which used to leave the tail of a 250-image batch unqueued until the
+  // first 100 images had finished).
+  it("queues a confirmed run in full without draining the in-flight window first", async () => {
     const values = Array.from({ length: 101 }, (_, index) => String(index));
     window.localStorage.setItem(
       "sceneworks-studio-image-project_1",
@@ -332,11 +354,45 @@ describe("Image Studio batch cardinality admission", () => {
 
     await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
     await click(container.querySelector(".batch-confirm .prompt-cta"));
-    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(100));
 
-    expect(container.querySelector(".batch-run-progress")?.textContent).toContain("Queued 100/101");
-    await click([...container.querySelectorAll(".batch-run-progress button")].find((button) => button.textContent === "Stop"));
-    await vi.waitFor(() => expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/101 done"));
+    // Every prompt posted, not just the first windowful: the run is finished submitting
+    // with all 101 jobs queued and none of them done yet.
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(101));
+    expect(container.querySelector(".batch-run-progress")?.textContent).toContain("0/101 done");
+  });
+
+  // The window is still a real bound for a run far past the queue depth — it feeds that
+  // many jobs at a time rather than posting a huge product in one burst.
+  it("windows a confirmed run larger than the in-flight limit", async () => {
+    const total = MAX_LISTED_JOBS + 1;
+    const values = Array.from({ length: total }, (_, index) => String(index));
+    window.localStorage.setItem(
+      "sceneworks-studio-image-project_1",
+      JSON.stringify({
+        model: Z_IMAGE.id,
+        count: 1,
+        batchMode: true,
+        batchPromptsText: "{{value}}",
+        batchVariableValues: { value: values },
+      }),
+    );
+    let sequence = 0;
+    const createImageJob = vi.fn(async () => ({ id: `batch-${sequence++}` }));
+    await render(baseContext({ createImageJob }));
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+    await click(container.querySelector(".batch-confirm .prompt-cta"));
+    await vi.waitFor(() => expect(createImageJob).toHaveBeenCalledTimes(MAX_LISTED_JOBS));
+
+    expect(container.querySelector(".batch-run-progress")?.textContent).toContain(
+      `Queued ${MAX_LISTED_JOBS}/${total}`,
+    );
+    await click(
+      [...container.querySelectorAll(".batch-run-progress button")].find((button) => button.textContent === "Stop"),
+    );
+    await vi.waitFor(() =>
+      expect(container.querySelector(".batch-run-progress")?.textContent).toContain(`0/${total} done`),
+    );
   });
 });
 
@@ -366,7 +422,7 @@ describe("ImageStudio advanced model defaults", () => {
     await act(async () => {});
   }
 
-  it("resets advanced overrides to the newly selected model defaults", async () => {
+  it("preserves supported resolution while resetting model-specific advanced overrides", async () => {
     const createImageJob = vi.fn(async () => ({ id: "job-1" }));
     await render(
       baseContext({
@@ -436,13 +492,65 @@ describe("ImageStudio advanced model defaults", () => {
     const payload = createImageJob.mock.calls[0][0];
     expect(payload.model).toBe("qwen_image");
     expect(payload.advanced).toMatchObject({
-      resolution: "1536x1024",
+      resolution: "1024x1024",
       sampler: "unipc",
       scheduler: "shift",
       schedulerShift: 4.2,
     });
     expect(payload.advanced).not.toHaveProperty("steps");
     expect(payload.advanced).not.toHaveProperty("guidanceScale");
+  });
+});
+
+describe("ImageStudio resolution continuity", () => {
+  let container;
+  let root;
+
+  beforeEach(() => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    window.localStorage.clear();
+    ({ container, root } = mountRoot());
+  });
+
+  afterEach(async () => {
+    await unmountRoot(root, container);
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    ["exact 2K landscape", "2048x1408", ["1024x1024", "2048x1408"], "2048x1408"],
+    ["nearby 2K landscape", "2048x1408", ["1024x1024", "1536x1024", "2048x1440"], "2048x1440"],
+    ["smaller landscape", "2048x1408", ["1024x1024", "1536x1024", "1024x1536"], "1536x1024"],
+    ["portrait", "1408x2048", ["1024x1024", "1024x1536", "1536x1024"], "1024x1536"],
+    ["closest square size", "2048x2048", ["1024x1024", "1536x1536"], "1536x1536"],
+  ])("keeps the %s composition through switching and submission", async (_, previous, options, expected) => {
+    const createImageJob = vi.fn(async () => ({ id: "job-1" }));
+    const source = { ...Z_IMAGE, limits: { resolutions: ["1024x1024", previous] } };
+    const destination = {
+      ...Z_IMAGE,
+      id: "destination",
+      name: "Destination",
+      limits: { resolutions: options },
+    };
+    await act(async () => {
+      root.render(
+        <AppContext.Provider value={baseContext({ createImageJob, imageModels: [source, destination] })}>
+          <ImageStudio />
+        </AppContext.Provider>,
+      );
+    });
+    const resolutionSelect = () => field(container, "Aspect");
+    await act(async () => setSelect(resolutionSelect(), previous));
+    await act(async () => setSelect(field(container, "Model"), destination.id));
+    expect(resolutionSelect().value).toBe(expected);
+
+    await click([...container.querySelectorAll("button")].find((button) => button.textContent === "Generate"));
+    expect(createImageJob.mock.calls[0][0].advanced.resolution).toBe(expected);
+
+    // Returning to the source preserves the current choice when possible, rather than
+    // restoring an old per-model preference or resetting to the square default.
+    await act(async () => setSelect(field(container, "Model"), source.id));
+    expect(resolutionSelect().value).toBe(previous);
   });
 });
 

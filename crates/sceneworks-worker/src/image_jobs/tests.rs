@@ -652,6 +652,33 @@ fn hires_fix_preflight_accepts_img2img_models_and_rejects_conflicts() {
         .unwrap_err()
         .to_string()
         .contains("6144x4096"));
+
+    // sc-26644: a model that neither is SDXL nor advertises `ui.img2img` is refused, naming the
+    // model and the missing capability — the same shared gate the API now runs at enqueue.
+    let not_capable = request(json!({
+        "projectId": "p",
+        "model": "z_image_turbo",
+        "modelManifestEntry": { "family": "z-image" },
+        "hiresFix": { "enabled": true }
+    }));
+    let error = validate_hires_fix_request(&not_capable)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("img2img-capable"),
+        "names the missing capability: {error}"
+    );
+    assert!(error.contains("z_image_turbo"), "names the model: {error}");
+
+    // An absent `hiresFix` block is unchanged: disabled, and every other check inert.
+    let no_block = request(json!({
+        "projectId": "p",
+        "model": "z_image_turbo",
+        "modelManifestEntry": { "family": "z-image" },
+        "upscale": { "enabled": true }
+    }));
+    assert!(no_block.hires_fix.is_disabled());
+    validate_hires_fix_request(&no_block).expect("no hiresFix block, no refusal");
 }
 
 #[cfg(any(
@@ -3503,6 +3530,47 @@ fn streaming_result_carries_facts_for_api_persistence() {
     assert_eq!(result["adapter"], json!(plan.adapter));
 }
 
+/// sc-8953 follow-through (2026-10-27): the STEP-tick result omits the accumulated fact sets
+/// (`assetWrites` / `generationSet` / `prefixKvCache`) on purpose — the per-step cadence is
+/// steps × images and the accumulated set had begun OOM-killing the WebView2 renderer
+/// mid-batch. The slim shape keeps every key a RUNNING job's UI consumes.
+///
+/// Gated like `slim_step_result` itself (macOS / the candle lane) so the default lane
+/// never dead-code warns and the parity lane never sees an out-of-scope symbol.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn slim_step_result_omits_the_accumulated_fact_sets() {
+    // `count: 8` is the payload-sanity clamp (`MAX_COUNT`), but the assertion is on the
+    // PLAN's field, not the literal — a large real batch (a 260-image angle set) streams
+    // the same shape with a bigger `expectedCount`.
+    let plan = ImagePlan::new(&request(
+        json!({ "projectId": "p", "prompt": "x", "count": 8 }),
+    ));
+    let result = slim_step_result(&plan);
+    // The accumulated sets the API would otherwise re-serialize and re-broadcast
+    // per step — all absent.
+    assert!(
+        !result.contains_key("assetWrites"),
+        "slim step result must not deep-clone the accumulated asset writes"
+    );
+    assert!(
+        !result.contains_key("generationSet"),
+        "slim step result must not carry the generation-set fact"
+    );
+    assert!(
+        !result.contains_key("prefixKvCache"),
+        "slim step result must not carry the prefix-KV-cache summary"
+    );
+    // The running-UI identity keys stay present.
+    assert_eq!(result["generationSetId"], json!(plan.genset_id));
+    assert_eq!(result["expectedCount"], json!(plan.image_count));
+    assert_eq!(result["adapter"], json!(plan.adapter));
+    assert_eq!(result["model"], json!(plan.request.model));
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3645,9 +3713,16 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         1,
         "candle route and payload File tokens must be prepared exactly once per job"
     );
-    let route_binding = run_job
-        .find("let route = prepare_candle_image_route")
-        .expect("one route binding");
+    let route_preparation = run_job
+        .find("prepare_candle_image_route(")
+        .expect("one candle route preparation");
+    let route_binding = run_job[..route_preparation]
+        .rfind("let route = {")
+        .expect("the prepared candle route is bound once");
+    assert!(
+        run_job[route_binding..route_preparation].contains("prepare_image_route_with_progress("),
+        "candle route preparation must report real source-verification progress"
+    );
     let plan_use = run_job[route_binding..]
         .find("ImagePlan::with_count_and_adapter")
         .expect("the resolved route feeds the plan");
@@ -10170,11 +10245,22 @@ fn qwen_image_2_1_live_mlx_lane_sends_an_alpha_reference_as_reference_rgba() {
                 (edit_refs[1].width, edit_refs[1].height),
                 "RGB and alpha share the fitted geometry"
             );
-            let alphas: std::collections::BTreeSet<u8> =
-                image.pixels.chunks_exact(4).map(|p| p[3]).collect();
+            let alphas: std::collections::BTreeSet<u8> = image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|p| p[3])
+                .collect();
             assert!(alphas.contains(&0) && alphas.contains(&255), "{alphas:?}");
             // Straight alpha: the transparent half keeps its authored colour, never zeroed.
-            let transparent = image.pixels.chunks_exact(4).find(|p| p[3] == 0).unwrap();
+            let transparent = image
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .find(|p| p[3] == 0)
+                .unwrap();
             assert_eq!(&transparent[..3], &[10, 200, 30]);
         }
         other => panic!("the cut-out must travel as ReferenceRgba, got {other:?}"),
@@ -10292,7 +10378,7 @@ fn assert_qwen_image_2_1_native_geometry(emitted: &[Conditioning], lane: &str, f
                  upstream never crops or letterboxes a condition image"
             );
             // The plane is the asset's own, unresampled: columns 0..6 transparent, 6..12 opaque.
-            for (index, pixel) in portrait.pixels.chunks_exact(4).enumerate() {
+            for (index, pixel) in portrait.pixels.as_chunks::<4>().0.iter().enumerate() {
                 let expected = if index % 12 < 6 { 0 } else { 255 };
                 assert_eq!(
                     pixel[3], expected,
@@ -18544,7 +18630,9 @@ fn candle_preprocess_depth_estimates_off_mac() {
     assert!(
         depth
             .pixels
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .all(|p| p[0] == p[1] && p[1] == p[2]),
         "depth control must be grayscale-broadcast"
     );
@@ -22038,6 +22126,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // unlike the dedicated IP-Adapter/ControlNet routes, it loads no second conditioning network
         // and reaches the generic `generate_candle_stream` base-model admission gate.
         "KolorsEdit",
+        // MOSS retains edit rank A/B tensors on its existing base projections, with no second
+        // independently loaded conditioning network. Its native edit peak includes those tensors
+        // and the reference workspace; the exact cold estimate and loader gate are checked below.
+        "MossImageEdit",
         // Krea sampling-regime lanes: the same base, a different schedule / phase list.
         "KreaTurboOnRaw",
         "KreaMultiPhase",
@@ -22073,6 +22165,12 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "base.rs",
             include_str!("base.rs"),
             "evaluate_shared_image_priced_with_resources(",
+        ),
+        (
+            "MossImageEdit",
+            "moss.rs",
+            include_str!("moss.rs"),
+            "runtime.cold_peak(",
         ),
         (
             "SdxlEdit",
@@ -22202,6 +22300,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "start_cached_gen_stream(",
             "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
+            "start_cached_gen_stream_with_request_state_using_owned(",
         ]
         .iter()
         .filter_map(|needle| {
@@ -22230,6 +22329,68 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             );
         }
     }
+
+    // MOSS computes its exact edit peak before the cache handoff and admits inside the actual
+    // cache-miss loader. Check the Candle arm specifically, so the parallel MLX arm cannot carry
+    // this assertion, then bind the production loader callback to the admitted factory boundary.
+    let moss = include_str!("moss.rs");
+    let native_runtime = moss
+        .split_once("impl MossStreamRuntime for NativeMossStreamRuntime")
+        .expect("native MOSS defaults must exist")
+        .1;
+    let peak_lines: Vec<_> = native_runtime.lines().collect();
+    let candle_start = peak_lines
+        .windows(2)
+        .position(|lines| {
+            lines[0].trim()
+                == "#[cfg(all(not(target_os = \"macos\"), feature = \"backend-candle\"))]"
+                && lines[1].trim() == "let peak = if edit {"
+        })
+        .expect("native defaults must retain the Candle cold-peak arm");
+    assert!(
+        peak_lines[candle_start + 2..]
+            .iter()
+            .take_while(|line| !line.contains("} else {"))
+            .any(|line| line.contains("moss_edit_cold_peak(variant,")
+                && !line.trim_start().starts_with("//")),
+        "MOSS Candle edit must use the exact native edit peak before the cache handoff"
+    );
+    let loader = moss
+        .split_once("load: move |id: &str, spec: &LoadSpec| {")
+        .expect("MOSS must retain its actual cache-miss loader")
+        .1
+        .split_once("\n        },")
+        .expect("MOSS loader callback must end")
+        .0;
+    let live_loader = loader
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        live_loader.contains("moss_load_admitted(")
+            && live_loader.contains("|| load_generator(id, spec)"),
+        "MOSS actual provider construction must remain inside the admitted loader closure"
+    );
+    let factory = moss
+        .split_once("fn moss_load_admitted<T>(")
+        .expect("MOSS admitted factory must exist")
+        .1
+        .split_once("\n}\n")
+        .expect("MOSS admitted factory must end")
+        .0;
+    let live_factory = factory
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let admission = live_factory
+        .find("moss_admit(peak, 0, budget)")
+        .expect("MOSS cold admission must grant no residency credit");
+    let load = live_factory
+        .find("\n    load()")
+        .expect("MOSS admitted factory must invoke the supplied loader");
+    assert!(admission < load, "MOSS must admit before provider loading");
 
     // Imported single-file lanes use the same provider registry and generator cache as snapshot-backed
     // lanes. Their primary source must remain `File`, their companion snapshot must be explicit, and the
@@ -22582,7 +22743,7 @@ mod preview_stream_tests {
                     ..
                 } => {
                     assert_eq!(index, expected_index);
-                    assert_eq!(actual_seed, seed);
+                    assert_eq!(actual_seed, Some(seed));
                     assert_eq!(face_likeness.unwrap()["score"], likeness);
                 }
                 other => panic!("expected a scored image, got {}", gen_event_name(&other)),
@@ -22666,7 +22827,7 @@ mod preview_stream_tests {
             other => panic!("expected a step event, got {}", gen_event_name(&other)),
         }
         match rx.try_recv().expect("image 0 completes") {
-            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, 70)),
+            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, Some(70))),
             other => panic!("expected an image event, got {}", gen_event_name(&other)),
         }
         assert!(
@@ -22682,10 +22843,12 @@ mod preview_stream_tests {
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
             GenEvent::Upsampling { .. } => "Upsampling",
+            GenEvent::LoadActivity { .. } => "LoadActivity",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::ImageFacts { .. } => "ImageFacts",
+            GenEvent::AssetWritten { .. } => "AssetWritten",
             GenEvent::Image { .. } => "Image",
         }
     }
@@ -22704,11 +22867,13 @@ mod preview_stream_tests {
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
     }
 
-    /// The frame rides `result.previewFrame` as a single slot on the EXISTING streaming result —
+    /// The frame rides `result.previewFrame` as a single slot on the SLIM STEP result —
     /// `result` is replaced wholesale per accepted POST, so a result built without the slot (the
-    /// final/terminal posts) is what clears it. Both halves are pinned here.
+    /// full Image/Decoding posts and every terminal post) is what clears it. Both halves are
+    /// pinned here, plus the sc-8953 follow-through contract: the step result carries NO
+    /// accumulated fact sets.
     #[test]
-    fn streaming_result_carries_the_preview_slot_and_omits_it_when_cleared() {
+    fn slim_step_result_carries_the_preview_slot_and_omits_it_when_cleared() {
         let plan = ImagePlan::new(&request(
             json!({ "projectId": "p", "prompt": "x", "count": 1 }),
         ));
@@ -22718,7 +22883,7 @@ mod preview_stream_tests {
             total: 20,
             data_url: "data:image/jpeg;base64,QQ==".to_owned(),
         };
-        let with = streaming_result_with_preview(&plan, &[], Some(&slot));
+        let with = slim_step_result_with_preview(&plan, Some(&slot));
         let frame = with
             .get("previewFrame")
             .and_then(Value::as_object)
@@ -22731,13 +22896,13 @@ mod preview_stream_tests {
             Some("data:image/jpeg;base64,QQ==")
         );
 
-        let without = streaming_result_with_preview(&plan, &[], None);
+        let without = slim_step_result_with_preview(&plan, None);
         assert!(
             !without.contains_key("previewFrame"),
             "a result built with no live slot must omit the key entirely"
         );
-        // Every other key matches the plain streaming result — the preview is strictly additive.
-        assert_eq!(without, streaming_result(&plan, &[]));
+        // Every other key matches the plain slim step result — the preview is strictly additive.
+        assert_eq!(without, slim_step_result(&plan));
     }
 }
 
@@ -22768,12 +22933,12 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         .expect("the Preview arm of consume_gen_events");
     let arm_end = arm_start
         + base[arm_start..]
-            .find("\n            GenEvent::Image {")
-            .expect("the Preview arm is followed by the Image arm");
+            .find("\n            GenEvent::")
+            .expect("the Preview arm is followed by another event arm");
     let arm = &base[arm_start..arm_end];
     assert!(
         !arm.contains("update_job("),
-        "GenEvent::Preview must NOT post — the frame rides the next Step/Decoding update, which is \
+        "GenEvent::Preview must NOT post — the frame rides the next Step update, which is \
          why the first `generating` POST carries no previewFrame and why previewSupport.js holds \
          its placeholder across denoise step 1. Arm:\n{arm}"
     );
@@ -22781,14 +22946,24 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         arm.contains("latest_preview = Some(slot)"),
         "the Preview arm must park the frame in the single latest-wins slot for the next POST"
     );
-    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked.
+    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked
+    // on the SLIM step result (sc-8953 follow-through — no accumulated fact sets per step).
     let step_start = base
         .find("GenEvent::Step {")
         .expect("the Step arm of consume_gen_events");
-    let step_arm = &base[step_start..(step_start + 2000).min(base.len())];
+    let step_arm = &base[step_start..(step_start + 2600).min(base.len())];
     assert!(
-        step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
-        "the Step arm is the POST that carries the parked frame"
+        step_arm.contains("update_job(") && step_arm.contains("slim_step_result_with_preview("),
+        "the Step arm is the POST that carries the parked frame on the slim step result"
+    );
+    // And the full fact set streams on the arms where it can actually change.
+    let image_start = base
+        .find("GenEvent::Image {")
+        .expect("the Image arm of consume_gen_events");
+    let image_arm = &base[image_start..(image_start + 6000).min(base.len())];
+    assert!(
+        image_arm.contains("streaming_result(plan, asset_writes)"),
+        "the Image arm must post the FULL result (the fact set just grew by this image)"
     );
 }
 
@@ -28114,8 +28289,8 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
     // is the ordering of receipt authority versus cache rebinding rather than a provider result.
     let base = include_str!("base.rs");
     let body = base
-        .split_once("async fn generate_candle_stream_using(")
-        .expect("missing production function marker generate_candle_stream_using")
+        .split_once("async fn generate_candle_registry_stream_using(")
+        .expect("missing production generic Candle function marker")
         .1
         .split_once("\n}\n")
         .expect("generate_candle_stream has no top-level end marker")
@@ -28463,13 +28638,19 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
     // reference-aware twin. The optional hires first pass remains the plain selection.
     assert!(stream
         .contains("let shared_memory = if let Some(references) = flux3_references.as_ref() {"));
-    let shared_calls = stream
+    // Per-tier preflight also uses the shared selector before generation-memory construction.
+    // This guard concerns the final render pass and its independent Hires first pass.
+    let render_selectors = stream
+        .split_once("let mut generation_memory:")
+        .expect("render selection begins after the per-tier capability clamp")
+        .1;
+    let shared_calls = render_selectors
         .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
         .count()
-        + stream
+        + render_selectors
             .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced(")
             .count()
-        + stream
+        + render_selectors
             .match_indices(
                 "crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources(",
             )
@@ -29987,7 +30168,7 @@ async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_res
         for (index, seed) in [(0_usize, 5_i64), (1, 6)] {
             let _ = tx.blocking_send(GenEvent::Image {
                 index,
-                seed,
+                seed: Some(seed),
                 width: 64,
                 height: 64,
                 pixels: stub_rgb8(64, 64, seed),

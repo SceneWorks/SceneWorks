@@ -25,8 +25,8 @@ use crate::WorkerResult;
 /// message strings (sc-11191, F-019).
 struct CachedGenerator {
     generator: Box<dyn Generator>,
-    /// The execution policy selected on the cold load. This is a materialization fact about the
-    /// resident generator, not part of its reusable load identity.
+    /// The execution policy selected on the cold load. Most providers keep this materialization
+    /// fact outside their reusable identity; Candle SDXL binds it because Sequential is irreversible.
     loaded_policy: ExecutionPolicy,
     /// Process-global MLX active bytes that predated this cached generator. Request admission must
     /// never mistake these unrelated allocations for already-resident generator weights.
@@ -181,10 +181,14 @@ pub(crate) struct LoadIdentity {
     /// (`Eligible` + `Resident`) has no staging seam, so it must never warm-serve a request that
     /// still needs the declared Sequential load (or the reverse); the two reload instead.
     released_resident: bool,
+    /// Candle SDXL retains its cold-load Sequential policy as a staging floor. A later Resident
+    /// request cannot undo it, so switching residency must reload to execute the admitted shape.
+    sdxl_cuda_offload_policy: Option<OffloadPolicy>,
 }
 
 /// Request-scoped residency and materialization intent, split from [`LoadIdentity`] so changing a
-/// policy does not force the same weights/composition to reload.
+/// policy ordinarily does not force the same weights/composition to reload. Candle SDXL's retained
+/// Sequential loader policy is an exception: its admitted Resident shape requires a fresh loader.
 ///
 /// sc-18317 made the warm-hit case a decision rather than a substitution: see
 /// [`propose_warm_policy`] and [`crate::execution_planner`]. A cached generator now runs under the
@@ -282,6 +286,18 @@ impl LoadIdentity {
     }
 
     pub(crate) fn try_from_load_spec(engine_id: &str, spec: &LoadSpec) -> gen_core::Result<Self> {
+        Self::try_from_load_spec_for_backend(
+            engine_id,
+            spec,
+            cfg!(all(not(target_os = "macos"), feature = "backend-candle")),
+        )
+    }
+
+    fn try_from_load_spec_for_backend(
+        engine_id: &str,
+        spec: &LoadSpec,
+        candle: bool,
+    ) -> gen_core::Result<Self> {
         spec.validate_load_shape_declaration()?;
         spec.validate_prepared_file_pins()?;
         Ok(Self {
@@ -364,6 +380,8 @@ impl LoadIdentity {
             released_resident: cfg!(target_os = "macos")
                 && spec.load_shape_declaration_result == LoadShapeDeclarationResult::Eligible
                 && spec.offload_policy == OffloadPolicy::Resident,
+            sdxl_cuda_offload_policy: (candle && engine_id == "sdxl")
+                .then_some(spec.offload_policy),
         })
     }
 }
@@ -465,6 +483,33 @@ impl CacheAdapterSpec {
                 .map(|scales| scales.iter().map(|scale| scale.to_bits()).collect()),
             moe_expert: adapter.moe_expert,
         })
+    }
+}
+
+/// Selects the existing serialized cache worker; isolated tests use the same worker loop.
+#[derive(Clone)]
+pub(crate) struct GeneratorCacheHandle {
+    worker: mpsc::Sender<GeneratorJob>,
+    evict_transform: bool,
+}
+impl GeneratorCacheHandle {
+    pub(crate) fn global() -> Self {
+        Self {
+            worker: generator_worker().clone(),
+            evict_transform: true,
+        }
+    }
+    #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+    pub(crate) fn isolated() -> (Self, thread::JoinHandle<()>) {
+        let (worker, rx) = mpsc::channel();
+        let join = thread::spawn(move || run_generator_cache_worker(rx, None));
+        (
+            Self {
+                worker,
+                evict_transform: false,
+            },
+            join,
+        )
     }
 }
 
@@ -1272,9 +1317,48 @@ pub(crate) async fn with_cached_generator_for_request_using<R>(
 where
     R: Send + 'static,
 {
+    with_cached_generator_for_request_using_cache(
+        GeneratorCacheHandle::global(),
+        engine_id,
+        spec,
+        load_error_context,
+        load_generator,
+        run,
+    )
+    .await
+}
+
+pub(crate) async fn with_cached_generator_for_request_using_cache<R>(
+    cache: GeneratorCacheHandle,
+    engine_id: &'static str,
+    spec: LoadSpec,
+    load_error_context: impl Into<String>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+    run: impl FnOnce(
+            &dyn Generator,
+            MemoryCacheState,
+            ExecutionPolicy,
+            crate::execution_planner::WarmPolicyProposal,
+            u64,
+            u64,
+        ) -> WorkerResult<R>
+        + Send
+        + 'static,
+) -> WorkerResult<R>
+where
+    R: Send + 'static,
+{
     with_cached_generator_for_request_after_cold_admission_using_on(
-        generator_worker(),
-        crate::transform_cache::evict_resident_transform(),
+        &cache.worker,
+        async {
+            if cache.evict_transform {
+                crate::transform_cache::evict_resident_transform().await
+            } else {
+                Ok(false)
+            }
+        },
         engine_id,
         spec,
         load_error_context,
@@ -2338,6 +2422,63 @@ mod tests {
             LoadIdentity::from_load_spec("sdxl", &lightning),
             "one shared engine must not reuse a sibling catalog route's loaded contract"
         );
+    }
+
+    // CI_IMPACT: one pure cache-key/transition regression; enum payloads replace generators,
+    // so this executes no model, loads no checkpoint, and creates no CUDA/Metal context.
+    #[test]
+    fn sdxl_cuda_policy_transitions_reload_without_fragmenting_other_provider_caches() {
+        let weights = tempfile::tempdir().expect("SDXL cache identity fixture");
+        let base = LoadSpec::new(WeightsSource::Dir(weights.path().to_path_buf()))
+            .with_resolved_route("sdxl")
+            .with_quant(Quant::Q4);
+        let key = |engine_id, policy, candle| {
+            LoadIdentity::try_from_load_spec_for_backend(
+                engine_id,
+                &base.clone().with_offload_policy(policy),
+                candle,
+            )
+            .unwrap()
+        };
+        let mut cache = CacheThread::new(false);
+        let mut loads = 0;
+        for (policy, expected_access) in [
+            (OffloadPolicy::Resident, CacheAccess::Cold),
+            (OffloadPolicy::Resident, CacheAccess::Warm),
+            (OffloadPolicy::Sequential, CacheAccess::Cold),
+            (OffloadPolicy::Sequential, CacheAccess::Warm),
+            (OffloadPolicy::Resident, CacheAccess::Cold),
+        ] {
+            let access = cache
+                .with_model_access(
+                    key("sdxl", policy, true),
+                    || {
+                        loads += 1;
+                        Ok(policy)
+                    },
+                    |loaded_policy, access| {
+                        assert_eq!(
+                            *loaded_policy, policy,
+                            "a cached Sequential loader must not serve a literal Resident endpoint"
+                        );
+                        Ok(access)
+                    },
+                    "SDXL pure cache entry disappeared",
+                )
+                .unwrap();
+            assert_eq!(access, expected_access);
+        }
+        assert_eq!(
+            loads, 3,
+            "both residency transitions reload, identical policies reuse"
+        );
+        for (engine_id, candle) in [("flux1_dev", true), ("sdxl", false)] {
+            assert_eq!(
+                key(engine_id, OffloadPolicy::Resident, candle),
+                key(engine_id, OffloadPolicy::Sequential, candle),
+                "the CUDA SDXL exception must not alter generic Candle or MLX policy reuse",
+            );
+        }
     }
 
     #[test]

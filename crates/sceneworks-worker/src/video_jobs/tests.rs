@@ -2310,8 +2310,8 @@ fn video_preflight_refuses_reference_media_past_what_the_model_declares() {
 #[tokio::test]
 async fn resolve_reference_audio_conditioning_resolves_project_relative_asset_paths() {
     let data_dir = tempfile::tempdir().expect("temp dir creates");
-    let mut settings = Settings::from_env();
-    settings.data_dir = data_dir.path().to_path_buf();
+    let mut settings = Settings::for_test(data_dir.path().to_path_buf());
+    settings.api_url = crate::tests::spawn_no_user_cancel_capture_stub().await.0;
     let api = ApiClient::new(&settings);
     let job = reference_audio_job_snapshot("job-sc17160");
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
@@ -2581,8 +2581,8 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     }
 
     let data_dir = tempfile::tempdir().expect("temp dir creates");
-    let mut settings = Settings::from_env();
-    settings.data_dir = data_dir.path().to_path_buf();
+    let mut settings = Settings::for_test(data_dir.path().to_path_buf());
+    settings.api_url = crate::tests::spawn_no_user_cancel_capture_stub().await.0;
     let api = ApiClient::new(&settings);
     let job = reference_audio_job_snapshot("job-sc24070");
     let store = ProjectStore::new(settings.data_dir.clone(), "worker");
@@ -2680,7 +2680,9 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     let mono = tracks[0];
     let mismatched = mono
         .samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|frame| (frame[0] - frame[1]).abs() > 1.0 / 32_768.0)
         .count();
     assert_eq!(
@@ -2696,7 +2698,9 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
     let stereo = tracks[1];
     let distinct = stereo
         .samples
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter(|frame| (frame[0] - frame[1]).abs() > 0.1)
         .count();
     assert!(
@@ -2709,8 +2713,8 @@ async fn resolve_reference_audio_conditioning_upmixes_a_mono_reference_to_dual_m
 
 /// A [`JobSnapshot`] for the reference-audio resolver tests. The resolver spawns ffmpeg through the
 /// shared runner, which uses the id only to name the scratch directory and to address the
-/// heartbeat/cancel polls — neither of which needs a real job row, because the poll interval never
-/// elapses inside a sub-second transcode.
+/// heartbeat/cancel polls. The test-owned API stub answers both, including Tokio's immediate first
+/// interval tick, without contacting an ambient server or requiring a real job row.
 ///
 /// The id is a parameter so each test is legibly its own job. The resolver's scratch directory
 /// used to be named by the id alone, so two tests (or two test PROCESSES on one host — sc-25777,
@@ -9907,7 +9911,7 @@ fn scail2_dir() -> Option<PathBuf> {
 fn scail2_smoke_color_mask(w: u32, h: u32, bg: [u8; 3]) -> Image {
     let (wu, hu) = (w as usize, h as usize);
     let mut px = vec![0u8; wu * hu * 3];
-    for chunk in px.chunks_exact_mut(3) {
+    for chunk in px.as_chunks_mut::<3>().0 {
         chunk.copy_from_slice(&bg);
     }
     for y in (hu / 4)..(3 * hu / 4) {
@@ -12002,9 +12006,8 @@ fn wan_5b_timing() {
             dit_peak_bytes.get_or_insert(mlx_rs::memory::get_peak_memory());
         }
         Progress::Loading(_) => {}
-        Progress::PromptUpsamplingComplete
-        | Progress::ConditioningComplete
-        | Progress::Upsampling { .. } => {}
+        Progress::PromptUpsamplingComplete => {}
+        Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
     };
     let decoded = run_video_generation(input, &cancel, &mut on_progress).expect("5B generation");
     let end = Instant::now();

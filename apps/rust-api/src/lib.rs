@@ -23,9 +23,9 @@ use parking_lot::Mutex;
 use sceneworks_core::contracts::{
     CancelPendingJobsRequest, CancelPendingJobsResponse, ClaimRequest, ClaimResponse,
     ClearJobsRequest, ClearJobsResponse, ContractNumber, DuplicateJobRequest, GenerationMetrics,
-    GenerationMetricsRow, ImageUpscaleRequest, JobCreateRequest, JobSnapshot, JobStatus, JobType,
-    JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest, QueueSummary,
-    RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
+    GenerationMetricsRow, HiresFixRequest, ImageUpscaleRequest, JobCreateRequest, JobSnapshot,
+    JobStatus, JobType, JsonObject, PrioritizeJobsRequest, PrioritizeJobsResponse, ProgressRequest,
+    QueueSummary, RetryJobRequest, WorkerCapability, WorkerHeartbeatRequest, WorkerRegisterRequest,
     WorkerSnapshot, WorkerStatus, WorkerTerminationRequest,
 };
 use sceneworks_core::hf_home::{huggingface_hub_cache_dir, huggingface_repo_cache_path};
@@ -37,6 +37,7 @@ use sceneworks_core::jobs_store::{
     model_mac_support, video_job_type_for_mode, video_request_is_claimable_by_any_lane, CreateJob,
     DuplicateJob, JobsStore, JobsStoreError, MacCapabilities, ProgressUpdate, RegisterWorker,
     RetryJob, RouteDecision, StaleSweep, UnsupportedReason, WorkerHeartbeat, JOB_STATUSES,
+    MAX_LISTED_JOBS,
 };
 use sceneworks_core::lora_family::{
     accepted_lora_families, apply_adapter_metadata_to_manifest_entry,
@@ -3878,6 +3879,19 @@ fn public_queue_summary(mut summary: QueueSummary) -> QueueSummary {
 /// job for lifecycle work. Redact at the serialization boundary so no new producer can accidentally
 /// publish the worker-private selection receipt. `jobs.snapshot` is currently built directly in the
 /// SSE bootstrap; supporting it here keeps this boundary safe if that snapshot becomes live later.
+///
+/// sc-8953 follow-through (2026-10-27): `job.updated` ALSO slims the live payload here — for a
+/// NON-terminal job, `result.assets` (the fully-built normalized asset records, KBs each, one per
+/// finished image) is dropped from the EVENT while `assetIds` stays. Every SSE tick used to carry
+/// the whole accumulated array (a 260-image batch ≈ 650 KB+ per tick, thousands of ticks), and the
+/// WebView2 renderer `JSON.parse`d every one — cumulative multi-GB allocation churn that hit V8's
+/// ~4 GB old-space ceiling and OOM-killed the renderer mid-batch (Crashpad `0xE0000008`, daily
+/// since 2026-10-24), leaving the desktop app a dead white window. The frontend resolves job
+/// outputs id-first (`jobResultAssets.js`: `assetIds` is its FIRST preference, `assets` only a
+/// pre-catalog fallback) and re-fetches the catalog on every asset-count change, so a live event
+/// without the embedded records renders identically; terminal events keep the full `assets` (the
+/// durable row's enrichment contract, `persist_reported_assets`). Snapshots stay full — bootstrap
+/// is once per connect, not per tick.
 fn redact_private_job_metadata_from_event(event: &str, value: &mut Value) {
     fn redact_job(value: &mut Value) {
         let Ok(job) = serde_json::from_value::<JobSnapshot>(value.clone()) else {
@@ -3886,7 +3900,11 @@ fn redact_private_job_metadata_from_event(event: &str, value: &mut Value) {
             *value = Value::Null;
             return;
         };
-        *value = serde_json::to_value(public_job_snapshot(job)).unwrap_or(Value::Null);
+        let mut job = public_job_snapshot(job);
+        if !sceneworks_core::jobs_store::TERMINAL_STATUSES.contains(&job.status.as_str()) {
+            job.result.remove("assets");
+        }
+        *value = serde_json::to_value(job).unwrap_or(Value::Null);
     }
 
     match event {
@@ -5163,7 +5181,30 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("projectId is required"));
     }
     validate_model_id(&payload.model)?;
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+    if (payload.moss_image_advanced.is_some()
+        || payload
+            .advanced
+            .contains_key(sceneworks_core::moss_image_advanced::KEY))
+        && (payload.mode != "edit_image" || !sceneworks_core::moss_image::is_moss(&payload.model))
+    {
+        return Err(ApiError::bad_request(
+            "mossImageAdvanced tensor/output controls require explicit MOSS edit_image mode",
+        ));
+    }
+    let positive_tensor = payload.mode == "edit_image"
+        && sceneworks_core::moss_image::is_moss(&payload.model)
+        && (payload
+            .moss_image_advanced
+            .as_ref()
+            .is_some_and(|a| a.positive.is_some())
+            || payload
+                .advanced
+                .get(sceneworks_core::moss_image_advanced::KEY)
+                .and_then(|v| v.get("positive"))
+                .is_some_and(|v| !v.is_null()));
+    if (!positive_tensor && payload.prompt.is_empty())
+        || payload.prompt.chars().count() > MAX_PROMPT_CHARS
+    {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));

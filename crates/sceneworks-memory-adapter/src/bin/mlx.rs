@@ -58,6 +58,15 @@ const IRIS_PROVIDER: &str = "iris_3b";
 const IRIS_DEPTH_PROVIDER: &str = "iris_3b_depth";
 const IRIS_RESTORE_PROVIDER: &str = "iris_3b_restore";
 
+#[path = "mlx_supra2.rs"]
+mod mlx_supra2;
+
+/// Supra2-IMG (sc-24217, epic 24212), served by `mlx_supra2`: `mlx-gen-supra2`'s registry id
+/// (`gen_core::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
+/// because `scripts/stale-lane-report.mjs::adapterCapturableProviders` reads the dispatch arms off
+/// this file; `mlx_supra2`'s tests bind it to the engine constant through `protocol`.
+const SUPRA2_PROVIDER: &str = "supra2_img";
+
 const EDGES: [u32; 7] = [768, 640, 512, 448, 384, 320, 256];
 const MAX_THRESHOLD: f64 = 3e-2;
 const MEAN_THRESHOLD: f64 = 3e-3;
@@ -20578,9 +20587,8 @@ impl SenseNovaPhases {
             }
             Progress::Loading(_) => self.other_loading_boundaries += 1,
             Progress::Step { .. } => {}
-            Progress::PromptUpsamplingComplete
-            | Progress::ConditioningComplete
-            | Progress::Upsampling { .. } => {}
+            Progress::PromptUpsamplingComplete => {}
+            Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
         }
     }
 }
@@ -22708,6 +22716,9 @@ fn run_with(
         IRIS_PROVIDER => mlx_iris::run(request),
         IRIS_DEPTH_PROVIDER => mlx_iris::run(request),
         IRIS_RESTORE_PROVIDER => mlx_iris::run(request),
+        // sc-24217: Supra2-IMG's total pipeline (text encoder + DiT + VAE, resident) at the
+        // published request, over a bundle converted in a separate adapter process beforehand.
+        SUPRA2_PROVIDER => mlx_supra2::run(request),
         other => Err(format!(
             "MLX five-rung calibration does not implement provider {other:?}"
         )),
@@ -22730,6 +22741,8 @@ fn main() {
         flux3_common::boundary_self_test::SELF_TEST_ACTION => {
             flux3_common::boundary_self_test::native_boundary_self_test(&request, "mlx")
         }
+        // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
+        protocol::SUPRA2_IMG_CONVERT_ACTION => protocol::supra2_convert(&request),
         other => Err(format!("unsupported action {other:?}")),
     }
     .unwrap_or_else(|error| protocol::fail(error));

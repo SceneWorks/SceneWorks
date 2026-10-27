@@ -150,6 +150,9 @@ export const MODEL_STORIES = {
   // entry is MLX-only until then, so a Candle cell cannot be attributed to a Metal-scoped story.
   flux3_klein: { mlx: 26234, candle: 26235 },
   flux3_klein_base: { mlx: 26239, candle: 26239 },
+  // Supra2-IMG (epic 24212): ported to MLX by sc-24213 and to Candle by sc-24214 — each backend's
+  // cells are owned by the story that brought that lane through SceneWorks.
+  supra2_img: { mlx: 24213, candle: 24214 },
   qwen_image_edit_2511: { mlx: 15460, candle: 15868 },
   qwen_image_edit_2511_lightning: { mlx: 15461, candle: 15871 },
   lens: { mlx: 15462, candle: 17489 },
@@ -232,6 +235,10 @@ export const FAMILY_STORIES = {
   // model cells belong to sc-26235, so the distinct Candle resource-family owner is sc-26241
   // (S8). One id may own only one thing; neither mapping claims a measured memory anchor.
   26233: { mlx: 26233, candle: 26241 },
+  // Supra2-IMG: the MLX family is owned by its epic (sc-24212); the model stories sc-24213/sc-24214
+  // own the supra2_img cells, and one id may own only one thing. The Candle family twin is sc-24217,
+  // the epic's terminal story that owns the one measurement campaign (memory included).
+  24212: { mlx: 24212, candle: 24217 },
 };
 
 /**
@@ -382,6 +389,7 @@ export function familyGroup(modelId) {
   if (modelId.startsWith("iris")) return 25678;
   if (modelId.startsWith("flux3")) return 26233;
   if (modelId === "moss_image_base" || modelId === "moss_image_sft") return 26323;
+  if (modelId === "supra2_img") return 24212;
   throw new Error(`no family story for ${modelId}`);
 }
 

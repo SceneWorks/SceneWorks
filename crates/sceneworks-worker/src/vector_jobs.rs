@@ -3632,7 +3632,19 @@ fn sanitize_static_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
 fn sanitize_svg_bytes(input: &[u8]) -> WorkerResult<CanonicalSvg> {
     match sanitize_inert_svg_bytes(input) {
         Ok(canonical) => Ok(canonical),
-        Err(inert_error) => sanitize_static_svg_bytes(input).or(Err(inert_error)),
+        // Static SVG accepts safe stylesheets that the narrow profile rejects. Report its
+        // actual failure first, retaining any distinct narrow-profile resource-limit diagnosis.
+        Err(inert_error) => sanitize_static_svg_bytes(input).map_err(|static_error| {
+            match (static_error, inert_error) {
+                (
+                    WorkerError::InvalidPayload(detail),
+                    WorkerError::InvalidPayload(inert_detail),
+                ) if detail != inert_detail => WorkerError::InvalidPayload(format!(
+                    "{detail} (narrow SVG profile also rejected: {inert_detail})"
+                )),
+                (error, _) => error,
+            }
+        }),
     }
 }
 
@@ -7299,6 +7311,32 @@ mod tests {
     }
 
     #[test]
+    fn stylesheet_rejection_reports_the_authoritative_static_error() {
+        let unsupported = r#"<svg><style>.x{unknown-static-property:red}</style><path class="x" d="M0 0H1"/></svg>"#;
+        let detail = invalid_detail(sanitize_svg(unsupported));
+        assert!(
+            detail.starts_with("provider SVG CSS property unknown-static-property"),
+            "{detail}"
+        );
+        assert!(
+            detail.contains("narrow SVG profile also rejected:"),
+            "{detail}"
+        );
+
+        let external = r#"<svg><style>.x{fill:url(https://example.invalid/paint)}</style><path class="x" d="M0 0H1"/></svg>"#;
+        assert!(
+            invalid_detail(sanitize_svg(external)).starts_with(&invalid_detail(
+                sanitize_static_svg_bytes(external.as_bytes())
+            ),)
+        );
+
+        let safe = r#"<svg width="16" height="16"><style>.x{fill:red;stroke:black;stroke-width:1}</style><rect class="x" width="16" height="16"/></svg>"#;
+        let canonical = sanitize_svg(safe).expect("safe provider stylesheet");
+        assert!(!canonical.svg.contains("<style"));
+        assert_static_render_equivalent("safe provider stylesheet", safe, &canonical.svg);
+    }
+
+    #[test]
     fn static_fallback_rejects_active_external_and_unsupported_content() {
         let malicious = [
             r#"<svg><script>alert(1)</script></svg>"#,
@@ -7481,7 +7519,9 @@ mod tests {
             );
             assert!(
                 comparison_pixels(&canonical.svg, 512)
-                    .chunks_exact(4)
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
                     .any(|pixel| pixel[3] != 0),
                 "{label} canonical render is empty"
             );

@@ -569,6 +569,63 @@ async fn ui_preferences_simple_ui_round_trips_and_merges() {
 }
 
 #[tokio::test]
+async fn ui_preferences_sidebar_collapsed_round_trips_and_merges() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir); // no token configured ⇒ PUT is open
+    let app = create_app(settings).expect("app creates");
+
+    // Fresh install: the Advanced sidebar is expanded.
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(prefs.get("sidebarCollapsed").is_none());
+
+    // Opting in persists and is echoed back.
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "sidebarCollapsed": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["sidebarCollapsed"], true);
+
+    // Survives a "relaunch".
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["sidebarCollapsed"], true);
+
+    // A partial PUT (theme only) MERGES — it must not silently drop the user back into the
+    // expanded sidebar on their next launch.
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "theme": "dark" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, prefs) = request(app.clone(), "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["sidebarCollapsed"], true);
+    assert_eq!(prefs["theme"], "dark");
+
+    // Opting back out persists too (a false must be stored, not treated as "unset").
+    let (status, saved) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/ui-preferences",
+        json!({ "sidebarCollapsed": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(saved["sidebarCollapsed"], false);
+    let (status, prefs) = request(app, "GET", "/api/v1/ui-preferences", Value::Null).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(prefs["sidebarCollapsed"], false);
+}
+
+#[tokio::test]
 async fn ui_preferences_catalog_navigation_round_trips_safely_and_merges() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);

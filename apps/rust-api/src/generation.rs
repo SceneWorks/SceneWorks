@@ -132,6 +132,21 @@ pub(crate) async fn create_image_job(
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
+    if let Some(advanced) = job_payload.remove("mossImageAdvanced") {
+        let map = job_payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+        if map
+            .insert(sceneworks_core::moss_image_advanced::KEY.into(), advanced)
+            .is_some()
+        {
+            return Err(ApiError::bad_request(
+                "supply mossImageAdvanced once, not at both request boundaries",
+            ));
+        }
+    }
     job_payload.remove("requestedGpu");
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
@@ -246,6 +261,27 @@ pub(crate) async fn create_image_job(
             .and_then(requested_steps)
         {
             if let Some(message) = steps_limit_error(&model_id, steps, entry) {
+                return Err(ApiError::bad_request(message));
+            }
+        }
+        // Hires.fix (sc-26644): the shared core gate the worker re-applies before any model load
+        // (`image_request::hires_fix_request_error`). The typed DTO used to silently drop the web's
+        // top-level `hiresFix`, so the second pass never ran AND the worker's refusals never fired —
+        // a POST for a model that should refuse it returned 201 and failed later (or rendered
+        // without the pass). Judged against the FINAL payload (post-preset, with the resolved
+        // dimensions above) and the server-owned manifest entry, and off `from_payload` so the API
+        // and the worker parse the request exactly the same way. Read after the width/height/count
+        // defaults because the 4096-target check needs the resolved geometry.
+        {
+            let request = sceneworks_core::image_request::ImageRequest::from_payload(&job_payload);
+            let family = entry
+                .get("family")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default();
+            if let Some(message) =
+                sceneworks_core::image_request::hires_fix_request_error(&request, family)
+            {
                 return Err(ApiError::bad_request(message));
             }
         }
@@ -466,7 +502,27 @@ pub(crate) async fn create_image_job(
             .and_then(Value::as_u64)
             .and_then(|value| u32::try_from(value).ok())
             .unwrap_or_else(|| payload.count.unwrap_or_else(default_image_count));
-        job_payload.insert("seeds".to_owned(), random_image_seeds(count));
+        let mut seeds = random_image_seeds(count);
+        // sc-24215: a native count batch (`image.nativeCountBatch`, Supra2-IMG) renders image k on
+        // seed `seeds[0] + k` in one engine call, so the recorded batch must be that run, not
+        // independent draws the engine never used.
+        if model_manifest_entry
+            .as_object()
+            .is_some_and(sceneworks_core::image_sampling_controls::native_count_batch)
+        {
+            if let Some(base) = seeds
+                .as_array()
+                .and_then(|seeds| seeds.first())
+                .and_then(Value::as_i64)
+            {
+                seeds = Value::Array(
+                    (0..i64::from(count))
+                        .map(|k| Value::from(base + k))
+                        .collect(),
+                );
+            }
+        }
+        job_payload.insert("seeds".to_owned(), seeds);
     }
     // Create in `pending_caption` when an async caption is pending, else the default `queued`. The
     // POST returns 201 immediately either way — it never waits on the expansion (sc-9120).
@@ -787,7 +843,7 @@ pub(crate) async fn validate_flux3_reference_payload(
     validate_ordered_image_references(state, project_id.to_owned(), references.asset_ids).await
 }
 
-async fn validate_ordered_image_references(
+pub(crate) async fn validate_ordered_image_references(
     state: AppState,
     project_id: String,
     asset_ids: Vec<String>,

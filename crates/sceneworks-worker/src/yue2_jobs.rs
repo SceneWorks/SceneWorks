@@ -1045,10 +1045,11 @@ impl Yue2Progress {
     /// The job fraction and message after `progress`.
     pub(crate) fn observe(&mut self, progress: Progress) -> (f64, String) {
         let message = match progress {
+            Progress::PromptUpsamplingComplete => {
+                return (self.fraction, "Generating audio.".to_owned())
+            }
             // FLUX 3 image enhancement is not a YuE2 phase: retain fraction and stage counters.
-            Progress::PromptUpsamplingComplete
-            | Progress::ConditioningComplete
-            | Progress::Upsampling { .. } => {
+            Progress::ConditioningComplete | Progress::Upsampling { .. } => {
                 return (self.fraction, "Generating audio.".to_owned())
             }
             Progress::Loading(_) => {

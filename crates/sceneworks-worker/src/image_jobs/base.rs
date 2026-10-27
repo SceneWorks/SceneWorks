@@ -674,6 +674,8 @@ impl ImageRoute {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandleImageRoute {
+    /// Typed native MOSS editing, using the shared MOSS stream rather than generic conditioning.
+    MossImageEdit,
     /// InstantID identity (sc-5491) — the off-Mac sibling of `ImageRoute::InstantId`. Checked first
     /// because `instantid_realvisxl` is not an `is_candle_engine` txt2img id.
     InstantId,
@@ -1053,7 +1055,7 @@ impl CandleImageRoute {
                 sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER.len() as u32
             }
             // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
-            CandleImageRoute::CandleTxt2Img => request.image_count(),
+            CandleImageRoute::CandleTxt2Img | CandleImageRoute::MossImageEdit => request.image_count(),
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
@@ -1102,7 +1104,8 @@ impl CandleImageRoute {
             CandleImageRoute::QwenImageComfyui => qwen_comfyui_candle::QWEN_COMFYUI_CANDLE_ENGINE,
             CandleImageRoute::Flux2Comfyui => flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE,
             CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
-            CandleImageRoute::MageEdit
+            CandleImageRoute::MossImageEdit
+            | CandleImageRoute::MageEdit
             | CandleImageRoute::QwenImage21Edit
             | CandleImageRoute::Flux3Reference
             | CandleImageRoute::CandleTxt2Img => candle_adapter_label(&request.model),
@@ -1164,7 +1167,9 @@ fn resolve_candle_image_route_with_prepared_availability(
     // Order matches the historical ladder: the edit / reference / identity / control lanes are all
     // checked BEFORE the generic `is_candle_engine` txt2img arm (they share candle txt2img model ids, so
     // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
-    if flux1_ipadapter_pose_combination(request) {
+    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+        Some(CandleImageRoute::MossImageEdit)
+    } else if flux1_ipadapter_pose_combination(request) {
         Some(CandleImageRoute::FluxIpAdapterPoseReject)
     } else if instantid_available(request, settings) {
         Some(CandleImageRoute::InstantId)
@@ -1861,6 +1866,21 @@ fn model_path_override(request: &ImageRequest) -> Option<String> {
     Some(raw_path.to_owned())
 }
 
+/// The confined directory a job's `modelPath` (the request's `advanced.modelPath`, else the entry's
+/// injected one — [`model_path_override`]) names, through the app-managed resolver that refuses a
+/// path outside the data dir. The ONE resolution the load ([`resolve_weights_dir`]) and the
+/// failed-load diagnosis (`converted_install::explain_failed_load`) share, so a diagnosis judges —
+/// and marks — exactly the bundle the load read. `Ok(None)` when the job names no `modelPath`.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+pub(crate) fn resolve_model_path_dir(
+    request: &ImageRequest,
+    settings: &Settings,
+) -> WorkerResult<Option<PathBuf>> {
+    model_path_override(request)
+        .map(|path| resolve_app_managed_model_dir(settings, &path, "Image modelPath"))
+        .transpose()
+}
+
 /// Typed, actionable preflight for a **convert-at-install** model whose conversion has not produced
 /// a local artifact yet (sc-20529).
 ///
@@ -1952,6 +1972,52 @@ fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
     )))
 }
 
+/// Typed, actionable preflight for an injected converted artifact that would not load (sc-24216).
+///
+/// The twin of [`unconverted_model_preflight`] for the case where the conversion DID run but its
+/// output is no longer what the engine accepts — truncated, edited, or written by an older build.
+/// For a converter with an engine-owned pin contract
+/// ([`sceneworks_core::converted_artifacts::CONTRACT_CONVERTERS`], e.g. `supra2_img`) the engine's
+/// own CHEAP check runs here (manifest, pin contract, file sizes, and a verification failure a
+/// previous failed load recorded), so a damaged bundle is refused before any load with a message
+/// naming the remedy instead of the engine's raw refusal. Same-size corruption is caught by the
+/// engine's own load-time digests and explained by [`crate::converted_install::explain_failed_load`]
+/// — never by hashing here, so a healthy install is hashed once per load. Every other converter
+/// passes untouched.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+fn converted_artifact_preflight(
+    request: &ImageRequest,
+    dir: &std::path::Path,
+) -> WorkerResult<()> {
+    let Some(mlx) = request.model_manifest_entry.get("mlx") else {
+        return Ok(());
+    };
+    if mlx.get("requiresConversion").and_then(Value::as_bool) != Some(true) {
+        return Ok(());
+    }
+    let converter = mlx
+        .get("converter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    let Some(problem) = sceneworks_core::converted_artifacts::converted_artifact_problem(
+        converter,
+        dir,
+        sceneworks_core::converted_artifacts::ArtifactCheck::Sizes,
+    ) else {
+        return Ok(());
+    };
+    Err(WorkerError::InvalidPayload(
+        crate::converted_install::converted_files_message(
+            crate::converted_install::model_display_name(
+                &request.model_manifest_entry,
+                &request.model,
+            ),
+            &problem,
+        ),
+    ))
+}
+
 /// Fail-loud gate for the CANDLE stub fallback (sc-20529) — the off-Mac twin of [`mlx_weights_gap`],
 /// consulted by `run_image_generate_job` immediately before it would call `generate_stub_stream`.
 ///
@@ -2026,8 +2092,8 @@ pub(crate) fn resolve_weights_dir(
             explicit.as_deref(),
         )?));
     }
-    if let Some(path) = model_path_override(request) {
-        let dir = resolve_app_managed_model_dir(settings, &path, "Image modelPath")?;
+    if let Some(dir) = resolve_model_path_dir(request, settings)? {
+        converted_artifact_preflight(request, &dir)?;
         // Anima (epic 10512) is convert-at-install with a q4/q8/bf16 MATRIX: unlike other convert
         // models (a single flat dir), its injected `modelPath` is the converted ROOT holding `bf16/`,
         // `q8/`, `q4/` tier subdirs (written by `convert_anima_prequant`). Descend into the requested
@@ -4065,6 +4131,357 @@ pub(super) fn candle_certified_load_spec(
         })
 }
 
+/// Bind the endpoint price to the complete ordinary SDXL assembly, including the shared VAE and
+/// tokenizers actually opened by Candle. ArtifactSeal's existing stat-identity memo avoids repeated
+/// multi-GB hashing; these exact tokens then participate in cache identity and guard registry load.
+/// Different base-tier members or consumed component bytes lose endpoint authority. Unused files in
+/// a shared tokenizer/VAE snapshot do not affect the price of the same loaded assembly.
+#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
+fn seal_sdxl_endpoint_load_spec(
+    spec: &mut LoadSpec,
+    expected: &[sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::EndpointArtifactFile],
+) -> WorkerResult<bool> {
+    use std::collections::BTreeMap;
+
+    const COMPONENTS: [(&str, &str); 3] = [
+        ("tokenizer_clip_l", "tokenizer.json"),
+        ("tokenizer_clip_bigg", "tokenizer.json"),
+        ("vae_fp16_fix", "diffusion_pytorch_model.safetensors"),
+    ];
+    // The measured assembly has one base directory and these three component sources. The stock
+    // co-requisite resolver returns File for a single literal manifest member; providers also accept
+    // its snapshot Dir. Extra encoders, controls, adapters, or imports cannot inherit this endpoint.
+    if spec.file_source_paths().len() + spec.directory_source_paths().len() != 4
+        || spec.components.len() != COMPONENTS.len()
+        || COMPONENTS
+            .iter()
+            .any(|(id, _)| !spec.components.contains_key(*id))
+    {
+        return Ok(false);
+    }
+    let WeightsSource::Dir(base) = &spec.weights else {
+        return Ok(false);
+    };
+    let mut components = Vec::new();
+    for (id, file) in COMPONENTS {
+        let path = match spec.components.get(id) {
+            Some(WeightsSource::Dir(root)) => root.join(file),
+            Some(WeightsSource::File(path))
+                if path.file_name() == Some(std::ffi::OsStr::new(file)) =>
+            {
+                path.clone()
+            }
+            _ => return Ok(false),
+        };
+        components.push((format!("components/{id}/{file}"), path));
+    }
+
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        prefix: &str,
+        files: &mut BTreeMap<String, PathBuf>,
+    ) -> WorkerResult<()> {
+        for entry in std::fs::read_dir(directory).map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "SDXL endpoint inventory cannot read {}: {error}",
+                directory.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!("SDXL endpoint inventory failed: {error}"))
+                })?
+                .path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                WorkerError::InvalidPayload(format!(
+                    "SDXL endpoint member cannot be inspected: {error}"
+                ))
+            })?;
+            if metadata.is_dir() {
+                visit(root, &path, prefix, files)?;
+                continue;
+            }
+            // HF snapshot links to blob files are normal; directory links are not inventory roots.
+            if !std::fs::metadata(&path)
+                .map_err(|error| {
+                    WorkerError::InvalidPayload(format!(
+                        "SDXL endpoint member target cannot be inspected: {error}"
+                    ))
+                })?
+                .is_file()
+            {
+                return Err(WorkerError::InvalidPayload(format!(
+                    "SDXL endpoint member must be a file: {}",
+                    path.display()
+                )));
+            }
+            let relative = path
+                .strip_prefix(root)
+                .expect("inventory child stays below root");
+            let relative = relative
+                .iter()
+                .map(|part| part.to_str())
+                .collect::<Option<Vec<_>>>()
+                .ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "SDXL endpoint member has a non-UTF-8 path".to_owned(),
+                    )
+                })?
+                .join("/");
+            files.insert(format!("{prefix}/{relative}"), path);
+        }
+        Ok(())
+    }
+
+    let mut actual = BTreeMap::new();
+    let base = std::path::absolute(base).map_err(|error| {
+        WorkerError::InvalidPayload(format!("SDXL endpoint root cannot be absolutized: {error}"))
+    })?;
+    visit(&base, &base, "base", &mut actual)?;
+    // These are the exact joins used by SDXL's resolve_tokenizer_file/resolve_vae_file. The same HF
+    // shared snapshot may contain additional CLIP weights installed for an unrelated model.
+    for (name, path) in components {
+        if !path.is_file() {
+            return Ok(false);
+        }
+        actual.insert(name, path);
+    }
+    if expected.is_empty()
+        || expected.len() != actual.len()
+        || expected.iter().any(|file| !actual.contains_key(&file.path))
+    {
+        return Ok(false);
+    }
+    let mut pins = Vec::with_capacity(expected.len());
+    for file in expected {
+        let pin = gen_core::PinnedWeightsFile::pin(&actual[&file.path])
+            .map_err(|error| crate::classify_engine_error("SDXL endpoint load pin", error))?;
+        let digest = pin
+            .content_sha256()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if pin.target_fingerprint().size != file.bytes || digest != file.sha256 {
+            return Ok(false);
+        }
+        pins.push(pin);
+    }
+    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "SDXL endpoint load preparation")?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod sdxl_endpoint_inventory_tests {
+    use super::*;
+    use sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::EndpointArtifactFile;
+    use sha2::{Digest, Sha256};
+
+    fn fixture() -> (tempfile::TempDir, LoadSpec, Vec<EndpointArtifactFile>) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for path in [
+            "base/unet/model.safetensors",
+            "base/vae/model.safetensors",
+            "components/tokenizer_clip_l/tokenizer.json",
+            "components/tokenizer_clip_bigg/tokenizer.json",
+            "components/vae_fp16_fix/diffusion_pytorch_model.safetensors",
+        ] {
+            let file = temp.path().join(path);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, b"fixture-a").unwrap();
+            files.push(EndpointArtifactFile {
+                path: path.to_owned(),
+                bytes: 9,
+                sha256: format!("{:x}", Sha256::digest(b"fixture-a")),
+            });
+        }
+        let mut spec = LoadSpec::new(WeightsSource::Dir(temp.path().join("base")));
+        for id in ["tokenizer_clip_l", "tokenizer_clip_bigg", "vae_fp16_fix"] {
+            spec = spec.with_component(
+                id,
+                WeightsSource::Dir(temp.path().join("components").join(id)),
+            );
+        }
+        (temp, spec, files)
+    }
+
+    // CI_IMPACT: tiny filesystem fixtures and SHA-256 only; no model, learned layer, or device.
+    #[test]
+    fn sdxl_endpoint_inventory_pins_the_actual_shared_vae_and_both_tokenizers() {
+        let (_temp, mut spec, expected) = fixture();
+        assert!(seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        assert_eq!(spec.prepared_file_pins().len(), expected.len());
+        spec.validate_prepared_file_pins().unwrap();
+        let shared_vae = match &spec.components["vae_fp16_fix"] {
+            WeightsSource::Dir(root) => root.join("diffusion_pytorch_model.safetensors"),
+            _ => unreachable!(),
+        };
+        assert!(spec.prepared_file_pins().get(&shared_vae).is_some());
+        std::fs::write(shared_vae, b"fixture-b").unwrap();
+        assert!(spec.validate_prepared_file_pins().is_err());
+    }
+
+    // CI_IMPACT: actual stock co-requisite factory over four tiny cached files; no model/device calls.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    #[test]
+    fn sdxl_endpoint_inventory_accepts_the_certified_stock_component_factory() {
+        let temp = tempfile::tempdir().unwrap();
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+            ("HF_HOME", ""),
+            ("SCENEWORKS_DATA_DIR", temp.path().to_str().unwrap()),
+            ("SCENEWORKS_CONFIG_DIR", temp.path().to_str().unwrap()),
+        ]);
+        let settings = Settings::from_env();
+        let source = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .map(|(_, source)| *source)
+            .unwrap();
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(source)).unwrap();
+        let manifest = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "sdxl")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        let descriptor = crate::inference_runtime::media_descriptor("sdxl").unwrap();
+        let mut expected = Vec::new();
+        let mut base = None;
+        for download in manifest["downloads"].as_array().unwrap() {
+            let component = download.get("componentId").and_then(Value::as_str);
+            if component.is_some_and(|id| !descriptor.required_components.contains(&id))
+                || (component.is_none() && download["variant"] != "q4")
+            {
+                continue;
+            }
+            let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(
+                &settings.data_dir,
+                download["repo"].as_str().unwrap(),
+            )
+            .unwrap()
+            .join("snapshots")
+            .join(download["revision"].as_str().unwrap());
+            let (relative, file) = if let Some(component) = component {
+                let file = download["files"][0].as_str().unwrap();
+                (
+                    format!("components/{component}/{file}"),
+                    snapshot.join(file),
+                )
+            } else {
+                base = Some(snapshot.join("q4"));
+                (
+                    "base/fixture.bin".to_owned(),
+                    snapshot.join("q4/fixture.bin"),
+                )
+            };
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"fixture-a").unwrap();
+            expected.push(EndpointArtifactFile {
+                path: relative,
+                bytes: 9,
+                sha256: format!("{:x}", Sha256::digest(b"fixture-a")),
+            });
+        }
+        let spec =
+            load_spec(base.unwrap(), Some(Quant::Q4), Vec::new(), None).with_resolved_route("sdxl");
+        let mut spec = attach_required_components(spec, "sdxl", manifest, &settings).unwrap();
+        assert_eq!(spec.components.len(), 3);
+        assert_eq!(spec.file_source_paths().len(), 3);
+        assert_eq!(spec.directory_source_paths().len(), 1);
+        assert!(candle_certified_load_spec(
+            "sdxl", &settings, &spec, manifest, "q4"
+        ));
+        assert!(seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        assert_eq!(spec.prepared_file_pins().len(), expected.len());
+        spec.validate_prepared_file_pins().unwrap();
+        for source in spec.components.values() {
+            let WeightsSource::File(path) = source else {
+                panic!("the stock single-literal co-requisite must resolve to File");
+            };
+            assert!(spec.prepared_file_pins().get(path).is_some());
+        }
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_file_components_reject_changed_members_and_extra_sources() {
+        for changed in 0..3 {
+            let (temp, mut spec, expected) = fixture();
+            for file in &expected[2..] {
+                let component = file.path.split('/').nth(1).unwrap();
+                spec = spec
+                    .with_component(component, WeightsSource::File(temp.path().join(&file.path)));
+            }
+            let path = temp.path().join(&expected[2 + changed].path);
+            std::fs::write(&path, b"fixture-b").unwrap();
+            assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+            std::fs::remove_file(path).unwrap();
+            assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        }
+        let (temp, spec, expected) = fixture();
+        let renamed = temp.path().join("components/tokenizer_clip_l/other.json");
+        std::fs::write(&renamed, b"fixture-a").unwrap();
+        let mut renamed_spec = spec
+            .clone()
+            .with_component("tokenizer_clip_l", WeightsSource::File(renamed));
+        assert!(!seal_sdxl_endpoint_load_spec(&mut renamed_spec, &expected).unwrap());
+        for source in [
+            WeightsSource::File(temp.path().join(&expected[2].path)),
+            WeightsSource::Dir(temp.path().join("base")),
+        ] {
+            let mut extra = spec.clone().with_text_encoder(source);
+            assert!(!seal_sdxl_endpoint_load_spec(&mut extra, &expected).unwrap());
+        }
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_rejects_changed_missing_and_extra_members() {
+        // Equal-size changes in every source must lose the measured price, including shared VAE
+        // changes which a tier-root-only inventory would miss.
+        for index in 0..5 {
+            let (temp, mut spec, expected) = fixture();
+            std::fs::write(temp.path().join(&expected[index].path), b"fixture-b").unwrap();
+            assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+            assert!(!spec.prepared_file_pins().is_prepared());
+        }
+        let (temp, mut spec, expected) = fixture();
+        std::fs::remove_file(temp.path().join(&expected[0].path)).unwrap();
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+
+        let (temp, mut spec, expected) = fixture();
+        std::fs::write(temp.path().join("base/added.safetensors"), b"fixture-a").unwrap();
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+
+        let (temp, spec, expected) = fixture();
+        let mut spec =
+            spec.with_component("unexpected", WeightsSource::Dir(temp.path().join("base")));
+        assert!(!seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+    }
+
+    #[test]
+    fn sdxl_endpoint_inventory_ignores_unused_shared_snapshot_members() {
+        let (temp, mut spec, expected) = fixture();
+        std::fs::write(
+            temp.path()
+                .join("components/tokenizer_clip_l/model.safetensors"),
+            b"unused",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("components/vae_fp16_fix/config.json"),
+            b"{}",
+        )
+        .unwrap();
+        assert!(seal_sdxl_endpoint_load_spec(&mut spec, &expected).unwrap());
+        assert_eq!(spec.prepared_file_pins().len(), expected.len());
+    }
+}
+
 /// Seal every file recursively-inventoried receipt provider can read before selector evaluation.
 /// The same finalized `LoadSpec` reaches the generator cache, so cold/warm execution cannot
 /// silently re-resolve a pathname after admission.
@@ -4976,7 +5393,14 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
         // The historical 80-step ceiling, raised to the model's own default where that is higher
         // (Iris-3B's release default is 100, sc-25679) so the default is always reachable rather
         // than silently clamped below what the model ships with.
-        .map(|steps| (steps as u32).clamp(1, max_requested_steps(model.default_steps())))
+        // A declared `limits.hardMaxSteps` (sc-24215) replaces the historical ceiling; the
+        // model's own boundary refuses a request above it before this point.
+        .map(|steps| {
+            let ceiling =
+                sceneworks_core::video_request::hard_max_steps(&request.model_manifest_entry)
+                    .unwrap_or_else(|| max_requested_steps(model.default_steps()));
+            (steps as u32).clamp(1, ceiling)
+        })
         .unwrap_or(model.default_steps())
 }
 
@@ -4987,7 +5411,7 @@ fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u32 {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 fn max_requested_steps(default_steps: u32) -> u32 {
-    default_steps.max(80)
+    default_steps.max(sceneworks_core::image_request::BASE_MAX_IMAGE_STEPS)
 }
 
 /// Resolve the guidance scale. Distilled variants (z-image-turbo, flux schnell) take
@@ -5436,14 +5860,56 @@ fn mlx_raw_settings(
     quant_bits: Option<i64>,
     guidance: Option<f32>,
 ) -> JsonObject {
-    let mut raw = flux3_references::caller_raw_settings(&request.advanced);
+    mlx_raw_settings_for_bundle(request, None, repo, steps, quant_bits, guidance)
+}
+
+/// [`mlx_raw_settings`] for a render whose weights LOADED from `bundle` (the generic lane's resolved
+/// `weights_dir`): Supra2's unconditional-context record is read off that bundle's manifest, never
+/// re-resolved from the request (sc-24217 pre-merge review).
+fn mlx_raw_settings_for_bundle(
+    request: &ImageRequest,
+    bundle: Option<&Path>,
+    repo: &str,
+    steps: u32,
+    quant_bits: Option<i64>,
+    guidance: Option<f32>,
+) -> JsonObject {
+    let mut raw = if sceneworks_core::image_request::flux3::is_model(&request.model) {
+        flux3_references::caller_raw_settings(&request.advanced)
+    } else {
+        request.advanced.clone()
+    };
     // This key is worker-owned. A replayed recipe or hostile advanced payload must never be able to
     // forge Auto's rung-4 decision; the trusted Candle path may add it back after final admission.
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
     // Worker-owned too (epic 25899): only the image's own render report adds the record back.
     raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+    raw.remove(sceneworks_core::moss_image::EDIT_REPORT_KEY);
+    raw.remove("moss_image_edit_execution_report");
     raw.remove(sceneworks_core::moss_image::REPORT_KEY);
     raw.remove("moss_image_execution_report");
+    // Worker-owned (sc-24215): the pinned weights Supra2 rendered from, never a replayed copy.
+    // So are the unconditional context CFG steered against and the rendering backend (epic-review
+    // follow-up): the reproducibility record, never a replayed copy.
+    raw.remove(sceneworks_core::supra2::MODEL_REVISIONS_KEY);
+    if sceneworks_core::supra2::is_supra2(&request.model) {
+        raw.insert(
+            sceneworks_core::supra2::MODEL_REVISIONS_KEY.to_owned(),
+            sceneworks_core::supra2::pinned_revisions(&request.model_manifest_entry),
+        );
+        raw.insert(
+            sceneworks_core::supra2::UNCONDITIONAL_KEY.to_owned(),
+            sceneworks_core::supra2::unconditional_source(bundle, guidance),
+        );
+        raw.insert(
+            sceneworks_core::supra2::BACKEND_KEY.to_owned(),
+            Value::from(if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            }),
+        );
+    }
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
     raw.insert("numInferenceSteps".to_owned(), json!(steps));
@@ -7243,6 +7709,60 @@ mod metrics_settings_tests {
         ));
     }
 
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn moss_edit_completion_metrics_do_not_invent_q8_for_the_r15_request_shape() {
+        // Actual R15 MLX edit shape: no quant field, BF16 native components, 30 steps/CFG4,
+        // shift5, 768x512 and seed173. Exercise the same helper used after event consumption,
+        // rather than supplying an already-correct label to image_settings_metrics.
+        for model in ["moss_image_base", "moss_image_sft"] {
+            let req = request(json!({
+                "model": model, "mode": "edit_image", "prompt": "Change only the blue bottle body and blue cap to deep red.",
+                "negativePrompt": "", "width": 768, "height": 512, "count": 1, "seed": 173,
+                "referenceAssetIds": ["asset_reference"],
+                "advanced": {"steps": 30, "guidanceScale": 4, "schedulerShift": 5,
+                    "mossImage": {"acceleration": "off", "uncond_skip_layers": []},
+                    "mossImageEdit": {"reference_max_edge": 512, "use_kv_cache": true}}
+            }));
+            let metrics = build_image_metrics(&req, Some(30), 1, None);
+            assert_eq!(metrics.quant_label.as_deref(), Some("bf16"));
+            assert_eq!(metrics.quant_bits, None);
+            assert_eq!(metrics.model.as_deref(), Some(model));
+            assert_eq!(metrics.steps, Some(30));
+            assert_eq!(metrics.image_count, Some(1));
+            assert_eq!(
+                (metrics.width, metrics.height, metrics.seed),
+                (Some(768), Some(512), Some(173))
+            );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn ordinary_moss_dmd_completion_keeps_generic_quant_metrics_semantics() {
+        use gen_core::moss_image::{MossDmdPrecision, MossImageAcceleration, MossImageOptions};
+        for precision in [MossDmdPrecision::UnmergedBf16, MossDmdPrecision::FullFp32] {
+            let options = MossImageOptions {
+                acceleration: MossImageAcceleration::Dmd(precision),
+                ..Default::default()
+            };
+            let req = request(
+                json!({"model": "moss_image_sft", "mode": "text_to_image", "prompt": "mist",
+                "advanced": {"mossImage": options}}),
+            );
+            let expected = effective_quant_label(&req, None);
+            let metrics = build_image_metrics(&req, Some(8), 1, None);
+            assert_eq!(metrics.quant_label, expected.0);
+            assert_eq!(metrics.quant_bits, expected.1.map(|bits| bits as u32));
+        }
+    }
+
     #[test]
     fn default_run_reports_effective_settings_not_blank() {
         let req = request(json!({
@@ -7740,6 +8260,9 @@ fn render_on_surface(
     };
     // A native prompt batch is the prompt list ALONE (the engine refuses `prompt` beside it).
     let (prompt, prompt_batch, count) = match surface.prompt_batch {
+        Some(batch) if batch.prompts.len() == 1 => {
+            (batch.prompts[0].clone(), Vec::new(), batch.count)
+        }
         Some(batch) => (String::new(), batch.prompts.clone(), batch.count),
         None => (prompt.to_owned(), Vec::new(), 1),
     };
@@ -7855,8 +8378,8 @@ fn resolve_hires_fix_plan(
         .hires_fix
         .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
     Some(HiresFixPlan {
-        width: hires_fix_target_dimension(request.width, upscale_by),
-        height: hires_fix_target_dimension(request.height, upscale_by),
+        width: sceneworks_core::image_request::hires_fix_target_dimension(request.width, upscale_by),
+        height: sceneworks_core::image_request::hires_fix_target_dimension(request.height, upscale_by),
         steps: request.hires_fix.effective_steps(first_pass_steps),
         guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
         true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
@@ -8136,9 +8659,7 @@ fn generate_one_with_hires_on_surface(
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
         Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
-        Progress::Upsampling { tokens, max_tokens } => {
-            on_progress(Progress::Upsampling { tokens, max_tokens })
-        }
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
@@ -8204,9 +8725,7 @@ fn generate_one_with_hires_on_surface(
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
         Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
-        Progress::Upsampling { tokens, max_tokens } => {
-            on_progress(Progress::Upsampling { tokens, max_tokens })
-        }
+        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
@@ -8829,7 +9348,7 @@ fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImag
         &resized
     };
     let mut pixels = Vec::with_capacity(image.pixels.len() / 3 * 4);
-    for (rgb, a) in image.pixels.chunks_exact(3).zip(plane.as_raw().iter()) {
+    for (rgb, a) in image.pixels.as_chunks::<3>().0.iter().zip(plane.as_raw().iter()) {
         pixels.extend_from_slice(rgb);
         pixels.push(*a);
     }
@@ -8845,7 +9364,7 @@ fn rgba_reference(image: &Image, plane: &image::GrayImage) -> gen_core::RgbaImag
 fn split_rgba_reference(image: &gen_core::RgbaImage) -> WorkerResult<(Image, image::GrayImage)> {
     let mut rgb = Vec::with_capacity(image.pixels.len() / 4 * 3);
     let mut plane = Vec::with_capacity(image.pixels.len() / 4);
-    for pixel in image.pixels.chunks_exact(4) {
+    for pixel in image.pixels.as_chunks::<4>().0 {
         rgb.extend_from_slice(&pixel[..3]);
         plane.push(pixel[3]);
     }
@@ -10683,8 +11202,9 @@ async fn generate_stream_using(
     } else {
         (quant, quant_bits)
     };
-    let raw_settings = mlx_raw_settings(
+    let raw_settings = mlx_raw_settings_for_bundle(
         request,
+        Some(&weights_dir),
         &repo,
         steps,
         quant_bits,
@@ -11048,6 +11568,9 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "flux3_klein" | "flux3_klein_base" => "candle_flux3",
         "moss_image_base" => "candle_moss_image_base",
         "moss_image_sft" => "candle_moss_image_sft",
+        "moss_image_base" | "moss_image_sft" => moss_adapter_label(model, "candle"),
+        // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
+        "supra2_img" => "candle_supra2",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
         "lens" | "lens_turbo" => "candle_lens",
         "kolors" => "candle_kolors",
@@ -11074,6 +11597,11 @@ fn candle_adapter_label(model: &str) -> &'static str {
         // Anima 2B (sc-10676): base / aesthetic / turbo share the candle Anima engine (the off-Mac
         // sibling of the `mlx_anima` label).
         "anima_base" | "anima_aesthetic" | "anima_turbo" => "candle_anima",
+        // Iris-3B (sc-25680): the off-Mac sibling of the `mlx_iris` label.
+        "iris_3b" => "candle_iris",
+        // Bernini's production stream stamps this via its own route; the request-only fallback
+        // (`adapter_id`) reaches it through here.
+        "bernini_image" => CANDLE_BERNINI_IMAGE_ADAPTER,
         // sdxl / realvisxl share the candle "sdxl" engine.
         _ => CANDLE_ADAPTER,
     }
@@ -11158,6 +11686,21 @@ fn candle_tier_fit(
             needed_gb,
             available_gb,
         },
+    }
+}
+
+/// A generic SDXL request has a narrower, artifact-bound staging contract than its descriptor.
+/// Bespoke edit/IP/detail lanes never reach this path. Keep the legacy tier verdict unless the
+/// exact request selector has admitted the candidate; a declaration alone grants no saving.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn candle_tier_fit_after_shared_selection(
+    legacy: TierFit,
+    selection: Option<&crate::candle_memory_strategy::CandleMemoryEvaluation>,
+) -> TierFit {
+    if selection.is_some() {
+        TierFit::Fits
+    } else {
+        legacy
     }
 }
 
@@ -12815,16 +13358,20 @@ async fn generate_candle_stream(
         device_backend,
         asset_writes,
         crate::inference_runtime::load,
+        Arc::new(NativeMossStreamRuntime),
     )
     .await
 }
 
 /// [`generate_candle_stream`] with the generator loader supplied by the caller — the Candle twin of
 /// [`generate_stream_using`] (sc-25680): every pre-load decision, the cached load, the per-item drive
-/// and `consume_gen_events` are the production code; only the engine is injectable, so a test can pin
-/// progress / cancel / failure on a real candle job arm without weights or a CUDA device.
+/// and `consume_gen_events` are the production code. Private MOSS source, admission and cache
+/// dependencies permit CPU lifecycle tests through this dispatcher without a CUDA device.
 #[allow(clippy::too_many_arguments)]
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    all(test, target_os = "macos")
+))]
 async fn generate_candle_stream_using(
     api: &ApiClient,
     settings: &Settings,
@@ -12836,9 +13383,10 @@ async fn generate_candle_stream_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
+    runtime: Arc<dyn MossStreamRuntime>,
 ) -> WorkerResult<()> {
     if sceneworks_core::moss_image::is_moss(&plan.request.model) {
-        return generate_moss_stream_using(
+        return generate_moss_stream_with_runtime(
             api,
             settings,
             job,
@@ -12846,9 +13394,47 @@ async fn generate_candle_stream_using(
             project_path,
             asset_writes,
             load_generator,
+            runtime,
+            "candle",
         )
         .await;
     }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        generate_candle_registry_stream_using(
+            api,
+            settings,
+            job,
+            plan,
+            project_path,
+            _device_backend,
+            asset_writes,
+            load_generator,
+        )
+        .await
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Err(WorkerError::Engine(
+            "generic Candle registry stream is unavailable on macOS".into(),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_registry_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    _device_backend: &str,
+    asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
     let flux3_references = flux3_references::resolve_owned_references(
         &plan.request,
         &settings.data_dir,
@@ -12866,6 +13452,7 @@ async fn generate_candle_stream_using(
     let flux3_layout =
         flux3_references::resolve_owned_layout(&resolved_request, flux3_references.as_ref())?;
     let request = &resolved_request;
+
     let adapter_label = candle_adapter_label(&request.model);
     // Join the MODEL_TABLE row with the linked candle descriptor (same resolver the MLX path uses).
     // `None` means the candle provider crate for this id wasn't linked/registered — fail loud rather
@@ -13273,6 +13860,43 @@ async fn generate_candle_stream_using(
         )));
     }
     let adapter_source_bytes = krea_adapter_bytes.unwrap_or(0);
+    // Ordinary SDXL reaches a request-scoped provider contract whose staging support is narrower
+    // than the descriptor shared with its bespoke surfaces. Price each installed candidate with
+    // that contract before the resident-only capability clamp can reject it. Other SDXL surfaces
+    // retain their existing gates; no descriptor capability is broadened here.
+    let sdxl_request_tier_admission = engine_id == "sdxl"
+        && request.model == "sdxl"
+        && matches!(request.mode.as_str(), "image_generation" | "text_to_image")
+        && edit_reference.is_none()
+        && img2img_reference.is_none()
+        && edit_refs.is_empty()
+        && edit_mask.is_none()
+        && hires_fix.is_none()
+        && !use_pid
+        && native_batch.is_none();
+    let sdxl_endpoints = if sdxl_request_tier_admission
+        && request.count == 1
+        && adapter_count == 0
+        && flash_attn
+        && lane_controls.cfg_interval.is_none()
+        && guidance_method.is_none()
+        && scheduler.is_none()
+        && scheduler_shift.is_none()
+    {
+        sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::packaged_sdxl_cuda_memory_endpoints()
+            .filter(|endpoints| {
+                endpoints.settings.get("steps").and_then(Value::as_u64) == Some(u64::from(steps))
+                    && endpoints.settings.get("guidance").and_then(Value::as_f64)
+                        == guidance.map(f64::from)
+                    && endpoints.settings.get("flashAttn").and_then(Value::as_bool) == Some(true)
+                    && sampler.as_deref().is_none_or(|sampler| {
+                        endpoints.resolved_defaults.get("sampler").and_then(Value::as_str)
+                            == Some(sampler)
+                    })
+            })
+    } else {
+        None
+    };
     // sc-10733 capability downtier: for a DEFAULT job (no explicit per-(screen,model) pick, and not the
     // bespoke ConvRot tier), if the resolved tier won't fit the live budget, step DOWN to the highest
     // installed tier that does — floored at the per-model quality floor — rejecting only when nothing
@@ -13302,10 +13926,112 @@ async fn generate_candle_stream_using(
         let candidates: Vec<(&'static str, TierFit)> =
             downtier_candidate_tiers(request, settings, tier, floor)
                 .into_iter()
-                .map(|candidate| {
-                    let candidate_adapter_bytes =
-                        candle_adapter_resident_bytes(engine_id, candidate, adapter_source_bytes);
-                    let fit = if krea_turbo_ladder && adapter_count == 0 {
+                .map(|candidate| -> WorkerResult<_> {
+                    let candidate_adapter_bytes = candle_adapter_resident_bytes(
+                        engine_id,
+                        candidate,
+                        adapter_source_bytes,
+                    );
+                    let fit = if sdxl_request_tier_admission {
+                        let legacy = candle_tier_fit(
+                            &request.model_manifest_entry,
+                            candidate,
+                            budget,
+                            sequential_capable,
+                            candidate_adapter_bytes,
+                        );
+                        let selected = if let Some(dir) =
+                            resolve_tier_dir(request, settings, candidate)
+                        {
+                            let (candidate_quant, _) = candle_quant_for_resolved_tier(
+                                request,
+                                candidate,
+                                &dir,
+                                model.supports_quant(),
+                                false,
+                            );
+                            let spec = load_spec(dir, candidate_quant, adapters.clone(), None)
+                                .with_resolved_route(request.model.clone());
+                            let spec = attach_required_components(
+                                spec,
+                                engine_id,
+                                &request.model_manifest_entry,
+                                settings,
+                            )?;
+                            let spec =
+                                attach_manifest_text_encoder(spec, engine_id, request, settings)?
+                                    .into_load_spec();
+                            let mut spec = apply_declared_candle_image_load_shape(
+                                engine_id,
+                                Some(candidate),
+                                &request.mode,
+                                &request.model_manifest_entry,
+                                spec,
+                                false,
+                            );
+                            let certified = candle_certified_load_spec(
+                                engine_id,
+                                settings,
+                                &spec,
+                                &request.model_manifest_entry,
+                                candidate,
+                            );
+                            let candidate_endpoints = match sdxl_endpoints {
+                                Some(endpoints) if certified && candidate == "q4" => {
+                                    seal_sdxl_endpoint_load_spec(&mut spec, &endpoints.artifact.files)?
+                                        .then_some(endpoints)
+                                }
+                                _ => None,
+                            };
+                            let overlay_bytes = candidate_adapter_bytes.saturating_add(
+                                lane_controls::declared_activation_overlay_bytes(
+                                    request,
+                                    None,
+                                    memory_width,
+                                    memory_height,
+                                )?,
+                            );
+                            crate::candle_memory_strategy::evaluate_shared_image_priced(
+                                engine_id,
+                                &request.model,
+                                &spec,
+                                certified,
+                                &request.model_manifest_entry,
+                                candidate,
+                                &request.mode,
+                                (adapter_count > 0).then_some("lora"),
+                                gen_core::MemoryGeometry {
+                                    width: memory_width,
+                                    height: memory_height,
+                                    batch: 1,
+                                    frames: 1,
+                                    reference_count: 0,
+                                },
+                                false,
+                                false,
+                                false,
+                                false,
+                                budget,
+                                shared_reserve_gb,
+                                crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
+                                    &request.model_manifest_entry,
+                                    candidate,
+                                    overlay_bytes,
+                                ),
+                                overlay_bytes,
+                                if reclaimable_gb > 0.0 {
+                                    gen_core::MemoryCacheState::Warm
+                                } else {
+                                    gen_core::MemoryCacheState::Cold
+                                },
+                                None,
+                                candidate_endpoints,
+                            )?
+                        } else {
+                            None
+                        };
+                        candle_tier_fit_after_shared_selection(legacy, selected.as_ref())
+                    } else if krea_turbo_ladder && adapter_count == 0 {
                         let candidate_runtime = resolve_tier_dir(request, settings, candidate)
                             .and_then(|dir| {
                                 krea_runtime_evidence_context(request, settings, candidate, &dir)
@@ -13374,9 +14100,9 @@ async fn generate_candle_stream_using(
                             candidate_adapter_bytes,
                         )
                     };
-                    (candidate, fit)
+                    Ok((candidate, fit))
                 })
-                .collect();
+                .collect::<WorkerResult<_>>()?;
         match choose_downtier(tier, &candidates) {
             DowntierPick::Keep => {}
             DowntierPick::Downtier(chosen) => {
@@ -13486,8 +14212,14 @@ async fn generate_candle_stream_using(
             convrot.is_some() || is_anima_model(&request.model),
         ),
     };
-    let mut raw_settings =
-        mlx_raw_settings(request, &repo, steps, quant_bits, guidance.or(true_cfg));
+    let mut raw_settings = mlx_raw_settings_for_bundle(
+        request,
+        Some(&weights_dir),
+        &repo,
+        steps,
+        quant_bits,
+        guidance.or(true_cfg),
+    );
     // The declared pixel-space activations beyond the one 1024² image the floors carry — a native
     // prompt batch's extra images (sc-25681) and an output above 1024² (sc-25684) — ride every
     // resident/sequential prediction below exactly like resident adapter bytes do:
@@ -13670,6 +14402,13 @@ async fn generate_candle_stream_using(
     );
     seal_recursive_receipt_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
     seal_ideogram_load_spec(engine_id, artifact_is_certified, &mut shared_contract_spec)?;
+    let sdxl_endpoints = match sdxl_endpoints {
+        Some(endpoints) if artifact_is_certified && shared_tier == "q4" => {
+            seal_sdxl_endpoint_load_spec(&mut shared_contract_spec, &endpoints.artifact.files)?
+                .then_some(endpoints)
+        }
+        _ => None,
+    };
     // Epic 25899: the provider's prefix KV cache, priced from the linked provider for THIS request
     // (`None` for every provider without one — its admission is unchanged). The Candle surcharge
     // follows the build's production device width, not the tier.
@@ -13728,6 +14467,7 @@ async fn generate_candle_stream_using(
             },
             prefix_kv_cache_surcharge,
             Some(&references.resources),
+            sdxl_endpoints,
         )
     } else {
         crate::candle_memory_strategy::evaluate_shared_image_priced(
@@ -13768,6 +14508,7 @@ async fn generate_candle_stream_using(
                 gen_core::MemoryCacheState::Cold
             },
             prefix_kv_cache_surcharge,
+            sdxl_endpoints,
         )
     }?;
     if flux3_references.is_some() && shared_memory.is_none() {
@@ -13854,13 +14595,23 @@ async fn generate_candle_stream_using(
         }
         memory_strategy_selection = Some(evaluation.context.selection);
         generation_memory = evaluation.memory;
+        if sdxl_request_tier_admission
+            && evaluation.context.selection.strategy == gen_core::MemoryStrategy::Resident
+        {
+            // The measured resident endpoint is literal: disable the provider's legacy automatic
+            // decode fallback by carrying an explicit all-false request memory block.
+            generation_memory = Some(gen_core::GenerationMemory::default());
+        }
         adapted_peak_gb = Some(evaluation.predicted_peak_gb);
         ideogram_warm_staged = evaluation.warm_staged;
         // Resident is the selector's conservative sentinel, not authority to reconfigure a request.
         // In particular, a later legacy low-VRAM decision may choose sequential residency; carrying a
         // Resident scope would then overwrite that request memory back to resident in configure_request.
-        selected_memory_strategy_context =
-            optimized_shared_memory_context(engine_id, evaluation.context);
+        selected_memory_strategy_context = if sdxl_request_tier_admission {
+            Some(evaluation.context)
+        } else {
+            optimized_shared_memory_context(engine_id, evaluation.context)
+        };
     }
     if let Some(evaluation) = first_pass_shared_memory {
         hires_first_pass_generation_memory = evaluation.memory;
@@ -13926,7 +14677,13 @@ async fn generate_candle_stream_using(
     // Some exactly when the receipt produced a graded selection for this request, including a
     // Resident one — which is a real decision the load must honor, not an absence of one.
     let receipt_selector_authoritative = receipt_priced_selection.is_some();
-    let use_sequential = if receipt_selector_authoritative {
+    // The generic SDXL selector validates the exact artifact, request and composition, including
+    // resident scratch-bounding rungs. The descriptor's deliberately broad staging flag and the
+    // old geometry-free resident row must not veto that same decision after it passed the tier
+    // chooser. Missing or refused selection still reaches the unchanged legacy resident gate.
+    let request_selector_authoritative = receipt_selector_authoritative
+        || (sdxl_request_tier_admission && memory_strategy_selection.is_some());
+    let use_sequential = if request_selector_authoritative {
         generation_memory.is_some_and(|memory| memory.stage_residency)
     } else if let Some(
         fit @ crate::vram_gate::KreaTurboFit::Resident {
@@ -14275,7 +15032,11 @@ async fn generate_candle_stream_using(
     // exactly what a later swap-in reclaims after the single-slot cache evicts this model. Reached only
     // when the gate ADMITTED the load (the reject arms `return` above), so we never record a peak we
     // didn't actually attempt to allocate.
-    let incurred_peak = if use_sequential {
+    let incurred_peak = if sdxl_request_tier_admission && memory_strategy_selection.is_some() {
+        // An endpoint-priced resident/scratch-bound run must not credit the old padded resident
+        // manifest row during the next eviction. Only the admitted raw working set is reclaimable.
+        adapted_peak_gb
+    } else if use_sequential {
         adapted_peak_gb.or_else(|| {
             crate::vram_gate::predicted_sequential_peak_gb_with_adapter_bytes(
                 &request.model_manifest_entry,
@@ -14289,74 +15050,70 @@ async fn generate_candle_stream_using(
     if let Some(peak_gb) = incurred_peak {
         crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
     }
-    let mut memory_strategy_context = selected_memory_strategy_context.or_else(|| {
-        memory_strategy_selection.and_then(|selection| {
-            let budget = budget?;
-            let predicted_peak_gb = adapted_peak_gb?;
-            let turbo_fit = request
-                .model_manifest_entry
-                .get("candle")?
-                .get("turboFit")?;
-            let calibration_abi = u32::try_from(turbo_fit.get("calibrationAbi")?.as_u64()?).ok()?;
-            let calibration_fingerprint = turbo_fit
-                .get("calibrationFingerprint")?
-                .as_str()?
-                .to_owned();
-            let gb_to_bytes = |gb: f64| {
-                (gb * 1024.0 * 1024.0 * 1024.0)
-                    .round()
-                    .clamp(0.0, u64::MAX as f64) as u64
-            };
-            tracing::info!(
-                backend = "candle",
-                evidence_revision = krea_evidence_revision(),
-                reclaimable_gb,
-                raw_available_gb = raw_budget.map_or(0.0, |raw| raw.free_gb),
-                effective_available_gb = budget.free_gb,
-                requested_tier,
-                effective_tier = tier,
-                strategy = ?selection.strategy,
-                "shared memory-strategy selection admitted"
-            );
-            // sc-17097: the shape now comes from the manifest, which states what the curves were MEASURED
-            // under. Reading it back off the provider - as this did - made the safety check compare the
-            // provider against itself, so calibration ABI 2's load-shape axis could never fail here.
-            let load_shape = crate::vram_gate::krea_turbo_load_shape(turbo_fit)?;
-            Some(gen_core::MemoryRunContext {
-                selection,
-                optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
-                calibration_abi,
-                calibration_fingerprint,
-                load_shape,
-                mode: gen_core::MemoryMode::TextToImage,
-                has_reference: reference_count > 0,
-                use_pid: false,
-                has_phases: false,
-                geometry: gen_core::MemoryGeometry {
-                    width: memory_width,
-                    height: memory_height,
-                    batch: 1,
-                    frames: 1,
-                    reference_count,
-                },
-                reference_resources: None,
-                overlay: None,
-                budget: gen_core::MemoryBudget {
-                    total_bytes: gb_to_bytes(budget.total_gb),
-                    committed_bytes: gb_to_bytes((budget.total_gb - budget.free_gb).max(0.0)),
-                    reclaimable_bytes: 0,
-                    reserved_headroom_bytes: gb_to_bytes(2.0),
-                },
-                predicted_peak_bytes: gb_to_bytes(predicted_peak_gb),
-                cache_state: if reclaimable_gb > 0.0 {
-                    gen_core::MemoryCacheState::Warm
-                } else {
-                    gen_core::MemoryCacheState::Cold
-                },
-                evidence_revision: krea_evidence_revision(),
-            })
+    let mut memory_strategy_context = selected_memory_strategy_context.or_else(|| memory_strategy_selection.and_then(|selection| {
+        let budget = budget?;
+        let predicted_peak_gb = adapted_peak_gb?;
+        let turbo_fit = request.model_manifest_entry.get("candle")?.get("turboFit")?;
+        let calibration_abi =
+            u32::try_from(turbo_fit.get("calibrationAbi")?.as_u64()?).ok()?;
+        let calibration_fingerprint = turbo_fit
+            .get("calibrationFingerprint")?
+            .as_str()?
+            .to_owned();
+        let gb_to_bytes = |gb: f64| {
+            (gb * 1024.0 * 1024.0 * 1024.0)
+                .round()
+                .clamp(0.0, u64::MAX as f64) as u64
+        };
+        tracing::info!(
+            backend = "candle",
+            evidence_revision = krea_evidence_revision(),
+            reclaimable_gb,
+            raw_available_gb = raw_budget.map_or(0.0, |raw| raw.free_gb),
+            effective_available_gb = budget.free_gb,
+            requested_tier,
+            effective_tier = tier,
+            strategy = ?selection.strategy,
+            "shared memory-strategy selection admitted"
+        );
+        // sc-17097: the shape now comes from the manifest, which states what the curves were MEASURED
+        // under. Reading it back off the provider - as this did - made the safety check compare the
+        // provider against itself, so calibration ABI 2's load-shape axis could never fail here.
+        let load_shape = crate::vram_gate::krea_turbo_load_shape(turbo_fit)?;
+        Some(gen_core::MemoryRunContext {
+            selection,
+            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
+            calibration_abi,
+            calibration_fingerprint,
+            load_shape,
+            mode: gen_core::MemoryMode::TextToImage,
+            has_reference: reference_count > 0,
+            use_pid: false,
+            has_phases: false,
+            geometry: gen_core::MemoryGeometry {
+                width: memory_width,
+                height: memory_height,
+                batch: 1,
+                frames: 1,
+                reference_count,
+            },
+            reference_resources: None,
+            overlay: None,
+            budget: gen_core::MemoryBudget {
+                total_bytes: gb_to_bytes(budget.total_gb),
+                committed_bytes: gb_to_bytes((budget.total_gb - budget.free_gb).max(0.0)),
+                reclaimable_bytes: 0,
+                reserved_headroom_bytes: gb_to_bytes(2.0),
+            },
+            predicted_peak_bytes: gb_to_bytes(predicted_peak_gb),
+            cache_state: if reclaimable_gb > 0.0 {
+                gen_core::MemoryCacheState::Warm
+            } else {
+                gen_core::MemoryCacheState::Cold
+            },
+            evidence_revision: krea_evidence_revision(),
         })
-    });
+    }));
     if !receipt_selector_authoritative {
         apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
     }
@@ -14890,6 +15647,14 @@ fn image_settings_metrics(
     quant_bits: Option<i64>,
     image_count: u32,
 ) -> GenerationMetrics {
+    // MOSS edit loads its frozen BF16 transformer/text encoder contract with no quantization.
+    // The generic resolver's omitted-setting Q8 default is not an executed tier for this lane.
+    let (quant_label, quant_bits) =
+        if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+            (Some("bf16".to_owned()), None)
+        } else {
+            (quant_label, quant_bits)
+        };
     let adv = &request.advanced;
     let string_or = |key: &str, default: &str| -> Option<String> {
         Some(
@@ -15144,13 +15909,16 @@ fn encode_preview_data_url(frame: &gen_core::PreviewFrame) -> Option<String> {
     ))
 }
 
-/// [`streaming_result`] plus the current preview frame, when one is live.
-fn streaming_result_with_preview(
-    plan: &ImagePlan,
-    asset_writes: &[Value],
-    preview: Option<&PreviewSlot>,
-) -> JsonObject {
-    let mut result = streaming_result(plan, asset_writes);
+/// [`slim_step_result`] plus the current preview frame, when one is live — the STEP-tick
+/// result posted on every `GenEvent::Step`. Deliberately O(1): the accumulated
+/// `assetWrites`/`generationSet`/`prefixKvCache` fact sets are omitted here (streamed on the
+/// `Image` / `Decoding` / `Loading` arms instead) because the per-step cadence is
+/// steps-per-image × images per batch and the accumulated set had begun OOM-killing the
+/// WebView2 renderer mid-batch (see `streaming_result`'s RESOLVED TRADEOFF note, sc-8953).
+/// The store restores any omitted accumulation into the durable row, so a slim step tick
+/// can never regress it.
+fn slim_step_result_with_preview(plan: &ImagePlan, preview: Option<&PreviewSlot>) -> JsonObject {
+    let mut result = crate::image_jobs::slim_step_result(plan);
     if let Some(slot) = preview {
         result.insert(
             "previewFrame".to_owned(),
@@ -15220,7 +15988,11 @@ async fn consume_gen_events_with_disclosure(
     let total_u32 = total as u32;
     // A native prompt batch (sc-25681) is ONE engine call over all `total` images: its steps
     // (the engine's `steps × count`) span the whole bar, not image 0's slice of it.
-    let one_pass = !plan.request.prompts.is_empty();
+    // So is a native count batch (sc-24215, `image.nativeCountBatch`): one call over `count` images.
+    let one_pass = !plan.request.prompts.is_empty()
+        || sceneworks_core::image_sampling_controls::native_count_batch(
+            &plan.request.model_manifest_entry,
+        );
     let (step_slices, step_label) = if one_pass {
         (1, format!("Batch of {total}"))
     } else {
@@ -15339,9 +16111,11 @@ async fn consume_gen_events_with_disclosure(
                             &step_text(index, format!("step {current}/{step_total}")),
                             auto_tier_streaming,
                         ),
-                        Some(streaming_result_with_preview(
+                        // Slim on purpose (sc-8953 follow-through): the fact set does not
+                        // change on a step tick, so the accumulated asset writes must NOT
+                        // ride it — see `slim_step_result_with_preview`.
+                        Some(slim_step_result_with_preview(
                             plan,
-                            asset_writes,
                             latest_preview.as_ref(),
                         )),
                         backend,
@@ -15380,15 +16154,41 @@ async fn consume_gen_events_with_disclosure(
                         ProgressStage::Generating,
                         step_fraction(index, 1, 1, step_slices),
                         &step_text(index, "decoding".to_owned()),
-                        Some(streaming_result_with_preview(
-                            plan,
-                            asset_writes,
-                            latest_preview.as_ref(),
-                        )),
+                        // Full result (asset writes CAN change on a decode), but the
+                        // preview frame is the interim image's; the decode arm's own
+                        // result carries no frame and `streaming_result` alone is right.
+                        Some(streaming_result(plan, asset_writes)),
                         backend,
                     ),
                 )
                 .await?;
+            }
+            GenEvent::LoadActivity { index, pending } => {
+                let activity = load_progress::take(&pending);
+                let (status, stage) = if activity == Some(gen_core::LoadActivity::EncodingPrompt) {
+                    (JobStatus::Running, ProgressStage::Generating)
+                } else {
+                    (JobStatus::LoadingModel, ProgressStage::LoadingModel)
+                };
+                mark_started(index);
+                tracing::info!(event = "image_load_activity", job_id = %job.id,
+                    image_index = index, activity = ?activity);
+                update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        status,
+                        stage,
+                        step_fraction(index, 0, 1, total_u32),
+                        &progress_with_auto_tier_streaming(
+                            &format!("Image {}/{total} — {}.", index + 1,
+                                load_activity_message(activity)),
+                            auto_tier_streaming,
+                        ),
+                        Some(streaming_result(plan, asset_writes)),
+                        backend,
+                    ),
+                ).await?;
             }
             GenEvent::Loading { index, phase } => {
                 mark_started(index);
@@ -15441,6 +16241,24 @@ async fn consume_gen_events_with_disclosure(
             }
             GenEvent::ImageFacts { index, facts } => {
                 pending_image_facts.entry(index).or_default().extend(facts);
+            }
+            GenEvent::AssetWritten { index, fact } => {
+                phase_timer.mark_item_done(Instant::now());
+                asset_writes.push(Value::Object(fact));
+                update_job(
+                    api,
+                    &job.id,
+                    image_progress(
+                        JobStatus::Running,
+                        ProgressStage::Generating,
+                        0.1 + 0.85 * ((index + 1) as f64 / total as f64),
+                        &format!("Generated output {}/{total}.", index + 1),
+                        Some(streaming_result(plan, asset_writes)),
+                        backend,
+                    ),
+                )
+                .await?;
+                heartbeat(api, settings, WorkerStatus::Busy, Some(&job.id)).await?;
             }
             GenEvent::PromptEnhancement {
                 index,
@@ -15660,6 +16478,51 @@ async fn consume_gen_events_with_disclosure(
 mod candle_label_tests {
     use super::*;
 
+    #[test]
+    fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temp.path().join("data"));
+        settings.backend_candle_enabled = true;
+        for model in ["moss_image_base", "moss_image_sft"] {
+            let request = ImageRequest::from_payload(json!({"model":model,"mode":"edit_image",
+                "sourceAssetId":"ref","prompts":["blue cup","red cup"],"prompt":"blue cup","count":2
+            }).as_object().unwrap());
+            let route = resolve_candle_image_route_with_prepared_availability(
+                &request, &settings, false, false, false, false, false, false, false,
+            )
+            .unwrap();
+            assert_eq!(route, CandleImageRoute::MossImageEdit);
+            assert_eq!(route.image_count(&request, &settings), 4);
+            assert_eq!(route.adapter_label(&request), candle_adapter_label(model));
+            assert!(!route.applies_request_loras(&request));
+            let ordinary = ImageRequest::from_payload(
+                json!({"model":model,"mode":"text_to_image"})
+                    .as_object()
+                    .unwrap(),
+            );
+            assert_eq!(
+                resolve_candle_image_route_with_prepared_availability(
+                    &ordinary, &settings, false, false, false, false, false, false, false
+                ),
+                Some(CandleImageRoute::CandleTxt2Img)
+            );
+        }
+        settings.backend_candle_enabled = false;
+        let request = ImageRequest::from_payload(
+            json!({"model":"moss_image_sft","mode":"edit_image","sourceAssetId":"ref"})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(
+            resolve_candle_image_route_with_prepared_availability(
+                &request, &settings, false, false, false, false, false, false, false
+            ),
+            None
+        );
+    }
+
+
+
     /// sc-24163: a LoRA/LoKr on a Qwen-Image 2.1 reference edit must pass the fail-closed route
     /// guard — the edit route renders through the same adapter-bearing generic stream as 2.1 T2I.
     #[test]
@@ -15863,8 +16726,26 @@ mod candle_label_tests {
         }
         // Krea 2 Turbo (sc-7581): the candle asset stamp.
         assert_eq!(candle_adapter_label("krea_2_turbo"), "candle_krea");
+        // Supra2-IMG (sc-24214): its own stamp, never the `candle_sdxl` fallback.
+        assert_eq!(candle_adapter_label("supra2_img"), "candle_supra2");
         assert_eq!(candle_adapter_label("sdxl"), "candle_sdxl");
         assert_eq!(candle_adapter_label("realvisxl"), "candle_sdxl");
+        assert_eq!(candle_adapter_label("iris_3b"), "candle_iris");
+        assert_eq!(candle_adapter_label("bernini_image"), "candle_bernini");
+        // Only the SDXL-engine ids may fall through to `candle_sdxl`; any other candle-routed model
+        // landing there is missing from the map and would stamp the wrong provenance.
+        const SDXL_ENGINE_IDS: &[&str] = &[
+            "sdxl",
+            "realvisxl",
+            "illustrious_xl_v1",
+            "illustrious_xl_v2",
+            "realvisxl_lightning",
+        ];
+        for model in sceneworks_core::jobs_store::candle_routed_image_models() {
+            if !SDXL_ENGINE_IDS.contains(model) {
+                assert_ne!(candle_adapter_label(model), CANDLE_ADAPTER, "{model}");
+            }
+        }
         // Every wired engine carries a `candle_`-prefixed label, distinct from the `mlx_` labels.
         for model in [
             "z_image_turbo",

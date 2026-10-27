@@ -540,6 +540,9 @@ fn model_table_rows_resolve_and_flags_match_descriptor() {
         // sc-26325: native MOSS Base/SFT both expose real CFG and negative conditioning.
         ("moss_image_base", true, true),
         ("moss_image_sft", true, true),
+        // sc-24213: Supra2-IMG runs CFG against the checkpoint's stored unconditional embedding and
+        // refuses a negative prompt.
+        ("supra2_img", true, false),
     ];
     // Every row is covered by the expectation table (no row added without a flag pair here).
     assert_eq!(MODEL_TABLE.len(), expected.len());
