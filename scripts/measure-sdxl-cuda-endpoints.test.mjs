@@ -53,6 +53,28 @@ test("endpoint pair keeps one q4 artifact and renders only maximum and minimum",
   assert.deepEqual(plan, original);
 });
 
+// CI_IMPACT: pure cross-language request/guard contract, <1 second; no adapter execution/build.
+test("both actual endpoint requests match the adapter's exact composition guard", async () => {
+  const source = await readFile(new URL("../crates/sceneworks-memory-adapter/src/bin/candle.rs", import.meta.url), "utf8");
+  const start = source.indexOf("fn run_sdxl_endpoint(");
+  assert.ok(start >= 0);
+  const adapter = source.slice(start, source.indexOf("\nfn main()", start));
+  const guarded = /let expected_parameters = if endpoint == "resident" \{([\s\S]*?)\n    \};/.exec(adapter);
+  assert.ok(guarded, "endpoint validator owns an explicit resident/minimum contract");
+  const parameterPairs = [...guarded[1].matchAll(/json!\((\{[\s\S]*?\})\)/g)].map((match) =>
+    JSON.parse(match[1].replace(/(\d)_(?=\d)/g, "$1").replace(/,(\s*[}\]])/g, "$1")));
+  assert.equal(parameterPairs.length, 2);
+  assert.match(adapter, /\(width, height\) != \(1024, 1024\) \|\| json!\(parameters\) != expected_parameters/);
+  for (const [index, endpoint] of ENDPOINTS.entries()) {
+    const request = { action: "sdxl_endpoint", sdxlEndpoint: endpoint.name, planned: endpointCase(plan, endpoint) };
+    assert.match(adapter, new RegExp(`"${request.sdxlEndpoint}" => "${request.planned.strategy.rung}"`));
+    assert.deepEqual(request.planned.target.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+    assert.deepEqual(request.planned.strategy.parameters, parameterPairs[index]);
+  }
+  assert.notDeepEqual({ stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 }, parameterPairs[1],
+    "the previous minimum must fail the current endpoint guard rather than capture a mislabeled recipe");
+});
+
 test("endpoint receipt accepts whole-run load-inclusive peak and natural cleanup", () => {
   assert.doesNotThrow(() => validateEndpoint(receipt(), ENDPOINTS[0]));
 });
