@@ -217,6 +217,34 @@ jobs:
           await writeFile(path.join(evidence,"cpu-tools.json"),JSON.stringify({kind:"h3-cpu-oracle-tools",status:"import-and-help-preflight-passed",numericProof:false,pythonExecutable:python,...versions,sourceSha:env.GITHUB_SHA,nativeEvidenceSha:env.H3_NATIVE_EVIDENCE_SHA,freezeSha256:createHash("sha256").update(freeze).digest("hex"),device:"cpu",meaning:"Actual import/version/help only; selected-artifact arithmetic remains unproven until the native/CPU comparison passes."},null,2)+"\n");
           await appendFile(env.GITHUB_ENV,`H3_SPEECH_PYTHON=${python}\n${bridgeNeeded?"H3_PROBE_PYTHON="+python+"\n":""}`);
           NODE
+      # Each attempt copies the verified weights (~223 GB) into its own private root, and a failed
+      # attempt leaves that root behind; NTFS cannot clone, so a few failures fill E:. Clear only
+      # this campaign's earlier run roots (and their bootstrap siblings) under the fixed parent,
+      # and only for runs GitHub reports as completed, before this run stages anything.
+      - name: Clear this campaign's completed prior-run roots on the Windows E drive
+        if: ${{ runner.os == 'Windows' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {execFileSync} from "node:child_process";
+          import {readdir, rm, statfs} from "node:fs/promises";
+          import path from "node:path";
+          const parent = "E:\\huggingface\\sc26691-private", current = process.env.GITHUB_RUN_ID;
+          const entries = await readdir(parent, {withFileTypes: true}).catch(e => { if (e.code === "ENOENT") return []; throw e; });
+          for (const entry of entries) {
+            const match = /^(\d+)-\d+(?:-bootstrap-[0-9a-f]{40})?$/.exec(entry.name);
+            if (!entry.isDirectory() || !match || match[1] === current) continue;
+            const status = execFileSync("gh", ["api", `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${match[1]}`, "--jq", ".status"], {encoding: "utf8"}).trim();
+            if (status !== "completed") { console.log(`keeping ${entry.name}: run ${match[1]} is ${status}`); continue; }
+            await rm(path.join(parent, entry.name), {recursive: true, force: false});
+            console.log(`removed ${entry.name}`);
+          }
+          const fs = await statfs("E:\\");
+          console.log(`E: free ${(fs.bavail * fs.bsize / 2 ** 30).toFixed(1)} GiB`);
+          NODE
       - name: Bootstrap the reduced terminal campaign when requested
         id: bootstrap
         shell: bash
