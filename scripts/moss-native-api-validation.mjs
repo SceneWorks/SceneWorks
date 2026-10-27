@@ -247,20 +247,29 @@ export async function executePreparation(root, args, log, limitMs, state, { env 
 // executable path still match what we observed. There is no POSIX ps and no
 // getuid here; a bare `taskkill /T` tree is never used.
 
-export function queryWindowsProcesses() {
+export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = spawnSync} = {}) {
+  if (pids !== null && (!Array.isArray(pids) || !pids.length || pids.length > 64 || new Set(pids).size !== pids.length || !pids.every(pid=>Number.isSafeInteger(pid)&&pid>0))) return null;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return null;
+  const filter=pids===null?"":` -Filter '${pids.map(pid=>`ProcessId = ${pid}`).join(" OR ")}'`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    "$rows = @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize)",
-    "$rows | ForEach-Object { @{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId;",
+    `$rows = @(Get-CimInstance Win32_Process${filter} | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize)`,
+    "$records = @($rows | ForEach-Object { @{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId;",
     "  birthMs = [long](([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()); path = [string]$_.ExecutablePath;",
-    "  rssBytes = [long]$_.WorkingSetSize } } | ConvertTo-Json -Compress",
+    "  rssBytes = [long]$_.WorkingSetSize } })",
+    "ConvertTo-Json -InputObject $records -Compress",
   ].join("\n");
-  const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: 20_000, maxBuffer: 32 * 1024 * 1024 });
+  const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: Math.min(20_000,timeoutMs), maxBuffer: pids===null?32*1024*1024:1024*1024 });
   if (result.error || result.status !== 0 || !result.stdout.trim()) return null;
-  const parsed = JSON.parse(result.stdout.trim());
+  let parsed;
+  try { parsed=JSON.parse(result.stdout.trim()); } catch { return null; }
+  if (!Array.isArray(parsed) && (!parsed || typeof parsed!=="object")) return null;
   const rows = new Map();
   for (const row of Array.isArray(parsed) ? parsed : [parsed]) {
-    if (![row?.pid, row?.ppid, row?.birthMs, row?.rssBytes].every(Number.isSafeInteger) || typeof row.path !== "string") continue;
+    if (![row?.pid, row?.ppid, row?.birthMs, row?.rssBytes].every(Number.isSafeInteger) || row.pid<=0 || row.ppid<0 || row.birthMs<0 || row.rssBytes<0 || typeof row.path !== "string" || rows.has(row.pid) || (pids!==null&&!pids.includes(row.pid))) {
+      if(pids!==null)return null;
+      continue;
+    }
     rows.set(row.pid, { pid: row.pid, ppid: row.ppid, birthMs: row.birthMs, path: row.path.toLowerCase(), rssBytes: row.rssBytes });
   }
   return rows;

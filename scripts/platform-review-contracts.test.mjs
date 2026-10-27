@@ -3029,6 +3029,8 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         // and not symmetry for its own sake.
         "config/engine-capabilities/audio/capabilities.candle.json",
         "scripts/compare-engine-capability-facts.mjs", // invoked directly by the native verification step
+        "scripts/moss-native-api-validation*.mjs", // normal pre-compiler Node probe executes this test/reader family
+        "scripts/moss-training-acceptance*.mjs", // that same probe imports the native supervisor and exact-PID reader
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the inference revision the whole lane compiles
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin

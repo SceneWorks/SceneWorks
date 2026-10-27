@@ -142,12 +142,15 @@ export function validatePreflight(p, backend, source, caseId, phase = 'capture')
   return p.resolvedCapBytes;
 }
 
+const windowsRows=rows=>rows&&new Map([...rows].map(([pid,r])=>[pid,{...r,birth:String(r.birthMs),executable:r.path}]));
+export const recheckWindowsRows=(pids,timeoutMs)=>windowsRows(queryWindowsProcesses({pids,timeoutMs}));
+
 // Mac and Windows share pid+birth+executable identity. The Windows query is reused
 // from the CPU driver; no CPU execution function or its fixed bounds are changed.
 export function processRows(platform = process.platform, onFailure = null, run = spawnSync) {
   if (platform === 'win32') {
     const rows = queryWindowsProcesses();
-    return rows && new Map([...rows].map(([pid,r]) => [pid,{ ...r, birth: String(r.birthMs), executable: r.path }]));
+    return windowsRows(rows);
   }
   const started=performance.now();
   const p = run('ps', ['-axo','pid=,ppid=,rss=,lstart=,comm='], { encoding:'utf8', env:{...process.env,LC_ALL:'C'}, timeout:3000, maxBuffer:16*1024*1024 });
@@ -164,79 +167,110 @@ export function processRows(platform = process.platform, onFailure = null, run =
   }
   return rows;
 }
-const matches = (a,b) => a && b && a.birth === b.birth && a.executable === b.executable;
-export function observeOwned(rows, known, rootPid, onIdentityFailure = null) {
+const identityFacts=r=>r?({pid:r.pid,ppid:r.ppid,birthMs:Number.isFinite(r.birthMs)?r.birthMs:null,
+  birth:typeof r.birth==='string'?r.birth.slice(0,128):null,executable:typeof r.executable==='string'?r.executable.slice(0,512):null,
+  rssBytes:Number.isSafeInteger(r.rssBytes)?r.rssBytes:null}):null;
+export function observeOwned(rows, known, rootPid, onIdentityFailure = null, {pending = new Map(), recheckWindows = null, onResolution = null, onRss = null} = {}) {
   assert(rows instanceof Map, 'owned process telemetry unavailable');
+  const scope = new Map();
+  const refuse=(reason,row,parent,recheck=null)=>{
+    onIdentityFailure?.({at:new Date().toISOString(),reason,rootPid,candidate:identityFacts(row),parent:identityFacts(parent),recheck});
+    fail(reason);
+  };
   const root = rows.get(rootPid);
-  if (!known.has(rootPid)) {
-    assert(root && root.ppid === process.pid && root.birth && root.executable, 'initial owned root identity unavailable');
+  if (!known.has(rootPid) && !pending.has(rootPid)) {
+    assert(root && root.ppid === process.pid && root.birth, 'initial owned root identity unavailable');
     if(Object.hasOwn(root,'birthMs')) {
       const parent=rows.get(process.pid);
       assert(Number.isFinite(root.birthMs) && Number.isFinite(parent?.birthMs) && root.birthMs>=parent.birthMs, 'initial Windows root birth not authenticated against owned parent');
-    }
-    known.set(rootPid, root);
+    } else assert(root.executable, 'initial owned root identity unavailable');
+    pending.set(rootPid,root);
   }
-  // An exec preserves birth but changes executable; retain the authenticated live
-  // identity instead of mistaking it for an exited process. A reused birth is
-  // never adopted. No signal is sent by this cooperative supervisor.
-  for (const [pid, identity] of known) {
+  // A pending row has authenticated ancestry/birth but not yet an executable. Keep
+  // it and observed offspring for cleanup even if the root exits or they reparent.
+  for (const [pid,identity] of [...known,...pending]) {
     const row=rows.get(pid);
-    if(row && row.birth===identity.birth && row.executable!==identity.executable) known.set(pid,{...row});
+    if(row && row.birth===identity.birth){scope.set(pid,row);if(pending.has(pid))pending.set(pid,{...identity,absent:false});}
+    else if(pending.has(pid))pending.set(pid,{...identity,absent:true}); // Fresh census proves the old birth absent.
   }
-  const live = new Map([...known].filter(([pid,identity]) => matches(rows.get(pid),identity)).map(([pid]) => [pid, rows.get(pid)]));
   let changed = true;
-  while (changed) { changed = false; for (const row of rows.values()) if (!live.has(row.pid) && live.has(row.ppid)) {
-    const parent=live.get(row.ppid);
-    let identityError = null;
-    // Exclude a proven stale CIM parent edge before requiring the unrelated row's path.
+  while (changed) { changed = false; for (const row of rows.values()) if (!scope.has(row.pid) && scope.has(row.ppid)) {
+    const parent=scope.get(row.ppid);
     if (Object.hasOwn(row,'birthMs') || Object.hasOwn(parent,'birthMs')) {
-      if (!Number.isFinite(row.birthMs) || !Number.isFinite(parent.birthMs)) identityError = 'Windows birth telemetry missing';
-      else if (row.birthMs < parent.birthMs) continue;
+      if (!Number.isFinite(row.birthMs) || !Number.isFinite(parent.birthMs)) refuse('Windows birth telemetry missing',row,parent);
+      if (row.birthMs < parent.birthMs) continue;
     }
-    if (!identityError && !(row.birth && row.executable)) identityError = 'descendant identity missing';
-    if (identityError) {
-      const facts=r=>({pid:r.pid,ppid:r.ppid,birthMs:Number.isFinite(r.birthMs)?r.birthMs:null,
-        birth:typeof r.birth==='string'?r.birth.slice(0,128):null,executable:typeof r.executable==='string'?r.executable.slice(0,512):null,
-        rssBytes:Number.isSafeInteger(r.rssBytes)?r.rssBytes:null});
-      onIdentityFailure?.({at:new Date().toISOString(),reason:identityError,rootPid,candidate:facts(row),parent:facts(parent)});
-      fail(identityError);
-    }
-    if (known.has(row.pid)) assert(matches(row,known.get(row.pid)), 'owned descendant PID reused');
-    known.set(row.pid,row); live.set(row.pid,row); changed = true;
+    if (known.has(row.pid) && known.get(row.pid).birth!==row.birth) refuse('owned descendant PID reused',row,parent);
+    scope.set(row.pid,row);pending.set(row.pid,row);changed=true;
   } }
-  let rss = 0;
-  for (const r of live.values()) { assert(Number.isSafeInteger(r.rssBytes) && r.rssBytes >= 0, 'missing/negative owned RSS'); rss += r.rssBytes; }
-  return { live:[...live.values()], rss };
+  let rss=0;
+  for(const row of scope.values()){assert(Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0,'missing/negative owned RSS');rss+=row.rssBytes;}
+  // Charge the original census before any recheck can observe an exit/lower RSS.
+  onRss?.({rss,live:[...scope.values()]});
+  const unresolved=[...scope.values()].filter(row=>Object.hasOwn(row,'birthMs')&&!(typeof row.executable==='string'&&row.executable.trim()));
+  const gone=new Set();
+  if(unresolved.length){
+    let fresh=null;
+    try{fresh=recheckWindows?.(unresolved.map(row=>row.pid))??null;}catch{ /* Query denial is unresolved, never absence. */ }
+    const valid=fresh instanceof Map && [...fresh].every(([pid,row])=>unresolved.some(original=>original.pid===pid)&&row?.pid===pid&&Number.isSafeInteger(row.birthMs)&&row.birthMs>=0&&Number.isSafeInteger(row.ppid)&&row.ppid>=0&&Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0&&typeof row.executable==='string'&&row.birth===String(row.birthMs));
+    for(const row of unresolved){
+      const current=valid?fresh.get(row.pid):null;
+      const outcome=!valid?'unavailable':!current?'absent':current.birth!==row.birth?'pid-reused':current.ppid!==row.ppid?'parent-drift':current.executable.trim()?'resolved':'live-path-unavailable';
+      const witness={at:new Date().toISOString(),outcome,candidate:identityFacts(row),current:identityFacts(current)};
+      onResolution?.(witness);
+      if(outcome==='absent'||outcome==='pid-reused'){
+        gone.add(row.pid);pending.set(row.pid,{...row,absent:true});
+        if(row.pid===rootPid&&!known.has(rootPid))refuse('initial owned root identity unavailable',row,rows.get(row.ppid),witness);
+      }
+      else if(outcome==='resolved')scope.set(row.pid,{...current,rssBytes:Math.max(row.rssBytes,current.rssBytes)});
+      else refuse('descendant identity missing',row,scope.get(row.ppid)??known.get(row.ppid),witness);
+    }
+  }
+  let resolvedRss=0;
+  for(const row of scope.values())resolvedRss+=row.rssBytes;
+  if(resolvedRss>rss){rss=resolvedRss;onRss?.({rss,live:[...scope.values()]});}
+  const live=[];
+  for(const [pid,row] of scope){
+    if(gone.has(pid))continue;
+    const parent=scope.get(row.ppid)??known.get(row.ppid);
+    if(!(row.birth&&row.executable))refuse('descendant identity missing',row,parent);
+    const previous=known.get(pid);
+    // Windows has no POSIX exec-in-place: an empty/different image is not an exec.
+    if(previous&&Object.hasOwn(row,'birthMs')&&row.executable!==previous.executable)refuse('owned Windows executable differs',row,parent);
+    known.set(pid,row);pending.delete(pid);live.push(row);
+  }
+  return {live,rss};
 }
 
 // Cooperative cancellation is a native-polled owned file, NOT SIGKILL of a Metal
 // command buffer. If release cannot be proven, stop the lane, preserve logs and
 // report failure; never proceed to the next cell or signal an unrelated process.
-export async function executeSupervised(root, command, log, limitMs, state, { env = process.env, capBytes = null, cancelFile = `${log}.cancel`, query = processRows, releaseMs = BOUNDS.release, spawnChild = spawn } = {}) {
+export async function executeSupervised(root, command, log, limitMs, state, { env = process.env, capBytes = null, cancelFile = `${log}.cancel`, query = processRows, releaseMs = BOUNDS.release, spawnChild = spawn, recheckWindows = recheckWindowsRows } = {}) {
   const fd = openSync(log,'w');
   const child = spawnChild(command[0],command.slice(1),{cwd:root,env:{...env,MOSS_ACCEPTANCE_CANCEL_FILE:cancelFile},stdio:['ignore','pipe','pipe'],windowsHide:true});
   let done = false, code = null, error = null, logOpen = true;
   const completed = new Promise(resolve => { child.on('error',e => {error=e;}); child.on('close',c => {done=true;code=c;resolve();}); });
   for (const stream of [child.stdout,child.stderr]) stream.on('data',b => { if(logOpen) writeSync(fd,b); });
-  const known = new Map();
+  const known = new Map(), pending = new Map();
   const queryOwned=()=>query(process.platform,failure=>{state.telemetryFailure??=failure;});
-  const observe=()=>observeOwned(queryOwned(),known,child.pid,witness=>{state.identityFailure??=witness;});
   const deadline = Date.now() + limitMs;
   let cancelAt = null, cancelReason = null;
+  const recordRss=observed=>{
+    if(!done&&capBytes!==null){
+      assert(state.rssFirstBytes>0||observed.rss>0,'no positive initial aggregate owned RSS');
+      if(observed.rss>0){
+        state.rssFirstBytes??=observed.rss;state.rssPeakBytes=Math.max(state.rssPeakBytes??0,observed.rss);
+        (state.rssSamples??=[]).push({at:new Date().toISOString(),aggregateBytes:observed.rss,ownedPids:observed.live.map(row=>row.pid)});
+        if(observed.rss>capBytes){state.cancelled=true;cancelReason??=`aggregate owned RSS exceeded cap (${observed.rss} > ${capBytes})`;}
+      }
+    }
+  };
+  const observe=(until=Math.min(deadline,cancelAt===null?Infinity:cancelAt+releaseMs))=>observeOwned(queryOwned(),known,child.pid,witness=>{state.identityFailure??=witness;},{pending,onRss:recordRss,
+    recheckWindows:pids=>recheckWindows(pids,Math.min(20_000,Math.max(0,until-Date.now()))),
+    onResolution:witness=>{state.identityResolution??=witness;}});
   try {
     while (true) {
       const observed = observe();
-      if (!done && capBytes !== null) {
-        assert(state.rssFirstBytes > 0 || observed.rss > 0, 'no positive initial aggregate owned RSS');
-        // A process may exit during the synchronous census before its close event is delivered.
-        // Zero RSS after a positive sample is neither a resource sample nor release proof.
-        if (observed.rss > 0) {
-          state.rssFirstBytes ??= observed.rss;
-          state.rssPeakBytes = Math.max(state.rssPeakBytes ?? 0, observed.rss);
-          (state.rssSamples ??= []).push({at:new Date().toISOString(),aggregateBytes:observed.rss,ownedPids:observed.live.map(r=>r.pid)});
-          if (observed.rss > capBytes) { state.cancelled = true; cancelReason ??= `aggregate owned RSS exceeded cap (${observed.rss} > ${capBytes})`; }
-        }
-      }
       if (done && !observed.live.length) { state.cleanup = { released:true, observedIdentities:[...known.values()] }; break; }
       if (done || state.cancelled || Date.now() >= deadline) {
         if (!cancelAt) { cancelAt = Date.now(); writeFileSync(cancelFile, JSON.stringify({cancel:true,reason:cancelReason??'owned cancellation/deadline/resource limit'})); }
@@ -254,10 +288,10 @@ export async function executeSupervised(root, command, log, limitMs, state, { en
     const until = Date.now()+releaseMs;
     let released = false;
     while (Date.now()<until) {
-      try { const o=observe(); if(done && !o.live.length) {released=true;break;} } catch { /* unavailable telemetry is never release proof */ }
+      try { const o=observe(until); if(done && !o.live.length) {released=true;break;} } catch { /* unavailable telemetry is never release proof */ }
       await pause(250);
     }
-    state.cleanup={released,observedIdentities:[...known.values()]}; state.unsafe=!released;
+    state.cleanup={released,observedIdentities:[...known.values()],pendingIdentities:[...pending.values()].filter(row=>!row.absent).map(identityFacts)}; state.unsafe=!released;
     if (cancelReason && !e.message.includes(cancelReason)) throw new Error(`${e.message}; ${cancelReason}`, {cause:e});
     throw e;
   } finally { logOpen=false; closeSync(fd); }

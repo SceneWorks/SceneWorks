@@ -227,6 +227,52 @@ test('owned identity refusal records only one bounded candidate relation',()=>{
  assert.throws(()=>observeOwned(rows,new Map(),42,value=>{witness=value;}),/descendant identity missing/);
  assert.equal(witness.parent.executable.length,512);assert.equal(witness.candidate.pid,43);assert.equal(JSON.stringify(witness).includes('secret'),false);assert.equal(Object.hasOwn(witness,'rows'),false);
 });
+const winRow=(pid,ppid,birthMs,executable,rssBytes=1)=>({pid,ppid,birthMs,birth:String(birthMs),executable,rssBytes});
+function actualWindowsWitness(){
+ const parent=winRow(44816,process.pid,1793073157759,'d:/owned/native.exe',380723200);
+ const candidate=winRow(57240,44816,1793073218066,'',28229632);
+ return {parent,candidate,rows:new Map([[process.pid,winRow(process.pid,0,1793073150000,'d:/node.exe')],[44816,parent],[57240,candidate]])};
+}
+test('Windows exact-birth recheck resolves the actual young witness once without lowering its observed RSS',()=>{
+ for(const outcome of ['resolved','absent','pid-reused']){
+  const {rows,candidate}=actualWindowsWitness(),known=new Map(),pending=new Map();let resolution,calls=0;
+  const fresh=outcome==='absent'?new Map():new Map([[57240,{...candidate,executable:'c:/metadata.exe',birthMs:candidate.birthMs+(outcome==='pid-reused'?1:0),birth:String(candidate.birthMs+(outcome==='pid-reused'?1:0)),rssBytes:1}]]);
+  const observed=observeOwned(rows,known,44816,null,{pending,recheckWindows:pids=>{calls++;assert.deepEqual(pids,[57240]);return fresh;},onResolution:value=>{resolution=value;}});
+  assert.equal(calls,1);assert.equal(resolution.outcome,outcome);assert.equal(observed.rss,380723200+28229632);
+  assert.equal(known.has(57240),outcome==='resolved');assert.deepEqual(observed.live.map(r=>r.pid),outcome==='resolved'?[44816,57240]:[44816]);
+ }
+});
+test('an initially unresolved Windows root cannot turn its own disappearance into initial identity admission',()=>{
+ const {rows,parent}=actualWindowsWitness();rows.delete(57240);rows.set(44816,{...parent,executable:''});
+ assert.throws(()=>observeOwned(rows,new Map(),44816,null,{recheckWindows:()=>new Map()}),/initial owned root identity unavailable/);
+});
+test('Windows live blank, denied and malformed exact-reader results never count as disappearance',()=>{
+ const {candidate}=actualWindowsWitness();
+ for(const fresh of [null,new Map([[57240,candidate]]),new Map([[57240,{...candidate,ppid:99}]]),new Map([[57240,{...candidate,birthMs:null}]]),new Map([[99,{...candidate,pid:99}]])]){
+  const {rows}=actualWindowsWitness(),pending=new Map();let failure;
+  assert.throws(()=>observeOwned(rows,new Map(),44816,value=>{failure=value;},{pending,recheckWindows:()=>fresh}),/descendant identity missing/);
+  assert.equal(failure.candidate.pid,57240);assert.ok(failure.recheck);assert.equal(pending.get(57240).birth,candidate.birth);
+ }
+ const {rows}=actualWindowsWitness();assert.throws(()=>observeOwned(rows,new Map(),44816,null,{recheckWindows:()=>{throw new Error('denied');}}),/descendant identity missing/);
+});
+test('Windows selected reread batches only unresolved owned rows and retains witnessed offspring after parent disappearance',()=>{
+ const {rows,candidate}=actualWindowsWitness();rows.set(57241,winRow(57241,57240,candidate.birthMs+1,'c:/child.exe',3));rows.set(99,winRow(99,1,100,'',999999));
+ const observed=observeOwned(rows,new Map(),44816,null,{recheckWindows:pids=>{assert.deepEqual(pids,[57240]);return new Map();}});
+ assert.deepEqual(observed.live.map(r=>r.pid),[44816,57241]);assert.equal(observed.rss,380723200+28229632+3);
+});
+test('known Windows blank paths require resolution and cannot become an exec; POSIX exec remains supported',()=>{
+ for(const outcome of ['resolved','absent','live-blank','changed-image']){
+  const {rows,candidate,parent}=actualWindowsWitness();const original={...candidate,executable:'c:/original.exe'};const known=new Map([[44816,parent],[57240,original]]);
+  const current=outcome==='absent'?new Map():new Map([[57240,{...candidate,executable:outcome==='resolved'?'c:/original.exe':outcome==='changed-image'?'c:/different.exe':''}]]);
+  const act=()=>observeOwned(rows,known,44816,null,{recheckWindows:()=>current});
+  if(outcome==='live-blank'||outcome==='changed-image')assert.throws(act,/identity missing|Windows executable differs/);else act();
+  assert.equal(known.get(57240).executable,'c:/original.exe');
+ }
+ const direct=actualWindowsWitness();direct.rows.set(57240,{...direct.candidate,executable:'c:/changed.exe'});
+ assert.throws(()=>observeOwned(direct.rows,new Map([[44816,direct.parent],[57240,{...direct.candidate,executable:'c:/original.exe'}]]),44816),/Windows executable differs/);
+ const old={pid:42,ppid:process.pid,birth:'same-birth',executable:'/old',rssBytes:10};const known=new Map([[42,old]]);
+ const observed=observeOwned(new Map([[42,{...old,executable:'/new'}]]),known,42);assert.equal(observed.live[0].executable,'/new');assert.equal(known.get(42).executable,'/new');
+});
 test('POSIX census records bounded failure facts while preserving null telemetry and the exact query budget',()=>{
  for(const result of [{error:Object.assign(new Error('spawnSync ps ETIMEDOUT'),{code:'ETIMEDOUT'}),status:null,signal:'SIGTERM'}, {error:null,status:1,signal:null}]) {
   let failure;const rows=processRows('darwin',value=>{failure=value;},(command,args,options)=>{
@@ -305,6 +351,30 @@ test('RSS shutdown race retains the cap breach alongside a surviving descendant 
   assert.match(error.message,/owned processes did not cooperatively release/);assert.match(error.message,/aggregate owned RSS exceeded cap \(22 > 20\)/);return true;
  });
  assert.equal(state.cancelled,true);assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);
+});
+test('unresolved Windows candidates and reparented observed offspring block cleanup after root close',async t=>{
+ for(const keepCandidate of [true,false]){
+  const dir=fixture(t),state={},parent=winRow(4242,process.pid,200,'c:/native.exe',10),candidate=winRow(4243,4242,300,'',20),leaf=winRow(4244,4243,400,'c:/leaf.exe',3);
+  const control=winRow(process.pid,0,100,'c:/node.exe');const survivors=[{...leaf,ppid:1}];if(keepCandidate)survivors.push({...candidate,ppid:1});
+  const probe=exitRaceChild([{rows:[control,parent,candidate,leaf]},{rows:survivors,close:7},{rows:survivors}]);
+  await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{query:probe.query,spawnChild:()=>probe.child,recheckWindows:()=>null,releaseMs:1}),/descendant identity missing/);
+  assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);assert.equal(state.identityFailure.candidate.pid,4243);
+  if(keepCandidate)assert.ok(state.cleanup.pendingIdentities.some(row=>row.pid===4243));else assert.ok(state.cleanup.observedIdentities.some(row=>row.pid===4244));
+ }
+});
+test('unresolved Windows cleanup requires fresh actual absence, never null telemetry',async t=>{
+ for(const endRows of [[],null]){
+  const dir=fixture(t),state={},control=winRow(process.pid,0,100,'c:/node.exe'),parent=winRow(4242,process.pid,200,'c:/native.exe',10),candidate=winRow(4243,4242,300,'',20);
+  const probe=exitRaceChild([{rows:[control,parent,candidate]},{rows:endRows,close:7},{rows:endRows}]);
+  await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{query:probe.query,spawnChild:()=>probe.child,recheckWindows:()=>null,releaseMs:endRows===null?1:1000}),/descendant identity missing/);
+  assert.equal(state.cleanup.released,endRows!==null);assert.equal(state.unsafe,endRows===null);
+ }
+});
+test('resolving a vanished Windows row cannot erase the original owned RSS cap breach',async t=>{
+ const dir=fixture(t),state={},control=winRow(process.pid,0,100,'c:/node.exe'),parent=winRow(4242,process.pid,200,'c:/native.exe',10),candidate=winRow(4243,4242,300,'',30);
+ const probe=exitRaceChild([{rows:[control,parent,candidate],close:7},{rows:[]}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,recheckWindows:()=>new Map(),releaseMs:1000}),/aggregate owned RSS exceeded cap \(40 > 20\)/);
+ assert.equal(state.rssPeakBytes,40);assert.equal(state.cancelled,true);assert.equal(state.cleanup.released,true);assert.equal(state.identityResolution.outcome,'absent');
 });
 test('sequential capture publishes each cell live, reuses preparation, and preserves complete backend receipt',async t=>{
  for(const backend of ['mlx','cuda']) {

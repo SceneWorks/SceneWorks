@@ -12,7 +12,7 @@ import {
   BOUNDS, checkDiscovery, ENVIRONMENT_WHITELIST, executeOwnedChild, EXPECTED_TESTS, ignoredSourceFacts,
   MOSS_PREFIX, ownedWindowsTree, parseArgs, parseTestList, planAuthenticatedCleanup,
   executePreparation, isPreparationCommand, requireManualContext, RSS_CAP_GB, runValidation, startRssGuard,
-  statedRssCapBytes, sumOwnedRss, sumWindowsOwnedRss,
+  statedRssCapBytes, sumOwnedRss, sumWindowsOwnedRss, queryWindowsProcesses,
 } from "./moss-native-api-validation.mjs";
 import { TESTS as CLOSED_SELECTOR_TESTS, digest as sha256 } from "./moss-consumer-assertions.mjs";
 
@@ -674,6 +674,24 @@ test("CPU preparation refuses an observed close after its deadline before the ne
   assert.equal(state.completion.stdioClosed,true);assert.equal(state.completion.completed,false);assert.equal(kills,0);
 });
 
+test("selected Windows census batches exact PIDs and distinguishes empty JSON from unavailable metadata",()=>{
+  const row={pid:57240,ppid:44816,birthMs:1793073218066,path:"C:\\Windows\\System32\\tool.exe",rssBytes:28229632};
+  for(const stdout of [JSON.stringify([row]),"[]"]){
+    const rows=queryWindowsProcesses({pids:[57240,7708],timeoutMs:1234,run:(program,args,options)=>{
+      assert.equal(program,"powershell.exe");assert.match(args.at(-1),/-Filter 'ProcessId = 57240 OR ProcessId = 7708'/);
+      assert.match(args.at(-1),/ConvertTo-Json -InputObject \$records/);assert.equal(options.timeout,1234);assert.equal(options.maxBuffer,1024*1024);
+      return {status:0,stdout};
+    }});
+    assert.ok(rows instanceof Map);assert.equal(rows.size,stdout==="[]"?0:1);
+  }
+  for(const result of [{status:1,stdout:"[]"},{status:0,stdout:""},{status:0,stdout:"null"},{status:0,stdout:"not-json"},
+    {status:0,stdout:JSON.stringify([{...row,birthMs:null}])},{status:0,stdout:JSON.stringify([{...row,path:null}])},
+    {status:0,stdout:JSON.stringify([{...row,pid:99}])},{status:0,stdout:JSON.stringify([row,row])},{error:new Error("denied"),stdout:"[]"}]){
+    assert.equal(queryWindowsProcesses({pids:[57240],run:()=>result}),null,"denial/malformed rows are not absence");
+  }
+  for(const pids of [[],[1,1],["1 OR 1=1"],Array.from({length:65},(_,i)=>i+1)])assert.equal(queryWindowsProcesses({pids,run:()=>assert.fail("invalid selection launched a query")}),null);
+});
+
 test("Windows real CPU preparation handles fast metadata before compilation",{skip:process.platform!=="win32",timeout:120_000},async t=>{
   const root=mkdtempSync(path.join(os.tmpdir(),"moss-real-preparation-"));t.after(()=>rmSync(root,{recursive:true,force:true}));
   for(const [name,command,code,output] of [
@@ -690,23 +708,36 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
   }
   // Exercise the actual native supervisor and CIM with CPU processes before any compiler/model.
   // The helper exits cooperatively only after a prior authenticated RSS sample contains both PIDs.
-  const {executeSupervised,processRows}=await import("./moss-training-acceptance.mjs");
+  const {executeSupervised,processRows,recheckWindowsRows}=await import("./moss-training-acceptance.mjs");
   const releaseFile=path.join(root,"owned-guard-release"),log=path.join(root,"owned-guard.log"),state={};
   const helperCode="const fs=require('node:fs');setInterval(()=>{if(fs.existsSync(process.argv[1])||fs.existsSync(process.env.MOSS_ACCEPTANCE_CANCEL_FILE))process.exit(0);},20);setTimeout(()=>process.exit(9),25000);";
-  const ownedCode=`const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(helperCode)},${JSON.stringify(releaseFile)}],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({rootPid:process.pid,childPid:child.pid}));child.on('error',()=>process.exit(9));child.on('close',code=>process.exit(code??9));setTimeout(()=>process.exit(9),26000);`;
-  let identities=null,released=false,result;
+  const ownedCode=`const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(helperCode)},${JSON.stringify(releaseFile)}],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({rootPid:process.pid,childPid:child.pid}));child.on('error',()=>process.exit(9));child.on('close',code=>{if(code!==0)process.exit(code??9);const short=spawn(process.execPath,['-e',\"console.log('short metadata')\"],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({shortPid:short.pid}));short.on('error',()=>process.exit(9));short.on('close',exit=>{console.log(JSON.stringify({shortExit:exit}));setTimeout(()=>process.exit(exit??9),1500);});});setTimeout(()=>process.exit(9),26000);`;
+  let identities=null,released=false,result,masked=false;const actualRechecks=[];
   const query=(platform,onFailure)=>{
     const rows=processRows(platform,onFailure);
     const line=readFileSync(log,"utf8").split("\n").find(value=>value.startsWith('{"rootPid":'));
     if(line)identities=JSON.parse(line);
-    if(!released&&identities&&state.rssSamples?.some(sample=>sample.ownedPids.includes(identities.rootPid)&&sample.ownedPids.includes(identities.childPid))){writeFileSync(releaseFile,"cooperative release");released=true;}
+    if(!released&&identities&&state.rssSamples?.some(sample=>sample.ownedPids.includes(identities.rootPid)&&sample.ownedPids.includes(identities.childPid))){
+      // Force one missing path on a real live child; the production exact reader must resolve it.
+      if(!masked){const row=rows.get(identities.childPid);assert.ok(row?.executable);rows.set(row.pid,{...row,path:"",executable:""});masked=true;}
+      else {
+        assert.ok(actualRechecks.some(check=>check.pids.includes(identities.childPid)&&check.rows?.some(row=>row.pid===identities.childPid&&row.executable)));
+        writeFileSync(releaseFile,"cooperative release");released=true;
+      }
+    }
     return rows;
   };
-  try{result=await executeSupervised(ROOT,[process.execPath,"-e",ownedCode],log,30_000,state,{query,capBytes:512*1024*1024});}
+  try{result=await executeSupervised(ROOT,[process.execPath,"-e",ownedCode],log,30_000,state,{query,capBytes:512*1024*1024,recheckWindows:(pids,timeoutMs)=>{
+    const rows=recheckWindowsRows(pids,timeoutMs);actualRechecks.push({pids,rows:rows?[...rows.values()]:null});return rows;
+  }});}
   catch(error){t.diagnostic(JSON.stringify({kind:"owned-native-guard-failure",identities,identityFailure:state.identityFailure??null,telemetryFailure:state.telemetryFailure??null,cleanup:state.cleanup??null,unsafe:state.unsafe??null}));throw error;}
   assert.equal(result.exit,0);assert.equal(released,true);assert.ok(state.rssFirstBytes>0);assert.equal(state.cleanup.released,true);assert.notEqual(state.unsafe,true);
   for(const pid of [identities.rootPid,identities.childPid]){const identity=state.cleanup.observedIdentities.find(row=>row.pid===pid);assert.ok(Number.isSafeInteger(identity?.birthMs)&&identity.executable);}
-  t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,samples:state.rssSamples.length,cleanup:state.cleanup}));
+  assert.match(result.output,/"shortExit":0/);assert.equal(masked,true);
+  t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,injectedMissingPath:masked,actualRechecks,samples:state.rssSamples.length,cleanup:state.cleanup}));
+  const after=queryWindowsProcesses({pids:[identities.childPid],timeoutMs:5000});
+  assert.ok(after instanceof Map);assert.notEqual(after.get(identities.childPid)?.birthMs,state.cleanup.observedIdentities.find(row=>row.pid===identities.childPid).birthMs,"the exact old child birth must be absent after release");
+
 });
 
 test("manual Windows capture checks actual preparation supervision before its first compiler command", () => {
@@ -717,6 +748,7 @@ test("manual Windows capture checks actual preparation supervision before its fi
   assert.match(step, /if: \$\{\{ matrix\.backend == 'cuda' \}\}/);
   assert.match(step, /node --test --test-name-pattern="\^Windows real CPU preparation" scripts\/moss-native-api-validation\.test\.mjs/);
   const normal=readFileSync(path.join(ROOT,".github/workflows/windows-candle.yml"),"utf8").split("  imported-nvfp4-worker-smoke:")[0];
+  for(const family of ["scripts/moss-native-api-validation*.mjs","scripts/moss-training-acceptance*.mjs"])assert.ok(normal.includes(`      - "${family}"`),`Windows probe must be selected when ${family} changes`);
   const early=normal.indexOf("- name: Check Windows owned CPU preparation before compilation");
   assert.ok(early>normal.indexOf("- name: Set up Node for Cargo cache selection")&&early<normal.indexOf("- name: Isolate Cargo dependency checkout")&&early<normal.indexOf("- name: Fetch the pinned inference release"));
   const normalStep=normal.slice(early,normal.indexOf("      - ",early+1));

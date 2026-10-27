@@ -108,6 +108,10 @@ on:
       # The native producer below delegates its content comparison to this script. A script-only
       # change must exercise the lane it governs.
       - "scripts/compare-engine-capability-facts.mjs"
+      # The pre-compiler owned-process probe imports these two exact controller families.
+      # CI_IMPACT: controller edits select this existing Windows lane; no new Rust inputs.
+      - "scripts/moss-native-api-validation*.mjs"
+      - "scripts/moss-training-acceptance*.mjs"
       - "Cargo.toml"
       - "Cargo.lock"
       # The toolchain and cargo-config seams (sc-17703, Michael's call — these are
