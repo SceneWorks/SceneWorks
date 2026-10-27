@@ -5,7 +5,7 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, admittedReplayProcessEnvs, admittedReplayWorker, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource, selectCaptureGpu, parseGpuInventory, endpointGpuEnv, replayInferenceSourceIdentity } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, admittedReplayProcessEnvs, admittedReplayWorker, assertAdmittedReplayCompletion, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource, selectCaptureGpu, parseGpuInventory, endpointGpuEnv, replayInferenceSourceIdentity } from "./measure-sdxl-cuda-endpoints.mjs";
 import { EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
 
 // CI_IMPACT: one pure cross-module path contract; no files, build, API or model execution.
@@ -432,6 +432,22 @@ test("admitted replay accepts the ordinary selector's cheaper affordable SDXL co
   ]) assert.throws(() => assertAdmittedReplaySelection({ ...selection, ...patch }), /did not admit/);
 });
 
+// CI_IMPACT: pure completed-job records only; no API, subprocess, device or render.
+test("admitted replay completion binds the owned worker, physical GPU fields and Candle SDXL result", () => {
+  for (const physicalIndex of [0, 1]) {
+    const gpu = { physicalIndex, uuid };
+    const job = { status: "completed", workerId: "owned-worker", backend: String(physicalIndex),
+      assignedGpu: String(physicalIndex), result: { adapter: "candle_sdxl" } };
+    assert.doesNotThrow(() => assertAdmittedReplayCompletion(job, "owned-worker", gpu));
+    for (const patch of [{ status: "failed" }, { workerId: "other-worker" }, { workerId: undefined },
+      { backend: "candle" }, { backend: String(1 - physicalIndex) }, { backend: undefined },
+      { assignedGpu: String(1 - physicalIndex) }, { assignedGpu: undefined },
+      { result: { adapter: "mlx_sdxl" } }, { result: { adapter: "candle_sdxl_edit" } }, { result: {} }, { result: undefined }]) {
+      assert.throws(() => assertAdmittedReplayCompletion({ ...job, ...patch }, "owned-worker", gpu), /owned worker/);
+    }
+  }
+});
+
 test("admitted replay waits for API persisted assets and validates the actual sidecar shape", () => {
   const image = { id: "asset_replay", projectId: "project_replay", type: "image", lineage: { jobId: "job_replay" },
     file: { path: "assets/images/replay.png", mimeType: "image/png", width: 1024, height: 1024 } };
@@ -481,6 +497,7 @@ test("admitted replay workflow uses GPU1 only as bootstrap before selecting GPU0
   assert.match(script, /child\.stdin\.end\(\)/, "owned worker uses existing natural stdin-EOF shutdown");
   assert.match(script, /SCENEWORKS_PARENT_PID/, "owned API uses existing parent-death natural shutdown");
   assert.match(script, /receipt\.selection = admittedReplaySelection\(await readFile/);
+  assert.match(script, /assertAdmittedReplayCompletion\(receipt\.completedJob, workerId, gpu\)/);
   assert.match(script, /persistedReplayAsset\(job, project\.id, jobId\)/);
   assert.match(script, /\/assets\/\$\{encodeURIComponent\(persisted\.image\.id\)\}/, "read the persisted sidecar through the ordinary asset API");
   const main = script.slice(script.indexOf("export async function main("));
