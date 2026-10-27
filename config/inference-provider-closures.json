@@ -1,11 +1,11 @@
 {
   "_comment": "Per-provider inference compile-closure digests (sc-17774). Calibration currency compares a record's captured closureDigest against the entry here for the SAME provider, so a change to one model's code path can no longer demote another's. Regenerate on every inference pin bump: node scripts/inference-closure-digest.mjs --repo <inference> --write. Derivation, and what this unit deliberately does NOT see, are documented in scripts/inference-closure-digest.mjs.",
   "digestVersion": "inference-closure-digest v4",
-  "inferenceRevision": "81cff07c13137fea520cec0b1dc9b8f083514601",
+  "inferenceRevision": "6012abad731c94f6c53428029b8d16e917b0a5b7",
   "providers": {
     "candle:bernini": {
       "crate": "crates/media/candle-gen/candle-gen-bernini",
-      "digest": "69cc3c85530fe94fbfe2d894f1a2ad6404119c45dc7b2bc67b9bee4db0558d54",
+      "digest": "a5921c88e7e9c5bf783b9fe48bf2ae232fd418f6c9a1686a5c25de16cd827196",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -32,7 +32,7 @@
     },
     "candle:chroma1_base": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "0d0d9aeec6811a4c31f5db5d85e0ab93d403999e5c6a2b6e8ab79597ade09581",
+      "digest": "9e753fec5a181a5f721f2c69a58b353f19f909cc728f642212af55b82592a083",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -61,7 +61,7 @@
     },
     "candle:chroma1_flash": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "0a87797f6a2f715b97593a98954c0b30a02523f225856b4efc02a27482307fe2",
+      "digest": "f71788a8c41ae97248ae3946783ddeeba03e5c4d1b3036f3f02010174d73743b",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -90,7 +90,7 @@
     },
     "candle:chroma1_hd": {
       "crate": "crates/media/candle-gen/candle-gen-chroma",
-      "digest": "714b8b520871f133132d62c939e753aa0120c951a7ad3c09984328b858343451",
+      "digest": "4b904e8612a840775aa7c382d6bb1e9de78836b2da7ae48b2fc6c5745148f273",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -119,7 +119,7 @@
     },
     "candle:flux1_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
-      "digest": "7459d89682f75d1ac7e3369484bdf01c29789b9ee750839cc8fb6b12c0d0fc20",
+      "digest": "b2ef07445dfcda69225c4f8e31faeb71c80900870f0c8741689c4b201c89703d",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -147,7 +147,7 @@
     },
     "candle:flux1_schnell": {
       "crate": "crates/media/candle-gen/candle-gen-flux",
-      "digest": "8eda2abfb9a8528a2d6eb7b0df0956040d268df9f98212128c8e9bcb41c66aec",
+      "digest": "0139f4eedd4c2335d31f8a7164fed0f8ba86af9c12eb80fbaeed3d3c2d02ea0a",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -175,7 +175,7 @@
     },
     "candle:flux2_dev": {
       "crate": "crates/media/candle-gen/candle-gen-flux2",
-      "digest": "e0f195611a027a4c3b6aaadc6c19af32558b5b0547a6b96a197c4ead61d76d8a",
+      "digest": "0e3ab9aed54f0dae8ae0da8ef2f1c317e8394b0df0b73d3b42ab54bb20beaf49",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -199,7 +199,7 @@
     },
     "candle:flux2_klein_9b": {
       "crate": "crates/media/candle-gen/candle-gen-flux2",
-      "digest": "e20f786aaa90b3d1abe4af872b7524b0cdb8011f020f098caf149338dab318a4",
+      "digest": "b41f16bf6cf160dbf97e2a5493926cedf0ca0e70694803bc6cc2e61dc4474596",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -223,7 +223,7 @@
     },
     "candle:ideogram_4": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
-      "digest": "3ed6542db7facd476af1daf3d02f14319803ef4970437b8d12e2a18884bce2e8",
+      "digest": "15f159ba99542b8848ff5b48fc3c6ed86fdaea03f1ad2ff7b85b5f948e605e29",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -248,7 +248,7 @@
     },
     "candle:ideogram_4_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-ideogram",
-      "digest": "40b69171e20182397ec303565bdbad6a4d76f4e87a501d12cb8af99466f2f782",
+      "digest": "d90a51c5add4ecc992296c831fd72f900e796b75595ca691883c558bf3e8434c",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -273,7 +273,7 @@
     },
     "candle:instantid": {
       "crate": "crates/media/candle-gen/candle-gen-instantid",
-      "digest": "f8cd2444d8c563f874a66a6bdd97a4ae43bf1a74fce3fcb5ce9f0f9d946cbc4e",
+      "digest": "048051eb89a3f3f44ba06fc112d410d2f5732c9a747ef6ec1a750868faa685d7",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -301,7 +301,7 @@
     },
     "candle:iris_3b": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "4ee4d8dbaa3f90d8dfc78f6264f6e5182b2aae42ded29876eb4ca50aad8252ec",
+      "digest": "002c87d5cd6af84bb44c9140f86fff6fe0295babe30269940fa1332226a31ee4",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -324,7 +324,7 @@
     },
     "candle:iris_3b_depth": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "ea2cba02990d310f657c2f23ba85d968f311db3df0fbe11d470f0e275ac373d9",
+      "digest": "707397dab5554257f5676543c3818f16b7254eef1855e4068058441d598a4cb3",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -347,7 +347,7 @@
     },
     "candle:iris_3b_restore": {
       "crate": "crates/media/candle-gen/candle-gen-iris",
-      "digest": "0700346bdc353940e2e76f371da230b70b7a2859226bb08ddd26bcf1ad05fda9",
+      "digest": "644fae1152bd17f81fe5c0d06ab189a903d89f90e5986135871fdef1a77f83c7",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -370,7 +370,7 @@
     },
     "candle:kolors": {
       "crate": "crates/media/candle-gen/candle-gen-kolors",
-      "digest": "30a3304fdd764e0102515bc38eaa87b88daea78ba0a19f6fe73a174bf1d024be",
+      "digest": "264f54ccc4c07bb6f0f33afd9c755baa2ea24983bbf710f9315505b0abf0f3c9",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -398,7 +398,7 @@
     },
     "candle:krea_2_raw": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "f6a712d98d96110ade0249720330d0054855902a2ee69174572d5688c02201bf",
+      "digest": "50969d729332f5488a4e325404944cd253eeea4352977b0cd2ecc6c0abc3e595",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -429,7 +429,7 @@
     },
     "candle:krea_2_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "945feff490a0d1cd7c94754d405bee0507a7d54157912927734b945828fe8096",
+      "digest": "5b36a6cbb512cba620aa5f6093535d70540ce837b89808bec7a04f78c8fd0322",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -460,7 +460,7 @@
     },
     "candle:krea_2_turbo_control": {
       "crate": "crates/media/candle-gen/candle-gen-krea",
-      "digest": "7a5d8245a2c351ff106ed2f773575d5679c83c6bd9a8f24d81be046888cb02e8",
+      "digest": "f736f766543425585e9c706f9d1afba6ae04ee5c07a0af89b6b8c6867bf105f7",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -491,7 +491,7 @@
     },
     "candle:lens": {
       "crate": "crates/media/candle-gen/candle-gen-lens",
-      "digest": "f21cef26f8882a290e92e0335d7e6c8c7d8dde279592fb9e2f1541f0c28bc003",
+      "digest": "20b5a8d5ed8074c72226468ea51bb0ec407b6a05fca56439100566e3d9714bbd",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -520,7 +520,7 @@
     },
     "candle:lens_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-lens",
-      "digest": "f6da9668d16ac71be70429d357b75c855328776e64e37e57c3cc5a477e4ee982",
+      "digest": "fb4f1b2efd36ae96891444e82070b0aba3833ca70c78cf2640ffc6259e151a1a",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -549,7 +549,7 @@
     },
     "candle:ltx_2_3_distilled": {
       "crate": "crates/media/candle-gen/candle-gen-ltx",
-      "digest": "8b1be7c90d631ddca42c9472e83f44b168b1a4f02e24a3b3327f4835bdbb02fe",
+      "digest": "3cda344b73c92b1ba06a245417606d9b91a3b571cc56fb767cf789898618879f",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -576,7 +576,7 @@
     },
     "candle:ltx_2_5_distilled": {
       "crate": "crates/media/candle-gen/candle-gen-ltx",
-      "digest": "fa1f74559078a40814072b7841a86b805bb5b50265c64354c53d63c8fc13949f",
+      "digest": "37fcf5cc8780c36a91ff9b8307f1cc9b7712aaef4d634ae6f4584dc961f5b653",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -603,7 +603,7 @@
     },
     "candle:mage_flow": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "17c58808f11a10b729d6d29bc44133c142399e6bdb358140cb3eab8cdae3f7e7",
+      "digest": "68198826a60a7a2790ff2fc820904df10b0195b1bf40dc531bd686e1e6031294",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -633,7 +633,7 @@
     },
     "candle:mage_flow_base": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "9cd311e49ab64a618c07e8c172c81889b594c583712c31dce3e8e293b22ca5b9",
+      "digest": "df7af961b8dff0183e95c998054747999f9cab383191b796ba879b319c4043b5",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -663,7 +663,7 @@
     },
     "candle:mage_flow_edit": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "5ecd38bb0c05ab32805c4f0482f1ea3364669bbba6aa88e421fa2a0f413c0e89",
+      "digest": "b5adf15da256859b7b4a20f47aff09f7791735395c68d2dfff600324ddab32be",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -693,7 +693,7 @@
     },
     "candle:mage_flow_edit_base": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "b15a7a9f5c745e37f72f3368b67f435f3669db945ce05f987413f65f37aded49",
+      "digest": "65e8b5b0f4d7a25fe63cda7fe71c3c0ad9c64afab994090eaa9e68e87a29b850",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -723,7 +723,7 @@
     },
     "candle:mage_flow_edit_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "b06482ddfd5af29de2562619bcec4766757a55b0073a0d24fa47582483a2b3b6",
+      "digest": "3ca0df6bb3ad260d3e4b8dc3f064c8e4a84fb3bd19bbd2b72f482e578b19d106",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -753,7 +753,7 @@
     },
     "candle:mage_flow_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-mage",
-      "digest": "a11945d30d344dd0a773adbc90fe8209bbb84f95f240cec4c4d0084ec1e05fa7",
+      "digest": "b1f05b528f8a0051c05ef84760a812bd43ff07d0d2c3073dc8cf444d08f2f592",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -783,7 +783,7 @@
     },
     "candle:minimax_h3": {
       "crate": "crates/media/candle-gen/candle-gen-minimax-h3",
-      "digest": "35b72e537be434bd7d17277b4a578d6011fb6f56595800ec15adfd1ce3365b1f",
+      "digest": "1eff03fbabf73d9cb47a3e057358e0c256f18306f150a2b5074e46a9cd8891b3",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -813,7 +813,7 @@
     },
     "candle:pulid_flux": {
       "crate": "crates/media/candle-gen/candle-gen-pulid",
-      "digest": "81c83bdf6d6d842d6dcabc78889ba1f581b9c1c5b2f30752ce90e647d0ab81a8",
+      "digest": "02d02bd6ed4f645acefbcf2fad769407370a974644951272dc107407aa4de345",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -842,7 +842,7 @@
     },
     "candle:qwen_image": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image",
-      "digest": "9ca993fc72fd1752c8ab6c8cc18bfd19804e24f2e9d9bb42b1d2d56c8e11651a",
+      "digest": "c63b94eb79e30b915d40914a30ff1530682fb0594c4571ac5539f7e7a833d962",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -865,7 +865,7 @@
     },
     "candle:qwen_image_2_1": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image-2-1",
-      "digest": "3585d261d2dd24bb0004104eba6f81bd18800f5094db85da0ad076802f5f5e02",
+      "digest": "2424ad43f1d00bcb3ee4b0f357526ef2c951655b5536a06287a351fb8edf30f6",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -892,7 +892,7 @@
     },
     "candle:qwen_image_2_1_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image-2-1",
-      "digest": "912fb78ae5a420248f38513675a6c6ee89c84f6a5b4c203c596ee39d52f752a1",
+      "digest": "43a9a40bd94f085a195aab668f57c06caf1f4ed3175e0c88de8fc83f99d3048d",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -919,7 +919,7 @@
     },
     "candle:qwen_image_edit": {
       "crate": "crates/media/candle-gen/candle-gen-qwen-image",
-      "digest": "0980418488ed84f9b0baf239a44f40b21a1720e1cdd324b5a87242e0333931a4",
+      "digest": "9877f3e9c57257fb177c282a71475b4f51032f64b1ca995eab3c4729dd3c604a",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -942,7 +942,7 @@
     },
     "candle:sana_1600m": {
       "crate": "crates/media/candle-gen/candle-gen-sana",
-      "digest": "a5ecc33e83eb6fdfee6840a27f6b856fcdc28f49763b61f3ae20c7ffae2fa92b",
+      "digest": "6067dbc2ff728ef011a57301797312453db109b3338b7a8795b380e5208b48a5",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -965,7 +965,7 @@
     },
     "candle:sana_sprint_1600m": {
       "crate": "crates/media/candle-gen/candle-gen-sana",
-      "digest": "4541be8e678ebaa447be60d9c035b511dd884f2d97c18a9663507bb384cc3ef5",
+      "digest": "b5978ba1e5b92ebdf24f736f5f437fc233dac851f530dfb6680ce83aed566f40",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -988,7 +988,7 @@
     },
     "candle:scail2_14b": {
       "crate": "crates/media/candle-gen/candle-gen-scail2",
-      "digest": "d166336530e831c4850ae33c48f820817c4e722ca7985eb2d98f6ee7b379126d",
+      "digest": "98e598cdf6279fb10849635a3b00f4c8c0c03e100cbdb90da50f113ee6328912",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1015,7 +1015,7 @@
     },
     "candle:sd3_5_large": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "c08b1dd89d9189ebab7c68242f57b315ae363dbe558546bf01da0f5a8d21925c",
+      "digest": "cf189d4c1760a1e4b3cc6ae1136ca5fe54e83f5592aecdd474de2b8a1b78f783",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1041,7 +1041,7 @@
     },
     "candle:sd3_5_large_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "325bb47122f89d53d15be2a91e81fa8f83611a170be90ac0d59152167f052de2",
+      "digest": "dcfad3585dae0de42c4c58a3172aa513d60e921078f5cc556e134f9363f6bb76",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1067,7 +1067,7 @@
     },
     "candle:sd3_5_medium": {
       "crate": "crates/media/candle-gen/candle-gen-sd3",
-      "digest": "738d5a78262c9baf702d3e7b4a899568530884045ad5386903252958c136e4b9",
+      "digest": "0e7496c3a03a93e363fa1ebfcb2b144ff56dca326a65baa962b2dd4c8a589d7b",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1093,7 +1093,7 @@
     },
     "candle:sdxl": {
       "crate": "crates/media/candle-gen/candle-gen-sdxl",
-      "digest": "a2f541a6d80b5953d5d28be10b7f4b1d740617e20c49b54bdbc9983ffa86a206",
+      "digest": "a3fde658c141e778950270feeb76b5fe85f8485297a5ee8e75020f1c723e8ea8",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1120,7 +1120,7 @@
     },
     "candle:sensenova_u1_8b": {
       "crate": "crates/media/candle-gen/candle-gen-sensenova",
-      "digest": "0f4010cf4ecf497e380232465e007d0574041fd2be6806a8ded7358bdc399ae9",
+      "digest": "bdd526162944028e6c19a9c134418dbc56c6976a90fa3ccfcf12137e210077c2",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1143,7 +1143,7 @@
     },
     "candle:sensenova_u1_8b_fast": {
       "crate": "crates/media/candle-gen/candle-gen-sensenova",
-      "digest": "45901065af37abd081816688a96d318de2eb0164c095334c8492144526000e2f",
+      "digest": "857110ce02b1141c69739da53b8c1a16331aff6ca5d10de722847f8d5eb78482",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1166,7 +1166,7 @@
     },
     "candle:supra2_img": {
       "crate": "crates/media/candle-gen/candle-gen-supra2",
-      "digest": "3fa810a10b3df6efbfd667499445bfa8af50972b8e33f4aa81a99149df0c614e",
+      "digest": "21e6be66377e6557031d95b4ceb2fd295668279285bcfb2fb68a39d85da4715c",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1194,7 +1194,7 @@
     },
     "candle:wan2_2_i2v_14b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "2a5ea2129301af72749a2726ec9f27ebd4239da183e01b70d1b25009ee4364cc",
+      "digest": "7cd22526f15b8bf15a8e7cc565b47402dd4f416f57225b3762ccc3cdbd8cfa08",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1220,7 +1220,7 @@
     },
     "candle:wan2_2_t2v_14b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "7b83f94249dbe649d73b9affabf096882d53c605e724e0906a2266f8f48af49f",
+      "digest": "f49ec0d1ef1cf49f96dd39675e4c96df524d8d3bc05d0e1a873c3ebbe9b752db",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1246,7 +1246,7 @@
     },
     "candle:wan2_2_ti2v_5b": {
       "crate": "crates/media/candle-gen/candle-gen-wan",
-      "digest": "28c4768d30ed36ee9d2253ddc8a0584ec07678da6f2fe4f755c91ebd01a70565",
+      "digest": "e5526885d861f0e5819a3efd2b94ce966978d466a3e72de2400b7bcd565c1dff",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1295,7 +1295,7 @@
     },
     "candle:z_image": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "8bbf9aed06bb42a7be15584e0a979a0537bfaf4af834223f95ec69c6bdadca47",
+      "digest": "b99ee0fabaa4310b8bff9aa9791a8d26e68cd2ca2ec48be0c03616bd81602e87",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1322,7 +1322,7 @@
     },
     "candle:z_image_control": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "fe0e8462b61cdb7345290a98856e7a48fa96062204cc33c756c5adbd405fe7e2",
+      "digest": "32e952fd370a2648ed76697dba03d8205e7fe9c64cae564a3f64eed8b00156a6",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
@@ -1349,7 +1349,7 @@
     },
     "candle:z_image_turbo": {
       "crate": "crates/media/candle-gen/candle-gen-z-image",
-      "digest": "2021a9e5495d95d1adc9a1aed3d308f44be446bc2e301d44326ce537eb902d17",
+      "digest": "7a5d6fdf24d9657717481db69ef11d1b2368be049333f2d769190887ae48bf68",
       "sharedContractDigest": "06240afdf467d35ed0b42627cb7d585e4042ebff133bc18a7eaeb0bc36c0a52e",
       "closureCrates": [
         "crates/contracts/core-llm",
