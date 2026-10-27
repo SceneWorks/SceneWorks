@@ -104,7 +104,8 @@ export function SimpleModelManager() {
         id: model.id,
         name: model.name ?? model.id,
         meta: [sizeLabel(model), needsLabel(model, tierOptions)].filter(Boolean).join(" · "),
-        memoryTitle: sdxlCudaMemoryEstimate(model, "q4", tierOptions.backend)?.description,
+        memoryTitle: needsLabel(model, tierOptions)?.startsWith("Q4 optimized ")
+          ? sdxlCudaMemoryEstimate(model, "q4", tierOptions.backend)?.description : undefined,
         manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
         entry: model,
         kind: "model",
