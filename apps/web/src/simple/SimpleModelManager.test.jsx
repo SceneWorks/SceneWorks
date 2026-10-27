@@ -162,6 +162,19 @@ describe("SimpleModelManager memory label", () => {
     expect(container.textContent).not.toContain("48 GB");
   });
 
+  // CI_IMPACT: one metadata-only DOM render of the stock Q4 row; no API/model execution.
+  it("shows the scoped SDXL CUDA optimized budget and both measured peaks", async () => {
+    await render(root, { macCapabilities: { macGatingActive: false }, models: [{
+      id: "sdxl", name: "SDXL", type: "image", installState: "installed", hasVariantMatrix: true,
+      variants: [{ variant: "q4", installState: "installed" }],
+      candle: { measured: false, minMemoryGb: 12, vramGbByTier: { q4: 12 } },
+    }] });
+    const meta = container.querySelector(".su-row-meta");
+    expect(meta.textContent).toContain("Q4 optimized ~5.4 GiB");
+    expect(meta.title).toContain("optimized 3.32 GiB; resident 9.32 GiB");
+    expect(meta.title).toContain("1024 × 1024, one image");
+  });
+
   it("shows the cheapest measured tier as a FLOOR when the model is not installed", async () => {
     // Nothing on disk, so the client cannot know which tier Download will fetch (the catalog omits the
     // manifest `default` flag). "from" states the entry cost without claiming a specific tier.
