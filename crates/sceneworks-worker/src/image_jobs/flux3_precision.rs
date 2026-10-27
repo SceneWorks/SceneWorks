@@ -99,7 +99,7 @@ pub(super) fn flux3_requested_tier_for_lane(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
-pub(super) use native::*;
+pub(crate) use native::*;
 
 #[cfg(any(
     test,
@@ -135,33 +135,33 @@ mod native {
     /// at their five seams: the weights directory, the gate/selector tier, the load quant + recipe
     /// bits, the (skipped) capability downtier, and the root encoder/autoencoder components.
     #[derive(Clone, Debug, PartialEq, Eq)]
-    pub(in crate::image_jobs) struct Flux3LoadPlan {
-        pub(in crate::image_jobs) tier: Flux3Tier,
+    pub(crate) struct Flux3LoadPlan {
+        pub(crate) tier: Flux3Tier,
         /// The package directory: the snapshot root for bf16, else the variant/derived package.
-        pub(in crate::image_jobs) weights_dir: PathBuf,
+        pub(crate) weights_dir: PathBuf,
         /// The root encoder and autoencoder, attached as explicit components for every non-dense
         /// package (`None` for bf16, which reads them from its own root).
-        pub(in crate::image_jobs) components: Option<(PathBuf, PathBuf)>,
+        pub(crate) components: Option<(PathBuf, PathBuf)>,
     }
 
     impl Flux3LoadPlan {
-        pub(in crate::image_jobs) const fn quant(&self) -> Option<Quant> {
+        pub(crate) const fn quant(&self) -> Option<Quant> {
             flux3_quant(self.tier)
         }
 
         /// The `mlxQuantize` bits the recipe records: q4/q8 only, never an alias for FP8R/NVFP4.
-        pub(in crate::image_jobs) const fn recipe_bits(&self) -> Option<i64> {
+        pub(crate) const fn recipe_bits(&self) -> Option<i64> {
             self.tier.recipe_bits()
         }
 
         /// The `(quant, recipe bits)` pair the generic lanes thread through.
-        pub(in crate::image_jobs) const fn quant_and_bits(&self) -> (Option<Quant>, Option<i64>) {
+        pub(crate) const fn quant_and_bits(&self) -> (Option<Quant>, Option<i64>) {
             (self.quant(), self.recipe_bits())
         }
 
         /// Attach the root encoder and autoencoder the package config names, so the selector, fit
         /// gate and provider load all inspect the same artifact set. Identity for bf16.
-        pub(in crate::image_jobs) fn attach_components(&self, spec: LoadSpec) -> LoadSpec {
+        pub(crate) fn attach_components(&self, spec: LoadSpec) -> LoadSpec {
             match &self.components {
                 None => spec,
                 Some((text_encoder, autoencoder)) => spec
@@ -471,7 +471,7 @@ mod native {
 /// advertises it and this device clears its floor, resolved against the snapshot at
 /// `snapshot_root`. `None` for every other model.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-pub(super) fn candle_flux3_plan(
+pub(crate) fn candle_flux3_plan(
     request: &super::ImageRequest,
     settings: &super::Settings,
     snapshot_root: &std::path::Path,
@@ -496,7 +496,7 @@ pub(super) fn candle_flux3_plan(
 
 /// The MLX lane's FLUX 3 load (bf16 / affine q4 / q8). `None` for every other model.
 #[cfg(target_os = "macos")]
-pub(super) fn mlx_flux3_plan(
+pub(crate) fn mlx_flux3_plan(
     request: &super::ImageRequest,
     settings: &super::Settings,
     snapshot_root: &std::path::Path,

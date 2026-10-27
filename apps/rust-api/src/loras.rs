@@ -2835,7 +2835,8 @@ mod base_model_gating_tests {
             header["__metadata__"]["base_revision"] =
                 json!("8454017f9ebaada30c998fccd9f67a80c7580f68");
         });
-        write_flux3_adapter(&dir.path().join("unstamped.safetensors"), |header| {
+        let unstamped = dir.path().join("unstamped.safetensors");
+        write_flux3_adapter(&unstamped, |header| {
             header["__metadata__"]
                 .as_object_mut()
                 .unwrap()
@@ -2947,6 +2948,9 @@ mod base_model_gating_tests {
         assert!(normalize().unwrap_err().detail.contains("header"));
         // An absent declaration uses the SAME fallback as the worker, never a different valid sibling.
         std::fs::remove_file(&selected).unwrap();
+        // `first_safetensors_path` is deliberately unordered; leave only the scan candidate so this
+        // fallback assertion cannot depend on directory iteration order.
+        std::fs::remove_file(&unstamped).unwrap();
         assert_eq!(
             resolve_adapter_in_dir(dir.path(), declared_adapter_file(&lora)),
             Some(scan.clone())

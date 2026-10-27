@@ -58,7 +58,7 @@ mod prompt_upsampling;
 // sc-26241: FLUX 3 package selection (bf16 / derived q4 q8 / publisher fp8r nvfp4). The request
 // check compiles on every lane, so the worker trust-boundary refusal holds even without a native
 // backend; package resolution compiles with the native lanes.
-mod flux3_precision;
+pub(crate) mod flux3_precision;
 #[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
 use prompt_upsampling::prompt_enhancement_fact;
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
