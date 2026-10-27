@@ -1690,7 +1690,7 @@
                       "engagedRungs": [
                         "resident"
                       ],
-                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v3",
                       "loadProfiles": [
                         "plain",
                         "lora",
@@ -1735,7 +1735,7 @@
                         "resident",
                         "staged_residency"
                       ],
-                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v3",
                       "loadProfiles": [
                         "plain",
                         "lora",
@@ -1768,7 +1768,7 @@
                         "resident",
                         "bounded_decode"
                       ],
-                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v3",
                       "loadProfiles": [
                         "plain",
                         "lora",
@@ -1796,7 +1796,8 @@
                           64
                         ],
                         "decodeTileEdges": [
-                          512
+                          512,
+                          256
                         ]
                       },
                       "parameters": {
@@ -1820,7 +1821,7 @@
                         "bounded_decode",
                         "bounded_attention"
                       ],
-                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                      "fingerprint": "sdxl-candle-realvisxl-staged-decode-attention-v3",
                       "loadProfiles": [
                         "plain",
                         "lora",
@@ -1845,13 +1846,15 @@
                       ],
                       "parameterRanges": {
                         "attentionChunkSizes": [
-                          67108864
+                          67108864,
+                          16777216
                         ],
                         "decodeOverlaps": [
                           64
                         ],
                         "decodeTileEdges": [
-                          512
+                          512,
+                          256
                         ]
                       },
                       "parameters": {
