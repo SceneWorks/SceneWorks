@@ -8886,22 +8886,22 @@ mod sdxl_family_tests {
     #[test]
     fn candle_route_fingerprints_are_the_engines_own_strings() {
         for (model_id, expected) in [
-            ("sdxl", "sdxl-candle-sdxl-staged-decode-attention-v1"),
+            ("sdxl", "sdxl-candle-sdxl-staged-decode-attention-v2"),
             (
                 "realvisxl",
-                "sdxl-candle-realvisxl-staged-decode-attention-v1",
+                "sdxl-candle-realvisxl-staged-decode-attention-v2",
             ),
             (
                 "realvisxl_lightning",
-                "sdxl-candle-realvisxl-lightning-staged-decode-attention-v1",
+                "sdxl-candle-realvisxl-lightning-staged-decode-attention-v2",
             ),
             (
                 "illustrious_xl_v1",
-                "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v1",
+                "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v2",
             ),
             (
                 "illustrious_xl_v2",
-                "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v1",
+                "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v2",
             ),
         ] {
             assert_eq!(sdxl_candle_route_fingerprint(model_id), expected);
