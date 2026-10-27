@@ -30,6 +30,7 @@ export function OrderedReferenceList({
   // (id) => label, so each caller can name an asset the way its own screen does.
   labelFor,
   className = "",
+  firstOrdinal = 1,
 }) {
   if (!Array.isArray(assetIds) || assetIds.length < 2) {
     return null;
@@ -38,14 +39,14 @@ export function OrderedReferenceList({
   return (
     <ol className={`ordered-references ${className}`.trim()}>
       {assetIds.map((id, index) => (
-        <li className="ordered-reference" key={id}>
-          <span className="ordered-reference-ordinal">{referenceOrdinalLabel(index)}</span>
+        <li className="ordered-reference" key={`${index}:${id}`}>
+          <span className="ordered-reference-ordinal">{referenceOrdinalLabel(index + firstOrdinal - 1)}</span>
           <span className="ordered-reference-label">
             {typeof labelFor === "function" ? labelFor(id) : id}
           </span>
           <span className="ordered-reference-actions">
             <button
-              aria-label={`Move ${referenceOrdinalLabel(index)} earlier`}
+              aria-label={`Move ${referenceOrdinalLabel(index + firstOrdinal - 1)} earlier`}
               className="secondary-action"
               disabled={index === 0}
               onClick={() => move(index, index - 1)}
@@ -54,7 +55,7 @@ export function OrderedReferenceList({
               ↑
             </button>
             <button
-              aria-label={`Move ${referenceOrdinalLabel(index)} later`}
+              aria-label={`Move ${referenceOrdinalLabel(index + firstOrdinal - 1)} later`}
               className="secondary-action"
               disabled={index === assetIds.length - 1}
               onClick={() => move(index, index + 1)}

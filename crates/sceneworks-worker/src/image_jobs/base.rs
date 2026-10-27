@@ -677,6 +677,8 @@ impl ImageRoute {
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CandleImageRoute {
+    /// Typed native MOSS editing, using the shared MOSS stream rather than generic conditioning.
+    MossImageEdit,
     /// InstantID identity (sc-5491) — the off-Mac sibling of `ImageRoute::InstantId`. Checked first
     /// because `instantid_realvisxl` is not an `is_candle_engine` txt2img id.
     InstantId,
@@ -1051,7 +1053,7 @@ impl CandleImageRoute {
                 sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER.len() as u32
             }
             // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
-            CandleImageRoute::CandleTxt2Img => request.image_count(),
+            CandleImageRoute::CandleTxt2Img | CandleImageRoute::MossImageEdit => request.image_count(),
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
@@ -1110,7 +1112,8 @@ impl CandleImageRoute {
                 flux2_comfyui_candle::FLUX2_COMFYUI_CANDLE_ENGINE
             }
             CandleImageRoute::Bernini => CANDLE_BERNINI_IMAGE_ADAPTER,
-            CandleImageRoute::MageEdit
+            CandleImageRoute::MossImageEdit
+            | CandleImageRoute::MageEdit
             | CandleImageRoute::QwenImage21Edit
             | CandleImageRoute::CandleTxt2Img => candle_adapter_label(&request.model),
         }
@@ -1171,7 +1174,9 @@ fn resolve_candle_image_route_with_prepared_availability(
     // Order matches the historical ladder: the edit / reference / identity / control lanes are all
     // checked BEFORE the generic `is_candle_engine` txt2img arm (they share candle txt2img model ids, so
     // without diverting first they'd be silently rendered as plain txt2img, dropping the source / poses).
-    if flux1_ipadapter_pose_combination(request) {
+    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+        Some(CandleImageRoute::MossImageEdit)
+    } else if flux1_ipadapter_pose_combination(request) {
         Some(CandleImageRoute::FluxIpAdapterPoseReject)
     } else if instantid_available(request, settings) {
         Some(CandleImageRoute::InstantId)
@@ -5845,6 +5850,8 @@ fn mlx_raw_settings_for_bundle(
     scrub_untrusted_memory_strategy_disclosure(&mut raw);
     // Worker-owned too (epic 25899): only the image's own render report adds the record back.
     raw.remove(lane_controls::PREFIX_KV_CACHE_KEY);
+    raw.remove(sceneworks_core::moss_image::EDIT_REPORT_KEY);
+    raw.remove("moss_image_edit_execution_report");
     raw.remove(sceneworks_core::moss_image::REPORT_KEY);
     raw.remove("moss_image_execution_report");
     // Worker-owned (sc-24215): the pinned weights Supra2 rendered from, never a replayed copy.
@@ -7645,6 +7652,60 @@ mod metrics_settings_tests {
         assert!(!completed_image_metrics_use_candle_flux1_exact_resolution(
             "qwen_image"
         ));
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn moss_edit_completion_metrics_do_not_invent_q8_for_the_r15_request_shape() {
+        // Actual R15 MLX edit shape: no quant field, BF16 native components, 30 steps/CFG4,
+        // shift5, 768x512 and seed173. Exercise the same helper used after event consumption,
+        // rather than supplying an already-correct label to image_settings_metrics.
+        for model in ["moss_image_base", "moss_image_sft"] {
+            let req = request(json!({
+                "model": model, "mode": "edit_image", "prompt": "Change only the blue bottle body and blue cap to deep red.",
+                "negativePrompt": "", "width": 768, "height": 512, "count": 1, "seed": 173,
+                "referenceAssetIds": ["asset_reference"],
+                "advanced": {"steps": 30, "guidanceScale": 4, "schedulerShift": 5,
+                    "mossImage": {"acceleration": "off", "uncond_skip_layers": []},
+                    "mossImageEdit": {"reference_max_edge": 512, "use_kv_cache": true}}
+            }));
+            let metrics = build_image_metrics(&req, Some(30), 1, None);
+            assert_eq!(metrics.quant_label.as_deref(), Some("bf16"));
+            assert_eq!(metrics.quant_bits, None);
+            assert_eq!(metrics.model.as_deref(), Some(model));
+            assert_eq!(metrics.steps, Some(30));
+            assert_eq!(metrics.image_count, Some(1));
+            assert_eq!(
+                (metrics.width, metrics.height, metrics.seed),
+                (Some(768), Some(512), Some(173))
+            );
+        }
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn ordinary_moss_dmd_completion_keeps_generic_quant_metrics_semantics() {
+        use gen_core::moss_image::{MossDmdPrecision, MossImageAcceleration, MossImageOptions};
+        for precision in [MossDmdPrecision::UnmergedBf16, MossDmdPrecision::FullFp32] {
+            let options = MossImageOptions {
+                acceleration: MossImageAcceleration::Dmd(precision),
+                ..Default::default()
+            };
+            let req = request(
+                json!({"model": "moss_image_sft", "mode": "text_to_image", "prompt": "mist",
+                "advanced": {"mossImage": options}}),
+            );
+            let expected = effective_quant_label(&req, None);
+            let metrics = build_image_metrics(&req, Some(8), 1, None);
+            assert_eq!(metrics.quant_label, expected.0);
+            assert_eq!(metrics.quant_bits, expected.1.map(|bits| bits as u32));
+        }
     }
 
     #[test]
@@ -11379,8 +11440,7 @@ fn candle_adapter_label(model: &str) -> &'static str {
         "qwen_image_2_1" => "candle_qwen_2_1",
         // Turbo (sc-25907): the distilled weights stamp their own label for the same reason.
         "qwen_image_2_1_turbo" => "candle_qwen_2_1_turbo",
-        "moss_image_base" => "candle_moss_image_base",
-        "moss_image_sft" => "candle_moss_image_sft",
+        "moss_image_base" | "moss_image_sft" => moss_adapter_label(model, "candle"),
         // Supra2-IMG (sc-24214): the off-Mac sibling of the `mlx_supra2` MODEL_TABLE label.
         "supra2_img" => "candle_supra2",
         "chroma1_hd" | "chroma1_base" | "chroma1_flash" => "candle_chroma",
@@ -13162,16 +13222,20 @@ async fn generate_candle_stream(
         device_backend,
         asset_writes,
         crate::inference_runtime::load,
+        Arc::new(NativeMossStreamRuntime),
     )
     .await
 }
 
 /// [`generate_candle_stream`] with the generator loader supplied by the caller — the Candle twin of
 /// [`generate_stream_using`] (sc-25680): every pre-load decision, the cached load, the per-item drive
-/// and `consume_gen_events` are the production code; only the engine is injectable, so a test can pin
-/// progress / cancel / failure on a real candle job arm without weights or a CUDA device.
+/// and `consume_gen_events` are the production code. Private MOSS source, admission and cache
+/// dependencies permit CPU lifecycle tests through this dispatcher without a CUDA device.
 #[allow(clippy::too_many_arguments)]
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    all(test, target_os = "macos")
+))]
 async fn generate_candle_stream_using(
     api: &ApiClient,
     settings: &Settings,
@@ -13183,12 +13247,58 @@ async fn generate_candle_stream_using(
     load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
         + Send
         + 'static,
+    runtime: Arc<dyn MossStreamRuntime>,
 ) -> WorkerResult<()> {
     if sceneworks_core::moss_image::is_moss(&plan.request.model) {
-        return generate_moss_stream_using(
-            api, settings, job, plan, project_path, asset_writes, load_generator,
-        ).await;
+        return generate_moss_stream_with_runtime(
+            api,
+            settings,
+            job,
+            plan,
+            project_path,
+            asset_writes,
+            load_generator,
+            runtime,
+            "candle",
+        )
+        .await;
     }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        generate_candle_registry_stream_using(
+            api,
+            settings,
+            job,
+            plan,
+            project_path,
+            _device_backend,
+            asset_writes,
+            load_generator,
+        )
+        .await
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Err(WorkerError::Engine(
+            "generic Candle registry stream is unavailable on macOS".into(),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+async fn generate_candle_registry_stream_using(
+    api: &ApiClient,
+    settings: &Settings,
+    job: &JobSnapshot,
+    plan: &ImagePlan,
+    project_path: &Path,
+    _device_backend: &str,
+    asset_writes: &mut Vec<Value>,
+    load_generator: impl FnOnce(&str, &LoadSpec) -> gen_core::Result<Box<dyn Generator>>
+        + Send
+        + 'static,
+) -> WorkerResult<()> {
     let request = &plan.request;
     let adapter_label = candle_adapter_label(&request.model);
     // Join the MODEL_TABLE row with the linked candle descriptor (same resolver the MLX path uses).
@@ -15290,6 +15400,14 @@ fn image_settings_metrics(
     quant_bits: Option<i64>,
     image_count: u32,
 ) -> GenerationMetrics {
+    // MOSS edit loads its frozen BF16 transformer/text encoder contract with no quantization.
+    // The generic resolver's omitted-setting Q8 default is not an executed tier for this lane.
+    let (quant_label, quant_bits) =
+        if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+            (Some("bf16".to_owned()), None)
+        } else {
+            (quant_label, quant_bits)
+        };
     let adv = &request.advanced;
     let string_or = |key: &str, default: &str| -> Option<String> {
         Some(
@@ -15819,6 +15937,12 @@ async fn consume_gen_events_with_disclosure(
             GenEvent::ImageFacts { index, facts } => {
                 pending_image_facts.entry(index).or_default().extend(facts);
             }
+            GenEvent::MossAssets(batch) => {
+                let mut staged = plan.moss_staged.lock().expect("MOSS staging lock");
+                if staged.is_some() { return Err(WorkerError::Engine("MOSS emitted multiple output batches".into())); }
+                asset_writes.extend(batch.facts.iter().cloned().map(Value::Object));
+                *staged = Some(batch);
+            }
             GenEvent::PromptEnhancement {
                 index,
                 expected_prompt,
@@ -16035,6 +16159,51 @@ async fn consume_gen_events_with_disclosure(
 #[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod candle_label_tests {
     use super::*;
+
+    #[test]
+    fn moss_edit_route_is_named_counted_labeled_and_separate_from_ordinary() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temp.path().join("data"));
+        settings.backend_candle_enabled = true;
+        for model in ["moss_image_base", "moss_image_sft"] {
+            let request = ImageRequest::from_payload(json!({"model":model,"mode":"edit_image",
+                "sourceAssetId":"ref","prompts":["blue cup","red cup"],"prompt":"blue cup","count":2
+            }).as_object().unwrap());
+            let route = resolve_candle_image_route_with_prepared_availability(
+                &request, &settings, false, false, false, false, false, false, false,
+            )
+            .unwrap();
+            assert_eq!(route, CandleImageRoute::MossImageEdit);
+            assert_eq!(route.image_count(&request, &settings), 4);
+            assert_eq!(route.adapter_label(&request), candle_adapter_label(model));
+            assert!(!route.applies_request_loras(&request));
+            let ordinary = ImageRequest::from_payload(
+                json!({"model":model,"mode":"text_to_image"})
+                    .as_object()
+                    .unwrap(),
+            );
+            assert_eq!(
+                resolve_candle_image_route_with_prepared_availability(
+                    &ordinary, &settings, false, false, false, false, false, false, false
+                ),
+                Some(CandleImageRoute::CandleTxt2Img)
+            );
+        }
+        settings.backend_candle_enabled = false;
+        let request = ImageRequest::from_payload(
+            json!({"model":"moss_image_sft","mode":"edit_image","sourceAssetId":"ref"})
+                .as_object()
+                .unwrap(),
+        );
+        assert_eq!(
+            resolve_candle_image_route_with_prepared_availability(
+                &request, &settings, false, false, false, false, false, false, false
+            ),
+            None
+        );
+    }
+
+
 
     /// sc-24163: a LoRA/LoKr on a Qwen-Image 2.1 reference edit must pass the fail-closed route
     /// guard — the edit route renders through the same adapter-bearing generic stream as 2.1 T2I.

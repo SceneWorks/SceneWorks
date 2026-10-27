@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { summarize } from "./validation/issues.js";
 import {
   keptSubstituteModelId,
+  mossWorkflowReplayIssue,
   modelSupportsWorkflowPoseReplay,
   pickedReferenceAssetIds,
   pickedSourceAssetId,
@@ -325,5 +326,20 @@ describe("carrying the user's own answers to the launch", () => {
 describe("the messages a panel would show", () => {
   it("never says anything at all about a recipe this install can run outright", () => {
     expect(messages({ report: report() })).toEqual([]);
+  });
+});
+
+describe("MOSS semantic-slot replay admission",()=>{
+  it.each([1,4])("reacquires all %i slots without deduplicating repeated asset picks",(count)=>{
+    const share={model:"moss_image_sft",mode:"edit_image"};
+    const here=report({model:{slug:share.model,catalogId:share.model,state:"resolved"},components:[{purpose:"moss_image_edit",state:"resolved"}],inputs:[{kind:"reference",count,state:"userSupplied"}]});
+    const inputPicks=Object.fromEntries(Array.from({length:count},(_,index)=>[`reference-0-${index}`,index%2?"b":"a"]));
+    const models=[{id:share.model,capabilities:["text_to_image","edit_image"]}],assets=[{id:"a",type:"image"},{id:"b",type:"image"}];
+    expect(mossWorkflowReplayIssue({share,report:here,models,assets,inputPicks})).toBe("");
+    expect(pickedReferenceAssetIds(here,inputPicks)).toEqual(count===1?["a"]:["a","b","a","b"]);
+    expect(mossWorkflowReplayIssue({share,report:here,models,assets:[],inputPicks})).toContain("missing");
+    expect(mossWorkflowReplayIssue({share,report:{...here,components:[]},models,assets,inputPicks})).toContain("exact pinned");
+    expect(mossWorkflowReplayIssue({share,report:here,models:[{id:share.model}],assets,inputPicks})).toContain("runtime");
+    expect(mossWorkflowReplayIssue({share,report:here,models,assets,inputPicks:{}})).toContain("Reacquire");
   });
 });
