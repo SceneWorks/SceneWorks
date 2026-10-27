@@ -1142,7 +1142,7 @@ fn sdxl_candle_route_fingerprint(model_id: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("-");
-    format!("sdxl-candle-{tokens}-staged-decode-attention-v2")
+    format!("sdxl-candle-{tokens}-staged-decode-attention-v3")
 }
 
 /// The SDXL-specific half of the shared five-rung spec: the resolved catalog route the engine
@@ -8605,8 +8605,8 @@ fn run_sdxl_endpoint(request: &Value) -> Result<Value, String> {
         json!({})
     } else {
         json!({
-            "stageResidency": true, "decodeTileEdge": 512, "decodeOverlap": 64,
-            "attentionChunkSize": runtime_cuda::gen_core::attention_budget::CONSTRAINED_ATTN_SCORES_BUDGET,
+            "stageResidency": true, "decodeTileEdge": 256, "decodeOverlap": 64,
+            "attentionChunkSize": 16_777_216,
         })
     };
     if (width, height) != (1024, 1024) || json!(parameters) != expected_parameters {
@@ -8886,22 +8886,22 @@ mod sdxl_family_tests {
     #[test]
     fn candle_route_fingerprints_are_the_engines_own_strings() {
         for (model_id, expected) in [
-            ("sdxl", "sdxl-candle-sdxl-staged-decode-attention-v2"),
+            ("sdxl", "sdxl-candle-sdxl-staged-decode-attention-v3"),
             (
                 "realvisxl",
-                "sdxl-candle-realvisxl-staged-decode-attention-v2",
+                "sdxl-candle-realvisxl-staged-decode-attention-v3",
             ),
             (
                 "realvisxl_lightning",
-                "sdxl-candle-realvisxl-lightning-staged-decode-attention-v2",
+                "sdxl-candle-realvisxl-lightning-staged-decode-attention-v3",
             ),
             (
                 "illustrious_xl_v1",
-                "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v2",
+                "sdxl-candle-illustrious-xl-rev1-staged-decode-attention-v3",
             ),
             (
                 "illustrious_xl_v2",
-                "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v2",
+                "sdxl-candle-illustrious-xl-rev2-staged-decode-attention-v3",
             ),
         ] {
             assert_eq!(sdxl_candle_route_fingerprint(model_id), expected);

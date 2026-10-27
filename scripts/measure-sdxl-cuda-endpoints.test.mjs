@@ -5,7 +5,7 @@ import { readFile, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
-import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, validatePackagedEndpointSummarySource } from "./measure-sdxl-cuda-endpoints.mjs";
+import { ENDPOINTS, endpointCase, validateEndpoint, compareRgb, endpointEvidenceReference, sdxlAssemblyInventory, admittedReplayRequest, admittedReplayEnv, assertAdmittedReplaySelection, admittedReplaySelection, persistedReplayAsset, parseReplayGpuSample, settlePostExitGpu, validatePackagedEndpointSummarySource } from "./measure-sdxl-cuda-endpoints.mjs";
 import { EVIDENCE_DIR } from "./package-sdxl-cuda-endpoints.mjs";
 
 // CI_IMPACT: one pure cross-module path contract; no files, build, API or model execution.
@@ -34,7 +34,7 @@ function receipt() {
 function replaySelection() {
   return { backend: "candle", route: "sdxl", actualTier: "q4", mode: "text_to_image", strategy: "bounded_attention",
     basis: "measured_endpoint", geometry: { width: 1024, height: 1024, batch: 1 },
-    parameters: { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 },
+    parameters: { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16_777_216 },
     predictedPeakBytes: 3_000_000_000, admittedPeakGb: 3.7, reserveGb: 1.5, availableGb: 4.5 };
 }
 
@@ -48,8 +48,31 @@ test("endpoint pair keeps one q4 artifact and renders only maximum and minimum",
   assert.equal(cases[0].target.tier, "q4");
   assert.deepEqual(cases.map((item) => item.loadShape), ["eager_materialization", "eager_materialization"]);
   assert.notEqual(cases[0].logicalCaseId, cases[1].logicalCaseId);
-  assert.deepEqual(cases[1].strategy.parameters, { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 64 * 1024 ** 2 });
+  assert.deepEqual(cases[1].strategy.parameters, { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16 * 1024 ** 2 });
+  assert.deepEqual(cases.map((item) => item.calibrationFingerprint), Array(2).fill("sdxl-candle-sdxl-staged-decode-attention-v3"));
   assert.deepEqual(plan, original);
+});
+
+// CI_IMPACT: pure cross-language request/guard contract, <1 second; no adapter execution/build.
+test("both actual endpoint requests match the adapter's exact composition guard", async () => {
+  const source = await readFile(new URL("../crates/sceneworks-memory-adapter/src/bin/candle.rs", import.meta.url), "utf8");
+  const start = source.indexOf("fn run_sdxl_endpoint(");
+  assert.ok(start >= 0);
+  const adapter = source.slice(start, source.indexOf("\nfn main()", start));
+  const guarded = /let expected_parameters = if endpoint == "resident" \{([\s\S]*?)\n    \};/.exec(adapter);
+  assert.ok(guarded, "endpoint validator owns an explicit resident/minimum contract");
+  const parameterPairs = [...guarded[1].matchAll(/json!\((\{[\s\S]*?\})\)/g)].map((match) =>
+    JSON.parse(match[1].replace(/(\d)_(?=\d)/g, "$1").replace(/,(\s*[}\]])/g, "$1")));
+  assert.equal(parameterPairs.length, 2);
+  assert.match(adapter, /\(width, height\) != \(1024, 1024\) \|\| json!\(parameters\) != expected_parameters/);
+  for (const [index, endpoint] of ENDPOINTS.entries()) {
+    const request = { action: "sdxl_endpoint", sdxlEndpoint: endpoint.name, planned: endpointCase(plan, endpoint) };
+    assert.match(adapter, new RegExp(`"${request.sdxlEndpoint}" => "${request.planned.strategy.rung}"`));
+    assert.deepEqual(request.planned.target.geometry, { width: 1024, height: 1024, batch: 1, frames: 1 });
+    assert.deepEqual(request.planned.strategy.parameters, parameterPairs[index]);
+  }
+  assert.notDeepEqual({ stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 }, parameterPairs[1],
+    "the previous minimum must fail the current endpoint guard rather than capture a mislabeled recipe");
 });
 
 test("endpoint receipt accepts whole-run load-inclusive peak and natural cleanup", () => {
@@ -73,6 +96,53 @@ test("endpoint receipt rejects missing load inclusion, context mismatch, flat ou
     const value = receipt(); mutate(value);
     assert.throws(() => validateEndpoint(value, ENDPOINTS[0]));
   }
+});
+
+// CI_IMPACT: injected probes and clock only; no actual waits, processes or GPU access.
+test("post-exit settling requires five consecutive idle stable samples after counter decay", async () => {
+  const simulate = async (rows, timeoutMs = 2_000) => {
+    let elapsed = 0; let index = 0;
+    return settlePostExitGpu(async (remainingMs) => {
+      assert.ok(remainingMs > 0 && remainingMs <= timeoutMs);
+      return rows[Math.min(index++, rows.length - 1)];
+    }, { timeoutMs, now: () => elapsed, sleep: async (ms) => { elapsed += ms; } });
+  };
+  const idle = await simulate(["2048,0,0"]);
+  assert.equal(idle.samples.length, 5); assert.equal(idle.elapsedMs, 800);
+  assert.equal(idle.afterBytes, 2048 * 1024 ** 2); assert.equal(idle.stableSamples, 5);
+  const decayed = await simulate(["2200,30,7", "2100,0,5", "2048,0,0"]);
+  assert.equal(decayed.samples.length, 7); assert.equal(decayed.elapsedMs, 1200);
+  assert.equal(decayed.afterBytes, idle.afterBytes);
+  const interrupted = await simulate(["2048,0,0", "2048,0,0", "2048,1,0", "2048,0,0"]);
+  assert.equal(interrupted.samples.length, 8, "activity resets the consecutive-idle count");
+  const stabilized = await simulate(["2048,0,0", "2176,0,0"]);
+  assert.equal(stabilized.samples.length, 6, "a memory jump resets the stable window");
+  assert.equal(stabilized.afterBytes, 2176 * 1024 ** 2);
+  for (const rows of [["2048,2,0"], ["2048,0,2"], ["2048,0,0", "2176,0,0", "2048,0,0", "2176,0,0", "2048,0,0", "2176,0,0"]]) {
+    await assert.rejects(() => simulate(rows, 1_200), (error) => {
+      assert.match(error.message, /did not settle.*1200ms/);
+      assert.match(error.message, /"usedBytes":/); assert.equal(error.samples.length, 6);
+      return true;
+    });
+  }
+  for (const invalid of ["2048,0", "2048,0,NaN", "2048,,0", "2048,101,0", "-1,0,0", "N/A,0,0"]) {
+    await assert.rejects(() => simulate([invalid]), (error) => {
+      assert.match(error.message, /invalid physical GPU1 post-exit telemetry/);
+      assert.equal(error.samples[0].raw, invalid); return true;
+    });
+  }
+});
+
+test("capture retains the parsed response before settling without promoting failed diagnostics", async () => {
+  const source = await readFile(new URL("./measure-sdxl-cuda-endpoints.mjs", import.meta.url), "utf8");
+  const capture = source.slice(source.indexOf("for (const endpoint of ENDPOINTS)"));
+  const response = capture.indexOf("`${endpoint.name}-response.json`");
+  const settling = capture.indexOf("settled = await settlePostExitGpu");
+  assert.ok(response >= 0 && settling > response);
+  assert.match(capture, /status: "failed", error: error\.message, samples: error\.samples/);
+  const validation = capture.indexOf("validateEndpoint(measurement, endpoint, pin)");
+  assert.ok(validation >= 0 && capture.indexOf("await writeFile(bundlePath, bundleBytes)") > validation);
+  assert.match(capture, /afterBytes: settled\.afterBytes, toleranceBytes: 64 \* 1024 \*\* 2/);
 });
 
 // One changed channel distinguishes a true RGB comparison from a digest-only attestation.
@@ -197,6 +267,20 @@ test("admitted replay accepts the ordinary selector's cheaper affordable SDXL co
   ]) {
     assert.equal(assertAdmittedReplaySelection({ ...selection, strategy, parameters, basis }), coverage);
   }
+  // Pure contract coverage only: these numeric combinations must describe the
+  // actual recipe the worker selected; no additional model render is planned.
+  for (const decodeTileEdge of [256, 512]) for (const attentionChunkSize of [16_777_216, 67_108_864]) for (const stageResidency of [false, true]) {
+    const measuredMinimum = stageResidency && decodeTileEdge === 256 && attentionChunkSize === 16_777_216;
+    const current = { ...selection, parameters: { ...bounded, decodeTileEdge, attentionChunkSize, stageResidency },
+      basis: measuredMinimum ? "measured_endpoint" : "anchor_derived" };
+    assert.equal(assertAdmittedReplaySelection(current), measuredMinimum ? "measured_minimum" : "estimated_intermediate");
+    assert.throws(() => assertAdmittedReplaySelection({ ...current, basis: measuredMinimum ? "anchor_derived" : "measured_endpoint" }),
+      "only the exact freshly measured minimum can claim endpoint coverage");
+  }
+  for (const decodeTileEdge of [256, 512]) for (const stageResidency of [false, true]) {
+    assert.equal(assertAdmittedReplaySelection({ ...selection, strategy: "bounded_decode", basis: "anchor_derived",
+      parameters: { ...bounded, decodeTileEdge, stageResidency } }), "estimated_intermediate");
+  }
   // availableGb is already net of reserve; an affordable 4.5-GiB admission under
   // a six-GiB free cap and 1.5-GiB reserve must not pay that reserve twice.
   assert.doesNotThrow(() => assertAdmittedReplaySelection({ ...selection, admittedPeakGb: 4.5 }));
@@ -206,6 +290,8 @@ test("admitted replay accepts the ordinary selector's cheaper affordable SDXL co
     { strategy: "staged_residency", parameters: plain },
     { strategy: "resident", parameters: { ...plain, stageResidency: true } },
     { parameters: { ...selection.parameters, decodeOverlap: 128 } },
+    { parameters: { ...selection.parameters, decodeTileEdge: 384 } },
+    { parameters: { ...selection.parameters, attentionChunkSize: 4_194_304 } },
     { parameters: { ...selection.parameters, attentionChunkSize: null } },
     { parameters: { ...selection.parameters, transformerWindowSize: 1 } },
     { parameters: { ...selection.parameters, unsupportedControl: true } },
@@ -252,6 +338,9 @@ test("admitted replay workflow remains manual and runs native pure gates on GPU1
   assert.match(source, /cargo test --release --locked -p sceneworks-core --lib sdxl_endpoint_/);
   assert.match(source, /cargo test --release --locked -p sceneworks-worker --features backend-candle --lib candle_memory_strategy::tests::sdxl_/);
   assert.match(source, /cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings/);
+  // CI_IMPACT: source-only assertion; the manual replay reuses its worker objects for a weights-free dump.
+  assert.match(source, /cargo run --release --locked -p sceneworks-worker --no-default-features --features backend-candle --bin dump-engine-capabilities/);
+  assert.match(source, /engine-capability-facts"/);
   assert.ok(source.indexOf("Validate the SDXL gate") < source.indexOf("Replay one ordinary admitted SDXL"));
   const script = await readFile(new URL("./measure-sdxl-cuda-endpoints.mjs", import.meta.url), "utf8");
   assert.match(script, /POST", "\/api\/v1\/image\/jobs"/);

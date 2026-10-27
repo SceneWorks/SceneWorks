@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
+import { performance } from "node:perf_hooks";
 import { ROOT, parseArgs, planRun, providerCommand, run } from "./measure-memory-catalog.mjs";
 import { capturePlannedCase, logicalCaseId, planAnchor } from "./memory-calibration-harness.mjs";
 import { hashArtifactInventory, artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
@@ -17,7 +18,7 @@ export const ENDPOINTS = Object.freeze([
   { name: "sequential", strategy: {
     rung: "bounded_attention",
     engagedRungs: ["resident", "staged_residency", "bounded_decode", "bounded_attention"],
-    parameters: { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67_108_864 },
+    parameters: { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16_777_216 },
   } },
 ]);
 
@@ -26,7 +27,7 @@ export function endpointCase(plan, endpoint) {
   planned.loadShape = "eager_materialization";
   planned.target.geometry = { width: 1024, height: 1024, batch: 1, frames: 1 };
   planned.strategy = structuredClone(endpoint.strategy);
-  planned.calibrationFingerprint = "sdxl-candle-sdxl-staged-decode-attention-v2";
+  planned.calibrationFingerprint = "sdxl-candle-sdxl-staged-decode-attention-v3";
   // Existing SDXL fixture validation accepts the five-rung prefix; the settings are separately
   // recorded from the actual GenerationRequest, with provider-default sampler and step count.
   planned.fixture = "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps";
@@ -137,16 +138,20 @@ export function validatePackagedEndpointSummarySource(source) {
 export function assertAdmittedReplaySelection(selection) {
   const parameters = selection?.parameters;
   const noDecode = parameters?.decodeTileEdge == null && parameters?.decodeOverlap == null;
-  const boundedDecode = parameters?.decodeTileEdge === 512 && parameters?.decodeOverlap === 64;
+  const boundedDecode = [256, 512].includes(parameters?.decodeTileEdge) && parameters?.decodeOverlap === 64;
   const noAttention = parameters?.attentionChunkSize == null;
   const recipe = typeof parameters?.stageResidency === "boolean" && parameters.transformerWindowSize == null
     && Object.keys(parameters).every((key) => ["stageResidency", "decodeTileEdge", "decodeOverlap", "attentionChunkSize", "transformerWindowSize"].includes(key))
     && (selection.strategy === "resident" && !parameters.stageResidency && noDecode && noAttention
       || selection.strategy === "staged_residency" && parameters.stageResidency && noDecode && noAttention
       || selection.strategy === "bounded_decode" && boundedDecode && noAttention
-      || selection.strategy === "bounded_attention" && boundedDecode && parameters.attentionChunkSize === 67_108_864);
+      || selection.strategy === "bounded_attention" && boundedDecode && [16_777_216, 67_108_864].includes(parameters.attentionChunkSize));
+  const minimum = ENDPOINTS[1].strategy.parameters;
+  const measuredMinimum = selection?.strategy === "bounded_attention" && parameters?.stageResidency === true
+    && parameters.decodeTileEdge === minimum.decodeTileEdge && parameters.decodeOverlap === minimum.decodeOverlap
+    && parameters.attentionChunkSize === minimum.attentionChunkSize;
   const coverage = selection?.strategy === "resident" ? "measured_resident"
-    : selection?.strategy === "bounded_attention" && parameters?.stageResidency ? "measured_minimum" : "estimated_intermediate";
+    : measuredMinimum ? "measured_minimum" : "estimated_intermediate";
   // availableGb is the selector's pool AFTER subtracting its reserve. Compare the
   // widened admission to that pool, and account for the reserve once against the
   // six-GiB guard. The selector canonicalizes decimal GiB ceilings to whole bytes.
@@ -211,6 +216,47 @@ export function parseReplayGpuSample(stdout, at = new Date().toISOString()) {
   }
   return { at, uuid: fields[0], usedBytes: numbers[0] * 1024 ** 2, freeBytes: numbers[1] * 1024 ** 2,
     gpuUtilization: numbers[2], memoryUtilization: numbers[3] };
+}
+
+// Only the manual endpoint capture waits here: at most 30 seconds per child exit.
+export async function settlePostExitGpu(probe, { timeoutMs = 30_000, pollMs = 200, now = () => performance.now(),
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+  const started = now(); const samples = []; let stable = [];
+  const fail = (reason) => {
+    const error = new Error(`${reason}; post-exit GPU1 samples: ${JSON.stringify(samples)}`);
+    error.samples = samples;
+    return error;
+  };
+  while (now() - started < timeoutMs) {
+    let raw;
+    try {
+      raw = await probe(timeoutMs - (now() - started));
+      const fields = raw.trim().split(",").map((field) => field.trim());
+      const values = fields.map(Number);
+      if (fields.length !== 3 || fields.some((field) => !field)
+          || values.some((value) => !Number.isSafeInteger(value) || value < 0)
+          || values[1] > 100 || values[2] > 100 || !Number.isSafeInteger(values[0] * 1024 ** 2)) {
+        throw new Error("invalid physical GPU1 post-exit telemetry");
+      }
+      const sample = { elapsedMs: now() - started, usedBytes: values[0] * 1024 ** 2,
+        gpuUtilization: values[1], memoryUtilization: values[2] };
+      samples.push(sample);
+      if (sample.gpuUtilization !== 0 || sample.memoryUtilization !== 0) stable = [];
+      else {
+        stable.push(sample);
+        if (Math.max(...stable.map((item) => item.usedBytes)) - Math.min(...stable.map((item) => item.usedBytes)) > 64 * 1024 ** 2) stable = [sample];
+        if (stable.length === 5 && now() - started <= timeoutMs) {
+          return { afterBytes: Math.max(...stable.map((item) => item.usedBytes)), samples, stableSamples: 5, elapsedMs: now() - started };
+        }
+      }
+    } catch (error) {
+      samples.push({ elapsedMs: now() - started, raw, error: error.message });
+      throw fail(error.message);
+    }
+    const remaining = timeoutMs - (now() - started);
+    if (remaining > 0) await sleep(Math.min(pollMs, remaining));
+  }
+  throw fail(`physical GPU1 did not settle to five consecutive idle stable samples within ${timeoutMs}ms`);
 }
 
 export function admittedReplayEnv(env, { state, hub, workerId, port, parentPid }) {
@@ -423,18 +469,6 @@ export async function main(argv = process.argv.slice(2)) {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("invalid physical GPU1 cleanup telemetry");
     return value * 1024 ** 2;
   };
-  const settledUsedBytes = async () => {
-    const samples = [];
-    for (let index = 0; index < 5; index++) {
-      const values = (await run(smi, ["-i", "1", "--query-gpu=memory.used,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"], { env, timeoutMs: 30_000 })).stdout.trim().split(",").map((value) => Number(value.trim()));
-      if (values.length !== 3 || values.some((value) => !Number.isSafeInteger(value) || value < 0)
-          || values[1] !== 0 || values[2] !== 0) throw new Error("post-exit physical GPU1 is not idle or observable");
-      samples.push(values[0] * 1024 ** 2);
-      if (index < 4) await new Promise((resolve) => setTimeout(resolve, 200));
-    }
-    if (Math.max(...samples) - Math.min(...samples) > 64 * 1024 ** 2) throw new Error("post-exit physical GPU1 baseline is unstable");
-    return Math.max(...samples);
-  };
   for (const endpoint of ENDPOINTS) {
     let measurement;
     const outputPath = path.join(workDir, `${endpoint.name}.png`);
@@ -459,9 +493,22 @@ export async function main(argv = process.argv.slice(2)) {
         await writeFile(path.join(workDir, `${endpoint.name}-${request.action}.log`), result.stderr);
         const fragment = JSON.parse(result.stdout);
         if (request.action === "sdxl_endpoint") {
+          // Retain the exact adapter response even if post-exit validation fails.
+          // This diagnostic is never packaged as validated endpoint evidence.
+          await writeFile(path.join(workDir, `${endpoint.name}-response.json`), JSON.stringify(fragment, null, 2) + "\n");
           measurement = fragment.endpointMeasurement;
           delete fragment.endpointMeasurement;
-          measurement.cleanup = { beforeBytes, afterBytes: await settledUsedBytes(), toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true };
+          let settled;
+          try {
+            settled = await settlePostExitGpu(async (remainingMs) => (await run(smi,
+              ["-i", "1", "--query-gpu=memory.used,utilization.gpu,utilization.memory", "--format=csv,noheader,nounits"],
+              { env, timeoutMs: Math.min(5_000, remainingMs) })).stdout);
+          } catch (error) {
+            await writeFile(path.join(workDir, `${endpoint.name}-settle.json`), JSON.stringify({ status: "failed", error: error.message, samples: error.samples }, null, 2) + "\n");
+            throw error;
+          }
+          await writeFile(path.join(workDir, `${endpoint.name}-settle.json`), JSON.stringify({ status: "settled", ...settled }, null, 2) + "\n");
+          measurement.cleanup = { beforeBytes, afterBytes: settled.afterBytes, toleranceBytes: 64 * 1024 ** 2, adapterProcessExited: true };
           validateEndpoint(measurement, endpoint, pin);
         }
         return JSON.stringify(fragment);

@@ -1,3 +1,4 @@
+// CI_IMPACT: existing pure packaging fixtures only, <1 second; no model/device execution.
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -20,11 +21,12 @@ function fixture() {
     const record = bundle.records[0];
     record.id = `imc-${String(index + 1).padStart(20, "0")}`;
     record.loadShape = "eager_materialization";
+    record.calibrationFingerprint = "sdxl-candle-sdxl-staged-decode-attention-v3";
     record.artifact.inventorySha256 = inventory.sha256;
     record.target.geometry = { width: 1024, height: 1024, frames: 1, batch: 1 };
     record.strategy = name === "resident"
       ? { rung: "resident", engagedRungs: ["resident"], parameters: {} }
-      : { rung: "bounded_attention", engagedRungs: ["resident", "staged_residency", "bounded_decode", "bounded_attention"], parameters: { stageResidency: true, decodeTileEdge: 512, decodeOverlap: 64, attentionChunkSize: 67108864 } };
+      : { rung: "bounded_attention", engagedRungs: ["resident", "staged_residency", "bounded_decode", "bounded_attention"], parameters: { stageResidency: true, decodeTileEdge: 256, decodeOverlap: 64, attentionChunkSize: 16777216 } };
     record.sweep = { axes: [], cases: [{ parameters: record.strategy.parameters, result: "passed" }], rangeVerified: false };
     record.logicalCaseId = logicalCaseId(record);
     record.id = recordId(record);
