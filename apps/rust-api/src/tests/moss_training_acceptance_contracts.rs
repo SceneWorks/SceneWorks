@@ -392,3 +392,64 @@ async fn adapter_import_cpu_contract() {
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
+
+#[test]
+fn training_library_resolves_declared_final_file_by_filesystem_identity() {
+    use super::moss_training_acceptance::resolve_training_library_adapter;
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("library");
+    std::fs::create_dir(&directory).unwrap();
+    let output = directory.join("trained.safetensors");
+    let checkpoint = directory.join("trained-step020.safetensors");
+    let header = br#"{"factor":{"dtype":"F32","shape":[1],"data_offsets":[0,4]}}"#;
+    let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+    bytes.extend_from_slice(header);
+    bytes.extend_from_slice(&1f32.to_le_bytes());
+    std::fs::write(&output, &bytes).unwrap();
+    std::fs::write(&checkpoint, &bytes).unwrap();
+    let expected = std::fs::canonicalize(&output).unwrap();
+    let mut entry = serde_json::json!({"installedPath":directory, "files":["trained.safetensors"]});
+    assert_eq!(
+        resolve_training_library_adapter(&entry, &expected).unwrap(),
+        expected
+    );
+    entry["installedPath"] = serde_json::json!(output);
+    assert_eq!(
+        resolve_training_library_adapter(&entry, &expected).unwrap(),
+        expected
+    );
+    entry["installedPath"] = serde_json::json!(directory);
+    entry["files"] = serde_json::json!(["trained-step020.safetensors"]);
+    assert!(
+        resolve_training_library_adapter(&entry, &expected).is_err(),
+        "equal bytes from another file are not the final adapter"
+    );
+    entry["installedPath"] = serde_json::json!(root.path().join("missing"));
+    assert!(resolve_training_library_adapter(&entry, &expected).is_err());
+    #[cfg(unix)]
+    {
+        let alias = root.path().join("library-alias");
+        std::os::unix::fs::symlink(&directory, &alias).unwrap();
+        entry = serde_json::json!({"installedPath":alias,"files":["trained.safetensors"]});
+        assert_eq!(
+            resolve_training_library_adapter(&entry, &expected).unwrap(),
+            expected
+        );
+    }
+    #[cfg(windows)]
+    {
+        let canonical_dir = std::fs::canonicalize(&directory).unwrap();
+        let plain = canonical_dir
+            .to_str()
+            .unwrap()
+            .strip_prefix(r"\\?\")
+            .unwrap()
+            .replace('\\', "/");
+        entry = serde_json::json!({"installedPath":plain,"files":["trained.safetensors"]});
+        assert_ne!(std::path::Path::new(&plain), expected.parent().unwrap());
+        assert_eq!(
+            resolve_training_library_adapter(&entry, &expected).unwrap(),
+            expected
+        );
+    }
+}

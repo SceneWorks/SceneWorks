@@ -3777,6 +3777,18 @@ async fn completed_moss_lokr_registers_exact_provenance_for_library_selection() 
         .iter()
         .find(|entry| entry["name"] == "MOSS Base LoKr")
         .expect("completed MOSS adapter appears in the library");
+    // Exercise the campaign's actual library resolver on this real API result.
+    // Windows canonical output paths carry a verbatim prefix while the API's
+    // installed directory can retain its ordinary path and mixed separators.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    assert_eq!(
+        super::moss_training_acceptance::resolve_training_library_adapter(entry, &adapter_path)
+            .unwrap(),
+        std::fs::canonicalize(&adapter_path).unwrap()
+    );
     assert_eq!(entry["family"], "moss-image");
     assert_eq!(entry["baseModel"], "moss_image_base");
     assert_eq!(entry["networkType"], "lokr");

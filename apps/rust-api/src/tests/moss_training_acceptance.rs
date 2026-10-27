@@ -1407,6 +1407,31 @@ async fn import_adapter(
     Ok(entry)
 }
 
+pub(super) fn resolve_training_library_adapter(entry: &Value, output: &Path) -> Result<PathBuf> {
+    let installed = PathBuf::from(text(entry, "installedPath")?);
+    require(
+        installed.is_absolute(),
+        "training library installed path is not absolute",
+    )?;
+    let declared = entry["files"]
+        .as_array()
+        .and_then(|files| files.first())
+        .and_then(Value::as_str);
+    let selected = if installed.is_dir() {
+        sceneworks_core::lora_family::resolve_adapter_in_dir(&installed, declared)
+            .ok_or("training library directory does not resolve an adapter")?
+    } else {
+        installed
+    };
+    let resolved = std::fs::canonicalize(&selected).map_err(|e| e.to_string())?;
+    let expected = std::fs::canonicalize(output).map_err(|e| e.to_string())?;
+    require(
+        resolved.is_file() && resolved == expected,
+        "library installed path does not resolve final adapter",
+    )?;
+    Ok(resolved)
+}
+
 async fn training_library_adapter(
     case: &mut Case,
     app: &axum::Router,
@@ -1441,16 +1466,14 @@ async fn training_library_adapter(
         "training library parent/method/source mismatch",
     )?;
     require(
-        output.as_path() == Path::new(text(&run.receipt, "final_native_path")?)
+        std::fs::canonicalize(&output).map_err(|e| e.to_string())?
+            == std::fs::canonicalize(text(&run.receipt, "final_native_path")?)
+                .map_err(|e| e.to_string())?
             && file_sha(&output)?
                 == file_sha(Path::new(text(&run.receipt, "final_adapter_path")?))?,
         "actual library completion is not the final native-produced adapter",
     )?;
-    let installed = PathBuf::from(text(&entry, "installedPath")?);
-    require(
-        installed == output || output.parent() == Some(installed.as_path()),
-        "library installed path does not resolve final adapter",
-    )?;
+    resolve_training_library_adapter(&entry, &output)?;
     require(
         entry["provenance"]["configSnapshot"]["alpha"] == 6.0
             && entry["provenance"]["configSnapshot"]["rank"] == 4
