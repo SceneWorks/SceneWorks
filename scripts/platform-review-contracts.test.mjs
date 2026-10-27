@@ -3122,6 +3122,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
         ".cargo/config.toml", // git-fetch-with-cli, without which the token-injected inference fetch breaks
         ".github/actions/prepare-rust-runner/**", // the job's own first step
+        ".github/actions/cleanup-runner-storage/**", // registered post action; Windows guard tests exercise its Cargo locks and path checks
         ".github/workflows/windows-candle.yml", // the lane itself
       ],
     },

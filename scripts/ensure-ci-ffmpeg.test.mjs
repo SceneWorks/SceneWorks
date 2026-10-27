@@ -32,6 +32,7 @@ if(name === 'sudo') {
 }
 if(name === 'dpkg') { console.log(process.env.ARCH); process.exit(0); }
 if(name === 'timeout') {
+  if(args.includes('update') && process.env.FAIL_PHASE === 'update-timeout') process.exit(124);
   if(args.includes('--download-only') && process.env.FAIL_PHASE === 'download-timeout') process.exit(124);
   const index = args.indexOf('apt-get');
   if(index < 0) process.exit(99);
@@ -107,11 +108,14 @@ test("missing ffmpeg uses only signed official Ubuntu sources and separates down
     assert.ok(call.args.includes("APT::Get::AllowUnauthenticated=false"));
     assert.ok(call.args.includes("APT::Update::Error-Mode=any"));
     assert.ok(call.args.includes("Dir::Etc::sourceparts=-"));
+    assert.ok(call.args.includes("Acquire::Languages=none"));
+    assert.ok(call.args.includes("Acquire::IndexTargets::deb::CNF::DefaultEnabled=false"));
+    assert.ok(call.args.includes("Acquire::IndexTargets::deb::DEP-11::DefaultEnabled=false"));
     assert.ok(call.args.some(arg => arg.startsWith("Dir::State::lists=") && !arg.includes("/var/lib/apt")));
   }
   const deadlines = result.calls.filter(call => call.name === "timeout");
   assert.deepEqual(deadlines.map(call => call.args.slice(0, 3)), [
-    ["--signal=TERM", "--kill-after=10s", "90s"],
+    ["--signal=TERM", "--kill-after=10s", "180s"],
     ["--signal=TERM", "--kill-after=10s", "180s"],
   ]);
 });
@@ -132,6 +136,13 @@ test("a continuously slow download is bounded and never reaches dpkg installatio
   const result = runFixture({ fail: "download-timeout" });
   assert.equal(result.status, 124);
   assert.ok(!result.calls.some(call => call.name === "apt-get" && call.args.includes("--no-download")));
+});
+
+test("a continuously slow metadata update is bounded and never downloads or installs packages", { skip: skipWithoutShebang }, () => {
+  const result = runFixture({ fail: "update-timeout" });
+  assert.equal(result.status, 124);
+  assert.ok(!result.calls.some(call => call.name === "apt-get"));
+  assert.equal(result.calls.filter(call => call.name === "timeout").length, 1);
 });
 
 test("install failure and an unsuitable installed binary both fail closed", { skip: skipWithoutShebang }, () => {
