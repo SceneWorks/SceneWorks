@@ -6835,21 +6835,26 @@ pub(crate) async fn run_model_import_job(
             "model-uploads",
             "Model import sourcePath",
         )?;
-        if payload_bool(&job.payload, "uploadedSourcePath") && source_path.is_file() {
-            // Keep the upload as the retry/restart input until publication succeeds. A hard link
-            // avoids a second checkpoint-sized copy on the normal same-volume cache/install path.
-            let name = source_path.file_name().ok_or_else(|| {
-                WorkerError::InvalidPayload("Uploaded model has no filename".into())
-            })?;
-            if tokio::fs::hard_link(&source_path, staging_dir.join(name))
-                .await
-                .is_err()
-            {
+        // The staging copy is checkpoint-sized and reports no progress of its own.
+        with_job_heartbeat(api, settings, &job.id, async {
+            if payload_bool(&job.payload, "uploadedSourcePath") && source_path.is_file() {
+                // Keep the upload as the retry/restart input until publication succeeds. A hard
+                // link avoids a second checkpoint-sized copy on the normal same-volume path.
+                let name = source_path.file_name().ok_or_else(|| {
+                    WorkerError::InvalidPayload("Uploaded model has no filename".into())
+                })?;
+                if tokio::fs::hard_link(&source_path, staging_dir.join(name))
+                    .await
+                    .is_err()
+                {
+                    copy_lora_source(&source_path, &staging_dir).await?;
+                }
+            } else {
                 copy_lora_source(&source_path, &staging_dir).await?;
             }
-        } else {
-            copy_lora_source(&source_path, &staging_dir).await?;
-        }
+            Ok(())
+        })
+        .await?;
     } else if let Some(source_url) = source_url {
         download_model_source_url(
             &DownloadContext {
