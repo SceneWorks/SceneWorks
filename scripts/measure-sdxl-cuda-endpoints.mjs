@@ -8,6 +8,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { spawn } from "node:child_process";
 import { createServer } from "node:net";
+import { performance } from "node:perf_hooks";
 import { ROOT, parseArgs, planRun, providerCommand, run } from "./measure-memory-catalog.mjs";
 import { capturePlannedCase, logicalCaseId, planAnchor } from "./memory-calibration-harness.mjs";
 import { hashArtifactInventory, artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
@@ -218,7 +219,7 @@ export function parseReplayGpuSample(stdout, at = new Date().toISOString()) {
 }
 
 // Only the manual endpoint capture waits here: at most 30 seconds per child exit.
-export async function settlePostExitGpu(probe, { timeoutMs = 30_000, pollMs = 200, now = Date.now,
+export async function settlePostExitGpu(probe, { timeoutMs = 30_000, pollMs = 200, now = () => performance.now(),
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
   const started = now(); const samples = []; let stable = [];
   const fail = (reason) => {
