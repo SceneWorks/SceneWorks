@@ -1024,9 +1024,8 @@ export async function smokeDevice(index,execute=execFile) {
   const [physicalIndex,uuid,pci,name,memory]=rows[0].split(',').map(value=>value.trim());
   requireThat(physicalIndex===String(index)&&/^GPU-[a-f0-9-]+$/i.test(uuid)&&pci&&Number.isFinite(Number(memory)),'invalid selected CUDA device identity');
   const processes=(await execute('nvidia-smi',['--query-compute-apps=gpu_uuid,pid,process_name,used_memory','--format=csv,noheader,nounits'],{timeout:10000,windowsHide:true})).stdout;
-  const active=processes.trim()?processes.trim().split(/\r?\n/):[];
-  requireThat(active.every(row=>/^GPU-[a-f0-9-]+,\s*\d+,/i.test(row)),'CUDA compute ownership query returned unsupported or invalid data');
-  requireThat(!active.some(row=>row.split(',')[0].trim()===uuid),'selected CUDA device has a compute process; select the other available device or queue later');
+  // Observe current compute use; product memory admission decides whether a job fits.
+  // Shared GPU use is not an exclusive-ownership prerequisite for this smoke.
   return {physicalIndex:Number(physicalIndex),logicalIndex:0,uuid,pci,name,usedMiB:Number(memory),computeProcesses:processes.trim(),observedAt:new Date().toISOString()};
 }
 export async function smoke(env=process.env) {

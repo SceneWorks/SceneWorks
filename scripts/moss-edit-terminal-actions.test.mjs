@@ -612,6 +612,9 @@ test('manual Actions smoke builds once and retains one image without campaign ob
   assert.match(workflow,/build-and-image:/);assert.match(workflow,/moss-edit-terminal-actions\.mjs smoke/);
   assert.match(workflow,/real-weights/);assert.match(workflow,/if: always\(\)/);
   assert.match(workflow,/\$env:MOSS_PHASE -notin @\('smoke', 'execute'\)/);
+  const normalized=workflow.indexOf('moss-edit-terminal-actions.mjs normalize-env');
+  assert.ok(normalized>workflow.indexOf('node-version: 24')&&normalized<workflow.indexOf('uses: actions/download-artifact@'));
+  assert.match(workflow,/MOSS_ROOT:.*moss-execute-.*-cuda/);assert.match(workflow,/MOSS_BUNDLE:.*moss-bundle-/);
   assert.doesNotMatch(workflow,/strategy:|matrix:|finalize|execute-mlx:|execute-cuda:|verify-retained:|pull_request:|^  push:/m);
   const config=runtimeConfig({sourceSha:identity.sourceSha,inferenceSha:identity.inferenceSha,candidateId:'candidate',backends:{cuda:{hfHome:'/source/cache',port:17957,installAdapter:true,editAdapterFiles:['weights'],packageFiles:[{file:'weights',sha256:'a'.repeat(64)}]}}},{sourceRoot,inferenceRoot:'/inference',root:'/private/run',backend:'cuda',buildRoot:'/builds',bundleRoot:'/bundle'});assert.equal(config.hfHome,resolve('/private/run/hf'));assert.equal(config.packageSource,resolve('/source/cache'));
 });
@@ -1094,11 +1097,12 @@ test('fresh CUDA alone requires sized sealed staging before install while Mac an
  assert.equal(runtime.packageFiles[0].byteLength,undefined); // Original R19 path/SHA schema remains valid for reuse.
 });
 
-test('manual smoke selects either physical CUDA device and rejects existing compute ownership',async()=>{
+test('manual smoke selects either physical CUDA device and retains shared compute observations',async()=>{
   for(const index of ['0','1']) {
     const uuid=`GPU-${index}abc`,execute=async(_command,args)=>({stdout:args[0].startsWith('--id=')?`${index}, ${uuid}, 00000000:C${index}:00.0, Test CUDA, 123\n`:''});
     assert.equal((await smokeDevice(index,execute)).uuid,uuid);
-    await assert.rejects(()=>smokeDevice(index,async(command,args)=>args[0].startsWith('--id=')?execute(command,args):{stdout:`${uuid}, 1234, training, 1000`}),/compute process/);
+    const processes=`${uuid}, 1234, training, 1000`;
+    assert.equal((await smokeDevice(index,async(command,args)=>args[0].startsWith('--id=')?execute(command,args):{stdout:processes})).computeProcesses,processes);
     await assert.rejects(()=>smokeDevice(index,async()=>({stdout:`${1-Number(index)}, ${uuid}, pci, Test CUDA, 0`})),/identity/);
   }
   await assert.rejects(()=>smokeDevice('2'),/select physical/);

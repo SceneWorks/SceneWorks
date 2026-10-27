@@ -162,8 +162,8 @@ jobs:
       MOSS_INFERENCE_SHA: ${{ inputs.inference_sha }}
       MOSS_SOURCE: ${{ github.workspace }}/source
       MOSS_INFERENCE: ${{ github.workspace }}/inference
-      MOSS_BUNDLE: ${{ github.workspace }}/../moss-sc-26752/moss-inputs-${{ github.run_id }}-${{ github.run_attempt }}
-      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-smoke-${{ github.run_id }}-${{ github.run_attempt }}
+      MOSS_BUNDLE: ${{ github.workspace }}/../moss-sc-26752/moss-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+      MOSS_ROOT: ${{ github.workspace }}/../moss-sc-26752/moss-execute-${{ github.run_id }}-${{ github.run_attempt }}-cuda
       MOSS_BUNDLE_SHA: ${{ inputs.bundle_manifest_sha256 }}
       MOSS_CUDA_DEVICE: ${{ inputs.cuda_device || '0' }}
       MOSS_HF_HOME: ${{ inputs.hf_home }}
@@ -197,6 +197,8 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 24
+      - name: Normalize durable paths before artifact operations
+        run: node source/scripts/moss-edit-terminal-actions.mjs normalize-env
       - uses: ./source/.github/actions/prepare-rust-runner
         with:
           workspace-directory: source
