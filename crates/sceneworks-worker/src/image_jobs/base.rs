@@ -7095,7 +7095,7 @@ mod measured_mlx_load_shape_tests {
     }
 
     #[test]
-    fn worker_plain_sdxl_specs_reach_only_the_pinned_three_rung_contract() {
+    fn worker_plain_sdxl_specs_reach_the_pinned_four_rung_contract() {
         fn sdxl_spec(
             root: &std::path::Path,
             quant_bits: Option<u8>,
@@ -7155,16 +7155,58 @@ mod measured_mlx_load_shape_tests {
                 MemoryStrategySupport::Implemented,
                 "{tier}"
             );
-            for missing in [
+            for implemented in [
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
                 MemoryStrategy::BoundedDecode,
-                MemoryStrategy::BoundedAttention,
             ] {
                 assert_eq!(
-                    contract.capability(missing).unwrap().support,
-                    MemoryStrategySupport::Missing,
-                    "SDXL {tier} must not invent measured-Missing rungs"
+                    contract.capability(implemented).unwrap().support,
+                    MemoryStrategySupport::Implemented,
+                    "SDXL {tier} must expose its pinned v5 rung {implemented:?}"
                 );
             }
+            assert_eq!(
+                contract
+                    .capability(MemoryStrategy::BoundedAttention)
+                    .unwrap()
+                    .support,
+                MemoryStrategySupport::Missing,
+                "SDXL {tier} must not invent bounded attention"
+            );
+            let native_decode = &contract.pid_decode_routes.as_ref().unwrap().native;
+            assert_eq!(
+                native_decode.tile_edges,
+                [896, 768, 640, 512, 448, 384, 320, 256]
+            );
+            assert_eq!(native_decode.tile_overlap, 64);
+            let mut decode = gen_core::MemorySelection {
+                strategy: MemoryStrategy::BoundedDecode,
+                parameters: gen_core::MemoryStrategyParameters {
+                    decode_tile_edge: Some(512),
+                    decode_overlap: Some(64),
+                    ..Default::default()
+                },
+                tier: gen_core::MemoryNumericTier {
+                    precision: gen_core::Precision::Bf16,
+                    quant,
+                    component_precision_floors: &[],
+                },
+            };
+            contract
+                .validate_selection(&decode)
+                .expect("native decode selection");
+            let memory = contract
+                .generation_memory(&decode)
+                .expect("implemented bounded decode configures request memory");
+            assert!(memory.tile_vae_decode);
+            assert!(!memory.stage_residency);
+            assert!(!memory.stream_transformer_blocks);
+            decode.parameters.decode_tile_edge = Some(128);
+            assert!(
+                contract.validate_selection(&decode).is_err(),
+                "unpublished decode geometry"
+            );
         }
 
         let root = tempfile::tempdir().unwrap();

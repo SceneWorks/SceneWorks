@@ -1,15 +1,15 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:52078b0f300740594b2fc2007400ba55b8b096e2c7dc9801ecc4fd7fd35368a2",
+    "sceneWorksRevision": "source-tree:08cf3ada284c48a4054dbbad7b6fe87f325ae7143988fa7a2d21b0b19e1cb542",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "df10e66de5d589f9ceefbe4e4d52c7c483ef97d8a5a9fc1673e4a7ab6c382d48"
+        "sha256": "f40bd88ad1405164379c68e6365a11e423910cf7dd1f73d5456aef6a0c134875"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "3d116f6a41f25d8af620a424d9b1d092b714aa07cee0f78930f2ef78746a350c"
+        "sha256": "2cd3f99a6d88e0186c83f4b34d2e0bab47853465e58bfd1f0000a2a87157456d"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
@@ -17,7 +17,7 @@
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "7a46fc3b047f082227c827122e9869d9d033cf59f461b644038f73627c01b874"
+        "sha256": "734e55a46ba33b3e7270ca6ff972cedb473a103ca780b27049f6f92bb6d7fcf2"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
@@ -25,7 +25,7 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "6fcc6d3206bd6698350f66f610ba183f801b589add32a9ef4291b53fe1ad5f96"
+        "sha256": "eb79a71a7584ce84dfbe1d74e26795715afc7618237067afd2f8e0f9761d3b1b"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "43ce8941b0d8ca7e76478abaa1c14771ca9e7142d4e25231908915ccdf22b5ac"
+        "sha256": "7623e2e5ea68331ee251d52ab655ff49e586fc1b927e24ba0e875153668d9d36"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "add2ec29f9d7768d14162fd79e8aaaae8e53829e5fc3c95ed2c6c94f6942c39d"
+        "sha256": "f4faa6ef510042398c86ad99261a2dc5aa2f6d066d25e5f42bfe346c6413155c"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",

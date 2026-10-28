@@ -492,12 +492,17 @@ pub(crate) fn mage_flow_mlx_eligible(payload: &Map<String, Value>) -> bool {
 }
 
 /// Iris-3B generation (sc-25679) is text-to-image: the `iris_3b` engine takes no source, reference,
-/// mask, control or pose, and has no quant tier — it refuses `LoadSpec::quantize` by name. It DOES
-/// apply generation-task LoRA / LoKr adapters (sc-25681): `loras` routes, and the API's Iris task
-/// gate plus the engine's stamp check refuse an incompatible file. An enabled hires fix is refused:
-/// its second pass is an img2img refinement (a `Reference` at the hires strength) the engine refuses,
-/// after a full first pass. Any refused carrier keeps the job off MLX (an `mlx_unsupported`
-/// affordance) instead of reaching an engine that would refuse it.
+/// mask, control or pose. It DOES apply generation-task LoRA / LoKr adapters (sc-25681): `loras`
+/// routes, and the API's Iris task gate plus the engine's stamp check refuse an incompatible file.
+/// An enabled hires fix is refused: its second pass is an img2img refinement (a `Reference` at the
+/// hires strength) the engine refuses, after a full first pass. Any refused carrier keeps the job off
+/// MLX (an `mlx_unsupported` affordance) instead of reaching an engine that would refuse it.
+///
+/// sc-26266: the MLX engine quantizes at load, so `advanced.mlxQuantize` names one of its three
+/// tiers — `0` (bf16), `8` (q8) or `4` (q4), as an integer or its decimal string, the shapes
+/// `quantTier.js` emits and the worker's `resolve_quant` parses. Any other value (which the worker
+/// would silently round to q4 / q8) and every `advanced.quantTier` (the candle-only NVFP4 /
+/// non-bits tiers) stay refused.
 pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
     let hires_fix_enabled = payload
         .get("hiresFix")
@@ -507,9 +512,28 @@ pub(crate) fn iris_mlx_eligible(payload: &Map<String, Value>) -> bool {
         .unwrap_or(false);
     !hires_fix_enabled
         && mage_flow_mlx_eligible(payload)
-        && !["mlxQuantize", "quantTier"]
-            .iter()
-            .any(|key| has_nonnull_or_malformed_nested_carrier(payload, "advanced", key))
+        && iris_quantize_is_a_tier(payload)
+        && !has_nonnull_or_malformed_nested_carrier(payload, "advanced", "quantTier")
+}
+
+/// Whether `advanced.mlxQuantize` is absent/null or names an Iris MLX tier (`0` / `4` / `8`).
+fn iris_quantize_is_a_tier(payload: &Map<String, Value>) -> bool {
+    let Some(advanced) = payload.get("advanced") else {
+        return true;
+    };
+    let Some(advanced) = advanced.as_object() else {
+        // A malformed `advanced` is refused by the carrier checks it would otherwise hide.
+        return !has_nonnull_or_malformed_nested_carrier(payload, "advanced", "mlxQuantize");
+    };
+    match advanced.get("mlxQuantize") {
+        None | Some(Value::Null) => true,
+        Some(value) => matches!(
+            value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok()),
+            Some(0 | 4 | 8)
+        ),
+    }
 }
 
 /// FLUX 3 Image Klein base and distilled: text-to-image on the native MLX provider in one of the

@@ -33,6 +33,9 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=scripts/ci/metal_execution_entry.sh
+source "$ROOT/scripts/ci/metal_execution_entry.sh"
+metal_execution_entry "7200" bash "$0" "$@"
 PLAN="${PLAN:-$ROOT/config/film-harness/courier-workshop/plan.jsonc}"
 REFERENCES="${REFERENCES:-$ROOT/config/film-harness/courier-workshop/references.jsonc}"
 SHOTS="${SHOTS:-SH010,SH020}"

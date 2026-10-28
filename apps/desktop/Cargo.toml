@@ -65,7 +65,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 # from pinned PyPI wheels (zips), sha256-verified, and unzipped into %APPDATA%. Feature
 # sets preserve the existing downloader; zip 9 fixes unsafe archive extraction upstream.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
-zip = { version = "9", default-features = false, features = ["deflate"] }
+zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
 # Stream the wheel download chunk-by-chunk (StreamExt::next over reqwest's
 # bytes_stream) so a ~660 MB wheel is hashed + written to disk incrementally rather than

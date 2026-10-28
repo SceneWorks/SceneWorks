@@ -228,10 +228,10 @@ test('Windows actual round-trip UTC format is canonical Z in both job starts, ne
   assert.doesNotMatch(section,/UtcNow\.ToString\('o'\)/);
  }
 });
-test('both CUDA phases preserve established PCI device 1 exclusion and explicit Windows preparation workspace',()=>{
+test('both CUDA phases preserve PCI device 1, their serial group, and explicit Windows preparation workspace',()=>{
  const workflow=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
  const authoritative=readFileSync(path.join(root,'.github/workflows/windows-candle.yml'),'utf8');
- assert.match(authoritative,/group: windows-candle-gpu-real-weights\n      cancel-in-progress: false/);
+ assert.match(authoritative,/group: windows-candle-gpu-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}-iris-worker-smoke\n      cancel-in-progress: false/);
  assert.match(authoritative,/CUDA_DEVICE_ORDER: PCI_BUS_ID\n      CUDA_VISIBLE_DEVICES: "1"/);
  for(const job of ['capture','cross-load']) {
   const section=workflow.split(`  ${job}:\n`)[1].split(/^  [a-z][a-z-]+:\n/m)[0];

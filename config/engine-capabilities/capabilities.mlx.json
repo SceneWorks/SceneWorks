@@ -1,7 +1,7 @@
 {
   "backend": "mlx",
   "generatedFrom": {
-    "inferenceRevision": "d327a28f4c78141c75cd02527cf2699e18d63619",
+    "inferenceRevision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "engines": [
@@ -5311,8 +5311,27 @@
     {
       "id": "iris_3b",
       "composed": false,
-      "selectorDigest": "sha256:9dc34c16562e2cd09bc9fb8ea4df32086b11144500be3f85f5ce23a1ba7a8ec9",
+      "selectorDigest": "sha256:270a9f15c6a99348dcc1de3b114b3a57b921e3d335416dca952bf3f17bd22e19",
       "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
         {
           "selector": {
             "tier": "bf16",
@@ -5320,6 +5339,7 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
+            "bounded_attention",
             "resident",
             "staged_residency"
           ],
@@ -5332,9 +5352,169 @@
           "selector": {
             "tier": "bf16",
             "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
+            "bounded_attention",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q4",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "resident",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
+            "bounded_transformer_residency",
+            "resident",
+            "staged_residency"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
+        {
+          "selector": {
+            "tier": "q8",
+            "offloadPolicy": "sequential",
+            "loadShape": "eager_materialization"
+          },
+          "implementedRungs": [
+            "bounded_attention",
             "resident",
             "staged_residency"
           ],
@@ -5348,8 +5528,26 @@
     {
       "id": "iris_3b_depth",
       "composed": true,
-      "selectorDigest": "sha256:5bb34abbb2b96c7da7dae1f530e72eed26c4848b38197fa0c1177a12bdae9783",
+      "selectorDigest": "sha256:d8a2321c8b5371221c569f04758a0177ccdd4cfef4feb76e9be6a1b1b02ab089",
       "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
         {
           "selector": {
             "tier": "bf16",
@@ -5364,6 +5562,24 @@
             "staged_residency"
           ],
           "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -5385,8 +5601,26 @@
     {
       "id": "iris_3b_restore",
       "composed": true,
-      "selectorDigest": "sha256:5bb34abbb2b96c7da7dae1f530e72eed26c4848b38197fa0c1177a12bdae9783",
+      "selectorDigest": "sha256:d8a2321c8b5371221c569f04758a0177ccdd4cfef4feb76e9be6a1b1b02ab089",
       "surfaces": [
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "resident",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
+        },
         {
           "selector": {
             "tier": "bf16",
@@ -5401,6 +5635,24 @@
             "staged_residency"
           ],
           "deferredMaterializationRungs": []
+        },
+        {
+          "selector": {
+            "tier": "bf16",
+            "offloadPolicy": "sequential",
+            "loadShape": "deferred_materialization"
+          },
+          "implementedRungs": [
+            "bounded_transformer_residency",
+            "resident"
+          ],
+          "structurallyNotApplicableRungs": [
+            "bounded_decode",
+            "staged_residency"
+          ],
+          "deferredMaterializationRungs": [
+            "bounded_transformer_residency"
+          ]
         },
         {
           "selector": {
@@ -10807,7 +11059,7 @@
     {
       "id": "sdxl",
       "composed": false,
-      "selectorDigest": "sha256:c5b07b38e8dd5e55e7c92a772c7d8e86a9892dab322ec3249bddd304c16b714e",
+      "selectorDigest": "sha256:427d6360b49c4d9d55ba2f4335c46156d4246ce3d9523b1ca2020c16002c0027",
       "surfaces": [
         {
           "selector": {
@@ -10816,6 +11068,7 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "bounded_transformer_residency",
             "resident",
             "staged_residency"
@@ -10832,6 +11085,7 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "resident",
             "staged_residency"
           ],
@@ -10845,6 +11099,7 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "bounded_transformer_residency",
             "resident",
             "staged_residency"
@@ -10861,6 +11116,7 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "resident",
             "staged_residency"
           ],
@@ -10874,6 +11130,7 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "bounded_transformer_residency",
             "resident",
             "staged_residency"
@@ -10890,6 +11147,7 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "resident",
             "staged_residency"
           ],
@@ -10903,6 +11161,7 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "bounded_transformer_residency",
             "resident",
             "staged_residency"
@@ -10919,6 +11178,7 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "resident",
             "staged_residency"
           ],
@@ -10932,6 +11192,7 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "bounded_transformer_residency",
             "resident",
             "staged_residency"
@@ -10948,6 +11209,7 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "resident",
             "staged_residency"
           ],
@@ -10961,6 +11223,7 @@
             "loadShape": "deferred_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "bounded_transformer_residency",
             "resident",
             "staged_residency"
@@ -10977,6 +11240,7 @@
             "loadShape": "eager_materialization"
           },
           "implementedRungs": [
+            "bounded_decode",
             "resident",
             "staged_residency"
           ],
