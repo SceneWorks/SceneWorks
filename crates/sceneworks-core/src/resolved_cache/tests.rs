@@ -2758,8 +2758,8 @@ fn sha256_of(path: &Path) -> String {
 ///
 /// Stated as operation counts across the whole prepare flow on a multi-MB file: ONE hash pass per
 /// produced file (taken from the write stream) and ZERO re-reads through measure → publish →
-/// record_complete → acquire. The native load seal (`gen_core::PinnedWeightsFile::pin`) then binds
-/// to exactly the digest the stream recorded.
+/// record_complete → acquire → native load seal, which redeems the stream's digest through
+/// `gen_core::PinnedWeightsFile::pin_attested` and reports zero hashed bytes.
 #[test]
 fn a_produced_derivative_is_hashed_once_as_it_is_written_through_its_first_load() {
     let scratch = TempDir::new().unwrap();
@@ -2770,20 +2770,21 @@ fn a_produced_derivative_is_hashed_once_as_it_is_written_through_its_first_load(
     let key = plan.cache_key().unwrap();
     let resolver = resolver(&input, ActiveArtifactLeaseRegistry::default());
 
-    let (((published, lease), rereads), streamed) = produced::observe_stream_hashes(|| {
-        crate::model_artifacts::observe_content_hashes(|| {
-            let reservation = derived_reservation(&store, &input, &plan);
-            let attested = produce_attested(reservation.staging_path());
-            let published = reservation
-                .publish_produced_attested_with_check(&plan, &attested, &|| Ok(()))
-                .expect("the attested bundle publishes");
-            let lease = store
-                .acquire_complete(&key, &resolver, "runtime:video:model")
-                .unwrap()
-                .expect("the first load leases the published bundle");
-            (published, lease)
-        })
-    });
+    let (((published, lease, attested), rereads), streamed) =
+        produced::observe_stream_hashes(|| {
+            crate::model_artifacts::observe_content_hashes(|| {
+                let reservation = derived_reservation(&store, &input, &plan);
+                let attested = produce_attested(reservation.staging_path());
+                let published = reservation
+                    .publish_produced_attested_with_check(&plan, &attested, &|| Ok(()))
+                    .expect("the attested bundle publishes");
+                let lease = store
+                    .acquire_complete(&key, &resolver, "runtime:video:model")
+                    .unwrap()
+                    .expect("the first load leases the published bundle");
+                (published, lease, attested)
+            })
+        });
     assert_eq!(
         streamed, 2,
         "each produced file is hashed exactly once, by its write stream"
@@ -2805,7 +2806,25 @@ fn a_produced_derivative_is_hashed_once_as_it_is_written_through_its_first_load(
     {
         let path = bundle.join(&file.relative_path);
         assert_eq!(file.sha256.as_deref(), Some(sha256_of(&path).as_str()));
-        let seal = gen_core::PinnedWeightsFile::pin(&path).unwrap();
+        // The load seal redeems the write-stream digest (no content read) through the gen-core
+        // attestation captured when the stream closed, across the staging → bundle rename.
+        let attestation = attested
+            .get(&file.relative_path)
+            .and_then(|attested| attested.seal_attestation().cloned())
+            .expect("the stream captured a gen-core attestation");
+        let mut acquisitions = Vec::new();
+        let seal = gen_core::PinnedWeightsFile::pin_attested_with_progress(
+            &path,
+            &attestation,
+            || Ok(()),
+            |progress| acquisitions.push((progress.acquisition, progress.hashed_bytes)),
+        )
+        .unwrap();
+        assert_eq!(
+            acquisitions,
+            vec![(gen_core::runtime::ArtifactSealAcquisition::Attested, 0)],
+            "the native load seal must not re-read a file its writer already hashed"
+        );
         let sealed = format!(
             "sha256:{}",
             seal.content_sha256()

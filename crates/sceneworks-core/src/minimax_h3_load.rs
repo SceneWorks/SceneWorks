@@ -38,6 +38,8 @@ pub struct H3SourceAuthority {
     component_staging: std::sync::Arc<
         parking_lot::Mutex<Vec<crate::model_artifacts::provenance::H3ComponentStagingReceipt>>,
     >,
+    /// Seals carried across staging hard links they created, keyed by canonical target.
+    relinked: std::sync::Arc<parking_lot::Mutex<BTreeMap<PathBuf, PinnedWeightsFile>>>,
     _leases: Option<std::sync::Arc<H3SourceLeases>>,
 }
 
@@ -58,6 +60,7 @@ impl H3SourceAuthority {
             directory,
             planned,
             component_staging: Default::default(),
+            relinked: Default::default(),
             _leases: None,
         };
         authority.validate()?;
@@ -104,10 +107,44 @@ impl H3SourceAuthority {
         target: &Path,
     ) -> Result<(), String> {
         let receipts = crate::model_artifacts::provenance::stage_h3_component_with_receipts(
-            data_dir, assembly, link, target,
+            data_dir,
+            assembly,
+            link,
+            target,
+            &|source, destination| self.hard_link_through_seal(source, destination),
         )?;
         self.component_staging.lock().extend(receipts);
         Ok(())
+    }
+
+    /// Create one staging hard link. A file this authority holds a seal for is linked BY that seal
+    /// (`ArtifactSeal::hard_link_with_check`), which proves the link moved nothing but the change
+    /// time and carries the digest to the re-captured identity, so
+    /// [`Self::reseal_after_link_staging`] has nothing to re-read (sc-26691). Repeated links of the
+    /// same file chain from the latest carried seal. A file with no seal, or a seal that refuses,
+    /// is linked plainly and left to the re-seal's full read and digest comparison.
+    fn hard_link_through_seal(&self, source: &Path, destination: &Path) -> Result<(), String> {
+        let canonical = std::fs::canonicalize(source).map_err(|e| e.to_string())?;
+        let current = self.relinked.lock().get(&canonical).cloned().or_else(|| {
+            self.seals
+                .iter()
+                .find(|seal| seal.canonical_target_path() == canonical)
+                .cloned()
+        });
+        if let Some(seal) = current {
+            match seal.hard_link_with_check(destination, || Ok(())) {
+                Ok(relinked) => {
+                    self.relinked.lock().insert(canonical, relinked);
+                    return Ok(());
+                }
+                Err(error) => tracing::warn!(path = %source.display(), %error,
+                    "H3 staging link could not carry its seal; the re-seal re-reads this file"),
+            }
+            if std::fs::symlink_metadata(destination).is_ok() {
+                return Ok(());
+            }
+        }
+        std::fs::hard_link(source, destination).map_err(|e| e.to_string())
     }
 
     /// Windows stages imported-H3 task paths with snapshot-style file hard links, and adding a link
@@ -119,8 +156,20 @@ impl H3SourceAuthority {
         &mut self,
         check: impl Fn() -> std::io::Result<()>,
     ) -> Result<(), String> {
+        let relinked = std::mem::take(&mut *self.relinked.lock());
         for seal in &mut self.seals {
             if seal.ensure_unchanged().is_ok() {
+                continue;
+            }
+            // A seal that performed the link itself already carries the digest to the identity
+            // the link produced; adopt it only while it is still live.
+            if let Some(carried) = relinked
+                .get(seal.canonical_target_path())
+                .filter(|carried| carried.loader_path() == seal.loader_path())
+                .filter(|carried| carried.content_sha256() == seal.content_sha256())
+                .filter(|carried| carried.ensure_unchanged().is_ok())
+            {
+                *seal = carried.clone();
                 continue;
             }
             let repinned = PinnedWeightsFile::pin_with_progress(
@@ -416,6 +465,79 @@ fn members(dir: &Path) -> Result<Vec<PathBuf>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn authority_over(file: &Path) -> H3SourceAuthority {
+        let seal = PinnedWeightsFile::pin(file).unwrap();
+        H3SourceAuthority::new(
+            vec![seal],
+            file.parent().unwrap().to_path_buf(),
+            BTreeSet::from([file.file_name().unwrap().to_string_lossy().into_owned()]),
+        )
+        .unwrap()
+    }
+
+    /// sc-26691: a staging link made through the file's seal carries the seal across the
+    /// ChangeTime/ctime move it causes, and the re-seal adopts that carried seal (live, same
+    /// digest) instead of re-pinning the file cold. Repeated links chain from the latest one.
+    #[test]
+    fn a_staging_link_through_the_seal_leaves_the_re_seal_nothing_to_read() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("component").join("dit.safetensors");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"normalized dit bytes").unwrap();
+        let mut authority = authority_over(&file);
+        let digest = *authority.seals[0].content_sha256();
+
+        let staged = temp.path().join("staged");
+        std::fs::create_dir_all(staged.join("a")).unwrap();
+        std::fs::create_dir_all(staged.join("b")).unwrap();
+        for task in ["a", "b"] {
+            authority
+                .hard_link_through_seal(&file, &staged.join(task).join("dit.safetensors"))
+                .unwrap();
+        }
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        let carried = authority.relinked.lock().get(&canonical).cloned().unwrap();
+        carried
+            .ensure_unchanged()
+            .expect("the seal carried across both links is live");
+        assert_eq!(carried.content_sha256(), &digest);
+
+        authority.reseal_after_link_staging(|| Ok(())).unwrap();
+        assert_eq!(
+            authority.seals[0], carried,
+            "the re-seal adopts the carried seal"
+        );
+        authority.validate().unwrap();
+    }
+
+    /// Tamper semantics are unchanged: bytes rewritten after the staging link move mtime/size, the
+    /// carried seal is no longer live, and the re-seal's full read refuses the changed file.
+    #[test]
+    fn a_file_rewritten_after_its_staging_link_is_still_refused_by_the_re_seal() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("component").join("dit.safetensors");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"normalized dit bytes").unwrap();
+        let mut authority = authority_over(&file);
+        let staged = temp.path().join("staged");
+        std::fs::create_dir_all(&staged).unwrap();
+        authority
+            .hard_link_through_seal(&file, &staged.join("dit.safetensors"))
+            .unwrap();
+
+        std::fs::write(&file, b"NORMALIZED DIT BYTES").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(60))
+            .unwrap();
+        let error = authority
+            .reseal_after_link_staging(|| Ok(()))
+            .expect_err("changed bytes must never be re-authorized");
+        assert!(error.contains("changed"), "{error}");
+    }
 
     /// Terminal review Issue 2: a direct-path import whose frozen companion is NOT the DiT
     /// directory's sibling must still ACQUIRE that companion into the prepared receipt — the

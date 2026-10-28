@@ -505,11 +505,19 @@ fn same_windows_file(source: &Path, destination: &Path) -> bool {
     matches!((identity(source), identity(destination)), (Some(a), Some(b)) if a == b)
 }
 
+/// `hard_link(source, destination)` creates each Windows file link; the H3 source authority routes
+/// it through the file's own seal so the ChangeTime move the link causes does not cost a cold
+/// re-pin (sc-26691). Unix stages a directory symlink and never calls it.
 pub(crate) fn stage_h3_component_with_receipts(
     data_dir: &Path,
     assembly: &Value,
     link: &Path,
     target: &Path,
+    #[cfg_attr(not(windows), allow(unused_variables))] hard_link: &dyn Fn(
+        &Path,
+        &Path,
+    )
+        -> Result<(), String>,
 ) -> Result<Vec<H3ComponentStagingReceipt>, String> {
     use crate::checkpoint_plan_store::{SourceStampV1, StoreClockV1};
     if !link.starts_with(data_dir.join("cache/minimax-h3-shared"))
@@ -601,7 +609,7 @@ pub(crate) fn stage_h3_component_with_receipts(
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                     Err(error) => return Err(error.to_string()),
                 }
-                std::fs::hard_link(entry.path(), destination).map_err(|e| format!("cannot stage imported H3 file: {e}; keep the import and component cache on the same hardlink-capable volume"))?;
+                hard_link(&entry.path(), &destination).map_err(|e| format!("cannot stage imported H3 file: {e}; keep the import and component cache on the same hardlink-capable volume"))?;
             }
         }
     }

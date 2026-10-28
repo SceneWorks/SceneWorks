@@ -538,6 +538,36 @@ impl CheckpointDerivativeStore {
         check: &dyn Fn() -> std::io::Result<()>,
         produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
     ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
+        self.ensure_resolved_attested_with_check(resolved, request, check, produce)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// [`Self::ensure_resolved_with_check`], also returning the write-stream attestations of a
+    /// derivative this call produced (empty on a cache hit). Keyed by bundle-relative path; each
+    /// carries the gen-core attestation the native load seal redeems instead of re-reading the
+    /// freshly written file (sc-26691).
+    pub fn ensure_resolved_attested_with_check(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+        produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
+    ) -> Result<(CheckpointDerivativeOutcomeV1, ProducedAttestations), CheckpointDerivativeError>
+    {
+        let attested = ProducedAttestations::default();
+        let outcome =
+            self.ensure_resolved_into_with_check(resolved, request, check, produce, &attested)?;
+        Ok((outcome, attested))
+    }
+
+    fn ensure_resolved_into_with_check(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+        produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
+        attested: &ProducedAttestations,
+    ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
         check().map_err(ResolvedCacheError::from)?;
         let checkpoint_id = &resolved.checkpoint_id;
         let plan = self.plan_for(resolved, request)?;
@@ -573,7 +603,7 @@ impl CheckpointDerivativeStore {
                 .iter()
                 .map(|output| validate_output_path(output))
                 .collect::<Result<BTreeSet<_>, _>>()?,
-            attested: ProducedAttestations::default(),
+            attested: attested.clone(),
         };
         let produced = check()
             .map_err(|error| error.to_string())
@@ -589,9 +619,8 @@ impl CheckpointDerivativeStore {
                 message,
             });
         }
-        let attested = outputs.attested.clone();
         drop(outputs);
-        match reservation.publish_produced_attested_with_check(&plan, &attested, check) {
+        match reservation.publish_produced_attested_with_check(&plan, attested, check) {
             Ok(metadata) => Ok(CheckpointDerivativeOutcomeV1::Produced(Box::new(metadata))),
             Err(error) => Err(CheckpointDerivativeError::Cache(error)),
         }

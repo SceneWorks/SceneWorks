@@ -46,6 +46,10 @@ pub struct ProducedFileAttestation {
     size_bytes: u64,
     sha256: String,
     stamp: SourceStampV1,
+    /// The same digest bound to gen-core's own target fingerprint, so the native load seal can
+    /// redeem it instead of re-reading the file (`ArtifactSeal::pin_attested`). `None` when the
+    /// fingerprint could not be captured; the seal then reads the file as before.
+    seal: Option<gen_core::ArtifactDigestAttestation>,
 }
 
 impl ProducedFileAttestation {
@@ -67,6 +71,11 @@ impl ProducedFileAttestation {
 
     pub(crate) fn size_bytes(&self) -> u64 {
         self.size_bytes
+    }
+
+    /// The gen-core attestation for the native load seal, if one was captured.
+    pub fn seal_attestation(&self) -> Option<&gen_core::ArtifactDigestAttestation> {
+        self.seal.as_ref()
     }
 }
 
@@ -105,7 +114,7 @@ impl ProducedAttestations {
         })
     }
 
-    pub(crate) fn get(&self, relative: &Path) -> Option<ProducedFileAttestation> {
+    pub fn get(&self, relative: &Path) -> Option<ProducedFileAttestation> {
         self.0.lock().get(relative).cloned()
     }
 
@@ -189,14 +198,23 @@ impl ProducedFile {
                 "produced file's closing stamp does not describe the hashed stream",
             ));
         }
+        let digest: [u8; 32] = hasher.finalize().into();
+        let seal = gen_core::ArtifactDigestAttestation::capture(&self.path, digest).ok();
         #[cfg(test)]
         count_stream_hash();
         self.sink.0.lock().insert(
             self.relative.clone(),
             ProducedFileAttestation {
                 size_bytes: self.written,
-                sha256: format!("sha256:{:x}", hasher.finalize()),
+                sha256: format!(
+                    "sha256:{}",
+                    digest
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                ),
                 stamp,
+                seal,
             },
         );
         Ok(())
