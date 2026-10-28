@@ -206,8 +206,8 @@ test('workflow is reusable only, read-only, guarded uploads, exclusive dispatche
  const workflow=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
  assert.match(workflow,/workflow_call:/);assert.doesNotMatch(workflow,/^  (push|pull_request|schedule):/m);assert.doesNotMatch(workflow,/contents: write|pull-requests: write/);assert.match(workflow,/real-weights/);assert.match(workflow,/always\(\)/);
  const dispatcher=readFileSync(path.join(root,'.github/workflows/memory-catalog-campaign.yml'),'utf8');
- for(const job of ['qwen-app-lifecycle','iris-mlx-real-weights','mlx','candle'])assert.match(dispatcher,new RegExp(`  ${job}:\\n    if: \\$\\{\\{ !inputs.run_moss_training_acceptance`));
- assert.match(dispatcher,/default: unspecified/);assert.match(dispatcher,/needs: moss-selector-preflight/);
+ for(const job of ['flux3-app-lifecycle','flux3-terminal-host','flux3-terminal-queue','qwen-app-lifecycle','iris-mlx-real-weights','supra2-mlx-real-weights','mlx','candle'])assert.ok(dispatcher.includes(`  ${job}:\n    if: \${{ needs.moss-selector-preflight.outputs.enabled != 'true'`));
+ assert.match(dispatcher,/moss_options_json:/);assert.match(dispatcher,/needs: moss-selector-preflight/);
 });
 
 // Generated mock PNGs only: no SDK, native command, model or GPU is used.
@@ -609,10 +609,10 @@ test('cache inventory refuses missing selected files before compilation and reta
 test('MOSS dispatcher deliberately accepts cached primary real-weights and preserves unspecified refusal',t=>{
  const workflow=readFileSync(path.join(root,'.github/workflows/memory-catalog-campaign.yml'),'utf8');
  const guard=workflow.split('      - name: Reject conflicting selectors before compiler or device jobs')[1].split("node --input-type=module <<'JS'\n")[1].split('          JS')[0].replace(/^          /gm,'');
- assert.match(workflow,/options: \[unspecified, real-weights, rw-llm, rw-mage, rw-krea\]/);
- assert.match(workflow,/moss_runner_label:[\s\S]*?default: unspecified/);
+ assert.ok(guard.includes("['real-weights','rw-llm','rw-mage','rw-krea']"));
+ assert.match(workflow,/moss_options_json:[\s\S]*?default: "\{\}"/);
  for(const label of ['real-weights','rw-llm','rw-mage','rw-krea','unspecified','','nax']) {
-  const result=spawnSync(process.execPath,['--input-type=module','-e',guard],{encoding:'utf8',env:{...process.env,GITHUB_OUTPUT:path.join(fixture(t),'output'),SELECTORS:JSON.stringify({moss_runner_label:label,moss_phase:'capture'}),DISPATCH_SHA:source.workflowSource,DISPATCH_EVENT:'workflow_dispatch',DISPATCH_REPOSITORY:'SceneWorks/SceneWorks'}});
+  const result=spawnSync(process.execPath,['--input-type=module','-e',guard],{encoding:'utf8',env:{...process.env,GITHUB_OUTPUT:path.join(fixture(t),'output'),SELECTORS:JSON.stringify({moss_options_json:JSON.stringify({enabled:true,runner_label:label,phase:'capture'})}),DISPATCH_SHA:source.workflowSource,DISPATCH_EVENT:'workflow_dispatch',DISPATCH_REPOSITORY:'SceneWorks/SceneWorks'}});
   assert.equal(result.status,['real-weights','rw-llm','rw-mage','rw-krea'].includes(label)?0:1,result.stderr);
  }
  const reusable=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
@@ -693,32 +693,38 @@ test('every supervised native entry uses the production 8 MiB stack despite ambi
 test('current dispatcher fits 25 inputs and derives exact source and finalize run without retired selectors',t=>{
  const workflow=readFileSync(path.join(root,'.github/workflows/memory-catalog-campaign.yml'),'utf8');
  const inputs=workflow.split('    inputs:\n')[1].split('\n# `gh pr create`')[0];
- const names=[...inputs.matchAll(/^      ([A-Za-z_]+):$/gm)].map(match=>match[1]);
- assert.equal(names.length,23);assert.equal(new Set(names).size,23);assert.ok(names.length<=25);
- assert.equal(names.includes('moss_reference'),false);assert.equal(names.includes('moss_terminal'),false);
- assert.equal(names.includes('workflowSource'),false);assert.equal(names.includes('moss_evidence_run_id'),false);
+ const names=[...inputs.matchAll(/^      ([A-Za-z_][A-Za-z0-9_]*):$/gm)].map(match=>match[1]);
+ assert.equal(names.length,25);assert.equal(new Set(names).size,25);assert.ok(names.length<=25);
+ for(const removed of ['moss_reference','moss_terminal','workflowSource','moss_evidence_run_id','run_moss_training_acceptance','moss_runner_label','moss_phase','moss_inspection_json'])assert.equal(names.includes(removed),false);
+ assert.ok(names.includes('flux3_terminal_control_sha256'),'digits in delivered FLUX3 inputs must count');
  assert.match(workflow,/workflowSource: \$\{\{ github\.sha \}\}/);
  assert.match(workflow,/moss_evidence_run_id: \$\{\{ needs\.moss-selector-preflight\.outputs\.capture_run_id \}\}/);
  const guard=workflow.split('      - name: Reject conflicting selectors before compiler or device jobs')[1].split("node --input-type=module <<'JS'\n")[1].split('          JS')[0].replace(/^          /gm,'');
- const base={moss_runner_label:'real-weights',moss_phase:'capture'};
- const invoke=(changes={},environment={})=>{
+ const base={enabled:true,runner_label:'real-weights',phase:'capture'};
+ const invoke=(options=base,changes={},environment={})=>{
   const output=path.join(fixture(t),'output');
-  const result=spawnSync(process.execPath,['--input-type=module','-e',guard],{encoding:'utf8',env:{...process.env,GITHUB_OUTPUT:output,SELECTORS:JSON.stringify({...base,...changes}),DISPATCH_SHA:source.workflowSource,DISPATCH_EVENT:'workflow_dispatch',DISPATCH_REPOSITORY:'SceneWorks/SceneWorks',...environment}});
-  return {...result,output:result.status===0?readFileSync(output,'utf8'):''};
+  const result=spawnSync(process.execPath,['--input-type=module','-e',guard],{encoding:'utf8',env:{...process.env,GITHUB_OUTPUT:output,SELECTORS:JSON.stringify({moss_options_json:JSON.stringify(options),...changes}),DISPATCH_SHA:source.workflowSource,DISPATCH_EVENT:'workflow_dispatch',DISPATCH_REPOSITORY:'SceneWorks/SceneWorks',...environment}});
+  return {...result,output:result.status===0?Object.fromEntries(readFileSync(output,'utf8').trim().split('\n').map(line=>{const i=line.indexOf('=');return [line.slice(0,i),line.slice(i+1)];})):null};
  };
- assert.equal(invoke().output,'capture_run_id=\n');
- const inspection=JSON.stringify({captureRunId:'123',manifestSha256:source.manifestSha256,cases:[]});
- assert.equal(invoke({moss_phase:'finalize',moss_inspection_json:inspection}).output,'capture_run_id=123\n');
- for(const captureRunId of [undefined,null,123,'0','01','-1','1\nother=2','1e3']) {
-  assert.equal(invoke({moss_phase:'finalize',moss_inspection_json:JSON.stringify({captureRunId})}).status,1);
- }
- for(const moss_inspection_json of ['', '{}', '[]', 'null', '{malformed'])assert.equal(invoke({moss_phase:'finalize',moss_inspection_json}).status,1);
- assert.equal(invoke({moss_inspection_json:inspection}).status,1);
- for(const key of ['anchors','models'])assert.equal(invoke({[key]:'conflicting'}).status,1);
- for(const DISPATCH_SHA of ['', 'main', 'A'.repeat(40)])assert.equal(invoke({}, {DISPATCH_SHA}).status,1);
- assert.equal(invoke({ref:'b'.repeat(40)}).status,1);
- assert.equal(invoke({}, {DISPATCH_EVENT:'push'}).status,1);
- assert.equal(invoke({}, {DISPATCH_REPOSITORY:'another/repository'}).status,1);
+ assert.deepEqual(invoke({}).output,{enabled:'false'});
+ assert.deepEqual(invoke({enabled:false}).output,{enabled:'false'});
+ assert.equal(invoke(base,{moss_options_json:'{broken'}).status,1);
+ for(const options of [null,[],true,'text',{enabled:'true'},{enabled:false,runner_label:'real-weights'},{...base,unknown:true},{...base,runner_label:'unspecified'},{...base,inspection:[]},{...base,inspection:null}])assert.equal(invoke(options).status,1);
+ assert.deepEqual(invoke().output,{enabled:'true',runner_label:'real-weights',phase:'capture',inspection_json:'',capture_run_id:''});
+ assert.equal(invoke({...base,inspection:{}}).status,0);
+ const inspection={captureRunId:'123',manifestSha256:source.manifestSha256,cases:[]};
+ const finalized=invoke({...base,phase:'finalize',inspection});
+ assert.equal(finalized.output.capture_run_id,'123');assert.deepEqual(JSON.parse(finalized.output.inspection_json),inspection);
+ for(const captureRunId of [undefined,null,123,'0','01','-1','1\nother=2','1e3'])assert.equal(invoke({...base,phase:'finalize',inspection:{captureRunId}}).status,1);
+ for(const inspection of [undefined,{},[],null,'{malformed'])assert.equal(invoke({...base,phase:'finalize',inspection}).status,1);
+ assert.equal(invoke({...base,inspection}).status,1);
+ for(const key of ['anchors','models'])assert.equal(invoke(base,{[key]:'conflicting'}).status,1);
+ for(const profile of ['flux3-image-klein-app-lifecycle','flux3-image-klein-terminal-host','flux3-image-klein-terminal-queue'])assert.equal(invoke(base,{profile}).status,1);
+ for(const [key,value] of Object.entries({flux3_app_runner_target:'primary',flux3_terminal_host:'nax-macos',flux3_terminal_step:'run',flux3_terminal_control_sha256:'a'.repeat(64),flux3_queue_control_sha256:'b'.repeat(64)}))assert.equal(invoke(base,{[key]:value}).status,1);
+ for(const DISPATCH_SHA of ['', 'main', 'A'.repeat(40)])assert.equal(invoke(base,{}, {DISPATCH_SHA}).status,1);
+ assert.equal(invoke(base,{ref:'b'.repeat(40)}).status,1);
+ assert.equal(invoke(base,{}, {DISPATCH_EVENT:'push'}).status,1);
+ assert.equal(invoke(base,{}, {DISPATCH_REPOSITORY:'another/repository'}).status,1);
  const reusable=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
  assert.match(reusable,/MOSS_CAPTURE_RUN_ID: \$\{\{ inputs\.moss_evidence_run_id \}\}/);
  assert.match(reusable,/run-id: \$\{\{ inputs\.moss_evidence_run_id \}\}/);

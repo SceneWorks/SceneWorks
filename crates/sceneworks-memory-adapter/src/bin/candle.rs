@@ -28,6 +28,13 @@ use std::time::{Duration, Instant};
 #[path = "candle_wan_scail2.rs"]
 mod candle_wan_scail2;
 
+#[path = "candle_flux3.rs"]
+mod candle_flux3;
+#[path = "flux3_common.rs"]
+mod flux3_common;
+const FLUX3_ID: &str = "flux3_klein";
+const FLUX3_BASE_ID: &str = "flux3_klein_base";
+
 #[path = "candle_iris.rs"]
 mod candle_iris;
 
@@ -1175,6 +1182,7 @@ fn sdxl_candle_arm(request: &Value) -> Result<SdxlCandleArm, String> {
 /// This is derived rather than transcribed so a plan row can be checked against it without a
 /// weights root, and `run_five_rung_reference_loaded` still compares the LOADED contract's own
 /// string — this function is never the authority, only the plan-time expectation.
+#[cfg(test)]
 fn sdxl_candle_route_fingerprint(model_id: &str) -> String {
     let tokens = model_id
         .replace('_', "-")
@@ -5786,6 +5794,7 @@ struct Sc22737VideoArm {
     /// eager whatever the spec asks. The plan rows this arm serves must declare the same shape —
     /// `sc22737_plan_rows_declare_the_load_shape_their_arm_stages` holds them to it weights-free,
     /// because `run_sc22737_video_capture`'s plan/provider re-assert only fires on a CUDA host.
+    #[cfg(test)]
     load_shape: LoadShape,
 }
 
@@ -5823,6 +5832,7 @@ const BERNINI_CANDLE_VIDEO_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:bernini-dual-expert",
     validate_geometry: validate_bernini_candle_geometry,
     load_plan: bernini_candle_load_plan,
+    #[cfg(test)]
     load_shape: BERNINI_CANDLE_LOAD_SHAPE,
 };
 
@@ -5840,6 +5850,7 @@ const LTX23_CANDLE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:ltx-2.3",
     validate_geometry: validate_ltx23_candle_geometry,
     load_plan: ltx23_candle_load_plan,
+    #[cfg(test)]
     load_shape: LTX23_CANDLE_LOAD_SHAPE,
 };
 
@@ -5857,6 +5868,7 @@ const MINIMAX_CANDLE_BASE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:minimax-h3-joint-av",
     validate_geometry: validate_minimax_candle_geometry,
     load_plan: minimax_candle_load_plan,
+    #[cfg(test)]
     load_shape: MINIMAX_CANDLE_LOAD_SHAPE,
 };
 
@@ -5879,6 +5891,7 @@ const MINIMAX_CANDLE_REFERENCE_ARM: Sc22737VideoArm = Sc22737VideoArm {
     diagnostics_lane: "memory-candle-adapter:minimax-h3-joint-av",
     validate_geometry: validate_minimax_candle_geometry,
     load_plan: minimax_candle_load_plan,
+    #[cfg(test)]
     load_shape: MINIMAX_CANDLE_LOAD_SHAPE,
 };
 
@@ -7841,6 +7854,9 @@ fn run(request: &Value) -> Result<Value, String> {
         );
     }
     let provider = planned_provider(request)?;
+    if matches!(provider, FLUX3_ID | FLUX3_BASE_ID) {
+        return candle_flux3::run(request);
+    }
     if provider == LTX25_ID {
         return run_ltx25_capture(request);
     }
@@ -8786,6 +8802,11 @@ fn main() {
         "sdxl_inspect_output" => inspect_sdxl_output(&request),
         "run" => run(&request),
         "run_batch" => run_five_rung_batch(&request),
+        // Hidden zero-budget CPU self-test of THIS sealed binary's FLUX3 permit boundary; refused
+        // unless its own environment guard is set and no production invocation exists.
+        flux3_common::boundary_self_test::SELF_TEST_ACTION => {
+            flux3_common::boundary_self_test::native_boundary_self_test(&request, "candle")
+        }
         // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
         protocol::SUPRA2_IMG_CONVERT_ACTION => protocol::supra2_convert(&request),
         other => Err(format!("unsupported action {other:?}")),

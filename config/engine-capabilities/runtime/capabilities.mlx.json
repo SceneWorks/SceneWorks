@@ -19,6 +19,8 @@
     "flux2_klein_9b": "flux2_klein_9b",
     "flux2_klein_9b_kv": "flux2_klein_9b",
     "flux2_klein_9b_true_v2": "flux2_klein_9b",
+    "flux3_klein": "flux3_klein",
+    "flux3_klein_base": "flux3_klein_base",
     "flux_dev": "flux1_dev",
     "flux_schnell": "flux1_schnell",
     "ideogram_4": "ideogram_4",
@@ -372,6 +374,8 @@
   ],
   "trainerMappings": {
     "anima_base_lora": "anima_base",
+    "flux3_klein_edit_lora": "flux3_klein_base",
+    "flux3_klein_lora": "flux3_klein_base",
     "illustrious_xl_v1_lora": "sdxl",
     "illustrious_xl_v2_lora": "sdxl",
     "iris_3b_depth": "iris_3b_depth",

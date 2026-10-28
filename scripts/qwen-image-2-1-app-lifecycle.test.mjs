@@ -147,14 +147,15 @@ function assertDispatcherIsolation(workflow) {
   assert.match(workflow, /profile:[\s\S]*?default: catalog/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/qwen-image-2-1-app-lifecycle.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/iris-mlx-real-weights.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
-  assert.match(workflow, /uses: \.\/\.github\/workflows\/supra2-mlx-real-weights.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
-  assert.match(workflow, /inference_sha: \$\{\{ inputs.inference_sha \}\}/);
+  assert.match(workflow, /uses: \.\/\.github\/workflows\/flux3-image-klein-app-lifecycle\.yml\n    with:\n      source_sha: \$\{\{ inputs\.ref \}\}/);
+  assert.match(workflow, /uses: \.\/\.github\/workflows\/supra2-mlx-real-weights\.yml\n    with:\n      source_sha: \$\{\{ inputs\.ref \}\}/);
+  assert.match(workflow, /inference_sha: \$\{\{ inputs\.inference_sha \}\}/);
   assert.match(workflow, /qwen_app_runner_target:[\s\S]*?options:\s*\n\s*- primary\s*\n\s*- secondary[\s\S]*?default: primary/);
-  assert.match(workflow, /runner_target: \$\{\{ inputs.qwen_app_runner_target \}\}/);
+  assert.match(workflow, /runner_target: \$\{\{ inputs\.qwen_app_runner_target \}\}/);
   const jobsText = workflow.slice(workflow.indexOf("\njobs:\n"));
   const headers = [...jobsText.matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)];
   const jobs = headers.map((match) => match[1]);
-  assert.deepEqual(jobs, ["moss-selector-preflight", "moss-training-acceptance", "qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  assert.deepEqual(jobs, ["moss-selector-preflight", "moss-training-acceptance", "flux3-app-lifecycle", "flux3-terminal-host", "flux3-terminal-queue", "qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
   const jobBlock = (name) => {
     const index = jobs.indexOf(name), header = headers[index];
     return header && jobsText.slice(header.index + header[0].length, headers[index + 1]?.index);
@@ -165,32 +166,35 @@ function assertDispatcherIsolation(workflow) {
     // GitHub permits both a bare job expression and its explicit ${{ ... }} form.
     const predicate = expression.match(/^\$\{\{ (.+) \}\}$/)?.[1] ?? expression;
     const inputs = { profile, backend, run_moss_training_acceptance: runMoss };
-    const condition = predicate;
+    const condition = predicate.replaceAll("needs.moss-selector-preflight.outputs.enabled", "moss_enabled");
     // Evaluate only the tiny predicate grammar, never a workflow step or command.
     assert.match(condition, /^[a-z0-9_. '=()&|!-]+$/);
-    return Function("inputs", `return (${condition})`)(inputs);
+    return Function("inputs", "moss_enabled", "github", `return (${condition})`)(inputs, String(runMoss), {event_name:"workflow_dispatch"});
   });
   assert.doesNotMatch(workflow, /moss-reference-maintenance:|moss-upstream-reference:|moss-dispatch:|moss-edit-terminal:/);
   for (const backend of ["mlx", "candle"]) {
       assert.deepEqual(runs("catalog", backend, true), ["moss-selector-preflight", "moss-training-acceptance"], "training must skip all other device and publication jobs");
-      assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
-      assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
-      assert.deepEqual(runs("supra2-mlx-real-weights", backend), ["supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
-      assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
-      assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
+      assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["moss-selector-preflight", "qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
+      assert.deepEqual(runs("flux3-image-klein-app-lifecycle", backend), ["moss-selector-preflight", "flux3-app-lifecycle"], "FLUX3 proof must skip all catalog mutation steps");
+      assert.deepEqual(runs("iris-mlx-real-weights", backend), ["moss-selector-preflight", "iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
+      assert.deepEqual(runs("supra2-mlx-real-weights", backend), ["moss-selector-preflight", "supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
+      assert.deepEqual(runs("flux3-image-klein-terminal-host", backend), ["moss-selector-preflight", "flux3-terminal-host"], "FLUX3 terminal host step must skip all catalog mutation steps");
+      assert.deepEqual(runs("flux3-image-klein-terminal-queue", backend), ["moss-selector-preflight", "flux3-terminal-queue"], "FLUX3 queue must skip all catalog mutation steps");
+      assert.deepEqual(runs("catalog", backend), ["moss-selector-preflight", backend], "default catalog contract must remain unchanged");
+      assert.deepEqual(runs("", backend), ["moss-selector-preflight", backend], "omitted profile preserves catalog behavior");
       // Preserve bounded SDXL profile isolation.
       for (const profile of ["sdxl-cuda-endpoints", "sdxl-cuda-admitted-replay"]) {
-        assert.deepEqual(runs(profile, backend), ["candle"], "bounded SDXL profiles must skip all unrelated jobs");
+        assert.deepEqual(runs(profile, backend), ["moss-selector-preflight", "candle"], "bounded SDXL profiles must skip all unrelated jobs");
       }
-      assert.deepEqual(runs("sdxl-cuda-unknown", backend), [], "the SDXL prefix alone must not dispatch compute");
-      assert.deepEqual(runs("unknown", backend), [], "unknown profiles must fail closed");
+      assert.deepEqual(runs("sdxl-cuda-unknown", backend), ["moss-selector-preflight"], "the SDXL prefix alone must not dispatch compute");
+      assert.deepEqual(runs("unknown", backend), ["moss-selector-preflight"], "unknown profiles must fail closed");
   }
 }
 test("registered dispatcher isolates app proof from both catalog lanes and their publication", () => {
   const workflow = read(".github/workflows/memory-catalog-campaign.yml").replace(/\r\n/g, "\n");
   assertDispatcherIsolation(workflow);
   const guard = "(inputs.profile == '' || inputs.profile == 'catalog') && ";
-  const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replaceAll("!inputs.run_moss_training_acceptance && ", ""), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow.replace("runner_target: ${{ inputs.qwen_app_runner_target }}", "runner_target: primary"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
+  const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replaceAll("needs.moss-selector-preflight.outputs.enabled != 'true' && ", ""), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow.replace("runner_target: ${{ inputs.qwen_app_runner_target }}", "runner_target: primary"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
   for (const [index, mutant] of mutants.entries()) {
     assert.notEqual(mutant, workflow, "each mutation must change the dispatcher");
     assert.throws(() => assertDispatcherIsolation(mutant), `dispatcher mutant ${index} must fail`);

@@ -616,7 +616,12 @@ if (process.argv.includes("--self-test")) {
     process.exit(1);
   }
   const comparativeSummary = structuredClone(sourceAudit);
-  comparativeSummary._comment += " Previous pin 26f172e7 had a smaller scanned population.";
+  // This tests the analyzer, not whether the retained real human narrative was rewritten at a
+  // mechanical pin bump. Build an explicitly current comparison fixture from structured facts.
+  comparativeSummary._comment =
+    `Pin ${currentShortRevision} records ${sourceAudit.provenanceScan.matchedFiles} provenance candidates and ` +
+    `${sourceAudit.crateCoverage.cratePrefixes} production-Rust crate prefixes. ` +
+    "Previous pin 26f172e7 had a smaller scanned population.";
   if (validateAuditSummary(comparativeSummary).length !== 0) {
     console.error("self-test: an accurate current summary was rejected for mentioning a prior pin");
     process.exit(1);

@@ -3297,13 +3297,31 @@ async fn cancellation_while_waiting_for_busy_lease_is_restartable() {
     let id = created["id"].as_str().expect("catalog id").to_owned();
     let registry = CatalogRegistry::new(temporary.path().join("config"));
     let contended = registry.open_attached(&id).expect("catalog opens");
-    let held_lease = CatalogProcessingLease::try_acquire(&contended).expect("test lease");
+    let mut held_lease = Some(CatalogProcessingLease::try_acquire(&contended).expect("test lease"));
+    let cancellation_ack = Arc::new(tokio::sync::Barrier::new(2));
+    *state.catalog_scan_busy_lease_cancel_barrier_once.lock() = Some(cancellation_ack.clone());
     before_start.wait().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        tokio::time::timeout(
+            Duration::from_secs(30),
+            state.catalog_scan_contention_backoff_started.notified(),
+        )
+        .await
+        .is_ok(),
+        "intent guard: scanner must reach the held-lease wait before cancellation"
+    );
 
     let (shutdown, ()) = tokio::join!(state.catalog_scan_supervisor.shutdown(), async move {
-        drop(held_lease);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), cancellation_ack.wait())
+                .await
+                .is_ok(),
+            "intent guard: busy-lease waiter must acknowledge cancellation before lease release"
+        );
+        drop(held_lease.take());
         contended.close();
+        // Reconciliation may acquire the lease only after cancellation has won at the wait.
+        cancellation_ack.wait().await;
     });
     assert_eq!(shutdown.requested, 1);
     assert_eq!(shutdown.joined, 1);

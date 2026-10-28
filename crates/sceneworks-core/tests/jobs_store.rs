@@ -3675,6 +3675,49 @@ fn cancel_retry_and_duplicate_preserve_python_metadata_shapes() {
 }
 
 #[test]
+fn preallocated_duplicate_id_is_atomic_unique_and_preserves_the_source() {
+    let store = store("preallocated-training-duplicate");
+    let original = store
+        .create_job(image_job(object(json!({"prompt":"original"}))))
+        .unwrap();
+    let id = "job_preallocated_training_duplicate";
+    let duplicate = store
+        .duplicate_job_with_id(
+            id.to_owned(),
+            &original.id,
+            DuplicateJob {
+                payload_changes: object(json!({"plan":{"jobId":id}})),
+                requested_gpu: Some("gpu-1".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(duplicate.id, id);
+    assert_eq!(duplicate.payload["plan"]["jobId"], id);
+    assert_eq!(
+        duplicate.duplicate_of_job_id.as_deref(),
+        Some(original.id.as_str())
+    );
+    assert_eq!(duplicate.requested_gpu, "gpu-1");
+    let count = store.list_jobs(None, None, 100).unwrap().len();
+    assert!(store
+        .duplicate_job_with_id(
+            id.to_owned(),
+            &original.id,
+            DuplicateJob {
+                payload_changes: object(json!({"prompt":"must not replace"})),
+                requested_gpu: None,
+            }
+        )
+        .is_err());
+    assert_eq!(store.list_jobs(None, None, 100).unwrap().len(), count);
+    assert_eq!(store.get_job(id).unwrap().payload, duplicate.payload);
+    assert_eq!(
+        store.get_job(&original.id).unwrap().payload,
+        original.payload
+    );
+}
+
+#[test]
 fn stale_sweep_marks_worker_offline_and_job_interrupted() {
     let store = store("stale-sweep");
     register_image_worker(&store);

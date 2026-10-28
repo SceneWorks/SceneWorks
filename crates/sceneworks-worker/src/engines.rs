@@ -242,6 +242,27 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
         default_guidance: 3.0,
         adapter_label: "mlx_iris",
     },
+    // FLUX 3 Image Klein, distilled (sc-26234, epic sc-26233) — `mlx-gen-flux3` registers
+    // `flux3_klein`. The whole package (DiT + autoencoder + the bundled Qwen3-VL text encoder) is
+    // the one pinned upstream repository root, read by `gen_core::flux3::GenerationResources`; no
+    // co-requisite component. A flow map: 16 steps, no guidance (`gen_core::flux3::DEFAULT_STEPS`).
+    ModelRow {
+        sceneworks_id: "flux3_klein",
+        engine_id: "flux3_klein",
+        default_repo: "black-forest-labs/flux-3-image-klein",
+        default_steps: 16,
+        default_guidance: 0.0,
+        adapter_label: "mlx_flux3",
+    },
+    // S6: separate native CFG checkpoint, default50steps/3.5; never a distilled cache alias.
+    ModelRow {
+        sceneworks_id: "flux3_klein_base",
+        engine_id: "flux3_klein_base",
+        default_repo: "black-forest-labs/flux-3-image-klein-base",
+        default_steps: 50,
+        default_guidance: 3.5,
+        adapter_label: "mlx_flux3",
+    },
     // Supra2-IMG (sc-24213, epic 24212) — `mlx-gen-supra2` registers `supra2_img`. The weights dir
     // is the locally converted bundle (convert-at-install, injected `modelPath`); Flan-T5-Base and
     // SD VAE ft-MSE are catalog co-requisites the descriptor declares (`text_encoder`, `vae`), staged
@@ -1171,6 +1192,31 @@ mod tests {
     use sceneworks_core::contracts::WorkerCapability as Cap;
 
     #[test]
+    fn flux3_base_defaults_and_engine_identity_are_not_distilled_aliases() {
+        let base = MODEL_TABLE
+            .iter()
+            .find(|row| row.sceneworks_id == "flux3_klein_base")
+            .unwrap();
+        let distilled = MODEL_TABLE
+            .iter()
+            .find(|row| row.sceneworks_id == "flux3_klein")
+            .unwrap();
+        assert_eq!(base.engine_id, "flux3_klein_base");
+        assert_ne!(base.engine_id, distilled.engine_id);
+        assert_eq!(
+            base.default_repo,
+            "black-forest-labs/flux-3-image-klein-base"
+        );
+        assert_ne!(base.default_repo, distilled.default_repo);
+        assert_eq!((base.default_steps, base.default_guidance), (50, 3.5));
+        assert_eq!(
+            (distilled.default_steps, distilled.default_guidance),
+            (16, 0.0)
+        );
+        assert_eq!(base.adapter_label, "mlx_flux3");
+    }
+
+    #[test]
     fn training_inventory_names_every_sc18479_provider_id() {
         for id in [
             "anima_base",
@@ -1316,8 +1362,8 @@ mod tests {
     }
 
     // Guard 1 (was `test_character_image_capability_implies_engine_or_tuning_declaration`, sc-2018): every
-    // builtin that advertises `character_image` must have EITHER a worker identity engine (IP-Adapter /
-    // InstantID / PuLID-FLUX) OR a `ui.variationStrength` declaration. Otherwise the capability flag is
+    // builtin that advertises `character_image` must have a worker identity engine (IP-Adapter /
+    // InstantID / PuLID-FLUX), a native reference-edit route, or a `ui.variationStrength` declaration. Otherwise the capability flag is
     // dishonest — the picker shows the model in "With character" mode but the worker silently ignores the
     // reference (the shape of z_image_turbo's pre-sc-2005 bug). The cross-backbone guard: a future
     // character_image backbone added without engine wiring fails here before it ever reaches a user.
@@ -1338,15 +1384,22 @@ mod tests {
                 .get("ui")
                 .and_then(|ui| ui.get("variationStrength"))
                 .is_some_and(|v| !v.is_null());
-            if !(has_engine || has_variation_ui) {
+            // FLUX.3's native AE-only reference route needs neither an identity overlay nor
+            // an img2img strength control. Bind this category to the live route, not a UI flag.
+            let has_native_reference = sceneworks_core::image_request::flux3::is_model(id) && {
+                let support =
+                    sceneworks_core::jobs_store::model_mac_support(id, "image", Some("flux3"));
+                support.features.reference && support.features.edit
+            };
+            if !(has_engine || has_variation_ui || has_native_reference) {
                 misleading.push(id.to_owned());
             }
         }
         assert!(
             misleading.is_empty(),
             "Models advertise `character_image` without an identity engine (IP-Adapter / InstantID / \
-             PuLID-FLUX in CHARACTER_IMAGE_ENGINE_WIRING) or a `ui.variationStrength` declaration: {misleading:?}. \
-             Wire an identity engine for a reference/face-ID backbone, or declare `ui.variationStrength` \
+             PuLID-FLUX in CHARACTER_IMAGE_ENGINE_WIRING), a native reference-edit route, or a `ui.variationStrength` declaration: {misleading:?}. \
+             Wire a native reference/identity engine, or declare `ui.variationStrength` \
              for an edit-style backbone (sc-2017), or drop the capability flag (the z_image_turbo bug, sc-2005)."
         );
     }
@@ -1806,6 +1859,8 @@ mod tests {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     const EXPECTED_IMAGE_IDS: &[&str] = &[
+        "flux3_klein",
+        "flux3_klein_base",
         "iris_3b",
         "supra2_img",
         "moss_image_base",
@@ -1945,6 +2000,8 @@ mod tests {
             "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            // Both frozen FLUX3 checkpoints share the pinned packed-token grid, not weights.
+            "flux3_klein" | "flux3_klein_base" => gen_core::flux3::DOWNSAMPLING_RATIO,
             // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
             // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
             "supra2_img" => 256,
@@ -1997,6 +2054,10 @@ mod tests {
             "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
             "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            // FLUX 3 Image Klein (sc-26234): 16 pixels per packed token (8× VAE × 2×2 patchify).
+            // An ASSERTION-only literal on this lane: no Candle provider exists until sc-26235,
+            // which replaces it with that provider's constant.
+            "flux3_klein" | "flux3_klein_base" => 16,
             // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
             // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
             "supra2_img" => 256,
@@ -2264,6 +2325,8 @@ mod tests {
             ("qwen_image_2_1", 32),
             ("qwen_image_2_1_turbo", 32),
             ("iris_3b", 16),
+            ("flux3_klein", 16),
+            ("flux3_klein_base", 16),
             ("supra2_img", 256),
             ("z_image_turbo", 16),
             ("bernini", 16),

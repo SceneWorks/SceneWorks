@@ -7,6 +7,8 @@
 // `advanced` block the client sent verbatim. That split is why the two resolution readers below
 // disagree on purpose — see `recipeRequestedResolution`.
 
+import { isFlux3Model } from "./resolutionOverride.js";
+
 export function finiteRecipeNumber(value) {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
@@ -44,6 +46,21 @@ export function recipeRequestedResolution(recipe) {
 function rawResolutionString(recipe) {
   const raw = recipe?.rawAdapterSettings?.resolution;
   return typeof raw === "string" && raw.includes("x") ? raw : null;
+}
+
+// Authored FLUX3 reference geometry is not the rendered/cropped image geometry. A null side
+// deliberately delegates that axis to the reference canvas. Workflow imports carry UI intent,
+// not fabricated worker-owned reference provenance.
+export function recipeImageDimensionIntent(recipe) {
+  if (!isFlux3Model(recipe?.model)) return null;
+  const output = recipe?.rawAdapterSettings?.flux3ReferenceEditing?.output;
+  const requested = output && Object.hasOwn(output, "requestedWidth") && Object.hasOwn(output, "requestedHeight")
+    ? { width: output.requestedWidth, height: output.requestedHeight }
+    : recipe?.uiDimensionIntent;
+  if (!requested || !["width", "height"].every((axis) =>
+    Object.hasOwn(requested, axis) &&
+    (requested[axis] === null || (Number.isInteger(requested[axis]) && requested[axis] > 0)))) return null;
+  return { width: requested.width, height: requested.height };
 }
 
 // A recipe's LoRAs are either bare id strings or `{id, weight}` objects, depending on how the

@@ -6987,6 +6987,7 @@ name = "sceneworks-core"
 version = "0.10.3"
 dependencies = [
  "directories",
+ "flate2",
  "fs2",
  "fs_at",
  "getrandom 0.3.4",

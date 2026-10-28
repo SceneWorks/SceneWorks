@@ -104,11 +104,16 @@ The final reviewed web profile totals 2,897,898 / 862,405 / 736,096 bytes (raw/g
 
 The existing `memory-catalog-campaign.yml` dispatcher keeps training acceptance isolated from
 catalog and the other model profiles. Dispatch the exact reviewed source with `--ref`,
-`run_moss_training_acceptance=true`, an explicitly eligible `moss_runner_label`, and
-`moss_phase=capture`.
+`moss_options_json={"enabled":true,"runner_label":"real-weights","phase":"capture"}`.
+The other eligible runner labels are `rw-llm`, `rw-mage`, and `rw-krea`; choose one
+with all required cached snapshots. The default `{}` disables MOSS. The four MOSS
+options share this one strict object so the dispatcher preserves all delivered FLUX3
+inputs within GitHub's 25-input limit; unknown keys, malformed JSON and mixed profiles
+refuse before compiler or device setup.
 The source is the actual dispatched GitHub SHA. There is no separate `workflowSource` input.
 
-For `moss_phase=finalize`, supply the existing `moss_inspection_json` document. Its positive
+For finalization, use the same `moss_options_json` with `"phase":"finalize"` and put the
+existing inspection document in its `inspection` object. Its positive
 string `captureRunId` selects the original capture artifacts and is checked again by the
 unchanged evidence verifier against the inspection and artifact provenance. There is no
 separate `moss_evidence_run_id` input. These two derived values keep the combined dispatcher

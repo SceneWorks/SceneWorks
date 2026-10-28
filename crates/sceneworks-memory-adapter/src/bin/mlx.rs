@@ -40,6 +40,13 @@ mod mlx_ltx25;
 #[path = "mlx_wan_scail2.rs"]
 mod mlx_wan_scail2;
 
+#[path = "flux3_common.rs"]
+mod flux3_common;
+#[path = "mlx_flux3.rs"]
+mod mlx_flux3;
+const FLUX3_PROVIDER: &str = "flux3_klein";
+const FLUX3_BASE_PROVIDER: &str = "flux3_klein_base";
+
 #[path = "mlx_iris.rs"]
 mod mlx_iris;
 
@@ -22476,6 +22483,7 @@ fn exceeded_bound_capture_refusal_in(
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        observed_operating_envelopes: Vec::new(),
         exceeded_bounds: store
             .exceeded_bounds
             .iter()
@@ -22584,6 +22592,7 @@ fn run_with(
     // operator off fixing fixtures or provisioning weights for the wrong model. Refuse by name
     // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
     match provider {
+        FLUX3_PROVIDER | FLUX3_BASE_PROVIDER => mlx_flux3::run(request),
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
         // sc-22724: the undistilled base rides the same arm under its own registry id, artifact
         // family and execution path; the arm resolves which member from `(provider, mode)`.
@@ -22727,6 +22736,11 @@ fn main() {
         LTX_BOUNDED_CARRIER_ACTION => run_ltx_bounded_carrier_proof(&request),
         LTX_BOUNDED_CAMPAIGN_ACTION => run_ltx_bounded_campaign_entry(&request),
         "assess_batch" => assess_z_image_batch(&request),
+        // Hidden zero-budget CPU self-test of THIS sealed binary's FLUX3 permit boundary; refused
+        // unless its own environment guard is set and no production invocation exists.
+        flux3_common::boundary_self_test::SELF_TEST_ACTION => {
+            flux3_common::boundary_self_test::native_boundary_self_test(&request, "mlx")
+        }
         // sc-24217: the child-process half of `protocol::ensure_supra2_bundle` — never a capture.
         protocol::SUPRA2_IMG_CONVERT_ACTION => protocol::supra2_convert(&request),
         other => Err(format!("unsupported action {other:?}")),
@@ -33281,6 +33295,7 @@ mod exceeded_bound_tests {
             anchors: Vec::new(),
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: bounds,
         }
     }
@@ -33294,6 +33309,7 @@ mod exceeded_bound_tests {
             anchors: Vec::new(),
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: vec![anchor::ExceededBound {
                 id: "exceeded:bernini:mlx:bf16:base:base:fp:exc-0".to_owned(),
                 model_id: "bernini".to_owned(),

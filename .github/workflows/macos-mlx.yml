@@ -141,6 +141,11 @@ on:
         type: string
         required: false
         default: main
+      hosted_only:
+        description: "Hosted build/tests/capability artifact only; never self-hosted NAX or model calibration"
+        required: false
+        type: boolean
+        default: false
       run_memory_calibration:
         description: "Build and run the authoritative MLX memory-strategy adapter"
         required: false
@@ -375,6 +380,21 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate hosted-only dispatch intent
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.hosted_only }}
+        env:
+          RUN_MEMORY_CALIBRATION: ${{ inputs.run_memory_calibration }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          PROVISION_QWEN_SNAPSHOT: ${{ inputs.provision_qwen_snapshot }}
+          PROVISION_Z_IMAGE_SNAPSHOT: ${{ inputs.provision_z_image_snapshot }}
+        run: |
+          set -euo pipefail
+          for flag in RUN_MEMORY_CALIBRATION RUN_FIVE_RUNG_REFERENCE PROVISION_QWEN_SNAPSHOT PROVISION_Z_IMAGE_SNAPSHOT; do
+            if [ "${!flag}" != "false" ]; then
+              echo "::error::hosted_only requires $flag=false; calibration and provisioning are forbidden in this hosted artifact profile"
+              exit 1
+            fi
+          done
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.98.0"
@@ -535,9 +555,10 @@ jobs:
           PROVISION_QWEN_SNAPSHOT: ${{ inputs.provision_qwen_snapshot }}
           PROVISION_Z_IMAGE_SNAPSHOT: ${{ inputs.provision_z_image_snapshot }}
           RUN_MOSS_NATIVE_VALIDATION: ${{ inputs.run_moss_native_validation }}
+          HOSTED_ONLY: ${{ inputs.hosted_only }}
         run: |
           set -euo pipefail
-          for selector in RUN_MEMORY_CALIBRATION RUN_FIVE_RUNG_REFERENCE PROVISION_QWEN_SNAPSHOT PROVISION_Z_IMAGE_SNAPSHOT RUN_MOSS_NATIVE_VALIDATION; do
+          for selector in RUN_MEMORY_CALIBRATION RUN_FIVE_RUNG_REFERENCE PROVISION_QWEN_SNAPSHOT PROVISION_Z_IMAGE_SNAPSHOT RUN_MOSS_NATIVE_VALIDATION HOSTED_ONLY; do
             if [ "${!selector}" = "true" ]; then
               echo "::error::browser-fixture-artifact cannot be combined with $selector"
               exit 1
@@ -784,6 +805,7 @@ jobs:
           persist-credentials: false
       - name: Refuse conflicting MOSS validation inputs before compiler setup
         env:
+          HOSTED_ONLY: ${{ inputs.hosted_only }}
           VERIFICATION_PROFILE: ${{ inputs.verification_profile }}
           RUN_MEMORY_CALIBRATION: ${{ inputs.run_memory_calibration }}
           RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
@@ -791,7 +813,7 @@ jobs:
           PROVISION_Z_IMAGE_SNAPSHOT: ${{ inputs.provision_z_image_snapshot }}
         run: |
           set -euo pipefail
-          if [ "$VERIFICATION_PROFILE" != legacy ] || [ "$RUN_MEMORY_CALIBRATION" = true ] || [ "$RUN_FIVE_RUNG_REFERENCE" = true ] || [ "$PROVISION_QWEN_SNAPSHOT" = true ] || [ "$PROVISION_Z_IMAGE_SNAPSHOT" = true ]; then
+          if [ "$HOSTED_ONLY" = true ] || [ "$VERIFICATION_PROFILE" != legacy ] || [ "$RUN_MEMORY_CALIBRATION" = true ] || [ "$RUN_FIVE_RUNG_REFERENCE" = true ] || [ "$PROVISION_QWEN_SNAPSHOT" = true ] || [ "$PROVISION_Z_IMAGE_SNAPSHOT" = true ]; then
             echo '::error::MOSS native validation must be dispatched alone: use run_moss_native_validation=true with verification_profile=legacy and all calibration/provisioning flags false.'
             exit 1
           fi
@@ -878,7 +900,9 @@ jobs:
     # level up. A gate that did not succeed must therefore RUN the lane, matching
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
-    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.verification_profile == 'legacy' && !inputs.run_moss_native_validation)) && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    # An explicitly hosted-only dispatch excludes this ENTIRE job before runner selection.
+    # Its artifact capture is not NAX evidence; default manual and all PR/push routes stay unchanged.
+    if: ${{ !cancelled() && (github.event_name != 'workflow_dispatch' || (inputs.verification_profile == 'legacy' && !inputs.run_moss_native_validation)) && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) && !(github.event_name == 'workflow_dispatch' && inputs.hosted_only) }}
     # The default PR/main path needs only `nax`. A final same-repo PR to `main`
     # whose title starts with `[Mac2]`, and the resulting main push whose merge
     # subject starts with `[Mac2]`, use the `rw-mage` label to select nax-macos-2.
@@ -1357,7 +1381,7 @@ jobs:
       VERIFICATION_INFERENCE_SHA: ${{ inputs.inference_revision }}
       VERIFICATION_WORKFLOW_SHA: ${{ github.workflow_sha }}
       VERIFICATION_WORKFLOW_REF: ${{ github.workflow_ref }}
-      VERIFICATION_LEGACY_INPUTS: ${{ inputs.run_memory_calibration || inputs.run_five_rung_reference || inputs.provision_qwen_snapshot || inputs.provision_z_image_snapshot }}
+      VERIFICATION_LEGACY_INPUTS: ${{ inputs.hosted_only || inputs.run_memory_calibration || inputs.run_five_rung_reference || inputs.provision_qwen_snapshot || inputs.provision_z_image_snapshot }}
     steps:
       - name: Require actual secondary Mac before setup
         run: |

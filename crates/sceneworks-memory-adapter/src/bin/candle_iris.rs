@@ -84,6 +84,7 @@ const RESTORE: protocol::IrisRoute = protocol::IrisRoute {
 
 /// Whether this module serves `provider` — held to the pre-gate in `run` by
 /// `the_iris_pre_gate_names_exactly_the_providers_the_module_implements`.
+#[cfg(test)]
 pub(super) fn implements(provider: &str) -> bool {
     route(provider).is_ok()
 }

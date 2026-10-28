@@ -1666,6 +1666,222 @@
       }
     },
     {
+      "id": "flux3_klein_lora",
+      "name": "FLUX.3 Klein Base LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "flux3",
+      "baseModel": "flux3_klein_base",
+      "baseModelRepo": "black-forest-labs/flux-3-image-klein-base",
+      "kernel": "flux3_klein_lora",
+      "defaults": {
+        "rank": 4,
+        "alpha": 4,
+        "learningRate": 0.0001,
+        "steps": 1000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 100,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "flux3": {
+            "mode": "captioned"
+          },
+          "gradientCheckpointing": false,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "resume": false,
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "uniform",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          16
+        ],
+        "gradientCheckpointing": false,
+        "lossTypes": [
+          "mse"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "optimizers": [
+          "adamw"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          1,
+          128
+        ],
+        "resolutions": [
+          256,
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          1,
+          100000
+        ],
+        "timestepBiases": [
+          "balanced"
+        ],
+        "timestepTypes": [
+          "uniform",
+          "linear",
+          "sigmoid",
+          "logit_normal",
+          "mode",
+          "cosmap",
+          "sigma_sqrt"
+        ]
+      },
+      "ui": {
+        "datasetKind": "captioned",
+        "datasetModality": "image",
+        "description": "Native Candle/MLX additive LoRA on the undistilled dense FLUX.3 Klein base. Edit pairs require exactly one reference per target. No quantized training, activation checkpointing or in-training previews. Resume unchanged runs from the queue; duplicate starts a separate run. Source JSON is forwarded under flux3 only; unknown keys are refused. Source controls include caption_dropout, max_sequence_length, center_crop, random_flip, weighting_scheme, logit_mean, logit_std, mode_scale, max_grad_norm, lr_scheduler, lr_num_cycles and lr_power.",
+        "label": "FLUX.3 Klein Base LoRA",
+        "recommendedFor": [
+          "character",
+          "style"
+        ]
+      }
+    },
+    {
+      "id": "flux3_klein_edit_lora",
+      "name": "FLUX.3 Klein Base Edit LoRA",
+      "modality": "image",
+      "outputKind": "lora",
+      "family": "flux3",
+      "baseModel": "flux3_klein_base",
+      "baseModelRepo": "black-forest-labs/flux-3-image-klein-base",
+      "kernel": "flux3_klein_edit_lora",
+      "defaults": {
+        "rank": 4,
+        "alpha": 4,
+        "learningRate": 0.0001,
+        "steps": 1000,
+        "batchSize": 1,
+        "gradientAccumulation": 1,
+        "resolution": 512,
+        "saveEvery": 100,
+        "seed": 42,
+        "optimizer": "adamw",
+        "advanced": {
+          "flux3": {
+            "mode": "edit"
+          },
+          "gradientCheckpointing": false,
+          "lossType": "mse",
+          "lrScheduler": "constant",
+          "mixedPrecision": "bf16",
+          "networkType": "lora",
+          "outputScope": "project",
+          "requestedGpu": "auto",
+          "resume": false,
+          "sampleEvery": 0,
+          "timestepBias": "balanced",
+          "timestepType": "uniform",
+          "weightDecay": 0.0001
+        }
+      },
+      "limits": {
+        "alpha": [
+          1,
+          128
+        ],
+        "batchSize": [
+          1,
+          16
+        ],
+        "gradientCheckpointing": false,
+        "lossTypes": [
+          "mse"
+        ],
+        "lrSchedulers": [
+          "constant",
+          "linear",
+          "cosine"
+        ],
+        "maxReferenceImages": 1,
+        "mixedPrecisions": [
+          "bf16",
+          "f32"
+        ],
+        "networkTypes": [
+          "lora"
+        ],
+        "optimizers": [
+          "adamw"
+        ],
+        "outputScopes": [
+          "project",
+          "global"
+        ],
+        "rank": [
+          1,
+          128
+        ],
+        "resolutions": [
+          256,
+          512,
+          768,
+          1024
+        ],
+        "steps": [
+          1,
+          100000
+        ],
+        "timestepBiases": [
+          "balanced"
+        ],
+        "timestepTypes": [
+          "uniform",
+          "linear",
+          "sigmoid",
+          "logit_normal",
+          "mode",
+          "cosmap",
+          "sigma_sqrt"
+        ]
+      },
+      "ui": {
+        "datasetKind": "editPairs",
+        "datasetModality": "image",
+        "description": "Native Candle/MLX additive LoRA on the undistilled dense FLUX.3 Klein base. Edit pairs require exactly one reference per target. No quantized training, activation checkpointing or in-training previews. Resume unchanged runs from the queue; duplicate starts a separate run. Source JSON is forwarded under flux3 only; unknown keys are refused. Source controls include caption_dropout, max_sequence_length, center_crop, random_flip, weighting_scheme, logit_mean, logit_std, mode_scale, max_grad_norm, lr_scheduler, lr_num_cycles and lr_power.",
+        "label": "FLUX.3 Klein Base Edit LoRA",
+        "recommendedFor": [
+          "edit"
+        ]
+      }
+    },
+    {
       "id": "ltx_video_lora",
       "name": "LTX-2.3 Video LoRA",
       "modality": "video",

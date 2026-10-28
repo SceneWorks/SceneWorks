@@ -73,35 +73,21 @@ name: Memory catalog campaign
 on:
   workflow_dispatch:
     inputs:
-      run_moss_training_acceptance:
-        description: "Terminal MOSS training acceptance only; all other jobs are disabled. No downloads/publication."
-        required: false
-        type: boolean
-        default: false
-      moss_runner_label:
-        description: "MOSS only: explicitly choose a Mac with cached MOSS snapshots; unspecified is rejected."
-        required: true
-        type: choice
-        options: [unspecified, real-weights, rw-llm, rw-mage, rw-krea]
-        default: unspecified
-      moss_phase:
-        description: "MOSS capture runs eight training cells and eight cross-loads; finalize verifies that run plus actual preview inspections without GPU execution."
-        required: false
-        type: choice
-        options: [capture, finalize]
-        default: capture
-      moss_inspection_json:
-        description: "MOSS finalize only: named per-cell inspections, including the original positive captureRunId, actual review timestamps and manifest seal."
+      moss_options_json:
+        description: 'MOSS only: {"enabled":true,"runner_label":"real-weights","phase":"capture"}; finalize adds inspection with original captureRunId. Empty object disables MOSS.'
         required: false
         type: string
-        default: ""
+        default: "{}"
       profile:
-        description: "Catalog by default; Qwen app lifecycle runs only the reusable app proof, with no catalog walk or publication."
+        description: "Catalog by default; Qwen/FLUX3 app lifecycle profiles run only their reusable app proof, with no catalog walk or publication."
         required: false
         type: choice
         options:
           - catalog
           - qwen-image-2-1-app-lifecycle
+          - flux3-image-klein-app-lifecycle
+          - flux3-image-klein-terminal-host
+          - flux3-image-klein-terminal-queue
           - iris-mlx-real-weights
           - supra2-mlx-real-weights
           - sdxl-cuda-endpoints
@@ -120,6 +106,43 @@ on:
           - primary
           - secondary
         default: primary
+      flux3_app_runner_target:
+        description: "FLUX3 app smoke only: secondary=rw-mage; primary=rw-starvector. Reserve an idle physical Mac before dispatch."
+        required: false
+        type: choice
+        options:
+          - secondary
+          - primary
+        default: secondary
+      flux3_terminal_host:
+        description: "FLUX3 terminal host step only (sc-26243): nax-macos (dataset host) | nax-macos-2. The default none is refused, so an empty value never picks a Mac."
+        required: false
+        type: choice
+        options:
+          - none
+          - nax-macos
+          - nax-macos-2
+        default: none
+      flux3_terminal_step:
+        description: "FLUX3 terminal host step only: prepare | self-test | run (run is refused until that host lane's addendum is recorded). The default none is refused."
+        required: false
+        type: choice
+        options:
+          - none
+          - prepare
+          - self-test
+          - run
+        default: none
+      flux3_terminal_control_sha256:
+        description: "FLUX3 terminal host step only: sha256 of $HOME/sc26243-run/control/<host>/<step>.json on that Mac. The default none is refused."
+        required: false
+        type: string
+        default: none
+      flux3_queue_control_sha256:
+        description: "FLUX3 Windows queue only: sha256 of local D:/tmp/sc26243-run/queue-control.json. Default none refuses; an empty input never starts a campaign."
+        required: false
+        type: string
+        default: none
       iris_smoke_filter:
         description: "Iris MLX real-weights only (sc-25690): all | inference | training | full_ft | <one smoke test name> | cleanup."
         required: false
@@ -271,11 +294,15 @@ env:
 
 jobs:
   moss-selector-preflight:
-    if: ${{ inputs.run_moss_training_acceptance }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
+      enabled: ${{ steps.select.outputs.enabled }}
+      runner_label: ${{ steps.select.outputs.runner_label }}
+      phase: ${{ steps.select.outputs.phase }}
+      inspection_json: ${{ steps.select.outputs.inspection_json }}
       capture_run_id: ${{ steps.select.outputs.capture_run_id }}
     steps:
       - name: Reject conflicting selectors before compiler or device jobs
@@ -290,36 +317,50 @@ jobs:
           node --input-type=module <<'JS'
           import { appendFileSync } from 'node:fs';
           const i = JSON.parse(process.env.SELECTORS);
+          const emit = (key, value) => appendFileSync(process.env.GITHUB_OUTPUT, key + '=' + value + '\n');
+          let m;
+          try { m = JSON.parse(i.moss_options_json || '{}'); } catch { throw new Error('moss_options_json must be a JSON object'); }
+          if (m === null || typeof m !== 'object' || Array.isArray(m)) throw new Error('moss_options_json must be a JSON object');
+          const allowed = ['enabled','runner_label','phase','inspection'];
+          if (Object.keys(m).some(key => !allowed.includes(key))) throw new Error('unknown moss_options_json field');
+          if (Object.keys(m).length === 0 || (m.enabled === false && Object.keys(m).length === 1)) { emit('enabled','false'); process.exit(0); }
+          if (m.enabled !== true) throw new Error('nonempty moss_options_json requires enabled=true');
           const bad = [];
           if (process.env.DISPATCH_EVENT !== 'workflow_dispatch' || process.env.DISPATCH_REPOSITORY !== 'SceneWorks/SceneWorks') bad.push('MOSS requires an explicit dispatch in SceneWorks/SceneWorks');
           if (!/^[0-9a-f]{40}$/.test(process.env.DISPATCH_SHA)) bad.push('actual dispatched GitHub SHA must be exact 40-hex');
-          if (!['real-weights','rw-llm','rw-mage','rw-krea'].includes(i.moss_runner_label)) bad.push('explicitly choose moss_runner_label=real-weights|rw-llm|rw-mage|rw-krea with cached MOSS snapshots');
+          if (!['real-weights','rw-llm','rw-mage','rw-krea'].includes(m.runner_label)) bad.push('explicitly choose runner_label=real-weights|rw-llm|rw-mage|rw-krea with cached MOSS snapshots');
           if (i.profile && i.profile !== 'catalog') bad.push('profile must remain catalog (MOSS replaces it)');
           if (i.anchors || i.models || (i.iris_smoke_filter && i.iris_smoke_filter !== 'all')) bad.push('clear anchors/models/iris_smoke_filter overrides');
           if (i.download_missing || i.qwen_persistent_weights) bad.push('disable download_missing and qwen_persistent_weights; MOSS is cached/offline only');
           if (i.inference_sha && !/^[0-9a-f]{40}$/.test(i.inference_sha)) bad.push('inference_sha must be empty or exact 40-hex permanent lock pin');
-          if (!['capture','finalize'].includes(i.moss_phase)) bad.push('moss_phase must be capture or finalize');
+          const phase = m.phase === undefined ? 'capture' : m.phase;
+          if (!['capture','finalize'].includes(phase)) bad.push('phase must be capture or finalize');
+          const inspection = m.inspection === undefined ? {} : m.inspection;
+          if (inspection === null || typeof inspection !== 'object' || Array.isArray(inspection)) bad.push('inspection must be a JSON object');
           let captureRunId = '';
-          if (i.moss_phase === 'capture' && i.moss_inspection_json) bad.push('capture must not consume prior evidence or pre-written inspections');
-          if (i.moss_phase === 'finalize') {
-            try {
-              const inspection = JSON.parse(i.moss_inspection_json);
-              if (inspection === null || typeof inspection !== 'object' || Array.isArray(inspection) || typeof inspection.captureRunId !== 'string' || !/^[1-9][0-9]*$/.test(inspection.captureRunId)) throw new Error('invalid capture run');
-              captureRunId = inspection.captureRunId;
-            } catch { bad.push('finalize requires actual moss_inspection_json with its original positive captureRunId'); }
+          if (phase === 'capture' && Object.keys(inspection || {}).length) bad.push('capture must not consume prior evidence or pre-written inspections');
+          if (phase === 'finalize') {
+            if (!inspection || typeof inspection.captureRunId !== 'string' || !/^[1-9][0-9]*$/.test(inspection.captureRunId)) bad.push('finalize requires actual inspection with its original positive captureRunId');
+            else captureRunId = inspection.captureRunId;
           }
-          const defaults = {backend:'mlx',campaign:'sc-22738',skip_current:true,hf_cache_roots:'',qwen_app_runner_target:'primary',runner_label:'rw-krea (nax-macos-2, the second Mac)',push_every:'1',probe_budget_minutes:'60',instantid_weights:'',instantid_controlnet:'',pulid_weights:''};
+          const defaults = {backend:'mlx',campaign:'sc-22738',skip_current:true,hf_cache_roots:'',qwen_app_runner_target:'primary',runner_label:'rw-krea (nax-macos-2, the second Mac)',push_every:'1',probe_budget_minutes:'60',instantid_weights:'',instantid_controlnet:'',pulid_weights:'',flux3_app_runner_target:'secondary',flux3_terminal_host:'none',flux3_terminal_step:'none',flux3_terminal_control_sha256:'none',flux3_queue_control_sha256:'none'};
           for (const [key,value] of Object.entries(defaults)) if (i[key] !== undefined && i[key] !== value) bad.push('reset conflicting catalog/app selector ' + key);
           if (i.ref && i.ref !== 'feature/sc-22723-memory-anchor-measurability' && i.ref !== process.env.DISPATCH_SHA) bad.push('ref must remain its default or equal the actual dispatched GitHub SHA');
           if (bad.length) { console.error('MOSS acceptance must run alone: ' + bad.join('; ')); process.exit(1); }
-          appendFileSync(process.env.GITHUB_OUTPUT, 'capture_run_id=' + captureRunId + '\n');
+          emit('enabled','true');
+          emit('runner_label',m.runner_label);
+          emit('phase',phase);
+          emit('inspection_json',phase === 'finalize' ? JSON.stringify(inspection) : '');
+          emit('capture_run_id',captureRunId);
           JS
       - name: Check out the exact selected source for lock proof and fixed-data preparation
+        if: ${{ steps.select.outputs.enabled == 'true' }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
       - name: Read the actual permanent pin, never trust the optional input
+        if: ${{ steps.select.outputs.enabled == 'true' }}
         env:
           EXPECTED_INFERENCE_PIN: ${{ inputs.inference_sha }}
         shell: bash
@@ -332,10 +373,10 @@ jobs:
           console.log('Actual selected-source inference pin: ' + pin);
           JS
       - name: Prepare the one fixed image dataset without loading models
-        if: ${{ inputs.moss_phase == 'capture' }}
+        if: ${{ steps.select.outputs.enabled == 'true' && steps.select.outputs.phase == 'capture' }}
         run: python3 -I scripts/ci/moss-training-acceptance/prepare_dataset.py --manifest scripts/ci/moss-training-acceptance/campaign.json --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset"
       - name: Preserve fixed dataset bytes shared by all eight cells
-        if: ${{ always() && inputs.moss_phase == 'capture' }}
+        if: ${{ always() && steps.select.outputs.enabled == 'true' && steps.select.outputs.phase == 'capture' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: moss-dataset
@@ -343,7 +384,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
   moss-training-acceptance:
-    if: ${{ inputs.run_moss_training_acceptance }}
+    if: ${{ needs.moss-selector-preflight.outputs.enabled == 'true' }}
     needs: moss-selector-preflight
     permissions:
       contents: read
@@ -354,12 +395,55 @@ jobs:
     with:
       workflowSource: ${{ github.sha }}
       inference_sha: ${{ inputs.inference_sha }}
-      moss_runner_label: ${{ inputs.moss_runner_label }}
-      moss_phase: ${{ inputs.moss_phase }}
+      moss_runner_label: ${{ needs.moss-selector-preflight.outputs.runner_label }}
+      moss_phase: ${{ needs.moss-selector-preflight.outputs.phase }}
       moss_evidence_run_id: ${{ needs.moss-selector-preflight.outputs.capture_run_id }}
-      moss_inspection_json: ${{ inputs.moss_inspection_json }}
+      moss_inspection_json: ${{ needs.moss-selector-preflight.outputs.inspection_json }}
+  flux3-app-lifecycle:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'flux3-image-klein-app-lifecycle' }}
+    needs: moss-selector-preflight
+    permissions:
+      contents: read
+    # One ordinary installed-model/API/worker/saved-asset smoke. No catalog jobs,
+    # measurements, pin edits, branch publication or PR. Relative call = exact SHA.
+    uses: ./.github/workflows/flux3-image-klein-app-lifecycle.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      runner_target: ${{ inputs.flux3_app_runner_target }}
+  flux3-terminal-host:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'flux3-image-klein-terminal-host' }}
+    needs: moss-selector-preflight
+    permissions:
+      contents: read
+    # One coordinator-approved MLX terminal step on one named Mac. No artifact upload, catalog
+    # walk, measurement publication, pin edit or PR. Relative call = exact SHA.
+    uses: ./.github/workflows/flux3-image-klein-terminal-host.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      host: ${{ inputs.flux3_terminal_host }}
+      step: ${{ inputs.flux3_terminal_step }}
+      control_sha256: ${{ inputs.flux3_terminal_control_sha256 }}
+  flux3-terminal-queue:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'flux3-image-klein-terminal-queue' }}
+    needs: moss-selector-preflight
+    # Serialize WHOLE campaigns, not individual matrix slots. Otherwise two dispatches can each
+    # occupy half the box. One stable group across branches/approvals; no second inner group.
+    concurrency:
+      group: flux3-terminal-queue-physical-host
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/flux3-image-klein-terminal-queue.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      control_sha256: ${{ inputs.flux3_queue_control_sha256 }}
   qwen-app-lifecycle:
-    if: ${{ !inputs.run_moss_training_acceptance && inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
+    needs: moss-selector-preflight
     permissions:
       contents: read
     # Relative reusable-workflow calls resolve at the caller's exact commit. This
@@ -370,7 +454,8 @@ jobs:
       inference_sha: ${{ inputs.inference_sha }}
       runner_target: ${{ inputs.qwen_app_runner_target }}
   iris-mlx-real-weights:
-    if: ${{ !inputs.run_moss_training_acceptance && inputs.profile == 'iris-mlx-real-weights' }}
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'iris-mlx-real-weights' }}
+    needs: moss-selector-preflight
     permissions:
       contents: read
     # sc-25690 (epic 25678): the Iris-3B worker real-weight smokes on nax-macos-2, at the dispatch's
@@ -381,7 +466,8 @@ jobs:
       source_sha: ${{ inputs.ref }}
       filter: ${{ inputs.iris_smoke_filter }}
   supra2-mlx-real-weights:
-    if: ${{ !inputs.run_moss_training_acceptance && inputs.profile == 'supra2-mlx-real-weights' }}
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'supra2-mlx-real-weights' }}
+    needs: moss-selector-preflight
     permissions:
       contents: read
     # sc-24216 (epic 24212): the Supra2-IMG worker real-weight convert, render and offline lifecycle
@@ -391,7 +477,8 @@ jobs:
     with:
       source_sha: ${{ inputs.ref }}
   mlx:
-    if: ${{ !inputs.run_moss_training_acceptance && (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'mlx' }}
+    needs: moss-selector-preflight
     name: mlx catalog campaign
     # `rw-krea` and `nax` are the two macOS label sets verified as carried by a live runner
     # (nax-macos-2 and nax-macos respectively). A label NO runner carries does not fail the
@@ -544,7 +631,8 @@ jobs:
         run: bash scripts/ci/memory-catalog/pr.sh
 
   candle:
-    if: ${{ !inputs.run_moss_training_acceptance && (inputs.profile == 'sdxl-cuda-endpoints' || inputs.profile == 'sdxl-cuda-admitted-replay' || ((inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle')) }}
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && (inputs.profile == 'sdxl-cuda-endpoints' || inputs.profile == 'sdxl-cuda-admitted-replay' || ((inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle')) }}
+    needs: moss-selector-preflight
     name: candle catalog campaign
     # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
     # choice here: all four Windows listeners are processes on ONE box.

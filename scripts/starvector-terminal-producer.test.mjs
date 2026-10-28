@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { externalFixtureSkip } from "./test-platform-capabilities.mjs";
 import { pathToFileURL } from "node:url";
 import { claimTupleMarker, consolidateCanonicalArtifacts, inventory, sealReceipt, validateInferencePreflight, verifyInferenceCheckout, verifyInferenceValidatorDiff, verifyPermanentPin } from "./starvector-terminal-producer.mjs";
 

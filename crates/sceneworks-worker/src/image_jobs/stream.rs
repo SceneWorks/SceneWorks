@@ -12,6 +12,11 @@ enum GenEvent {
     Decoding {
         index: usize,
     },
+    Upsampling {
+        index: usize,
+        tokens: u32,
+        max_tokens: u32,
+    },
     Loading {
         index: usize,
         phase: LoadPhase,
@@ -206,13 +211,10 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
     if matches!(progress, Progress::ConditioningComplete) {
         return;
     }
-    // Prompt-upsampling events (inference 46c22c01e) fire only for a request that asked for
-    // enhancement on a provider that implements it; this lane has no upsampling consumer, so they
-    // stay internal exactly like the conditioning boundary.
-    if matches!(
-        progress,
-        Progress::PromptUpsamplingComplete | Progress::Upsampling { .. }
-    ) {
+    // The prompt-upsampling COMPLETION boundary has no consumer on this lane and stays internal
+    // exactly like the conditioning boundary. Incremental token counts DO reach the job wire: the
+    // FLUX 3 prompt-enhancement surface renders them (sc-26233).
+    if matches!(progress, Progress::PromptUpsamplingComplete) {
         return;
     }
     let event = match progress {
@@ -221,12 +223,12 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             current,
             total,
         },
-        Progress::ConditioningComplete => unreachable!("internal boundary filtered above"),
-        Progress::PromptUpsamplingComplete | Progress::Upsampling { .. } => {
-            unreachable!("prompt-upsampling events filtered above")
+        Progress::ConditioningComplete | Progress::PromptUpsamplingComplete => {
+            unreachable!("internal boundary filtered above")
         }
         Progress::Decoding => GenEvent::Decoding { index },
         Progress::Loading(phase) => GenEvent::Loading { index, phase },
+        Progress::Upsampling { tokens, max_tokens } => GenEvent::Upsampling { index, tokens, max_tokens },
     };
     let _ = tx.blocking_send(event);
 }
@@ -507,11 +509,11 @@ fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
     ));
 }
 
-/// The prompt-upsampling events (inference 46c22c01e) have no consumer on this lane, so they never
-/// reach the job wire: no event, no synthesized step.
+/// Incremental prompt-upsampling token counts DO reach the FLUX 3 surface; only the completion
+/// boundary stays internal (no event, no synthesized step).
 #[cfg(test)]
 #[test]
-fn prompt_upsampling_events_stay_internal() {
+fn prompt_upsampling_tokens_are_emitted_but_completion_stays_internal() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     send_gen_progress(
         &tx,
@@ -521,6 +523,14 @@ fn prompt_upsampling_events_stay_internal() {
             max_tokens: 8,
         },
     );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(GenEvent::Upsampling {
+            index: 0,
+            tokens: 3,
+            max_tokens: 8
+        })
+    ));
     send_gen_progress(&tx, 0, Progress::PromptUpsamplingComplete);
     assert!(matches!(
         rx.try_recv(),

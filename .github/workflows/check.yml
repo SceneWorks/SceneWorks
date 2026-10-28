@@ -247,6 +247,14 @@ jobs:
           cache-dependency-path: package-lock.json
       - name: Install pinned scaffold dependencies
         run: npm ci --ignore-scripts
+      # Strict historical lock-provenance tests need this immutable SceneWorks fixture; fetching
+      # ONE commit supplies Git evidence, not a generation or measurement run. The job's PR
+      # checkout is depth 1, so no historical commit is present without this step.
+      - name: Fetch the immutable historical lock-provenance fixture
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin 7090f742a7d2973dc3cc1c144aa8a272cdc293c9
+          test "$(git rev-parse 7090f742a7d2973dc3cc1c144aa8a272cdc293c9:Cargo.lock)" = 93b2c6e0634b1493ae8621f85e5154fc25ca2aab
       - name: Run portable scaffold and compose checks
         run: node scripts/unit-hf-sandbox.mjs -- node scripts/scaffold-test-selection.mjs --portable
       # DISABLED at PR time (sc-19758). release.yml still scans the BUILT bundle in all three of its

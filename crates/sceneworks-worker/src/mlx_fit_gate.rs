@@ -779,11 +779,14 @@ impl MlxRequestPlan {
         let request_scale = megapixel_scale * f64::from(geometry.batch.max(1));
         let fixed_reserve_bytes = self.fixed_reserve_bytes.min(self.activation_headroom_bytes);
         let area_bytes = self.activation_headroom_bytes - fixed_reserve_bytes;
-        fixed_reserve_bytes.saturating_add(
+        let baseline = fixed_reserve_bytes.saturating_add(
             (area_bytes as f64 * request_scale)
                 .round()
                 .clamp(0.0, u64::MAX as f64) as u64,
-        )
+        );
+        let extra =
+            flux3_cfg_additional_workspaces(self.engine_id, geometry.width, geometry.height);
+        baseline.saturating_add(extra.0.max(extra.1))
     }
 
     /// Convert the legacy whole-spec estimate into the base-only scalar expected by the additive
@@ -1286,6 +1289,9 @@ pub(crate) struct MlxRequestInputs {
     pub adapter_count: usize,
     pub has_reference: bool,
     pub reference_count: u32,
+    /// Actual owned reference geometry/tokens, never a client numeric memory hint. The selected
+    /// backend prices these from the current candidate LoadSpec before every probe/fit decision.
+    pub reference_resources: Option<gen_core::MemoryReferenceResourceFacts>,
     pub use_pid: bool,
     pub has_phases: bool,
     /// Conservative count of CLIP windows for the actual positive/negative prompt pair.
@@ -1302,6 +1308,19 @@ pub(crate) struct MlxRequestInputs {
     /// references and re-resolved CFG, under the same block) and on every lane that never reaches
     /// a cache provider.
     pub prefix_kv_cache_eligible: bool,
+}
+
+/// A live pricing context, not a cached request cost: every tier probe binds its actual spec.
+#[derive(Clone, Copy)]
+struct ReferencePricing<'a> {
+    spec: &'a LoadSpec,
+    registry: &'a gen_core::ProviderRegistry,
+}
+
+fn missing_reference_pricing(engine_id: &str) -> WorkerError {
+    WorkerError::InvalidPayload(format!(
+        "{engine_id}: owned reference resources require the reference-aware memory admission entry point and its resolved LoadSpec; unpriced references cannot be admitted"
+    ))
 }
 
 pub(crate) fn clip_window_upper_bound(prompt: &str, negative: &str) -> u32 {
@@ -1361,6 +1380,81 @@ pub(crate) struct MlxRequestEvaluation {
     /// every provider that prices none. A `Cached` plan is already written onto [`Self::memory`]
     /// and counted in `context.predicted_peak_bytes`.
     pub prefix_kv_cache: Option<crate::execution_planner::PrefixKvCachePlan>,
+}
+
+/// Frozen FLUX3 sampling.denoise always packs [unconditional, conditional], including scales
+/// 0 and 1; the distilled flow map packs one. This is NOT output/job count or decoder batch.
+pub(crate) fn flux3_conditioning_forward_batch(engine_id: &str) -> u64 {
+    if engine_id == "flux3_klein_base" {
+        2
+    } else {
+        1
+    }
+}
+
+/// Live hidden-width (3072) activation buffers of ONE FLUX3 `Block::forward` (pinned BFL
+/// `dit.py` / native `dit.rs`), per token, counted from the tensors alive at its widest point
+/// with NO intra-block reuse assumed: x 1, modulated x_mod 1, q/k/v projections 3, their
+/// contiguous head-split copies 3, f32 RMSNorm+RoPE q/k 2, attention output 1, mlp_in
+/// (2 x mlp_ratio 3) 6, silu(gate) 3, silu(gate)*up 3, mlp_out 1, attn_out 1, delta 1,
+/// gate*delta 1, residual 1 = 28. Blocks run sequentially, so only one block's set is live.
+pub(crate) const FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS: u64 = 28;
+
+/// Source-derived retained conditioning/DiT allowances, NOT measurements. The source clamps text
+/// at 4096, stacks 8 x 2560 encoder channels, uses 3072-wide blocks and 128-channel packed
+/// latents. Each active row carries [`FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS`] at f32 width even though
+/// most are bf16 — a deliberate PROVISIONAL over-estimate (no buffer reuse, f32 everywhere) until
+/// the epic-end measured anchor (sc-26243) replaces it; it is bounded by the source live set, not
+/// a guessed multiplier, so it does not refuse renders the live set could fit. Attention scratch
+/// and allocator reserve remain in the existing generic headroom; no weights, decoder, job count
+/// or optional PUP copies are added here.
+pub(crate) fn flux3_source_workspaces(engine_id: &str, width: u32, height: u32) -> (u64, u64) {
+    if !matches!(engine_id, "flux3_klein" | "flux3_klein_base") {
+        return (0, 0);
+    }
+    let rows = flux3_conditioning_forward_batch(engine_id);
+    let image = u64::from(width.div_ceil(16)).saturating_mul(u64::from(height.div_ceil(16)));
+    let conditioning = rows.saturating_mul(4096 * 20480 * 4);
+    let projections = image
+        .saturating_add(4096)
+        .saturating_mul(3072 * 4 * FLUX3_BLOCK_LIVE_HIDDEN_BUFFERS)
+        .saturating_mul(rows);
+    let cfg_merge = if rows == 2 {
+        image.saturating_mul(128 * 4 * 5)
+    } else {
+        0
+    };
+    (
+        conditioning,
+        projections
+            .saturating_add(conditioning)
+            .saturating_add(cfg_merge),
+    )
+}
+
+fn flux3_cfg_additional_workspaces(engine_id: &str, width: u32, height: u32) -> (u64, u64) {
+    if engine_id != "flux3_klein_base" {
+        return (0, 0);
+    }
+    let base = flux3_source_workspaces(engine_id, width, height);
+    let distilled = flux3_source_workspaces("flux3_klein", width, height);
+    (
+        base.0.saturating_sub(distilled.0),
+        base.1.saturating_sub(distilled.1),
+    )
+}
+
+fn flux3_cfg_workspace(
+    engine_id: &str,
+    geometry: MemoryGeometry,
+    generic: u64,
+) -> crate::mlx_phase_estimate::Workspace {
+    let extra = flux3_cfg_additional_workspaces(engine_id, geometry.width, geometry.height);
+    crate::mlx_phase_estimate::Workspace {
+        conditioning: generic.saturating_add(extra.0),
+        denoise: generic.saturating_add(extra.1),
+        decode: generic,
+    }
 }
 
 fn gib_to_bytes(gib: f64) -> u64 {
@@ -2911,7 +3005,7 @@ fn mlx_selected_phase_peak(
     selection: &MemorySelection,
     conditioning_windows: Option<u32>,
 ) -> Option<u64> {
-    use crate::mlx_phase_estimate::{layerwise_decode_workspace, Workspace};
+    use crate::mlx_phase_estimate::layerwise_decode_workspace;
     use sceneworks_core::memory_anchor::{AnchorBackend, AnchorMlxImageDeriveRequest};
     if mode_key != "text_to_image"
         || overlay.is_some()
@@ -2922,14 +3016,12 @@ fn mlx_selected_phase_peak(
         return None;
     }
     let phase = contract.phase_facts.as_ref()?;
+    let extra = flux3_cfg_additional_workspaces(plan.engine_id, geometry.width, geometry.height);
     let generic = plan
         .generic_headroom_bytes(geometry)
-        .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes));
-    let mut workspace = Workspace {
-        conditioning: generic,
-        denoise: generic,
-        decode: generic,
-    };
+        .saturating_sub(plan.fixed_reserve_bytes.min(plan.activation_headroom_bytes))
+        .saturating_sub(extra.0.max(extra.1));
+    let mut workspace = flux3_cfg_workspace(plan.engine_id, geometry, generic);
     if let Some(anchor) = mlx_image_anchor_store()
         .and_then(|store| {
             store.image_anchor_for(&plan.model_id, AnchorBackend::Mlx, plan_tier_key(plan.tier))
@@ -3558,6 +3650,7 @@ fn evaluate_request_with_budget(
         total_peak_bytes,
         external_committed_bytes,
         additional_evidence,
+        None,
     )
 }
 
@@ -3574,6 +3667,7 @@ fn evaluate_request_with_budget_and_warm_policy(
     total_peak_bytes: u64,
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
+    reference_pricing: Option<ReferencePricing<'_>>,
 ) -> WorkerResult<MlxRequestEvaluation> {
     evaluate_request_with_budget_using_bundle(
         generator,
@@ -3587,6 +3681,7 @@ fn evaluate_request_with_budget_and_warm_policy(
         external_committed_bytes,
         additional_evidence,
         None,
+        reference_pricing,
     )
 }
 
@@ -3603,6 +3698,7 @@ fn evaluate_request_with_budget_using_bundle(
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
     evidence_bundle: Option<&EvidenceBundle>,
+    reference_pricing: Option<ReferencePricing<'_>>,
 ) -> WorkerResult<MlxRequestEvaluation> {
     select_request_with_budget_using_bundle(
         MlxAdmissionPhase::Generation,
@@ -3640,6 +3736,7 @@ fn evaluate_request_with_budget_using_bundle(
         external_committed_bytes,
         additional_evidence,
         evidence_bundle,
+        reference_pricing,
     )?
     .into_evaluation()
 }
@@ -3740,8 +3837,30 @@ fn select_request_with_budget_using_bundle(
     external_committed_bytes: u64,
     additional_evidence: &[MemoryEvidence],
     evidence_bundle: Option<&EvidenceBundle>,
+    reference_pricing: Option<ReferencePricing<'_>>,
 ) -> WorkerResult<MlxRequestAdmission> {
     use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
+
+    let reference_workspace_bytes = if let Some(resources) = &inputs.reference_resources {
+        if !inputs.has_reference
+            || usize::try_from(inputs.reference_count).ok()
+                != Some(resources.prepared_canvases.len())
+        {
+            return Err(WorkerError::InvalidPayload(
+                "reference resource slots do not match the admitted ordered reference count"
+                    .to_owned(),
+            ));
+        }
+        let pricing = reference_pricing.ok_or_else(|| missing_reference_pricing(plan.engine_id))?;
+        crate::memory_strategy::reference_workspace_bytes_using(
+            pricing.registry,
+            plan.engine_id,
+            pricing.spec,
+            Some(resources),
+        )?
+    } else {
+        0
+    };
 
     // Component precision floors are a provider property, not a manifest guess. Bind them only
     // from the exact registry descriptor or loaded generator, then use that tier for every evidence/cache identity
@@ -4205,7 +4324,11 @@ fn select_request_with_budget_using_bundle(
             // measured peak exactly, as the selector does (sc-22738: no widening for a moved
             // closure).
             if candidate_budget.effective_gb().is_some_and(|available| {
-                exact.predicted_peak_bytes as f64 / BYTES_PER_GIB <= available
+                exact
+                    .predicted_peak_bytes
+                    .saturating_add(reference_workspace_bytes) as f64
+                    / BYTES_PER_GIB
+                    <= available
             }) {
                 selections.push(MemorySelection {
                     strategy: exact.key.strategy,
@@ -4346,10 +4469,11 @@ fn select_request_with_budget_using_bundle(
             } else {
                 0
             };
-            (shortfall > 0).then(|| {
+            let request_extra = shortfall.saturating_add(reference_workspace_bytes);
+            (request_extra > 0).then(|| {
                 let mut corrected = (*evidence).clone();
                 corrected.predicted_peak_bytes =
-                    corrected.predicted_peak_bytes.saturating_add(shortfall);
+                    corrected.predicted_peak_bytes.saturating_add(request_extra);
                 (corrected, shortfall)
             })
         })
@@ -4680,6 +4804,7 @@ fn select_request_with_budget_using_bundle(
         };
         needed_gb = evidence
             .predicted_peak_bytes
+            .saturating_add(reference_workspace_bytes)
             .saturating_add(prefix_kv_cache_extra)
             .saturating_add(reserve) as f64
             / BYTES_PER_GIB;
@@ -4687,7 +4812,9 @@ fn select_request_with_budget_using_bundle(
         budget.reserved_headroom_bytes = reserve;
         process_limit_bytes = Some(budget.total_bytes.saturating_sub(reserve));
         selected_record_id = Some(candidate.record_id.clone());
-        evidence.predicted_peak_bytes
+        evidence
+            .predicted_peak_bytes
+            .saturating_add(reference_workspace_bytes)
     } else if selection == resident_selection
         || synthesized_estimates
             .iter()
@@ -4699,11 +4826,12 @@ fn select_request_with_budget_using_bundle(
         candidates
             .iter()
             .find(|candidate| candidate.selection == selection)
-            .map_or(predicted_peak_bytes, |candidate| {
-                candidate.evidence.predicted_peak_bytes
-            })
+            .map_or(
+                predicted_peak_bytes.saturating_add(reference_workspace_bytes),
+                |candidate| candidate.evidence.predicted_peak_bytes,
+            )
     } else {
-        predicted_peak_bytes
+        predicted_peak_bytes.saturating_add(reference_workspace_bytes)
     };
     // The demand the admission approved: a cached selection was graded at its (corrected) shed
     // peak + the cache surcharge (`prefix_kv_cache_extra`).
@@ -4760,7 +4888,7 @@ fn select_request_with_budget_using_bundle(
             use_pid: inputs.use_pid,
             has_phases: inputs.has_phases,
             geometry,
-            reference_resources: None,
+            reference_resources: inputs.reference_resources.clone(),
             overlay: inputs.overlay.clone(),
             budget,
             predicted_peak_bytes,
@@ -4866,12 +4994,29 @@ pub(crate) fn preflight_request(
     inputs: &MlxRequestInputs,
     budget: MemoryBudget,
 ) -> WorkerResult<MlxRequestAdmission> {
+    // Fail closed before deriving a contract for this actual candidate spec. The selector also
+    // resolves the same pure provider bound before grading, including every warm-cache request.
+    crate::memory_strategy::reference_workspace_bytes(
+        plan.engine_id,
+        spec,
+        inputs.reference_resources.as_ref(),
+    )?;
     let contract = crate::inference_runtime::media()
         .memory_strategy_contract(plan.engine_id, spec)
         .map_err(|error| {
             crate::classify_engine_error("MLX pre-load memory contract failed", error)
         })?;
-    preflight_request_with_contract(contract.as_ref(), spec.offload_policy, plan, inputs, budget)
+    preflight_request_with_contract(
+        contract.as_ref(),
+        spec.offload_policy,
+        plan,
+        inputs,
+        budget,
+        Some(ReferencePricing {
+            spec,
+            registry: crate::inference_runtime::media(),
+        }),
+    )
 }
 
 /// [`preflight_request`] once the registry contract is resolved — split out so the tier probe's
@@ -4883,6 +5028,7 @@ fn preflight_request_with_contract(
     plan: &MlxRequestPlan,
     inputs: &MlxRequestInputs,
     budget: MemoryBudget,
+    reference_pricing: Option<ReferencePricing<'_>>,
 ) -> WorkerResult<MlxRequestAdmission> {
     select_request_with_budget_using_bundle(
         MlxAdmissionPhase::TierProbe,
@@ -4915,6 +5061,7 @@ fn preflight_request_with_contract(
         0,
         &[],
         None,
+        reference_pricing,
     )
 }
 
@@ -4928,6 +5075,40 @@ pub(crate) fn evaluate_request(
     load_policy: OffloadPolicy,
     warm_policy: crate::execution_planner::WarmPolicyProposal,
     external_committed_bytes: u64,
+) -> WorkerResult<MlxRequestEvaluation> {
+    if inputs.reference_resources.is_some() {
+        return Err(missing_reference_pricing(plan.engine_id));
+    }
+    let geometry = request_geometry(inputs);
+    let budget = live_request_budget(plan.engine_id)?;
+    let total_peak_bytes = request_total_peak_bytes(plan, geometry);
+    evaluate_request_with_budget_and_warm_policy(
+        generator,
+        plan,
+        inputs,
+        cache_state,
+        load_policy,
+        warm_policy,
+        budget,
+        total_peak_bytes,
+        external_committed_bytes,
+        &[],
+        None,
+    )
+}
+
+/// Loaded FLUX.3 reference request: price against the same resolved spec used for this cache lookup.
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_request_with_reference_spec(
+    generator: &dyn gen_core::Generator,
+    plan: &MlxRequestPlan,
+    inputs: &MlxRequestInputs,
+    cache_state: MemoryCacheState,
+    load_policy: OffloadPolicy,
+    warm_policy: crate::execution_planner::WarmPolicyProposal,
+    external_committed_bytes: u64,
+    reference_spec: &LoadSpec,
 ) -> WorkerResult<MlxRequestEvaluation> {
     let geometry = request_geometry(inputs);
     let budget = live_request_budget(plan.engine_id)?;
@@ -4943,6 +5124,10 @@ pub(crate) fn evaluate_request(
         total_peak_bytes,
         external_committed_bytes,
         &[],
+        Some(ReferencePricing {
+            spec: reference_spec,
+            registry: crate::inference_runtime::media(),
+        }),
     )
 }
 
@@ -6828,6 +7013,50 @@ pub fn full_finetune_memory_error(
 mod tests {
     use super::*;
 
+    #[test]
+    fn flux3_cfg_source_allowance_tracks_forward_rows_not_jobs_weights_or_decode() {
+        assert_eq!(flux3_conditioning_forward_batch("flux3_klein_base"), 2);
+        assert_eq!(flux3_conditioning_forward_batch("flux3_klein"), 1);
+        let geometry = request_geometry(&request_inputs(1024, 768, 1));
+        let full_base = flux3_source_workspaces("flux3_klein_base", 1024, 768);
+        // 1024x768 -> 64x48 = 3072 image tokens + 4096 text tokens, two CFG rows.
+        let tokens = 3072u64 + 4096;
+        assert_eq!(full_base.0, 2 * 4096 * 20480 * 4);
+        assert_eq!(
+            full_base.1,
+            tokens * 3072 * 4 * 28 * 2 + full_base.0 + 3072 * 128 * 4 * 5
+        );
+        let full_distilled = flux3_source_workspaces("flux3_klein", 1024, 768);
+        assert_eq!(full_base.0, full_distilled.0 * 2);
+        assert!(full_base.1 > full_distilled.1 * 2); // CFG merge buffers, not another weight copy.
+        let phase = flux3_cfg_workspace("flux3_klein_base", geometry, 791);
+        assert!(phase.conditioning > 791 && phase.denoise > 791);
+        assert_eq!(phase.decode, 791);
+        let mut base = request_plan();
+        base.engine_id = "flux3_klein_base";
+        base.model_id = "flux3_klein_base".into();
+        let mut distilled = base.clone();
+        distilled.engine_id = "flux3_klein";
+        distilled.model_id = "flux3_klein".into();
+        let extra = flux3_cfg_additional_workspaces("flux3_klein_base", 1024, 768);
+        assert_eq!(
+            base.generic_total_peak_bytes(geometry) - distilled.generic_total_peak_bytes(geometry),
+            extra.0.max(extra.1)
+        );
+        assert_eq!(
+            base.generic_total_peak_bytes(geometry) - base.generic_headroom_bytes(geometry),
+            base.asset_bytes
+        );
+        for count in [1, 4, 8] {
+            let inputs = request_inputs(1024, 768, count);
+            assert_eq!(request_geometry(&inputs).batch, 1);
+            assert_eq!(
+                base.generic_total_peak_bytes(request_geometry(&inputs)),
+                base.generic_total_peak_bytes(geometry)
+            );
+        }
+    }
+
     // -------------------------------------------------------------------------------------
     // Image-MLX anchor injection seam (epic 22505 feature-end fix round): the mirror of
     // `vram_gate::tests`' seam, for the same reason — anchor currency is the PACKAGED
@@ -8426,6 +8655,111 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ReferenceRenderRecord {
+        safety: Vec<gen_core::MemoryRunContext>,
+        scopes: Vec<gen_core::MemoryRunContext>,
+        generated: usize,
+        finished: Vec<gen_core::MemoryRunOutcome>,
+    }
+
+    struct ReferenceRenderScope(std::sync::Arc<std::sync::Mutex<ReferenceRenderRecord>>);
+    impl gen_core::MemoryRequestScope for ReferenceRenderScope {
+        fn configure_request(
+            &mut self,
+            _: &mut gen_core::GenerationRequest,
+        ) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn enter_phase(&mut self, _: gen_core::MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn leave_phase(&mut self, _: gen_core::MemoryPhase) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn configure_decode(&mut self, _: u32, _: u32, _: MemoryGeometry) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn configure_attention(&mut self, _: u32) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn materialize_transformer_window(&mut self, _: u32, _: u32) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn finish(&mut self, outcome: gen_core::MemoryRunOutcome) -> gen_core::Result<()> {
+            self.0.lock().unwrap().finished.push(outcome);
+            Ok(())
+        }
+    }
+
+    struct ReferenceRenderGenerator {
+        descriptor: gen_core::ModelDescriptor,
+        record: std::sync::Arc<std::sync::Mutex<ReferenceRenderRecord>>,
+    }
+    impl gen_core::Generator for ReferenceRenderGenerator {
+        fn descriptor(&self) -> &gen_core::ModelDescriptor {
+            &self.descriptor
+        }
+        fn validate(&self, _: &gen_core::GenerationRequest) -> gen_core::Result<()> {
+            Ok(())
+        }
+        fn memory_strategy_safety_check(
+            &self,
+            context: &gen_core::MemoryRunContext,
+        ) -> gen_core::MemorySafetyDecision {
+            self.record.lock().unwrap().safety.push(context.clone());
+            gen_core::MemorySafetyDecision::Accept
+        }
+        fn begin_memory_strategy_request(
+            &self,
+            context: &gen_core::MemoryRunContext,
+        ) -> gen_core::Result<Option<Box<dyn gen_core::MemoryRequestScope + '_>>> {
+            self.record.lock().unwrap().scopes.push(context.clone());
+            Ok(Some(Box::new(ReferenceRenderScope(std::sync::Arc::clone(
+                &self.record,
+            )))))
+        }
+        fn generate(
+            &self,
+            request: &gen_core::GenerationRequest,
+            _: &mut dyn FnMut(gen_core::Progress),
+        ) -> gen_core::Result<gen_core::GenerationOutput> {
+            let mut record = self.record.lock().unwrap();
+            assert_eq!(
+                record.safety.len(),
+                1,
+                "provider guard must run before rendering"
+            );
+            assert_eq!(
+                record.scopes.len(),
+                1,
+                "the admitted scope must be open before rendering"
+            );
+            let context = &record.scopes[0];
+            assert_eq!(record.safety[0], *context);
+            assert_eq!(
+                context
+                    .reference_resources
+                    .as_ref()
+                    .unwrap()
+                    .prepared_canvases
+                    .len(),
+                request.conditioning.len()
+            );
+            assert_eq!(
+                (request.width, request.height),
+                (context.geometry.width, context.geometry.height)
+            );
+            assert!(request.flux3_reference_output.is_some());
+            record.generated += 1;
+            Ok(gen_core::GenerationOutput::Images(vec![gen_core::Image {
+                width: request.width,
+                height: request.height,
+                pixels: vec![137; (request.width * request.height * 3) as usize],
+            }]))
+        }
+    }
+
     fn request_generator(contract: Option<MemoryProviderContract>) -> RequestGenerator {
         RequestGenerator {
             descriptor: gen_core::ModelDescriptor {
@@ -8529,6 +8863,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         }
     }
 
@@ -8549,6 +8884,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         };
         let (mode, mode_key) = request_mode(&plain.mode);
         assert_eq!(mode, MemoryMode::TextToImage);
@@ -8710,6 +9046,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         };
         for provider in ["flux1_schnell", "flux1_dev"] {
             for mode in ["text_to_image", "style_variations"] {
@@ -8999,6 +9336,335 @@ mod tests {
         }
     }
 
+    #[test]
+    fn owned_reference_pricing_precedes_candidate_fit_and_none_preserves_decisions() {
+        fn descriptor() -> gen_core::ModelDescriptor {
+            let mut descriptor = fixture_generator().descriptor;
+            descriptor.capabilities.min_size = 16;
+            descriptor.capabilities.max_size = 4096;
+            descriptor.capabilities.max_count = 1;
+            descriptor
+        }
+        fn no_load(_: &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
+            panic!("reference fit must not load a generator")
+        }
+        fn price(
+            spec: &LoadSpec,
+            facts: &gen_core::MemoryReferenceResourceFacts,
+        ) -> gen_core::Result<u64> {
+            if facts.conditioning_tokens != 16 || facts.prepared_canvases != [(64, 64)] {
+                return Err(gen_core::Error::Unsupported(
+                    "invalid fixture reference facts".to_owned(),
+                ));
+            }
+            let WeightsSource::Dir(path) = &spec.weights else {
+                panic!("fixture directory")
+            };
+            Ok(if path.ends_with("q4") {
+                gib_to_bytes(4.0)
+            } else {
+                gib_to_bytes(16.0)
+            })
+        }
+        let registry = |priced: bool| {
+            let builder = gen_core::ProviderRegistryBuilder::new().register_generator(
+                gen_core::ModelRegistration {
+                    descriptor,
+                    load: no_load,
+                    footprint: None,
+                },
+            );
+            let builder = if priced {
+                builder.register_reference_workspace(gen_core::ReferenceWorkspaceRegistration {
+                    provider_id: "fixture_provider",
+                    reference_workspace_bytes: price,
+                })
+            } else {
+                builder
+            };
+            builder.build().unwrap()
+        };
+        let registry = registry(true);
+        let mut generator = fixture_generator();
+        // A real staging opportunity: separate 30 GiB conditioning and 3 GiB transformer stacks.
+        let contract = generator.contract.as_mut().unwrap();
+        contract.asset_facts.base_bytes = gib_to_bytes(33.0);
+        contract.asset_facts.conditioning_bytes = gib_to_bytes(30.0);
+        contract.load_shape = gen_core::LoadShape::DeferredMaterialization;
+        contract.calibration = Some(gen_core::MemoryCalibrationIdentity::new(
+            "fixture-formula-v2",
+            gen_core::LoadShape::DeferredMaterialization,
+        ));
+        let plan = MlxRequestPlan {
+            asset_bytes: gib_to_bytes(33.0),
+            calibration: MlxCalibrationConfig::Absent,
+            ..fixture_plan()
+        };
+        let mut q4 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("q4")));
+        q4.offload_policy = OffloadPolicy::Sequential;
+        let mut bf16 = LoadSpec::new(WeightsSource::Dir(PathBuf::from("bf16")));
+        bf16.offload_policy = OffloadPolicy::Sequential;
+        let plain = fixture_inputs(1024, 1024);
+        let data = tempfile::tempdir().unwrap();
+        let store = sceneworks_core::project_store::ProjectStore::new(
+            data.path().to_path_buf(),
+            "scope-test",
+        );
+        let project = store.create_project("owned pre-load references").unwrap();
+        let source = data.path().join("source.png");
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([17, 31, 47, 0]))
+            .save(&source)
+            .unwrap();
+        let asset = store
+            .import_asset(
+                &project.id,
+                sceneworks_core::project_store::UploadAsset {
+                    filename: "source.png".to_owned(),
+                    content_type: Some("image/png".to_owned()),
+                    source_path: source,
+                    source_asset_id: None,
+                    provenance: None,
+                },
+            )
+            .unwrap();
+        let payload = serde_json::json!({"projectId":project.id,"model":"flux3_klein","mode":"edit_image","sourceAssetId":asset["id"],"width":1024,"height":1024,"count":1});
+        let authored = sceneworks_core::image_request::ImageRequest::from_payload(
+            payload.as_object().unwrap(),
+        );
+        let references = crate::image_jobs::flux3_references::resolve_owned_references(
+            &authored,
+            data.path(),
+            std::path::Path::new(&project.path),
+        )
+        .unwrap()
+        .unwrap();
+        let facts = references.resources.clone();
+        assert_eq!(facts.prepared_canvases, [(64, 64)]);
+        assert_eq!(facts.conditioning_tokens, 16);
+        let mut referenced = plain.clone();
+        referenced.has_reference = true;
+        referenced.reference_count = 1;
+        referenced.reference_resources = Some(facts.clone());
+        let mut reference_legacy = referenced.clone();
+        reference_legacy.reference_resources = None;
+        let run = |inputs: &MlxRequestInputs,
+                   spec: Option<&LoadSpec>,
+                   total: f64,
+                   phase: MlxAdmissionPhase| {
+            select_request_with_budget_using_bundle(
+                phase,
+                generator.descriptor.capabilities.component_precision_floors,
+                generator.contract.as_ref(),
+                None,
+                &|_| None,
+                |base| {
+                    generator
+                        .contract
+                        .as_ref()
+                        .unwrap()
+                        .predicted_peak_from_base(base)
+                },
+                &plan,
+                inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Sequential,
+                crate::execution_planner::WarmPolicyProposal::inert(plan.engine_id),
+                fixture_budget(total),
+                plan.generic_total_peak_bytes(request_geometry(inputs)),
+                0,
+                &[],
+                None,
+                spec.map(|spec| ReferencePricing {
+                    spec,
+                    registry: &registry,
+                }),
+            )
+        };
+        for phase in [MlxAdmissionPhase::Generation, MlxAdmissionPhase::TierProbe] {
+            let without = run(&plain, None, 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            let with_unused_spec = run(&plain, Some(&q4), 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            assert_eq!(
+                format!("{:?}", without.context),
+                format!("{:?}", with_unused_spec.context)
+            );
+            let base = run(&reference_legacy, None, 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            let small = run(&referenced, Some(&q4), 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            let large = run(&referenced, Some(&bf16), 128.0, phase)
+                .unwrap()
+                .into_evaluation()
+                .unwrap();
+            assert_eq!(
+                small.context.predicted_peak_bytes,
+                base.context.predicted_peak_bytes + gib_to_bytes(4.0)
+            );
+            assert_eq!(
+                large.context.predicted_peak_bytes,
+                base.context.predicted_peak_bytes + gib_to_bytes(16.0)
+            );
+            assert_eq!(small.context.reference_resources, Some(facts.clone()));
+            let optimized = (8..128)
+                .find_map(|total| {
+                    run(&referenced, Some(&q4), f64::from(total), phase)
+                        .unwrap()
+                        .into_evaluation()
+                        .ok()
+                        .filter(|evaluation| evaluation.context.selection.strategy.is_optimized())
+                })
+                .expect("fixture must exercise an actually admitted optimized reference request");
+            // This is the SAME scope/render entry used by render_on_surface on both native lanes,
+            // past real pre-load pricing and selection, not an assertion on a helper's stored field.
+            for admission in [&small, &optimized] {
+                for backend in ["candle", "mlx"] {
+                    for engine_id in ["flux3_klein", "flux3_klein_base"] {
+                        let context = crate::memory_strategy::executable_context(
+                            engine_id,
+                            admission.context.clone(),
+                        )
+                        .expect("resource-bearing Resident and optimized contexts must survive");
+                        let mut descriptor = fixture_generator().descriptor;
+                        descriptor.id = engine_id;
+                        descriptor.backend = backend;
+                        let record = std::sync::Arc::new(std::sync::Mutex::new(
+                            ReferenceRenderRecord::default(),
+                        ));
+                        // Construct the loaded handle ONLY after the provider-priced pre-load gate.
+                        let loaded = ReferenceRenderGenerator {
+                            descriptor,
+                            record: std::sync::Arc::clone(&record),
+                        };
+                        let mut request = gen_core::GenerationRequest {
+                            prompt: "reference-scoped render".to_owned(),
+                            width: context.geometry.width,
+                            height: context.geometry.height,
+                            // The production reference-render seam, not the test, installs the
+                            // resolved original carriers and authored output-size intent.
+                            memory: Some(admission.memory),
+                            ..Default::default()
+                        };
+                        crate::image_jobs::flux3_references::render_reference_request(
+                            &loaded,
+                            &mut request,
+                            &references,
+                            Some(&context),
+                            &mut |_| {},
+                        )
+                        .unwrap();
+                        fn carrier(
+                            conditioning: &gen_core::Conditioning,
+                        ) -> (u32, u32, &[u8], Option<f32>) {
+                            match conditioning {
+                                gen_core::Conditioning::Reference { image, strength } => {
+                                    (image.width, image.height, &image.pixels, *strength)
+                                }
+                                gen_core::Conditioning::ReferenceRgba { image, strength } => {
+                                    (image.width, image.height, &image.pixels, *strength)
+                                }
+                                other => panic!("unexpected owned carrier: {other:?}"),
+                            }
+                        }
+                        assert_eq!(request.conditioning.len(), references.conditioning.len());
+                        for (actual, expected) in
+                            request.conditioning.iter().zip(&references.conditioning)
+                        {
+                            assert_eq!(carrier(actual), carrier(expected));
+                        }
+                        assert_eq!(request.flux3_reference_output, Some(references.output_size));
+                        let observed = record.lock().unwrap();
+                        assert_eq!(observed.safety, vec![admission.context.clone()]);
+                        assert_eq!(observed.scopes, vec![admission.context.clone()]);
+                        assert_eq!(observed.scopes[0].reference_resources, Some(facts.clone()));
+                        assert_eq!(observed.generated, 1);
+                        assert_eq!(
+                            observed.finished,
+                            vec![gen_core::MemoryRunOutcome::Complete]
+                        );
+                        drop(observed);
+                        assert!(
+                            crate::memory_strategy::generate_with_scope_report(
+                                &loaded,
+                                &mut request,
+                                None,
+                                &mut |_| {}
+                            )
+                            .is_err(),
+                            "references must not take the legacy no-context shortcut"
+                        );
+                        let mut substituted = context.clone();
+                        substituted
+                            .reference_resources
+                            .as_mut()
+                            .unwrap()
+                            .conditioning_tokens += 1;
+                        let error = crate::image_jobs::flux3_references::render_reference_request(
+                            &loaded,
+                            &mut request,
+                            &references,
+                            Some(&substituted),
+                            &mut |_| {},
+                        )
+                        .unwrap_err();
+                        assert!(error.to_string().contains("same admitted reference"));
+                        let mut missing_facts = context.clone();
+                        missing_facts.reference_resources = None;
+                        assert!(crate::memory_strategy::generate_with_scope_report(
+                            &loaded,
+                            &mut request,
+                            Some(&missing_facts),
+                            &mut |_| {}
+                        )
+                        .is_err());
+                        assert_eq!(
+                            record.lock().unwrap().generated,
+                            1,
+                            "missing facts must fail before rendering"
+                        );
+                    }
+                }
+            }
+            let mut rejected_only_with_references = 0;
+            for total in 8..128 {
+                let without = run(&plain, None, f64::from(total), phase).unwrap();
+                let with = run(&referenced, Some(&bf16), f64::from(total), phase).unwrap();
+                if matches!(without, MlxRequestAdmission::Admitted(_))
+                    && matches!(with, MlxRequestAdmission::Rejected(_))
+                {
+                    rejected_only_with_references += 1;
+                }
+            }
+            assert!(
+                rejected_only_with_references > 0,
+                "reference cost never changed the fit decision"
+            );
+        }
+        let error = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &referenced,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(128.0),
+            plan.generic_total_peak_bytes(request_geometry(&referenced)),
+            0,
+            &[],
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("reference-aware memory admission"));
+    }
+
     /// `None` when the packaged bundle cannot supply this fixture — see the note beside the
     /// selection below. The caller withholds its question rather than reddening.
     fn packaged_krea_plan() -> Option<MlxRequestPlan> {
@@ -9224,6 +9890,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         }
     }
 
@@ -9699,6 +10366,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect_err("the 6 GiB high record plus its 3 GiB foreign reserve must refuse");
         let message = error.to_string();
@@ -9760,6 +10428,7 @@ mod tests {
                 0,
                 &[],
                 Some(&packaged_bundle()),
+                None,
             )
         };
 
@@ -9832,6 +10501,7 @@ mod tests {
             0,
             &[],
             Some(&packaged_bundle()),
+            None,
         )
         .expect("the exact 896 cell fits once its 128 GiB-host reserve is normalized to 83 GiB");
         assert_eq!(
@@ -10366,6 +11036,7 @@ mod tests {
             conditioning_windows: None,
             negative_branch: false,
             prefix_kv_cache_eligible: false,
+            reference_resources: None,
         };
         assert_eq!(
             provider_request_mode("flux2_klein_9b", &public_base),
@@ -10464,6 +11135,7 @@ mod tests {
                     conditioning_windows: None,
                     negative_branch: false,
                     prefix_kv_cache_eligible: false,
+                    reference_resources: None,
                 };
                 let evaluation = evaluate_request_with_budget(
                     &generator,
@@ -10515,6 +11187,7 @@ mod tests {
                 conditioning_windows: None,
                 negative_branch: false,
                 prefix_kv_cache_eligible: false,
+                reference_resources: None,
             };
             let mut refused = plan.clone();
             refused.load_shape_declaration_result = LoadShapeDeclarationResult::Refused;
@@ -10648,6 +11321,7 @@ mod tests {
                     conditioning_windows: None,
                     negative_branch: false,
                     prefix_kv_cache_eligible: false,
+                    reference_resources: None,
                 };
                 let evaluation = evaluate_request_with_budget(
                     &generator,
@@ -11203,6 +11877,7 @@ mod tests {
                 gib_to_bytes(46.0),
                 0,
                 &[],
+                None,
             )
         }
     }
@@ -13974,6 +14649,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("selected exact candidate");
         assert_eq!(evaluated.process_limit_bytes, Some(gib_to_bytes(5.0)));
@@ -13994,6 +14670,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect_err("the exact covered 5 GiB cell must reject when only 3 GiB is safely available");
         let unfit = unfit.to_string();
@@ -14028,6 +14705,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("a mixed-precision provider falls back to its conservative resident estimate");
 
@@ -14070,6 +14748,7 @@ mod tests {
                 gib_to_bytes(4.0),
                 0,
                 &[],
+                None,
                 None,
             )
             .unwrap_or_else(|error| panic!("{label} provider binding failed: {error}"));
@@ -14209,6 +14888,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect(
             "a load-shape mismatch must degrade to the estimate ladder, not refuse the request",
@@ -14303,6 +14983,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the matching-shape cell is admitted");
         assert!(
@@ -14364,6 +15045,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the resident cell is admitted");
         assert_eq!(
@@ -14432,6 +15114,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect(
             "a measured cell on a rung the loaded contract does not implement must degrade to the \
@@ -14607,6 +15290,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("a composition drift must degrade to the estimate ladder, not refuse the request");
         assert_eq!(
@@ -14642,6 +15326,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the agreeing resident sibling is admitted");
         assert_eq!(
@@ -14713,6 +15398,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect(
             "a parameter-range narrowing must degrade to the estimate ladder, not refuse the \
@@ -14747,6 +15433,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the still-valid resident sibling is admitted");
         assert_eq!(
@@ -16453,6 +17140,7 @@ mod tests {
                 0,
                 &[],
                 Some(&bundle),
+                None,
             )
         };
         let admitted_moved = evaluate(&moved_plan, &inputs, 8.5, 4.0)
@@ -16564,6 +17252,7 @@ mod tests {
                 0,
                 &[],
                 Some(&bundle),
+                None,
             )
             .expect("the exact covered request must select its verified rung")
         };
@@ -16606,6 +17295,7 @@ mod tests {
                 0,
                 &[],
                 Some(&bundle),
+                None,
             )
             .unwrap_or_else(|error| panic!("{total_gib} GiB ladder failed: {error}"));
             assert_eq!(evaluation.context.selection.strategy, expected);
@@ -16743,6 +17433,7 @@ mod tests {
                 0,
                 &[],
                 Some(&bundle),
+                None,
             )
             .unwrap_or_else(|error| panic!("{total_gib} GiB Krea route failed: {error}"));
             assert_eq!(evaluation.context.selection.strategy, expected);
@@ -16779,6 +17470,7 @@ mod tests {
             0,
             &[],
             Some(&bundle),
+            None,
         )
         .expect("the bounded-decode candidate's own 5+2 GiB boundary fits");
         assert_eq!(
@@ -17803,6 +18495,7 @@ mod tests {
                 committed,
                 &[],
                 None,
+                None,
             )
             .expect("the fixture request is structurally admissible")
         };
@@ -17965,6 +18658,7 @@ mod tests {
                 plan.generic_total_peak_bytes(request_geometry(inputs)),
                 0,
                 &[],
+                None,
                 None,
             )
             .expect("a roomy budget admits the request")
@@ -18180,6 +18874,7 @@ mod tests {
                     committed,
                     &[],
                     None,
+                    None,
                 )
                 .expect("structurally admissible")
             };
@@ -18194,6 +18889,7 @@ mod tests {
                 total_peak,
                 committed,
                 &[],
+                None,
                 None,
             ) {
                 Ok(evaluation) => MlxRequestAdmission::Admitted(Box::new(evaluation)),
@@ -18214,6 +18910,7 @@ mod tests {
                     &plan,
                     &inputs,
                     budget(committed),
+                    None,
                 )
                 .expect("structurally admissible")
             };
@@ -18235,6 +18932,7 @@ mod tests {
                     0,
                     &[],
                     None,
+                    None,
                 )
                 .expect("structurally admissible")
             };
@@ -18250,6 +18948,7 @@ mod tests {
                     probe_total_peak,
                     0,
                     &[],
+                    None,
                     None,
                 )
                 .is_ok()
@@ -18480,6 +19179,7 @@ mod tests {
                 plan.generic_total_peak_bytes(geometry),
                 0,
                 &[],
+                None,
                 None,
             )
             .expect("structurally admissible")
@@ -20146,6 +20846,9 @@ mod tests {
             "sdxl",
             // Iris-3B (sc-25679): `supports_sequential_offload` — encoder, drop, then backbone.
             "iris_3b",
+            // FLUX 3 Image Klein (sc-26234): the same staged shape — tower, drop, then DiT + AE.
+            "flux3_klein",
+            "flux3_klein_base",
             "z_image",
             "z_image_control",
             "z_image_turbo",
@@ -22533,6 +23236,7 @@ mod declared_sequential_release_artifact_tests {
                     conditioning_windows: None,
                     negative_branch: false,
                     prefix_kv_cache_eligible: false,
+                    reference_resources: None,
                 };
                 preflight_request(candidate, &plan, &inputs, budget).unwrap()
             };

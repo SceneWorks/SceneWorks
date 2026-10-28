@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use sceneworks_core::contracts::GenerationMetrics;
 
 use crate::api_client::ApiClient;
-use crate::gpu::gpu_utilization;
+use crate::gpu::{gpu_utilization, is_cpu_worker};
 
 /// Reset the MLX peak-memory high-water mark at job start (macOS/MLX only). The
 /// counter is process-global, so this scopes the subsequent `get_peak_memory`
@@ -63,7 +63,8 @@ async fn total_memory_bytes(sampled_total_mb: u64) -> Option<u64> {
 fn normalize_backend(gpu_id: &str) -> &'static str {
     match gpu_id {
         "mlx" => "mlx",
-        "" | "cpu" => "cpu",
+        "" => "cpu",
+        value if is_cpu_worker(value) => "cpu",
         _ => "cuda",
     }
 }
@@ -95,11 +96,17 @@ impl JobMetricsProbe {
     /// sampler (see [`GPU_SAMPLE_INTERVAL`]). A CPU-only worker has no GPU to
     /// query, so no sampler is spawned.
     pub(crate) fn start(gpu_id: &str) -> Self {
-        reset_peak_memory();
+        Self::start_with(gpu_id, reset_peak_memory)
+    }
+
+    fn start_with(gpu_id: &str, reset: impl FnOnce()) -> Self {
+        if normalize_backend(gpu_id) != "cpu" {
+            reset();
+        }
         let load_permille_max = Arc::new(AtomicU32::new(0));
         let mem_used_mb_max = Arc::new(AtomicU64::new(0));
         let mem_total_mb = Arc::new(AtomicU64::new(0));
-        let sampler = if gpu_id.is_empty() || gpu_id == "cpu" {
+        let sampler = if normalize_backend(gpu_id) == "cpu" {
             None
         } else {
             let gpu_id = gpu_id.to_owned();
@@ -138,7 +145,20 @@ impl JobMetricsProbe {
 
     /// Stop sampling and build the metrics block: peak memory (MLX exact on
     /// macOS, sampled max elsewhere), peak GPU load, total wall-clock, backend.
-    pub(crate) async fn finish(mut self) -> GenerationMetrics {
+    pub(crate) async fn finish(self) -> GenerationMetrics {
+        self.finish_with(mlx_peak_memory_bytes, total_memory_bytes)
+            .await
+    }
+
+    async fn finish_with<F, Fut>(
+        mut self,
+        read_peak: impl FnOnce() -> Option<u64>,
+        read_total: F,
+    ) -> GenerationMetrics
+    where
+        F: FnOnce(u64) -> Fut,
+        Fut: std::future::Future<Output = Option<u64>>,
+    {
         if let Some(handle) = self.sampler.take() {
             handle.abort();
         }
@@ -148,9 +168,14 @@ impl JobMetricsProbe {
             .then(|| serde_json::Number::from_f64(load_permille as f64 / 10.0))
             .flatten();
         let sampled_used_mb = self.mem_used_mb_max.load(Ordering::Relaxed);
-        let peak_memory_bytes = mlx_peak_memory_bytes()
-            .or_else(|| (sampled_used_mb > 0).then_some(sampled_used_mb * 1024 * 1024));
-        let total_bytes = total_memory_bytes(self.mem_total_mb.load(Ordering::Relaxed)).await;
+        let (peak_memory_bytes, total_bytes) = if self.backend == "cpu" {
+            (None, None)
+        } else {
+            let peak = read_peak()
+                .or_else(|| (sampled_used_mb > 0).then_some(sampled_used_mb * 1024 * 1024));
+            let total = read_total(self.mem_total_mb.load(Ordering::Relaxed)).await;
+            (peak, total)
+        };
         let peak_memory_pct = match (peak_memory_bytes, total_bytes) {
             (Some(peak), Some(total)) if total > 0 => {
                 serde_json::Number::from_f64(peak as f64 / total as f64 * 100.0)
@@ -356,5 +381,54 @@ mod tests {
         assert!(metrics.total_ms.is_some());
         assert!(metrics.peak_gpu_load_pct.is_none());
         assert!(metrics.peak_memory_pct.is_none());
+    }
+}
+
+#[cfg(test)]
+mod cpu_preparation_metrics_tests {
+    use super::*;
+    #[tokio::test]
+    async fn cpu_preparation_actual_metrics_start_finish_never_calls_gpu_hooks() {
+        for id in ["cpu", ""] {
+            let probe = JobMetricsProbe::start_with(id, || panic!("CPU reset GPU peak memory"));
+            assert!(probe.sampler.is_none());
+            let metrics = probe
+                .finish_with(
+                    || panic!("CPU read GPU memory"),
+                    |_| -> std::future::Ready<Option<u64>> {
+                        panic!("CPU queried total GPU memory")
+                    },
+                )
+                .await;
+            assert_eq!(metrics.backend.as_deref(), Some("cpu"));
+            assert!(metrics.total_ms.is_some());
+            assert!(metrics.peak_memory_bytes.is_none());
+            assert!(metrics.peak_memory_pct.is_none());
+            assert!(metrics.peak_gpu_load_pct.is_none());
+        }
+    }
+    // Current-thread executor; finish aborts the sampler before the first yield.
+    // Inject all memory hooks, never call an actual platform memory/device API.
+    #[tokio::test]
+    async fn gpu_preparation_metrics_preserves_original_hook_order_and_results() {
+        for id in ["mlx", "0", "1"] {
+            let calls = std::cell::RefCell::new(Vec::new());
+            let probe = JobMetricsProbe::start_with(id, || calls.borrow_mut().push("reset"));
+            let metrics = probe
+                .finish_with(
+                    || {
+                        calls.borrow_mut().push("peak");
+                        Some(256)
+                    },
+                    |_| {
+                        calls.borrow_mut().push("total");
+                        std::future::ready(Some(1024))
+                    },
+                )
+                .await;
+            assert_eq!(*calls.borrow(), vec!["reset", "peak", "total"]);
+            assert_eq!(metrics.peak_memory_bytes, Some(256));
+            assert_eq!(metrics.peak_memory_pct.unwrap().as_f64(), Some(25.0));
+        }
     }
 }

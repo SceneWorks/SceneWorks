@@ -6481,6 +6481,557 @@
       }
     },
     {
+      // FLUX 3 Image Klein, the DISTILLED checkpoint (epic sc-26233, story sc-26234): one package,
+      // `black-forest-labs/flux-3-image-klein` @ 8454017f, served by the native MLX `flux3_klein`
+      // provider (`mlx-gen-flux3`; the Candle/CUDA twin is sc-26235, so the entry is Mac-only at
+      // this pin). The package bundles the bf16 5.6B flow-map DiT (`model.safetensors`), the f32
+      // autoencoder (`ae.safetensors`) and the Qwen3-VL-4B-Instruct text encoder (`text_encoder/`,
+      // byte-identical to Qwen/Qwen3-VL-4B-Instruct @ ebb281ec — the same LFS sha256 of both
+      // shards), and the engine reads all three from the package root
+      // (`gen_core::flux3::GenerationResources`): no separate component install. Download the WHOLE
+      // pinned repo, including variants, diffusers layout, configs, licenses and gallery assets.
+      //
+      // TIERS (sc-26241) — five packages, every one a distinct artifact, never a load-time
+      // transform of another: bf16 (the dense root package, both backends); q4 / q8 converted ON
+      // THIS MACHINE from the dense package by the backend's own inference converter (Candle GGML
+      // Q4_1 / Q8_0 off-Mac, MLX affine W4/W8 group 64 on macOS — the `localDerivation` rows); and
+      // the publisher fp8r / nvfp4 packages shipped inside the same snapshot at `variants/<tier>`,
+      // Candle on CUDA past their device floor (sm_89 / sm_120). A request names exactly one; an
+      // absent tier is bf16, never the app-wide q8 default.
+      //
+      // CONTROL SURFACE (E6) — exactly what the engine honours in S1: prompt, size on a 16-px grid
+      // (64..=4096, matching the engine and reference-derived canvases), count <= 8 (rendered one after another from
+      // seed + i), seed, steps (the release's 16), the flow-map Euler sampler (`euler`, the only
+      // integrator; its schedule alpha 6.93 is fixed, so no scheduler / shift axis). It is a flow
+      // map: NO classifier-free guidance and NO negative prompt — the engine refuses any guidance
+      // and any negative prompt by name (`supportsGuidance` /
+      // `supportsNegativePrompt` false, the z_image_turbo shape). Ordered 1–10 owned references
+      // condition the AE-only editing lane (sc-26236); boxes are sc-26237.
+      // Base checkpoint + identity-checked LoRA are integrated by sc-26239; tiers by sc-26241.
+      // Prompt upsampling uses the separate optional component below (sc-26238).
+      "id": "flux3_klein",
+      "loraCompatibility": { "families": ["flux3"], "types": ["style", "enhance", "character"], "baseModel": "black-forest-labs/flux-3-image-klein", "baseRevision": "8454017f9ebaada30c998fccd9f67a80c7580f68", "adapterKinds": ["lora"] },
+      "image": {
+        "supportsGuidance": false,
+        "supportsNegativePrompt": false,
+        // The released checkpoint renders on a 16-px token grid; Image Studio hints at it below
+        // 1024² and never restricts the size.
+        "patchGridVisibleBelow": 1024
+      },
+      "name": "FLUX 3 Image Klein",
+      "family": "flux3",
+      "type": "image",
+      "adapter": "mlx_flux3",
+      // The same request and pinned package run on MLX (sc-26234) and Candle/CUDA (sc-26235).
+      "macOnly": false,
+      "capabilities": ["text_to_image", "edit_image", "image_to_image", "character_image"],
+      "downloads": [
+        // The upstream package, pulled directly from Black Forest Labs (GATED under the FLUX
+        // Kommunity License; no SceneWorks re-host). Empty files means ALL 42 files at this exact
+        // revision. Authenticated recursive HF tree sums to 43,317,649,602 bytes, including fp8r /
+        // nvfp4 and diffusers copies. This is download/disk accounting, not a resident-memory claim.
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "bf16",
+          "default": true,
+          "files": [],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: the publisher FP8 rowwise package. It ships INSIDE the same pinned snapshot
+          // (`variants/fp8r/`: config.json, hf_quant_config.json, manifest.json and a
+          // 6,270,949,144-byte model.safetensors, by the unauthenticated Hub tree listing), so this
+          // tier row is the SAME whole-repository download as the bf16 row: installing either
+          // installs both. Loaded as shipped by the Candle provider (`Quant::Fp8Rowwise`) on CUDA
+          // past the sm_89 floor, with the root `text_encoder/` and `ae.safetensors` as explicit
+          // components. MLX advertises no FP8R tier, so the row is Windows/Linux only.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "fp8r",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: the publisher NVFP4 package (`variants/nvfp4/`, a 5,277,674,144-byte
+          // model.safetensors), the same whole-repository download. Candle on CUDA past the sm_120
+          // floor only.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "nvfp4",
+          "files": [],
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 43317649602, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: Candle GGML Q8_0, CONVERTED ON THIS MACHINE from the dense bf16 package by the
+          // inference converter (`candle_gen_flux3::convert::convert_ggml`) — the FLUX Kommunity
+          // License weights are never re-hosted. The pins are the converter's deterministic output
+          // for this exact source (`local_derivation::tests::flux3_conversions_reproduce_the_catalog_pins`).
+          // The derived package owns only its DiT, config, licence files and receipt; the text
+          // encoder and autoencoder stay the snapshot's own (receipt-verified external components).
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q8",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-candle-ggml-q8_0-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 6567555584,
+            "weightsSha256": "60d8c4b83a04741168d8bb17992e772e105d735db82b6c796d787007ab09e34f",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native Candle tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 49885249611, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: Candle GGML Q4_1, converted locally exactly like the q8 row above.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q4",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-candle-ggml-q4_1-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4453626272,
+            "weightsSha256": "037e023c665c44bd35bc979512f8b5e2a25b21dff6a5b59ac24ffcde2ab5b7ba",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native Candle tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 47771320299, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: MLX affine W8A16 (group 64), converted locally by the backend-neutral inference
+          // packer (`gen_core::flux3::native_convert::convert_affine`) for MLX's `quantized_matmul`.
+          // Deterministic and CPU-only, so its pins are reproduced on any host; only LOADING it needs
+          // Apple Silicon. A Candle GGML package and this one are different artifacts: no
+          // cross-backend reuse.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q8",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-mlx-affine-q8-g64-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 6567607528,
+            "weightsSha256": "2ca6f2dbd2f921b3b561c89a8d1b0e327691405260278bc070b59d35fc2b314b",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native MLX tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 49885301565, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26241: MLX affine W4A16 (group 64), converted locally like the q8 row above.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein",
+          "revision": "8454017f9ebaada30c998fccd9f67a80c7580f68",
+          "variant": "q4",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-mlx-affine-q4-g64-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4151688144,
+            "weightsSha256": "114ab4381c7a129dda73641ecac090b2d8705d717ba6e3986b20cf48f88c8e87",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native MLX tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 43317649602,
+          "footprint": { "diskSizeBytes": 47469382181, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-pup",
+          "revision": "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "prompt_upsampler",
+          "files": [],
+          "estimatedSizeBytes": 18839746673
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/black-forest-labs/flux-3-image-klein"
+      },
+      // FLUX Kommunity License v1.0 (gated): accept the licence at the source repo and add a
+      // Hugging Face token under Settings → Service credentials before downloading.
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/flux-3-image-klein/blob/main/LICENSE.md",
+      "defaults": {
+        // Release sampling defaults (`gen_core::flux3::DEFAULT_STEPS` / `DEFAULT_SIZE`; the flow map
+        // samples without CFG, so the guidance default is the inert 0 of the z_image_turbo shape).
+        "resolution": "1024x1024",
+        "steps": 16,
+        "guidanceScale": 0,
+        "sampler": "euler",
+        "count": 1
+      },
+      "limits": {
+        "resolutions": ["1024x1024", "1152x896", "896x1152", "1216x832", "832x1216", "1344x768", "768x1344", "768x768", "512x512"],
+        "count": [1, 2, 4, 8],
+        "minDimension": 64,
+        "maxDimension": 4096,
+        "maxReferenceAssets": 10,
+        "requiresDimensionsMultipleOf": 16,
+        // gen_core::flux3::SAMPLERS: the flow-map Euler step is the only integrator.
+        "samplers": ["euler"]
+      },
+      "mlx": {
+        // Conservative DECLARED floor (no measurement campaign): bf16 DiT (11.1 GB) + bf16 Qwen3-VL-4B
+        // tower (8.9 GB) + f32 autoencoder (0.34 GB) resident plus the 1024² attention and decoder
+        // activations. Replaced by measured evidence at the epic-end campaign (sc-26243).
+        //
+        // Per-tier floors (sc-26241), DERIVED with one rule on both lanes: the dense floor with its
+        // DiT term replaced by the tier's DiT as the provider's own memory contract prices it
+        // (`native_dit_bytes` over the package's tensor headers — packed targets at stored bytes,
+        // everything else as the dense path holds it), rounded UP:
+        //   floor = ceil(32 - (dense DiT GiB - tier DiT GiB)); dense DiT = 10.335 GiB
+        //   MLX affine (W4/W8 + bf16 scales/biases, no packed transient):
+        //     q8 6.116 GiB -> ceil(27.78) = 28    q4 3.866 GiB -> ceil(25.53) = 26
+        // Advisory on MLX (the MLX fit gate admits from the provider's own memory model). Measured
+        // rows from sc-26243 replace every derived floor.
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": { "bf16": 32, "q8": 28, "q4": 26 }
+      },
+      "candle": {
+        // Declared conservative resident floor, not measured: dense bf16 transformer and encoder,
+        // f32 autoencoder, activation scratch and allocator reserve. Terminal sc-26243 owns fitting.
+        //
+        // Per-tier floors (sc-26241), the same rule as the MLX block above, over the Candle
+        // provider's `native_dit_bytes` (which also charges the 256 MiB packed-GEMM transient once):
+        //   q8 GGML Q8_0 6.366 GiB -> ceil(28.03) = 29    q4 GGML Q4_1 4.398 GiB -> ceil(26.06) = 27
+        //   fp8r 6.090 GiB -> ceil(27.76) = 28            nvfp4 5.165 GiB -> ceil(26.83) = 27
+        // (fp8r/nvfp4 from the publisher packages' own headers, staged scales included). The
+        // scalar stays the densest tier's floor, the conservative fallback for any unlisted key.
+        "measured": false,
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": { "bf16": 32, "q8": 29, "q4": 27, "fp8r": 28, "nvfp4": 27 }
+      },
+      "ui": {
+        "promptEnhance": true,
+        "label": "FLUX 3 Image Klein",
+        "multiReference": true,
+        "description": "Black Forest Labs FLUX 3 Image Klein, the distilled checkpoint: a 5.6B flow-map transformer with its 16x autoencoder, conditioned on the bundled Qwen3-VL-4B-Instruct text encoder. Native MLX on Apple Silicon and Candle/CUDA on Windows/Linux NVIDIA; 16 Euler steps, no classifier-free guidance. One ~43.3 GB gated whole-repository download (FLUX Kommunity License); conservative resident memory floor ~32 GB at 1024\u00b2.",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "hideReferenceStrength": true,
+        "promptGuide": {
+          "title": "FLUX 3 Image Klein Prompt Guide",
+          "path": "/prompt-guides/flux3-image-klein.md",
+          "sources": [
+            { "label": "FLUX 3 Image Klein model card", "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein" },
+            { "label": "FLUX 3 Image Klein code", "url": "https://github.com/black-forest-labs/flux-3-image-klein" },
+            { "label": "FLUX 3 Image Klein announcement", "url": "https://bfl.ai/blog/flux-3-image-klein" }
+          ]
+        }
+      }
+    },
+    // S6 (sc-26239): separate frozen CFG checkpoint, not an alias of the distilled flow map.
+    // Whole pinned repository download. Publisher variants stay in the same pinned source.
+    // q4/q8 derivation rows are intentionally absent until REAL base conversions supply output
+    // sizes and SHA-256 pins (base file access is HTTP 403). Never reuse distilled pins or
+    // advertise these as installed/runnable; shared native tier plumbing refuses missing rows.
+    // Declared 32 GB weight/reserve floor, not a measured peak; source-derived two-row
+    // conditioning/denoise activations and optional VLM are accounted separately.
+    {
+      "id": "flux3_klein_base",
+      "image": {
+        "patchGridVisibleBelow": 1024
+      },
+      "name": "FLUX 3 Image Klein Base",
+      "family": "flux3",
+      "type": "image",
+      "adapter": "mlx_flux3",
+      "macOnly": false,
+      "capabilities": ["text_to_image", "edit_image", "image_to_image", "character_image"],
+      "downloads": [
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "default": true,
+          "files": [],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": {
+            "diskSizeBytes": 43229093855,
+            "residentMemoryBytes": null,
+            "peakMemoryBytes": null
+          },
+          "variant": "bf16"
+        },
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "files": [],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": {
+            "diskSizeBytes": 43229093855,
+            "residentMemoryBytes": null,
+            "peakMemoryBytes": null
+          },
+          "variant": "fp8r",
+          "platforms": [
+            "windows",
+            "linux"
+          ]
+        },
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "files": [],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": {
+            "diskSizeBytes": 43229093855,
+            "residentMemoryBytes": null,
+            "peakMemoryBytes": null
+          },
+          "variant": "nvfp4",
+          "platforms": [
+            "windows",
+            "linux"
+          ]
+        },
+        {
+          // sc-26243: Candle GGML Q8_0 of the BASE checkpoint, CONVERTED ON THIS MACHINE from its dense
+          // bf16 package by the inference converter, exactly like the distilled rows; the FLUX Kommunity
+          // License weights are never re-hosted. Pins are the genuine converter output observed for this exact
+          // source (`local_derivation::tests::flux3_capture_conversion_artifacts`, 2026-10-21, inference
+          // da7534d5); the package owns only its DiT, config, licence files and receipt.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "variant": "q8",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-candle-ggml-q8_0-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 6547108144,
+            "weightsSha256": "b7b35072a153c9cc8a8f5d83babac8a7e1c89dd9cb1f04c6a1235068027fd5f9",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native Candle tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": { "diskSizeBytes": 49776246342, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26243: Candle GGML Q4_1 of the base checkpoint, converted locally exactly like the q8 row above.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "variant": "q4",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-candle-ggml-q4_1-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4433178832,
+            "weightsSha256": "c62a66ba7b86b4d3b84b043b07bb54307d19b302285aaf111842c0862dfeaa8b",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native Candle tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["windows", "linux"],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": { "diskSizeBytes": 47662317030, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26243: MLX affine Q8 (group 64) of the base checkpoint, converted locally like the Candle rows.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "variant": "q8",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-mlx-affine-q8-g64-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 6547160088,
+            "weightsSha256": "1f82b806f7b29b46ee0a083054253fe3990a08634743a095f8993e945ec34df6",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native MLX tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": { "diskSizeBytes": 49776298296, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          // sc-26243: MLX affine Q4 (group 64) of the base checkpoint, converted locally like the Candle rows.
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-base",
+          "revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+          "variant": "q4",
+          "files": [],
+          "localDerivation": {
+            "fromVariant": "bf16",
+            "conversion": "flux3-mlx-affine-q4-g64-v1",
+            "weightsFile": "model.safetensors",
+            "weightsBytes": 4131240680,
+            "weightsSha256": "371fc8243bb40f06104a468e0097d5ecf1f887262d1cdb541a06e5cd3148d701",
+            "reason": "FLUX Kommunity License weights: SceneWorks does not redistribute converted packages, so the native MLX tier is converted on this machine from the verified pinned original."
+          },
+          "platforms": ["macos"],
+          "estimatedSizeBytes": 43229093855,
+          "footprint": { "diskSizeBytes": 47360378888, "residentMemoryBytes": null, "peakMemoryBytes": null }
+        },
+        {
+          "provider": "huggingface",
+          "repo": "black-forest-labs/flux-3-image-klein-pup",
+          "revision": "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
+          "coRequisite": true,
+          "required": "soft",
+          "componentId": "prompt_upsampler",
+          "files": [],
+          "estimatedSizeBytes": 18839746673
+        }
+      ],
+      "paths": {
+        "model": "${HF_CACHE}/black-forest-labs/flux-3-image-klein-base"
+      },
+      "gated": true,
+      "credentialHost": "huggingface.co",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/flux-3-image-klein-base/blob/1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4/LICENSE.md",
+      "defaults": {
+        "resolution": "1024x1024",
+        "steps": 50,
+        "guidanceScale": 3.5,
+        "sampler": "euler",
+        "count": 1
+      },
+      "limits": {
+        "resolutions": [
+          "1024x1024",
+          "1152x896",
+          "896x1152",
+          "1216x832",
+          "832x1216",
+          "1344x768",
+          "768x1344",
+          "768x768",
+          "512x512"
+        ],
+        "count": [
+          1,
+          2,
+          4,
+          8
+        ],
+        "minDimension": 64,
+        "maxDimension": 4096,
+        "maxReferenceAssets": 10,
+        "requiresDimensionsMultipleOf": 16,
+        "samplers": [
+          "euler"
+        ]
+      },
+      "mlx": {
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": {
+          "bf16": 32,
+          "q8": 29,
+          "q4": 27
+        }
+      },
+      "candle": {
+        "measured": false,
+        "minMemoryGb": 32,
+        "minMemoryGbByTier": {
+          "bf16": 32,
+          "q8": 29,
+          "q4": 27,
+          "fp8r": 28,
+          "nvfp4": 27
+        }
+      },
+      "ui": {
+        "hideReferenceStrength": true,
+        "label": "FLUX 3 Image Klein Base",
+        "multiReference": true,
+        "description": "Black Forest Labs FLUX 3 Image Klein Base: the native CFG checkpoint, default 50 Euler steps and guidance 3.5, with independent negative conditioning and identity-checked additive LoRA. Bundled pinned Qwen3-VL encoder and autoencoder; gated FLUX Kommunity License. Memory figures are unmeasured declarations; two-row denoising activations and optional prompt upsampler are accounted separately. Base q4/q8 local conversion installation awaits verified output size/SHA pins after base repository access is granted; no dense substitution.",
+        "recommendedFor": ["text_to_image", "edit_image", "character_image"],
+        "promptGuide": {
+          "title": "FLUX 3 Image Klein Prompt Guide",
+          "path": "/prompt-guides/flux3-image-klein.md",
+          "sources": [
+            {
+              "label": "FLUX 3 Image Klein model card",
+              "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-base"
+            },
+            {
+              "label": "FLUX 3 Image Klein code",
+              "url": "https://github.com/black-forest-labs/flux-3-image-klein"
+            },
+            {
+              "label": "FLUX 3 Image Klein announcement",
+              "url": "https://bfl.ai/blog/flux-3-image-klein"
+            }
+          ]
+        },
+        "promptEnhance": true
+      },
+      "loraCompatibility": {
+        "families": [
+          "flux3"
+        ],
+        "types": [
+          "style",
+          "enhance",
+          "character"
+        ],
+        "baseModel": "black-forest-labs/flux-3-image-klein-base",
+        "baseRevision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+        "adapterKinds": [
+          "lora"
+        ]
+      }
+    },
+    {
+      // sc-26238: the independent, ungated Apache-2.0 Qwen3.5-9B prompt upsampler. The 12-file
+      // pinned Hub tree totals 18,839,746,673 bytes; 18,819,722,392 of those are model weights.
+      // Whole-repository install, no Python runtime. The native image provider accounts for this
+      // optional resident VLM separately; these are download bytes, not a measured memory peak.
+      "id": "flux3_image_klein_pup",
+      "name": "FLUX 3 Prompt Upsampler",
+      "family": "flux3",
+      "type": "utility",
+      "componentOnly": true,
+      "capabilities": [],
+      "gated": false,
+      "license": "Apache-2.0",
+      "licenseUrl": "https://huggingface.co/black-forest-labs/flux-3-image-klein-pup/tree/8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
+      "downloads": [{
+        "provider": "huggingface",
+        "repo": "black-forest-labs/flux-3-image-klein-pup",
+        "revision": "8b069751eb5dcab23829d9c5eccb470eb8b8a4ed",
+        "files": [],
+        "estimatedSizeBytes": 18839746673
+      }],
+      "paths": { "model": "${HF_CACHE}/black-forest-labs/flux-3-image-klein-pup" },
+      "defaults": {},
+      "limits": {},
+      "loraCompatibility": { "families": [], "types": [] },
+      "ui": {
+        "label": "FLUX 3 Prompt Upsampler",
+        "description": "Optional native Qwen3.5-9B prompt upsampler for FLUX 3 Image Klein. Install separately to enable Enhance prompt; bypass needs no upsampler. Four upstream text/editing and locked-box modes are implemented natively. Apache-2.0; separate ~18.84 GB download and separate memory admission, not part of the image encoder.",
+        "recommendedFor": []
+      }
+    },
+    {
       // Iris-3B (epic sc-25678, story sc-25679) — the GENERATION task of speridlabs/iris-3b: a
       // pixel-space (no VAE) flow-matching DiT conditioned on 12 intermediate layers of
       // Qwen3-VL-4B-Instruct, served natively by inference's `mlx-gen-iris` (`iris_3b`).
