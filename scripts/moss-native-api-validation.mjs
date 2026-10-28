@@ -31,7 +31,8 @@
 // compilation. Compile time has its own separate workflow timeout and is not
 // part of the per-case bound.
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { digest, executeCpuCommand, parseTestResult } from "./moss-consumer-assertions.mjs";
@@ -328,23 +329,28 @@ public static class MossProcessSnapshot {
 }
 `;
 
+const windowsReaderSourceSha=digest(Buffer.from(WINDOWS_SNAPSHOT_SOURCE));
+const windowsReaders=new WeakMap(),windowsReaderDirectories=new Set();
+const psString=value=>"'"+value.replaceAll("'","''")+"'";
+function readerBytes(reader){
+  const directory=lstatSync(reader.directory),file=lstatSync(reader.assembly);
+  if(!directory.isDirectory()||directory.isSymbolicLink()||directory.dev!==reader.dev||directory.ino!==reader.ino||!file.isFile()||file.isSymbolicLink()||file.size<=0||file.size>4*1024*1024)throw new Error('native reader private file identity unavailable');
+  return readFileSync(reader.assembly);
+}
+// Injection gets its own invocation state; a fake subprocess can never seed the
+// real spawnSync reader. Production uses one reader for full and selected calls.
+export function disposeWindowsProcessReader(run=spawnSync){
+  const reader=windowsReaders.get(run);if(!reader)return;
+  reader.disposed=true;
+  try{if(reader.directory)rmSync(reader.directory,{recursive:true,force:true});windowsReaderDirectories.delete(reader.directory);}catch{ /* exit makes another bounded best-effort cleanup */ }
+}
+process.once('exit',()=>{for(const directory of windowsReaderDirectories){try{rmSync(directory,{recursive:true,force:true});}catch{ /* no shared cache or persistent reader */ }}});
+
 export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = spawnSync, onFailure = null} = {}) {
   if (pids !== null && (!Array.isArray(pids) || !pids.length || pids.length > 64 || new Set(pids).size !== pids.length || !pids.every(pid=>Number.isSafeInteger(pid)&&pid>0))) return null;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return null;
-  const selection=pids===null?'$null':`([long[]]@(${pids.join(',')}))`;
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    "$mossSnapshotClock = [System.Diagnostics.Stopwatch]::StartNew()",
-    "[Console]::Error.WriteLine('MOSS_PROCESS script_entry utc_ms=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ' elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
-    "Add-Type -TypeDefinition @'", WINDOWS_SNAPSHOT_SOURCE, "'@",
-    "[Console]::Error.WriteLine('MOSS_PROCESS type_ready elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
-    `$records = @([MossProcessSnapshot]::Read(${selection}))`,
-    "[Console]::Error.WriteLine('MOSS_PROCESS snapshot_returned elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
-    "ConvertTo-Json -InputObject $records -Compress",
-    "[Console]::Error.WriteLine('MOSS_PROCESS json_completed elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
-  ].join("\n");
   const started=performance.now(),bound=Math.min(20_000,timeoutMs);
-  const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: bound, maxBuffer: pids===null?32*1024*1024:1024*1024 });
+  let result={};
   const unavailable=category=>{
     // No process stdout, command lines or environment enter the diagnostic receipt.
     onFailure?.({command:'powershell.exe/Toolhelp32 process snapshot',category,at:new Date().toISOString(),timeoutMs:bound,elapsedMs:performance.now()-started,
@@ -354,6 +360,49 @@ export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = sp
       stderr:typeof result.stderr==='string'?result.stderr.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g,'').slice(0,512):null});
     return null;
   };
+  let reader=windowsReaders.get(run);
+  try{
+    if(!reader){
+      reader={sourceSha:windowsReaderSourceSha,assemblySha:null};windowsReaders.set(run,reader);
+      reader.directory=mkdtempSync(path.join(os.tmpdir(),'moss-process-reader-'));windowsReaderDirectories.add(reader.directory);chmodSync(reader.directory,0o700);
+      const identity=lstatSync(reader.directory);
+      Object.assign(reader,{assembly:path.join(reader.directory,'reader.dll'),dev:identity.dev,ino:identity.ino});
+    }
+    if(reader.disposed||reader.failure){result=reader.failure??{error:new Error('native reader already disposed')};return unavailable('reader-preparation-unavailable');}
+    if(reader.sourceSha!==windowsReaderSourceSha||(reader.assemblySha&&digest(readerBytes(reader))!==reader.assemblySha))throw new Error('native reader source/assembly integrity differs');
+  }catch(error){result={error};if(reader)reader.failure=result;return unavailable('reader-integrity');}
+  const compile=!reader.assemblySha,selection=pids===null?'$null':`([long[]]@(${pids.join(',')}))`;
+  const assembly=psString(reader.assembly);
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$mossSnapshotClock = [System.Diagnostics.Stopwatch]::StartNew()",
+    "[Console]::Error.WriteLine('MOSS_PROCESS script_entry utc_ms=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ' elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
+    ...(compile?["Add-Type -TypeDefinition @'", WINDOWS_SNAPSHOT_SOURCE, `'@ -OutputAssembly ${assembly}`]:[]),
+    `$readerBytes = [IO.File]::ReadAllBytes(${assembly})`,
+    "$readerHash = [Security.Cryptography.SHA256]::Create()",
+    "try { $readerDigest = [BitConverter]::ToString($readerHash.ComputeHash($readerBytes)).Replace('-','').ToLowerInvariant() } finally { $readerHash.Dispose() }",
+    ...(!compile?[`if ($readerDigest -cne '${reader.assemblySha}') { throw 'native reader assembly integrity differs' }`]:[]),
+    "$null = [Reflection.Assembly]::Load($readerBytes)",
+    `[Console]::Error.WriteLine('MOSS_PROCESS type_ready source_sha256=${windowsReaderSourceSha} assembly_sha256=' + $readerDigest + ' elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)`,
+    `$records = @([MossProcessSnapshot]::Read(${selection}))`,
+    "[Console]::Error.WriteLine('MOSS_PROCESS snapshot_returned elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
+    "ConvertTo-Json -InputObject $records -Compress",
+    "[Console]::Error.WriteLine('MOSS_PROCESS json_completed elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
+  ].join("\n");
+  try{result=run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: bound, maxBuffer: pids===null?32*1024*1024:1024*1024 });}
+  catch(error){result={error};}
+  if(compile){
+    // A verified type-ready marker proves compilation completed even if the
+    // subsequent snapshot failed. Never trust partial output or recompile it.
+    const prepared=/^MOSS_PROCESS type_ready source_sha256=([a-f0-9]{64}) assembly_sha256=([a-f0-9]{64}) elapsed_ms=\d+\r?$/m.exec(result.stderr??'');
+    try{
+      if(!prepared||prepared[1]!==reader.sourceSha||digest(readerBytes(reader))!==prepared[2])throw new Error('native reader preparation/integrity unavailable');
+      reader.assemblySha=prepared[2];
+    }catch(error){
+      reader.failure={...result,stdout:''};
+      if(!result.error&&result.status===0){result={...result,error};reader.failure={...result,stdout:''};return unavailable('reader-preparation-unavailable');}
+    }
+  }
   if (result.error) return unavailable('command-error');
   if (result.status !== 0) return unavailable('nonzero-status');
   if (typeof result.stdout!=='string'||!result.stdout.trim()) return unavailable('empty-stdout');

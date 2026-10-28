@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -12,7 +12,7 @@ import {
   BOUNDS, checkDiscovery, ENVIRONMENT_WHITELIST, executeOwnedChild, EXPECTED_TESTS, ignoredSourceFacts,
   MOSS_PREFIX, ownedWindowsTree, parseArgs, parseTestList, planAuthenticatedCleanup,
   executePreparation, isPreparationCommand, requireManualContext, RSS_CAP_GB, runValidation, startRssGuard,
-  statedRssCapBytes, sumOwnedRss, sumWindowsOwnedRss, queryWindowsProcesses, PRE_MODEL_CPU_TEST,
+  statedRssCapBytes, sumOwnedRss, sumWindowsOwnedRss, queryWindowsProcesses, disposeWindowsProcessReader, PRE_MODEL_CPU_TEST,
 } from "./moss-native-api-validation.mjs";
 import { TESTS as CLOSED_SELECTOR_TESTS, digest as sha256 } from "./moss-consumer-assertions.mjs";
 
@@ -736,6 +736,86 @@ test("CPU preparation refuses an observed close after its deadline before the ne
   assert.equal(state.completion.stdioClosed,true);assert.equal(state.completion.completed,false);assert.equal(kills,0);
 });
 
+// Literal subprocess seam: materialize labelled fake assembly bytes so tests
+// exercise the real private-file SHA binding; no C#/Windows API executes here.
+function simulatedWindowsReaderResult(script,result){
+  if(result.error||result.status!==0)return result;
+  const compiled=/^'@ -OutputAssembly '((?:[^']|'')+)'$/m.exec(script);
+  const assembly=/\$readerBytes = \[IO.File\]::ReadAllBytes\('((?:[^']|'')+)'\)/.exec(script)?.[1].replaceAll("''","'");
+  if(compiled)writeFileSync(compiled[1].replaceAll("''","'"),'literal simulated native reader assembly');
+  const source=/type_ready source_sha256=([a-f0-9]{64})/.exec(script)[1];
+  const marker=`MOSS_PROCESS type_ready source_sha256=${source} assembly_sha256=${sha256(readFileSync(assembly))} elapsed_ms=1\n`;
+  return {...result,stderr:marker+(result.stderr??'')};
+}
+
+// CI_IMPACT: tiny labelled files and injected subprocess results, never compiled/executed.
+test('Windows native reader compiles once then loads the same sealed bytes for full and selected snapshots',t=>{
+  const row={pid:42,ppid:1,birthMs:100,path:'owned.exe',rssBytes:10};let calls=0,assembly,source,assemblySha;
+  const run=(program,args,options)=>{
+    calls++;const script=args.at(-1);assert.equal(program,'powershell.exe');
+    assert.equal(options.timeout,calls===1?20000:1234);assert.equal(options.maxBuffer,calls===1?32*1024*1024:1024*1024);
+    if(calls===1){assertNativeSnapshotScript(script,'$null');assembly=/^'@ -OutputAssembly '((?:[^']|'')+)'$/m.exec(script)[1].replaceAll("''","'");}
+    else{assert.doesNotMatch(script,/Add-Type|Process32FirstW/);assert.match(script,/Read\(\(\[long\[\]\]@\(42\)\)\)/);assert.ok(script.includes(`$readerDigest -cne '${assemblySha}'`));}
+    assert.match(script,/\[Reflection.Assembly\]::Load\(\$readerBytes\)/);
+    const result=simulatedWindowsReaderResult(script,{status:0,stdout:JSON.stringify([row])});
+    const marker=/source_sha256=([a-f0-9]{64}) assembly_sha256=([a-f0-9]{64})/.exec(result.stderr);
+    if(calls===1){source=marker[1];assemblySha=marker[2];}else assert.deepEqual(marker.slice(1),[source,assemblySha]);
+    return result;
+  };
+  t.after(()=>disposeWindowsProcessReader(run));
+  assert.equal(queryWindowsProcesses({run}).get(42).rssBytes,10);
+  assert.equal(queryWindowsProcesses({run,pids:[42],timeoutMs:1234}).get(42).birthMs,100);
+  assert.equal(calls,2);assert.ok(existsSync(assembly));
+  disposeWindowsProcessReader(run);assert.equal(existsSync(path.dirname(assembly)),false);
+  assert.equal(queryWindowsProcesses({run}),null);assert.equal(calls,2,'disposed reader must not recompile');
+});
+
+test('Windows native reader refuses changed or missing sealed assembly before launching another process',t=>{
+  for(const change of ['bytes','missing']){
+    let calls=0,assembly;
+    const run=(_p,args)=>{
+      calls++;const script=args.at(-1);assembly=/^'@ -OutputAssembly '((?:[^']|'')+)'$/m.exec(script)[1].replaceAll("''","'");
+      return simulatedWindowsReaderResult(script,{status:0,stdout:'[]'});
+    };t.after(()=>disposeWindowsProcessReader(run));
+    assert.equal(queryWindowsProcesses({run}).size,0);
+    if(change==='bytes')writeFileSync(assembly,'changed assembly');else rmSync(assembly);
+    const failures=[];assert.equal(queryWindowsProcesses({run,onFailure:fact=>failures.push(fact)}),null);
+    assert.equal(failures[0].category,'reader-integrity');assert.equal(calls,1);
+    assert.equal(queryWindowsProcesses({run}),null);assert.equal(calls,1,'integrity failure never re-prepares');
+  }
+});
+
+test('Windows reader preparation failure is latched without retrying compilation',t=>{
+  let calls=0;const timeout=Object.assign(new Error('literal compiler timeout'),{code:'ETIMEDOUT'});
+  const run=()=>{calls++;return {error:timeout,status:null,signal:'SIGTERM',stdout:'',stderr:'MOSS_PROCESS script_entry utc_ms=1 elapsed_ms=0\n'};};
+  t.after(()=>disposeWindowsProcessReader(run));const failures=[];
+  assert.equal(queryWindowsProcesses({run,onFailure:fact=>failures.push(fact)}),null);
+  assert.equal(queryWindowsProcesses({run,onFailure:fact=>failures.push(fact)}),null);
+  assert.equal(calls,1);assert.deepEqual(failures.map(fact=>fact.category),['command-error','reader-preparation-unavailable']);
+  assert.ok(failures.every(fact=>fact.timedOut&&fact.error.code==='ETIMEDOUT'));
+});
+
+test('Windows reader independently authenticates source and produced assembly digests',t=>{
+  for(const field of ['source_sha256','assembly_sha256']){
+    let calls=0;const run=(_p,args)=>{
+      calls++;const result=simulatedWindowsReaderResult(args.at(-1),{status:0,stdout:'[]'});
+      return {...result,stderr:result.stderr.replace(new RegExp(`${field}=[a-f0-9]{64}`),`${field}=${'0'.repeat(64)}`)};
+    };t.after(()=>disposeWindowsProcessReader(run));const failures=[];
+    assert.equal(queryWindowsProcesses({run,onFailure:fact=>failures.push(fact)}),null);assert.equal(failures[0].category,'reader-preparation-unavailable');
+    assert.equal(queryWindowsProcesses({run}),null);assert.equal(calls,1);
+  }
+});
+
+test('Windows cleanup can reuse authenticated compilation after a failed snapshot without re-preparing it',t=>{
+  let calls=0;const run=(_p,args)=>{
+    calls++;const script=args.at(-1);
+    if(calls===1){const result=simulatedWindowsReaderResult(script,{status:0,stdout:'[]'});return {...result,status:1,stdout:'',stderr:result.stderr+'literal native snapshot failure'};}
+    assert.doesNotMatch(script,/Add-Type/);return simulatedWindowsReaderResult(script,{status:0,stdout:'[]'});
+  };t.after(()=>disposeWindowsProcessReader(run));const failures=[];
+  assert.equal(queryWindowsProcesses({run,onFailure:fact=>failures.push(fact)}),null);assert.equal(failures[0].category,'nonzero-status');
+  assert.equal(queryWindowsProcesses({run}).size,0);assert.equal(calls,2);
+});
+
 function assertNativeSnapshotScript(script,selection) {
   assert.doesNotMatch(script,/Get-CimInstance|Get-WmiObject|Get-Process|HashSet/);
   assert.match(script,/Array.IndexOf\(selected, \(long\)entry.pid\)/);
@@ -758,12 +838,12 @@ function assertNativeSnapshotScript(script,selection) {
 test('Windows snapshot preserves inaccessible graph rows and refuses malformed census records',()=>{
   const row={pid:57240,ppid:44816,birthMs:null,path:'',rssBytes:null};
   for(const pids of [null,[57240]]){
-    const rows=queryWindowsProcesses({pids,run:()=>({status:0,stdout:JSON.stringify([row])})});
+    const rows=queryWindowsProcesses({pids,run:(_p,args)=>simulatedWindowsReaderResult(args.at(-1),{status:0,stdout:JSON.stringify([row])})});
     assert.deepEqual(rows.get(row.pid),row,'protected/vanished detail failure remains present and unknown');
     for(const malformed of [{...row,pid:0},{...row,ppid:null},{...row,birthMs:undefined},{...row,rssBytes:-1},{...row,path:null}]){
-      assert.equal(queryWindowsProcesses({pids,run:()=>({status:0,stdout:JSON.stringify([malformed])})}),null);
+      assert.equal(queryWindowsProcesses({pids,run:(_p,args)=>simulatedWindowsReaderResult(args.at(-1),{status:0,stdout:JSON.stringify([malformed])})}),null);
     }
-    assert.equal(queryWindowsProcesses({pids,run:()=>({status:0,stdout:JSON.stringify([row,row])})}),null);
+    assert.equal(queryWindowsProcesses({pids,run:(_p,args)=>simulatedWindowsReaderResult(args.at(-1),{status:0,stdout:JSON.stringify([row,row])})}),null);
   }
 });
 
@@ -791,14 +871,14 @@ test("selected Windows census batches exact PIDs and distinguishes empty JSON fr
     const rows=queryWindowsProcesses({pids:[57240,7708],timeoutMs:1234,run:(program,args,options)=>{
       assert.equal(program,"powershell.exe");assertNativeSnapshotScript(args.at(-1),"([long[]]@(57240,7708))");
       assert.match(args.at(-1),/ConvertTo-Json -InputObject \$records/);assert.equal(options.timeout,1234);assert.equal(options.maxBuffer,1024*1024);
-      return {status:0,stdout};
+      return simulatedWindowsReaderResult(args.at(-1),{status:0,stdout});
     }});
     assert.ok(rows instanceof Map);assert.equal(rows.size,stdout==="[]"?0:1);
   }
   for(const result of [{status:1,stdout:"[]"},{status:0,stdout:""},{status:0,stdout:"null"},{status:0,stdout:"not-json"},
     {status:0,stdout:JSON.stringify([{...row,path:null}])},
     {status:0,stdout:JSON.stringify([{...row,pid:99}])},{status:0,stdout:JSON.stringify([row,row])},{error:new Error("denied"),stdout:"[]"}]){
-    assert.equal(queryWindowsProcesses({pids:[57240],run:()=>result}),null,"denial/malformed rows are not absence");
+    assert.equal(queryWindowsProcesses({pids:[57240],run:(_p,args)=>simulatedWindowsReaderResult(args.at(-1),result)}),null,"denial/malformed rows are not absence");
   }
   for(const pids of [[],[1,1],["1 OR 1=1"],Array.from({length:65},(_,i)=>i+1)])assert.equal(queryWindowsProcesses({pids,run:()=>assert.fail("invalid selection launched a query")}),null);
 });
@@ -823,14 +903,17 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
   const releaseFile=path.join(root,"owned-guard-release"),log=path.join(root,"owned-guard.log"),state={};
   const helperCode="const fs=require('node:fs');setInterval(()=>{if(fs.existsSync(process.argv[1])||fs.existsSync(process.env.MOSS_ACCEPTANCE_CANCEL_FILE))process.exit(0);},20);setTimeout(()=>process.exit(9),25000);";
   const ownedCode=`const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(helperCode)},${JSON.stringify(releaseFile)}],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({rootPid:process.pid,childPid:child.pid}));child.on('error',()=>process.exit(9));child.on('close',code=>{if(code!==0)process.exit(code??9);const short=spawn(process.execPath,['-e',\"console.log('short metadata')\"],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({shortPid:short.pid}));short.on('error',()=>process.exit(9));short.on('close',exit=>{console.log(JSON.stringify({shortExit:exit}));setTimeout(()=>process.exit(exit??9),1500);});});setTimeout(()=>process.exit(9),26000);`;
-  let identities=null,released=false,result,masked=false;const actualRechecks=[],queryMarkers=[];
+  let identities=null,released=false,result,masked=false;const actualRechecks=[],queryMarkers=[];let compilations=0,loads=0,readerAssembly=null;
   const markedQuery=(program,args,options)=>{
+    if(args.at(-1).includes("Add-Type -TypeDefinition")){
+      compilations++;readerAssembly=/^'@ -OutputAssembly '((?:[^']|'')+)'$/m.exec(args.at(-1))[1].replaceAll("''","'");
+    }else loads++;
     const result=spawnSync(program,args,options);
     if(!queryMarkers.length && !result.error && result.status===0){
       const markers=(result.stderr??"").split(/\r?\n/).filter(line=>/^MOSS_PROCESS /.test(line));
       assert.equal(markers.length,4);
       assert.match(markers[0],/^MOSS_PROCESS script_entry utc_ms=\d+ elapsed_ms=\d+$/);
-      assert.match(markers[1],/^MOSS_PROCESS type_ready elapsed_ms=\d+$/);
+      assert.match(markers[1],/^MOSS_PROCESS type_ready source_sha256=[a-f0-9]{64} assembly_sha256=[a-f0-9]{64} elapsed_ms=\d+$/);
       assert.match(markers[2],/^MOSS_PROCESS snapshot_returned elapsed_ms=\d+$/);
       assert.match(markers[3],/^MOSS_PROCESS json_completed elapsed_ms=\d+$/);
       const parsed=JSON.parse(result.stdout),self=(Array.isArray(parsed)?parsed:[parsed]).find(row=>row.pid===process.pid);
@@ -844,6 +927,7 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
     }
     return result;
   };
+  t.after(()=>disposeWindowsProcessReader(markedQuery));
   const query=(platform,onFailure)=>{
     const rows=processRows(platform,onFailure,markedQuery);
     const line=readFileSync(log,"utf8").split("\n").find(value=>value.startsWith('{"rootPid":'));
@@ -859,16 +943,19 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
     return rows;
   };
   try{result=await executeSupervised(ROOT,[process.execPath,"-e",ownedCode],log,30_000,state,{query,capBytes:512*1024*1024,recheckWindows:(pids,timeoutMs,onFailure)=>{
-    const rows=recheckWindowsRows(pids,timeoutMs,onFailure);actualRechecks.push({pids,rows:rows?[...rows.values()]:null});return rows;
+    const rows=recheckWindowsRows(pids,timeoutMs,onFailure,markedQuery);actualRechecks.push({pids,rows:rows?[...rows.values()]:null});return rows;
   }});}
-  catch(error){t.diagnostic(JSON.stringify({kind:"owned-native-guard-failure",identities,identityFailure:state.identityFailure??null,telemetryFailure:state.telemetryFailure??null,cleanup:state.cleanup??null,unsafe:state.unsafe??null}));throw error;}
+  catch(error){t.diagnostic(JSON.stringify({kind:"owned-native-guard-failure",identities,identityFailure:state.identityFailure??null,telemetryFailure:state.telemetryFailure??null,cleanup:state.cleanup??null,unsafe:state.unsafe??null,compilations,loads,queryMarkers,released,masked}));throw error;}
   assert.equal(result.exit,0);assert.equal(released,true);assert.ok(state.rssFirstBytes>0);assert.equal(state.cleanup.released,true);assert.notEqual(state.unsafe,true);
   for(const pid of [identities.rootPid,identities.childPid]){const identity=state.cleanup.observedIdentities.find(row=>row.pid===pid);assert.ok(Number.isSafeInteger(identity?.birthMs)&&identity.executable);}
   assert.match(result.output,/"shortExit":0/);assert.equal(masked,true);
   assert.equal(queryMarkers.length,4);
-  t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,injectedMissingPath:masked,actualRechecks,samples:state.rssSamples.length,cleanup:state.cleanup,queryMarkers}));
-  const after=queryWindowsProcesses({pids:[identities.childPid],timeoutMs:5000});
+  t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,injectedMissingPath:masked,actualRechecks,samples:state.rssSamples.length,cleanup:state.cleanup,queryMarkers,compilations,loads}));
+  const after=queryWindowsProcesses({pids:[identities.childPid],timeoutMs:5000,run:markedQuery});
+  assert.equal(compilations,1);assert.ok(loads>=2,"full and selected rereads reuse the same compiled reader");
   assert.ok(after instanceof Map);assert.notEqual(after.get(identities.childPid)?.birthMs,state.cleanup.observedIdentities.find(row=>row.pid===identities.childPid).birthMs,"the exact old child birth must be absent after release");
+  assert.ok(readerAssembly);disposeWindowsProcessReader(markedQuery);
+  assert.equal(existsSync(path.dirname(readerAssembly)),false,'the invocation-private compiled reader must be removed');
 
 });
 
@@ -942,10 +1029,10 @@ test('Windows query failures preserve bounded subtype facts without process stdo
  ];
  for(const [result,category] of variants){
   const facts=[];
-  assert.equal(queryWindowsProcesses({run:(_p,args,options)=>{assertNativeSnapshotScript(args.at(-1),'$null');assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return result;},onFailure:fact=>facts.push(fact)}),null);
+  assert.equal(queryWindowsProcesses({run:(_p,args,options)=>{assertNativeSnapshotScript(args.at(-1),'$null');assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return simulatedWindowsReaderResult(args.at(-1),result);},onFailure:fact=>facts.push(fact)}),null);
   assert.equal(facts.length,1);const fact=facts[0];assert.equal(fact.category,category);assert.equal(fact.status,result.status);assert.equal(fact.timeoutMs,20000);assert.ok(fact.elapsedMs>=0);assert.equal(fact.timedOut,category==='command-error');
   assert.ok((fact.stderr?.length??0)<=512);assert.equal(JSON.stringify(facts).includes(secret),false);
   if(result.stderr===markers)assert.equal(fact.stderr,markers,'bounded stage markers must survive timeout/status0 refusal unchanged');
  }
- const facts=[];assert.equal(queryWindowsProcesses({run:()=>({status:0,stdout:'[]'}),onFailure:f=>facts.push(f)}).size,0);assert.deepEqual(facts,[]);
+ const facts=[];assert.equal(queryWindowsProcesses({run:(_p,args)=>simulatedWindowsReaderResult(args.at(-1),{status:0,stdout:'[]'}),onFailure:f=>facts.push(f)}).size,0);assert.deepEqual(facts,[]);
 });

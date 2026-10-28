@@ -167,7 +167,7 @@ export async function validatePreflightChecked(p, backend, source, caseId, phase
 }
 
 const windowsRows=rows=>rows&&new Map([...rows].map(([pid,r])=>[pid,{...r,birth:Number.isSafeInteger(r.birthMs)?String(r.birthMs):null,executable:r.path}]));
-export const recheckWindowsRows=(pids,timeoutMs,onFailure=null)=>windowsRows(queryWindowsProcesses({pids,timeoutMs,onFailure}));
+export const recheckWindowsRows=(pids,timeoutMs,onFailure=null,run=spawnSync)=>windowsRows(queryWindowsProcesses({pids,timeoutMs,onFailure,run}));
 
 // Mac and Windows share pid+birth+executable identity. The Windows query is reused
 // from the CPU driver; no CPU execution function or its fixed bounds are changed.

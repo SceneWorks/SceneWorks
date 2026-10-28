@@ -1,4 +1,4 @@
-import {isPreparationCommand, PRE_MODEL_CPU_TEST} from "./moss-native-api-validation.mjs";
+import {isPreparationCommand, PRE_MODEL_CPU_TEST, disposeWindowsProcessReader} from "./moss-native-api-validation.mjs";
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -358,9 +358,16 @@ test('an initially unknown Windows root cannot admit its selected-snapshot disap
  assert.throws(()=>observeOwned(rows,new Map(),parent.pid,null,{recheckWindows:()=>new Map()}),/initial owned root identity unavailable/);
 });
 
-test('Windows native parser preserves unknown graph details without authenticating null birth',()=>{
+test('Windows native parser preserves unknown graph details without authenticating null birth',t=>{
  const unknown={pid:57240,ppid:44816,birthMs:null,path:'',rssBytes:null};
- const rows=processRows('win32',null,()=>({status:0,stdout:JSON.stringify([unknown])}));
+ const fakeRun=(_p,args)=>{
+  const script=args.at(-1),assembly=/^'@ -OutputAssembly '((?:[^']|'')+)'$/m.exec(script)[1].replaceAll("''","'");
+  writeFileSync(assembly,'literal simulated reader');
+  const source=/type_ready source_sha256=([a-f0-9]{64})/.exec(script)[1];
+  return {status:0,stdout:JSON.stringify([unknown]),stderr:`MOSS_PROCESS type_ready source_sha256=${source} assembly_sha256=${digest(readFileSync(assembly))} elapsed_ms=1\n`};
+ };
+ t.after(()=>disposeWindowsProcessReader(fakeRun));
+ const rows=processRows('win32',null,fakeRun);
  assert.equal(rows.get(57240).birth,null);assert.equal(rows.get(57240).rssBytes,null);
  const {rows:owned}=actualWindowsWitness();owned.delete(57240);owned.set(999,{...unknown,pid:999,ppid:1,birth:null,executable:''});
  assert.deepEqual(observeOwned(owned,new Map(),44816).live.map(row=>row.pid),[44816]);

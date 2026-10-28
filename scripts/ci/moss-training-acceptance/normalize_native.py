@@ -30,7 +30,7 @@ import re
 import shutil
 import struct
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 RAW_FORMAT = "moss-native-api-acceptance-candidate/v1"
 SEAL = "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1"
@@ -547,6 +547,77 @@ def _application(ctx, raw, role, adapter_sha):
             "receipt": image["jobReceipt"]}, adapters[0]
 
 
+def _refusal_output_path(value):
+    require(isinstance(value, str) and "\0" not in value
+            and ".." not in value.replace("\\", "/").split("/"),
+            "invalid low-cap output path")
+    # Compare recorded producer paths, never resolve them on the finalizer's host.
+    # These are the two aliases demonstrated by the native Mac/Windows receipts.
+    if value.startswith("\\\\?\\"):
+        value = value[4:]
+        require(re.match(r"^[A-Za-z]:[\\/]", value) is not None,
+                "unsupported Windows output namespace")
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        require(":" not in value[2:], "invalid Windows output path")
+        return PureWindowsPath(value)
+    require(PurePosixPath(value).is_absolute() and "\\" not in value,
+            "low-cap output path must be absolute")
+    if value.startswith("/private/var/"):
+        value = value[len("/private"):]
+    return PurePosixPath(value)
+
+
+def _validate_refusal_outputs(ctx, raw, low):
+    # Match the producer's validate_unpublished_training_outputs contract. The original raw
+    # inventory and hash-bound snapshot stay in the authenticated capture bundle; the normalized
+    # publishedOutputInventory describes MODEL outputs, excluding this informational plan only.
+    inventory = low["publishedOutputInventory"]
+    snapshot = low.get("submissionConfigSnapshot")
+    require(isinstance(inventory, list) and len(inventory) <= 1,
+            "low-cap output inventory must contain at most one informational config")
+    if not inventory:
+        require(snapshot is None, "submission config snapshot lacks its raw inventory entry")
+        return
+    output = inventory[0]
+    require(isinstance(output, str) and "\0" not in output
+            and (PurePosixPath(output).is_absolute() or PureWindowsPath(output).is_absolute())
+            and ".." not in output.replace("\\", "/").split("/")
+            and _basename(output) == "training-config.json",
+            "low-cap operation published a non-informational output")
+    require(isinstance(snapshot, dict) and snapshot.get("path") == "runs/low-cap/training-config.json",
+            "low-cap informational config snapshot missing or misplaced")
+    config = ctx.read(snapshot)  # Regular non-symlink artifact, exact retained bytes/hash and JSON.
+    job = low["job"]
+    require(job["id"] == low["jobId"] and job["type"] == "lora_train"
+            and job["status"] == "failed" and job["result"].get("trainedArtifactExported") is not True,
+            "low-cap job did not fail without a trained export")
+    plan = job["payload"]["plan"]
+    require(isinstance(plan, dict) and plan.get("jobId") == low["jobId"],
+            "low-cap submitted plan/job identity differs")
+    planned_output = plan.get("output")
+    require(isinstance(planned_output, dict), "low-cap submitted output identity missing")
+    lora_id = planned_output.get("loraId")
+    require(isinstance(lora_id, str) and lora_id not in ("", ".", "..")
+            and not any(char in lora_id for char in ("/", "\\", ":", "\0")),
+            "invalid low-cap submitted LoRA identity")
+    output_dir = _refusal_output_path(planned_output.get("outputDir"))
+    require(output_dir.name == lora_id
+            and _refusal_output_path(output) == output_dir / "training-config.json",
+            "low-cap informational config path differs from submitted output directory/LoRA identity")
+    events = [ctx.read(ref) for ref in raw["raw"]["api"]]
+    submissions = [event for event in events if isinstance(event, dict)
+                   and event.get("method") == "POST" and event.get("httpStatus") == 201
+                   and isinstance(event.get("route"), str) and event["route"].endswith("/training/jobs")
+                   and isinstance(event.get("response"), dict)
+                   and event["response"].get("id") == low["jobId"]]
+    require(len(submissions) == 1, "exact low-cap API submission missing or duplicated")
+    submitted = submissions[0]["response"]["payload"]["plan"]
+    # JSON equality keeps object order immaterial while distinguishing booleans from numbers.
+    canonical = lambda value: json.dumps(value, sort_keys=True, allow_nan=False)
+    require(canonical(config) == canonical(plan) == canonical(submitted),
+            "informational config differs from actual submitted plan")
+
+
 def _memory_refusal(ctx, raw):
     low = raw["raw"]["subruns"]["low-cap"]
     diagnostic = ctx.read(low["diagnostic"])
@@ -558,15 +629,16 @@ def _memory_refusal(ctx, raw):
     require(match is not None, "native low-cap refusal does not expose its actual required/resolved budget")
     demand, resolved = map(int, match.groups())
     requested = low["preparedNativeConfig"]["memoryLimitBytes"]
-    require(0 < resolved <= requested < demand and low["publishedOutputInventory"] == []
+    require(0 < resolved <= requested < demand
             and actual["weightsLoaded"] is False and not diagnostic["nativeReceipts"],
             "actual low-cap/native no-load/no-publication proof missing")
+    _validate_refusal_outputs(ctx, raw, low)
     return {"requestedControlCap": {"kind": "bytes", "value": requested}, "resolvedControlCapBytes": resolved,
             "projectedHeaderDemandBytes": demand,
             "headerDemandReceipt": ctx.reference(ctx.path("devicepreflight.json")),
             "refusedBeforeWeightsLoad": actual["weightsLoaded"] is False,
-            "actionableRefusal": refusal, "publishedOutput": bool(low["publishedOutputInventory"]),
-            "publishedOutputInventory": low["publishedOutputInventory"], "campaignCeilingRaised": False,
+            "actionableRefusal": refusal, "publishedOutput": False,
+            "publishedOutputInventory": [], "campaignCeilingRaised": False,
             "receipt": low["diagnostic"]}
 
 

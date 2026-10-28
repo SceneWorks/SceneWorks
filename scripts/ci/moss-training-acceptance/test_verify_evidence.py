@@ -56,6 +56,136 @@ class StaticContractTests(unittest.TestCase):
     def tearDown(self):
         self.directory.cleanup()
 
+    def refusal_fixture(self, name="refusal", output_dir="/owned/loras/lora_low",
+                        inventory_path=None, lora_id="lora_low"):
+        # Literal JSON/files only; never campaign evidence or model execution.
+        root = self.root / name
+        root.mkdir()
+        ctx = verifier._normalizer._Context(root)
+        plan = {"jobId": "low-job", "config": {"steps": 60, "cacheLatents": True},
+                "output": {"outputDir": output_dir, "loraId": lora_id}}
+        job = {"id": "low-job", "type": "lora_train", "status": "failed", "result": {},
+               "payload": {"plan": copy.deepcopy(plan)}}
+        snapshot = root / "runs/low-cap/training-config.json"
+        snapshot.parent.mkdir(parents=True)
+        snapshot.write_text(json.dumps(plan))
+        diagnostic = ctx.put("low-diagnostic.json", {"nativeMetadata": {
+            "refusal": "structural working-set bound 200 bytes exceeds the 100-byte device/trainer budget",
+            "weightsLoaded": False}, "nativeReceipts": []})
+        event = ctx.put("low-submission.json", {"method": "POST", "httpStatus": 201,
+            "route": "/api/v1/projects/owned/training/jobs", "response": copy.deepcopy(job)})
+        (root / "devicepreflight.json").write_text("{}")
+        low = {"jobId": "low-job", "job": job, "diagnostic": diagnostic,
+               "preparedNativeConfig": {"memoryLimitBytes": 100},
+               "publishedOutputInventory": [inventory_path or output_dir + "/training-config.json"],
+               "submissionConfigSnapshot": ctx.reference(snapshot)}
+        raw = {"raw": {"subruns": {"low-cap": low}, "api": [event]}}
+        return ctx, raw
+
+    def test_refusal_config_is_authenticated_information_not_model_output(self):
+        paths = [("/owned/loras/lora_low", "/owned/loras/lora_low/training-config.json"),
+                 ("/var/owned/loras/lora_low", "/private/var/owned/loras/lora_low/training-config.json"),
+                 ("/private/var/owned/loras/lora_low", "/var/owned/loras/lora_low/training-config.json"),
+                 (r"C:\Users\Michael\loras\lora_low", r"\\?\C:\Users\Michael\loras\lora_low\training-config.json"),
+                 ("C:/Users/Michael/loras/lora_low", r"C:\Users\Michael\loras\lora_low\training-config.json"),
+                 ("/owned/loras/lora_low", None)]
+        for output_dir, inventory_path in paths:
+            ctx, raw = self.refusal_fixture(str(len(list(self.root.iterdir()))), output_dir, inventory_path)
+            low = raw["raw"]["subruns"]["low-cap"]
+            if inventory_path is None:
+                low["publishedOutputInventory"] = []
+                del low["submissionConfigSnapshot"]
+            before = copy.deepcopy(raw)
+            result = verifier._normalizer._memory_refusal(ctx, raw)
+            self.assertEqual(raw, before)
+            self.assertFalse(result["publishedOutput"])
+            self.assertEqual(result["publishedOutputInventory"], [])
+            self.assertEqual(result["receipt"], low["diagnostic"])
+            if inventory_path is not None:
+                self.assertEqual(ctx.read(low["submissionConfigSnapshot"]), low["job"]["payload"]["plan"])
+            # The existing downstream contract remains strict and requires no schema relaxation.
+            from jsonschema import Draft202012Validator
+            schema = verifier.read_json(HERE / "evidence.schema.json")
+            contract = {"$defs": schema["$defs"], "$ref": "#/$defs/memoryRefusal"}
+            validator = Draft202012Validator(contract)
+            validator.validate(result)
+            result["publishedOutputInventory"] = ["training-config.json"]
+            self.assertTrue(list(validator.iter_errors(result)))
+
+    def test_refusal_config_path_is_bound_to_submitted_directory_and_lora_id(self):
+        values = [("/owned/loras/lora_low", "/foreign/training-config.json", "lora_low"),
+                  ("/owned/loras/lora_low", "/owned/loras/lora_other/training-config.json", "lora_low"),
+                  ("/owned/loras/lora_other", "/owned/loras/lora_other/training-config.json", "lora_low"),
+                  ("/var/owned/loras/lora_low", "/private/other/owned/loras/lora_low/training-config.json", "lora_low"),
+                  (r"C:\owned\loras\lora_low", r"\\?\C:\foreign\loras\lora_low\training-config.json", "lora_low"),
+                  (r"C:\owned\loras\lora_low", r"\\?\D:\owned\loras\lora_low\training-config.json", "lora_low"),
+                  (r"C:\owned\loras\lora_low", r"\\?\UNC\server\owned\loras\lora_low\training-config.json", "lora_low"),
+                  (r"C:\owned\loras\lora_low", r"\\.\C:\owned\loras\lora_low\training-config.json", "lora_low"),
+                  (r"C:\owned\loras\lora_low", r"\\?\C:owned\loras\lora_low\training-config.json", "lora_low"),
+                  ("/owned/loras/lora_low", "/owned/loras/lora_low/training-config.json", "../lora_low")]
+        for index, (output_dir, inventory_path, lora_id) in enumerate(values):
+            ctx, raw = self.refusal_fixture(str(index), output_dir, inventory_path, lora_id)
+            with self.subTest(path=inventory_path, lora_id=lora_id), self.assertRaises(ValueError):
+                verifier._normalizer._memory_refusal(ctx, raw)
+
+    def test_refusal_outputs_refuse_extra_unknown_and_malformed_inventory(self):
+        values = [None, {}, "training-config.json", [None], [1], ["training-config.json"],
+                  ["/owned/adapter.safetensors"], ["/owned/step-20"], ["/owned/preview.png"],
+                  ["/owned/training-config.json", "/owned/training-config.json"],
+                  ["/owned/../training-config.json"], ["/owned/training-config.json/"]]
+        for index, value in enumerate(values):
+            ctx, raw = self.refusal_fixture(str(index))
+            raw["raw"]["subruns"]["low-cap"]["publishedOutputInventory"] = value
+            with self.subTest(inventory=value), self.assertRaises(verifier._normalizer.NormalizationError):
+                verifier._normalizer._memory_refusal(ctx, raw)
+
+    def test_refusal_config_refuses_missing_tampered_wrong_plan_or_symlink(self):
+        for variant in ("missing", "hash", "wrong-plan", "wrong-type", "malformed-json", "symlink",
+                        "wrong-reference", "unlisted-snapshot", "missing-submission", "wrong-api-plan"):
+            ctx, raw = self.refusal_fixture(variant)
+            low = raw["raw"]["subruns"]["low-cap"]
+            snapshot = ctx.path(low["submissionConfigSnapshot"]["path"])
+            if variant == "missing":
+                del low["submissionConfigSnapshot"]
+            elif variant == "hash":
+                snapshot.write_text("{}")
+            elif variant in ("wrong-plan", "wrong-type", "malformed-json"):
+                plan = copy.deepcopy(low["job"]["payload"]["plan"])
+                plan["config"]["cacheLatents"] = False if variant == "wrong-plan" else 1
+                snapshot.write_text("not JSON" if variant == "malformed-json" else json.dumps(plan))
+                low["submissionConfigSnapshot"] = ctx.reference(snapshot)
+            elif variant == "symlink":
+                target = ctx.root / "other.json"
+                target.write_bytes(snapshot.read_bytes())
+                snapshot.unlink()
+                snapshot.symlink_to(target)
+            elif variant == "wrong-reference":
+                low["submissionConfigSnapshot"] = ctx.put("training-config.json", low["job"]["payload"]["plan"])
+            elif variant == "unlisted-snapshot":
+                low["publishedOutputInventory"] = []
+            elif variant == "missing-submission":
+                raw["raw"]["api"] = []
+            else:
+                event = ctx.read(raw["raw"]["api"][0])
+                event["response"]["payload"]["plan"]["config"]["steps"] = 61
+                raw["raw"]["api"] = [ctx.put("wrong-api-plan.json", event)]
+            with self.subTest(variant=variant), self.assertRaises(ValueError):
+                verifier._normalizer._memory_refusal(ctx, raw)
+
+    def test_refusal_config_does_not_excuse_load_receipt_or_budget_failure(self):
+        for variant in ("loaded", "receipt", "budget", "job", "export"):
+            ctx, raw = self.refusal_fixture(variant)
+            low = raw["raw"]["subruns"]["low-cap"]
+            diagnostic = ctx.read(low["diagnostic"])
+            if variant == "loaded": diagnostic["nativeMetadata"]["weightsLoaded"] = True
+            elif variant == "receipt": diagnostic["nativeReceipts"] = [{"steps": 1}]
+            elif variant == "budget": low["preparedNativeConfig"]["memoryLimitBytes"] = 99
+            elif variant == "job": low["job"]["id"] = "wrong-job"
+            else: low["job"]["result"]["trainedArtifactExported"] = True
+            low["diagnostic"] = ctx.put("changed-diagnostic.json", diagnostic)
+            with self.subTest(variant=variant), self.assertRaises(verifier._normalizer.NormalizationError):
+                verifier._normalizer._memory_refusal(ctx, raw)
+
     def test_normalizer_is_loaded_under_isolated_python_from_trusted_sibling(self):
         self.assertEqual(Path(verifier._normalizer.__file__).resolve(), HERE / "normalize_native.py")
 
