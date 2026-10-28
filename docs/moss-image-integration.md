@@ -38,7 +38,7 @@ Training targets the ordinary Base or SFT model. **8-step acceleration** is a se
 
 ## Requests and replay
 
-Typed `POST /api/v1/image/jobs`, MCP `generate_image`, presets, retry and duplicate use the same final payload validator, after preset expansion or replay merging. The existing raw `POST /api/v1/jobs` security boundary refuses `image_generate` and `image_edit` for every model. Its directly allowed `image_detail` operation refuses MOSS because that provider implements text-to-image only.
+Typed `POST /api/v1/image/jobs`, MCP `generate_image`, presets, retry and duplicate use the same final payload validator, after preset expansion or replay merging. The existing raw `POST /api/v1/jobs` security boundary refuses `image_generate` and `image_edit` for every model. MOSS supports typed text-to-image and explicit `edit_image` routes; `image_detail` remains unsupported.
 
 ```json
 {
@@ -53,7 +53,7 @@ Typed `POST /api/v1/image/jobs`, MCP `generate_image`, presets, retry and duplic
 
 Generic steps, guidance, negative prompt and schedule shift retain their ordinary wire fields. `advanced.mossImage` accepts the native strict options object: acceleration, context, `uncond_skip_layers`, `training_shift` and `slg` (layers, scale, start and stop). For unconditional skip layers, null/omission means the author's `[22]`; `[]` disables skipping. An empty SLG layer list remains empty. CFG 0 retains its negative prompt. Accelerated requests refuse explicit incompatible controls instead of discarding them. The studio disables those controls and retains ordinary choices locally for switching OFF.
 
-Prompt text is preserved, including multilingual prose, tags and authored JSON. Native prompt batches preserve order; outputs are prompt-major and image-minor. Batch recipes retain images per prompt, while generation-set counts report the total output count. Frozen advanced tensor inputs remain available through the native contract, without a product tensor-upload endpoint.
+Prompt text is preserved, including multilingual prose, tags and authored JSON. Native prompt batches preserve order; outputs are prompt-major and image-minor. Batch recipes retain images per prompt, while generation-set counts report the total output count. Optional native tensor inputs are also exposed for explicit MOSS edit requests through project NPY uploads and the **Import tensor NPY (optional)** control.
 
 Requested options persist through studio state, saved presets, recipes and image history. PNG workflow exports preserve canonical options and a validated actual execution receipt, replacing any local adapter path with its frozen filename. Imported receipts are display metadata. Generation scrubs supplied or replayed reports and reads a new report only after successful, uncanceled provider execution while holding the serialized generator transaction.
 
@@ -63,9 +63,11 @@ The primary Base/SFT transformer and required SFT text encoder/tokenizer/VAE/sch
 
 Before loading tensors, the worker authenticates the frozen repository, revision, relative path, physical size and SHA-256 of each selected file. Cache identities include mode, precision, components and content pins. Admission prices the selected execution closure and request workspace; cached unselected optional packages do not increase it. Warm admission credits only the current generator's actual owned residency, bounded by current committed device memory. Normal worker progress, heartbeats, cancellation and artifact writes surround the native provider.
 
-## Native capability facts capture
+## Historical capability facts capture (sc-26325)
 
-After the permanent inference-main pin, committed preflight pass and coordinator push, the existing Windows workflow can capture the real Candle registry descriptors without running GPU or runtime tests:
+These commands, device settings and measurements describe the earlier sc-26325 delivery. They are retained with their original provenance. Current training acceptance uses [Training acceptance dispatch](#training-acceptance-dispatch) below; current web budgets are defined in [apps/web/bundle-budgets.json](../apps/web/bundle-budgets.json).
+
+The earlier delivery used the following Windows descriptor-capture profile without running GPU or runtime tests:
 
 ```sh
 gh workflow run windows-candle.yml --ref story/sc-26325-epic-26321-moss-image-evaluation -f capability_facts_only=true
@@ -75,7 +77,7 @@ This optional input defaults to false. The explicit profile hides CUDA devices, 
 
 This is CPU descriptor capture, not required CI GPU-test coverage or native model acceptance. The coordinator must still run the normal required checks and separately admitted real product campaign.
 
-## Small terminal product acceptance
+## Historical generation-only acceptance (sc-26325)
 
 The ignored test below calls `run_image_generate_job`, including normal route selection, asset preparation, admission, serialized cache, default native loader, progress consumption and PNG/recipe writing. It does not inject a generator. Run it alone only after the coordinator admits the device and provisions the exact frozen snapshots; source compilation does not prove native execution.
 
@@ -93,7 +95,7 @@ Required environment: `MOSS_BASE_SNAPSHOT`, `MOSS_SHARED_SNAPSHOT` and `MOSS_DMD
 
 The separate native backend acceptance retains advanced tensor and cancellation coverage. Neither this smoke nor CPU consumer tests establish comparative quality or a benchmark verdict.
 
-## Web bundle evidence
+## Historical web bundle evidence (sc-26325)
 
 All initial-load, raw-size and largest-route limits remain enabled and unchanged. Against the clean `875666c7c` baseline, initial JavaScript changes from 474,820 / 146,257 / 124,981 bytes (raw/gzip/Brotli) to 467,260 / 143,621 / 122,981. Sharing disclosure details load through the existing interaction boundary; preference persistence remains on the initial path.
 
