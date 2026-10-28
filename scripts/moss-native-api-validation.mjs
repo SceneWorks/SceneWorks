@@ -257,11 +257,15 @@ export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = sp
   const filter=pids===null?"":` -Filter '${pids.map(pid=>`ProcessId = ${pid}`).join(" OR ")}'`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
+    "$mossCimClock = [System.Diagnostics.Stopwatch]::StartNew()",
+    "[Console]::Error.WriteLine('MOSS_CIM script_entry utc_ms=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ' elapsed_ms=' + $mossCimClock.ElapsedMilliseconds)",
     `$rows = @(Get-CimInstance Win32_Process${filter} -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize)`,
+    "[Console]::Error.WriteLine('MOSS_CIM census_returned elapsed_ms=' + $mossCimClock.ElapsedMilliseconds)",
     "$records = @($rows | ForEach-Object { @{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId;",
     "  birthMs = [long](([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()); path = [string]$_.ExecutablePath;",
     "  rssBytes = [long]$_.WorkingSetSize } })",
     "ConvertTo-Json -InputObject $records -Compress",
+    "[Console]::Error.WriteLine('MOSS_CIM json_completed elapsed_ms=' + $mossCimClock.ElapsedMilliseconds)",
   ].join("\n");
   const started=performance.now(),bound=Math.min(20_000,timeoutMs);
   const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: bound, maxBuffer: pids===null?32*1024*1024:1024*1024 });

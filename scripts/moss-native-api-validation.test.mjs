@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -728,9 +728,24 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
   const releaseFile=path.join(root,"owned-guard-release"),log=path.join(root,"owned-guard.log"),state={};
   const helperCode="const fs=require('node:fs');setInterval(()=>{if(fs.existsSync(process.argv[1])||fs.existsSync(process.env.MOSS_ACCEPTANCE_CANCEL_FILE))process.exit(0);},20);setTimeout(()=>process.exit(9),25000);";
   const ownedCode=`const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(helperCode)},${JSON.stringify(releaseFile)}],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({rootPid:process.pid,childPid:child.pid}));child.on('error',()=>process.exit(9));child.on('close',code=>{if(code!==0)process.exit(code??9);const short=spawn(process.execPath,['-e',\"console.log('short metadata')\"],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({shortPid:short.pid}));short.on('error',()=>process.exit(9));short.on('close',exit=>{console.log(JSON.stringify({shortExit:exit}));setTimeout(()=>process.exit(exit??9),1500);});});setTimeout(()=>process.exit(9),26000);`;
-  let identities=null,released=false,result,masked=false;const actualRechecks=[];
+  let identities=null,released=false,result,masked=false;const actualRechecks=[],queryMarkers=[];
+  const markedQuery=(program,args,options)=>{
+    const result=spawnSync(program,args,options);
+    if(!queryMarkers.length && !result.error && result.status===0){
+      const markers=(result.stderr??"").split(/\r?\n/).filter(line=>/^MOSS_CIM /.test(line));
+      assert.equal(markers.length,3);
+      assert.match(markers[0],/^MOSS_CIM script_entry utc_ms=\d+ elapsed_ms=\d+$/);
+      assert.match(markers[1],/^MOSS_CIM census_returned elapsed_ms=\d+$/);
+      assert.match(markers[2],/^MOSS_CIM json_completed elapsed_ms=\d+$/);
+      assert.ok(markers.join("\n").length<512);
+      const elapsed=markers.map(line=>Number(/elapsed_ms=(\d+)$/.exec(line)[1]));
+      assert.ok(elapsed[0]<=elapsed[1] && elapsed[1]<=elapsed[2]);
+      queryMarkers.push(...markers);
+    }
+    return result;
+  };
   const query=(platform,onFailure)=>{
-    const rows=processRows(platform,onFailure);
+    const rows=processRows(platform,onFailure,markedQuery);
     const line=readFileSync(log,"utf8").split("\n").find(value=>value.startsWith('{"rootPid":'));
     if(line)identities=JSON.parse(line);
     if(!released&&identities&&state.rssSamples?.some(sample=>sample.ownedPids.includes(identities.rootPid)&&sample.ownedPids.includes(identities.childPid))){
@@ -750,7 +765,8 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
   assert.equal(result.exit,0);assert.equal(released,true);assert.ok(state.rssFirstBytes>0);assert.equal(state.cleanup.released,true);assert.notEqual(state.unsafe,true);
   for(const pid of [identities.rootPid,identities.childPid]){const identity=state.cleanup.observedIdentities.find(row=>row.pid===pid);assert.ok(Number.isSafeInteger(identity?.birthMs)&&identity.executable);}
   assert.match(result.output,/"shortExit":0/);assert.equal(masked,true);
-  t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,injectedMissingPath:masked,actualRechecks,samples:state.rssSamples.length,cleanup:state.cleanup}));
+  assert.equal(queryMarkers.length,3);
+  t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,injectedMissingPath:masked,actualRechecks,samples:state.rssSamples.length,cleanup:state.cleanup,queryMarkers}));
   const after=queryWindowsProcesses({pids:[identities.childPid],timeoutMs:5000});
   assert.ok(after instanceof Map);assert.notEqual(after.get(identities.childPid)?.birthMs,state.cleanup.observedIdentities.find(row=>row.pid===identities.childPid).birthMs,"the exact old child birth must be absent after release");
 
@@ -817,17 +833,19 @@ test('Candle MOSS output uses runner context only at step scope and uploads the 
 test('Windows query failures preserve bounded subtype facts without process stdout',()=>{
  const secret='DO_NOT_LOG_PROCESS_ROWS';
  const timeout=Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'),{code:'ETIMEDOUT'});
+ const markers='MOSS_CIM script_entry utc_ms=1793188800000 elapsed_ms=0\nMOSS_CIM census_returned elapsed_ms=12\nMOSS_CIM json_completed elapsed_ms=14\n';
  const variants=[
   [{error:timeout,status:null,signal:'SIGTERM',stdout:secret,stderr:'x'.repeat(700)},'command-error'],
-  [{error:timeout,status:0,signal:null,stdout:'[{"pid":1,"ppid":0,"birthMs":1,"path":"owned.exe","rssBytes":1}]',stderr:''},'command-error'],
+  [{error:timeout,status:0,signal:null,stdout:'[{"pid":1,"ppid":0,"birthMs":1,"path":"owned.exe","rssBytes":1}]',stderr:markers},'command-error'],
   [{status:1,stdout:'[]',stderr:'CIM access denied'},'nonzero-status'],
   [{status:0,stdout:' '},'empty-stdout'],[{status:0,stdout:secret},'invalid-json'],[{status:0,stdout:'null'},'invalid-shape'],
  ];
  for(const [result,category] of variants){
   const facts=[];
-  assert.equal(queryWindowsProcesses({run:(_p,args,options)=>{assert.match(args.at(-1),/Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize/);assert.doesNotMatch(args.at(-1),/-Filter/);assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return result;},onFailure:fact=>facts.push(fact)}),null);
+  assert.equal(queryWindowsProcesses({run:(_p,args,options)=>{assert.match(args.at(-1),/Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize/);assert.doesNotMatch(args.at(-1),/-Filter/);const script=args.at(-1);assert.equal((script.match(/\[Console\]::Error\.WriteLine\('MOSS_CIM /g)??[]).length,3);const stages=['MOSS_CIM script_entry','Get-CimInstance Win32_Process','MOSS_CIM census_returned','ConvertTo-Json -InputObject $records -Compress','MOSS_CIM json_completed'];for(let i=1;i<stages.length;i++)assert.ok(script.indexOf(stages[i-1])<script.indexOf(stages[i]));assert.equal(script.split('\n').filter(line=>line==='ConvertTo-Json -InputObject $records -Compress').length,1);assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return result;},onFailure:fact=>facts.push(fact)}),null);
   assert.equal(facts.length,1);const fact=facts[0];assert.equal(fact.category,category);assert.equal(fact.status,result.status);assert.equal(fact.timeoutMs,20000);assert.ok(fact.elapsedMs>=0);assert.equal(fact.timedOut,category==='command-error');
   assert.ok((fact.stderr?.length??0)<=512);assert.equal(JSON.stringify(facts).includes(secret),false);
+  if(result.stderr===markers)assert.equal(fact.stderr,markers,'bounded stage markers must survive timeout/status0 refusal unchanged');
  }
  const facts=[];assert.equal(queryWindowsProcesses({run:()=>({status:0,stdout:'[]'}),onFailure:f=>facts.push(f)}).size,0);assert.deepEqual(facts,[]);
 });
