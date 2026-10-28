@@ -245,33 +245,109 @@ export async function executePreparation(root, args, log, limitMs, state, { env 
 }
 
 // ---- Windows owned-process supervision -------------------------------------------------------
-// Identities come from Win32_Process (the same CreationDate/ExecutablePath
-// technique scripts/lib/yue2-windows-owned-gpu.mjs validates GPU captures
-// with). A process is signalled only while its pid, birth and — for the root —
-// executable path still match what we observed. There is no POSIX ps and no
-// getuid here; a bare `taskkill /T` tree is never used.
+// Toolhelp preserves the full PID/PPID graph, including inaccessible processes.
+// Details come from one limited-information handle per process. Unknown facts
+// remain null/empty, never fabricated zero or proof that a PID disappeared.
+const WINDOWS_SNAPSHOT_SOURCE = `
+using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class MossProcessSnapshot {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  struct ProcessEntry {
+    public uint size, usage, pid;
+    public UIntPtr heap;
+    public uint module, threads, ppid;
+    public int priority;
+    public uint flags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)] public string name;
+  }
+  [StructLayout(LayoutKind.Sequential)]
+  struct MemoryCounters {
+    public uint size, faults;
+    public UIntPtr peakWorkingSet, workingSet, peakPagedPool, pagedPool;
+    public UIntPtr peakNonPagedPool, nonPagedPool, pagefile, peakPagefile;
+  }
+  public sealed class Row {
+    public long pid, ppid;
+    public long? birthMs, rssBytes;
+    public string path = "";
+  }
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr CreateToolhelp32Snapshot(uint flags, uint pid);
+  [DllImport("kernel32.dll", EntryPoint="Process32FirstW", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32First(IntPtr snapshot, ref ProcessEntry entry);
+  [DllImport("kernel32.dll", EntryPoint="Process32NextW", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool Process32Next(IntPtr snapshot, ref ProcessEntry entry);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetProcessTimes(IntPtr process, out long creation, out long exit, out long kernel, out long user);
+  [DllImport("kernel32.dll", EntryPoint="QueryFullProcessImageNameW", CharSet=CharSet.Unicode, SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process, uint flags, StringBuilder path, ref uint size);
+  [DllImport("psapi.dll", SetLastError=true)] static extern bool GetProcessMemoryInfo(IntPtr process, ref MemoryCounters counters, uint size);
+  [DllImport("kernel32.dll")] static extern void GetSystemTimePreciseAsFileTime(out long time);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+  static void Close(IntPtr handle) {
+    if (!CloseHandle(handle)) throw new Win32Exception(Marshal.GetLastWin32Error(), "process snapshot handle close failed");
+  }
+  public static Row[] Read(long[] selected) {
+    var rows = new List<Row>();
+    long boundary;
+    GetSystemTimePreciseAsFileTime(out boundary);
+    IntPtr snapshot = CreateToolhelp32Snapshot(0x00000002, 0); // TH32CS_SNAPPROCESS only.
+    if (snapshot == new IntPtr(-1)) throw new Win32Exception(Marshal.GetLastWin32Error(), "process snapshot unavailable");
+    try {
+      var entry = new ProcessEntry();
+      entry.size = (uint)Marshal.SizeOf(typeof(ProcessEntry));
+      bool present = Process32First(snapshot, ref entry);
+      while (present) {
+        if (entry.pid != 0 && (selected == null || Array.IndexOf(selected, (long)entry.pid) >= 0)) {
+          var row = new Row { pid=entry.pid, ppid=entry.ppid };
+          rows.Add(row); // Keep the graph even if a protected/exited process cannot be opened.
+          IntPtr process = OpenProcess(0x00001000, false, entry.pid); // QUERY_LIMITED_INFORMATION.
+          if (process != IntPtr.Zero) {
+            try {
+              long birth, exit, kernel, user;
+              // A newer handle may be a reused PID, not this snapshot's parent edge.
+              // The conservative boundary can refuse a process born during the snapshot.
+              if (GetProcessTimes(process, out birth, out exit, out kernel, out user) && birth <= boundary) {
+                row.birthMs = (birth - 116444736000000000L) / 10000L;
+                var image = new StringBuilder(32768);
+                uint length = (uint)image.Capacity;
+                if (QueryFullProcessImageName(process, 0, image, ref length)) row.path = image.ToString();
+                var memory = new MemoryCounters();
+                memory.size = (uint)Marshal.SizeOf(typeof(MemoryCounters));
+                if (GetProcessMemoryInfo(process, ref memory, memory.size)) row.rssBytes = checked((long)memory.workingSet.ToUInt64());
+              }
+            } finally { Close(process); }
+          }
+        }
+        present = Process32Next(snapshot, ref entry);
+      }
+      if (Marshal.GetLastWin32Error() != 18) throw new Win32Exception(Marshal.GetLastWin32Error(), "process snapshot enumeration incomplete"); // ERROR_NO_MORE_FILES.
+    } finally { Close(snapshot); }
+    return rows.ToArray();
+  }
+}
+`;
 
 export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = spawnSync, onFailure = null} = {}) {
   if (pids !== null && (!Array.isArray(pids) || !pids.length || pids.length > 64 || new Set(pids).size !== pids.length || !pids.every(pid=>Number.isSafeInteger(pid)&&pid>0))) return null;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return null;
-  const filter=pids===null?"":` -Filter '${pids.map(pid=>`ProcessId = ${pid}`).join(" OR ")}'`;
+  const selection=pids===null?'$null':`([long[]]@(${pids.join(',')}))`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    "$mossCimClock = [System.Diagnostics.Stopwatch]::StartNew()",
-    "[Console]::Error.WriteLine('MOSS_CIM script_entry utc_ms=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ' elapsed_ms=' + $mossCimClock.ElapsedMilliseconds)",
-    `$rows = @(Get-CimInstance Win32_Process${filter} -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize)`,
-    "[Console]::Error.WriteLine('MOSS_CIM census_returned elapsed_ms=' + $mossCimClock.ElapsedMilliseconds)",
-    "$records = @($rows | ForEach-Object { @{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId;",
-    "  birthMs = [long](([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()); path = [string]$_.ExecutablePath;",
-    "  rssBytes = [long]$_.WorkingSetSize } })",
+    "$mossSnapshotClock = [System.Diagnostics.Stopwatch]::StartNew()",
+    "[Console]::Error.WriteLine('MOSS_PROCESS script_entry utc_ms=' + [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() + ' elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
+    "Add-Type -TypeDefinition @'", WINDOWS_SNAPSHOT_SOURCE, "'@",
+    "[Console]::Error.WriteLine('MOSS_PROCESS type_ready elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
+    `$records = @([MossProcessSnapshot]::Read(${selection}))`,
+    "[Console]::Error.WriteLine('MOSS_PROCESS snapshot_returned elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
     "ConvertTo-Json -InputObject $records -Compress",
-    "[Console]::Error.WriteLine('MOSS_CIM json_completed elapsed_ms=' + $mossCimClock.ElapsedMilliseconds)",
+    "[Console]::Error.WriteLine('MOSS_PROCESS json_completed elapsed_ms=' + $mossSnapshotClock.ElapsedMilliseconds)",
   ].join("\n");
   const started=performance.now(),bound=Math.min(20_000,timeoutMs);
   const result = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: bound, maxBuffer: pids===null?32*1024*1024:1024*1024 });
   const unavailable=category=>{
     // No process stdout, command lines or environment enter the diagnostic receipt.
-    onFailure?.({command:'powershell.exe/Get-CimInstance Win32_Process',category,at:new Date().toISOString(),timeoutMs:bound,elapsedMs:performance.now()-started,
+    onFailure?.({command:'powershell.exe/Toolhelp32 process snapshot',category,at:new Date().toISOString(),timeoutMs:bound,elapsedMs:performance.now()-started,
       error:result.error?{code:result.error.code??null,message:String(result.error.message).slice(0,512)}:null,
       status:result.status??null,signal:result.signal??null,timedOut:result.error?.code==='ETIMEDOUT',
       stdoutBytes:typeof result.stdout==='string'?Buffer.byteLength(result.stdout):0,
@@ -286,10 +362,12 @@ export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = sp
   if (!Array.isArray(parsed) && (!parsed || typeof parsed!=="object")) return unavailable('invalid-shape');
   const rows = new Map();
   for (const row of Array.isArray(parsed) ? parsed : [parsed]) {
-    if (![row?.pid, row?.ppid, row?.birthMs, row?.rssBytes].every(Number.isSafeInteger) || row.pid<=0 || row.ppid<0 || row.birthMs<0 || row.rssBytes<0 || typeof row.path !== "string" || rows.has(row.pid) || (pids!==null&&!pids.includes(row.pid))) {
-      if(pids!==null)return unavailable('invalid-selected-row');
-      continue;
-    }
+    // Unknown per-process details preserve the graph. Malformed graph/duplicates
+    // invalidate the entire census: skipping a row could hide an owned child.
+    if (!row || !Number.isSafeInteger(row.pid) || row.pid<=0 || !Number.isSafeInteger(row.ppid) || row.ppid<0
+      || !(row.birthMs===null || (Number.isSafeInteger(row.birthMs)&&row.birthMs>=0))
+      || !(row.rssBytes===null || (Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0))
+      || typeof row.path!=="string" || rows.has(row.pid) || (pids!==null&&!pids.includes(row.pid))) return unavailable(pids===null?'invalid-row':'invalid-selected-row');
     rows.set(row.pid, { pid: row.pid, ppid: row.ppid, birthMs: row.birthMs, path: row.path.toLowerCase(), rssBytes: row.rssBytes });
   }
   return rows;
@@ -300,7 +378,8 @@ export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = sp
 export function sumWindowsOwnedRss(rows, identity) {
   const tree = ownedWindowsTree(rows, identity);
   if (!tree.authenticated) return null;
-  return tree.owned.reduce((total, entry) => total + (rows.get(entry.pid).rssBytes ?? 0), 0);
+  if (tree.owned.some(entry=>!Number.isSafeInteger(rows.get(entry.pid).rssBytes)||rows.get(entry.pid).rssBytes<0)) return null;
+  return tree.owned.reduce((total, entry) => total + rows.get(entry.pid).rssBytes, 0);
 }
 
 export function killWindowsPid(pid) {
@@ -310,11 +389,11 @@ export function killWindowsPid(pid) {
 
 // Authenticated descendants of a live, identity-matching root. As in the
 // terminal supervisor's observeOwned, every edge must use the CURRENT immediate
-// parent's birth: CIM can retain an old parent's PID after that PID is reused.
+// parent's birth: Windows can retain an old parent's PID after that PID is reused.
 export function ownedWindowsTree(rows, identity) {
   if (!(rows instanceof Map) || !identity) return { authenticated: false, owned: [] };
   const root = rows.get(identity.pid);
-  if (!root || !Number.isSafeInteger(root.birthMs) || root.birthMs !== identity.birthMs || root.path !== identity.path) return { authenticated: false, owned: [] };
+  if (!root || !Number.isSafeInteger(root.birthMs) || !root.path || root.birthMs !== identity.birthMs || root.path !== identity.path) return { authenticated: false, owned: [] };
   const owned = new Map([[identity.pid, 0]]);
   let changed = true;
   while (changed) {
@@ -322,7 +401,9 @@ export function ownedWindowsTree(rows, identity) {
     for (const row of rows.values()) {
       if (owned.has(row.pid) || !owned.has(row.ppid)) continue;
       const parent = rows.get(row.ppid);
-      if (!Number.isSafeInteger(row.birthMs) || row.birthMs < parent.birthMs) continue;
+      if (!Number.isSafeInteger(row.birthMs)) return { authenticated: false, owned: [] };
+      if (row.birthMs < parent.birthMs) continue;
+      if (!row.path) return { authenticated: false, owned: [] };
       owned.set(row.pid, owned.get(row.ppid) + 1);
       changed = true;
     }
@@ -338,9 +419,15 @@ export function planAuthenticatedCleanup(rows, identity, knownDescendants, rootA
   const targets = [];
   for (const [pid, birthMs] of knownDescendants) {
     const row = rows.get(pid);
-    if (row && row.birthMs === birthMs) targets.push(pid);
+    if (row && !Number.isSafeInteger(row.birthMs)) throw new Error("cleanup identity birth unavailable");
+    if (row && row.birthMs === birthMs) {
+      if (!row.path) throw new Error("cleanup identity path unavailable");
+      targets.push(pid);
+    }
   }
   const rootRow = rows.get(identity.pid);
+  if (rootRow && !Number.isSafeInteger(rootRow.birthMs)) throw new Error("cleanup root birth unavailable");
+  if (rootRow && rootRow.birthMs === identity.birthMs && !rootRow.path) throw new Error("cleanup root path unavailable");
   if (rootAlive && rootRow && rootRow.birthMs === identity.birthMs && rootRow.path === identity.path) targets.push(identity.pid);
   return { targets: [...new Set(targets)] };
 }
@@ -361,7 +448,7 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
   let identity = null;
   try {
     const rows = query(), row = rows?.get(child.pid);
-    if (!row) throw new Error("spawned child is absent from the process table");
+    if (!row || !Number.isSafeInteger(row.birthMs) || !row.path) throw new Error("spawned child identity is unavailable in the process table");
     identity = { pid: row.pid, birthMs: row.birthMs, path: row.path };
   } catch (error) {
     failure ??= `owned child identity unavailable: ${error.message}`;
@@ -371,6 +458,21 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
   let sampled = 0;
   const observe = () => {
     const rows = query(), tree = ownedWindowsTree(rows, identity);
+    const rootRow=rows?.get(identity.pid);
+    // A synchronous snapshot can finish before Node delivers the root's close
+    // event. Fresh absence/reuse is not an unknown live identity; final cleanup
+    // must still await close and independently recheck all known descendants.
+    if(rows instanceof Map&&(!rootRow||(Number.isSafeInteger(rootRow.birthMs)&&rootRow.birthMs!==identity.birthMs))){
+      // Root exit does not erase a present, already authenticated descendant.
+      for(const [pid,birth]of known){const row=rows.get(pid);if(row&&(!Number.isSafeInteger(row.birthMs)||(row.birthMs===birth&&(!row.path||!Number.isSafeInteger(row.rssBytes)||row.rssBytes<0)))){
+        state.unsafe=true;throw new Error("owned Windows identity/RSS unavailable");
+      }}
+      return;
+    }
+    if (!tree.authenticated || sumWindowsOwnedRss(rows, identity) === null) {
+      state.unsafe = true;
+      throw new Error("owned Windows identity/RSS unavailable");
+    }
     if (tree.authenticated) for (const entry of tree.owned) if (entry.pid !== identity.pid) known.set(entry.pid, entry.birthMs);
 
   };
@@ -389,7 +491,7 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
     // Root only through Node's own child handle; descendants only by re-authenticated pid+birth.
     const killed = [], unproven = [];
     try {
-      // Node's own handle remains ours even if CIM cannot authenticate a birth.
+      // Node's own handle remains ours even if the snapshot cannot authenticate a birth.
       // Kill/reap that handle before reporting the still-unproven tree cleanup.
       if (!identity && !closed) {
         try { child.kill("SIGKILL"); killed.push(`${child.pid} (own handle)`); } catch { unproven.push(child.pid); }
@@ -409,7 +511,7 @@ export async function executeOwnedChild(root, args, log, limitMs, state, supervi
       // identity, not merely targets that happened to appear in the kill plan.
       for (const [pid, birth] of new Map([[identity.pid, identity.birthMs], ...known])) {
         const row = remaining.get(pid);
-        if (row && row.birthMs === birth) unproven.push(pid);
+        if (row && (!Number.isSafeInteger(row.birthMs) || row.birthMs === birth)) unproven.push(pid);
       }
       if (unproven.length) { state.unsafe = true; failure = `${failure ?? "owned child cleanup failed"}; unproven cleanup: ${JSON.stringify(unproven)}`; }
     } catch (error) {
@@ -491,7 +593,7 @@ const defaultInstallSignals = (cancel) => {
 };
 
 // Platform-split aggregate owned-RSS sampling: POSIX via ps ppid chains from the
-// live child, Windows via the authenticated Win32_Process identity tree.
+// live child, Windows via the authenticated native Windows identity tree.
 const defaultGuardSample = (state) =>
   process.platform === "win32" ? sumWindowsOwnedRss(queryWindowsProcesses(), state.identity) : sumOwnedRss(sampleRssRows(), state.child?.pid);
 

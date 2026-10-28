@@ -166,7 +166,7 @@ export async function validatePreflightChecked(p, backend, source, caseId, phase
   check();return cap;
 }
 
-const windowsRows=rows=>rows&&new Map([...rows].map(([pid,r])=>[pid,{...r,birth:String(r.birthMs),executable:r.path}]));
+const windowsRows=rows=>rows&&new Map([...rows].map(([pid,r])=>[pid,{...r,birth:Number.isSafeInteger(r.birthMs)?String(r.birthMs):null,executable:r.path}]));
 export const recheckWindowsRows=(pids,timeoutMs,onFailure=null)=>windowsRows(queryWindowsProcesses({pids,timeoutMs,onFailure}));
 
 // Mac and Windows share pid+birth+executable identity. The Windows query is reused
@@ -201,6 +201,63 @@ export function observeOwned(rows, known, rootPid, onIdentityFailure = null, {pe
     onIdentityFailure?.({at:new Date().toISOString(),reason,rootPid,candidate:identityFacts(row),parent:identityFacts(parent),recheck});
     fail(reason);
   };
+  const rememberUnresolved=row=>{
+    // Details can fail before ancestry is authenticated. Retain every visible
+    // possible descendant for cleanup, including after exit/reparenting; do not
+    // promote that uncertainty into an authenticated identity on a later census.
+    const branch=new Map([[row.pid,row]]);let changed=true;
+    while(changed){changed=false;for(const child of rows.values())if(!branch.has(child.pid)&&branch.has(child.ppid)){
+      const parent=branch.get(child.ppid);
+      if(Number.isSafeInteger(child.birthMs)&&Number.isSafeInteger(parent.birthMs)&&child.birthMs<parent.birthMs)continue;
+      branch.set(child.pid,child);changed=true;
+    }}
+    for(const [pid,candidate]of branch)if(!pending.has(pid))pending.set(pid,known.has(pid)?{...known.get(pid),absent:false}:{...candidate,unresolvedAncestry:true,absent:false});
+  };
+  // A process born during Toolhelp's snapshot/detail join has an explicit
+  // placeholder. Resolve only via one fresh selected census, including its
+  // immediate parent, so a reused PID cannot lend a stale parent edge.
+  if(!known.has(rootPid)&&!pending.has(rootPid))assert(rows.get(rootPid)?.ppid===process.pid,'initial owned root identity unavailable');
+  const possible=new Map([...known,...pending].filter(([pid])=>rows.has(pid)).map(([pid])=>[pid,rows.get(pid)]));
+  if(rows.has(rootPid))possible.set(rootPid,rows.get(rootPid));
+  let expanded=true;
+  while(expanded){expanded=false;for(const row of rows.values())if(!possible.has(row.pid)&&possible.has(row.ppid)){
+    const parent=possible.get(row.ppid);
+    if(Number.isSafeInteger(row.birthMs)&&Number.isSafeInteger(parent.birthMs)&&row.birthMs<parent.birthMs)continue;
+    possible.set(row.pid,row);expanded=true;
+  }}
+  const originalRoot=rows.get(rootPid),launcher=rows.get(process.pid);
+  if(!known.has(rootPid)&&!pending.has(rootPid)&&originalRoot?.ppid===process.pid&&Number.isSafeInteger(originalRoot.birthMs)&&Number.isSafeInteger(launcher?.birthMs)&&originalRoot.birthMs>=launcher.birthMs)pending.set(rootPid,originalRoot);
+  const incomplete=[...possible.values()].filter(row=>Object.hasOwn(row,'birthMs')&&!Number.isSafeInteger(row.birthMs));
+  let censusRssFloor=0;
+  if(incomplete.length){
+    censusRssFloor=[...possible.values()].reduce((sum,row)=>sum+(Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0?row.rssBytes:0),0);
+    const pids=[...new Set(incomplete.flatMap(row=>[row.pid,row.ppid]))].filter(pid=>pid>0);
+    let fresh=null;
+    try{fresh=recheckWindows?.(pids)??null;}catch{ /* Denial is not absence. */ }
+    const valid=fresh instanceof Map&&[...fresh].every(([pid,row])=>pids.includes(pid)&&row?.pid===pid&&Number.isSafeInteger(row.birthMs)&&row.birthMs>=0&&Number.isSafeInteger(row.ppid)&&row.ppid>=0&&Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0&&typeof row.executable==='string'&&row.birth===String(row.birthMs));
+    rows=new Map(rows);
+    for(const row of incomplete){
+      const current=valid?fresh.get(row.pid):null,parent=current?fresh.get(current.ppid):null;
+      const oldParent=rows.get(row.ppid),previous=known.get(row.pid)??pending.get(row.pid);
+      const matchedParent=parent&&parent.executable.trim()&&current.ppid===row.ppid&&current.birthMs>=parent.birthMs&&
+        (Number.isSafeInteger(oldParent?.birthMs)?parent.birthMs===oldParent.birthMs:incomplete.some(candidate=>candidate.pid===parent.pid))&&
+        (!oldParent?.executable||parent.executable===oldParent.executable);
+      const outcome=!valid?'unavailable':!current?'absent':!current.executable.trim()?'live-path-unavailable':!matchedParent?'parent-drift':'birth-resolved';
+      const witness={at:new Date().toISOString(),outcome,candidate:identityFacts(row),current:identityFacts(current)};onResolution?.(witness);
+      if(outcome==='absent'){
+        rememberUnresolved(row);rows.delete(row.pid);pending.set(row.pid,{...(previous??row),absent:true});
+        if(row.pid===rootPid&&!known.has(rootPid))refuse('initial owned root identity unavailable',row,oldParent,witness);
+      }else if(outcome==='birth-resolved'){
+        if(previous?.unresolvedAncestry&&!Number.isSafeInteger(previous.birthMs)){rememberUnresolved(row);refuse('Windows descendant ancestry unresolved',row,oldParent,witness);}
+        // The new handle may belong to a replacement PID. Its older visible
+        // offspring cannot be discarded as stale under that replacement birth.
+        rememberUnresolved(row);
+        const resolved={...current,rssBytes:Math.max(Number.isSafeInteger(row.rssBytes)?row.rssBytes:0,current.rssBytes)};
+        if(!previous)pending.set(row.pid,resolved); // Track it even if an older offspring immediately refuses.
+        rows.set(row.pid,resolved);
+      }else{rememberUnresolved(row);refuse('Windows birth telemetry missing',row,oldParent,witness);}
+    }
+  }
   const root = rows.get(rootPid);
   if (!known.has(rootPid) && !pending.has(rootPid)) {
     assert(root && root.ppid === process.pid && root.birth, 'initial owned root identity unavailable');
@@ -210,10 +267,14 @@ export function observeOwned(rows, known, rootPid, onIdentityFailure = null, {pe
     } else assert(root.executable, 'initial owned root identity unavailable');
     pending.set(rootPid,root);
   }
-  // A pending row has authenticated ancestry/birth but not yet an executable. Keep
-  // it and observed offspring for cleanup even if the root exits or they reparent.
+  // Pending includes explicitly unresolved ancestry as well as incomplete paths.
+  // Retain these observations for cleanup even after root exit or reparenting.
   for (const [pid,identity] of [...known,...pending]) {
     const row=rows.get(pid);
+    if(row && Object.hasOwn(row,'birthMs') && (!Number.isSafeInteger(row.birthMs)||!Number.isSafeInteger(identity.birthMs))){
+      rememberUnresolved(row);refuse('Windows birth telemetry missing',row,rows.get(row.ppid));
+    }
+    if(row && identity.unresolvedAncestry && row.birth===identity.birth)refuse('Windows descendant ancestry unresolved',row,rows.get(row.ppid));
     if(row && row.birth===identity.birth){scope.set(pid,row);if(pending.has(pid))pending.set(pid,{...identity,absent:false});}
     else if(pending.has(pid))pending.set(pid,{...identity,absent:true}); // Fresh census proves the old birth absent.
   }
@@ -221,7 +282,7 @@ export function observeOwned(rows, known, rootPid, onIdentityFailure = null, {pe
   while (changed) { changed = false; for (const row of rows.values()) if (!scope.has(row.pid) && scope.has(row.ppid)) {
     const parent=scope.get(row.ppid);
     if (Object.hasOwn(row,'birthMs') || Object.hasOwn(parent,'birthMs')) {
-      if (!Number.isFinite(row.birthMs) || !Number.isFinite(parent.birthMs)) refuse('Windows birth telemetry missing',row,parent);
+      if (!Number.isFinite(row.birthMs) || !Number.isFinite(parent.birthMs)) {rememberUnresolved(row);refuse('Windows birth telemetry missing',row,parent);}
       if (row.birthMs < parent.birthMs) continue;
     }
     if (known.has(row.pid) && known.get(row.pid).birth!==row.birth) refuse('owned descendant PID reused',row,parent);
@@ -230,6 +291,7 @@ export function observeOwned(rows, known, rootPid, onIdentityFailure = null, {pe
   let rss=0;
   for(const row of scope.values()){assert(Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0,'missing/negative owned RSS');rss+=row.rssBytes;}
   // Charge the original census before any recheck can observe an exit/lower RSS.
+  rss=Math.max(rss,censusRssFloor);
   onRss?.({rss,live:[...scope.values()]});
   const unresolved=[...scope.values()].filter(row=>Object.hasOwn(row,'birthMs')&&!(typeof row.executable==='string'&&row.executable.trim()));
   const gone=new Set();

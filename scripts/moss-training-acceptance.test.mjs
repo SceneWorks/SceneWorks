@@ -280,6 +280,95 @@ test('Windows birth guards reject stale root PID and each stale ParentProcessId 
  rows.set(42,row(42,process.pid,50));assert.throws(()=>observeOwned(rows,new Map(),42),/root birth/);
  rows.set(42,row(42,process.pid,200));delete rows.get(44).birthMs;assert.throws(()=>observeOwned(rows,new Map(),42),/birth telemetry/);
 });
+// Unknown Toolhelp details are still graph members, including after root exit/reparenting.
+test('Windows unknown births remain pending until fresh absence, never PID reuse or release',()=>{
+ const {rows,parent,candidate}=actualWindowsWitness();
+ rows.set(57240,{...candidate,birthMs:null,birth:null,rssBytes:null});
+ const grandchild=winRow(57241,57240,candidate.birthMs+1,'c:/helper.exe');rows.set(57241,grandchild);
+ const known=new Map(),pending=new Map();
+ assert.throws(()=>observeOwned(rows,known,44816,null,{pending}),/Windows birth telemetry missing/);
+ assert.equal(pending.has(57240),true);assert.notEqual(pending.get(57240).absent,true);
+ assert.equal(pending.get(57241).unresolvedAncestry,true);
+ // The parent can exit and the unknown child can reparent; a later readable birth
+ // cannot prove which incarnation was initially observed, so it stays unresolved.
+ rows.delete(44816);rows.set(57240,{...candidate,ppid:1,executable:'c:/tool.exe'});
+ assert.throws(()=>observeOwned(rows,known,44816,null,{pending}),/Windows birth telemetry missing/);
+ assert.notEqual(pending.get(57240).absent,true);
+ rows.delete(57240);rows.set(57241,{...grandchild,ppid:1});
+ assert.throws(()=>observeOwned(rows,known,44816,null,{pending}),/Windows descendant ancestry unresolved/);
+ assert.notEqual(pending.get(57241).absent,true);
+ rows.delete(57241);assert.deepEqual(observeOwned(rows,known,44816,null,{pending}).live,[]);
+ assert.equal(pending.get(57240).absent,true);assert.equal(pending.get(57241).absent,true);
+ // An already-authenticated PID with unknown current birth is not a replacement PID.
+ const authenticated=new Map([[44816,parent]]),held=new Map();
+ const unavailable=new Map([[44816,{...parent,birthMs:null,birth:null}]]);
+ assert.throws(()=>observeOwned(unavailable,authenticated,44816,null,{pending:held}),/Windows birth telemetry missing/);
+ assert.notEqual(held.get(44816).absent,true);
+});
+
+test('Windows boundary placeholders resolve once against a fresh authenticated parent',()=>{
+ const original=actualWindowsWitness(),child={...original.candidate,birthMs:null,birth:null,rssBytes:null};
+ original.rows.set(child.pid,child);
+ for(const mode of ['resolved','absent','denied','unknown','parent-reused','parent-drift','parent-image']){
+  const known=new Map(),pending=new Map();let calls=0;
+  const complete={...original.candidate,executable:'c:/tool.exe'},parent={...original.parent};
+  if(mode==='parent-reused'){parent.birthMs++;parent.birth=String(parent.birthMs);}
+  if(mode==='parent-image')parent.executable='c:/different.exe';
+  if(mode==='parent-drift')complete.ppid=1;
+  const reread=pids=>{calls++;assert.deepEqual(pids,[57240,44816]);return mode==='denied'?null:new Map(mode==='absent'?[[44816,parent]]:[[44816,parent],[57240,mode==='unknown'?child:complete]]);};
+  const act=()=>observeOwned(original.rows,known,44816,null,{pending,recheckWindows:reread});
+  if(mode==='resolved')assert.deepEqual(act().live.map(row=>row.pid),[44816,57240]);
+  else if(mode==='absent'){assert.deepEqual(act().live.map(row=>row.pid),[44816]);assert.equal(pending.get(child.pid).absent,true);}
+  else assert.throws(act,/Windows birth telemetry missing/);
+  assert.equal(calls,1,'no retry loop');
+ }
+});
+
+test('Windows replacement-parent resolution retains the older observed child through reparenting',()=>{
+ const launcher=winRow(process.pid,0,100,'node.exe'),root=winRow(42,process.pid,200,'native.exe');
+ const placeholder={...winRow(43,42,250,''),birthMs:null,birth:null,rssBytes:null};
+ const oldChild=winRow(44,43,300,'old-helper.exe'),replacement=winRow(43,42,500,'replacement.exe');
+ const rows=new Map([launcher,root,placeholder,oldChild].map(row=>[row.pid,row])),known=new Map(),pending=new Map();
+ assert.throws(()=>observeOwned(rows,known,42,null,{pending,recheckWindows:()=>new Map([[42,root],[43,replacement]])}),/Windows descendant ancestry unresolved/);
+ assert.equal(pending.get(44).birthMs,300);assert.equal(pending.get(44).unresolvedAncestry,true);
+ assert.equal(pending.get(43).birthMs,500,'fresh parent identity must remain tracked if its older child refuses');
+ assert.equal(known.has(44),false,'older child must not inherit replacement-parent authentication');
+ rows.delete(42);rows.delete(43);rows.set(44,{...oldChild,ppid:1});
+ assert.throws(()=>observeOwned(rows,known,42,null,{pending}),/Windows descendant ancestry unresolved/);
+ assert.notEqual(pending.get(44).absent,true);
+ rows.delete(44);rows.set(43,{...replacement,ppid:1});
+ assert.deepEqual(observeOwned(rows,known,42,null,{pending}).live.map(row=>row.pid),[43]);
+ rows.delete(43);assert.deepEqual(observeOwned(rows,known,42,null,{pending}).live,[]);assert.equal(pending.get(44).absent,true);
+});
+
+test('Windows boundary repair never lowers already observed RSS',()=>{
+ const {rows,parent,candidate}=actualWindowsWitness();rows.set(candidate.pid,{...candidate,birthMs:null,birth:null,rssBytes:500});
+ let measured;
+ const result=observeOwned(rows,new Map(),parent.pid,null,{recheckWindows:()=>new Map([[parent.pid,parent],[candidate.pid,{...candidate,executable:'c:/tool.exe',rssBytes:1}]]),onRss:value=>{measured=value.rss;}});
+ assert.equal(result.rss,parent.rssBytes+500);assert.equal(measured,parent.rssBytes+500);
+});
+
+test('Windows birth repair cannot authenticate a root with a foreign parent',()=>{
+ const {rows,parent}=actualWindowsWitness();rows.delete(57240);rows.set(parent.pid,{...parent,ppid:99,birthMs:null,birth:null,rssBytes:null});rows.set(99,winRow(99,0,100,'foreign.exe'));
+ assert.throws(()=>observeOwned(rows,new Map(),parent.pid,null,{recheckWindows:()=>assert.fail('foreign root must refuse before selected repair')}),/initial owned root identity unavailable/);
+});
+
+test('an initially unknown Windows root cannot admit its selected-snapshot disappearance',()=>{
+ const {rows,parent}=actualWindowsWitness();rows.delete(57240);rows.set(parent.pid,{...parent,birthMs:null,birth:null,rssBytes:null});
+ assert.throws(()=>observeOwned(rows,new Map(),parent.pid,null,{recheckWindows:()=>new Map()}),/initial owned root identity unavailable/);
+});
+
+test('Windows native parser preserves unknown graph details without authenticating null birth',()=>{
+ const unknown={pid:57240,ppid:44816,birthMs:null,path:'',rssBytes:null};
+ const rows=processRows('win32',null,()=>({status:0,stdout:JSON.stringify([unknown])}));
+ assert.equal(rows.get(57240).birth,null);assert.equal(rows.get(57240).rssBytes,null);
+ const {rows:owned}=actualWindowsWitness();owned.delete(57240);owned.set(999,{...unknown,pid:999,ppid:1,birth:null,executable:''});
+ assert.deepEqual(observeOwned(owned,new Map(),44816).live.map(row=>row.pid),[44816]);
+ const {rows:missingRss}=actualWindowsWitness();missingRss.set(57240,{...missingRss.get(57240),executable:'c:/tool.exe',rssBytes:null});
+ const pending=new Map();assert.throws(()=>observeOwned(missingRss,new Map(),44816,null,{pending}),/missing\/negative owned RSS/);
+ assert.equal(pending.has(57240),true);
+});
+
 test('Windows stale parent edges exclude blank unrelated paths before authenticating genuine children',()=>{
  const row=(pid,ppid,birthMs,executable=`owned-${pid}`)=>({pid,ppid,birthMs,birth:String(birthMs),executable,rssBytes:1});
  const rows=new Map([[process.pid,row(process.pid,0,100)],[42,row(42,process.pid,200)],[43,row(43,42,150,'')],[44,row(44,42,300)],[45,row(45,44,250,'')]]);
@@ -371,6 +460,17 @@ function exitRaceChild(samples) {
 }
 const rssRoot=rssBytes=>({pid:4242,ppid:process.pid,birth:'owned-root-birth',executable:'/owned/native',rssBytes});
 const rssDescendant=(rssBytes,ppid=4242)=>({pid:4243,ppid,birth:'owned-child-birth',executable:'/owned/helper',rssBytes});
+test('Windows unreadable descendant subtree blocks release after root close and reparenting',async t=>{
+ const dir=fixture(t),state={};
+ const parent=winRow(process.pid,0,100,'node.exe'),root=winRow(4242,process.pid,200,'native.exe',10);
+ const unknown={...winRow(4243,4242,300,''),birthMs:null,birth:null,rssBytes:null};
+ const grandchild=winRow(4244,4243,400,'helper.exe',1);
+ const probe=exitRaceChild([{rows:[parent,root,unknown,grandchild]},{rows:[{...grandchild,ppid:1}],close:7}]);
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),3000,state,{capBytes:20,query:probe.query,spawnChild:()=>probe.child,releaseMs:10}),/Windows birth telemetry missing/);
+ assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);
+ assert.ok(state.cleanup.pendingIdentities.some(row=>row.pid===4244));
+});
+
 test('RSS shutdown race preserves the cap refusal until close and fresh owned absence',async t=>{
  const dir=fixture(t),log=path.join(dir,'case.log'),state={};
  const probe=exitRaceChild([{rows:[rssRoot(10)]},{rows:[rssRoot(21)]},{rows:[rssRoot(0)],close:7},{rows:[]}]);

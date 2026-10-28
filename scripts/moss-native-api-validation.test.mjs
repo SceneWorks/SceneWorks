@@ -542,7 +542,7 @@ test("Windows cleanup signals only re-authenticated owned identities", () => {
   assert.equal(sumWindowsOwnedRss(null, identity), null);
 });
 
-// Simulated CIM rows and EventEmitter children only: no host queries or kills.
+// Simulated Windows rows and EventEmitter children only: no host queries or kills.
 const WINDOWS_ROOT = { pid: 100, ppid: 1, birthMs: 10_000, path: "cargo.exe", rssBytes: 100 };
 const WINDOWS_PARENT = { pid: 101, ppid: 100, birthMs: 20_000, path: "rustc.exe", rssBytes: 200 };
 const WINDOWS_STALE = { pid: 102, ppid: 101, birthMs: 15_000, path: "unrelated-survivor.exe", rssBytes: 10_000 };
@@ -598,8 +598,55 @@ test("Windows tree authenticates every immediate parent birth, not just the root
   rows.set(103, { ...WINDOWS_CHILD, birthMs: WINDOWS_PARENT.birthMs - 1 });
   assert.deepEqual(ownedWindowsTree(rows, WINDOWS_ROOT).owned.map(({ pid }) => pid), [100, 101]);
   rows.set(101, { ...WINDOWS_PARENT, birthMs: NaN });
-  assert.deepEqual(ownedWindowsTree(rows, WINDOWS_ROOT).owned.map(({ pid }) => pid), [100]);
+  assert.equal(ownedWindowsTree(rows, WINDOWS_ROOT).authenticated,false,"unknown child birth is not a stale edge");
   assert.equal(ownedWindowsTree(rows, { ...WINDOWS_ROOT, birthMs: 9000 }).authenticated, false);
+});
+
+test('Windows generic supervision waits for queued close after a fresh root absence and still requires final telemetry',async t=>{
+ for(const missingFinal of [false,true]){
+  let child,queries=0,closed=false;const state={};
+  const dir=mkdtempSync(path.join(os.tmpdir(),'moss-close-query-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const supervision={sampleMs:0,graceMs:50,spawnChild:()=>{
+    child=Object.assign(new EventEmitter(),{pid:100,stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>assert.fail('naturally completed own handle must not be killed')});
+    return child;
+  },query:()=>{
+    queries++;
+    if(queries===1)return windowsRows(WINDOWS_ROOT);
+    if(queries===2){assert.equal(closed,false);queueMicrotask(()=>{closed=true;child.emit('close',0,null);});return new Map();}
+    if(queries===3)return new Map();
+    assert.equal(queries,4);return missingFinal?null:new Map();
+  },kill:()=>assert.fail('no foreign PID may be signalled')};
+  const execution=executeOwnedChild(ROOT,['mock-only'],path.join(dir,'command.log'),3000,state,supervision);
+  if(missingFinal){await assert.rejects(execution,/post-termination process telemetry unavailable/);assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);}
+  else{assert.equal((await execution).exit,0);assert.equal(state.cleanup.released,true);assert.notEqual(state.unsafe,true);}
+  assert.equal(queries,4);assert.equal(closed,true);
+ }
+});
+
+test('Windows queued root close cannot erase unknown facts of a previously known child',async t=>{
+ for(const missing of ['birthMs','path','rssBytes']){
+  let child,queries=0;const state={},killed=[];
+  const dir=mkdtempSync(path.join(os.tmpdir(),'moss-known-close-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const supervision={sampleMs:0,graceMs:50,spawnChild:()=>{
+    child=Object.assign(new EventEmitter(),{pid:100,stdout:new PassThrough(),stderr:new PassThrough(),kill:()=>true});return child;
+  },query:()=>{
+    queries++;
+    if(queries<=2)return windowsRows(WINDOWS_ROOT,WINDOWS_PARENT);
+    if(queries===3){queueMicrotask(()=>child.emit('close',0,null));return windowsRows({...WINDOWS_PARENT,ppid:1,[missing]:missing==='path'?'':null},WINDOWS_CHILD);}
+    assert.ok(queries<=5);return new Map(); // Both disappear before final cleanup.
+  },kill:pid=>{killed.push(pid);return 0;}};
+  await assert.rejects(executeOwnedChild(ROOT,['mock-only'],path.join(dir,'command.log'),3000,state,supervision),/owned Windows identity\/RSS unavailable/);
+  assert.equal(state.unsafe,true);assert.equal(state.cleanup.released,false);assert.deepEqual(killed,[]);assert.equal(queries,5);
+ }
+});
+
+test('Windows generic supervision keeps unknown reachable identities unsafe after root close',async t=>{
+  const mock=windowsSupervisor(),baseQuery=mock.supervision.query;let calls=0;
+  mock.supervision.query=()=>{const rows=baseQuery();if(++calls===2)rows.set(101,{...rows.get(101),birthMs:null,path:'',rssBytes:null});return rows;};
+  const dir=mkdtempSync(path.join(os.tmpdir(),'moss-unknown-owned-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));
+  const state={};
+  await assert.rejects(executeOwnedChild(ROOT,['mock-only'],path.join(dir,'command.log'),BOUNDS.caseMs,state,mock.supervision),/owned Windows identity\/RSS unavailable/);
+  assert.equal(state.unsafe,true);assert.equal(state.cleanup.released,false);assert.deepEqual(mock.killed,[]);
 });
 
 test("Windows supervisor never adopts or kills stale-edge survivors or reused descendant PIDs", async () => {
@@ -689,19 +736,67 @@ test("CPU preparation refuses an observed close after its deadline before the ne
   assert.equal(state.completion.stdioClosed,true);assert.equal(state.completion.completed,false);assert.equal(kills,0);
 });
 
+function assertNativeSnapshotScript(script,selection) {
+  assert.doesNotMatch(script,/Get-CimInstance|Get-WmiObject|Get-Process|HashSet/);
+  assert.match(script,/Array.IndexOf\(selected, \(long\)entry.pid\)/);
+  const stages=['MOSS_PROCESS script_entry','Add-Type -TypeDefinition', 'MOSS_PROCESS type_ready',`$records = @([MossProcessSnapshot]::Read(${selection}))`,'MOSS_PROCESS snapshot_returned','ConvertTo-Json -InputObject $records -Compress','MOSS_PROCESS json_completed'];
+  for(let i=1;i<stages.length;i++)assert.ok(script.indexOf(stages[i-1])<script.indexOf(stages[i]),stages[i]);
+  assert.equal((script.match(/\[Console\]::Error\.WriteLine\('MOSS_PROCESS /g)??[]).length,4);
+  assert.equal(script.split('\n').filter(line=>line==='ConvertTo-Json -InputObject $records -Compress').length,1);
+  for(const api of ['Process32FirstW','Process32NextW','GetProcessTimes','QueryFullProcessImageNameW','GetProcessMemoryInfo','GetSystemTimePreciseAsFileTime'])assert.ok(script.includes(api));
+  assert.match(script,/CreateToolhelp32Snapshot\(0x00000002, 0\)/);
+  assert.match(script,/OpenProcess\(0x00001000, false, entry.pid\)/);
+  assert.match(script,/public UIntPtr heap/);assert.match(script,/SizeConst=260/);
+  assert.match(script,/entry.size = \(uint\)Marshal.SizeOf\(typeof\(ProcessEntry\)\)/);
+  assert.match(script,/birth <= boundary/);assert.match(script,/row.rssBytes = checked\(\(long\)memory.workingSet.ToUInt64\(\)\)/);
+  assert.match(script,/new StringBuilder\(32768\)/);assert.match(script,/QueryFullProcessImageName\(process, 0,/);
+  assert.match(script,/finally \{ Close\(process\); \}/);assert.match(script,/finally \{ Close\(snapshot\); \}/);
+  assert.match(script,/GetLastWin32Error\(\) != 18/);
+}
+
+// CI_IMPACT: literal rows only; actual native API execution remains the existing Windows CPU prefix.
+test('Windows snapshot preserves inaccessible graph rows and refuses malformed census records',()=>{
+  const row={pid:57240,ppid:44816,birthMs:null,path:'',rssBytes:null};
+  for(const pids of [null,[57240]]){
+    const rows=queryWindowsProcesses({pids,run:()=>({status:0,stdout:JSON.stringify([row])})});
+    assert.deepEqual(rows.get(row.pid),row,'protected/vanished detail failure remains present and unknown');
+    for(const malformed of [{...row,pid:0},{...row,ppid:null},{...row,birthMs:undefined},{...row,rssBytes:-1},{...row,path:null}]){
+      assert.equal(queryWindowsProcesses({pids,run:()=>({status:0,stdout:JSON.stringify([malformed])})}),null);
+    }
+    assert.equal(queryWindowsProcesses({pids,run:()=>({status:0,stdout:JSON.stringify([row,row])})}),null);
+  }
+});
+
+test('Windows unknown owned facts never become zero RSS or cleanup absence',()=>{
+  const unrelated={pid:999,ppid:1,birthMs:null,path:'',rssBytes:null};
+  const rows=windowsRows(WINDOWS_ROOT,WINDOWS_PARENT,unrelated);
+  assert.equal(ownedWindowsTree(rows,WINDOWS_ROOT).authenticated,true);
+  assert.equal(sumWindowsOwnedRss(rows,WINDOWS_ROOT),300);
+  for(const missing of ['birthMs','path','rssBytes']){
+    const unknown={...WINDOWS_PARENT,[missing]:missing==='path'?'':null};rows.set(unknown.pid,unknown);
+    if(missing!=='rssBytes')assert.equal(ownedWindowsTree(rows,WINDOWS_ROOT).authenticated,false);
+    assert.equal(sumWindowsOwnedRss(rows,WINDOWS_ROOT),null,missing);
+  }
+  rows.set(WINDOWS_PARENT.pid,{...WINDOWS_PARENT,birthMs:null});
+  assert.throws(()=>planAuthenticatedCleanup(rows,WINDOWS_ROOT,new Map([[101,20000]]),true),/birth unavailable/);
+  rows.set(101,{...WINDOWS_PARENT,path:''});
+  assert.throws(()=>planAuthenticatedCleanup(rows,WINDOWS_ROOT,new Map([[101,20000]]),true),/path unavailable/);
+  rows.delete(101);rows.set(100,{...WINDOWS_ROOT,birthMs:null});
+  assert.throws(()=>planAuthenticatedCleanup(rows,WINDOWS_ROOT,new Map(),false),/birth unavailable/);
+});
+
 test("selected Windows census batches exact PIDs and distinguishes empty JSON from unavailable metadata",()=>{
   const row={pid:57240,ppid:44816,birthMs:1793073218066,path:"C:\\Windows\\System32\\tool.exe",rssBytes:28229632};
   for(const stdout of [JSON.stringify([row]),"[]"]){
     const rows=queryWindowsProcesses({pids:[57240,7708],timeoutMs:1234,run:(program,args,options)=>{
-      assert.equal(program,"powershell.exe");assert.match(args.at(-1),/-Filter 'ProcessId = 57240 OR ProcessId = 7708'/);
-      assert.match(args.at(-1),/-Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize/);
+      assert.equal(program,"powershell.exe");assertNativeSnapshotScript(args.at(-1),"([long[]]@(57240,7708))");
       assert.match(args.at(-1),/ConvertTo-Json -InputObject \$records/);assert.equal(options.timeout,1234);assert.equal(options.maxBuffer,1024*1024);
       return {status:0,stdout};
     }});
     assert.ok(rows instanceof Map);assert.equal(rows.size,stdout==="[]"?0:1);
   }
   for(const result of [{status:1,stdout:"[]"},{status:0,stdout:""},{status:0,stdout:"null"},{status:0,stdout:"not-json"},
-    {status:0,stdout:JSON.stringify([{...row,birthMs:null}])},{status:0,stdout:JSON.stringify([{...row,path:null}])},
+    {status:0,stdout:JSON.stringify([{...row,path:null}])},
     {status:0,stdout:JSON.stringify([{...row,pid:99}])},{status:0,stdout:JSON.stringify([row,row])},{error:new Error("denied"),stdout:"[]"}]){
     assert.equal(queryWindowsProcesses({pids:[57240],run:()=>result}),null,"denial/malformed rows are not absence");
   }
@@ -722,7 +817,7 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
     assert.equal(result.exit,code);assert.match(result.output,output);assert.equal(state.completion.completed,true);assert.equal(state.cleanup,undefined);
     t.diagnostic(JSON.stringify({name,completion:state.completion}));
   }
-  // Exercise the actual native supervisor and CIM with CPU processes before any compiler/model.
+  // Exercise the actual native supervisor and Toolhelp reader with CPU processes before any compiler/model.
   // The helper exits cooperatively only after a prior authenticated RSS sample contains both PIDs.
   const {executeSupervised,processRows,recheckWindowsRows}=await import("./moss-training-acceptance.mjs");
   const releaseFile=path.join(root,"owned-guard-release"),log=path.join(root,"owned-guard.log"),state={};
@@ -732,14 +827,19 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
   const markedQuery=(program,args,options)=>{
     const result=spawnSync(program,args,options);
     if(!queryMarkers.length && !result.error && result.status===0){
-      const markers=(result.stderr??"").split(/\r?\n/).filter(line=>/^MOSS_CIM /.test(line));
-      assert.equal(markers.length,3);
-      assert.match(markers[0],/^MOSS_CIM script_entry utc_ms=\d+ elapsed_ms=\d+$/);
-      assert.match(markers[1],/^MOSS_CIM census_returned elapsed_ms=\d+$/);
-      assert.match(markers[2],/^MOSS_CIM json_completed elapsed_ms=\d+$/);
+      const markers=(result.stderr??"").split(/\r?\n/).filter(line=>/^MOSS_PROCESS /.test(line));
+      assert.equal(markers.length,4);
+      assert.match(markers[0],/^MOSS_PROCESS script_entry utc_ms=\d+ elapsed_ms=\d+$/);
+      assert.match(markers[1],/^MOSS_PROCESS type_ready elapsed_ms=\d+$/);
+      assert.match(markers[2],/^MOSS_PROCESS snapshot_returned elapsed_ms=\d+$/);
+      assert.match(markers[3],/^MOSS_PROCESS json_completed elapsed_ms=\d+$/);
+      const parsed=JSON.parse(result.stdout),self=(Array.isArray(parsed)?parsed:[parsed]).find(row=>row.pid===process.pid);
+      assert.equal(self?.ppid,process.ppid);assert.equal(self.path.toLowerCase(),process.execPath.toLowerCase());
+      assert.ok(Number.isSafeInteger(self.birthMs)&&self.birthMs>0&&self.birthMs<=Date.now());
+      assert.ok(Number.isSafeInteger(self.rssBytes)&&self.rssBytes>0);
       assert.ok(markers.join("\n").length<512);
       const elapsed=markers.map(line=>Number(/elapsed_ms=(\d+)$/.exec(line)[1]));
-      assert.ok(elapsed[0]<=elapsed[1] && elapsed[1]<=elapsed[2]);
+      assert.ok(elapsed.every((value,index)=>index===0||elapsed[index-1]<=value));
       queryMarkers.push(...markers);
     }
     return result;
@@ -765,7 +865,7 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
   assert.equal(result.exit,0);assert.equal(released,true);assert.ok(state.rssFirstBytes>0);assert.equal(state.cleanup.released,true);assert.notEqual(state.unsafe,true);
   for(const pid of [identities.rootPid,identities.childPid]){const identity=state.cleanup.observedIdentities.find(row=>row.pid===pid);assert.ok(Number.isSafeInteger(identity?.birthMs)&&identity.executable);}
   assert.match(result.output,/"shortExit":0/);assert.equal(masked,true);
-  assert.equal(queryMarkers.length,3);
+  assert.equal(queryMarkers.length,4);
   t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,injectedMissingPath:masked,actualRechecks,samples:state.rssSamples.length,cleanup:state.cleanup,queryMarkers}));
   const after=queryWindowsProcesses({pids:[identities.childPid],timeoutMs:5000});
   assert.ok(after instanceof Map);assert.notEqual(after.get(identities.childPid)?.birthMs,state.cleanup.observedIdentities.find(row=>row.pid===identities.childPid).birthMs,"the exact old child birth must be absent after release");
@@ -829,11 +929,11 @@ test('Candle MOSS output uses runner context only at step scope and uploads the 
  assert.match(run,/--output "%MOSS_NATIVE_OUTPUT%"/);
 });
 
-// CI_IMPACT: injected query results only; platform test above remains the real CIM check.
+// CI_IMPACT: injected query results only; platform test above remains the real native Windows check.
 test('Windows query failures preserve bounded subtype facts without process stdout',()=>{
  const secret='DO_NOT_LOG_PROCESS_ROWS';
  const timeout=Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'),{code:'ETIMEDOUT'});
- const markers='MOSS_CIM script_entry utc_ms=1793188800000 elapsed_ms=0\nMOSS_CIM census_returned elapsed_ms=12\nMOSS_CIM json_completed elapsed_ms=14\n';
+ const markers='MOSS_PROCESS script_entry utc_ms=1793188800000 elapsed_ms=0\nMOSS_PROCESS type_ready elapsed_ms=9\nMOSS_PROCESS snapshot_returned elapsed_ms=12\nMOSS_PROCESS json_completed elapsed_ms=14\n';
  const variants=[
   [{error:timeout,status:null,signal:'SIGTERM',stdout:secret,stderr:'x'.repeat(700)},'command-error'],
   [{error:timeout,status:0,signal:null,stdout:'[{"pid":1,"ppid":0,"birthMs":1,"path":"owned.exe","rssBytes":1}]',stderr:markers},'command-error'],
@@ -842,7 +942,7 @@ test('Windows query failures preserve bounded subtype facts without process stdo
  ];
  for(const [result,category] of variants){
   const facts=[];
-  assert.equal(queryWindowsProcesses({run:(_p,args,options)=>{assert.match(args.at(-1),/Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize/);assert.doesNotMatch(args.at(-1),/-Filter/);const script=args.at(-1);assert.equal((script.match(/\[Console\]::Error\.WriteLine\('MOSS_CIM /g)??[]).length,3);const stages=['MOSS_CIM script_entry','Get-CimInstance Win32_Process','MOSS_CIM census_returned','ConvertTo-Json -InputObject $records -Compress','MOSS_CIM json_completed'];for(let i=1;i<stages.length;i++)assert.ok(script.indexOf(stages[i-1])<script.indexOf(stages[i]));assert.equal(script.split('\n').filter(line=>line==='ConvertTo-Json -InputObject $records -Compress').length,1);assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return result;},onFailure:fact=>facts.push(fact)}),null);
+  assert.equal(queryWindowsProcesses({run:(_p,args,options)=>{assertNativeSnapshotScript(args.at(-1),'$null');assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return result;},onFailure:fact=>facts.push(fact)}),null);
   assert.equal(facts.length,1);const fact=facts[0];assert.equal(fact.category,category);assert.equal(fact.status,result.status);assert.equal(fact.timeoutMs,20000);assert.ok(fact.elapsedMs>=0);assert.equal(fact.timedOut,category==='command-error');
   assert.ok((fact.stderr?.length??0)<=512);assert.equal(JSON.stringify(facts).includes(secret),false);
   if(result.stderr===markers)assert.equal(fact.stderr,markers,'bounded stage markers must survive timeout/status0 refusal unchanged');
