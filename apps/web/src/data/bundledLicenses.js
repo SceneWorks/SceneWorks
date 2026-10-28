@@ -14,6 +14,7 @@ import onnxruntimeLicense from "../../../desktop/licenses/onnxruntime/LICENSE?ur
 import cudaNotice from "../../../desktop/licenses/cuda/NOTICE.txt?url&no-inline";
 import flashAttentionLicense from "../../../desktop/licenses/flash-attention/LICENSE.txt?url&no-inline";
 import cutlassLicense from "../../../desktop/licenses/cutlass/LICENSE.txt?url&no-inline";
+import flashAttentionAuthors from "../../../desktop/licenses/flash-attention/AUTHORS.txt?url&no-inline";
 // Re-hosted AI model weights (sc-5604). Upstream license text reproduced so the
 // redistribution attribution travels with the app. The three Wan2.2 models are
 // each redistributed under Apache-2.0; the LTX-2.3 bundle carries two restricted
@@ -205,6 +206,7 @@ const DOCUMENT_URL = {
   "cuda-notice": cudaNotice,
   "flash-attention-license": flashAttentionLicense,
   "cutlass-license": cutlassLicense,
+  "flash-attention-authors": flashAttentionAuthors,
   "wan2.2-ti2v-5b-apache": wanTi2v5bApache,
   "wan2.2-i2v-a14b-apache": wanI2vA14bApache,
   "wan2.2-t2v-a14b-apache": wanT2vA14bApache,
