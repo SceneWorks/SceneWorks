@@ -7999,6 +7999,36 @@ fn bernini_backends_share_engine_id_and_video_mode_mapping() {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
+fn video_stall_window_covers_preparation_and_cold_load_until_the_first_step() {
+    // sc-26691: a healthy imported H3 render was cancelled 600 s into a ~25 minute cold load on the
+    // CUDA host, because the engine reports nothing before its first denoise step.
+    let baseline = video_stall_timeout_policy(None, "minimax_h3", 544, 1088, 124, None);
+    assert_eq!(baseline.timeout, VIDEO_STALL_TIMEOUT);
+    assert_eq!(
+        video_stall_window(baseline, false),
+        VIDEO_PRE_STEP_STALL_TIMEOUT
+    );
+    assert_eq!(video_stall_window(baseline, true), VIDEO_STALL_TIMEOUT);
+    // Never shortens a per-step budget larger than the pre-step window.
+    let long = VideoStallTimeoutPolicy {
+        timeout: VIDEO_PRE_STEP_STALL_TIMEOUT + Duration::from_secs(60),
+        basis: "wan_a14b",
+    };
+    assert_eq!(video_stall_window(long, false), long.timeout);
+    // An operator override stays absolute, before and after the first step.
+    let operator = video_stall_timeout_policy(Some("120"), "minimax_h3", 544, 1088, 124, None);
+    assert_eq!(
+        video_stall_window(operator, false),
+        Duration::from_secs(120)
+    );
+    assert_eq!(video_stall_window(operator, true), Duration::from_secs(120));
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
 fn video_stall_timeout_operator_override_is_absolute() {
     // A valid positive override wins even when it is below both the default and the H3 workload
     // budget. This is the explicit operator escape hatch, not a lower bound.

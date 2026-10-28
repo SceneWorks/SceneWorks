@@ -2324,6 +2324,37 @@ pub(super) fn run_video_generation(
 ))]
 pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// The silent window allowed before an engine's FIRST denoise step: request preparation plus a
+/// cold model load, which emits no progress of its own on the Candle MiniMax-H3 engine. The
+/// per-step budgets above model the gap between steps, not this. Measured on the RTX PRO 6000
+/// Windows host (sc-26691): an imported 31.7 GB MiniMax-H3 int8 DiT loaded at ~38 MB/s
+/// (2.3 GB/min of device memory) and was still loading 13 minutes in, on course for about 25
+/// minutes before its first step, so the 600 s step budget cancelled a healthy render. A load that
+/// truly wedges is still caught, just later. Never shortens a larger per-step budget, and an
+/// operator override stays absolute.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const VIDEO_PRE_STEP_STALL_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+
+/// The stall window in force: the request's per-step budget once a denoise step has arrived,
+/// [`VIDEO_PRE_STEP_STALL_TIMEOUT`] (or the larger per-step budget) before then.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_stall_window(
+    policy: VideoStallTimeoutPolicy,
+    first_step_seen: bool,
+) -> Duration {
+    if first_step_seen || policy.basis == "operator_override" {
+        policy.timeout
+    } else {
+        policy.timeout.max(VIDEO_PRE_STEP_STALL_TIMEOUT)
+    }
+}
+
 /// The timeout policy and its receipt-facing basis. Keeping the basis next to the duration makes a
 /// request-aware watchdog observable instead of leaving an unexplained, model-specific number in a
 /// later stall event.
@@ -3274,6 +3305,9 @@ pub(super) async fn generate_video_using(
     // Time of the most recent progress event; the forward-progress watchdog fails the job if
     // this goes stale for `stall_timeout` (covers both the silent load phase and step-to-step).
     let mut last_progress = Instant::now();
+    // Until the first denoise step the job is preparing and cold-loading, which the per-step
+    // budget does not model; see [`video_stall_window`].
+    let mut first_step_seen = false;
     // Interval arm so the cold model-load phase (crate::inference_runtime::load emits no progress)
     // still heartbeats and polls cancel, instead of looking dead to the API's
     // staleness check until the first denoise step (sc-4276 / F-MLXW-12; mirrors
@@ -3320,6 +3354,7 @@ pub(super) async fn generate_video_using(
                     // still owned by the fraction/message match below.
                     match &progress {
                         Progress::Step { total, .. } => {
+                            first_step_seen = true;
                             phase_timer.mark_sample_step(Instant::now());
                             if video_effective_steps.is_none() {
                                 video_effective_steps = Some(*total);
@@ -3387,12 +3422,14 @@ pub(super) async fn generate_video_using(
                     // (the block runs on a separate thread), so the API sees a healthy job forever.
                     // If no progress has arrived for `stall_timeout`, request engine cancel and start
                     // the abandon countdown.
-                    if !canceled && last_progress.elapsed() >= stall_timeout {
+                    let stall_window = video_stall_window(stall_policy, first_step_seen);
+                    if !canceled && last_progress.elapsed() >= stall_window {
                         tracing::warn!(
                             event = "rust_worker_video_stalled",
                             jobId = %job.id,
                             engine = %log_engine_id,
-                            stallSeconds = stall_timeout.as_secs(),
+                            stallSeconds = stall_window.as_secs(),
+                            firstStepSeen = first_step_seen,
                             "no progress within the stall window — requesting engine cancel"
                         );
                         cancel.cancel();
@@ -3441,7 +3478,7 @@ pub(super) async fn generate_video_using(
     if stalled {
         return Err(WorkerError::Engine(format!(
             "Video generation stalled: no progress for {}s. The job was canceled.",
-            stall_timeout.as_secs()
+            video_stall_window(stall_policy, first_step_seen).as_secs()
         )));
     }
     if canceled {
