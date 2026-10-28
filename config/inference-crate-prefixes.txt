@@ -23,6 +23,7 @@ crates/audio/candle-audio-yue2
 crates/bundles/runtime-catalog
 crates/bundles/runtime-cpu
 crates/bundles/runtime-cuda
+crates/bundles/runtime-ios
 crates/bundles/runtime-macos
 crates/contracts/core-llm
 crates/contracts/core-llm/core-llm-testkit
@@ -74,6 +75,7 @@ crates/media/candle-gen/candle-gen-svd
 crates/media/candle-gen/candle-gen-wan
 crates/media/candle-gen/candle-gen-z-image
 crates/media/candle-gen/vendor/candle-core
+crates/media/candle-gen/vendor/candle-flash-attn
 crates/media/candle-gen/vendor/candle-kernels
 crates/media/candle-gen/vendor/candle-metal-kernels
 crates/media/mlx-gen
@@ -91,6 +93,7 @@ crates/media/mlx-gen/mlx-gen-flux2
 crates/media/mlx-gen/mlx-gen-flux3
 crates/media/mlx-gen/mlx-gen-ideogram
 crates/media/mlx-gen/mlx-gen-instantid
+crates/media/mlx-gen/mlx-gen-ios-catalog
 crates/media/mlx-gen/mlx-gen-iris
 crates/media/mlx-gen/mlx-gen-joycaption
 crates/media/mlx-gen/mlx-gen-kolors
@@ -119,3 +122,7 @@ crates/media/mlx-gen/mlx-gen-supra2
 crates/media/mlx-gen/mlx-gen-svd
 crates/media/mlx-gen/mlx-gen-wan
 crates/media/mlx-gen/mlx-gen-z-image
+ios-host/smoke
+vendor/clip-regex/regex
+vendor/clip-regex/regex-automata
+vendor/clip-regex/regex-syntax
