@@ -12136,7 +12136,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn shipped_plain_sdxl_without_a_binding_preserves_the_three_rung_estimate_path() {
+    fn shipped_plain_sdxl_without_a_binding_preserves_the_four_rung_estimate_path() {
         fn fixture_spec(root: &std::path::Path, policy: OffloadPolicy) -> LoadSpec {
             for component in ["text_encoder", "text_encoder_2", "unet", "vae"] {
                 let directory = root.join(component);
@@ -12261,7 +12261,25 @@ mod tests {
         );
         assert!(constrained.memory.stage_residency);
         assert!(constrained.memory.stream_transformer_blocks);
-        assert!(!constrained.memory.tile_vae_decode);
+        assert!(constrained.memory.tile_vae_decode);
+        let parameters = &constrained.context.selection.parameters;
+        assert!([896, 768, 640, 512, 448, 384, 320, 256].contains(
+            &parameters
+                .decode_tile_edge
+                .expect("rung 4 composes native decode")
+        ));
+        assert_eq!(parameters.decode_overlap, Some(64));
+        assert_eq!(
+            constrained.memory.decode_tile_edge,
+            parameters.decode_tile_edge
+        );
+        assert_eq!(constrained.memory.decode_overlap, parameters.decode_overlap);
+        contract(root.path(), OffloadPolicy::Sequential)
+            .validate_selection(&constrained.context.selection)
+            .expect("the estimate must select the provider's explicit v5 composition");
+        assert!(!resident.memory.tile_vae_decode);
+        assert!(!resident.memory.stage_residency);
+        assert!(!resident.memory.stream_transformer_blocks);
         assert!(!constrained.memory.chunk_attention);
         for evaluation in [&resident, &constrained] {
             assert_eq!(evaluation.context.mode, MemoryMode::TextToImage);
@@ -16092,14 +16110,14 @@ mod tests {
                     "Lens bf16 asset {base_asset_bytes} is smaller than its source encoder"
                 ));
             }
-            create_sparse_weights(
+            set_sparse_valid_safetensor(
                 &weights.join("text_encoder/model.safetensors"),
                 LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-            );
-            create_sparse_weights(
+            )?;
+            set_sparse_valid_safetensor(
                 &weights.join("transformer/model.safetensors"),
                 base_asset_bytes - LENS_BF16_TEXT_ENCODER_DISK_BYTES,
-            );
+            )?;
             std::fs::write(
                 weights.join("text_encoder/config.json"),
                 r#"{"quantization_config":{"quant_method":"mxfp4"}}"#,
@@ -20123,10 +20141,18 @@ mod tests {
             .tempdir()
             .expect("temp dir");
         let root = root_guard.path();
-        for (component, bytes) in [("text_encoder", 13), ("transformer", 11), ("vae", 3)] {
-            let dir = root.join(component);
-            std::fs::create_dir_all(&dir).expect("component dir");
-            std::fs::write(dir.join("model.safetensors"), vec![0; bytes]).expect("fixture");
+        let (te_disk, dit_disk, vae_disk) = (256_u64, 272_u64, 288_u64);
+        let disk_total = te_disk + dit_disk + vae_disk;
+        for (component, bytes) in [
+            ("text_encoder", te_disk),
+            ("transformer", dit_disk),
+            ("vae", vae_disk),
+        ] {
+            crate::test_fixture_disk::set_sparse_valid_safetensor(
+                &root.join(component).join("model.safetensors"),
+                bytes,
+            )
+            .expect("valid structural fixture for the provider's strict header reader");
         }
         std::fs::write(
             root.join("text_encoder").join("config.json"),
@@ -20137,7 +20163,7 @@ mod tests {
         let (dense_total, dense_te, dense_headroom) = spec_component_bytes("lens_turbo", &spec);
         let expected_te = (30.07 * BYTES_PER_GIB).ceil() as u64;
         assert_eq!(dense_te, expected_te);
-        assert_eq!(dense_total, expected_te + 14);
+        assert_eq!(dense_total, expected_te + dit_disk + vae_disk);
         assert_eq!(dense_headroom, HeadroomAllowance::LENS_DENSE);
         // sc-16195: a bare measured transient carries NO OS reserve, so the request estimator
         // must leave the whole allowance in its area term for this path.
@@ -20161,7 +20187,7 @@ mod tests {
         let (bf16_total, bf16_te, bf16_headroom) = spec_component_bytes("lens_turbo", &spec);
         assert_eq!(
             (bf16_total, bf16_te),
-            (27, 13),
+            (disk_total, te_disk),
             "bf16-on-disk has no MXFP4 materialization delta"
         );
         assert_eq!(
@@ -20178,7 +20204,7 @@ mod tests {
         )
         .expect("packed marker with inherited MXFP4 metadata");
         let (packed_total, packed_te, packed_headroom) = spec_component_bytes("lens_turbo", &spec);
-        assert_eq!((packed_total, packed_te), (27, 13));
+        assert_eq!((packed_total, packed_te), (disk_total, te_disk));
         assert_eq!(packed_headroom, HeadroomAllowance::GENERIC);
         for engine_id in ["lens", "lens_turbo"] {
             let plan =
