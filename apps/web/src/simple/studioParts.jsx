@@ -300,7 +300,7 @@ export function StudioResults({ job, assets, type, columns, meta, pendingCount =
                 <button
                   aria-label="Open preview"
                   className="su-result-open"
-                  onClick={() => openPreview(asset)}
+                  onClick={() => openPreview(asset, { scope: results })}
                   type="button"
                 >
                   <AssetThumbnail asset={asset} />

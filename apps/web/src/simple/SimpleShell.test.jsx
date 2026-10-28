@@ -750,6 +750,101 @@ describe("SimpleShell", () => {
     expect(context.createModelDownloadJob.mock.calls[0][0].id).toBe("flux_dev");
   });
 
+  describe("asset preview navigation", () => {
+    const gallery = ["one", "two", "three"].map((name, index) => ({
+      id: `asset-${name}`,
+      type: "image",
+      projectId: "project-1",
+      displayName: `${name}.png`,
+      url: `/media/${name}.png`,
+      createdAt: `2026-10-0${index + 1}T00:00:00Z`,
+    }));
+
+    function previewName() {
+      return container.querySelector(".su-preview-head strong")?.textContent;
+    }
+
+    async function openFromAssets(name) {
+      await renderShell(root, baseContext({ assets: gallery }));
+      await click(navButton(container, "Assets"));
+      await click(container.querySelector(`.su-asset[title="${name}"]`));
+    }
+
+    function pressKey(key, target = document.body) {
+      return act(async () => {
+        target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+      });
+    }
+
+    function swipe(dx, dy = 0) {
+      const stage = container.querySelector(".su-preview-stage");
+      const touch = (x, y) => ({ clientX: x, clientY: y, identifier: 0, target: stage });
+      return act(async () => {
+        const start = new Event("touchstart", { bubbles: true });
+        Object.assign(start, { touches: [touch(200, 200)], changedTouches: [touch(200, 200)] });
+        stage.dispatchEvent(start);
+        const end = new Event("touchend", { bubbles: true });
+        Object.assign(end, { touches: [], changedTouches: [touch(200 + dx, 200 + dy)] });
+        stage.dispatchEvent(end);
+      });
+    }
+
+    it("steps through the grid it was opened from with buttons, disabled at the ends", async () => {
+      await renderShell(root, baseContext({ assets: gallery }));
+      await click(navButton(container, "Assets"));
+      // Grid order is the collection order.
+      const names = [...container.querySelectorAll(".su-asset")].map((node) => node.title);
+      await click(container.querySelector(`.su-asset[title="${names[0]}"]`));
+
+      expect(previewName()).toBe(names[0]);
+      expect(container.querySelector(".su-preview-position").textContent).toBe("1 / 3");
+      expect(container.querySelector('[aria-label="Previous asset"]').disabled).toBe(true);
+
+      await click(container.querySelector('[aria-label="Next asset"]'));
+      await click(container.querySelector('[aria-label="Next asset"]'));
+      expect(previewName()).toBe(names[2]);
+      expect(container.querySelector(".su-preview-position").textContent).toBe("3 / 3");
+      expect(container.querySelector('[aria-label="Next asset"]').disabled).toBe(true);
+
+      await click(container.querySelector('[aria-label="Previous asset"]'));
+      expect(previewName()).toBe(names[1]);
+    });
+
+    it("navigates with the Left/Right arrow keys, but not while typing elsewhere", async () => {
+      await openFromAssets("two.png");
+      const start = previewName();
+      await pressKey("ArrowRight");
+      const afterRight = previewName();
+      expect(afterRight).not.toBe(start);
+      await pressKey("ArrowLeft");
+      expect(previewName()).toBe(start);
+
+      const search = container.querySelector('input[aria-label="Search assets"]');
+      await pressKey("ArrowRight", search);
+      expect(previewName()).toBe(start);
+    });
+
+    it("navigates on a horizontal swipe and ignores a mostly-vertical one", async () => {
+      await openFromAssets("two.png");
+      const start = previewName();
+      await swipe(-120, 10);
+      const next = previewName();
+      expect(next).not.toBe(start);
+      await swipe(80, 200);
+      expect(previewName()).toBe(next);
+      await swipe(120);
+      expect(previewName()).toBe(start);
+    });
+
+    it("shows no navigation for an asset opened alone", async () => {
+      await renderShell(root, baseContext({ assets: [gallery[0]] }));
+      await click(navButton(container, "Assets"));
+      await click(container.querySelector(".su-asset"));
+      expect(container.querySelector(".su-preview-nav")).toBeNull();
+      expect(container.querySelector(".su-preview-position")).toBeNull();
+    });
+  });
+
   it("reports the mode switch to the host app", async () => {
     const onModeChange = vi.fn();
     await renderShell(root, baseContext(), { onModeChange });

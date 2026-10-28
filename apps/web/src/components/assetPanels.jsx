@@ -6,6 +6,7 @@ import { assetMatchesCharacter } from "../characterMembership.js";
 import { assetCanCarryWorkflow, saveAssetAs, revealAsset } from "../assetActions.js";
 import { SAVE_WITHOUT_WORKFLOW_LABEL } from "../workflowEmbedPreferences.js";
 import { isDesktop, isPageFullscreen, setViewerFullscreen } from "../runtime.js";
+import { usePreviewArrowNavigation } from "../hooks/usePreviewArrowNavigation.js";
 import {
   AssetMedia,
   AssetThumbnail,
@@ -1103,6 +1104,9 @@ function FullscreenPreviewComponent({
 
   const zoomed = view.scale > PREVIEW_MIN_SCALE;
 
+  const goPrevious = previousAsset ? () => onPreviewAsset(previousAsset, "previous") : null;
+  const goNext = nextAsset ? () => onPreviewAsset(nextAsset, "next") : null;
+
   // Right-click context menu (sc-8729). Override the native WKWebView menu on the
   // stage for BOTH the <img> and <video> paths and render our own at the cursor.
   const [contextMenu, setContextMenu] = React.useState(null);
@@ -1170,6 +1174,10 @@ function FullscreenPreviewComponent({
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [isFullscreen, contextMenu, exitFullscreen]);
+
+  // Left/Right arrows mirror the prev/next buttons; the open context menu keeps its own keys.
+  const stageRef = React.useRef(null);
+  usePreviewArrowNavigation({ rootRef: stageRef, enabled: !contextMenu, onPrevious: goPrevious, onNext: goNext });
 
   // Never leave the OS window/page stuck in fullscreen if the preview unmounts while
   // active (collection exhausted mid-fullscreen, external close).
@@ -1278,12 +1286,12 @@ function FullscreenPreviewComponent({
           Close
         </button>
       </div>
-      <div className="preview-modal-stage" onContextMenu={openContextMenu}>
+      <div className="preview-modal-stage" onContextMenu={openContextMenu} ref={stageRef}>
           <button
             aria-label="Previous asset"
             className="preview-nav-button previous"
             disabled={!previousAsset}
-            onClick={() => previousAsset && onPreviewAsset(previousAsset, "previous")}
+            onClick={() => goPrevious?.()}
             type="button"
           >
             <Icon.ArrowLeft size={18} />
@@ -1326,7 +1334,7 @@ function FullscreenPreviewComponent({
             aria-label="Next asset"
             className="preview-nav-button next"
             disabled={!nextAsset}
-            onClick={() => nextAsset && onPreviewAsset(nextAsset, "next")}
+            onClick={() => goNext?.()}
             type="button"
           >
             <Icon.ArrowRight size={18} />
