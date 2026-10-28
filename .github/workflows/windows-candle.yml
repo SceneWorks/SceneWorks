@@ -394,10 +394,11 @@ jobs:
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
       SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
-      # Automatic PR/push tests are model-free and do not open a CUDA device.
+      # Automatic PR/push validation may construct a CUDA context for weights-free
+      # trainer metadata/config checks; learned kernels remain dispatch-only.
       # Preserve the existing manual-dispatch default and its step-local overrides.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && '1' || github.event_name == 'workflow_dispatch' && '0' || '-1' }}
+      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && '1' || github.event_name == 'workflow_dispatch' && '0' || '1' }}
       CAPABILITY_FACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only }}
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
@@ -2024,20 +2025,20 @@ jobs:
         env:
           CARGO_NET_OFFLINE: 'false'
         run: cargo fetch --locked
-      - name: Compile the ignored quant kernel
+      # The early dispatch check restricts this input to exactly 0 or 1 before cmd
+      # expansion. Keep both Cargo invocations in the same vcvars/NVCC_CCBIN env:
+      # cudaforge tracks NVCC_CCBIN and otherwise rebuilds in the captured child.
+      - name: Compile then run exactly the ignored quant kernel
         shell: cmd
+        env:
+          KERNEL_PHYSICAL_INDEX: ${{ inputs.quant_kernel_physical_index }}
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test --locked -p sceneworks-worker --features backend-candle --test cuda_quant_smoke --no-run
           if errorlevel 1 exit /b 1
-      - name: Run exactly the ignored quant kernel on the declared shared device
-        shell: powershell
-        env:
-          KERNEL_PHYSICAL_INDEX: ${{ inputs.quant_kernel_physical_index }}
-        run: |
-          python -I scripts/ci/cuda_quant_kernel_validation.py --physical-index $env:KERNEL_PHYSICAL_INDEX
-          if ($LASTEXITCODE -ne 0) { throw 'required shared quant kernel validation failed' }
+          python -I scripts/ci/cuda_quant_kernel_validation.py --physical-index %KERNEL_PHYSICAL_INDEX%
+          if errorlevel 1 exit /b 1
       - name: Upload shared kernel result (not model or VRAM evidence)
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

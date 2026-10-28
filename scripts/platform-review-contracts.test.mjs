@@ -1413,8 +1413,13 @@ test("ordinary CUDA tests retain the full suite while the unchanged kernel is di
   assert.match(manual, /runs-on: \[self-hosted, Windows, X64, cuda\]/);
   assert.match(manual, /cancel-in-progress: false/);
   assert.match(manual, /cargo test --locked -p sceneworks-worker --features backend-candle --test cuda_quant_smoke --no-run/);
-  assert.match(manual, /python -I scripts\/ci\/cuda_quant_kernel_validation\.py --physical-index \$env:KERNEL_PHYSICAL_INDEX/);
+  assert.match(manual, /python -I scripts\/ci\/cuda_quant_kernel_validation\.py --physical-index %KERNEL_PHYSICAL_INDEX%/);
   assert.ok(manual.indexOf("--check-dispatch") < manual.indexOf("uses: ./.github/actions/prepare-rust-runner"));
+  const kernelStep = workflowStep(manual, "Compile then run exactly the ignored quant kernel");
+  assert.match(kernelStep, /shell: cmd/);
+  assert.match(kernelStep, /call "C:\\Program Files \(x86\)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64\.bat"/);
+  assert.match(kernelStep, /set NVCC_CCBIN=%VCToolsInstallDir%bin\\Hostx64\\x64/);
+  assert.ok(kernelStep.indexOf("--no-run") < kernelStep.indexOf("python -I scripts/ci/cuda_quant_kernel_validation.py"));
   for (const name of ["candle-worker", "imported-nvfp4-worker-smoke", "yue2-terminal-cuda", "iris-worker-smoke", "supra2-worker-smoke"]) {
     const route = workflowExpression(workflowJob(workflow, name));
     assert.equal(evaluateWorkflow(route, "workflow_dispatch", { quant_kernel_only: true,
@@ -1439,7 +1444,7 @@ test("Windows Candle and manual NVFP4 jobs keep their physical GPU choices expli
   const imported = jobBlock(candle, candle.indexOf("  imported-nvfp4-worker-smoke:\n"));
   assert.match(worker, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
   const route = workflowExpression(worker, "CUDA_VISIBLE_DEVICES");
-  for (const [event, expected] of [["pull_request", "-1"], ["push", "-1"], ["workflow_dispatch", "0"]]) {
+  for (const [event, expected] of [["pull_request", "1"], ["push", "1"], ["workflow_dispatch", "0"]]) {
     assert.equal(evaluateWorkflow(route, event), expected, event);
     assert.equal(evaluateWorkflow(route, event, { capability_facts_only: false }), expected, event);
   }
@@ -3011,7 +3016,7 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
   const worker = workflowJob(workflow, "candle-worker");
   const visible = workflowExpression(worker, "CUDA_VISIBLE_DEVICES");
   assert.equal(evaluateWorkflow(visible, "workflow_dispatch", { capability_facts_only: true }), "-1");
-  for (const event of ["push", "pull_request"]) assert.equal(evaluateWorkflow(visible, event, { capability_facts_only: true }), "-1");
+  for (const event of ["push", "pull_request"]) assert.equal(evaluateWorkflow(visible, event, { capability_facts_only: true }), "1");
   const profile = workflowExpression(worker, "CAPABILITY_FACTS_ONLY");
   assert.equal(evaluateWorkflow(profile, "workflow_dispatch", { capability_facts_only: true }), true);
   for (const event of ["push", "pull_request", "workflow_dispatch"]) assert.equal(Boolean(evaluateWorkflow(profile, event)), false);
