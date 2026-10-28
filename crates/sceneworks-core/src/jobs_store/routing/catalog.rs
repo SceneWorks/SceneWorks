@@ -1162,13 +1162,12 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // Iris-3B generation (sc-25679 MLX / sc-25680 Candle, epic 25678): the native Candle/CUDA port
     // (`candle-gen-iris`) registers the SAME engine id `iris_3b`, so the one plain text-to-image
     // contract that routes to MLX on a Mac routes off-Mac too, through the generic candle txt2img
-    // lane. No quant tier; generation-task LoRA / LoKr adapters apply on both lanes (sc-25681 —
-    // `candle-gen-iris` advertises `supports_lora` / `supports_lokr` like the MLX twin), and
-    // `CandleImageRefusal::IrisSurface` holds the candle gate to exactly the MLX arm's shape
-    // (`iris_mlx_eligible`).
+    // lane. Both engines support load-time q4/q8 for backbone and text encoder (sc-26266),
+    // including generation-task LoRA / LoKr adapters. `IrisSurface` keeps the request shapes
+    // identical across backends (`iris_mlx_eligible`).
     ModelCaps::new("moss_image_base", true, true, false, false, false),
     ModelCaps::new("moss_image_sft", true, true, false, false, false),
-    ModelCaps::new("iris_3b", true, true, false, true, false),
+    ModelCaps::new("iris_3b", true, true, false, false, true),
     // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
     // MLX and Candle/CUDA. S6 adds the base checkpoint and exact-identity LoRA; S8 owns
     // native precision packages. Missing base converted pins never become a dense fallback.
@@ -2731,6 +2730,7 @@ mod tests {
         "sd3_5_large",
         "sd3_5_large_turbo",
         "sd3_5_medium",
+        "iris_3b",
     ];
 
     // Z-Image Turbo/base select already-packed q4/q8/bf16 directories; this is not on-the-fly quant,
@@ -2780,8 +2780,6 @@ mod tests {
         "anima_base",
         "anima_aesthetic",
         "anima_turbo",
-        // sc-25681: Iris-3B generation-task LoRA / LoKr, no candle quant tier.
-        "iris_3b",
     ];
 
     const EXPECTED_CANDLE_VIDEO_ROUTED_MODELS: &[&str] = &[

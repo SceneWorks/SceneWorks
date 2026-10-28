@@ -268,14 +268,14 @@ mod tests {
     /// sampler menu is the descriptor's solver menu, there is no scheduler menu but a declared shift
     /// axis, the CFG interval / caption-overflow declarations mirror the descriptor's capability
     /// flags, adapters are offered iff the engine applies them (generation-task stamps only), and
-    /// there is no quant tier because the engine refuses quantization.
+    /// the bf16 / q8 / q4 tier rows are exactly the engine's load-time tiers (sc-26266): one
+    /// shared download, q8 / q4 macOS-only, bf16 the default and the no-pick tier.
     ///
     /// *Mutation that reds this:* drop `euler` from `limits.samplers`, or `supportsCfgInterval`.
     #[test]
     fn the_catalog_row_offers_exactly_the_linked_engines_controls() {
         let model = crate::engines::mlx_model("iris_3b").expect("iris_3b is linked");
         assert_eq!(model.engine_id(), "iris_3b");
-        assert!(!model.supports_quant());
         assert!(model.supports_guidance() && model.supports_negative_prompt());
         let caps = &model.descriptor.capabilities;
         assert_eq!(model.default_steps(), gen_core::iris::DEFAULT_STEPS);
@@ -322,10 +322,45 @@ mod tests {
             entry["loraCompatibility"]["irisTask"].as_str(),
             Some(IrisTask::Generation.name())
         );
-        assert!(entry
-            .get("mlx")
-            .and_then(|mlx| mlx.get("quantize"))
-            .is_none());
+        // sc-26266: both engines advertise q8/q4, loaded from the same dense upstream files.
+        assert_eq!(
+            caps.supported_quants,
+            [gen_core::Quant::Q8, gen_core::Quant::Q4]
+        );
+        assert_eq!(
+            entry["mlx"]["quantize"].as_i64(),
+            Some(0),
+            "no pick loads bf16"
+        );
+        let tiers: Vec<(&str, Option<&Value>, bool, &Value)> = entry["downloads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|download| download.get("componentId").is_none())
+            .map(|download| {
+                (
+                    download["variant"]
+                        .as_str()
+                        .expect("every backbone row names a tier"),
+                    download.get("platforms"),
+                    download.get("default").and_then(Value::as_bool) == Some(true),
+                    &download["files"],
+                )
+            })
+            .collect();
+        assert_eq!(
+            tiers.iter().map(|tier| tier.0).collect::<Vec<_>>(),
+            ["bf16", "q8", "q4"]
+        );
+        for (tier, platforms, default, files) in &tiers {
+            assert_eq!(
+                *files,
+                &json!(["config.yaml", "model.safetensors"]),
+                "{tier}"
+            );
+            assert_eq!(*default, *tier == "bf16", "{tier}");
+            assert!(platforms.is_none(), "all native platforms serve {tier}");
+        }
         assert_eq!(
             limits["requiresDimensionsMultipleOf"].as_u64(),
             Some(u64::from(gen_core::iris::SIZE_MULTIPLE))
@@ -710,6 +745,9 @@ mod tests {
         loaded_offload: Option<gen_core::OffloadPolicy>,
         /// The materialization shape the loader was handed (`LoadSpec::load_shape`).
         loaded_shape: Option<gen_core::LoadShape>,
+        /// The tier the loader was handed (`LoadSpec::quantize`; `None` = bf16).
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        loaded_quant: Option<Option<gen_core::Quant>>,
         stopped_on_cancel: bool,
         /// Every memory-strategy context the arm opened an engine request scope under.
         #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -888,6 +926,7 @@ mod tests {
         let loaded_adapters = Arc::new(Mutex::new(Vec::new()));
         let loaded_offload = Arc::new(Mutex::new(None));
         let loaded_shape = Arc::new(Mutex::new(None));
+        let loaded_quant = Arc::new(Mutex::new(None));
         let stopped_on_cancel = Arc::new(Mutex::new(false));
         let memory_contexts = Arc::new(Mutex::new(Vec::new()));
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -945,6 +984,7 @@ mod tests {
                 let loader_adapters = Arc::clone(&loaded_adapters);
                 let loader_offload = Arc::clone(&loaded_offload);
                 let loader_shape = Arc::clone(&loaded_shape);
+                let loader_quant = Arc::clone(&loaded_quant);
                 let loader = move |_engine: &str, spec: &LoadSpec| {
                     #[cfg(target_os = "macos")]
                     let contract = crate::inference_runtime::media()
@@ -952,6 +992,7 @@ mod tests {
                     *loader_loads.lock().unwrap() += 1;
                     *loader_offload.lock().unwrap() = Some(spec.offload_policy);
                     *loader_shape.lock().unwrap() = Some(spec.load_shape);
+                    *loader_quant.lock().unwrap() = Some(spec.quantize);
                     *loader_adapters.lock().unwrap() = spec.adapters.clone();
                     Ok(Box::new(IrisArmProbe {
                         descriptor,
@@ -1025,6 +1066,7 @@ mod tests {
         let loaded_adapters = loaded_adapters.lock().unwrap().clone();
         let loaded_offload = *loaded_offload.lock().unwrap();
         let loaded_shape = *loaded_shape.lock().unwrap();
+        let loaded_quant = *loaded_quant.lock().unwrap();
         let memory_contexts = memory_contexts.lock().unwrap().clone();
         let stopped_on_cancel = *stopped_on_cancel.lock().unwrap();
         let load_calls = *loads.lock().unwrap();
@@ -1038,10 +1080,40 @@ mod tests {
             loaded_adapters,
             loaded_offload,
             loaded_shape,
+            loaded_quant,
             stopped_on_cancel,
             memory_contexts,
             project_files: files_under(project.path()),
             switch,
+        }
+    }
+
+    /// sc-26266: both native arms route a tier pick to the quantized load — `advanced.mlxQuantize` 4 /
+    /// 8 reach the engine as `LoadSpec::quantize` Q4 / Q8, and no pick (or an explicit 0) loads
+    /// bf16 through the catalog's `mlx.quantize: 0` — and the job completes at that tier.
+    ///
+    /// *Mutations that red this:* dropping `mlx.quantize: 0` (a no-pick request loads the
+    /// resolver's q8 default); an engine that advertises no quant (every pick loads bf16).
+    #[test]
+    fn a_tier_pick_reaches_the_quantized_load() {
+        for (advanced, want) in [
+            (json!({}), None),
+            (json!({ "mlxQuantize": 0 }), None),
+            (json!({ "mlxQuantize": 8 }), Some(gen_core::Quant::Q8)),
+            (json!({ "mlxQuantize": 4 }), Some(gen_core::Quant::Q4)),
+            (json!({ "mlxQuantize": "0" }), None),
+            (json!({ "mlxQuantize": "8" }), Some(gen_core::Quant::Q8)),
+            (json!({ "mlxQuantize": "4" }), Some(gen_core::Quant::Q4)),
+        ] {
+            let run = run_iris_arm(
+                ArmBehavior::Completes,
+                false,
+                json!({ "advanced": advanced.clone() }),
+            );
+            assert!(run.outcome.is_ok(), "{advanced}: {:?}", run.outcome);
+            assert_eq!(run.load_calls, 1, "{advanced}");
+            assert_eq!(run.loaded_quant, Some(want), "{advanced}");
+            assert_eq!(run.generate_calls, 1, "{advanced}");
         }
     }
 
@@ -1888,23 +1960,18 @@ mod tests {
         }
     }
 
-    /// The Iris engines' `validate` refuses a request memory block that tiles a decode or streams
-    /// transformer blocks (neither exists on any Iris route), and bounded attention with no chunk
-    /// size (MLX refuses bounded attention outright). The worker builds that block in exactly one
-    /// place — `MemoryProviderContract::generation_memory` over the selected rung — so for every
-    /// rung of every Iris route, on the contract THIS lane's engine publishes, the block the worker
-    /// would send is one the engine honours. Also pins what the ladder is expected to reach:
-    /// staged residency on both lanes, bounded attention (with its one published chunk size) on
-    /// Candle alone.
+    /// Both Iris generation engines implement resident, staged and bounded-attention rungs. The
+    /// shared contract must emit the selected, declared chunk budget only for bounded attention;
+    /// neither a missing budget nor an undeclared one is a valid selection. Encoder-free tasks
+    /// retain resident attention. Decode tiling and transformer streaming remain unavailable.
     ///
-    /// *Mutation that reds this:* none in the worker — it holds the engine's declaration. It reds
-    /// if a pin bump makes an Iris contract engage a rung the engine's `validate` refuses.
+    /// *Mutations that red this:* dropping or changing the emitted chunk budget, or withdrawing
+    /// the generation descriptor's bounded-attention rung. No GPU or weights are needed.
     #[test]
     fn no_selectable_iris_rung_emits_a_request_memory_block_the_engine_refuses() {
         use gen_core::MemoryStrategy;
         let registry = crate::inference_runtime::media();
         let spec = LoadSpec::new(WeightsSource::Dir("iris-weights-free".into()));
-        let candle = cfg!(not(target_os = "macos"));
         let mut generation_rungs = Vec::new();
         for id in [
             "iris_3b",
@@ -1954,22 +2021,49 @@ mod tests {
                 );
                 assert_eq!(memory.decode_tile_edge, None, "{id} {strategy:?}");
                 assert_eq!(memory.transformer_window_size, None, "{id} {strategy:?}");
-                if candle {
+                assert_eq!(
+                    memory.chunk_attention,
+                    strategy == MemoryStrategy::BoundedAttention,
+                    "{id} {strategy:?}: only the bounded-attention rung chunks attention"
+                );
+                if strategy == MemoryStrategy::BoundedAttention {
+                    assert_eq!(id, "iris_3b", "encoder-free tasks keep resident attention");
+                    let budget = memory
+                        .attention_chunk_size
+                        .expect("a bounded-attention request must name its budget");
+                    assert!(budget > 0, "{id}: the attention budget is nonzero");
+                    assert_eq!(Some(budget), selection.parameters.attention_chunk_size);
                     assert_eq!(
-                        memory.chunk_attention,
-                        memory.attention_chunk_size.is_some(),
-                        "{id} {strategy:?}: a chunked request names its budget"
+                        contract
+                            .capability(MemoryStrategy::BoundedAttention)
+                            .unwrap()
+                            .parameters
+                            .attention_chunk_sizes,
+                        [budget],
+                        "{id}: the request carries the engine's one declared budget"
                     );
+                    for invalid_budget in [None, Some(budget / 2)] {
+                        let mut invalid = selection;
+                        invalid.parameters.attention_chunk_size = invalid_budget;
+                        assert!(
+                            contract.validate_selection(&invalid).is_err(),
+                            "{id}: a missing or undeclared budget {invalid_budget:?} must be refused"
+                        );
+                    }
                 } else {
-                    assert!(!memory.chunk_attention, "{id} {strategy:?}: {memory:?}");
+                    assert_eq!(memory.attention_chunk_size, None, "{id} {strategy:?}");
                 }
             }
         }
-        let mut expected = vec![MemoryStrategy::Resident, MemoryStrategy::StagedResidency];
-        if candle {
-            expected.push(MemoryStrategy::BoundedAttention);
-        }
-        assert_eq!(generation_rungs, expected, "the generation ladder's rungs");
+        assert_eq!(
+            generation_rungs,
+            [
+                MemoryStrategy::Resident,
+                MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedAttention,
+            ],
+            "both native generation ladders retain all three implemented rungs"
+        );
     }
 
     /// A budget on which a 2 × 2 native batch runs under an OPTIMIZED rung on the Candle lane: the
