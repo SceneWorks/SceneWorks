@@ -2948,7 +2948,7 @@ fn prestage_imported_minimax_h3_task_paths(
 }
 
 /// MLX stages imported task paths with directory symlinks after preparation; nothing to settle.
-#[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+#[cfg(target_os = "macos")]
 fn prestage_imported_minimax_h3_task_paths(
     _settings: &Settings,
     _request: &VideoRequest,
