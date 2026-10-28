@@ -20158,7 +20158,7 @@ fn generate_minimax_h3_using_refuses_a_wrong_partition_shape_before_loading() {
 /// either entry; narrow `"tokenizer/*"` to `"tokenizer/tokenizer_config.json"`; drop
 /// `"FL2VA/audio_vae/config.yaml"` from the three-document list.
 #[test]
-fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
+fn minimax_h3_download_set_covers_every_probed_shared_file_on_every_platform() {
     use sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS;
     use sceneworks_core::jsonc::strip_jsonc_comments;
 
@@ -20212,42 +20212,46 @@ fn minimax_h3_macos_download_set_covers_every_probed_shared_file() {
             .find(|model| model["id"].as_str() == Some(entry_id))
             .unwrap_or_else(|| panic!("{entry_id} present in the builtin catalog"));
 
-        // macOS rows against the upstream repo only. The tier rows live in the SceneWorks rehost
-        // and the off-Mac rows serve candle, neither of which supplies `spec.weights` on this lane.
-        let patterns: Vec<&str> = model["downloads"]
-            .as_array()
-            .unwrap_or_else(|| panic!("{entry_id} declares downloads"))
-            .iter()
-            .filter(|row| row["repo"].as_str() == Some(UPSTREAM_REPO))
-            .filter(|row| {
-                row["platforms"]
-                    .as_array()
-                    .is_some_and(|p| p.iter().any(|v| v.as_str() == Some("macos")))
-            })
-            .flat_map(|row| row["files"].as_array().into_iter().flatten())
-            .filter_map(|f| f.as_str())
-            .collect();
-        assert!(
-            !patterns.is_empty(),
-            "{entry_id} declares no macOS {UPSTREAM_REPO} rows at all"
-        );
-
-        for probe in &probes {
-            let covered = patterns
+        // Each platform's rows against the upstream repo. The tier rows live in the SceneWorks
+        // rehost; the upstream rows supply `spec.weights`. `candle-gen-minimax-h3` probes the same
+        // shared files (`<root>/tokenizer/tokenizer.json` included), so an off-Mac platform with a
+        // probe no row supplies is the same unloadable install (sc-26691: no tokenizer off-Mac).
+        for platform in ["macos", "windows", "linux"] {
+            let patterns: Vec<&str> = model["downloads"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{entry_id} declares downloads"))
                 .iter()
-                .any(|pattern| match pattern.strip_suffix('*') {
-                    // `tokenizer/*` covers `tokenizer/tokenizer.json`. The retained trailing `/` is
-                    // what stops `vae/*` from claiming `audio_vae/config.json`.
-                    Some(prefix) => probe.starts_with(prefix),
-                    None => *pattern == probe.as_str(),
-                });
+                .filter(|row| row["repo"].as_str() == Some(UPSTREAM_REPO))
+                .filter(|row| {
+                    row["platforms"]
+                        .as_array()
+                        .is_some_and(|p| p.iter().any(|v| v.as_str() == Some(platform)))
+                })
+                .flat_map(|row| row["files"].as_array().into_iter().flatten())
+                .filter_map(|f| f.as_str())
+                .collect();
             assert!(
-                covered,
-                "{entry_id}: `mlx-gen-minimax-h3::load` probes `{probe}` under the {UPSTREAM_REPO} \
-                 snapshot, but no macOS download row supplies it. A probe with no row is not a slow \
-                 download — it is an install that fails the completeness gate before the loader \
-                 runs. Declared patterns: {patterns:?}"
+                !patterns.is_empty(),
+                "{entry_id} declares no {platform} {UPSTREAM_REPO} rows at all"
             );
+
+            for probe in &probes {
+                let covered = patterns
+                    .iter()
+                    .any(|pattern| match pattern.strip_suffix('*') {
+                        // `tokenizer/*` covers `tokenizer/tokenizer.json`. The retained trailing `/` is
+                        // what stops `vae/*` from claiming `audio_vae/config.json`.
+                        Some(prefix) => probe.starts_with(prefix),
+                        None => *pattern == probe.as_str(),
+                    });
+                assert!(
+                covered,
+                "{entry_id}: the MiniMax-H3 loader probes `{probe}` under the {UPSTREAM_REPO} \
+                 snapshot, but no {platform} download row supplies it. A probe with no row is not a \
+                 slow download — it is an install that fails the completeness gate before the \
+                 loader runs. Declared patterns: {patterns:?}"
+            );
+            }
         }
     }
 }
