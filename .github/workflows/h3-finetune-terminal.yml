@@ -551,8 +551,8 @@ jobs:
           CASE_ID: ${{ inputs.case_id }}
           H3_TERMINAL_AUTHORIZED_PAIR: ${{ inputs.sceneworks_sha }}:${{ inputs.inference_sha }}
           CUDA_DEVICE_ORDER: ${{ inputs.backend == 'cuda' && 'PCI_BUS_ID' || '' }}
-          CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
-          SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '0' || '' }}
+          CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '1' || '' }}
+          SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '1' || '' }}
         run: |
           set -euo pipefail
           if [ "${H3_TERMINAL_SKIP_RUN:-0}" = "1" ]; then echo "inspect-only request: no model execution"; exit 0; fi
@@ -593,8 +593,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           H3_TERMINAL_AUTHORIZED_PAIR: ${{ inputs.sceneworks_sha }}:${{ inputs.inference_sha }}
           CUDA_DEVICE_ORDER: ${{ inputs.backend == 'cuda' && 'PCI_BUS_ID' || '' }}
-          CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
-          SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '0' || '' }}
+          CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '1' || '' }}
+          SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '1' || '' }}
         run: |
           set -euo pipefail
           export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"

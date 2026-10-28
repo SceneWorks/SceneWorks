@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
-import { cudaDeviceEvidence } from './ci/h3-import-native-proof.mjs';
+import { cudaDeviceEvidence, MANUAL_CUDA_PHYSICAL_GPU } from './ci/h3-import-native-proof.mjs';
 import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
 // Windows: the bootstrap output root is ~95 characters deep and cargo/nvcc nest candle's kernel
 // build ~50 more below CARGO_TARGET_DIR, so a target under the output root overruns MAX_PATH.
@@ -102,7 +102,7 @@ export async function hardware(backend, deviceId, deps={}) {
   }
   const inventory=(await execute('nvidia-smi',['--query-gpu=index,uuid,pci.bus_id,name,driver_version','--format=csv,noheader'])).stdout;
   const cuda=cudaDeviceEvidence(deps.env??process.env,inventory),row=cuda.selectedPhysicalDevice;
-  assert.equal(row.uuid,deviceId,'requested CUDA UUID must be the actual PCI-ordered manual device zero');
+  assert.equal(row.uuid,deviceId,'requested CUDA UUID must be the actual PCI-ordered manual physical device 1');
   return {device:row.uuid+' '+row.name,driver:row.driverVersion,cuda};
 }
 
@@ -257,7 +257,7 @@ export class OwnedService {
     assert.ok(this.c.inputs.some(i=>i.path===r?.scenario && i.role==='scenario'),'bind the actual request/action scenario as an input');
     assert.ok(r && Number.isInteger(r.port) && r.port>1024 && r.port<=65535 && r.gpuId);
     if(!this.fake && this.c.backend==='cuda') {
-      assert.equal(String(r.gpuId),'0','manual campaign must retain product GPU zero');
+      assert.equal(String(r.gpuId),MANUAL_CUDA_PHYSICAL_GPU,'manual campaign runs on physical GPU 1 (GPU 0 is the owner display GPU)');
       await hardware('cuda',r.deviceId); // Confirm UUID/PCI mapping before any build, listener or model load.
     }
     const services=path.join(this.p.output,'services');await mkdir(services,{recursive:true});

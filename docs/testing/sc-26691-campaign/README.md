@@ -27,4 +27,6 @@ BACKENDS=cuda docs/testing/sc-26691-campaign/dispatch.sh --ack <sceneworks-sha>
   `timeoutSeconds` (7200) is the per-case bound. See the epic handoff for why these are under review.
 - `expected_runner`: `cuda-windows` / `cuda-windows-2` (the job is pinned by the runner-name label),
   `nax-macos` for MLX.
-- CUDA uses `gpuId`/`requestedGpu` `0`; MLX uses `mlx`.
+- CUDA uses `gpuId`/`requestedGpu` `1` (physical GPU 1 in PCI-bus order: `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
+  `CUDA_VISIBLE_DEVICES=1`, `SCENEWORKS_GPU_ID=1`; device evidence is the GPU-1 UUID). GPU 0 is the
+  owner's display/work GPU and is never used. MLX uses `mlx`.

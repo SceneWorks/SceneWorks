@@ -282,16 +282,16 @@ test('private environment isolates cache/config/credentials while preserving dev
 });
 test('root-selected compiler reaches private child environments without inheriting credentials',()=>{
   const previous=process.env.RUSTUP_TOOLCHAIN;process.env.RUSTUP_TOOLCHAIN='9.8.7';
-  try{const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'0',backend:'cuda'},'unit_fake_token');assert.equal(env.RUSTUP_TOOLCHAIN,'9.8.7');assert.equal(env.SCENEWORKS_CANDLE_REQUIRED,'1');assert.equal(env.SCENEWORKS_CANDLE_UNSUPPORTED_MODE,'enforce');assert.equal(env.SCENEWORKS_MLX_REQUIRED,undefined);assert.ok(!Object.hasOwn(env,'HF_TOKEN'));}
+  try{const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'1',backend:'cuda'},'unit_fake_token');assert.equal(env.RUSTUP_TOOLCHAIN,'9.8.7');assert.equal(env.SCENEWORKS_CANDLE_REQUIRED,'1');assert.equal(env.SCENEWORKS_CANDLE_UNSUPPORTED_MODE,'enforce');assert.equal(env.SCENEWORKS_MLX_REQUIRED,undefined);assert.ok(!Object.hasOwn(env,'HF_TOKEN'));}
   finally{if(previous===undefined)delete process.env.RUSTUP_TOOLCHAIN;else process.env.RUSTUP_TOOLCHAIN=previous;}
 });
-test('CUDA receipt binds PCI-ordered device zero rather than NVML index zero using only fake inventory',async()=>{
+test('CUDA receipt binds PCI-ordered physical device 1 rather than NVML index 1 using only fake inventory',async()=>{
   const csv='0, GPU-unit_fake-high, 00000000:41:00.0, unit_fake_high, unit_fake_driver\n1, GPU-unit_fake-low, 00000000:01:00.0, unit_fake_low, unit_fake_driver\n';
-  const env={CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:'0'},calls=[];
+  const env={CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:'1',SCENEWORKS_GPU_ID:'1'},calls=[];
   const exec=async(command,args)=>{calls.push([command,args]);return{stdout:csv};};
-  const value=await hardware('cuda','GPU-unit_fake-low',{env,exec});assert.equal(value.cuda.selectedPhysicalDevice.nvmlIndex,1);assert.equal(value.cuda.selectedPhysicalDevice.uuid,'GPU-unit_fake-low');assert.equal(calls[0][0],'nvidia-smi');assert.ok(calls[0][1].includes('--query-gpu=index,uuid,pci.bus_id,name,driver_version'));
-  await assert.rejects(hardware('cuda','GPU-unit_fake-high',{env,exec}),/manual device zero/);
-  for(const bad of [{...env,CUDA_VISIBLE_DEVICES:'1'},{...env,CUDA_DEVICE_ORDER:'FASTEST_FIRST'}])await assert.rejects(hardware('cuda','GPU-unit_fake-low',{env:bad,exec}),/manual CUDA proof/);
+  const value=await hardware('cuda','GPU-unit_fake-high',{env,exec});assert.equal(value.cuda.selectedPhysicalDevice.nvmlIndex,0);assert.equal(value.cuda.selectedPhysicalDevice.uuid,'GPU-unit_fake-high');assert.equal(calls[0][0],'nvidia-smi');assert.ok(calls[0][1].includes('--query-gpu=index,uuid,pci.bus_id,name,driver_version'));
+  await assert.rejects(hardware('cuda','GPU-unit_fake-low',{env,exec}),/manual physical device 1/);
+  for(const bad of [{...env,CUDA_VISIBLE_DEVICES:'0'},{...env,CUDA_DEVICE_ORDER:'FASTEST_FIRST'},{...env,SCENEWORKS_GPU_ID:'0'}])await assert.rejects(hardware('cuda','GPU-unit_fake-high',{env:bad,exec}),/manual CUDA proof/);
 });
 test('native unknown source size stays unknown while a real zero-byte size stays zero',()=>{assert.equal(observedSourceBytes(undefined),null);assert.equal(observedSourceBytes(null),null);assert.equal(observedSourceBytes('None'),null);assert.equal(observedSourceBytes(0),0);assert.equal(observedSourceBytes('0'),0);assert.equal(observedSourceBytes(1024),1024);});
 async function coldCancelFake(t){

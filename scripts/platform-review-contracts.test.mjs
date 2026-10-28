@@ -111,7 +111,8 @@ test("H3 model-level forwards stay out of ordinary CI and require positive manua
   assert.match(workflowJob(server, "h3-import-mlx"), /test "\$RUNNER_NAME" = nax-macos-2/);
   assert.match(workflowJob(server, "h3-import-cuda"), /runs-on: \[self-hosted, Windows, X64, cuda\]/);
   assert.match(workflowJob(server, "h3-import-cuda"), /group: windows-candle-gpu-real-weights/);
-  assert.match(workflowJob(server, "h3-import-cuda"), /CUDA_VISIBLE_DEVICES: "0"/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /CUDA_VISIBLE_DEVICES: "1"/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /SCENEWORKS_GPU_ID: "1"/);
   const fixture = await source("crates/sceneworks-worker/src/minimax_h3_import_fixture.rs");
   for (const backend of ["mlx", "cuda"]) {
     for (const name of proofSelection(backend)) {
@@ -206,13 +207,16 @@ test("H3 native proof evidence refuses zero tests, ignored tests, wrong selectio
 test("H3 CUDA proof preserves PCI ordering and records the actual selected physical GPU", async () => {
   const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-import-cuda");
   assert.match(job, /^      CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
-  const env = { CUDA_DEVICE_ORDER: "PCI_BUS_ID", CUDA_VISIBLE_DEVICES: "0" };
+  const env = { CUDA_DEVICE_ORDER: "PCI_BUS_ID", CUDA_VISIBLE_DEVICES: "1", SCENEWORKS_GPU_ID: "1" };
+  // NVML order deliberately disagrees with PCI order: PCI-ordered physical device 1 is GPU-high.
   const csv = "0, GPU-high, 00000000:41:00.0, card-high, 580.1\n1, GPU-low, 00000000:01:00.0, card-low, 580.1\n";
   const evidence = cudaDeviceEvidence(env, csv);
   assert.equal(evidence.cudaDeviceOrder, "PCI_BUS_ID");
-  assert.deepEqual(evidence.selectedPhysicalDevice, { nvmlIndex: 1, uuid: "GPU-low", pciBusId: "00000000:01:00.0", name: "card-low", driverVersion: "580.1" });
+  assert.deepEqual(evidence.selectedPhysicalDevice, { nvmlIndex: 0, uuid: "GPU-high", pciBusId: "00000000:41:00.0", name: "card-high", driverVersion: "580.1" });
   for (const order of [undefined, "", "FASTEST_FIRST"]) assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_DEVICE_ORDER: order }, csv));
-  assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_VISIBLE_DEVICES: "1" }, csv));
+  assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_VISIBLE_DEVICES: "0" }, csv), /physical device 1/);
+  assert.throws(() => cudaDeviceEvidence({ ...env, SCENEWORKS_GPU_ID: "0" }, csv), /SCENEWORKS_GPU_ID/);
+  assert.throws(() => cudaDeviceEvidence(env, "1, GPU-only, 00000000:01:00.0, card, 580.1"), /physical CUDA device 1/);
   for (const malformed of ["", "0, GPU-unknown, nope, card, 580", "0, missing-uuid, 0000:01:00.0, card, 580"]) assert.throws(() => cudaDeviceEvidence(env, malformed));
   assert.match(await source("scripts/ci/h3-import-native-proof.mjs"), /receipt\.cuda = cudaDeviceEvidence\(process\.env, inventory\)/);
 });

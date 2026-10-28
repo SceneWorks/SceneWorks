@@ -46,7 +46,7 @@ async function seedLikeRuntime(plan,c){
 }
 test('fresh filesystem and one scoped input reach a real source-bound prepared cohort without prior plan/scenario files',async t=>{
   for(const backend of ['mlx','cuda']){
-  const f=await fixture(t),original=structuredClone(f.args.request.bootstrap.legalAuthority);f.args.backend=backend;if(backend==='cuda')Object.assign(f.args.request.bootstrap.operator,{gpuId:'0',requestedGpu:'0'});f.env.H3_TERMINAL_ROUTE=`h3-terminal-${backend}`;await assert.rejects(access(f.args.outputRoot),/ENOENT/);
+  const f=await fixture(t),original=structuredClone(f.args.request.bootstrap.legalAuthority);f.args.backend=backend;if(backend==='cuda')Object.assign(f.args.request.bootstrap.operator,{gpuId:'1',requestedGpu:'1'});f.env.H3_TERMINAL_ROUTE=`h3-terminal-${backend}`;await assert.rejects(access(f.args.outputRoot),/ENOENT/);
   const result=await bootstrapTerminal(f.args);assert.equal(result.prepared,true);assert.equal(result.proof,false);assert.equal(result.cases,25);assert.equal(f.calls.stage,1);assert.equal(f.calls.inputs,1);
   const plan=JSON.parse(await readFile(result.planPath,'utf8'));validatePlan(plan);assert.equal(plan.backend,backend);assert.equal(plan.proof_kind,'unit_fake');assert.equal(plan.preparationState,'bound');assert.equal(plan.assetStaging.receipt.sha256,await hashFile(plan.assetStaging.receipt.path));
   for(const c of plan.cases)await verifyInputs(c);
@@ -75,5 +75,7 @@ test('bootstrap rejects arbitrary source/code/template fields and synthetic cons
   // The macOS lane's jobs must be routable to the product MLX worker: a request naming GPU 0 is
   // refused before anything is prepared, instead of queuing jobs no worker will ever claim.
   for(const field of ['gpuId','requestedGpu']){const r=request();r.bootstrap.operator[field]='0';assert.throws(()=>validateBootstrapRequest(r,{backend:'mlx'}),/MLX worker/);}
+  // CUDA runs only on physical GPU 1: GPU 0 is the owner's display/work GPU.
+  for(const [gpuId,requestedGpu] of [['0','0'],['0','1'],['1','0']]){const r=request();Object.assign(r.bootstrap.operator,{gpuId,requestedGpu});assert.throws(()=>validateBootstrapRequest(r,{backend:'cuda',unitFake:true}),/physical GPU 1/);}
   const input=request().bootstrap.legalAuthority,binding=bindScopedAuthority(input,[{role:'source',sha256:'a'.repeat(64),legal:{licenseId:'MiniMax-H3-Community-License-Agreement'},origin:{kind:'casebook-asset',assetSet:'singularity'}}],{allowUnitFake:true});binding.operatorInput.acknowledged=false;assert.throws(()=>assertScopedBinding(binding,{allowUnitFake:true}));
 });
