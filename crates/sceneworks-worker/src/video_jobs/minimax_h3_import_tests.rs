@@ -999,9 +999,10 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
             if references {
                 request.mode = "reference_to_video".to_owned();
             }
-            let dit =
-                crate::video_jobs::minimax_h3::resolve_imported_minimax_h3_dit(&request, &settings)
-                    .unwrap();
+            let dit = crate::video_jobs::minimax_h3::prepare_imported_minimax_h3_dit_blocking(
+                &request, &settings,
+            )
+            .unwrap();
             let supported = partition == "hybrid" || (partition == "ref2va") == references;
             if !supported {
                 continue;
@@ -1010,6 +1011,10 @@ fn candle_imported_partition_staging_matches_the_task_selected_sibling() {
                 &settings, &request, &dit,
             )
             .unwrap();
+            // The load's own staging must leave the prepared seals valid. On Windows the task
+            // paths are file hard links, and relinking a sealed file changed its ChangeTime: the
+            // CUDA campaign's Ref2VA render failed "artifact seal mismatch after load".
+            dit.load_authority.validate().unwrap();
             let transformer = load.dit_dir.unwrap();
             let selected = if references {
                 transformer.with_file_name("transformer_ref")

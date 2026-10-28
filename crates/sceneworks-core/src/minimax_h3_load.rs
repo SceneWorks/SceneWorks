@@ -110,6 +110,42 @@ impl H3SourceAuthority {
         Ok(())
     }
 
+    /// Windows stages imported-H3 task paths with snapshot-style file hard links, and adding a link
+    /// updates the linked file's ChangeTime: identity drift to a seal pinned before the staging,
+    /// though no byte changed. After that staging pass, re-pin each drifted seal and require the
+    /// digest it was first pinned with, so the original acquisition still authorizes the bytes and a
+    /// replaced file is still refused. Unchanged seals are kept without re-reading content.
+    pub fn reseal_after_link_staging(
+        &mut self,
+        check: impl Fn() -> std::io::Result<()>,
+    ) -> Result<(), String> {
+        for seal in &mut self.seals {
+            if seal.ensure_unchanged().is_ok() {
+                continue;
+            }
+            let repinned = PinnedWeightsFile::pin_with_progress(
+                seal.loader_path(),
+                || match check() {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        Err(gen_core::Error::Canceled)
+                    }
+                    Err(error) => Err(gen_core::Error::Io(error)),
+                },
+                observe_artifact_seal_progress,
+            )
+            .map_err(|error| error.to_string())?;
+            if repinned.content_sha256() != seal.content_sha256() {
+                return Err(format!(
+                    "imported H3 file changed while its task paths were staged: {}",
+                    seal.loader_path().display()
+                ));
+            }
+            *seal = repinned;
+        }
+        Ok(())
+    }
+
     pub fn component_staging(
         &self,
     ) -> Vec<crate::model_artifacts::provenance::H3ComponentStagingReceipt> {

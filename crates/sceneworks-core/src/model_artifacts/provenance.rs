@@ -492,6 +492,19 @@ impl H3ComponentStagingReceipt {
 /// Stage the existing directory alias, then bind each frozen member to the ORIGINAL revision
 /// spelling. No payload hashes are acquired here: the prepared pin later proves the recorded
 /// SHA/size, with cooperative cancellation. This is not a second cache or persisted registry.
+/// Same volume and file index: `destination` is already a hard link to `source`. Opening a file
+/// to read its identity does not touch its ChangeTime.
+#[cfg(windows)]
+fn same_windows_file(source: &Path, destination: &Path) -> bool {
+    let identity = |path: &Path| {
+        std::fs::File::open(path)
+            .ok()
+            .and_then(|file| winapi_util::file::information(&file).ok())
+            .map(|info| (info.volume_serial_number(), info.file_index()))
+    };
+    matches!((identity(source), identity(destination)), (Some(a), Some(b)) if a == b)
+}
+
 pub(crate) fn stage_h3_component_with_receipts(
     data_dir: &Path,
     assembly: &Value,
@@ -578,6 +591,11 @@ pub(crate) fn stage_h3_component_with_receipts(
                     continue;
                 }
                 let destination = link.join(entry.file_name());
+                // Re-staging must not relink a file already linked here: adding a hard link
+                // updates the shared file's ChangeTime, which a pinned seal reads as identity drift.
+                if same_windows_file(&entry.path(), &destination) {
+                    continue;
+                }
                 match std::fs::remove_file(&destination) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}

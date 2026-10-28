@@ -2050,16 +2050,24 @@ async fn prepare_imported_minimax_h3_dit(
         phase = "source-and-normalization");
     let task = tokio::task::spawn_blocking(move || {
         let _entered = preparation_span.enter();
-        resolve_imported_minimax_h3_dit_with_check(&source_request, &source_settings, &|| {
-            h3_preparation_checkpoint(&task_cancel)
-        })
-        .map_err(|error| {
-            if task_cancel.is_cancelled() && error.to_string().contains(H3_PREPARATION_CANCELED) {
-                WorkerError::Canceled(H3_PREPARATION_CANCELED.into())
-            } else {
-                error
-            }
-        })
+        let checkpoint = || h3_preparation_checkpoint(&task_cancel);
+        resolve_imported_minimax_h3_dit_with_check(&source_request, &source_settings, &checkpoint)
+            .and_then(|dit| {
+                prestage_imported_minimax_h3_task_paths(
+                    &source_settings,
+                    &source_request,
+                    dit,
+                    &checkpoint,
+                )
+            })
+            .map_err(|error| {
+                if task_cancel.is_cancelled() && error.to_string().contains(H3_PREPARATION_CANCELED)
+                {
+                    WorkerError::Canceled(H3_PREPARATION_CANCELED.into())
+                } else {
+                    error
+                }
+            })
     });
     let result = supervise_h3_preparation(cancel.clone(), task, Duration::from_secs(2), || async {
         if shutdown_requested() {
@@ -2126,6 +2134,20 @@ pub(super) fn resolve_imported_minimax_h3_dit(
     settings: &Settings,
 ) -> WorkerResult<ImportedMiniMaxH3Dit> {
     resolve_imported_minimax_h3_dit_with_check(request, settings, &|| Ok(()))
+}
+
+/// The blocking body of [`prepare_imported_minimax_h3_dit`] without its async supervision: resolve,
+/// then settle the task-path staging the load will reuse. Tests drive the load through this so
+/// they see the same prepared seals production does.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+pub(super) fn prepare_imported_minimax_h3_dit_blocking(
+    request: &VideoRequest,
+    settings: &Settings,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    let checkpoint = || -> std::io::Result<()> { Ok(()) };
+    resolve_imported_minimax_h3_dit_with_check(request, settings, &checkpoint).and_then(|dit| {
+        prestage_imported_minimax_h3_task_paths(settings, request, dit, &checkpoint)
+    })
 }
 
 #[cfg(any(
@@ -2895,6 +2917,47 @@ pub(super) fn resolve_imported_minimax_h3_load(
 /// Stage both task paths according to the declared compatibility. The key includes plan identity,
 /// semantic digest, partition and source directories; Windows uses snapshot-style file hardlinks
 /// rather than privilege-gated directory links, and Unix uses directory symlinks. No tensor copies.
+/// Stage the Candle load's task paths inside preparation, while its seals can still be settled.
+///
+/// Windows stages them with file hard links, and a new link updates the linked file's ChangeTime,
+/// which the post-load seal check reads as drift: the CUDA campaign's imported Ref2VA render failed
+/// "artifact seal mismatch after load" on a file whose bytes never changed. Staging here and then
+/// re-pinning only the drifted seals against their original digests leaves the load's own staging
+/// call a no-op relink (staging skips a file already linked). Unix stages directory symlinks, which
+/// leave the linked files untouched, so nothing drifts there.
+#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+fn prestage_imported_minimax_h3_task_paths(
+    settings: &Settings,
+    request: &VideoRequest,
+    mut dit: ImportedMiniMaxH3Dit,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    if dit.partition != sceneworks_core::minimax_h3_import::MiniMaxH3Partition::Fl2va {
+        let bound = resolve_imported_h3_components(settings, request, &dit)?;
+        stage_imported_minimax_h3_assembly(settings, &dit, &bound.companion)?;
+    }
+    dit.load_authority
+        .reseal_after_link_staging(check)
+        .map_err(|error| {
+            WorkerError::InvalidPayload(format!(
+                "[checkpoint-plan:source-drift] checkpoint {:?}: {error}",
+                dit.checkpoint_id
+            ))
+        })?;
+    Ok(dit)
+}
+
+/// MLX stages imported task paths with directory symlinks after preparation; nothing to settle.
+#[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+fn prestage_imported_minimax_h3_task_paths(
+    _settings: &Settings,
+    _request: &VideoRequest,
+    dit: ImportedMiniMaxH3Dit,
+    _check: &dyn Fn() -> std::io::Result<()>,
+) -> WorkerResult<ImportedMiniMaxH3Dit> {
+    Ok(dit)
+}
+
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn stage_imported_minimax_h3_assembly(
     settings: &Settings,
