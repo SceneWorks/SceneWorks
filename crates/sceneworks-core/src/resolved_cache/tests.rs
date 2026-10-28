@@ -2235,6 +2235,7 @@ fn a_cancellation_observed_while_waiting_for_the_publication_lock_publishes_noth
                 }
             },
             true,
+            None,
         )
         .unwrap_err();
     assert!(
@@ -2504,6 +2505,7 @@ fn cancellation_at_the_publication_fence_never_writes_complete_metadata_or_recei
                 }
             },
             true,
+            None,
         )
         .unwrap_err();
     holder_thread.join().unwrap();
@@ -2707,4 +2709,198 @@ fn released_cache_locks_are_free_even_while_an_inherited_descriptor_survives() {
         probe.err()
     );
     drop(inherited);
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-26691 — a produced derivative is hashed once, as it is written.
+// ---------------------------------------------------------------------------------------------
+
+const PRODUCED_WEIGHTS: &str = "diffusion_pytorch_model-00001-of-00001.safetensors";
+const PRODUCED_INDEX: &str = "diffusion_pytorch_model.safetensors.index.json";
+/// Large enough that the write crosses many buffer boundaries, small enough for a unit test.
+const PRODUCED_WEIGHTS_BYTES: usize = 8 * 1024 * 1024;
+
+fn produced_weights_payload() -> Vec<u8> {
+    (0..PRODUCED_WEIGHTS_BYTES)
+        .map(|index| (index % 251) as u8)
+        .collect()
+}
+
+/// Produce the two-file fixture bundle through hashing writers, the way
+/// `CheckpointDerivativeOutputs::create` hands them to a producer.
+fn produce_attested(staging: &Path) -> ProducedAttestations {
+    let attested = ProducedAttestations::default();
+    let payload = produced_weights_payload();
+    let mut weights = attested
+        .create(staging, Path::new(PRODUCED_WEIGHTS))
+        .unwrap();
+    for chunk in payload.chunks(1024 * 1024 - 7) {
+        weights.write_all(chunk).unwrap();
+    }
+    weights.finish().unwrap();
+    // Dropped rather than finished: the serde_json::to_writer shape every H3 sidecar uses.
+    serde_json::to_writer(
+        attested.create(staging, Path::new(PRODUCED_INDEX)).unwrap(),
+        &json!({"weight_map": {"a": PRODUCED_WEIGHTS}}),
+    )
+    .unwrap();
+    assert_eq!(attested.len(), 2, "both streams must record an attestation");
+    attested
+}
+
+fn sha256_of(path: &Path) -> String {
+    format!("sha256:{:x}", Sha256::digest(std::fs::read(path).unwrap()))
+}
+
+/// The H3 import defect (CUDA run 40643143319): a 34 GB derivative was copied once and then
+/// SHA-256'd four more times by this store alone — measurement, publication validation, completion
+/// validation, and the first `acquire_complete` — before the native load seal read it again.
+///
+/// Stated as operation counts across the whole prepare flow on a multi-MB file: ONE hash pass per
+/// produced file (taken from the write stream) and ZERO re-reads through measure → publish →
+/// record_complete → acquire. The native load seal (`gen_core::PinnedWeightsFile::pin`) then binds
+/// to exactly the digest the stream recorded.
+#[test]
+fn a_produced_derivative_is_hashed_once_as_it_is_written_through_its_first_load() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&[PRODUCED_WEIGHTS, PRODUCED_INDEX]);
+    let key = plan.cache_key().unwrap();
+    let resolver = resolver(&input, ActiveArtifactLeaseRegistry::default());
+
+    let (((published, lease), rereads), streamed) = produced::observe_stream_hashes(|| {
+        crate::model_artifacts::observe_content_hashes(|| {
+            let reservation = derived_reservation(&store, &input, &plan);
+            let attested = produce_attested(reservation.staging_path());
+            let published = reservation
+                .publish_produced_attested_with_check(&plan, &attested, &|| Ok(()))
+                .expect("the attested bundle publishes");
+            let lease = store
+                .acquire_complete(&key, &resolver, "runtime:video:model")
+                .unwrap()
+                .expect("the first load leases the published bundle");
+            (published, lease)
+        })
+    });
+    assert_eq!(
+        streamed, 2,
+        "each produced file is hashed exactly once, by its write stream"
+    );
+    assert_eq!(
+        rereads, 0,
+        "measure, publish, record_complete and the first acquire must all reuse the write-stream \
+         digest instead of re-reading the bundle"
+    );
+
+    // The recorded digests are the real ones, and the load seal binds to them.
+    let bundle = store.bundle_path(&key).unwrap();
+    for file in published
+        .artifact
+        .closure
+        .members
+        .iter()
+        .flat_map(|member| member.files.iter())
+    {
+        let path = bundle.join(&file.relative_path);
+        assert_eq!(file.sha256.as_deref(), Some(sha256_of(&path).as_str()));
+        let seal = gen_core::PinnedWeightsFile::pin(&path).unwrap();
+        let sealed = format!(
+            "sha256:{}",
+            seal.content_sha256()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+        assert_eq!(file.sha256.as_deref(), Some(sealed.as_str()));
+    }
+    assert_eq!(
+        published.artifact.closure.members[0].files[0].size_bytes,
+        Some(PRODUCED_WEIGHTS_BYTES as u64)
+    );
+    drop(lease);
+}
+
+/// The other half of the tradeoff: trusting the write stream must not weaken drift detection.
+/// A same-length rewrite AFTER the stream closed (in staging, before publication) moves the
+/// identity stamp, so measurement re-reads the file — and refuses it, because the bytes are no
+/// longer what the producer wrote.
+#[test]
+fn a_produced_file_rewritten_after_its_stream_closed_is_re_hashed_and_refused() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&[PRODUCED_WEIGHTS, PRODUCED_INDEX]);
+    let key = plan.cache_key().unwrap();
+
+    let reservation = derived_reservation(&store, &input, &plan);
+    let staging = reservation.staging_path().to_owned();
+    let attested = produce_attested(&staging);
+    let mut tampered = produced_weights_payload();
+    tampered[PRODUCED_WEIGHTS_BYTES / 2] ^= 0xff;
+    std::fs::write(staging.join(PRODUCED_WEIGHTS), &tampered).unwrap();
+
+    let (refused, rereads) = crate::model_artifacts::observe_content_hashes(|| {
+        reservation.publish_produced_attested_with_check(&plan, &attested, &|| Ok(()))
+    });
+    let error = refused.expect_err("bytes the producer did not write must never publish");
+    assert!(
+        error
+            .to_string()
+            .contains("changed after its producer wrote it"),
+        "{error}"
+    );
+    assert_eq!(
+        rereads, 1,
+        "only the file whose stamp moved is re-read; the untouched one keeps its stream digest"
+    );
+    assert_eq!(store.lookup_complete(&key).unwrap(), None);
+}
+
+/// And after publication: the content receipt the produced path records is keyed on the
+/// closure's stat identity, so a same-length rewrite of a published file sends the first load
+/// back through the full read, which refuses the bundle.
+#[test]
+fn a_published_produced_bundle_altered_before_its_first_load_is_re_hashed_and_refused() {
+    let scratch = TempDir::new().unwrap();
+    let input = scratch.path().join("library");
+    std::fs::create_dir(&input).unwrap();
+    let store = ResolvedCacheStore::open(&scratch.path().join("data")).unwrap();
+    let plan = derived_plan(&[PRODUCED_WEIGHTS, PRODUCED_INDEX]);
+    let key = plan.cache_key().unwrap();
+    let resolver = resolver(&input, ActiveArtifactLeaseRegistry::default());
+
+    let reservation = derived_reservation(&store, &input, &plan);
+    let attested = produce_attested(reservation.staging_path());
+    reservation
+        .publish_produced_attested_with_check(&plan, &attested, &|| Ok(()))
+        .unwrap();
+    let digest = cache_key_digest(&key).unwrap();
+    assert!(
+        store.read_content_receipt(&digest, &key).is_some(),
+        "the produced path records the verdict its completion pass earned"
+    );
+
+    let published = store.bundle_path(&key).unwrap().join(PRODUCED_WEIGHTS);
+    let mut tampered = produced_weights_payload();
+    tampered[7] ^= 0x01;
+    std::fs::write(&published, &tampered).unwrap();
+
+    let (refused, rereads) = crate::model_artifacts::observe_content_hashes(|| {
+        store.acquire_complete(&key, &resolver, "runtime:video:model")
+    });
+    assert!(
+        refused.is_err(),
+        "a produced bundle altered after publication must be refused at the load boundary"
+    );
+    assert!(
+        rereads >= 1,
+        "a moved stat identity must invalidate the receipt and re-read the closure, not reuse it"
+    );
+    assert!(
+        store.read_content_receipt(&digest, &key).is_none(),
+        "the stale verdict is retracted by the pass that refused the bundle"
+    );
 }

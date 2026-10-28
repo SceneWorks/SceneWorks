@@ -702,6 +702,40 @@ fn an_altered_derivative_bundle_is_refused_at_the_lease_boundary() {
     }
 }
 
+/// sc-26691 end to end: `ensure` hashes each output as the producer writes it, and publication
+/// records the content verdict that stream earned, so the first lease redeems it instead of
+/// re-reading the bundle. The digest recorded in the journal is the real digest of the bytes.
+#[test]
+fn a_produced_derivative_carries_its_write_stream_digest_into_the_first_lease() {
+    use sha2::{Digest, Sha256};
+    let fx = fixture("hash-once");
+    let resolved = resolve(&fx);
+    let produced = match fx
+        .store
+        .ensure(&fx.checkpoint_id, &request(), write_index)
+        .unwrap()
+    {
+        CheckpointDerivativeOutcomeV1::Produced(metadata) => metadata,
+        other => panic!("the fixture derivative must be produced, got {other:?}"),
+    };
+    let cache_key = fx.store.cache_key(&resolved, &request()).unwrap();
+    let entry = fx.store.cache().entry_path(&cache_key).unwrap();
+    assert!(
+        entry.join("content.verification.json").exists(),
+        "publication of a produced bundle records the verdict its write streams earned"
+    );
+    let index = entry.join("bundle").join("index.json");
+    let recorded = produced.artifact.closure.members[0].files[0]
+        .sha256
+        .clone()
+        .unwrap();
+    assert_eq!(
+        recorded,
+        format!("sha256:{:x}", Sha256::digest(fs::read(&index).unwrap()))
+    );
+    assert!(fx.store.acquire(&resolved, &request()).unwrap().is_some());
+}
+
 /// The request validator refuses key material it cannot key on, rather than digesting it and
 /// producing a key two different requests could share.
 #[test]

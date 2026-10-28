@@ -11,6 +11,10 @@ pub use materialization::{
     PromotionScheduleOutcome, ResolvedCacheMaterializer, ResolvedCachePromotionScheduler,
 };
 
+#[path = "resolved_cache/produced.rs"]
+mod produced;
+pub use produced::{ProducedAttestations, ProducedFile, ProducedFileAttestation};
+
 #[path = "resolved_cache/retention.rs"]
 mod retention;
 pub use retention::{
@@ -2268,13 +2272,17 @@ impl ResolvedCacheReservation {
         self,
         artifact: ResolvedModelArtifact,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
-        self.publish_staged_with_check(artifact, &|| Ok(()))
+        self.publish_staged_with_check(artifact, &|| Ok(()), None)
     }
 
+    /// `attested` carries the write-stream digests of a produced bundle (sc-26691). A file whose
+    /// attestation still describes it is validated on presence, size and confinement without
+    /// re-reading its bytes; every other file is re-hashed exactly as before.
     fn publish_staged_with_check(
         self,
         mut artifact: ResolvedModelArtifact,
         check: &dyn Fn() -> std::io::Result<()>,
+        attested: Option<&ProducedAttestations>,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
         let preparation = (|| {
             check()?;
@@ -2285,7 +2293,7 @@ impl ResolvedCacheReservation {
                 ));
             }
             validate_staging_confinement(&self)?;
-            artifact
+            artifact_trusting_attestations(&artifact, &self.staging_path, attested)
                 .validate_with_check(check)
                 .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
             if artifact
@@ -2338,7 +2346,7 @@ impl ResolvedCacheReservation {
             return Err(error);
         }
         artifact.location = ArtifactLocation::ResolvedLocal { root: bundle };
-        self.record_complete_checked(artifact, check, true)
+        self.record_complete_checked(artifact, check, true, attested)
     }
 
     /// Publish a bundle the producer wrote into [`Self::staging_path`] (sc-20635).
@@ -2366,6 +2374,22 @@ impl ResolvedCacheReservation {
         plan: &DerivedArtifactPlan,
         check: &dyn Fn() -> std::io::Result<()>,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        self.publish_produced_attested_with_check(plan, &ProducedAttestations::default(), check)
+    }
+
+    /// [`Self::publish_produced_with_check`] for a producer that wrote through
+    /// [`ProducedAttestations::create`] (sc-26691). Each produced file's write-stream digest is the
+    /// authority for measurement, publication validation, completion validation and the content
+    /// receipt the first load redeems — so a produced byte is hashed once, as it is written. Trust
+    /// is keyed on the file's identity stamp at every one of those stages: a file that is missing
+    /// an attestation, or whose stamp moved since its stream closed, is re-hashed (and refused if
+    /// its bytes no longer match), exactly as an unattested publication would.
+    pub(crate) fn publish_produced_attested_with_check(
+        self,
+        plan: &DerivedArtifactPlan,
+        attested: &ProducedAttestations,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
         let prepared = (|| {
             check()?;
             let mut artifact = plan.artifact_at(&self.staging_path, ArtifactState::Published);
@@ -2374,7 +2398,8 @@ impl ResolvedCacheReservation {
                 for file in &mut member.files {
                     let relative = member.destination.join(&file.relative_path);
                     let path = self.staging_path.join(&relative);
-                    let (size_bytes, sha256) = measure_produced_file(&path, check)?;
+                    let (size_bytes, sha256) =
+                        measure_produced_file(&path, attested.get(&relative).as_ref(), check)?;
                     file.size_bytes = Some(size_bytes);
                     file.sha256 = Some(sha256);
                     declared.insert(relative);
@@ -2387,7 +2412,7 @@ impl ResolvedCacheReservation {
             Ok::<_, ResolvedCacheError>(artifact)
         })();
         match prepared {
-            Ok(artifact) => self.publish_staged_with_check(artifact, check),
+            Ok(artifact) => self.publish_staged_with_check(artifact, check, Some(attested)),
             Err(error) => {
                 // A refused measured publication keeps its original refusal as the answer; a
                 // staging tree holding a linked entry is left untouched rather than removed.
@@ -2476,7 +2501,7 @@ impl ResolvedCacheReservation {
         self,
         artifact: ResolvedModelArtifact,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
-        self.record_complete_checked(artifact, &|| Ok(()), false)
+        self.record_complete_checked(artifact, &|| Ok(()), false, None)
     }
 
     fn record_complete_checked(
@@ -2484,7 +2509,13 @@ impl ResolvedCacheReservation {
         artifact: ResolvedModelArtifact,
         check: &dyn Fn() -> std::io::Result<()>,
         cleanup_unpublished: bool,
+        attested: Option<&ProducedAttestations>,
     ) -> Result<ResolvedCacheMetadata, ResolvedCacheError> {
+        // A produced bundle's completion pass proves every file — by its live write-stream
+        // attestation or by a re-hash — so it is entitled to record the same content receipt the
+        // load boundary would otherwise spend a full closure read to earn. Observed before and
+        // after the pass under the same guard `validate_complete_metadata_with_check` uses.
+        let mut receipt_before = None;
         let validation = (|| {
             check()?;
             let expected_root = self.bundle_path()?;
@@ -2495,7 +2526,10 @@ impl ResolvedCacheReservation {
                 ));
             }
             validate_completion_confinement(&self.store, &self.cache_key, &artifact)?;
-            artifact
+            if attested.is_some() {
+                receipt_before = artifact.closure.stat_identity_at_root(&expected_root).ok();
+            }
+            artifact_trusting_attestations(&artifact, &expected_root, attested)
                 .validate_with_check(check)
                 .map_err(|error| ResolvedCacheError::new(error.to_string()))?;
             if artifact
@@ -2559,12 +2593,50 @@ impl ResolvedCacheReservation {
         metadata.session_id = None;
         metadata.recovery_status = RecoveryStatus::Clean;
         self.store.write_complete_receipt(&self.digest, &metadata)?;
+        // Retract any verdict an earlier generation of this entry left behind before the new
+        // journal makes the entry loadable; the produced path re-records one below.
+        self.store.remove_content_receipt(&self.digest)?;
         self.store
             .write_metadata_unlocked(&self.digest, &metadata)?;
+        if let Some(before) = receipt_before {
+            self.record_produced_content_receipt(&metadata, before);
+        }
         self.finished = true;
         let _ = std::fs::remove_file(&self.record_path);
         self.artifact_lock.take();
         Ok(metadata)
+    }
+
+    /// Record the content verdict a produced bundle's completion pass just earned, but only if the
+    /// closure's stat identity did not move across that pass. Best-effort by design: a receipt that
+    /// cannot be recorded costs the next load one re-hash, which is the behaviour without it.
+    fn record_produced_content_receipt(
+        &self,
+        metadata: &ResolvedCacheMetadata,
+        before: Vec<ClosureFileStat>,
+    ) {
+        let Ok(bundle) = self.bundle_path() else {
+            return;
+        };
+        let after = metadata
+            .artifact
+            .closure
+            .stat_identity_at_root(&bundle)
+            .ok();
+        if after.as_ref() != Some(&before) {
+            return;
+        }
+        let receipt = now_seconds().map(|verified_at| ClosureContentReceipt {
+            schema_version: RESOLVED_CACHE_STORE_VERSION,
+            cache_key: metadata.cache_key.clone(),
+            verified_at,
+            files: before,
+        });
+        if let Err(error) =
+            receipt.and_then(|receipt| self.store.write_content_receipt(&self.digest, &receipt))
+        {
+            tracing::warn!(%error, "produced bundle content receipt was not recorded; the first load re-hashes");
+        }
     }
 
     fn schedule_canceled_cleanup(
@@ -3170,6 +3242,7 @@ fn validate_pending_derivative_shape(
 /// regular file, so a producer cannot publish bytes that live outside the staging directory.
 fn measure_produced_file(
     path: &Path,
+    attestation: Option<&ProducedFileAttestation>,
     check: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<(u64, String), ResolvedCacheError> {
     check()?;
@@ -3188,12 +3261,30 @@ fn measure_produced_file(
             path.display()
         )));
     }
+    // The write stream already hashed these bytes; its digest stands while the file is still the
+    // entry that stream closed (sc-26691). Otherwise measure by reading, as before.
+    if let Some(measured) = attestation.and_then(|attestation| attestation.redeem(path, None)) {
+        check()?;
+        return Ok(measured);
+    }
+    #[cfg(test)]
+    crate::model_artifacts::count_content_hash();
     let digest = crate::checkpoint_plan_store::source_file_sha256_with_check(path, check)?;
     let size_bytes = std::fs::metadata(path)?.len();
     check()?;
     if size_bytes != metadata.len() {
         return Err(ResolvedCacheError::new(format!(
             "produced derivative file {} changed while it was being measured",
+            path.display()
+        )));
+    }
+    // A stream attested these bytes and the file no longer is the entry it closed. Re-reading
+    // settled what is there now; if that is not what the producer wrote, something else wrote it.
+    if attestation.is_some_and(|attestation| {
+        attestation.sha256() != format!("sha256:{digest}") || attestation.size_bytes() != size_bytes
+    }) {
+        return Err(ResolvedCacheError::new(format!(
+            "produced derivative file {} changed after its producer wrote it",
             path.display()
         )));
     }
@@ -3591,6 +3682,34 @@ fn run_listing_validation_observer() {
             observer();
         }
     });
+}
+
+/// `artifact` with the recorded digest cleared for exactly those files a live write-stream
+/// attestation still covers at `root`, so `validate` proves presence, size and confinement for
+/// them and re-hashes everything else. With no attestations this is `artifact` unchanged.
+fn artifact_trusting_attestations(
+    artifact: &ResolvedModelArtifact,
+    root: &Path,
+    attested: Option<&ProducedAttestations>,
+) -> ResolvedModelArtifact {
+    let mut artifact = artifact.clone();
+    let Some(attested) = attested.filter(|attested| !attested.is_empty()) else {
+        return artifact;
+    };
+    for member in &mut artifact.closure.members {
+        for file in &mut member.files {
+            let relative = member.destination.join(&file.relative_path);
+            let redeemed = attested.get(&relative).is_some_and(|attestation| {
+                attestation
+                    .redeem(&root.join(&relative), file.sha256.as_deref())
+                    .is_some()
+            });
+            if redeemed {
+                file.sha256 = None;
+            }
+        }
+    }
+    artifact
 }
 
 fn artifact_without_content_hashes(artifact: &ResolvedModelArtifact) -> ResolvedModelArtifact {
