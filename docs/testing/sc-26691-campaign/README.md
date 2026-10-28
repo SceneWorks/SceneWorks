@@ -21,7 +21,9 @@ BACKENDS=cuda docs/testing/sc-26691-campaign/dispatch.sh --ack <sceneworks-sha>
   feature pin. `dispatch.sh` stamps it from the reviewed head's `crates/sceneworks-worker/Cargo.toml`
   pin (`9ddabbea` today: inference main, SceneWorks/inference#1369); the checked-in requests carry the
   same value.
-- Requires `bash`, `jq`, `git` and an authenticated `gh` (on Windows: Git Bash with `jq` on `PATH`).
+- Requires `bash`, `node`, `git` and an authenticated `gh` (on Windows: Git Bash); no standalone
+  `jq`. `DRY_RUN=1` runs every read and stamps/validates both requests, printing them instead of
+  dispatching.
 
 ## Knobs
 

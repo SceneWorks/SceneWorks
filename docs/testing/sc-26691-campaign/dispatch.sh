@@ -56,12 +56,28 @@ dispatch() {  # $1=backend $2=expected_runner
   local req="$(dirname "$0")/h3-terminal-$backend.json"
   # The request is stamped with the verified head, so the stationary pair names the revision that
   # was actually reviewed and validated, rather than whatever the payload happened to carry.
-  jq --argjson ack true --arg runner "$runner" --arg sw "$SW" --arg inf "$INF" \
-     '.bootstrap.legalAuthority.acknowledged = $ack | .expected_runner = $runner | .sceneworks_sha = $sw | .inference_sha = $inf' \
-     "$req" > "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json"
-  jq -e '.bootstrap.legalAuthority.acknowledged == true' "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json" >/dev/null
-  jq -e --arg s "$SW" '.sceneworks_sha == $s' "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json" >/dev/null
-  jq -e --arg i "$INF" '.inference_sha == $i' "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json" >/dev/null
+  local out="${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json"
+  # node, not jq: this box (and the Windows runners) have no standalone jq. Stamp, then re-read the
+  # written file and assert every stamped field, so a write that lost one never dispatches.
+  node -e '
+    const fs = require("fs");
+    const [req, out, runner, sw, inf] = process.argv.slice(1);
+    const p = JSON.parse(fs.readFileSync(req, "utf8"));
+    p.bootstrap.legalAuthority.acknowledged = true;
+    p.expected_runner = runner;
+    p.sceneworks_sha = sw;
+    p.inference_sha = inf;
+    fs.writeFileSync(out, JSON.stringify(p, null, 2) + "\n");
+    const back = JSON.parse(fs.readFileSync(out, "utf8"));
+    if (back.bootstrap.legalAuthority.acknowledged !== true || back.expected_runner !== runner ||
+        back.sceneworks_sha !== sw || back.inference_sha !== inf) {
+      console.error("REFUSING: stamped request did not round-trip"); process.exit(1);
+    }' "$req" "$out" "$runner" "$SW" "$INF"
+  if [ -n "${DRY_RUN:-}" ]; then
+    echo "DRY_RUN: would dispatch h3-terminal-$backend (expected_runner=$runner) with $out:"
+    cat "$out"
+    return
+  fi
   gh workflow run server-candle-linux.yml --repo "$REPO" --ref "$REF" \
      -f starvector_terminal_operation="h3-terminal-$backend" \
      -f campaign_run_id="$(cat "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json")" >/dev/null
@@ -88,9 +104,10 @@ for backend in ${BACKENDS:-mlx cuda}; do
   runner="$(resolve "$backend")"
   [ -n "$runner" ] || { echo "no idle compatible runner for $backend" >&2; exit 4; }
   dispatch "$backend" "$runner"
-  sleep 15
+  [ -n "${DRY_RUN:-}" ] || sleep 15
 done
 
+if [ -n "${DRY_RUN:-}" ]; then echo "DRY_RUN: nothing dispatched"; exit 0; fi
 echo "--- dispatched; both runs must be launched together ---"
 gh run list --repo "$REPO" --workflow server-candle-linux.yml --limit 4 \
   --json databaseId,status,headSha,createdAt --jq '.[]|"\(.databaseId) \(.status) \(.headSha[0:9]) \(.createdAt)"'
