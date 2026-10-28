@@ -335,7 +335,7 @@ impl SourceStampV1 {
     ///
     /// An undated stamp (v1 bindings) and an undated mtime are both untrusted for the same reason:
     /// there is nothing to measure.
-    fn is_racy(&self) -> bool {
+    pub(crate) fn is_racy(&self) -> bool {
         match (self.observed_nanos, self.modified_nanos) {
             (Some(observed), Some(modified)) => {
                 observed.saturating_sub(modified) < SOURCE_STAMP_GRANULARITY_NANOS

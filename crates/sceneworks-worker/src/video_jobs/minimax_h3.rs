@@ -2254,6 +2254,7 @@ fn resolve_imported_minimax_h3_dit_with_check(
     .map_err(|reason| refuse("invalid-tensor-inventory", reason))?;
     sceneworks_core::minimax_h3_import::verify_imported_pruning(&assembly, &inventory)
         .map_err(|reason| refuse("pruning-incompatible", reason))?;
+    let mut produced_attestations = None;
     let (directory, derivative, normalization_cache_outcome) = if inventory.requires_normalization {
         use sceneworks_core::checkpoint_derivative::{
             CheckpointDerivativeOutcomeV1, CheckpointDerivativeStore,
@@ -2261,15 +2262,18 @@ fn resolve_imported_minimax_h3_dit_with_check(
         let cache = CheckpointDerivativeStore::open(&settings.data_dir)
             .map_err(|e| refuse("normalization", e.to_string()))?;
         let normalization = inventory.derivative_request();
-        let cache_outcome =
-            match cache
-                .ensure_resolved_with_check(&resolved, &normalization, check, |outputs| {
-                    with_imported_h3_source_seals(&pins, || {
-                        inventory.produce_with_check(outputs, check)
-                    })
+        // A derivative produced here was hashed as it was written; its attestations let the load
+        // seals below redeem that digest instead of re-reading the files (sc-26691).
+        let (cache_outcome, attested) = cache
+            .ensure_resolved_attested_with_check(&resolved, &normalization, check, |outputs| {
+                with_imported_h3_source_seals(&pins, || {
+                    inventory.produce_with_check(outputs, check)
                 })
-                .map_err(|e| refuse("normalization", e.to_string()))?
-            {
+            })
+            .map_err(|e| refuse("normalization", e.to_string()))?;
+        produced_attestations = Some(attested);
+        let cache_outcome =
+            match cache_outcome {
                 CheckpointDerivativeOutcomeV1::Contended => return Err(refuse(
                     "normalization-busy",
                     "this H3 source is being normalized by another load; retry after it completes"
@@ -2363,22 +2367,33 @@ fn resolve_imported_minimax_h3_dit_with_check(
         // a fresh pin of whatever now occupies a published derivative as new authority.
         for member in &lease.artifact().closure.members {
             for file in &member.files {
-                let path = directory
-                    .join(&member.destination)
-                    .join(&file.relative_path);
-                let pin = gen_core::PinnedWeightsFile::pin_with_progress(
-                    &path,
-                    || match check() {
-                        Ok(()) => Ok(()),
-                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
-                            Err(gen_core::Error::Canceled)
-                        }
-                        Err(error) => Err(gen_core::Error::Io(error)),
-                    },
-                    |progress| {
-                        sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
-                    },
-                )
+                let relative = member.destination.join(&file.relative_path);
+                let path = directory.join(&relative);
+                let checked = || match check() {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                        Err(gen_core::Error::Canceled)
+                    }
+                    Err(error) => Err(gen_core::Error::Io(error)),
+                };
+                let observe = |progress: &gen_core::runtime::ArtifactSealProgress| {
+                    sceneworks_core::minimax_h3_load::observe_artifact_seal_progress(progress)
+                };
+                // The attestation is redeemed only while gen-core's own fresh capture of the file's
+                // identity matches the one taken when the writer closed; otherwise this is a pin.
+                let attestation = produced_attestations
+                    .as_ref()
+                    .and_then(|attested| attested.get(&relative))
+                    .and_then(|attested| attested.seal_attestation().cloned());
+                let pin = match &attestation {
+                    Some(attestation) => gen_core::PinnedWeightsFile::pin_attested_with_progress(
+                        &path,
+                        attestation,
+                        checked,
+                        observe,
+                    ),
+                    None => gen_core::PinnedWeightsFile::pin_with_progress(&path, checked, observe),
+                }
                 .map_err(|e| match e {
                     gen_core::Error::Canceled => {
                         refuse("source-acquisition", H3_PREPARATION_CANCELED.to_owned())
@@ -2948,7 +2963,7 @@ fn prestage_imported_minimax_h3_task_paths(
 }
 
 /// MLX stages imported task paths with directory symlinks after preparation; nothing to settle.
-#[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+#[cfg(target_os = "macos")]
 fn prestage_imported_minimax_h3_task_paths(
     _settings: &Settings,
     _request: &VideoRequest,

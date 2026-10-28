@@ -1226,7 +1226,7 @@ thread_local! {
 }
 
 #[cfg(test)]
-fn count_content_hash() {
+pub(crate) fn count_content_hash() {
     CONTENT_HASH_COUNT.with(|count| count.set(count.get().saturating_add(1)));
 }
 
