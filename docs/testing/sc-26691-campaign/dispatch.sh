@@ -29,6 +29,22 @@ if [ "$head_sha" != "$SW" ]; then
   exit 3
 fi
 
+# The inference half of the stationary pair is the pin the reviewed head itself carries: the
+# bootstrap's `sourcePair` refuses any case whose `inference_sha` is not the worker's
+# `rev = "<sha>"`, so a stale checked-in value would fail every case after the ~148 GB bootstrap.
+worker_manifest="$(git show "$SW:crates/sceneworks-worker/Cargo.toml")" || {
+  echo "REFUSING: cannot read crates/sceneworks-worker/Cargo.toml at $SW (git fetch first)." >&2
+  exit 3
+}
+INF="$(printf '%s\n' "$worker_manifest" \
+  | grep -o 'github.com/SceneWorks/inference", rev = "[0-9a-f]\{40\}"' \
+  | grep -o '[0-9a-f]\{40\}' | sort -u)"
+if [ "$(printf '%s\n' "$INF" | grep -c .)" != 1 ]; then
+  echo "REFUSING: $SW does not pin exactly one inference revision (got: ${INF:-none})." >&2
+  exit 3
+fi
+echo "stationary pair: sceneworks=$SW inference=$INF"
+
 # Candidate runners per backend, with live state. MLX: the campaign runs on nax-macos (real-weights label).
 echo "--- live runner state ---"
 gh api --paginate orgs/SceneWorks/actions/runners --jq '.runners[]|
@@ -40,11 +56,12 @@ dispatch() {  # $1=backend $2=expected_runner
   local req="$(dirname "$0")/h3-terminal-$backend.json"
   # The request is stamped with the verified head, so the stationary pair names the revision that
   # was actually reviewed and validated, rather than whatever the payload happened to carry.
-  jq --argjson ack true --arg runner "$runner" --arg sw "$SW" \
-     '.bootstrap.legalAuthority.acknowledged = $ack | .expected_runner = $runner | .sceneworks_sha = $sw' \
+  jq --argjson ack true --arg runner "$runner" --arg sw "$SW" --arg inf "$INF" \
+     '.bootstrap.legalAuthority.acknowledged = $ack | .expected_runner = $runner | .sceneworks_sha = $sw | .inference_sha = $inf' \
      "$req" > "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json"
   jq -e '.bootstrap.legalAuthority.acknowledged == true' "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json" >/dev/null
   jq -e --arg s "$SW" '.sceneworks_sha == $s' "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json" >/dev/null
+  jq -e --arg i "$INF" '.inference_sha == $i' "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json" >/dev/null
   gh workflow run server-candle-linux.yml --repo "$REPO" --ref "$REF" \
      -f starvector_terminal_operation="h3-terminal-$backend" \
      -f campaign_run_id="$(cat "${TMPDIR:-/tmp}/h3-terminal-$backend.ack.json")" >/dev/null

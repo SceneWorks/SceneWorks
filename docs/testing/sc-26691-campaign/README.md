@@ -18,8 +18,10 @@ BACKENDS=cuda docs/testing/sc-26691-campaign/dispatch.sh --ack <sceneworks-sha>
 - `--ack` records the operator's scoped MiniMax-H3 Community License acknowledgment (sc-26691
   activity 27075) and must name the branch's current head; the script refuses a moved head.
 - `inference_sha` must be reachable from inference `origin/main` — the bootstrap refuses an interim
-  feature pin. It is `232f3f24` (inference main, SceneWorks/inference#1367).
-- Requires `bash`, `jq` and an authenticated `gh` (on Windows: Git Bash with `jq` on `PATH`).
+  feature pin. `dispatch.sh` stamps it from the reviewed head's `crates/sceneworks-worker/Cargo.toml`
+  pin (`9ddabbea` today: inference main, SceneWorks/inference#1369); the checked-in requests carry the
+  same value.
+- Requires `bash`, `jq`, `git` and an authenticated `gh` (on Windows: Git Bash with `jq` on `PATH`).
 
 ## Knobs
 
@@ -42,11 +44,12 @@ quadratic in it:
 - **Generated clip:** every case renders 124 frames (5.17 s, H3's shortest legal duration) at
   1088x544, or 1536x768 for the 768p first/last recipe. Not reducible.
 - **Image references** (`imageA`/`imageB`, 576x320 plates): the request sets no
-  `referenceImageShortEdge`, so the engine default applies. At the current inference pin
-  (`232f3f24`) that default upscales every plate to the 2048 short edge (3680x2048, 7,360 latent
-  rows + 7,360 vision tokens each). The sc-26691 engine change makes `match` the default resize mode
-  (`min(1, sqrt(targetArea / refArea))`, sides on the 32 lattice): a 576x320 plate against the
-  1088x544 canvas stays 576x320 (180 + 180). Do not add an explicit short edge to the requests.
+  `referenceImageShortEdge` or `referenceImageResizeMode`, so the engine defaults apply. At the
+  current inference pin (`9ddabbea`, which carries the sc-26691 engine change) the default resize
+  mode is `match` (`min(1, sqrt(targetArea / refArea))`, sides on the 32 lattice): a 576x320 plate
+  against the 1088x544 canvas stays 576x320 (180 + 180), where the pre-sc-26691 pin (`232f3f24`)
+  upscaled every plate to the 2048 short edge (3680x2048, 7,360 latent rows + 7,360 vision tokens
+  each). Do not add an explicit short edge to the requests.
 - **Clip references** (`clipA`/`clipB`): 2 s / 48 frames (was 6 s / 144 frames, truncated by the
   engine to the full 124 generated frames). On the engine's 768-short-edge canvas (1376x768) a clip
   snaps to 39 frames = 12 latents (12,384 rows) and 2 vision blocks, instead of 37 latents (38,184)
