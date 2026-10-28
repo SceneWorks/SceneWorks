@@ -9567,6 +9567,22 @@ fn slim_step_progress_results_keep_the_accumulated_fact_sets() {
             })),
         )
         .expect("full progress");
+    // API-owned augmentation replaces raw writes with published assets.
+    let current = store.get_job(&created.id).unwrap();
+    let published = object(json!({"generationSetId":"genset-1",
+        "assets":[{"id":"asset-1","mediaPath":"assets/images/one.png"}],
+        "assetIds":["asset-1"],"prefixKvCache":[{"cache":"hit"}],
+        "generationSet":{"id":"genset-1","count":260},"assetWrites":[{"id":"asset-1"}]}));
+    store
+        .replace_job_result_after_progress(
+            &created.id,
+            Some("worker-1"),
+            JobStatus::Running,
+            &current.result,
+            &published,
+            false,
+        )
+        .unwrap();
     // Then a slim STEP tick: the accumulations are absent ON PURPOSE.
     store
         .update_job_progress(
@@ -9588,6 +9604,8 @@ fn slim_step_progress_results_keep_the_accumulated_fact_sets() {
         job.result.get("prefixKvCache"),
         Some(&json!([{ "cache": "hit" }]))
     );
+    assert_eq!(job.result.get("assets"), published.get("assets"));
+    assert_eq!(job.result.get("assetIds"), published.get("assetIds"));
     // ...and carries the slim tick's own keys verbatim.
     assert_eq!(job.result.get("expectedCount"), Some(&json!(260)));
 
@@ -9615,6 +9633,20 @@ fn slim_step_progress_results_keep_the_accumulated_fact_sets() {
     assert_eq!(
         job.result.get("prefixKvCache"),
         Some(&json!([{ "cache": "hit" }]))
+    );
+    let mut terminal = report(
+        json!({"generationSetId":"genset-1", "assetWrites":[{"id":"asset-1"},{"id":"asset-2"}]}),
+    );
+    terminal.status = JobStatus::Completed;
+    terminal.stage = ProgressStage::Completed;
+    let accepted = store
+        .update_job_progress_with_outcome(&created.id, terminal)
+        .unwrap();
+    assert!(accepted.side_effects_pending);
+    assert_eq!(accepted.job.result.get("assets"), published.get("assets"));
+    assert_eq!(
+        accepted.job.result.get("assetIds"),
+        published.get("assetIds")
     );
 }
 

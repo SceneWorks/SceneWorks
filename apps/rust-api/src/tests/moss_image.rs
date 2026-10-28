@@ -1878,3 +1878,139 @@ async fn moss_consumer_mcp_to_real_api_persists_ordered_slots_without_rendering(
         let _ = server.await;
     }
 }
+
+// CI_IMPACT: two literal 16x16 PNGs and real API/store transitions only; no model or device.
+#[tokio::test]
+async fn terminal_image_side_effect_failure_preserves_published_assets_until_idempotent_recovery() {
+    use sceneworks_core::{contracts::JobType, jobs_store::CreateJob};
+    let _hf = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    setup(&temp);
+    let (app, state) = create_app_with_state(test_settings(&temp)).unwrap();
+    let project = state
+        .project_store
+        .create_project("Published terminal assets")
+        .unwrap();
+    let relative = "assets/images/terminal-output.png";
+    let media = std::path::Path::new(&project.path).join(relative);
+    std::fs::create_dir_all(media.parent().unwrap()).unwrap();
+    image::RgbImage::from_pixel(16, 16, image::Rgb([31; 3]))
+        .save(&media)
+        .unwrap();
+    let original_pixels = std::fs::read(&media).unwrap();
+    let second_relative = "assets/images/terminal-output-2.png";
+    let second_media = std::path::Path::new(&project.path).join(second_relative);
+    image::RgbImage::from_pixel(16, 16, image::Rgb([63; 3]))
+        .save(&second_media)
+        .unwrap();
+    let second_pixels = std::fs::read(&second_media).unwrap();
+    let job = state
+        .jobs_store
+        .create_job(CreateJob {
+            job_type: JobType::ImageGenerate,
+            project_id: Some(project.id.clone()),
+            project_name: None,
+            payload:
+                json!({"model":"moss_image_sft","prompt":"literal","count":2,"width":16,"height":16})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            requested_gpu: "auto".into(),
+            source_job_id: None,
+            duplicate_of_job_id: None,
+            attempts: 1,
+            initial_status: None,
+        })
+        .unwrap();
+    claim_job_as_worker(
+        &app,
+        &job.id,
+        "terminal-publisher",
+        &[
+            "image_generate",
+            "gpu",
+            if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle"
+            },
+        ],
+    )
+    .await;
+    let first_result = json!({"generationSetId":"genset_terminal", "expectedCount":2,
+        "generationSet":{"id":"genset_terminal","model":"moss_image_sft","mode":"text_to_image","count":2},
+        "assetWrites":[{"assetId":"published-output","displayName":"Literal image","type":"image",
+            "createdAt":"2026-10-28T00:00:00Z","mimeType":"image/png","mediaPath":relative,"width":16,"height":16,
+            "rawAdapterSettings":{"literalProviderWitness":"retained"}}]});
+    let mut result = first_result.clone();
+    result["assetWrites"].as_array_mut().unwrap().push(json!({
+        "assetId":"published-output-2","displayName":"Second literal image","type":"image",
+        "createdAt":"2026-10-28T00:00:00Z","mimeType":"image/png","mediaPath":second_relative,"width":16,"height":16
+    }));
+    let progress = |status: &str| {
+        json!({"status":status,"stage":if status=="completed"{"completed"}else{"generating"},"progress":1,
+        "message":"Literal output published","workerId":"terminal-publisher","result":if status=="running"{&first_result}else{&result}})
+    };
+    let endpoint = format!("/api/v1/jobs/{}/progress", job.id);
+    let (status, running) = request(app.clone(), "POST", &endpoint, progress("running")).await;
+    assert_eq!(status, StatusCode::OK, "{running}");
+    let assets = running["result"]["assets"].clone();
+    let ids = running["result"]["assetIds"].clone();
+    assert_eq!(ids, json!(["published-output"]));
+    assert_eq!(assets.as_array().unwrap().len(), 1);
+    *state.progress_side_effects_fail_once.lock() = true;
+    let (status, failed) = request(app.clone(), "POST", &endpoint, progress("completed")).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
+    let (status, pending) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/v1/jobs/{}", job.id),
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(pending["status"], "completed");
+    assert_eq!(
+        pending["result"]["assets"], assets,
+        "accepted terminal handoff must never retract published assets"
+    );
+    assert_eq!(pending["result"]["assetIds"], ids);
+    assert_eq!(
+        pending["result"]["assetWrites"].as_array().unwrap().len(),
+        2
+    );
+    let saved = state.jobs_store.get_job(&job.id).unwrap();
+    assert!(state
+        .jobs_store
+        .pending_terminal_progress_side_effects(&job.id, saved.worker_id.as_deref(), saved.status)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        crate::jobs::recover_pending_terminal_progress_side_effects_once(&state)
+            .await
+            .unwrap(),
+        1
+    );
+    let (status, retry) = request(app.clone(), "POST", &endpoint, progress("completed")).await;
+    assert_eq!(status, StatusCode::OK, "{retry}");
+    let recovered_assets = retry["result"]["assets"].as_array().unwrap();
+    assert_eq!(recovered_assets.len(), 2);
+    assert_eq!(recovered_assets[0], assets[0]);
+    assert_eq!(
+        retry["result"]["assetIds"],
+        json!(["published-output", "published-output-2"])
+    );
+    let (status, repeated) = request(app.clone(), "POST", &endpoint, progress("completed")).await;
+    assert_eq!(status, StatusCode::OK, "{repeated}");
+    assert_eq!(repeated["result"]["assets"], retry["result"]["assets"]);
+    assert_eq!(repeated["result"]["assetIds"], retry["result"]["assetIds"]);
+    assert!(retry["result"].get("assetWrites").is_none());
+    let saved = state.jobs_store.get_job(&job.id).unwrap();
+    assert!(state
+        .jobs_store
+        .pending_terminal_progress_side_effects(&job.id, saved.worker_id.as_deref(), saved.status)
+        .unwrap()
+        .is_none());
+    assert_eq!(std::fs::read(&media).unwrap(), original_pixels);
+    assert_eq!(std::fs::read(&second_media).unwrap(), second_pixels);
+}
