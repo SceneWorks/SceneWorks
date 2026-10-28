@@ -811,9 +811,15 @@ describe("SimpleShell", () => {
     });
 
     it("navigates with the Left/Right arrow keys, but not while typing elsewhere", async () => {
-      await openFromAssets("two.png");
+      await renderShell(root, baseContext({ assets: gallery }));
+      await click(navButton(container, "Assets"));
+      // Open from a focused tile, as a keyboard user would: focus must move into the viewer.
+      const tile = container.querySelector('.su-asset[title="two.png"]');
+      tile.focus();
+      await click(tile);
+      expect(container.querySelector(".su-preview").contains(document.activeElement)).toBe(true);
       const start = previewName();
-      await pressKey("ArrowRight");
+      await pressKey("ArrowRight", document.activeElement);
       const afterRight = previewName();
       expect(afterRight).not.toBe(start);
       await pressKey("ArrowLeft");

@@ -86,6 +86,18 @@ export function SimplePreview({
   const rootRef = useRef(null);
   usePreviewArrowNavigation({ rootRef, onPrevious: goPrevious, onNext: goNext });
 
+  // Take focus on open so keys reach the viewer, not the grid tile that opened it; hand it back
+  // on close (same contract as the shared Modal).
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    rootRef.current?.focus();
+    return () => {
+      if (previousFocus?.isConnected && typeof previousFocus.focus === "function") {
+        previousFocus.focus();
+      }
+    };
+  }, []);
+
   const swipeStart = useRef(null);
   const onTouchStart = (event) => {
     const touch = event.touches[0];
@@ -114,7 +126,7 @@ export function SimplePreview({
   const navigable = Boolean(previousAsset || nextAsset);
 
   return (
-    <div aria-label={`${title} preview`} className="su-preview" ref={rootRef} role="dialog">
+    <div aria-label={`${title} preview`} className="su-preview" ref={rootRef} role="dialog" tabIndex={-1}>
       <div className="su-preview-head">
         <button aria-label="Close preview" className="su-preview-close" onClick={onClose} type="button">
           <Icon.Close size={18} />
