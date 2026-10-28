@@ -677,6 +677,19 @@ def _registered_reference_sha(runs, library):
     return sha
 
 
+def _dmd_components_retained(report, mode):
+    require(report["resolved"]["acceleration"] == mode, "selected/actual DMD mode differs")
+    # Full FP32 embeds time/LoRA in its merged transformer. Separate component
+    # receipts are required only for the unmerged package, as in the native contract.
+    require(mode in ("unmerged_bf16", "full_fp32"), "unknown DMD execution mode")
+    roles = {asset["role"] for asset in report["assets"]}
+    required = {"dmd_dataspace"}
+    if mode == "unmerged_bf16":
+        required |= {"dmd_time", "dmd_lora"}
+    require(required <= roles, "actual DMD accelerator components were dropped")
+    return True
+
+
 def normalize_capture(raw, caseRoot, manifest, driverReceipt, caseEntry):
     """Return local normal-form observations; external/global proofs stay missing."""
     ctx = _Context(caseRoot)
@@ -788,10 +801,7 @@ def normalize_capture(raw, caseRoot, manifest, driverReceipt, caseEntry):
                 "producedImage": False, "receipt": ctx.put(f"refusal-{mode}.json", refusal)})
         else:
             report = ctx.read(images[role]["executionReceipt"])
-            require(report["resolved"]["acceleration"] == mode, "selected/actual DMD mode differs")
-            roles = {a["role"] for a in report["assets"]}
-            retained = {"dmd_time", "dmd_dataspace"} <= roles and (mode != "unmerged_bf16" or "dmd_lora" in roles)
-            require(retained, "actual DMD accelerator components were dropped")
+            retained = _dmd_components_retained(report, mode)
             custom, _ = _application(ctx, raw, role, final_sha)
             selected_sources = {(a["repository"], a["revision"]) for a in report["assets"]}
             regression["dmdExecutions"].append({"selectedMode": mode, "executedMode": report["resolved"]["acceleration"],

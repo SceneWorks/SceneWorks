@@ -1564,6 +1564,30 @@ pub(super) fn require_custom_adapter_application(
         format!("selected CUSTOM library adapter {id} lacks exact successful provider application evidence"))
 }
 
+// The validated receipt already requires the exact mode-specific asset inventory.
+// Full FP32 embeds time/LoRA in the merged transformer; only unmerged uses separate files.
+pub(super) fn require_dmd_component_roles(
+    mode: &str,
+    roles: impl IntoIterator<Item = gen_core::moss_image::MossImageAssetRole>,
+) -> Result<()> {
+    use gen_core::moss_image::MossImageAssetRole;
+    let roles: BTreeSet<_> = roles.into_iter().collect();
+    let required: &[MossImageAssetRole] = match mode {
+        "off" => &[],
+        "full_fp32" => &[MossImageAssetRole::DmdDataspace],
+        "unmerged_bf16" => &[
+            MossImageAssetRole::DmdDataspace,
+            MossImageAssetRole::DmdTime,
+            MossImageAssetRole::DmdLora,
+        ],
+        _ => return Err("unknown DMD execution mode".into()),
+    };
+    require(
+        required.iter().all(|role| roles.contains(role)),
+        "actual DMD execution omitted accelerator component weight receipts",
+    )
+}
+
 async fn generate(
     case: &mut Case,
     app: &axum::Router,
@@ -1689,26 +1713,7 @@ async fn generate(
             )?;
         }
     }
-    if mode != "off" {
-        use gen_core::moss_image::MossImageAssetRole;
-        for role in [
-            MossImageAssetRole::DmdTime,
-            MossImageAssetRole::DmdDataspace,
-        ] {
-            require(
-                data.assets.iter().any(|a| a.role == role),
-                "actual DMD execution omitted accelerator component weight receipts",
-            )?;
-        }
-        if mode == "unmerged_bf16" {
-            require(
-                data.assets
-                    .iter()
-                    .any(|a| a.role == MossImageAssetRole::DmdLora),
-                "actual unmerged DMD execution omitted accelerator LoRA",
-            )?;
-        }
-    }
+    require_dmd_component_roles(mode, data.assets.iter().map(|asset| asset.role))?;
     for asset in &data.assets {
         require(
             gen_core::moss_image::MOSS_IMAGE_ASSETS

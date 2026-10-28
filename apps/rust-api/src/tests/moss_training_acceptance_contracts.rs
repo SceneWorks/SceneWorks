@@ -17,6 +17,28 @@ fn dmd_regression_payload_omits_cfg_while_ordinary_preview_retains_sealed_guidan
     }
     assert!(generation_advanced("unknown").is_err());
 }
+// CI_IMPACT: literal receipt-role checks only; no model or tensor execution.
+#[test]
+fn dmd_component_guard_distinguishes_merged_and_unmerged_receipts() {
+    use super::moss_training_acceptance::require_dmd_component_roles;
+    use gen_core::moss_image::MossImageAssetRole::{DmdDataspace, DmdLora, DmdTime, Transformer};
+    let merged = [Transformer, DmdDataspace];
+    let unmerged = [Transformer, DmdDataspace, DmdTime, DmdLora];
+    require_dmd_component_roles("off", []).unwrap();
+    require_dmd_component_roles("full_fp32", merged).unwrap();
+    require_dmd_component_roles("unmerged_bf16", unmerged).unwrap();
+    assert!(require_dmd_component_roles("unmerged_bf16", merged).is_err());
+    assert!(require_dmd_component_roles("unknown", unmerged).is_err());
+    for missing in [DmdDataspace, DmdTime, DmdLora] {
+        assert!(require_dmd_component_roles(
+            "unmerged_bf16",
+            unmerged.into_iter().filter(|role| *role != missing),
+        )
+        .is_err());
+    }
+    assert!(require_dmd_component_roles("full_fp32", [Transformer]).is_err());
+}
+
 use sceneworks_worker::test_support::gen_core;
 use std::collections::BTreeSet;
 

@@ -59,6 +59,27 @@ class StaticContractTests(unittest.TestCase):
     def test_normalizer_is_loaded_under_isolated_python_from_trusted_sibling(self):
         self.assertEqual(Path(verifier._normalizer.__file__).resolve(), HERE / "normalize_native.py")
 
+    def test_dmd_component_guard_distinguishes_merged_and_unmerged_receipts(self):
+        # Literal metadata only, never a campaign receipt or model execution.
+        def report(mode, roles):
+            return {"resolved": {"acceleration": mode}, "assets": [{"role": role} for role in roles]}
+        merged = ["transformer", "dmd_dataspace"]
+        unmerged = ["transformer", "dmd_dataspace", "dmd_time", "dmd_lora"]
+        check = verifier._normalizer._dmd_components_retained
+        self.assertTrue(check(report("full_fp32", merged), "full_fp32"))
+        self.assertTrue(check(report("unmerged_bf16", unmerged), "unmerged_bf16"))
+        invalid = [("unmerged_bf16", merged), ("full_fp32", ["transformer"])]
+        invalid += [("unmerged_bf16", [role for role in unmerged if role != missing])
+                    for missing in ("dmd_dataspace", "dmd_time", "dmd_lora")]
+        for mode, roles in invalid:
+            with self.subTest(mode=mode, roles=roles), self.assertRaisesRegex(
+                    verifier._normalizer.NormalizationError, "components were dropped"):
+                check(report(mode, roles), mode)
+        with self.assertRaisesRegex(verifier._normalizer.NormalizationError, "mode differs"):
+            check(report("unmerged_bf16", unmerged), "full_fp32")
+        with self.assertRaisesRegex(verifier._normalizer.NormalizationError, "unknown DMD"):
+            check(report("unknown", unmerged), "unknown")
+
     def test_normalizer_preserves_actual_descriptor_strides_and_hash_encoding(self):
         raw = optional_diagnostic_fixture(mask=True)["prepared_evaluation"]["before"]
         point = verifier._normalizer._point(raw)
