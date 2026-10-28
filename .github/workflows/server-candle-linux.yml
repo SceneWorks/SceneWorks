@@ -299,7 +299,7 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') }}
     runs-on: [self-hosted, Windows, X64, cuda]
     concurrency:
-      # Device zero is the same manually reserved device as the existing Windows proof lanes.
+      # Physical GPU 1 (PCI-bus order) is the runner card; GPU 0 is the owner's display GPU.
       group: windows-candle-gpu-real-weights
       cancel-in-progress: false
     timeout-minutes: 60
@@ -310,8 +310,8 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CUDA_COMPUTE_CAP: "120"
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: "0"
-      SCENEWORKS_GPU_ID: "0"
+      CUDA_VISIBLE_DEVICES: "1"
+      SCENEWORKS_GPU_ID: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

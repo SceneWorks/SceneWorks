@@ -9,7 +9,7 @@ import {caseBook,prepareCases,finalizeCampaignPlan,prepareControlledLoKr} from '
 import {SOURCE,hashFile,sourcePair,validatePlan} from './h3-finetune-terminal.mjs';
 import {operationalCases} from './h3-finetune-terminal-reduced.mjs';
 import {assertCliEnvironment,privateRunRoot,selectStageFiles,runStage,prepareReferenceFixtures,bindScopedAuthority} from './h3-finetune-terminal-stage.mjs';
-import {cudaDeviceEvidence} from './ci/h3-import-native-proof.mjs';
+import {cudaDeviceEvidence,MANUAL_CUDA_PHYSICAL_GPU} from './ci/h3-import-native-proof.mjs';
 import {prepareBootstrapInputs} from './h3-finetune-terminal-bootstrap-inputs.mjs';
 import {prepareActualProbeManifest,inspectActualArtifactHeader} from './h3-finetune-terminal-artifact-probe.mjs';
 const execute=promisify(execFile),clone=structuredClone;
@@ -35,7 +35,7 @@ export function validateBootstrapRequest(request,{backend,unitFake=false}={}){
   const op=b.operator;keys(op,['compatibleBase','projectName','seed','requestedGpu','gpuId','port','componentTier','hostBudgetBytes','deviceBudgetBytes','minimumControlDelta','maximumBaselineDelta','width','height','wideWidth','wideHeight','timeoutSeconds','lokrAmplitude','pulpcutSampling'],'operator');
   assert.equal(op.compatibleBase,'builtin:minimax_h3','explicit compatible base binding required');
   assert.ok(Number.isSafeInteger(op.seed)&&op.seed>=0&&op.seed<=0xffffffff);assert.ok(typeof op.requestedGpu==='string'&&op.requestedGpu.length);assert.ok(typeof op.gpuId==='string'&&op.gpuId.length);
-  if(backend==='cuda')assert.equal(op.gpuId,'0','manual bootstrap retains product GPU zero');
+  if(backend==='cuda'){assert.equal(op.gpuId,MANUAL_CUDA_PHYSICAL_GPU,'manual bootstrap runs on physical GPU 1 (GPU 0 is the owner display GPU)');assert.equal(op.requestedGpu,MANUAL_CUDA_PHYSICAL_GPU,'CUDA jobs must request the physical GPU 1 worker');}
   // The macOS lane's worker is the product's in-process MLX worker, whose GPU id is `mlx`; claim
   // routing keys on it, and a job requesting any other GPU is never handed to that worker.
   if(backend==='mlx'){assert.equal(op.gpuId,'mlx','the macOS lane runs the product MLX worker (GPU id mlx)');assert.equal(op.requestedGpu,'mlx','macOS jobs must request the MLX worker (requestedGpu mlx)');}
@@ -89,14 +89,17 @@ export async function bootstrapTerminal({request,backend,swRoot,inferenceRoot,ev
   const statePath=path.join(outputRoot,'bootstrap.json'),writeState=async value=>{await save(statePath,value);await save(path.join(evidenceRoot,'bootstrap.json'),value);};await writeState({...marker,status:'preparing',prepared:false,proof:false});
   try{
     if(!fake)await sourcePair({sceneworks,inference,output:outputRoot},swRoot,inferenceRoot);
-    let deviceId=op.gpuId;if(backend==='cuda'){if(fake)deviceId='unit_fake_gpu';else{const csv=(await execute('nvidia-smi',['--query-gpu=index,uuid,pci.bus_id,name,driver_version','--format=csv,noheader'],{env,timeout:30000})).stdout;deviceId=cudaDeviceEvidence({...env,CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:'0'},csv).selectedPhysicalDevice.uuid;}}
+    let deviceId=op.gpuId;if(backend==='cuda'){if(fake)deviceId='unit_fake_gpu';else{const csv=(await execute('nvidia-smi',['--query-gpu=index,uuid,pci.bus_id,name,driver_version','--format=csv,noheader'],{env,timeout:30000})).stdout;deviceId=cudaDeviceEvidence({...env,CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:MANUAL_CUDA_PHYSICAL_GPU,SCENEWORKS_GPU_ID:MANUAL_CUDA_PHYSICAL_GPU},csv).selectedPhysicalDevice.uuid;}}
     const book=fake&&deps.book?deps.book:caseBook;assert.deepEqual(book.source,SOURCE);
     const authorityPath=path.join(outputRoot,'operator-acknowledgment.json');await save(authorityPath,legal);const authorityInput=await checkedInput(authorityPath,'operator-acknowledgment');
     const facts=[];for(const set of REQUIRED_SETS)for(const file of selectStageFiles(book,[set]))facts.push(scopedFact(set==='turbo'?'adapter':'source',file.expectedSha256,file.legal,{kind:'casebook-asset',assetSet:set,repo:file.repo,revision:file.revision,file:file.file}));
     let authority=bindScopedAuthority(legal,facts,{allowUnitFake:fake});
-    const stage=await(deps.stage??runStage)({request:{asset_sets:REQUIRED_SETS,prepare_identity_controls:true,license_authority:authority},backend,env,platform:process.platform,evidenceDir:evidenceRoot,...(fake?{book,allowUnitFake:true}: {})});
+    // unit_fake never stages under the real Windows root; it uses the POSIX layout under the test's
+    // own HF_HOME (an explicit deps.platform still wins for path-derivation tests).
+    const stagePlatform=fake?(deps.platform??'linux'):process.platform;
+    const stage=await(deps.stage??runStage)({request:{asset_sets:REQUIRED_SETS,prepare_identity_controls:true,license_authority:authority},backend,env,platform:stagePlatform,evidenceDir:evidenceRoot,...(fake?{book,allowUnitFake:true}: {})});
     assert.equal(stage.kind,'h3-finetune-stage-receipt');assert.equal(stage.status,'completed');assert.ok(fake?stage.proof_kind==='unit_fake':stage.proof_kind==='frozen_stage_content');
-    const stageRoot=stage.settings.privateRoot,stagePath=path.join(stageRoot,'h3-stage-receipt.json');assert.equal(await realpath(stageRoot),await realpath(privateRunRoot({backend,platform:process.platform,env,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT})));const stageOwner=JSON.parse(await readFile(path.join(stageRoot,'sc26691-owner.json'),'utf8'));assert.equal(stageOwner.codeSha,sceneworks);assert.equal(stageOwner.backend,backend);assert.equal(String(stageOwner.runId),String(env.GITHUB_RUN_ID));assert.equal(String(stageOwner.runAttempt),String(env.GITHUB_RUN_ATTEMPT));assert.ok(stage.identityControls?.differentBytes?.actualSHA,'actual identity controls must exist before building their source bindings');
+    const stageRoot=stage.settings.privateRoot,stagePath=path.join(stageRoot,'h3-stage-receipt.json');assert.equal(await realpath(stageRoot),await realpath(privateRunRoot({backend,platform:stagePlatform,env,runId:env.GITHUB_RUN_ID,attempt:env.GITHUB_RUN_ATTEMPT})));const stageOwner=JSON.parse(await readFile(path.join(stageRoot,'sc26691-owner.json'),'utf8'));assert.equal(stageOwner.codeSha,sceneworks);assert.equal(stageOwner.backend,backend);assert.equal(String(stageOwner.runId),String(env.GITHUB_RUN_ID));assert.equal(String(stageOwner.runAttempt),String(env.GITHUB_RUN_ATTEMPT));assert.ok(stage.identityControls?.differentBytes?.actualSHA,'actual identity controls must exist before building their source bindings');
     const acknowledgmentFor=async(entry,context)=>{
       if(context?.reference)return {scope:'existing-pinned-producer-source',acknowledged:legal.acknowledged};
       assert.equal(context?.component,true);assert.ok(selections.some(v=>v.modelId===context.modelId),'component source outside selected catalog bases');assert.equal(legal.includeSelectedComponents,true);

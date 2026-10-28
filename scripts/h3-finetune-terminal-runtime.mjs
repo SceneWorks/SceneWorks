@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
-import { cudaDeviceEvidence } from './ci/h3-import-native-proof.mjs';
+import { cudaDeviceEvidence, MANUAL_CUDA_PHYSICAL_GPU } from './ci/h3-import-native-proof.mjs';
 import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
 // Windows: the bootstrap output root is ~95 characters deep and cargo/nvcc nest candle's kernel
 // build ~50 more below CARGO_TARGET_DIR, so a target under the output root overruns MAX_PATH.
@@ -20,6 +20,10 @@ import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
 export function cargoTarget(c,kind,longPath,platform=process.platform){
   return platform==='win32'?`${privateRunRoot({backend:c.backend,platform,env:process.env,runId:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT})}-${kind}`:longPath;
 }
+// A unit_fake run never resolves the real Windows private root (E:\huggingface\sc26691-private):
+// unless a test names a platform explicitly, it takes the POSIX layout under its own output root.
+export const UNIT_FAKE_PLATFORM = 'linux';
+export function runPlatform(deps={}){return deps.platform??(deps.proof_kind==='unit_fake'?UNIT_FAKE_PLATFORM:process.platform);}
 const exec = promisify(execFile);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const json = async p => JSON.parse(await readFile(p, 'utf8'));
@@ -102,7 +106,7 @@ export async function hardware(backend, deviceId, deps={}) {
   }
   const inventory=(await execute('nvidia-smi',['--query-gpu=index,uuid,pci.bus_id,name,driver_version','--format=csv,noheader'])).stdout;
   const cuda=cudaDeviceEvidence(deps.env??process.env,inventory),row=cuda.selectedPhysicalDevice;
-  assert.equal(row.uuid,deviceId,'requested CUDA UUID must be the actual PCI-ordered manual device zero');
+  assert.equal(row.uuid,deviceId,'requested CUDA UUID must be the actual PCI-ordered manual physical device 1');
   return {device:row.uuid+' '+row.name,driver:row.driverVersion,cuda};
 }
 
@@ -156,7 +160,7 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   assert.equal(n.package,c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3');
   if(c.backend==='cuda') base.push('--features','cuda');
   const buildCommand=[...base,'--no-run','--message-format=json'];
-  const opts={cwd:inferenceRoot,env:{...process.env,...(c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:cargoTarget(c,'native',path.join(p.output,`native-target-${p.inference}-${c.backend}`),deps.platform),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'},timeoutSeconds:c.timeoutSeconds};
+  const opts={cwd:inferenceRoot,env:{...process.env,...(c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:cargoTarget(c,'native',path.join(p.output,`native-target-${p.inference}-${c.backend}`),runPlatform(deps)),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'},timeoutSeconds:c.timeoutSeconds};
   await runner(buildCommand,{...opts,logPath:path.join(dir,'native-build.log')});
   const records=(await readFile(path.join(dir,'native-build.log'),'utf8')).split('\n').flatMap(l=>{try{return [JSON.parse(l)];}catch{return [];}});
   const artifact=records.find(v=>v.reason==='compiler-artifact' && v.target?.name==='integration' && v.profile?.test && v.executable);
@@ -195,7 +199,7 @@ export async function executeFixture(p,c,swRoot,inferenceRoot,dir,deps={}) {
   assert.equal(c.fixtureProof.kind,'source-bound-assertions');assert.equal(c.command[0],'cargo');assert.ok(c.command.includes('test')&&c.command.includes(path.join(swRoot,'Cargo.toml')));
   assert.ok(c.inputs.length);for(const input of c.inputs)assert.equal(await hashFile(input.path),input.sha256);
   const state=path.join(dir,'fixture-state');await mkdir(state);
-  const env={...privateEnvironment(state,{port:43210,gpuId:'cpu',backend:c.backend},randomUUID()),CARGO_TARGET_DIR:cargoTarget(c,'fixture',path.join(p.output,`fixture-target-${p.sceneworks}-${p.inference}-${c.backend}`),deps.platform),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'};
+  const env={...privateEnvironment(state,{port:43210,gpuId:'cpu',backend:c.backend},randomUUID()),CARGO_TARGET_DIR:cargoTarget(c,'fixture',path.join(p.output,`fixture-target-${p.sceneworks}-${p.inference}-${c.backend}`),runPlatform(deps)),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'};
   await (deps.runProcess??runProcess)(c.command,{cwd:swRoot,env,logPath:path.join(dir,'assertions.log'),timeoutSeconds:c.timeoutSeconds});
   const log=await readFile(path.join(dir,'assertions.log'),'utf8'),passed=executedTests(log);assert.ok(!/\bSKIP\b/.test(log));
   const proof={kind:'source-bound-assertions',proof_kind:fake?'unit_fake':'campaign_fixture',sceneworks:p.sceneworks,inference:p.inference,command:c.command,passed,inputs:c.inputs,meaning:'Executed source-bound synthetic contract assertions; no real-model/native load or measured peak claimed'};
@@ -257,7 +261,7 @@ export class OwnedService {
     assert.ok(this.c.inputs.some(i=>i.path===r?.scenario && i.role==='scenario'),'bind the actual request/action scenario as an input');
     assert.ok(r && Number.isInteger(r.port) && r.port>1024 && r.port<=65535 && r.gpuId);
     if(!this.fake && this.c.backend==='cuda') {
-      assert.equal(String(r.gpuId),'0','manual campaign must retain product GPU zero');
+      assert.equal(String(r.gpuId),MANUAL_CUDA_PHYSICAL_GPU,'manual campaign runs on physical GPU 1 (GPU 0 is the owner display GPU)');
       await hardware('cuda',r.deviceId); // Confirm UUID/PCI mapping before any build, listener or model load.
     }
     const services=path.join(this.p.output,'services');await mkdir(services,{recursive:true});
@@ -289,7 +293,7 @@ export class OwnedService {
     const runner=this.deps.runProcess??runProcess;
     const command=['cargo','build','--locked','--manifest-path',path.join(this.swRoot,'Cargo.toml'),'-p','sceneworks-rust-api','--bin','sceneworks-rust-api'];
     if(this.c.backend==='cuda')command.push('--features','sceneworks-rust-api/backend-candle');
-    const platform=this.deps.platform??process.platform,buildRoot=path.join(this.p.output,`service-build-${this.p.sceneworks}-${this.p.inference}-${this.c.backend}`),receipt=path.join(buildRoot,'build.json');
+    const platform=runPlatform(this.deps),buildRoot=path.join(this.p.output,`service-build-${this.p.sceneworks}-${this.p.inference}-${this.c.backend}`),receipt=path.join(buildRoot,'build.json');
     const target=cargoTarget(this.c,'target',path.join(buildRoot,'target'),platform);
     const configuration={command,flags:Object.fromEntries(['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','RUSTUP_TOOLCHAIN'].map(k=>[k,process.env[k]??null])),proof_kind:this.fake?'unit_fake':'campaign_native'};
     let cached;

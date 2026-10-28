@@ -8,6 +8,14 @@ import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateC
 import { assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
+// Tests must never write under a real HF cache: neither the Windows campaign root nor the HF_HOME
+// / ~/.cache/huggingface this process inherited. Every path a test materializes stays in its temp dir.
+const REAL_HF_ROOTS=[process.env.HF_HOME,process.env.HF_HUB_CACHE,'E:\\huggingface',path.join(os.homedir(),'.cache','huggingface')].filter(Boolean).map(p=>path.resolve(p).toLowerCase());
+function assertTestOwned(file,temporary){
+  const resolved=path.resolve(file),lower=resolved.toLowerCase();
+  assert.ok(lower.startsWith(path.resolve(temporary).toLowerCase()+path.sep),`${resolved} escapes the test temp dir ${temporary}`);
+  for(const real of REAL_HF_ROOTS)assert.ok(lower!==real&&!lower.startsWith(real+path.sep),`${resolved} is under the real HF cache ${real}`);
+}
 const sw='a'.repeat(40),inf='b'.repeat(40),semantic='c'.repeat(64);
 async function fixture(t,group='capability',check='image',backend='mlx') {
   const root=await mkdtemp(path.join(os.tmpdir(),'sc26691-runtime-unit-fake-'));t.after(()=>rm(root,{recursive:true,force:true}));
@@ -104,7 +112,7 @@ test('native adapter consumes actual named executed comparisons without inventin
   f.c.inputs.push({path:fixturePath,sha256:await hashFile(fixturePath),role:'numeric-fixture'},...refs);f.c.referenceRevision=caseBook.numeric.convrot.referenceRevision;
   const name=caseBook.numeric.convrot.selector;f.c.numericProof={kind:'native-pinned-fixture',package:'mlx-gen-minimax-h3',tests:[name]};
   const commands=[];const runProcess=async(argv,options)=>{commands.push(argv);let text;
-    if(argv[0]==='cargo'){const binary=path.join(options.env.CARGO_TARGET_DIR,'integration-unit-fake');await mkdir(path.dirname(binary),{recursive:true});await writeFile(binary,'unit_fake binary NOT executable');text=JSON.stringify({reason:'compiler-artifact',target:{name:'integration'},profile:{test:true},executable:binary});}
+    if(argv[0]==='cargo'){assertTestOwned(options.env.CARGO_TARGET_DIR,f.root);const binary=path.join(options.env.CARGO_TARGET_DIR,'integration-unit-fake');await mkdir(path.dirname(binary),{recursive:true});await writeFile(binary,'unit_fake binary NOT executable');text=JSON.stringify({reason:'compiler-artifact',target:{name:'integration'},profile:{test:true},executable:binary});}
     else text=argv.includes('--list')?`${name}: test\nunrelated::case: test\n`:`running 1 test\ntest ${name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n`;
     await writeFile(options.logPath,text,{flag:'wx'});
   };
@@ -142,7 +150,7 @@ test('backend readbacks bind both source identities, canonical cases and input h
 });
 test('source-bound fixture adapter records actual assertions without fictional load/peak receipts',async t=>{
   const f=await fixture(t,'lifecycle','source-drift');f.c.command=['cargo','test','--manifest-path',path.join(f.root,'Cargo.toml'),'-p','sceneworks-core','--test','minimax_h3_import','--','unit_fake_assertion'];f.c.fixtureProof={kind:'source-bound-assertions'};
-  const r=await executeFixture(f.p,f.c,f.root,f.native,f.dir,{proof_kind:'unit_fake',runProcess:async(argv,options)=>{await writeFile(options.logPath,'test unit_fake_assertion ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n');},hardware:async()=>({device:'unit_fake',driver:'unit_fake'})});
+  const r=await executeFixture(f.p,f.c,f.root,f.native,f.dir,{proof_kind:'unit_fake',runProcess:async(argv,options)=>{assertTestOwned(options.env.CARGO_TARGET_DIR,f.root);await writeFile(options.logPath,'test unit_fake_assertion ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n');},hardware:async()=>({device:'unit_fake',driver:'unit_fake'})});
   assert.equal(r.proof.passed,1);assert.equal(r.evidence.proof_kind,'unit_fake');assert.ok(!r.evidence.metrics&&!r.evidence.runtimeIdentity);
 });
 test('self-contained restart campaign scenario creates baseline, restarts owned state and replays captured job',async t=>{
@@ -282,16 +290,16 @@ test('private environment isolates cache/config/credentials while preserving dev
 });
 test('root-selected compiler reaches private child environments without inheriting credentials',()=>{
   const previous=process.env.RUSTUP_TOOLCHAIN;process.env.RUSTUP_TOOLCHAIN='9.8.7';
-  try{const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'0',backend:'cuda'},'unit_fake_token');assert.equal(env.RUSTUP_TOOLCHAIN,'9.8.7');assert.equal(env.SCENEWORKS_CANDLE_REQUIRED,'1');assert.equal(env.SCENEWORKS_CANDLE_UNSUPPORTED_MODE,'enforce');assert.equal(env.SCENEWORKS_MLX_REQUIRED,undefined);assert.ok(!Object.hasOwn(env,'HF_TOKEN'));}
+  try{const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'1',backend:'cuda'},'unit_fake_token');assert.equal(env.RUSTUP_TOOLCHAIN,'9.8.7');assert.equal(env.SCENEWORKS_CANDLE_REQUIRED,'1');assert.equal(env.SCENEWORKS_CANDLE_UNSUPPORTED_MODE,'enforce');assert.equal(env.SCENEWORKS_MLX_REQUIRED,undefined);assert.ok(!Object.hasOwn(env,'HF_TOKEN'));}
   finally{if(previous===undefined)delete process.env.RUSTUP_TOOLCHAIN;else process.env.RUSTUP_TOOLCHAIN=previous;}
 });
-test('CUDA receipt binds PCI-ordered device zero rather than NVML index zero using only fake inventory',async()=>{
+test('CUDA receipt binds PCI-ordered physical device 1 rather than NVML index 1 using only fake inventory',async()=>{
   const csv='0, GPU-unit_fake-high, 00000000:41:00.0, unit_fake_high, unit_fake_driver\n1, GPU-unit_fake-low, 00000000:01:00.0, unit_fake_low, unit_fake_driver\n';
-  const env={CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:'0'},calls=[];
+  const env={CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:'1',SCENEWORKS_GPU_ID:'1'},calls=[];
   const exec=async(command,args)=>{calls.push([command,args]);return{stdout:csv};};
-  const value=await hardware('cuda','GPU-unit_fake-low',{env,exec});assert.equal(value.cuda.selectedPhysicalDevice.nvmlIndex,1);assert.equal(value.cuda.selectedPhysicalDevice.uuid,'GPU-unit_fake-low');assert.equal(calls[0][0],'nvidia-smi');assert.ok(calls[0][1].includes('--query-gpu=index,uuid,pci.bus_id,name,driver_version'));
-  await assert.rejects(hardware('cuda','GPU-unit_fake-high',{env,exec}),/manual device zero/);
-  for(const bad of [{...env,CUDA_VISIBLE_DEVICES:'1'},{...env,CUDA_DEVICE_ORDER:'FASTEST_FIRST'}])await assert.rejects(hardware('cuda','GPU-unit_fake-low',{env:bad,exec}),/manual CUDA proof/);
+  const value=await hardware('cuda','GPU-unit_fake-high',{env,exec});assert.equal(value.cuda.selectedPhysicalDevice.nvmlIndex,0);assert.equal(value.cuda.selectedPhysicalDevice.uuid,'GPU-unit_fake-high');assert.equal(calls[0][0],'nvidia-smi');assert.ok(calls[0][1].includes('--query-gpu=index,uuid,pci.bus_id,name,driver_version'));
+  await assert.rejects(hardware('cuda','GPU-unit_fake-low',{env,exec}),/manual physical device 1/);
+  for(const bad of [{...env,CUDA_VISIBLE_DEVICES:'0'},{...env,CUDA_DEVICE_ORDER:'FASTEST_FIRST'},{...env,SCENEWORKS_GPU_ID:'0'}])await assert.rejects(hardware('cuda','GPU-unit_fake-high',{env:bad,exec}),/manual CUDA proof/);
 });
 test('native unknown source size stays unknown while a real zero-byte size stays zero',()=>{assert.equal(observedSourceBytes(undefined),null);assert.equal(observedSourceBytes(null),null);assert.equal(observedSourceBytes('None'),null);assert.equal(observedSourceBytes(0),0);assert.equal(observedSourceBytes('0'),0);assert.equal(observedSourceBytes(1024),1024);});
 async function coldCancelFake(t){

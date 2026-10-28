@@ -713,7 +713,7 @@ test('reference fixtures refuse real injected execution, incomplete stage owners
 test('reference fixture failure retains failure metadata in evidence and never claims model proof', async t => {
   const { root, evidence } = await stagedRootFixture(t, 'ref-fail-'), tools = { ffmpeg: '/unit_fake/ffmpeg', ffprobe: '/unit_fake/ffprobe' };
   const env = { PATH: '/unit_fake/bin', RUNNER_NAME: 'nax-macos', H3_STAGE_BACKEND: 'mlx' };
-  await assert.rejects(prepareReferenceFixtures({ root, evidenceDir: evidence, book: await loadCasebook(), execute: referenceExecute({ failAsset: 'testsrc2=size=576x320:rate=24:duration=6' }), tools, allowUnitFake: true, env, platform: 'darwin', now: () => 0 }), /exited 2|failed/);
+  await assert.rejects(prepareReferenceFixtures({ root, evidenceDir: evidence, book: await loadCasebook(), execute: referenceExecute({ failAsset: 'testsrc2=size=576x320:rate=24:duration=2' }), tools, allowUnitFake: true, env, platform: 'darwin', now: () => 0 }), /exited 2|failed/);
   const receipt = JSON.parse(await readFile(path.join(evidence, 'reference-fixtures.json'), 'utf8'));
   assert.equal(receipt.status, 'failed'); assert.equal(receipt.campaign_proof, false); assert.equal(receipt.proof_kind, 'unit_fake');
   assert.ok(receipt.fixtureCount < 5); assert.ok(receipt.error?.message);

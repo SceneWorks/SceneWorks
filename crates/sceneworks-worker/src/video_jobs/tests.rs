@@ -7998,25 +7998,39 @@ fn bernini_backends_share_engine_id_and_video_mode_mapping() {
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
+const NO_H3: super::minimax_h3_sequence::MinimaxH3StallRequest<'static> =
+    super::minimax_h3_sequence::MinimaxH3StallRequest::EMPTY;
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn video_stall_window_covers_preparation_and_cold_load_until_the_first_step() {
     // sc-26691: a healthy imported H3 render was cancelled 600 s into a ~25 minute cold load on the
-    // CUDA host, because the engine reports nothing before its first denoise step.
-    let baseline = video_stall_timeout_policy(None, "minimax_h3", 544, 1088, 124, None);
+    // CUDA host, because the engine reports nothing before its first denoise step — and that first
+    // `Step` event arrives only once the step has completed, so the window carries one step too.
+    let baseline = video_stall_timeout_policy(None, "minimax_h3", 544, 1088, 124, None, NO_H3);
     assert_eq!(baseline.timeout, VIDEO_STALL_TIMEOUT);
     assert_eq!(
         video_stall_window(baseline, false),
-        VIDEO_PRE_STEP_STALL_TIMEOUT
+        VIDEO_PRE_STEP_STALL_TIMEOUT + VIDEO_STALL_TIMEOUT
     );
     assert_eq!(video_stall_window(baseline, true), VIDEO_STALL_TIMEOUT);
-    // Never shortens a per-step budget larger than the pre-step window.
-    let long = VideoStallTimeoutPolicy {
-        timeout: VIDEO_PRE_STEP_STALL_TIMEOUT + Duration::from_secs(60),
-        basis: "wan_a14b",
-    };
+    // Other engines keep the generic window, which never shortens a larger per-step budget.
+    let generic = video_stall_timeout_policy(None, "wan2_2_ti2v_5b", 1280, 720, 77, None, NO_H3);
+    assert_eq!(
+        video_stall_window(generic, false),
+        VIDEO_PRE_STEP_STALL_TIMEOUT
+    );
+    let long = VideoStallTimeoutPolicy::with_generic_pre_step(
+        VIDEO_PRE_STEP_STALL_TIMEOUT + Duration::from_secs(60),
+        "wan_a14b",
+    );
     assert_eq!(video_stall_window(long, false), long.timeout);
     // An operator override stays absolute, before and after the first step.
-    let operator = video_stall_timeout_policy(Some("120"), "minimax_h3", 544, 1088, 124, None);
+    let operator =
+        video_stall_timeout_policy(Some("120"), "minimax_h3", 544, 1088, 124, None, NO_H3);
     assert_eq!(
         video_stall_window(operator, false),
         Duration::from_secs(120)
@@ -8033,9 +8047,10 @@ fn video_stall_timeout_operator_override_is_absolute() {
     // A valid positive override wins even when it is below both the default and the H3 workload
     // budget. This is the explicit operator escape hatch, not a lower bound.
     assert_eq!(
-        video_stall_timeout_policy(Some("120"), "minimax_h3", 768, 1344, 345, None),
+        video_stall_timeout_policy(Some("120"), "minimax_h3", 768, 1344, 345, None, NO_H3),
         VideoStallTimeoutPolicy {
             timeout: Duration::from_secs(120),
+            pre_step: Duration::from_secs(120),
             basis: "operator_override",
         }
     );
@@ -8046,18 +8061,20 @@ fn video_stall_timeout_operator_override_is_absolute() {
             u32::MAX,
             u32::MAX,
             u32::MAX,
-            None
+            None,
+            NO_H3
         ),
         VideoStallTimeoutPolicy {
             timeout: Duration::from_secs(90),
+            pre_step: Duration::from_secs(90),
             basis: "operator_override",
         }
     );
     // Invalid values are not overrides; H3 must still receive its request-derived budget.
     for raw in [Some(""), Some("nope"), Some("0")] {
         assert_eq!(
-            video_stall_timeout_policy(raw, "minimax_h3", 768, 1344, 243, None).timeout,
-            Duration::from_secs(1176)
+            video_stall_timeout_policy(raw, "minimax_h3", 768, 1344, 243, None, NO_H3).timeout,
+            Duration::from_secs(1796)
         );
     }
 }
@@ -8070,9 +8087,18 @@ fn video_stall_timeout_operator_override_is_absolute() {
 fn video_stall_timeout_non_h3_remains_the_global_default() {
     for raw in [None, Some(""), Some("nope"), Some("0")] {
         assert_eq!(
-            video_stall_timeout_policy(raw, "wan2_2_ti2v_5b", u32::MAX, u32::MAX, u32::MAX, None),
+            video_stall_timeout_policy(
+                raw,
+                "wan2_2_ti2v_5b",
+                u32::MAX,
+                u32::MAX,
+                u32::MAX,
+                None,
+                NO_H3
+            ),
             VideoStallTimeoutPolicy {
                 timeout: VIDEO_STALL_TIMEOUT,
+                pre_step: VIDEO_PRE_STEP_STALL_TIMEOUT,
                 basis: "default",
             },
             "invalid or absent override {raw:?} must not make the generic timeout request-aware"
@@ -8087,18 +8113,15 @@ fn video_stall_timeout_non_h3_remains_the_global_default() {
 #[test]
 fn video_stall_timeout_minimax_h3_shortest_full_canvas_preserves_the_600_second_baseline() {
     for (width, height) in [(768, 1344), (1344, 768)] {
-        assert_eq!(
-            video_stall_timeout_policy(None, "minimax_h3", width, height, 124, None),
-            VideoStallTimeoutPolicy {
-                timeout: VIDEO_STALL_TIMEOUT,
-                basis: "minimax_h3_baseline",
-            }
-        );
+        let policy =
+            video_stall_timeout_policy(None, "minimax_h3", width, height, 124, None, NO_H3);
+        assert_eq!(policy.timeout, VIDEO_STALL_TIMEOUT);
+        assert_eq!(policy.basis, "minimax_h3_baseline");
     }
-    // A long small-canvas request carries less packed pixel-frame work than the measured shortest
-    // full-canvas baseline, so it does not weaken genuine stall detection either.
+    // A long small-canvas request packs fewer rows than the measured shortest full-canvas
+    // baseline, so it does not weaken genuine stall detection either.
     assert_eq!(
-        video_stall_timeout_policy(None, "minimax_h3", 320, 576, 345, None).timeout,
+        video_stall_timeout_policy(None, "minimax_h3", 320, 576, 345, None, NO_H3).timeout,
         VIDEO_STALL_TIMEOUT
     );
 }
@@ -8109,11 +8132,13 @@ fn video_stall_timeout_minimax_h3_shortest_full_canvas_preserves_the_600_second_
 ))]
 #[test]
 fn video_stall_timeout_minimax_h3_243_frame_full_canvas_exceeds_the_false_stall_threshold() {
-    let portrait = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, 243, None);
-    let landscape = video_stall_timeout_policy(None, "minimax_h3", 1344, 768, 243, None);
+    let portrait = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, 243, None, NO_H3);
+    let landscape = video_stall_timeout_policy(None, "minimax_h3", 1344, 768, 243, None, NO_H3);
     assert_eq!(portrait, landscape, "orientation cannot change packed work");
-    assert_eq!(portrait.timeout, Duration::from_secs(1176));
-    assert_eq!(portrait.basis, "minimax_h3_pixel_frames");
+    // 73,898 packed rows against the 38,222-row baseline: ceil(600 * cost(S) / cost(S0)) with
+    // cost(S) = S * (26,880 + S).
+    assert_eq!(portrait.timeout, Duration::from_secs(1796));
+    assert_eq!(portrait.basis, "minimax_h3_packed_sequence");
     assert!(portrait.timeout > Duration::from_secs(600));
 }
 
@@ -8127,32 +8152,76 @@ fn video_stall_timeout_minimax_h3_is_monotonic_and_bounded_on_the_full_legal_lat
 
     let mut previous = VIDEO_STALL_TIMEOUT;
     for frames in MINIMAX_H3_LEGAL_FRAME_COUNTS {
-        let policy = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, frames, None);
+        let policy = video_stall_timeout_policy(None, "minimax_h3", 768, 1344, frames, None, NO_H3);
         assert!(
             policy.timeout >= previous,
             "timeout regressed at legal frame count {frames}"
         );
-        let expected_seconds = 600_u64
-            .saturating_mul(u64::from(frames))
-            .div_ceil(u64::from(MINIMAX_H3_LEGAL_FRAME_COUNTS[0]));
-        assert_eq!(
-            policy.timeout,
-            Duration::from_secs(expected_seconds),
-            "full-canvas policy must scale with the effective H3 frame lattice"
-        );
         previous = policy.timeout;
     }
-    assert_eq!(previous, Duration::from_secs(1670));
+    // The longest legal full-canvas text-only clip: 104,478 rows.
+    assert_eq!(previous, Duration::from_secs(3310));
 
-    // Mutation/bound proof: out-of-contract dimensions and frame counts cannot expand the stall
-    // budget beyond the largest legal H3 request, and zeroes cannot lower the existing baseline.
+    // Mutation/bound proof: an out-of-contract frame count clamps onto the legal lattice, and a
+    // request the layout envelope refuses is budgeted at the finite ceiling, never small.
     assert_eq!(
-        video_stall_timeout_policy(None, "minimax_h3", u32::MAX, u32::MAX, u32::MAX, None).timeout,
-        Duration::from_secs(1670)
+        video_stall_timeout_policy(None, "minimax_h3", 768, 1344, u32::MAX, None, NO_H3).timeout,
+        Duration::from_secs(3310)
     );
+    let refused = video_stall_timeout_policy(None, "minimax_h3", 0, 0, 0, None, NO_H3);
     assert_eq!(
-        video_stall_timeout_policy(None, "minimax_h3", 0, 0, 0, None).timeout,
-        VIDEO_STALL_TIMEOUT
+        refused.timeout,
+        super::minimax_h3_sequence::MINIMAX_H3_STEP_STALL_CEILING
+    );
+    assert_eq!(refused.basis, "minimax_h3_sequence_unknown");
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn video_stall_timeout_minimax_h3_reads_the_reference_geometry_from_the_engine_input() {
+    // sc-26691's measured case shape: the references, not the 1088x544 canvas, set the budget.
+    let plate = || Conditioning::Reference {
+        image: Image {
+            width: 576,
+            height: 320,
+            pixels: Vec::new(),
+        },
+        strength: None,
+    };
+    let conditioning = [plate(), plate()];
+    let referenced = video_stall_timeout_policy(
+        None,
+        "minimax_h3",
+        1088,
+        544,
+        124,
+        None,
+        super::minimax_h3_sequence::MinimaxH3StallRequest {
+            conditioning: &conditioning,
+            ..NO_H3
+        },
+    );
+    let bare = video_stall_timeout_policy(None, "minimax_h3", 1088, 544, 124, None, NO_H3);
+    assert!(referenced.pre_step > bare.pre_step);
+    assert_eq!(bare.timeout, VIDEO_STALL_TIMEOUT);
+    // Engine ids other than H3 ignore the H3 reference geometry entirely.
+    assert_eq!(
+        video_stall_timeout_policy(
+            None,
+            "wan2_2_ti2v_5b",
+            1088,
+            544,
+            124,
+            None,
+            super::minimax_h3_sequence::MinimaxH3StallRequest {
+                conditioning: &conditioning,
+                ..NO_H3
+            },
+        ),
+        video_stall_timeout_policy(None, "wan2_2_ti2v_5b", 1088, 544, 124, None, NO_H3)
     );
 }
 
@@ -8166,13 +8235,13 @@ fn video_stall_timeout_wan_a14b_default_request_outlasts_the_measured_silent_win
     // guidance 1.0) measured ~527 s of cold load plus ~453 s per denoise step with no event between,
     // so the first silent window (~980 s) overran the flat 600 s default on every A14B engine.
     for engine in ["wan2_2_t2v_14b", "wan2_2_i2v_14b", "wan2_2_vace_fun_14b"] {
-        let policy = video_stall_timeout_policy(None, engine, 1280, 720, 77, Some(1.0));
+        let policy = video_stall_timeout_policy(None, engine, 1280, 720, 77, Some(1.0), NO_H3);
         assert_eq!(
             policy,
-            VideoStallTimeoutPolicy {
-                timeout: Duration::from_secs(1200 + 3 * 453),
-                basis: "wan_a14b_token_work",
-            },
+            VideoStallTimeoutPolicy::with_generic_pre_step(
+                Duration::from_secs(1200 + 3 * 453),
+                "wan_a14b_token_work",
+            ),
             "{engine}"
         );
         // At least 2x the measured ~980 s first silent window.
@@ -8187,11 +8256,8 @@ fn video_stall_timeout_wan_a14b_default_request_outlasts_the_measured_silent_win
         "krea_realtime_14b",
     ] {
         assert_eq!(
-            video_stall_timeout_policy(None, engine, 1280, 720, 77, None),
-            VideoStallTimeoutPolicy {
-                timeout: VIDEO_STALL_TIMEOUT,
-                basis: "default",
-            },
+            video_stall_timeout_policy(None, engine, 1280, 720, 77, None, NO_H3),
+            VideoStallTimeoutPolicy::with_generic_pre_step(VIDEO_STALL_TIMEOUT, "default"),
             "{engine}"
         );
     }
@@ -8206,14 +8272,15 @@ fn video_stall_timeout_wan_a14b_scales_with_tokens_and_cfg() {
     // The original sc-10299 repro: 832x480, 33 frames -> 52*30*9 = 14,040 tokens.
     // ceil(453 * 14040 / 72000) = 89 s per step under Lightning (CFG off).
     assert_eq!(
-        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 832, 480, 33, Some(1.0)).timeout,
+        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 832, 480, 33, Some(1.0), NO_H3).timeout,
         Duration::from_secs(1200 + 3 * 89)
     );
     // Lightning off: guidance > 1 runs a second (negative) forward per step -> twice the work.
     // `None` is the engine's CFG-on default and must budget the same as an explicit guidance.
     for guidance in [None, Some(5.0)] {
         assert_eq!(
-            video_stall_timeout_policy(None, "wan2_2_t2v_14b", 1280, 720, 77, guidance).timeout,
+            video_stall_timeout_policy(None, "wan2_2_t2v_14b", 1280, 720, 77, guidance, NO_H3)
+                .timeout,
             Duration::from_secs(1200 + 3 * 2 * 453),
             "{guidance:?}"
         );
@@ -8222,7 +8289,8 @@ fn video_stall_timeout_wan_a14b_scales_with_tokens_and_cfg() {
     let mut previous = Duration::ZERO;
     for frames in (5..=81).step_by(4) {
         let timeout =
-            video_stall_timeout_policy(None, "wan2_2_i2v_14b", 832, 480, frames, Some(1.0)).timeout;
+            video_stall_timeout_policy(None, "wan2_2_i2v_14b", 832, 480, frames, Some(1.0), NO_H3)
+                .timeout;
         assert!(timeout >= previous, "budget regressed at {frames} frames");
         previous = timeout;
     }
@@ -8238,25 +8306,34 @@ fn video_stall_timeout_wan_a14b_is_bounded_and_overridable() {
     // ceil(906 * 75600 / 72000) = 952 s per step.
     let max = Duration::from_secs(1200 + 3 * 952);
     assert_eq!(
-        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 1280, 720, 81, None).timeout,
+        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 1280, 720, 81, None, NO_H3).timeout,
         max
     );
     // Out-of-contract input clamps to that bound instead of producing an unbounded budget.
     assert_eq!(
-        video_stall_timeout_policy(None, "wan2_2_t2v_14b", u32::MAX, u32::MAX, u32::MAX, None)
-            .timeout,
+        video_stall_timeout_policy(
+            None,
+            "wan2_2_t2v_14b",
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+            None,
+            NO_H3
+        )
+        .timeout,
         max
     );
     // Degenerate dimensions add no step work but keep the cold-load allowance.
     assert_eq!(
-        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 0, 0, 0, Some(1.0)).timeout,
+        video_stall_timeout_policy(None, "wan2_2_t2v_14b", 0, 0, 0, Some(1.0), NO_H3).timeout,
         Duration::from_secs(1200)
     );
     // The operator override stays absolute for Wan too.
     assert_eq!(
-        video_stall_timeout_policy(Some("300"), "wan2_2_t2v_14b", 1280, 720, 81, None),
+        video_stall_timeout_policy(Some("300"), "wan2_2_t2v_14b", 1280, 720, 81, None, NO_H3),
         VideoStallTimeoutPolicy {
             timeout: Duration::from_secs(300),
+            pre_step: Duration::from_secs(300),
             basis: "operator_override",
         }
     );

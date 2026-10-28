@@ -57,9 +57,18 @@ export function observeMetalCase(name, receipt, save, observe = metalMemoryObser
   return observation;
 }
 
+// Physical GPU 0 is the owner's display/work GPU; the self-hosted CUDA runners own physical GPU 1.
+// Manual H3 proofs therefore pin the PCI-bus-ordered physical device 1 (CUDA ordinal 0 inside the
+// process, because CUDA_VISIBLE_DEVICES narrows visibility to that one card). SCENEWORKS_GPU_ID is
+// the worker's physical (nvidia-smi, PCI-ordered) index, so it must name the same card.
+export const MANUAL_CUDA_PHYSICAL_GPU = "1";
+
 export function cudaDeviceEvidence(env, csv) {
-  if (env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID" || env.CUDA_VISIBLE_DEVICES !== "0") {
-    throw new Error("manual CUDA proof requires PCI_BUS_ID ordering and visible device 0");
+  if (env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID" || env.CUDA_VISIBLE_DEVICES !== MANUAL_CUDA_PHYSICAL_GPU) {
+    throw new Error(`manual CUDA proof requires PCI_BUS_ID ordering and visible physical device ${MANUAL_CUDA_PHYSICAL_GPU}`);
+  }
+  if (env.SCENEWORKS_GPU_ID !== undefined && env.SCENEWORKS_GPU_ID !== "" && env.SCENEWORKS_GPU_ID !== MANUAL_CUDA_PHYSICAL_GPU) {
+    throw new Error(`manual CUDA proof requires SCENEWORKS_GPU_ID ${MANUAL_CUDA_PHYSICAL_GPU} to match the visible physical device`);
   }
   const devices = csv.trim().split(/\r?\n/).filter(Boolean).map(line => {
     const [index, uuid, pciBusId, name, driverVersion] = line.split(",").map(value => value.trim());
@@ -74,10 +83,11 @@ export function cudaDeviceEvidence(env, csv) {
     for (let i = 0; i < a.busOrder.length; i++) if (a.busOrder[i] !== b.busOrder[i]) return a.busOrder[i] - b.busOrder[i];
     return 0;
   });
-  if (!devices.length) throw new Error("missing physical CUDA device identity");
-  const { busOrder: _order, ...selectedPhysicalDevice } = devices[0];
+  const physical = Number(MANUAL_CUDA_PHYSICAL_GPU);
+  if (devices.length <= physical) throw new Error(`missing physical CUDA device ${physical} identity`);
+  const { busOrder: _order, ...selectedPhysicalDevice } = devices[physical];
   return { cudaDeviceOrder: env.CUDA_DEVICE_ORDER, cudaVisibleDevices: env.CUDA_VISIBLE_DEVICES,
-    selectedPhysicalDevice, enumeration: "PCI_BUS_ID ascending; CUDA visible ordinal 0" };
+    selectedPhysicalDevice, enumeration: `PCI_BUS_ID ascending; physical device ${physical} (CUDA visible ordinal 0)` };
 }
 
 /// Build-only process supervision: stdout/stderr go directly to durable files, not a Node
@@ -141,7 +151,7 @@ export async function runProof(backend, evidence) {
   requireManualSelection(process.env.GITHUB_EVENT_NAME, process.env.H3_IMPORT_BACKEND, backend);
   if (process.platform !== (backend === "mlx" ? "darwin" : "win32")) throw new Error("native backend/host mismatch");
   if (backend === "mlx" && process.env.RUNNER_NAME !== "nax-macos-2") throw new Error("MLX proof is Mac2-only");
-  if (backend === "cuda" && (process.env.CUDA_VISIBLE_DEVICES !== "0" || process.env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID")) throw new Error("manual CUDA proof must retain PCI_BUS_ID ordering and device 0");
+  if (backend === "cuda" && (process.env.CUDA_VISIBLE_DEVICES !== MANUAL_CUDA_PHYSICAL_GPU || process.env.CUDA_DEVICE_ORDER !== "PCI_BUS_ID")) throw new Error(`manual CUDA proof must retain PCI_BUS_ID ordering and physical device ${MANUAL_CUDA_PHYSICAL_GPU}`);
   if (!path.isAbsolute(evidence)) throw new Error("evidence directory must be absolute and new");
   mkdirSync(evidence); // refuse accidental reuse of an earlier receipt/log set
   const start = Date.now();
@@ -150,7 +160,7 @@ export async function runProof(backend, evidence) {
   const receipt = {
     schema: 1, sourceSha: checked("git", ["rev-parse", "HEAD"]).trim(), inferenceSha,
     event: process.env.GITHUB_EVENT_NAME, selection: process.env.H3_IMPORT_BACKEND,
-    runner: process.env.RUNNER_NAME, backend, device: backend === "cuda" ? "CUDA_VISIBLE_DEVICES=0" : "Mac2 Metal",
+    runner: process.env.RUNNER_NAME, backend, device: backend === "cuda" ? `CUDA_VISIBLE_DEVICES=${MANUAL_CUDA_PHYSICAL_GPU}` : "Mac2 Metal",
     fixtureSource: fixture, fixtureSha256: createHash("sha256").update(readFileSync(fixture)).digest("hex"),
     configuration: { syntheticOnly: true, downloads: false, layers: 1, refinerLayers: 1, hiddenSize: 256,
       attentionHeads: 2, headDim: 128, ffnDim: 256, timeEmbedDim: 64, tableGrid: 1025, tableRank: 8,

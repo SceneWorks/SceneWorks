@@ -872,7 +872,7 @@ export async function ensureInlineNativeWitnesses(p,backend,swRoot,{run=runProce
     await run(build,{cwd:native.root,env,logPath:path.join(dir,'build.log'),timeoutSeconds:3600});
     const binaries=[];for(const line of(await readFile(path.join(dir,'build.log'),'utf8')).split('\n')){try{const v=JSON.parse(line);if(v.reason==='compiler-artifact'&&v.target?.name==='integration'&&v.profile?.test&&v.executable)binaries.push(v.executable);}catch{}}
     assert.equal(new Set(binaries).size,1,'one exact native integration executable required');
-    if(backend==='mlx'){const {observeMetalCase}=await import('./ci/h3-import-native-proof.mjs');observeMetalCase('inline-two-native-causal-witnesses',receipt,()=>{});}else{assert.equal(env.CUDA_VISIBLE_DEVICES,'0');assert.equal(env.CUDA_DEVICE_ORDER,'PCI_BUS_ID');}await save(receiptPath,receipt);
+    if(backend==='mlx'){const {observeMetalCase}=await import('./ci/h3-import-native-proof.mjs');observeMetalCase('inline-two-native-causal-witnesses',receipt,()=>{});}else{assert.equal(env.CUDA_VISIBLE_DEVICES,'1','physical GPU 1 only; GPU 0 is the owner display GPU');assert.equal(env.CUDA_DEVICE_ORDER,'PCI_BUS_ID');}await save(receiptPath,receipt);
     const args=[...selectors,'--exact','--ignored','--nocapture','--test-threads=1'];
     const command=backend==='mlx'?['python3.12','-I',path.join(swRoot,'scripts/ci/iris-mlx-real-weights/tree_guard.py'),'8','360',log,'--',binaries[0],...args]:[binaries[0],...args];
     await run(command,{cwd:swRoot,env,logPath:backend==='mlx'?path.join(dir,'guard.log'):log,timeoutSeconds:420});

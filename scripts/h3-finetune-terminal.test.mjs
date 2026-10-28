@@ -218,7 +218,7 @@ test('the bootstrap output root shares a volume with the staged model files', as
   // Same device, by construction, on both platforms.
   const { privateRunRoot } = await import('./h3-finetune-terminal-stage.mjs');
   const mac = privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: '/Volumes/Models/huggingface' }, runId: '7', attempt: '1' });
-  assert.equal(mac, '/Volumes/Models/huggingface/sc26691-private/7-1');
+  assert.equal(mac, path.join('/Volumes/Models/huggingface', 'sc26691-private', '7-1'));
   const win = privateRunRoot({ backend: 'cuda', platform: 'win32', env: {}, runId: '7', attempt: '1' });
   assert.equal(win, 'E:\\huggingface\\sc26691-private\\7-1');
 });
@@ -325,10 +325,10 @@ test('H3 caller forwards only explicit request fields and the standing read toke
   assert.match(job,/SCENEWORKS_INFERENCE_READ_TOKEN: \$\{\{ secrets\.SCENEWORKS_INFERENCE_READ_TOKEN \|\| secrets\.INFERENCE_READ_TOKEN \}\}/);
   const callee=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');assert.match(callee,/SCENEWORKS_INFERENCE_READ_TOKEN:\n        required: false/);assert.match(callee,/group: h3-finetune-terminal-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
 });
-test('terminal reuses native device queues and binds manual CUDA zero without changing ordinary queues',async()=>{
+test('terminal reuses native device queues and binds manual CUDA physical GPU 1 without changing ordinary queues',async()=>{
   const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),job=workflowJob(workflow,'terminal');
   const group=/^      group: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(group,{backend:'cuda'}),'windows-candle-gpu-real-weights');assert.equal(workflowExpression(group,{backend:'mlx'}),'h3-import-proofs-nax-macos');assert.match(job,/cancel-in-progress: false/);
-  for(const [key,value]of [['CUDA_DEVICE_ORDER','PCI_BUS_ID'],['CUDA_VISIBLE_DEVICES','0'],['SCENEWORKS_GPU_ID','0']]){const expression=new RegExp(`^          ${key}: (.+)$`,'m').exec(job)[1];assert.equal(workflowExpression(expression,{backend:'cuda'}),value);}
+  for(const [key,value]of [['CUDA_DEVICE_ORDER','PCI_BUS_ID'],['CUDA_VISIBLE_DEVICES','1'],['SCENEWORKS_GPU_ID','1']]){const expression=new RegExp(`^          ${key}: (.+)$`,'m').exec(job)[1];assert.equal(workflowExpression(expression,{backend:'cuda'}),value);}
 });
 test('actual reusable preflight rejects source-ref drift before product execution without a main activation prerequisite',async t=>{
   const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),code=/node --input-type=module -e '\n([\s\S]*?)\n          '/.exec(workflow)?.[1];assert.ok(code);
