@@ -255,7 +255,7 @@ pub fn stamp_reference_image_resize_mode(
     Ok(())
 }
 
-//// Stamp the resize mode a job is about to RENDER with, at the moment a worker claims it
+/// Stamp the resize mode a job is about to RENDER with, at the moment a worker claims it
 /// (sc-26691). Returns whether `payload` changed.
 ///
 /// Creation stamps every new MiniMax-H3 job, but a job queued before sc-26691 reaches the claim
