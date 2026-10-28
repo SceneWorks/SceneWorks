@@ -422,18 +422,24 @@ SCENEWORKS_SDXL_REVISION=<resolved immutable artifact revision>
 ```
 
 The adapter validates the exact immutable snapshot, pinned registry contract and
-`sdxl-mlx-unet-shared-ladder-v3` fingerprint before loading. It accepts only reference-free,
+`sdxl-mlx-unet-shared-ladder-v5` fingerprint before loading the in-snapshot VAE. The separate
+fp16-fix VAE retains its distinct `v5-vae-fp16` identity. The arm accepts only reference-free,
 overlay-free `text_to_image`; q4, q8 and bf16 are planned at 768 and 1024 with the production
-deferred-materialization shape. Each tier includes only Resident, Staged, and bounded-transformer
-residency across cadence `1, 2, 5, 10` (`Dit`): SDXL's bounded decode and bounded attention were measured `Missing`
-and are not invented here. The arm records synchronized conditioning/denoise/decode peaks, exact-fit,
+deferred-materialization shape.
+Resident and Staged take no parameters. Bounded decode requires explicit `decodeTileEdge` from
+`896, 768, 640, 512, 448, 384, 320, 256` and `decodeOverlap: 64`. Bounded-transformer residency
+requires that same tile pair plus cadence `1, 2, 5, 10` and component `dit`; its composition includes
+Staged and bounded decode. Bounded attention remains `Missing`. The arm records synchronized
+conditioning/denoise/decode peaks, exact-fit,
 unknown-budget and stale-evidence behavior, selected-versus-unselected parity, and a required failing
-output mutation. The pinned SDXL provider does not read the calibration error hook, and its plain
-untiled VAE decode does not consult the cancellation flag, so the adapter truthfully emits
+output mutation. The pinned SDXL provider does not read the calibration error hook, so the adapter
+truthfully emits
 `runtime_complete`: formal warm/cancel/error lifecycle scenarios remain `not_run`, the mutation is
 kept in diagnostics, and neither is promoted into full lifecycle coverage. SC-18379 publishes
 apparatus only—no physical capture, evidence record, or manifest
 binding—so production remains estimate-backed until a real Apple-Silicon capture is reviewed.
+The current plan uses v5 prospectively; retained v3 captures and manifest bindings keep their original identity and
+cannot satisfy a v5 plan without an appropriate new capture.
 
 The Candle adapter requires:
 

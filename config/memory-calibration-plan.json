@@ -2758,7 +2758,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "sdxl-base-mlx-bf16-1024-seed18379-step2"
     },
     "sdxl:q4:mlx": {
@@ -2773,7 +2773,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "sdxl-base-mlx-q4-768-seed18379-step2"
     },
     "sdxl:q8:mlx": {
@@ -2788,7 +2788,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "sdxl-base-mlx-q8-1024-seed18379-step2"
     },
     "sensenova_u1_8b:bf16:candle": {
@@ -4252,7 +4252,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "realvisxl-mlx-q4-768-seed18379-step2"
     },
     "realvisxl:q8:mlx": {
@@ -4267,7 +4267,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "realvisxl-mlx-q8-1024-seed18379-step2"
     },
     "realvisxl:bf16:mlx": {
@@ -4282,7 +4282,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "realvisxl-mlx-bf16-1024-seed18379-step2"
     },
     "realvisxl:q4:candle": {
@@ -4342,7 +4342,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "realvisxl-lightning-mlx-q4-768-seed18379-step2"
     },
     "realvisxl_lightning:q8:mlx": {
@@ -4357,7 +4357,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "realvisxl-lightning-mlx-q8-1024-seed18379-step2"
     },
     "realvisxl_lightning:bf16:mlx": {
@@ -4372,7 +4372,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "realvisxl-lightning-mlx-bf16-1024-seed18379-step2"
     },
     "realvisxl_lightning:q4:candle": {
@@ -4432,7 +4432,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "illustrious-xl-v1-mlx-q4-768-seed18379-step2"
     },
     "illustrious_xl_v1:q8:mlx": {
@@ -4447,7 +4447,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "illustrious-xl-v1-mlx-q8-1024-seed18379-step2"
     },
     "illustrious_xl_v1:bf16:mlx": {
@@ -4462,7 +4462,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "illustrious-xl-v1-mlx-bf16-1024-seed18379-step2"
     },
     "illustrious_xl_v1:q4:candle": {
@@ -4522,7 +4522,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "illustrious-xl-v2-mlx-q4-768-seed18379-step2"
     },
     "illustrious_xl_v2:q8:mlx": {
@@ -4537,7 +4537,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "illustrious-xl-v2-mlx-q8-1024-seed18379-step2"
     },
     "illustrious_xl_v2:bf16:mlx": {
@@ -4552,7 +4552,7 @@
       },
       "evidenceScope": "authoritative",
       "loadShape": "deferred_materialization",
-      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v3",
+      "calibrationFingerprint": "sdxl-mlx-unet-shared-ladder-v5",
       "fixture": "illustrious-xl-v2-mlx-bf16-1024-seed18379-step2"
     },
     "illustrious_xl_v2:q4:candle": {
