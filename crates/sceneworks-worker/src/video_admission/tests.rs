@@ -5788,6 +5788,9 @@ fn native_quant_request<'a>(conditioning: &'a [gen_core::Conditioning]) -> Nativ
             prompt: "synthetic H3 prompt",
             conditioning,
             reference_image_short_edge: Some(256),
+            // The short edge only scales a plate under `diffusers` (sc-26691); these fixtures price
+            // the scaled plate, so they name that mode rather than the engine's `match` default.
+            reference_image_resize_mode: Some(gen_core::ReferenceImageResizeMode::Diffusers),
         },
         evaluations: Some(4),
     }

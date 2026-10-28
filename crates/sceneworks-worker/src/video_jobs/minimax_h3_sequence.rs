@@ -75,6 +75,8 @@ pub(super) struct MinimaxH3StallRequest<'a> {
     pub(super) conditioning: &'a [Conditioning],
     /// The request's `advanced.referenceImageShortEdge`; `None` ⇒ the engine's own default.
     pub(super) reference_image_short_edge: Option<u32>,
+    /// The request's `advanced.referenceImageResizeMode` (sc-26691); `None` ⇒ the engine's `match`.
+    pub(super) reference_image_resize_mode: Option<gen_core::ReferenceImageResizeMode>,
 }
 
 #[cfg(test)]
@@ -84,6 +86,7 @@ impl MinimaxH3StallRequest<'_> {
         prompt: "",
         conditioning: &[],
         reference_image_short_edge: None,
+        reference_image_resize_mode: None,
     };
 }
 
@@ -111,6 +114,7 @@ pub(super) fn minimax_h3_packed_rows(
         prompt: request.prompt,
         conditioning: request.conditioning,
         reference_image_short_edge: request.reference_image_short_edge,
+        reference_image_resize_mode: request.reference_image_resize_mode,
     })
     .ok()
     .map(|(packed, _)| packed)
@@ -213,6 +217,8 @@ mod tests {
         }
     }
 
+    /// Packed rows under the `diffusers` resize mode — the forced-2048 short edge every measured
+    /// row below was recorded with (the only behaviour the engine had before sc-26691).
     fn rows(width: u32, height: u32, frames: u32, conditioning: &[Conditioning]) -> u64 {
         minimax_h3_packed_rows(
             width,
@@ -220,10 +226,39 @@ mod tests {
             frames,
             MinimaxH3StallRequest {
                 conditioning,
+                reference_image_resize_mode: Some(gen_core::ReferenceImageResizeMode::Diffusers),
                 ..MinimaxH3StallRequest::EMPTY
             },
         )
         .unwrap()
+    }
+
+    /// sc-26691: under the engine's default `match` mode a plate already below the canvas area is
+    /// priced at its own size — the short-edge knob is inert there, so it cannot inflate the budget.
+    #[test]
+    fn match_mode_prices_a_small_plate_at_its_own_size() {
+        let plate = [Conditioning::Reference {
+            image: image(576, 320),
+            strength: None,
+        }];
+        let matched = |edge| {
+            minimax_h3_packed_rows(
+                1088,
+                544,
+                124,
+                MinimaxH3StallRequest {
+                    conditioning: &plate,
+                    reference_image_short_edge: edge,
+                    ..MinimaxH3StallRequest::EMPTY
+                },
+            )
+            .unwrap()
+        };
+        let bare = rows(1088, 544, 124, &[]);
+        // 576x320 on the stride-32 lattice: 18 x 10 = 180 latent rows, plus its vision tokens.
+        assert!(matched(None) - bare < rows(1088, 544, 124, &plate) - bare);
+        assert_eq!(matched(None), matched(Some(1024)));
+        assert_eq!(matched(None), matched(Some(2048)));
     }
 
     /// The envelope's arithmetic, restated so a silent change to the contract is visible here.
@@ -252,6 +287,7 @@ mod tests {
             MinimaxH3StallRequest {
                 conditioning: &plate,
                 reference_image_short_edge: Some(1024),
+                reference_image_resize_mode: Some(gen_core::ReferenceImageResizeMode::Diffusers),
                 ..MinimaxH3StallRequest::EMPTY
             },
         )
@@ -356,6 +392,7 @@ mod tests {
             124,
             MinimaxH3StallRequest {
                 conditioning: &clips,
+                reference_image_resize_mode: Some(gen_core::ReferenceImageResizeMode::Diffusers),
                 ..MinimaxH3StallRequest::EMPTY
             },
         );

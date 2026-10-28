@@ -727,6 +727,20 @@ pub(super) fn minimax_h3_raw_settings(
     let mut raw = request.advanced.clone();
     raw.insert("realModelInference".to_owned(), Value::Bool(true));
     raw.insert("model".to_owned(), Value::String(request.model.clone()));
+    // sc-26691. The RESOLVED reference resize policy, written whether or not the caller named one:
+    // a request that named none rendered under the engine's `match`, and recording that is what
+    // keeps an asset made today distinguishable from a pre-sc-26691 one (which has no key and was
+    // rendered under the forced short edge, i.e. `diffusers`). The arms refused a malformed value
+    // before this point, so the fallback below is never the recorded answer to a bad request.
+    let resize_mode = sceneworks_core::video_request::effective_reference_image_resize_mode(
+        sceneworks_core::video_request::requested_reference_image_resize_mode(&request.advanced)
+            .ok()
+            .flatten(),
+    );
+    raw.insert(
+        sceneworks_core::video_request::REFERENCE_IMAGE_RESIZE_MODE_KEY.to_owned(),
+        Value::String(resize_mode.as_str().to_owned()),
+    );
     raw.insert("fps".to_owned(), json!(request.fps));
     raw.insert("minimaxH3Tier".to_owned(), Value::String(tier.to_owned()));
     raw.insert("minimaxH3Task".to_owned(), Value::String(task.to_owned()));
@@ -760,6 +774,26 @@ pub(super) fn minimax_h3_raw_settings(
             .unwrap_or(sceneworks_core::minimax_h3_turbo::ENGINE_AUDIO_SIGMA_SHIFT)),
     );
     Value::Object(raw)
+}
+
+/// `advanced.referenceImageResizeMode` mapped onto the engine's own enum (sc-26691), or `None` when
+/// the request named none (gen-core then resolves `match`). Parsed and REFUSED here, like the short
+/// edge beside it, so a typo costs a payload parse rather than a 53 GB text-encoder load.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn minimax_h3_reference_image_resize_mode(
+    advanced: &sceneworks_core::contracts::JsonObject,
+) -> WorkerResult<Option<gen_core::ReferenceImageResizeMode>> {
+    use sceneworks_core::video_request::ReferenceImageResizeMode as Requested;
+    let requested = sceneworks_core::video_request::requested_reference_image_resize_mode(advanced)
+        .map_err(WorkerError::InvalidPayload)?;
+    Ok(requested.map(|mode| match mode {
+        Requested::Match => gen_core::ReferenceImageResizeMode::Match,
+        Requested::Max => gen_core::ReferenceImageResizeMode::Max,
+        Requested::Diffusers => gen_core::ReferenceImageResizeMode::Diffusers,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1525,6 +1559,7 @@ pub(super) async fn generate_minimax_h3_using(
     let reference_image_short_edge =
         sceneworks_core::video_request::requested_reference_image_short_edge(&request.advanced)
             .map_err(WorkerError::InvalidPayload)?;
+    let reference_image_resize_mode = minimax_h3_reference_image_resize_mode(&request.advanced)?;
     let adapters = resolve_minimax_h3_adapters(settings, semantics)?;
     let mut raw_settings = minimax_h3_raw_settings(
         request,
@@ -1586,6 +1621,7 @@ pub(super) async fn generate_minimax_h3_using(
         scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         reference_image_short_edge,
+        reference_image_resize_mode,
         ..VideoGenInput::default()
     };
     let decoded = generate_video_using(
@@ -1766,6 +1802,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
     let reference_image_short_edge =
         sceneworks_core::video_request::requested_reference_image_short_edge(&request.advanced)
             .map_err(WorkerError::InvalidPayload)?;
+    let reference_image_resize_mode = minimax_h3_reference_image_resize_mode(&request.advanced)?;
     let adapters = resolve_minimax_h3_adapters(settings, semantics)?;
     let (load, shared_tier) = match imported.as_ref() {
         Some(dit) => resolve_candle_imported_minimax_h3_load(settings, request, dit)?,
@@ -1802,6 +1839,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
                 prompt: &request.prompt,
                 conditioning: &conditioning,
                 reference_image_short_edge,
+                reference_image_resize_mode,
             },
             gen_core::veda::workspace::Backend::Cuda,
         )
@@ -1869,6 +1907,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
         scheduler_shift,
         seed: resolve_video_seed(request) as u64,
         reference_image_short_edge,
+        reference_image_resize_mode,
         offload_policy: OffloadPolicy::Sequential,
         ..VideoGenInput::default()
     };

@@ -2668,6 +2668,18 @@ impl Session<'_> {
             .and_then(CompiledRequest::effective_reference_image_short_edge)
     }
 
+    /// The EFFECTIVE reference-image resize mode one shot dispatches with, or `None` for a shot
+    /// that encodes no reference (sc-26691) — the companion of
+    /// [`Session::resolved_reference_short_edge`], read off the same compiled request.
+    fn resolved_reference_resize_mode(
+        &self,
+        shot_id: &str,
+    ) -> Option<sceneworks_core::video_request::ReferenceImageResizeMode> {
+        self.compiled
+            .request(shot_id)
+            .and_then(CompiledRequest::effective_reference_image_resize_mode)
+    }
+
     /// The LoRAs one shot dispatches with, the step count it renders at, and the turbo video shift
     /// that governs it (sc-23406) — all three read off the compiled request for the same reason
     /// [`Session::resolved_partition`] is, so the payload the route receives and the numbers the
@@ -2701,6 +2713,9 @@ impl Session<'_> {
             .resolved_model_id
             .clone();
         if !recorded.is_empty() {
+            // sc-26691: an adopted attempt that predates the resize mode was rendered `diffusers`.
+            self.record.shots[shot_index].attempts[attempt_index]
+                .backfill_legacy_reference_image_resize_mode();
             return recorded;
         }
         let (model, reason) = self.resolved_partition(shot_id);
@@ -2728,6 +2743,11 @@ impl Session<'_> {
             attempt.effective_steps = steps;
             attempt.turbo_scheduler_shift = shift;
         }
+        // NOT the same rule for the resize mode (sc-26691): what this shot resolves to TODAY is the
+        // engine's `match`, but a pre-story attempt was rendered under the forced short edge, so
+        // the record says `diffusers` — after the short edge above says whether it was a reference
+        // attempt at all.
+        attempt.backfill_legacy_reference_image_resize_mode();
         model
     }
 
@@ -4112,6 +4132,7 @@ impl Session<'_> {
                     let key = idempotency_key(&self.record.run_id, &shot.id, number);
                     let (resolved_model_id, partition_reason) = self.resolved_partition(&shot.id);
                     let reference_image_short_edge = self.resolved_reference_short_edge(&shot.id);
+                    let reference_image_resize_mode = self.resolved_reference_resize_mode(&shot.id);
                     let (loras, effective_steps, turbo_scheduler_shift) =
                         self.resolved_sampling(&shot.id);
                     self.record.shots[index].attempts.push(AttemptRecord {
@@ -4120,6 +4141,7 @@ impl Session<'_> {
                         resolved_model_id,
                         partition_reason,
                         reference_image_short_edge,
+                        reference_image_resize_mode,
                         loras,
                         effective_steps,
                         turbo_scheduler_shift,
@@ -6327,6 +6349,7 @@ async fn replace_take_operation(
     let key = idempotency_key(&session.record.run_id, shot_id, number);
     let (resolved_model_id, partition_reason) = session.resolved_partition(shot_id);
     let reference_image_short_edge = session.resolved_reference_short_edge(shot_id);
+    let reference_image_resize_mode = session.resolved_reference_resize_mode(shot_id);
     let (loras, effective_steps, turbo_scheduler_shift) = session.resolved_sampling(shot_id);
     session.record.shots[index].attempts.push(AttemptRecord {
         attempt: number,
@@ -6334,6 +6357,7 @@ async fn replace_take_operation(
         resolved_model_id,
         partition_reason,
         reference_image_short_edge,
+        reference_image_resize_mode,
         loras,
         effective_steps,
         turbo_scheduler_shift,
@@ -7673,6 +7697,7 @@ mod unit_tests {
             resolved_model_id: "minimax_h3".to_owned(),
             partition_reason: String::new(),
             reference_image_short_edge: None,
+            reference_image_resize_mode: None,
             loras: Vec::new(),
             effective_steps: None,
             turbo_scheduler_shift: None,

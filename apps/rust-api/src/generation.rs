@@ -2514,6 +2514,14 @@ pub(crate) async fn create_video_job(
             }
         }
     }
+    // sc-26691. A fresh request takes the engine's own `match` when it names no resize mode, and
+    // the persisted job SAYS so: the only job payload that may then lack the key is one written
+    // before it existed, which is how a replay recognises a `diffusers`-rendered record.
+    sceneworks_core::video_request::stamp_reference_image_resize_mode(
+        &mut job_payload,
+        sceneworks_core::video_request::REFERENCE_IMAGE_RESIZE_MODE_DEFAULT,
+    )
+    .map_err(ApiError::bad_request)?;
     sceneworks_core::video_request::VideoRequest::from_payload(&job_payload)
         .h3_veda_settings()
         .map_err(ApiError::bad_request)?;

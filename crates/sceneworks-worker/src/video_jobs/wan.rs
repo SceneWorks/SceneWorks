@@ -1381,6 +1381,9 @@ pub(super) struct VideoGenInput {
     /// sc-23402). `None` ⇒ the engine's own default; set only by the reference-partition arms, since
     /// it sizes a reference and a request carrying none has nothing to apply it to.
     pub(super) reference_image_short_edge: Option<u32>,
+    /// MiniMax-H3's image-reference resize policy (`advanced.referenceImageResizeMode`, sc-26691).
+    /// `None` ⇒ the engine's own default (`match`); set only by the MiniMax-H3 arms.
+    pub(super) reference_image_resize_mode: Option<gen_core::ReferenceImageResizeMode>,
     /// Stage the tier's alternate diffusion decoder instead of the default Conv VAE.
     pub(super) use_diffusion_decoder: bool,
     pub(super) steps: Option<u32>,
@@ -1519,6 +1522,7 @@ impl Default for VideoGenInput {
             auto_duration: None,
             temporal_upsample_rounds: None,
             reference_image_short_edge: None,
+            reference_image_resize_mode: None,
             use_diffusion_decoder: false,
             steps: None,
             guidance: None,
@@ -2222,6 +2226,9 @@ pub(super) fn run_loaded_video_generation(
         // sc-23402. `None` ⇒ gen-core's own `REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`; an out-of-range
         // value never reaches here, because the parse that produced it refused it.
         reference_image_short_edge: input.reference_image_short_edge,
+        // sc-26691. `None` ⇒ gen-core's `match`; a misspelt mode never reaches here, because the
+        // parse that produced it refused it.
+        reference_image_resize_mode: input.reference_image_resize_mode,
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,
@@ -2420,6 +2427,7 @@ fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
             prompt: &input.prompt,
             conditioning: &input.conditioning,
             reference_image_short_edge: input.reference_image_short_edge,
+            reference_image_resize_mode: input.reference_image_resize_mode,
         },
     )
 }
@@ -3113,6 +3121,7 @@ pub(super) async fn generate_video_using(
                         prompt: &input.prompt,
                         conditioning: &input.conditioning,
                         reference_image_short_edge: input.reference_image_short_edge,
+                        reference_image_resize_mode: input.reference_image_resize_mode,
                     })
                     .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
                 let native_quant_request = generator
@@ -3129,6 +3138,7 @@ pub(super) async fn generate_video_using(
                             prompt: &input.prompt,
                             conditioning: &input.conditioning,
                             reference_image_short_edge: input.reference_image_short_edge,
+                            reference_image_resize_mode: input.reference_image_resize_mode,
                         },
                         evaluations: input.steps,
                     });

@@ -14995,6 +14995,107 @@ async fn shipped_manifest_app_on_os(
     (app, project_id)
 }
 
+/// sc-26691. The video route validates `advanced.referenceImageResizeMode` and STAMPS a fresh
+/// MiniMax-H3 job with its resolved mode (`match` when the caller named none), so the persisted job
+/// is self-describing; a duplicate keeps the recorded mode or takes an explicit change; a misspelt
+/// mode, or the key on another family, is refused. (A record that predates the key — the legacy
+/// `diffusers` replay — is covered by `legacy_h3_records_replay_as_diffusers_and_new_records_keep_their_mode`
+/// in sceneworks-core, since this route can no longer write one.)
+#[tokio::test]
+async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+    let submit = |model: &str, advanced: Value| {
+        json!({
+            "projectId": project_id,
+            "model": model,
+            "mode": "text_to_video",
+            "prompt": "a lighthouse keeper hums while the storm rolls in",
+            "advanced": advanced,
+        })
+    };
+
+    let (status, fresh) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        submit("minimax_h3", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{fresh}");
+    assert_eq!(
+        fresh["payload"]["advanced"]["referenceImageResizeMode"], "match",
+        "a fresh request records the engine default it resolves to"
+    );
+
+    let (status, named) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        submit("minimax_h3", json!({ "referenceImageResizeMode": "max" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{named}");
+    assert_eq!(
+        named["payload"]["advanced"]["referenceImageResizeMode"],
+        "max"
+    );
+
+    let fresh_id = fresh["id"].as_str().expect("job id");
+    let (status, duplicate) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{fresh_id}/duplicate"),
+        json!({ "payloadChanges": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+    assert_eq!(
+        duplicate["payload"]["advanced"]["referenceImageResizeMode"], "match",
+        "a record written since the key existed replays its own mode"
+    );
+    let (status, changed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{fresh_id}/duplicate"),
+        json!({ "payloadChanges": { "advanced": { "referenceImageResizeMode": "diffusers" } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{changed}");
+    assert_eq!(
+        changed["payload"]["advanced"]["referenceImageResizeMode"],
+        "diffusers"
+    );
+
+    for (model, advanced, needle) in [
+        (
+            "minimax_h3",
+            json!({ "referenceImageResizeMode": "crop" }),
+            "advanced.referenceImageResizeMode must be one of",
+        ),
+        (
+            "wan_i2v",
+            json!({ "referenceImageResizeMode": "match" }),
+            "is not supported by wan_i2v",
+        ),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            submit(model, advanced),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{model}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(needle)),
+            "{model}: {error}"
+        );
+    }
+}
+
 /// sc-17159 (epic 17137) — every mode MiniMax-H3 DECLARES is submittable end to end against the
 /// SHIPPED manifest, and the enqueued payload carries what the worker needs.
 ///

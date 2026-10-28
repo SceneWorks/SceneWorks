@@ -15,6 +15,7 @@
 //! TI2V-5B (sc-3522 / sc-3357). Unsupported modes are refused and remain queued. The native-worker
 //! routing decision is sc-3036.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub use crate::h3_veda::{requested_h3_veda, H3VedaBudget, H3VedaSettings};
@@ -103,6 +104,193 @@ pub fn requested_reference_image_short_edge(advanced: &JsonObject) -> Result<Opt
         ));
     }
     Ok(Some(edge as u32))
+}
+
+/// The request key for MiniMax-H3's image-reference resize policy (sc-26691), riding `advanced`
+/// beside [`requested_reference_image_short_edge`]'s `referenceImageShortEdge`.
+pub const REFERENCE_IMAGE_RESIZE_MODE_KEY: &str = "referenceImageResizeMode";
+
+/// How a MiniMax-H3 image reference is resized before it is encoded (sc-26691) — the local twin of
+/// gen-core's `ReferenceImageResizeMode`, kept here for the same reason
+/// [`REFERENCE_IMAGE_SHORT_EDGE_MIN`] is: this crate has no gen-core dependency, yet the API, the
+/// film harness and the replay boundary all judge and record the value.
+///
+/// * `match` — scale the reference to the target canvas's pixel area, never upscaling. The engine's
+///   default for a request that names none.
+/// * `max` — only downsize a short edge above `referenceImageShortEdge`.
+/// * `diffusers` — force the short edge to `referenceImageShortEdge`, upscaling included. This is
+///   the ONLY behaviour the engine had before sc-26691, which is why a record written before the
+///   field existed replays as `diffusers` ([`REFERENCE_IMAGE_RESIZE_MODE_LEGACY`]).
+///
+/// The short-edge knob is read by `max` / `diffusers` only; under `match` it is inert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReferenceImageResizeMode {
+    #[default]
+    Match,
+    Max,
+    Diffusers,
+}
+
+impl ReferenceImageResizeMode {
+    /// Every admitted mode, in wire order.
+    pub const ALL: [Self; 3] = [Self::Match, Self::Max, Self::Diffusers];
+
+    /// The wire spelling (`match` / `max` / `diffusers`), identical to gen-core's serde form.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Match => "match",
+            Self::Max => "max",
+            Self::Diffusers => "diffusers",
+        }
+    }
+
+    /// Parse the wire spelling; exact and lowercase, as gen-core's serde is.
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.as_str() == value)
+    }
+}
+
+/// The resize mode a request that names none resolves to: gen-core's own `None ⇒ Match`.
+pub const REFERENCE_IMAGE_RESIZE_MODE_DEFAULT: ReferenceImageResizeMode =
+    ReferenceImageResizeMode::Match;
+
+/// The resize mode a record written BEFORE sc-26691 was rendered with. Such a record carries no
+/// `referenceImageResizeMode`, and its reference was encoded the only way the engine then knew —
+/// forced to the short edge — so a replay of it must ask for that, not today's default.
+pub const REFERENCE_IMAGE_RESIZE_MODE_LEGACY: ReferenceImageResizeMode =
+    ReferenceImageResizeMode::Diffusers;
+
+/// The EFFECTIVE resize mode for a requested value — the local twin of gen-core's
+/// `effective_reference_image_resize_mode` (`None` ⇒ [`REFERENCE_IMAGE_RESIZE_MODE_DEFAULT`]).
+/// Anything that RECORDS the mode resolves it through here so the record cannot drift from the
+/// engine.
+pub fn effective_reference_image_resize_mode(
+    requested: Option<ReferenceImageResizeMode>,
+) -> ReferenceImageResizeMode {
+    requested.unwrap_or(REFERENCE_IMAGE_RESIZE_MODE_DEFAULT)
+}
+
+/// Parse `advanced.referenceImageResizeMode` (sc-26691). Omission is `Ok(None)` — the engine's own
+/// default. Refused, naming the field and the admitted spellings, so a typo costs a payload parse
+/// rather than a 53 GB text-encoder load.
+pub fn requested_reference_image_resize_mode(
+    advanced: &JsonObject,
+) -> Result<Option<ReferenceImageResizeMode>, String> {
+    let Some(value) = advanced.get(REFERENCE_IMAGE_RESIZE_MODE_KEY) else {
+        return Ok(None);
+    };
+    value
+        .as_str()
+        .and_then(ReferenceImageResizeMode::parse)
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "advanced.{REFERENCE_IMAGE_RESIZE_MODE_KEY} must be one of \"match\", \"max\" or \
+                 \"diffusers\", got {value}"
+            )
+        })
+}
+
+/// Validate and STAMP the resize mode on a video job payload at a creation boundary (sc-26691).
+///
+/// A MiniMax-H3 payload leaves this function carrying an explicit, valid
+/// `advanced.referenceImageResizeMode`: the caller's own value, or `absent` when it named none. The
+/// stamp is what makes the persisted job self-describing — a job written from now on always says
+/// which policy it ran, so the one record that can lack the key is a record written before the key
+/// existed, and [`replay_reference_image_resize_mode_default`] can read that absence as "legacy".
+///
+/// Fresh requests pass [`REFERENCE_IMAGE_RESIZE_MODE_DEFAULT`]; replays pass what
+/// [`replay_reference_image_resize_mode_default`] decides. Every other family is refused the key:
+/// it has no reference resize to apply it to, and a visible-but-inert control is worse than a
+/// refusal.
+pub fn stamp_reference_image_resize_mode(
+    payload: &mut JsonObject,
+    absent: ReferenceImageResizeMode,
+) -> Result<(), String> {
+    let model = payload_model_id(payload);
+    let advanced = payload.get("advanced").and_then(Value::as_object);
+    let requested = match advanced {
+        Some(advanced) => requested_reference_image_resize_mode(advanced)?,
+        None => None,
+    };
+    if !is_minimax_h3_model(&model) {
+        if requested.is_some() {
+            return Err(format!(
+                "advanced.{REFERENCE_IMAGE_RESIZE_MODE_KEY} is a MiniMax-H3 reference control and \
+                 is not supported by {model}"
+            ));
+        }
+        return Ok(());
+    }
+    if requested.is_some() {
+        return Ok(());
+    }
+    let advanced = payload
+        .entry("advanced")
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    if !advanced.is_object() {
+        // `VideoRequest::from_payload` reads a non-object `advanced` as empty; keep that reading
+        // rather than replacing a caller value this function was not asked to judge.
+        return Ok(());
+    }
+    if let Some(advanced) = advanced.as_object_mut() {
+        advanced.insert(
+            REFERENCE_IMAGE_RESIZE_MODE_KEY.to_owned(),
+            Value::String(absent.as_str().to_owned()),
+        );
+    }
+    Ok(())
+}
+
+/// The resize mode a REPLAY (retry / duplicate) stamps when the merged payload names none
+/// (sc-26691).
+///
+/// `persisted` is the job payload as it was recorded. A MiniMax-H3 record without the key was
+/// written before sc-26691 — every later creation boundary stamps it
+/// ([`stamp_reference_image_resize_mode`]) — so it was rendered with the forced-short-edge
+/// behaviour and replays as [`REFERENCE_IMAGE_RESIZE_MODE_LEGACY`]. Anything else (a record that
+/// carried a mode the changes then dropped, or a replay that switched INTO the family from another
+/// model) is a new authored request and takes today's default.
+pub fn replay_reference_image_resize_mode_default(
+    persisted: &JsonObject,
+) -> ReferenceImageResizeMode {
+    replay_default(persisted)
+}
+
+/// The REPLAY (retry / duplicate) boundary for the resize mode (sc-26691): `merged` is the
+/// persisted payload with `changes` shallow-merged over it.
+///
+/// A mode the record carried is INHERITED, not authored, so a replay that moves off MiniMax-H3
+/// without restating `advanced` drops it (another family has nothing to apply it to — the same
+/// reset the MOSS controls get) rather than being refused for a key the caller never sent. What
+/// remains is then stamped exactly as at creation, with the absent default
+/// [`replay_reference_image_resize_mode_default`] decides: `diffusers` for a pre-sc-26691 H3
+/// record, `match` otherwise.
+pub fn stamp_replayed_reference_image_resize_mode(
+    merged: &mut JsonObject,
+    persisted: &JsonObject,
+    changes: &JsonObject,
+) -> Result<(), String> {
+    if !is_minimax_h3_model(&payload_model_id(merged)) && !changes.contains_key("advanced") {
+        if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
+            advanced.remove(REFERENCE_IMAGE_RESIZE_MODE_KEY);
+        }
+    }
+    stamp_reference_image_resize_mode(merged, replay_default(persisted))
+}
+
+fn replay_default(persisted: &JsonObject) -> ReferenceImageResizeMode {
+    let legacy = is_minimax_h3_model(&payload_model_id(persisted))
+        && !persisted
+            .get("advanced")
+            .and_then(Value::as_object)
+            .is_some_and(|advanced| advanced.contains_key(REFERENCE_IMAGE_RESIZE_MODE_KEY));
+    if legacy {
+        REFERENCE_IMAGE_RESIZE_MODE_LEGACY
+    } else {
+        REFERENCE_IMAGE_RESIZE_MODE_DEFAULT
+    }
 }
 
 /// Validated seconds window for LTX-2.5's opt-in duration predictor.
@@ -2726,6 +2914,191 @@ mod tests {
             })))
             .is_err());
         }
+    }
+
+    /// sc-26691. The three wire spellings round-trip through serde exactly as gen-core spells them,
+    /// absent means `match`, and anything else is refused by name.
+    #[test]
+    fn reference_image_resize_mode_parses_the_three_spellings_and_defaults_to_match() {
+        for mode in ReferenceImageResizeMode::ALL {
+            assert_eq!(serde_json::to_value(mode).unwrap(), json!(mode.as_str()));
+            assert_eq!(
+                serde_json::from_value::<ReferenceImageResizeMode>(json!(mode.as_str())).unwrap(),
+                mode
+            );
+            assert_eq!(
+                requested_reference_image_resize_mode(&payload(json!({
+                    "referenceImageResizeMode": mode.as_str()
+                })))
+                .unwrap(),
+                Some(mode)
+            );
+        }
+        assert_eq!(
+            requested_reference_image_resize_mode(&JsonObject::new()).unwrap(),
+            None
+        );
+        assert_eq!(
+            effective_reference_image_resize_mode(None),
+            ReferenceImageResizeMode::Match
+        );
+        assert_eq!(
+            REFERENCE_IMAGE_RESIZE_MODE_LEGACY,
+            ReferenceImageResizeMode::Diffusers
+        );
+        for invalid in [json!("MATCH"), json!("crop"), json!(null), json!(2048)] {
+            let message = requested_reference_image_resize_mode(&payload(json!({
+                "referenceImageResizeMode": invalid.clone()
+            })))
+            .unwrap_err();
+            assert!(
+                message.contains("advanced.referenceImageResizeMode"),
+                "{invalid}: {message}"
+            );
+        }
+    }
+
+    fn stamped_mode(payload: &JsonObject) -> Option<&str> {
+        payload["advanced"]
+            .get(REFERENCE_IMAGE_RESIZE_MODE_KEY)
+            .and_then(Value::as_str)
+    }
+
+    /// sc-26691. A FRESH MiniMax-H3 request is stamped with the engine default (`match`) when it
+    /// names no mode, keeps a mode it names, is refused a misspelt one, and another family is
+    /// refused the key outright and left otherwise untouched.
+    #[test]
+    fn a_fresh_h3_request_is_stamped_match_and_other_families_refuse_the_key() {
+        let mut fresh = payload(json!({ "model": "minimax_h3_ref", "advanced": {} }));
+        stamp_reference_image_resize_mode(&mut fresh, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT).unwrap();
+        assert_eq!(stamped_mode(&fresh), Some("match"));
+
+        let mut bare = payload(json!({ "model": "minimax_h3" }));
+        stamp_reference_image_resize_mode(&mut bare, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT).unwrap();
+        assert_eq!(stamped_mode(&bare), Some("match"), "{bare:?}");
+
+        let mut named = payload(json!({
+            "model": "minimax_h3_ref",
+            "advanced": { "referenceImageResizeMode": "max", "referenceImageShortEdge": 1536 }
+        }));
+        stamp_reference_image_resize_mode(&mut named, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT).unwrap();
+        assert_eq!(stamped_mode(&named), Some("max"));
+        assert_eq!(named["advanced"]["referenceImageShortEdge"], json!(1536));
+
+        let mut typo = payload(json!({
+            "model": "minimax_h3_ref",
+            "advanced": { "referenceImageResizeMode": "crop" }
+        }));
+        assert!(
+            stamp_reference_image_resize_mode(&mut typo, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT)
+                .unwrap_err()
+                .contains("referenceImageResizeMode")
+        );
+
+        let mut wan = payload(json!({ "model": "wan_i2v", "advanced": { "steps": 30 } }));
+        let before = wan.clone();
+        stamp_reference_image_resize_mode(&mut wan, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT).unwrap();
+        assert_eq!(wan, before, "no other family is stamped");
+        let mut wan_with_key = payload(json!({
+            "model": "wan_i2v",
+            "advanced": { "referenceImageResizeMode": "match" }
+        }));
+        assert!(stamp_reference_image_resize_mode(
+            &mut wan_with_key,
+            REFERENCE_IMAGE_RESIZE_MODE_DEFAULT
+        )
+        .unwrap_err()
+        .contains("not supported by wan_i2v"));
+    }
+
+    /// sc-26691, legacy replay. A MiniMax-H3 job recorded BEFORE the key existed was rendered under
+    /// the forced short edge, so its retry/duplicate resolves to `diffusers`; a record written since
+    /// carries its own (stamped) mode, which the replay keeps; and a replay that only switched INTO
+    /// the family from another model is a new request and takes `match`.
+    #[test]
+    fn legacy_h3_records_replay_as_diffusers_and_new_records_keep_their_mode() {
+        let replay = |persisted: JsonObject, changes: Value| {
+            let changes = payload(changes);
+            let mut merged = persisted.clone();
+            merged.extend(changes.clone());
+            stamp_replayed_reference_image_resize_mode(&mut merged, &persisted, &changes).unwrap();
+            stamped_mode(&merged).map(str::to_owned)
+        };
+
+        let legacy = payload(json!({
+            "model": "minimax_h3_ref",
+            "advanced": { "referenceImageShortEdge": 1536 }
+        }));
+        assert_eq!(
+            replay_reference_image_resize_mode_default(&legacy),
+            ReferenceImageResizeMode::Diffusers
+        );
+        assert_eq!(
+            replay(legacy.clone(), json!({})).as_deref(),
+            Some("diffusers")
+        );
+        assert_eq!(
+            replay(legacy.clone(), json!({ "seed": 7 })).as_deref(),
+            Some("diffusers")
+        );
+        // A legacy record with no `advanced` at all is still legacy.
+        assert_eq!(
+            replay(payload(json!({ "model": "minimax_h3" })), json!({})).as_deref(),
+            Some("diffusers")
+        );
+        // An explicit mode in the replay's own changes wins over the legacy reading.
+        assert_eq!(
+            replay(
+                legacy,
+                json!({ "advanced": { "referenceImageResizeMode": "match" } })
+            )
+            .as_deref(),
+            Some("match")
+        );
+
+        // A record written since: the creation boundary stamped it, and the replay keeps it.
+        let mut fresh = payload(json!({ "model": "minimax_h3_ref", "advanced": {} }));
+        stamp_reference_image_resize_mode(&mut fresh, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT).unwrap();
+        assert_eq!(
+            replay_reference_image_resize_mode_default(&fresh),
+            ReferenceImageResizeMode::Match
+        );
+        assert_eq!(replay(fresh, json!({})).as_deref(), Some("match"));
+        let max = payload(json!({
+            "model": "minimax_h3_ref",
+            "advanced": { "referenceImageResizeMode": "max" }
+        }));
+        assert_eq!(replay(max, json!({})).as_deref(), Some("max"));
+
+        // Switching into the family from another model is a new request, not a legacy H3 record.
+        let wan = payload(json!({ "model": "wan_i2v", "advanced": {} }));
+        assert_eq!(
+            replay(wan, json!({ "model": "minimax_h3_ref" })).as_deref(),
+            Some("match")
+        );
+
+        // Switching OUT of the family drops the inherited mode rather than refusing a key the
+        // caller never sent; restating it in `advanced` for another family is still refused.
+        let h3 = payload(json!({
+            "model": "minimax_h3",
+            "advanced": { "referenceImageResizeMode": "match", "steps": 8 }
+        }));
+        let changes = payload(json!({ "model": "mochi_1" }));
+        let mut merged = h3.clone();
+        merged.extend(changes.clone());
+        stamp_replayed_reference_image_resize_mode(&mut merged, &h3, &changes).unwrap();
+        assert_eq!(merged["advanced"], json!({ "steps": 8 }));
+        let changes = payload(json!({
+            "model": "mochi_1",
+            "advanced": { "referenceImageResizeMode": "match" }
+        }));
+        let mut merged = h3.clone();
+        merged.extend(changes.clone());
+        assert!(
+            stamp_replayed_reference_image_resize_mode(&mut merged, &h3, &changes)
+                .unwrap_err()
+                .contains("not supported by mochi_1")
+        );
     }
 
     /// sc-23402. `advanced.referenceImageShortEdge` is admitted over 1024..=2048 INCLUSIVE, refused

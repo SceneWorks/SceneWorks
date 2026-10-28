@@ -998,6 +998,17 @@ async fn validate_and_canonicalize_merged_generation_payload(
             | JobType::VideoBridge
             | JobType::PersonReplace
     ) {
+        // sc-26691. A replay keeps the resize mode its record names (the shallow merge carried it),
+        // and a MiniMax-H3 record that names NONE predates the key — every creation boundary since
+        // stamps it — so it was rendered under the forced short edge and replays as `diffusers`
+        // rather than silently switching to today's `match` default. See
+        // `stamp_replayed_reference_image_resize_mode`.
+        sceneworks_core::video_request::stamp_replayed_reference_image_resize_mode(
+            &mut merged,
+            &persisted,
+            payload_changes,
+        )
+        .map_err(ApiError::bad_request)?;
         let model_id = merged
             .get("model")
             .and_then(Value::as_str)

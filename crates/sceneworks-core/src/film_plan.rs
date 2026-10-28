@@ -32,7 +32,7 @@ use serde_json::{json, Map, Value};
 use crate::jsonc::strip_jsonc_comments;
 use crate::video_request::{
     default_fps, default_resolution, duration_limit_error, fps_limit_error, reference_caps,
-    REFERENCE_IMAGE_SHORT_EDGE_MAX, REFERENCE_IMAGE_SHORT_EDGE_MIN,
+    ReferenceImageResizeMode, REFERENCE_IMAGE_SHORT_EDGE_MAX, REFERENCE_IMAGE_SHORT_EDGE_MIN,
 };
 // Longest prompt the generation routes accept: the route's own declaration, not a copy of it, so
 // this validator cannot bless a prompt length the enqueue would refuse (sc-22710).
@@ -391,6 +391,15 @@ pub struct PlanModelAdvanced {
     /// size, so the knob is not written into its request, its job body or its attempt record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_image_short_edge: Option<u32>,
+    /// How an image REFERENCE is resized before it is encoded — MiniMax-H3's `ref2va` policy
+    /// (`advanced.referenceImageResizeMode`, sc-26691): `match` (the engine default — scale to the
+    /// target canvas's area, never upscaling), `max` (only downsize a short edge above
+    /// `referenceImageShortEdge`) or `diffusers` (force that short edge, upscaling included — the
+    /// only behaviour before sc-26691). A misspelling is refused when the plan is read.
+    ///
+    /// It reaches exactly the shots `referenceImageShortEdge` reaches, for the same reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_resize_mode: Option<ReferenceImageResizeMode>,
     /// Model evaluations (NFE) every shot renders at, overriding whatever the rest of the plan
     /// would have resolved — the plan-level twin of the Video Studio's `advanced.steps` (sc-23406).
     ///
@@ -4118,6 +4127,15 @@ pub struct AttemptRecord {
     /// the rendered one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_image_short_edge: Option<u32>,
+    /// The EFFECTIVE reference-image resize mode this attempt was dispatched with (sc-26691) —
+    /// present exactly when [`AttemptRecord::reference_image_short_edge`] is.
+    ///
+    /// Absent on a reference attempt only when the record predates sc-26691, and such an attempt
+    /// was rendered under the forced short edge; the harness backfills it as
+    /// [`crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY`] (`diffusers`) when it adopts
+    /// one, never as today's default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_resize_mode: Option<ReferenceImageResizeMode>,
     /// The catalog LoRA ids this attempt was DISPATCHED with, in the order they ride the payload
     /// (sc-23406). Empty means none applied to this attempt's partition — which is a real,
     /// recorded state, not an absence: a mixed plan that declares only the ref2v turbo renders its
@@ -4177,6 +4195,20 @@ impl AttemptRecord {
     /// Whether this attempt produced a take that is still a candidate for selection.
     pub fn has_live_take(&self) -> bool {
         self.take.is_some() && self.rejection.is_none()
+    }
+
+    /// Backfill the resize mode of a REFERENCE attempt recorded before sc-26691 (sc-26691).
+    ///
+    /// Every attempt written since records its effective mode beside its short edge, so a
+    /// reference attempt (one with a short edge) that has none was dispatched to an engine that only
+    /// knew the forced short edge: it is recorded as
+    /// [`crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY`], never as today's default. A
+    /// base-partition attempt (no short edge) stays without a mode — no reference was resized.
+    pub fn backfill_legacy_reference_image_resize_mode(&mut self) {
+        if self.reference_image_short_edge.is_some() && self.reference_image_resize_mode.is_none() {
+            self.reference_image_resize_mode =
+                Some(crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY);
+        }
     }
 }
 
@@ -6493,6 +6525,53 @@ mod tests {
         );
     }
 
+    /// sc-26691, legacy replay of a run record. A REFERENCE attempt written before the resize mode
+    /// existed (a short edge, no mode) reads back as `diffusers` — the forced short edge it was
+    /// rendered with — never as today's `match`; an attempt that recorded its mode keeps it; a
+    /// base-partition attempt (no short edge) gains no mode.
+    #[test]
+    fn a_pre_resize_mode_reference_attempt_backfills_as_diffusers() {
+        let attempt = |extra: Value| -> AttemptRecord {
+            let mut record = json!({
+                "attempt": 1,
+                "resolvedModelId": "minimax_h3_ref",
+                "status": "succeeded",
+                "startedAt": "2026-10-01T00:00:00Z",
+                "elapsedSeconds": 1.0,
+            });
+            record
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            serde_json::from_value(record).unwrap()
+        };
+        let mut legacy = attempt(json!({ "referenceImageShortEdge": 2048 }));
+        assert_eq!(legacy.reference_image_resize_mode, None);
+        legacy.backfill_legacy_reference_image_resize_mode();
+        assert_eq!(
+            legacy.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Diffusers)
+        );
+        assert_eq!(
+            serde_json::to_value(&legacy).unwrap()["referenceImageResizeMode"],
+            json!("diffusers")
+        );
+
+        let mut recorded = attempt(json!({
+            "referenceImageShortEdge": 2048,
+            "referenceImageResizeMode": "match"
+        }));
+        recorded.backfill_legacy_reference_image_resize_mode();
+        assert_eq!(
+            recorded.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Match)
+        );
+
+        let mut base = attempt(json!({ "resolvedModelId": "minimax_h3" }));
+        base.backfill_legacy_reference_image_resize_mode();
+        assert_eq!(base.reference_image_resize_mode, None);
+    }
+
     #[test]
     fn take_selection_and_attempt_accounting_ignore_human_requested_attempts() {
         let attempt = |number: u32, human: bool, take: bool| AttemptRecord {
@@ -6501,6 +6580,7 @@ mod tests {
             resolved_model_id: "minimax_h3".into(),
             partition_reason: "no reference roles; renders on the plan's model minimax_h3".into(),
             reference_image_short_edge: None,
+            reference_image_resize_mode: None,
             loras: Vec::new(),
             effective_steps: None,
             turbo_scheduler_shift: None,

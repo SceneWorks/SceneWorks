@@ -4746,6 +4746,146 @@ fn minimax_h3_reference_short_edge_is_parsed_from_advanced_and_refused_out_of_ra
     );
 }
 
+/// sc-26691. `advanced.referenceImageResizeMode` maps onto the engine's own enum one-for-one, an
+/// absent key stays absent (gen-core resolves `match`), and a misspelling is refused by name.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn minimax_h3_reference_resize_mode_maps_onto_the_engine_enum() {
+    use super::minimax_h3::minimax_h3_reference_image_resize_mode as parse;
+    let advanced = |value: Value| -> serde_json::Map<String, Value> {
+        json!({ "referenceImageResizeMode": value })
+            .as_object()
+            .cloned()
+            .expect("object")
+    };
+    assert_eq!(parse(&serde_json::Map::new()).unwrap(), None);
+    for (wire, engine) in [
+        ("match", gen_core::ReferenceImageResizeMode::Match),
+        ("max", gen_core::ReferenceImageResizeMode::Max),
+        ("diffusers", gen_core::ReferenceImageResizeMode::Diffusers),
+    ] {
+        assert_eq!(parse(&advanced(json!(wire))).unwrap(), Some(engine));
+        // The wire spelling is gen-core's own serde form, so the two enums cannot drift.
+        assert_eq!(serde_json::to_value(engine).unwrap(), json!(wire));
+    }
+    for invalid in [json!("Match"), json!("crop"), json!(1)] {
+        let error = parse(&advanced(invalid.clone())).expect_err("refused");
+        assert!(
+            error.to_string().contains("referenceImageResizeMode"),
+            "{invalid}: {error}"
+        );
+    }
+    // The local default is the engine's default.
+    assert_eq!(
+        gen_core::effective_reference_image_resize_mode(&gen_core::GenerationRequest::default()),
+        gen_core::ReferenceImageResizeMode::Match
+    );
+    assert_eq!(
+        sceneworks_core::video_request::effective_reference_image_resize_mode(None).as_str(),
+        "match"
+    );
+}
+
+/// sc-26691. The mode reaches the engine's `GenerationRequest` through the shared funnel, and an
+/// absent one stays absent so gen-core's own default resolves it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn shared_video_funnel_carries_the_reference_resize_mode_to_the_request() {
+    let probe = |mode: Option<gen_core::ReferenceImageResizeMode>| {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let generator = ProbeGenerator {
+            descriptor: gen_core::ModelDescriptor {
+                id: "minimax_h3_ref",
+                family: "minimax_h3",
+                backend: "test",
+                modality: gen_core::Modality::Video,
+                capabilities: Default::default(),
+                required_components: &[],
+                control_kinds: None,
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+            },
+            request: captured.clone(),
+            adapter_reports: Default::default(),
+            audio: None,
+        };
+        let input = VideoGenInput {
+            engine_id: "minimax_h3_ref",
+            prompt: "a courier".to_owned(),
+            width: 576,
+            height: 320,
+            frames: 125,
+            fps: 24,
+            reference_image_resize_mode: mode,
+            ..VideoGenInput::default()
+        };
+        run_loaded_video_generation(&generator, input, &CancelFlag::new(), &mut |_| {})
+            .expect("probe generation");
+        let request = captured.lock().unwrap().clone().expect("captured request");
+        request.reference_image_resize_mode
+    };
+    for mode in [
+        gen_core::ReferenceImageResizeMode::Match,
+        gen_core::ReferenceImageResizeMode::Max,
+        gen_core::ReferenceImageResizeMode::Diffusers,
+    ] {
+        assert_eq!(probe(Some(mode)), Some(mode));
+    }
+    assert_eq!(probe(None), None);
+}
+
+/// sc-26691. The asset recipe records the RESOLVED resize mode: the caller's own value, or the
+/// engine's `match` when the request named none — never an absence, because an absent key is how a
+/// pre-sc-26691 (`diffusers`-rendered) asset reads.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn minimax_h3_recipe_records_the_resolved_reference_resize_mode() {
+    let record = |advanced: Value| {
+        let request = VideoRequest::from_payload(
+            json!({
+                "model": "minimax_h3_ref",
+                "mode": "reference_to_video",
+                "prompt": "a courier",
+                "advanced": advanced,
+            })
+            .as_object()
+            .expect("object"),
+        );
+        super::minimax_h3::minimax_h3_raw_settings(
+            &request,
+            "bf16",
+            "ref2va",
+            &[],
+            None,
+            None,
+            None,
+        )
+    };
+    assert_eq!(
+        record(json!({}))["referenceImageResizeMode"],
+        json!("match")
+    );
+    assert_eq!(
+        record(json!({ "referenceImageResizeMode": "diffusers" }))["referenceImageResizeMode"],
+        json!("diffusers")
+    );
+    assert_eq!(
+        record(json!({ "referenceImageResizeMode": "max", "referenceImageShortEdge": 1536 }))
+            ["referenceImageShortEdge"],
+        json!(1536),
+        "the short edge still rides beside the mode"
+    );
+}
+
 /// A `JobSnapshot` for a Mochi video job. `payload.model` is what the completion metrics read.
 #[cfg(any(
     target_os = "macos",
