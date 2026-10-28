@@ -171,15 +171,17 @@ export const recheckWindowsRows=(pids,timeoutMs,onFailure=null,run=spawnSync)=>w
 
 // Mac and Windows share pid+birth+executable identity. The Windows query is reused
 // from the CPU driver; no CPU execution function or its fixed bounds are changed.
-export function processRows(platform = process.platform, onFailure = null, run = spawnSync) {
+export function processRows(platform = process.platform, onFailure = null, run = spawnSync, timeoutMs = 20_000) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return null;
+  const bound = Math.min(20_000, timeoutMs);
   if (platform === 'win32') {
-    const rows = queryWindowsProcesses({run,onFailure});
+    const rows = queryWindowsProcesses({run,onFailure,timeoutMs:bound});
     return windowsRows(rows);
   }
   const started=performance.now();
-  const p = run('ps', ['-axo','pid=,ppid=,rss=,lstart=,comm='], { encoding:'utf8', env:{...process.env,LC_ALL:'C'}, timeout:3000, maxBuffer:16*1024*1024 });
+  const p = run('ps', ['-axo','pid=,ppid=,rss=,lstart=,comm='], { encoding:'utf8', env:{...process.env,LC_ALL:'C'}, timeout:bound, maxBuffer:16*1024*1024 });
   if (p.error || p.status !== 0) {
-    onFailure?.({command:'ps',at:new Date().toISOString(),timeoutMs:3000,elapsedMs:performance.now()-started,
+    onFailure?.({command:'ps',at:new Date().toISOString(),timeoutMs:bound,elapsedMs:performance.now()-started,
       error:p.error?{code:p.error.code??null,message:p.error.message}:null,status:p.status??null,signal:p.signal??null,
       stderr:typeof p.stderr==='string'?p.stderr.slice(0,512):null});
     return null;
@@ -217,12 +219,14 @@ export function observeOwned(rows, known, rootPid, onIdentityFailure = null, {pe
   // placeholder. Resolve only via one fresh selected census, including its
   // immediate parent, so a reused PID cannot lend a stale parent edge.
   if(!known.has(rootPid)&&!pending.has(rootPid))assert(rows.get(rootPid)?.ppid===process.pid,'initial owned root identity unavailable');
-  const possible=new Map([...known,...pending].filter(([pid])=>rows.has(pid)).map(([pid])=>[pid,rows.get(pid)]));
+  const possible=new Map([...known,...pending].filter(([pid,identity])=>!identity.absent&&rows.has(pid)).map(([pid])=>[pid,rows.get(pid)]));
   if(rows.has(rootPid))possible.set(rootPid,rows.get(rootPid));
   let expanded=true;
   while(expanded){expanded=false;for(const row of rows.values())if(!possible.has(row.pid)&&possible.has(row.ppid)){
     const parent=possible.get(row.ppid);
     if(Number.isSafeInteger(row.birthMs)&&Number.isSafeInteger(parent.birthMs)&&row.birthMs<parent.birthMs)continue;
+    // A fresh owned-parent edge is independent of a previously absent PID.
+    if(pending.get(row.pid)?.absent&&!known.has(row.pid))pending.delete(row.pid);
     possible.set(row.pid,row);expanded=true;
   }}
   const originalRoot=rows.get(rootPid),launcher=rows.get(process.pid);
@@ -270,6 +274,7 @@ export function observeOwned(rows, known, rootPid, onIdentityFailure = null, {pe
   // Pending includes explicitly unresolved ancestry as well as incomplete paths.
   // Retain these observations for cleanup even after root exit or reparenting.
   for (const [pid,identity] of [...known,...pending]) {
+    if(identity.absent)continue; // Proven absence cannot authenticate a later PID incarnation.
     const row=rows.get(pid);
     if(row && Object.hasOwn(row,'birthMs') && (!Number.isSafeInteger(row.birthMs)||!Number.isSafeInteger(identity.birthMs))){
       rememberUnresolved(row);refuse('Windows birth telemetry missing',row,rows.get(row.ppid));
@@ -338,7 +343,7 @@ export async function executeSupervised(root, command, log, limitMs, state, { en
   const completed = new Promise(resolve => { child.on('error',e => {error=e;}); child.on('close',c => {done=true;code=c;resolve();}); });
   for (const stream of [child.stdout,child.stderr]) stream.on('data',b => { if(logOpen) writeSync(fd,b); });
   const known = new Map(), pending = new Map();
-  const queryOwned=()=>query(process.platform,failure=>{state.telemetryFailure??=failure;});
+  const queryOwned=until=>query(process.platform,failure=>{state.telemetryFailure??=failure;},spawnSync,Math.min(20_000,Math.max(0,until-Date.now())));
   const deadline = Date.now() + limitMs;
   let cancelAt = null, cancelReason = null;
   const recordRss=observed=>{
@@ -351,7 +356,7 @@ export async function executeSupervised(root, command, log, limitMs, state, { en
       }
     }
   };
-  const observe=(until=Math.min(deadline,cancelAt===null?Infinity:cancelAt+releaseMs))=>observeOwned(queryOwned(),known,child.pid,witness=>{state.identityFailure??=witness;},{pending,onRss:recordRss,
+  const observe=(until=Math.min(deadline,cancelAt===null?Infinity:cancelAt+releaseMs))=>observeOwned(queryOwned(until),known,child.pid,witness=>{state.identityFailure??=witness;},{pending,onRss:recordRss,
     recheckWindows:pids=>recheckWindows(pids,Math.min(20_000,Math.max(0,until-Date.now())),failure=>{state.telemetryFailure??=failure;}),
     onResolution:witness=>{state.identityResolution??=witness;}});
   try {
@@ -369,9 +374,12 @@ export async function executeSupervised(root, command, log, limitMs, state, { en
     if (error) throw error;
     return { exit:code, output:readFileSync(log,'utf8') };
   } catch (e) {
-    writeFileSync(cancelFile,JSON.stringify({cancel:true,reason:cancelReason??e.message}));
+    if (cancelAt === null) {
+      cancelAt = Date.now();
+      writeFileSync(cancelFile,JSON.stringify({cancel:true,reason:cancelReason??e.message}));
+    }
     // Even telemetry failures request cooperative cancellation and prove release.
-    const until = Date.now()+releaseMs;
+    const until = cancelAt+releaseMs;
     let released = false;
     while (Date.now()<until) {
       try { const o=observe(until); if(done && !o.live.length) {released=true;break;} } catch { /* unavailable telemetry is never release proof */ }

@@ -333,12 +333,63 @@ test('Windows replacement-parent resolution retains the older observed child thr
  assert.equal(pending.get(44).birthMs,300);assert.equal(pending.get(44).unresolvedAncestry,true);
  assert.equal(pending.get(43).birthMs,500,'fresh parent identity must remain tracked if its older child refuses');
  assert.equal(known.has(44),false,'older child must not inherit replacement-parent authentication');
- rows.delete(42);rows.delete(43);rows.set(44,{...oldChild,ppid:1});
+ rows.delete(42);rows.set(43,{...replacement,ppid:1});rows.set(44,{...oldChild,ppid:1});
  assert.throws(()=>observeOwned(rows,known,42,null,{pending}),/Windows descendant ancestry unresolved/);
  assert.notEqual(pending.get(44).absent,true);
  rows.delete(44);rows.set(43,{...replacement,ppid:1});
  assert.deepEqual(observeOwned(rows,known,42,null,{pending}).live.map(row=>row.pid),[43]);
  rows.delete(43);assert.deepEqual(observeOwned(rows,known,42,null,{pending}).live,[]);assert.equal(pending.get(44).absent,true);
+});
+
+function absentWindowsPidWitness(){
+ const root=winRow(53768,process.pid,1793200697891,'d:/owned/native.exe',100);
+ const launcher=winRow(process.pid,0,1793200600000,'d:/node.exe');
+ const missing={...winRow(65688,root.pid,0,''),birthMs:null,birth:null,rssBytes:null};
+ const rows=new Map([[process.pid,launcher],[root.pid,root]]),known=new Map(),pending=new Map();
+ observeOwned(rows,known,root.pid,null,{pending});rows.set(missing.pid,missing);
+ let resolution;
+ observeOwned(rows,known,root.pid,null,{pending,recheckWindows:()=>new Map([[root.pid,root]]),onResolution:value=>{resolution=value;}});
+ assert.equal(resolution.outcome,'absent');assert.equal(pending.get(missing.pid).absent,true);
+ return {root,rows,known,pending,missing};
+}
+
+// Exact pub25 sequence: absent unknown65688 is later foreign rustfmt65688.
+test('Windows proven-absent unknown PID does not adopt or refuse a later foreign incarnation',()=>{
+ const {root,rows,known,pending,missing}=absentWindowsPidWitness();
+ const foreignParent=winRow(5508,4204,1793200900777,'c:/rustup.exe');
+ const foreign=winRow(65688,5508,1793200900856,'c:/rustfmt.exe',28725248);
+ const foreignChild={...winRow(65689,65688,0,''),birthMs:null,birth:null,rssBytes:null};
+ for(const row of [foreignParent,foreign,foreignChild])rows.set(row.pid,row);
+ const observed=observeOwned(rows,known,root.pid,null,{pending,recheckWindows:()=>assert.fail('foreign reused PID must not seed selected identity repair')});
+ assert.deepEqual(observed.live.map(row=>row.pid),[root.pid]);assert.equal(observed.rss,root.rssBytes);
+ assert.equal(known.has(missing.pid),false);assert.equal(pending.get(missing.pid).absent,true);assert.equal(pending.has(foreignChild.pid),false);
+});
+
+test('Windows fresh owned-parent edge authenticates a new incarnation after prior unknown PID absence',()=>{
+ const {root,rows,known,pending,missing}=absentWindowsPidWitness();
+ const current=winRow(missing.pid,root.pid,1793200900856,'c:/new-metadata.exe',9);rows.set(current.pid,current);
+ const observed=observeOwned(rows,known,root.pid,null,{pending});
+ assert.deepEqual(observed.live.map(row=>row.pid),[root.pid,current.pid]);assert.equal(observed.rss,root.rssBytes+9);
+ assert.equal(known.get(current.pid).birthMs,current.birthMs);assert.equal(pending.has(current.pid),false);
+});
+
+test('Windows a fresh unknown owned incarnation cannot inherit a retired PID absence during cleanup',()=>{
+ const {root,rows,known,pending,missing}=absentWindowsPidWitness();
+ const child=winRow(65689,missing.pid,1793200900860,'c:/helper.exe');rows.set(child.pid,child);
+ assert.throws(()=>observeOwned(rows,known,root.pid,null,{pending,recheckWindows:()=>null}),/Windows birth telemetry missing/);
+ assert.notEqual(pending.get(missing.pid).absent,true);assert.notEqual(pending.get(child.pid).absent,true);
+ rows.delete(root.pid);rows.set(missing.pid,{...missing,ppid:1});rows.set(child.pid,{...child,ppid:1});
+ assert.throws(()=>observeOwned(rows,known,root.pid,null,{pending,recheckWindows:()=>null}),/Windows birth telemetry missing/);
+ assert.notEqual(pending.get(missing.pid).absent,true);
+ rows.delete(missing.pid);assert.throws(()=>observeOwned(rows,known,root.pid,null,{pending}),/Windows descendant ancestry unresolved/);
+ rows.delete(child.pid);assert.deepEqual(observeOwned(rows,known,root.pid,null,{pending}).live,[]);
+});
+
+test('Windows previously known birth identity still refuses reuse through an owned parent',()=>{
+ const {root,rows,known,pending,missing}=absentWindowsPidWitness();
+ const prior=winRow(missing.pid,root.pid,1793200800000,'c:/old-metadata.exe');known.set(prior.pid,prior);pending.delete(prior.pid);
+ rows.set(prior.pid,winRow(prior.pid,root.pid,1793200900856,'c:/replacement.exe'));
+ assert.throws(()=>observeOwned(rows,known,root.pid,null,{pending}),/owned descendant PID reused/);
 });
 
 test('Windows boundary repair never lowers already observed RSS',()=>{
@@ -439,16 +490,26 @@ test('known Windows blank paths require resolution and cannot become an exec; PO
  const old={pid:42,ppid:process.pid,birth:'same-birth',executable:'/old',rssBytes:10};const known=new Map([[42,old]]);
  const observed=observeOwned(new Map([[42,{...old,executable:'/new'}]]),known,42);assert.equal(observed.live[0].executable,'/new');assert.equal(known.get(42).executable,'/new');
 });
+// CI_IMPACT: injected ps results/child handles only; no host census, learned execution or native build.
 test('POSIX census records bounded failure facts while preserving null telemetry and the exact query budget',()=>{
- for(const result of [{error:Object.assign(new Error('spawnSync ps ETIMEDOUT'),{code:'ETIMEDOUT'}),status:null,signal:'SIGTERM'}, {error:null,status:1,signal:null}]) {
+ for(const result of [{error:Object.assign(new Error('spawnSync ps ETIMEDOUT'),{code:'ETIMEDOUT'}),status:null,signal:'SIGTERM'},
+  {error:Object.assign(new Error('spawnSync ps ETIMEDOUT'),{code:'ETIMEDOUT'}),status:0,signal:null,stdout:'42 1 10 Mon Oct 26 20:08:34 2026 /owned/node\n'}, {error:null,status:1,signal:null}]) {
   let failure;const rows=processRows('darwin',value=>{failure=value;},(command,args,options)=>{
-   assert.equal(command,'ps');assert.deepEqual(args,['-axo','pid=,ppid=,rss=,lstart=,comm=']);assert.equal(options.timeout,3000);assert.equal(options.maxBuffer,16*1024*1024);assert.equal(options.env.LC_ALL,'C');
-   return {...result,stdout:'PRIVATE PROCESS TABLE MUST NOT BE RECORDED',stderr:'diagnostic '.repeat(100)};
+   assert.equal(command,'ps');assert.deepEqual(args,['-axo','pid=,ppid=,rss=,lstart=,comm=']);assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,16*1024*1024);assert.equal(options.env.LC_ALL,'C');
+   return {stdout:'PRIVATE PROCESS TABLE MUST NOT BE RECORDED',...result,stderr:'diagnostic '.repeat(100)};
   });
   assert.equal(rows,null);assert.throws(()=>observeOwned(rows,new Map(),42),/owned process telemetry unavailable/);
-  assert.equal(failure.command,'ps');assert.equal(failure.timeoutMs,3000);assert.ok(failure.elapsedMs>=0);assert.equal(failure.status,result.status);assert.equal(failure.signal,result.signal);assert.equal(failure.error?.code??null,result.error?.code??null);
+  assert.equal(failure.command,'ps');assert.equal(failure.timeoutMs,20000);assert.ok(failure.elapsedMs>=0);assert.equal(failure.status,result.status);assert.equal(failure.signal,result.signal);assert.equal(failure.error?.code??null,result.error?.code??null);
   assert.equal(failure.stderr.length,512);assert.equal(JSON.stringify(failure).includes('PRIVATE PROCESS TABLE'),false);assert.equal(Object.hasOwn(failure,'env'),false);
  }
+});
+test('POSIX census clamps its existing ceiling to remaining time and never queries with an exhausted budget',()=>{
+ for(const [remaining,wanted]of [[1234,1234],[30_000,20_000]]){
+  let failure;assert.equal(processRows('darwin',value=>{failure=value;},(_command,_args,options)=>{
+   assert.equal(options.timeout,wanted);return {status:7,stdout:''};
+  },remaining),null);assert.equal(failure.timeoutMs,wanted);
+ }
+ for(const remaining of [0,-1,NaN,Infinity])assert.equal(processRows('darwin',null,()=>assert.fail('expired/invalid budget launched ps'),remaining),null);
 });
 test('successful POSIX census preserves parsing without emitting an availability failure',()=>{
  for(const stdout of ['42 1 10 Mon Oct 26 20:08:34 2026 /owned/node\n','unparseable row\n']) {
@@ -467,6 +528,45 @@ function exitRaceChild(samples) {
 }
 const rssRoot=rssBytes=>({pid:4242,ppid:process.pid,birth:'owned-root-birth',executable:'/owned/native',rssBytes});
 const rssDescendant=(rssBytes,ppid=4242)=>({pid:4243,ppid,birth:'owned-child-birth',executable:'/owned/helper',rssBytes});
+test('full telemetry queries consume the original case deadline before fresh release',async t=>{
+ const dir=fixture(t),state={},bounds=[];let now=1000,calls=0;
+ t.mock.method(Date,'now',()=>now);
+ const child=Object.assign(new EventEmitter(),{pid:4242,stdout:new PassThrough(),stderr:new PassThrough()});
+ const query=(_platform,_failure,_run,remaining)=>{
+  bounds.push(remaining);now+=200;
+  if(++calls===1){queueMicrotask(()=>child.emit('close',0));return new Map([[4242,rssRoot(10)]]);}
+  return new Map();
+ };
+ const result=await executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),1234,state,{capBytes:20,query,spawnChild:()=>child});
+ assert.equal(result.exit,0);assert.deepEqual(bounds,[1234,1034]);assert.equal(state.cleanup.released,true);
+});
+test('full telemetry cleanup queries use the original release deadline without a new grace',async t=>{
+ const dir=fixture(t),state={},bounds=[];let now=1000,calls=0;
+ t.mock.method(Date,'now',()=>now);
+ const child=Object.assign(new EventEmitter(),{pid:4242,stdout:new PassThrough(),stderr:new PassThrough()});
+ const query=(_platform,_failure,_run,remaining)=>{
+  bounds.push(remaining);now+=100;
+  if(++calls===1)return null;
+  if(calls===2){queueMicrotask(()=>child.emit('close',0));return new Map([[4242,rssRoot(10)]]);}
+  return new Map();
+ };
+ await assert.rejects(executeSupervised(dir,['controlled-native'],path.join(dir,'case.log'),1234,state,{capBytes:20,query,spawnChild:()=>child,releaseMs:1000}),/owned process telemetry unavailable/);
+ assert.deepEqual(bounds,[1234,1000,900]);assert.equal(state.cleanup.released,true);assert.equal(state.unsafe,false);
+});
+test('an expired cancellation deadline never starts a second cleanup grace',async t=>{
+ const dir=fixture(t),state={},bounds=[],log=path.join(dir,'case.log');let now=1000,calls=0;
+ t.mock.method(Date,'now',()=>now);
+ const child=Object.assign(new EventEmitter(),{pid:4242,stdout:new PassThrough(),stderr:new PassThrough()});
+ const query=(_platform,_failure,_run,remaining)=>{
+  bounds.push(remaining);
+  if(now>=2200){now+=200;queueMicrotask(()=>child.emit('close',0));return new Map();}
+  now+=200;return new Map([[4242,rssRoot(++calls===1?21:10)]]);
+ };
+ await assert.rejects(executeSupervised(dir,['controlled-native'],log,10_000,state,{capBytes:20,query,spawnChild:()=>child,releaseMs:1000}),/owned processes did not cooperatively release/);
+ assert.deepEqual(bounds,[10_000,1000,800,600,400,200]);
+ assert.equal(state.cleanup.released,false);assert.equal(state.unsafe,true);
+ assert.match(JSON.parse(readFileSync(`${log}.cancel`)).reason,/aggregate owned RSS exceeded cap/);
+});
 test('Windows unreadable descendant subtree blocks release after root close and reparenting',async t=>{
  const dir=fixture(t),state={};
  const parent=winRow(process.pid,0,100,'node.exe'),root=winRow(4242,process.pid,200,'native.exe',10);

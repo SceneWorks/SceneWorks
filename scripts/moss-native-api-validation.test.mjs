@@ -928,8 +928,8 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
     return result;
   };
   t.after(()=>disposeWindowsProcessReader(markedQuery));
-  const query=(platform,onFailure)=>{
-    const rows=processRows(platform,onFailure,markedQuery);
+  const query=(platform,onFailure,_run,timeoutMs)=>{
+    const rows=processRows(platform,onFailure,markedQuery,timeoutMs);
     const line=readFileSync(log,"utf8").split("\n").find(value=>value.startsWith('{"rootPid":'));
     if(line)identities=JSON.parse(line);
     if(!released&&identities&&state.rssSamples?.some(sample=>sample.ownedPids.includes(identities.rootPid)&&sample.ownedPids.includes(identities.childPid))){
