@@ -181,6 +181,30 @@ fn has_safetensors_extension(path: &Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("safetensors"))
 }
 
+/// The worker and API inspect the same first usable record path and declared filename.
+pub fn adapter_record_path(lora: &Value) -> Option<PathBuf> {
+    ["installedPath", "sourcePath", "path"]
+        .into_iter()
+        .filter_map(|key| lora.get(key).and_then(Value::as_str))
+        .chain(
+            lora.get("source")
+                .and_then(|source| source.get("path"))
+                .and_then(Value::as_str),
+        )
+        .map(str::trim)
+        .find(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
+pub fn declared_adapter_file(lora: &Value) -> Option<&str> {
+    lora.get("files")
+        .and_then(Value::as_array)
+        .and_then(|files| files.first())
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 /// Resolves the adapter file to load from a LoRA record `dir`, preferring `declared`
 /// (the plain filename the record's manifest `files` list names) when it exists,
 /// otherwise falling back to [`first_safetensors_path`] (sc-10221).
@@ -210,6 +234,62 @@ pub fn resolve_adapter_in_dir(dir: &Path, declared: Option<&str>) -> Option<Path
         }
     }
     first_safetensors_path(dir)
+}
+
+/// Exact FLUX3 file selection shared by API inspection and worker loading. Other families keep
+/// their existing selector. A selected file may stay in its adapter directory or its own HF
+/// repository blob store, never a sibling repository or arbitrary symlink destination.
+pub fn resolve_adapter_for_model(
+    path: &Path,
+    declared: Option<&str>,
+    model: &str,
+) -> Option<PathBuf> {
+    if !matches!(model, "flux3_klein" | "flux3_klein_base") {
+        return if path.is_dir() {
+            resolve_adapter_in_dir(path, declared)
+        } else {
+            path.is_file().then(|| path.to_path_buf())
+        };
+    }
+    if let Some(name) = declared {
+        if name.is_empty()
+            || name == "."
+            || name == ".."
+            || name.contains('/')
+            || name.contains('\\')
+            || !is_safetensors_file(Path::new(name))
+        {
+            return None;
+        }
+    }
+    if path.is_dir() && declared.is_some_and(|name| !path.join(name).is_file()) {
+        return None; // Exact FLUX3 declarations never fall back to another training checkpoint.
+    }
+    let candidate = if path.is_dir() {
+        resolve_adapter_in_dir(path, declared)?
+    } else {
+        // HF file links normalize to extensionless blob names in the worker. The actual
+        // safetensors header/identity is re-read by both consumers, not inferred from suffix.
+        if !path.is_file() || is_hidden_file(path) {
+            return None;
+        }
+        path.to_path_buf()
+    };
+    let root = if path.is_dir() { path } else { path.parent()? };
+    let target = candidate.canonicalize().ok()?;
+    let within_dir = target.starts_with(root.canonicalize().ok()?);
+    let own_hf_blob = root
+        .ancestors()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "snapshots"))
+        .filter_map(Path::parent)
+        .filter(|repo| {
+            repo.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("models--"))
+        })
+        .filter_map(|repo| repo.join("blobs").canonicalize().ok())
+        .any(|blobs| target.starts_with(blobs));
+    (within_dir || own_hf_blob).then_some(candidate)
 }
 
 /// Returns the detected family for a base model directory or file.
@@ -565,6 +645,7 @@ pub fn model_adapter_for_family(family: &str) -> Option<&'static str> {
         "lens" => Some("lens_turbo"),
         "sensenova-u1" => Some("sensenova_u1"),
         "flux" => Some("flux_diffusers"),
+        "flux3" => Some("mlx_flux3"),
         "chroma" => Some("chroma_diffusers"),
         "kolors" => Some("kolors_diffusers"),
         "sdxl" => Some("sdxl_diffusers"),
@@ -642,6 +723,7 @@ pub fn model_capabilities_for_type_and_family(model_type: &str, family: &str) ->
         // refuses. Only imported/user flux2 models are affected; the builtin entries declare their
         // own `capabilities`.
         ("image", "flux2") => vec!["text_to_image"],
+        ("image", "flux3") => vec!["text_to_image"],
         ("image", "chroma") => vec!["text_to_image"],
         ("image", "kolors") => vec!["text_to_image", "character_image"],
         ("image", "sdxl") => vec!["text_to_image"],
@@ -2421,6 +2503,15 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     {
         return Some("mage-flow".to_owned());
     }
+    // Exact FLUX3 training identities, before the broad FLUX.1 substring detector.
+    if matches!(
+        normalized.as_str(),
+        "flux3"
+            | "black-forest-labs/flux-3-image-klein"
+            | "black-forest-labs/flux-3-image-klein-base"
+    ) {
+        return Some("flux3".to_owned());
+    }
     // Check flux2 before flux: FLUX.2 architecture strings ("flux2", "flux-2",
     // "flux.2", "flux_2") all contain the "flux" substring, so the generic flux
     // match below would otherwise swallow them. FLUX.2 is a distinct family with
@@ -2502,6 +2593,10 @@ pub struct AdapterFileMetadata {
     /// The base model id an Iris adapter's `baseModel` stamp names. Read ONLY alongside an
     /// `irisTask` stamp, so no other family's import is described differently than before.
     pub iris_base_model: Option<String>,
+    /// Header-declared training repository (raw `base_model`), never guessed from source.repo.
+    pub base_model: Option<String>,
+    /// Header-declared training-base commit (raw `base_revision`), not adapter source.revision.
+    pub base_revision: Option<String>,
 }
 
 impl AdapterFileMetadata {
@@ -2511,6 +2606,8 @@ impl AdapterFileMetadata {
             && self.alpha.is_none()
             && self.iris_task.is_none()
             && self.iris_base_model.is_none()
+            && self.base_model.is_none()
+            && self.base_revision.is_none()
     }
 }
 
@@ -2551,7 +2648,8 @@ pub fn inspect_adapter_in_dir(
 ///   about the file, and recording it would let a fallback masquerade as a stated value.
 /// - **Existing values win** (`or_insert`, matching the family reconcile at the same call site). A
 ///   value already on the entry came from the API pre-flight or an explicit caller, and a
-///   post-download re-read must not silently rewrite it.
+///   post-download re-read must not silently rewrite it. The localized FLUX3 checkpoint identity
+///   exception below instead records the actual header, never a dialog's model-id guess.
 pub fn apply_adapter_metadata_to_manifest_entry(
     entry: &mut Map<String, Value>,
     metadata: &AdapterFileMetadata,
@@ -2566,6 +2664,44 @@ pub fn apply_adapter_metadata_to_manifest_entry(
     }
     if let Some(alpha) = metadata.alpha {
         entry.entry("alpha").or_insert_with(|| json!(alpha));
+    }
+    if let Some(base_model) = &metadata.base_model {
+        entry
+            .entry("baseModel")
+            .or_insert_with(|| Value::String(base_model.clone()));
+    }
+    if let Some(base_revision) = &metadata.base_revision {
+        entry
+            .entry("baseRevision")
+            .or_insert_with(|| Value::String(base_revision.clone()));
+    }
+    // FLUX3 records file identity, not the import dialog's model-id selection. File-declared
+    // checkpoint fields/algorithm must replace stale caller guesses; legacy families retain the
+    // historical or_insert behavior above. Missing file fields cannot inherit a forged identity.
+    if metadata.base_model.as_deref().is_some_and(|repo| {
+        matches!(
+            repo,
+            "black-forest-labs/flux-3-image-klein" | "black-forest-labs/flux-3-image-klein-base"
+        )
+    }) {
+        for (key, value) in [
+            ("baseModel", metadata.base_model.as_ref()),
+            ("baseRevision", metadata.base_revision.as_ref()),
+            ("networkType", metadata.network_type.as_ref()),
+        ] {
+            entry.remove(key);
+            if let Some(value) = value {
+                entry.insert(key.into(), Value::String(value.clone()));
+            }
+        }
+        entry.remove("rank");
+        if let Some(rank) = metadata.rank {
+            entry.insert("rank".into(), json!(rank));
+        }
+        entry.remove("alpha");
+        if let Some(alpha) = metadata.alpha {
+            entry.insert("alpha".into(), json!(alpha));
+        }
     }
     // The Iris task identity (sc-25681): what Image Studio's picker and the API's compatibility
     // gate match against a model's `loraCompatibility.irisTask`.
@@ -2625,7 +2761,7 @@ pub fn read_adapter_metadata(header: &Value) -> AdapterFileMetadata {
         None
     };
 
-    let network_type = lookup(&["networkType", "network_type"])
+    let mut network_type = lookup(&["networkType", "network_type"])
         .as_ref()
         .and_then(Value::as_str)
         .map(|value| value.trim().to_ascii_lowercase())
@@ -2674,13 +2810,381 @@ pub fn read_adapter_metadata(header: &Value) -> AdapterFileMetadata {
     };
     let iris_task = stamp(IRIS_ADAPTER_TASK_KEY);
     let iris_base_model = iris_task.as_ref().and_then(|_| stamp("baseModel"));
+    // Localize the new identity projection to the two frozen FLUX3 checkpoints. Other families
+    // historically use baseModel for application model ids, so do not rewrite their imports.
+    let base_model = stamp("base_model").filter(|repo| {
+        matches!(
+            repo.as_str(),
+            "black-forest-labs/flux-3-image-klein" | "black-forest-labs/flux-3-image-klein-base"
+        )
+    });
+    let base_revision = base_model.as_ref().and_then(|_| stamp("base_revision"));
+    // FLUX3's exact tensor format proves LoRA even when PEFT omits a networkType stamp.
+    // This is not a rank/alpha default, nor a generic guess for other families.
+    if network_type.is_none()
+        && base_model.as_deref().is_some_and(|repo| {
+            matches!(
+                repo,
+                "black-forest-labs/flux-3-image-klein"
+                    | "black-forest-labs/flux-3-image-klein-base"
+            )
+        })
+    {
+        let keys = header
+            .as_object()
+            .map(|object| {
+                object
+                    .keys()
+                    .filter(|key| key.as_str() != "__metadata__")
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        if !keys.is_empty()
+            && keys
+                .iter()
+                .all(|key| key.ends_with(".lora_A.weight") || key.ends_with(".lora_B.weight"))
+        {
+            network_type = Some("lora".into());
+        }
+    }
     AdapterFileMetadata {
         network_type,
         rank,
         alpha,
         iris_task,
         iris_base_model,
+        base_model,
+        base_revision,
     }
+}
+
+// Mirrors inference gen_core::flux3::adapters semantic admission without linking an engine
+// into rust-api. Native/PEFT alpha conventions are accepted only when mutually consistent.
+fn flux3_metadata_error(detail: impl std::fmt::Display) -> String {
+    detail.to_string()
+}
+
+fn flux3_plain_metadata(meta: &serde_json::Value) -> Result<(f64, Vec<usize>), String> {
+    let peft = meta
+        .get("lora_adapter_metadata")
+        .map(|raw| {
+            let text = raw
+                .as_str()
+                .ok_or_else(|| flux3_metadata_error("lora_adapter_metadata must be a JSON string"))?;
+            let value: serde_json::Value = serde_json::from_str(text)
+                .map_err(|e| flux3_metadata_error(format!("invalid lora_adapter_metadata: {e}")))?;
+            let object = value
+                .as_object()
+                .ok_or_else(|| flux3_metadata_error("lora_adapter_metadata must contain an object"))?;
+            // Pinned diffusers 7ecb1e1 `_save_lora_weights` packs the transformer's PEFT config
+            // with `_pack_dict_with_prefix(metadata, "transformer")` (lora_base.py:327,1105) and
+            // its loader strips exactly that prefix (peft.py:212). Normalize ONLY that prefix;
+            // another component's keys (text_encoder.* etc.) cannot describe this DiT adapter.
+            let mut normalized = serde_json::Map::new();
+            for (key, field) in object {
+                let bare = key.strip_prefix("transformer.").unwrap_or(key);
+                if bare.contains('.') || bare.is_empty() {
+                    return Err(flux3_metadata_error(format!(
+                        "lora_adapter_metadata key {key:?} is not a transformer PEFT field; only the diffusers `transformer.` prefix is supported"
+                    )));
+                }
+                if let Some(previous) = normalized.insert(bare.to_owned(), field.clone()) {
+                    if &previous != field {
+                        return Err(flux3_metadata_error(format!(
+                            "lora_adapter_metadata declares {bare:?} twice with different values"
+                        )));
+                    }
+                }
+            }
+            Ok(serde_json::Value::Object(normalized))
+        })
+        .transpose()?;
+    let mut alpha: Option<f64> = None;
+    let mut ranks = Vec::new();
+    for section in std::iter::once(meta).chain(peft.iter()) {
+        for key in ["networkType", "network_type", "peft_type"] {
+            if let Some(kind) = section.get(key) {
+                if !kind
+                    .as_str()
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("lora"))
+                {
+                    return Err(flux3_metadata_error(format!(
+                        "{key} must name plain LoRA, got {kind}"
+                    )));
+                }
+            }
+        }
+        let args = section
+            .get("ss_network_args")
+            .map(|raw| {
+                let text = raw
+                    .as_str()
+                    .ok_or_else(|| flux3_metadata_error("ss_network_args must be a JSON string"))?;
+                let value = serde_json::from_str::<serde_json::Value>(text)
+                    .map_err(|e| flux3_metadata_error(format!("invalid ss_network_args: {e}")))?;
+                if !value.is_object() {
+                    return Err(flux3_metadata_error(
+                        "ss_network_args must contain an object",
+                    ));
+                }
+                Ok(value)
+            })
+            .transpose()?;
+        let algo = args
+            .as_ref()
+            .and_then(|args| args.get("algo"))
+            .and_then(serde_json::Value::as_str);
+        if algo.is_some_and(|algo| !algo.eq_ignore_ascii_case("lora")) {
+            return Err(flux3_metadata_error(
+                "ss_network_args.algo must name plain LoRA",
+            ));
+        }
+        if let Some(module) = section.get("ss_network_module") {
+            let plain = module.as_str().is_some_and(|module| {
+                matches!(module, "lora" | "networks.lora")
+                    || (module == "lycoris.kohya"
+                        && algo.is_some_and(|algo| algo.eq_ignore_ascii_case("lora")))
+            });
+            if !plain {
+                return Err(flux3_metadata_error(
+                    "ss_network_module does not identify plain LoRA",
+                ));
+            }
+        }
+        for key in ["use_rslora", "use_dora", "fan_in_fan_out"] {
+            if let Some(value) = section.get(key) {
+                let enabled = value.as_bool().or_else(|| {
+                    match value.as_str()?.trim().to_ascii_lowercase().as_str() {
+                        "false" => Some(false),
+                        "true" => Some(true),
+                        _ => None,
+                    }
+                });
+                if enabled != Some(false) {
+                    return Err(flux3_metadata_error(format!(
+                        "{key} is not supported; export plain additive LoRA"
+                    )));
+                }
+            }
+        }
+        for key in ["rank_pattern", "alpha_pattern"] {
+            if let Some(value) = section.get(key) {
+                let value = if let Some(text) = value.as_str() {
+                    serde_json::from_str(text)
+                        .map_err(|e| flux3_metadata_error(format!("invalid {key}: {e}")))?
+                } else {
+                    value.clone()
+                };
+                if !value.is_null() && !value.as_object().is_some_and(|object| object.is_empty()) {
+                    return Err(flux3_metadata_error(format!("per-target {key} is not supported; export a resolved global alpha/rank adapter")));
+                }
+            }
+        }
+        for key in ["lora_alpha", "alpha", "ss_network_alpha"] {
+            if let Some(value) = section.get(key) {
+                let value = value
+                    .as_f64()
+                    .or_else(|| value.as_str()?.trim().parse::<f64>().ok())
+                    .ok_or_else(|| flux3_metadata_error(format!("{key} must be numeric")))?;
+                if !value.is_finite() || value <= 0.0 || alpha.is_some_and(|alpha| alpha != value) {
+                    return Err(flux3_metadata_error(format!(
+                        "{key} must be finite, positive and consistent with every declared alpha"
+                    )));
+                }
+                alpha = Some(value);
+            }
+        }
+        for key in ["rank", "r", "ss_network_dim"] {
+            if let Some(value) = section.get(key) {
+                let rank = value
+                    .as_u64()
+                    .and_then(|rank| usize::try_from(rank).ok())
+                    .or_else(|| value.as_str()?.trim().parse::<usize>().ok())
+                    .filter(|rank| *rank > 0)
+                    .ok_or_else(|| {
+                        flux3_metadata_error(format!("{key} must be a positive integer"))
+                    })?;
+                ranks.push(rank);
+            }
+        }
+    }
+    Ok((
+        alpha.ok_or_else(|| {
+            flux3_metadata_error(
+                "explicit alpha/lora_alpha (native or PEFT metadata) is required; no rank fallback",
+            )
+        })?,
+        ranks,
+    ))
+}
+
+/// FLUX3 product-side header preflight. The API deliberately has no native engine dependency;
+/// this mirrors the pinned 45e57c9 architecture and diffusers7ecb1e1 key mapping. The native loader
+/// repeats admission against its actual config. Caller/catalog adapter identity is never authority.
+pub fn flux3_adapter_refusal(
+    _model: &Value,
+    model_id: &str,
+    lora_id: &str,
+    _lora: &Value,
+    header: Option<&Value>,
+) -> Option<String> {
+    let (repo, revision) = match model_id {
+        "flux3_klein" => (
+            "black-forest-labs/flux-3-image-klein",
+            "8454017f9ebaada30c998fccd9f67a80c7580f68",
+        ),
+        "flux3_klein_base" => (
+            "black-forest-labs/flux-3-image-klein-base",
+            "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+        ),
+        _ => return None,
+    };
+    let refuse = |detail: String| {
+        Some(format!(
+            "LoRA {lora_id} is incompatible with {model_id}: {detail}"
+        ))
+    };
+    let Some(header) = header.and_then(Value::as_object) else {
+        return refuse(
+            "readable safetensors header required; re-import the exact adapter file".into(),
+        );
+    };
+    let metadata = header.get("__metadata__");
+    for (key, expected) in [("base_model", repo), ("base_revision", revision)] {
+        if metadata
+            .and_then(|meta| meta.get(key))
+            .and_then(Value::as_str)
+            != Some(expected)
+        {
+            return refuse(format!("header {key} must be {expected}; re-export identity metadata for the actual training base"));
+        }
+    }
+    let (_, declared_ranks) = match flux3_plain_metadata(metadata.unwrap_or(&Value::Null)) {
+        Ok(metadata) => metadata,
+        Err(message) => return refuse(message),
+    };
+    let value = Value::Object(header.clone());
+    if read_adapter_metadata(&value)
+        .network_type
+        .as_deref()
+        .is_some_and(|kind| kind != "lora")
+    {
+        return refuse(
+            "only LoRA A/B bottleneck adapters are supported; LoKr/LoHa are not compatible".into(),
+        );
+    }
+    let mut pairs = std::collections::BTreeMap::<String, (Option<&Value>, Option<&Value>)>::new();
+    for (key, tensor) in header
+        .iter()
+        .filter(|(key, _)| key.as_str() != "__metadata__")
+    {
+        let (stem, down) = if let Some(stem) = key.strip_suffix(".lora_A.weight") {
+            (stem, true)
+        } else if let Some(stem) = key.strip_suffix(".lora_B.weight") {
+            (stem, false)
+        } else {
+            return refuse(format!(
+                "unrecognized tensor {key}; expected complete lora_A.weight/lora_B.weight pairs"
+            ));
+        };
+        let pair = pairs.entry(stem.to_owned()).or_default();
+        if down {
+            pair.0 = Some(tensor);
+        } else {
+            pair.1 = Some(tensor);
+        }
+    }
+    if pairs.is_empty() {
+        return refuse("adapter contains no LoRA projections".into());
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (stem, (down, up)) in pairs {
+        let Some((target, output, input)) = flux3_projection_shape(&stem) else {
+            return refuse(format!("unsupported target/key mapping {stem}; export pinned FLUX3 native or diffusers attention/MLP projections"));
+        };
+        if !seen.insert(target) {
+            return refuse(format!("duplicate mapped projection {stem}"));
+        }
+        let shape = |tensor: Option<&Value>| -> Option<Vec<u64>> {
+            let tensor = tensor?;
+            if !matches!(
+                tensor.get("dtype").and_then(Value::as_str),
+                Some("F32" | "F16" | "BF16")
+            ) {
+                return None;
+            }
+            tensor
+                .get("shape")?
+                .as_array()?
+                .iter()
+                .map(Value::as_u64)
+                .collect()
+        };
+        let Some(a) = shape(down) else {
+            return refuse(format!(
+                "{stem}: missing or invalid floating-point A matrix"
+            ));
+        };
+        let Some(b) = shape(up) else {
+            return refuse(format!(
+                "{stem}: missing or invalid floating-point B matrix"
+            ));
+        };
+        if a.len() != 2 || b.len() != 2 || a[0] == 0 || a[1] != input || b != [output, a[0]] {
+            return refuse(format!("{stem}: incompatible rank/shape A{a:?}, B{b:?}; expected [rank,{input}] and [{output},rank]"));
+        }
+        if declared_ranks.iter().any(|rank| *rank as u64 != a[0]) {
+            return refuse(format!(
+                "{stem}: every declared rank must match actual tensor rank {}",
+                a[0]
+            ));
+        }
+    }
+    None
+}
+
+fn flux3_projection_shape(stem: &str) -> Option<(String, u64, u64)> {
+    let stem = stem.strip_prefix("transformer.").unwrap_or(stem);
+    let stem = stem.strip_prefix("diffusion_model.").unwrap_or(stem);
+    let (parent, leaf) = if let Some(rest) = stem
+        .strip_prefix("mode_blocks.")
+        .or_else(|| stem.strip_prefix("content_mode_blocks."))
+    {
+        let mut parts = rest.splitn(3, '.');
+        let mode = parts.next()?;
+        let index = parts.next()?.parse::<usize>().ok()?;
+        if !["image", "image_cond"].contains(&mode) || index >= 5 {
+            return None;
+        }
+        (format!("content_mode_blocks.{mode}.{index}"), parts.next()?)
+    } else if let Some(rest) = stem.strip_prefix("txt_mode_blocks.") {
+        let (index, leaf) = rest.split_once('.')?;
+        let index = index.parse::<usize>().ok()?;
+        if index >= 5 {
+            return None;
+        }
+        (format!("txt_mode_blocks.{index}"), leaf)
+    } else {
+        let rest = stem
+            .strip_prefix("single_transformer_blocks.")
+            .or_else(|| stem.strip_prefix("single_blocks."))?;
+        let (index, leaf) = rest.split_once('.')?;
+        let index = index.parse::<usize>().ok()?;
+        if index >= 28 {
+            return None;
+        }
+        (format!("single_blocks.{index}"), leaf)
+    };
+    let (leaf, output, input) = match leaf {
+        "q_proj" | "attn.to_q" => ("q_proj", 3072, 3072),
+        "k_proj" | "attn.to_k" => ("k_proj", 3072, 3072),
+        "v_proj" | "attn.to_v" => ("v_proj", 3072, 3072),
+        "attn_out" | "attn.to_out.0" => ("attn_out", 3072, 3072),
+        "mlp_in" | "ff.linear_in" => ("mlp_in", 18432, 3072),
+        "mlp_out" | "ff.linear_out" => ("mlp_out", 3072, 9216),
+        _ => return None,
+    };
+    Some((format!("{parent}.{leaf}"), output, input))
 }
 
 /// Adapter `__metadata__` key naming the Iris task an adapter was trained for (gen-core's
@@ -7077,5 +7581,202 @@ mod tests {
         );
         // Passed directly as a file path, a sidecar is still not a safetensors file.
         assert_eq!(first_safetensors_path(&sidecar), None);
+    }
+    /// The header pinned diffusers 7ecb1e1 `save_lora_weights` writes: `transformer.`-packed
+    /// tensors AND `transformer.`-packed PEFT `lora_adapter_metadata` (lora_base.py:327,1105).
+    #[test]
+    fn flux3_diffusers_prefixed_peft_metadata_is_normalized_and_guarded() {
+        let model = json!({"id":"flux3_klein_base","family":"flux3"});
+        let entry = json!({});
+        let header = |patch: &dyn Fn(&mut Map<String, Value>)| {
+            let mut peft =
+                json!({"peft_type":"LORA","r":2,"lora_alpha":6,"use_rslora":false,"use_dora":false,
+                "fan_in_fan_out":false,"alpha_pattern":{},"rank_pattern":{},"bias":"none",
+                "target_modules":["to_q","to_k","to_v","to_out.0","linear_in","linear_out"]})
+                .as_object()
+                .unwrap()
+                .clone();
+            patch(&mut peft);
+            let packed: Map<String, Value> = peft
+                .into_iter()
+                .map(|(k, v)| (format!("transformer.{k}"), v))
+                .collect();
+            json!({
+                "__metadata__": {"format":"pt","base_model":"black-forest-labs/flux-3-image-klein-base",
+                    "base_revision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+                    "lora_adapter_metadata": serde_json::to_string_pretty(&packed).unwrap()},
+                "transformer.mode_blocks.image.1.attn.to_q.lora_A.weight": {"shape":[2,3072],"dtype":"F32"},
+                "transformer.mode_blocks.image.1.attn.to_q.lora_B.weight": {"shape":[3072,2],"dtype":"F32"}
+            })
+        };
+        let refusal =
+            |h: &Value| flux3_adapter_refusal(&model, "flux3_klein_base", "x", &entry, Some(h));
+        assert_eq!(
+            refusal(&header(&|_| {})),
+            None,
+            "diffusers-saved plain LoRA admits"
+        );
+        for (field, value) in [
+            ("use_rslora", json!(true)),
+            ("use_dora", json!(true)),
+            ("alpha_pattern", json!({"to_q":12})),
+            ("rank_pattern", json!({"to_q":8})),
+            ("r", json!(4)),
+        ] {
+            let h = header(&|p| {
+                p.insert(field.into(), value.clone());
+            });
+            assert!(refusal(&h).is_some(), "prefixed {field} must be refused");
+        }
+        let mut contradiction = header(&|_| {});
+        contradiction["__metadata__"]["lora_alpha"] = "12".into();
+        assert!(
+            refusal(&contradiction).is_some(),
+            "top-level alpha contradicts prefixed alpha"
+        );
+        let mut foreign = header(&|_| {});
+        let mut blob: Map<String, Value> = serde_json::from_str(
+            foreign["__metadata__"]["lora_adapter_metadata"]
+                .as_str()
+                .unwrap(),
+        )
+        .unwrap();
+        // Benign, otherwise consistent value: only the component prefix is wrong.
+        blob.insert("text_encoder.r".into(), json!(2));
+        foreign["__metadata__"]["lora_adapter_metadata"] =
+            serde_json::to_string(&blob).unwrap().into();
+        assert!(
+            refusal(&foreign).unwrap().contains("transformer"),
+            "another component's prefix"
+        );
+    }
+
+    #[test]
+    fn flux3_adapter_identity_projection_and_file_header_refusals() {
+        let header = json!({
+            "__metadata__": {"base_model": "black-forest-labs/flux-3-image-klein-base", "base_revision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4", "lora_alpha": "6"},
+            "transformer.mode_blocks.image.1.attn.to_q.lora_A.weight": {"shape": [2,3072], "dtype": "F32"},
+            "transformer.mode_blocks.image.1.attn.to_q.lora_B.weight": {"shape": [3072,2], "dtype": "F32"}
+        });
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("flux3"));
+        let metadata = read_adapter_metadata(&header);
+        assert_eq!(
+            metadata.base_model.as_deref(),
+            Some("black-forest-labs/flux-3-image-klein-base")
+        );
+        assert_eq!(
+            metadata.base_revision.as_deref(),
+            Some("1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4")
+        );
+        assert_eq!(metadata.network_type.as_deref(), Some("lora"));
+        let mut entry = json!({"baseModel":"flux3_klein_base", "baseRevision":"caller-guessed", "networkType":"lokr", "rank":99, "alpha":1}).as_object().unwrap().clone();
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
+        assert_eq!(
+            entry["baseModel"],
+            "black-forest-labs/flux-3-image-klein-base"
+        );
+        assert_eq!(
+            entry["baseRevision"],
+            "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"
+        );
+        assert_eq!(entry["networkType"], "lora");
+        assert!(
+            entry.get("rank").is_none(),
+            "the file declared no rank; do not preserve a caller guess"
+        );
+        assert_eq!(entry["alpha"].as_f64(), Some(6.0));
+        let legacy =
+            read_adapter_metadata(&json!({"__metadata__":{"base_model":"Wan-AI/Wan2.1-T2V-14B"}}));
+        assert!(legacy.base_model.is_none() && legacy.base_revision.is_none());
+        let model = json!({"id":"flux3_klein_base", "family":"flux3"});
+        let forged = json!({"baseModel":"black-forest-labs/flux-3-image-klein-base", "baseRevision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4", "networkType":"lora"});
+        assert!(
+            flux3_adapter_refusal(&model, "flux3_klein_base", "test", &forged, Some(&header))
+                .is_none()
+        );
+        let mut native = header.clone();
+        native["__metadata__"]
+            .as_object_mut()
+            .unwrap()
+            .remove("lora_alpha");
+        native["__metadata__"]["alpha"] = "6".into();
+        assert!(
+            flux3_adapter_refusal(&model, "flux3_klein_base", "test", &forged, Some(&native))
+                .is_none()
+        );
+        let mut peft = header.clone();
+        peft["__metadata__"]
+            .as_object_mut()
+            .unwrap()
+            .remove("lora_alpha");
+        peft["__metadata__"]["lora_adapter_metadata"] =
+            json!({"r":2,"lora_alpha":6,"peft_type":"LORA","use_rslora":false,"alpha_pattern":{}})
+                .to_string()
+                .into();
+        assert!(
+            flux3_adapter_refusal(&model, "flux3_klein_base", "test", &forged, Some(&peft))
+                .is_none()
+        );
+        let mut switched = header.clone();
+        switched["__metadata__"]["lora_adapter_metadata"] =
+            json!({"use_rslora":true}).to_string().into();
+        assert!(flux3_adapter_refusal(
+            &model,
+            "flux3_klein_base",
+            "test",
+            &forged,
+            Some(&switched)
+        )
+        .unwrap()
+        .contains("use_rslora"));
+        assert!(
+            flux3_adapter_refusal(&model, "flux3_klein", "test", &forged, Some(&header))
+                .unwrap()
+                .contains("base_model")
+        );
+        assert!(
+            flux3_adapter_refusal(&model, "flux3_klein_base", "test", &forged, None)
+                .unwrap()
+                .contains("header")
+        );
+        for (field, value) in [
+            ("base_model", "wrong/repository"),
+            ("base_revision", "0000000000000000000000000000000000000000"),
+            ("lora_alpha", "NaN"),
+        ] {
+            let mut changed = header.clone();
+            changed["__metadata__"][field] = value.into();
+            assert!(flux3_adapter_refusal(
+                &model,
+                "flux3_klein_base",
+                "test",
+                &forged,
+                Some(&changed)
+            )
+            .is_some());
+        }
+        let mut changed = header.clone();
+        changed["transformer.mode_blocks.image.1.attn.to_q.lora_B.weight"]["shape"] =
+            json!([3072, 3]);
+        assert!(
+            flux3_adapter_refusal(&model, "flux3_klein_base", "test", &forged, Some(&changed))
+                .unwrap()
+                .contains("rank")
+        );
+        let mut changed = header.clone();
+        changed["ignored.weight"] = json!({"shape":[1],"dtype":"F32"});
+        assert!(
+            flux3_adapter_refusal(&model, "flux3_klein_base", "test", &forged, Some(&changed))
+                .unwrap()
+                .contains("ignored.weight")
+        );
+        assert!(flux3_adapter_refusal(
+            &json!({"family":"flux"}),
+            "flux_dev",
+            "legacy",
+            &json!({}),
+            None
+        )
+        .is_none());
     }
 }

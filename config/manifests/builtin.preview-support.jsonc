@@ -7,10 +7,10 @@
   ],
   "generatedFrom": {
     "candle": {
-      "inferenceRevision": "a36b78ebb81a5bcf8033c7d1d008df602f481d95"
+      "inferenceRevision": "6f9bc0f23fe74a223e843a5c76208e8541c2a2ff"
     },
     "mlx": {
-      "inferenceRevision": "a36b78ebb81a5bcf8033c7d1d008df602f481d95"
+      "inferenceRevision": "6f9bc0f23fe74a223e843a5c76208e8541c2a2ff"
     }
   },
   "models": {
@@ -75,6 +75,14 @@
     "flux2_klein_9b_true_v2": {
       "candle": true,
       "mlx": true
+    },
+    "flux3_klein": {
+      "candle": false,
+      "mlx": false
+    },
+    "flux3_klein_base": {
+      "candle": false,
+      "mlx": false
     },
     "flux_dev": {
       "candle": true,

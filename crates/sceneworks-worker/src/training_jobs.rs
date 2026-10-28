@@ -65,6 +65,149 @@ use gen_core::{
     TrainingOutput, TrainingProgress, TrainingRequest, WeightsSource,
 };
 
+/// Model-less terminal witness. Uses the exact production config mapper and pure contracts;
+/// reads ONLY the frozen config JSON, never weights, tensors, registries or devices.
+pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, String> {
+    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    {
+        let _ = plan;
+        Err("unsupported: native training contracts are not enabled".to_owned())
+    }
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION, KERNELS};
+        if plan.schema_version != 1
+            || plan.plan_version != TRAINING_PLAN_VERSION
+            || plan.target.family != "flux3"
+            || !KERNELS.contains(&plan.target.kernel.as_str())
+            || plan.target.base_model != BASE_ID
+            || plan.target.base_model_repo.as_deref() != Some(BASE_REPO)
+        {
+            return Err("witness requires the frozen dense base target".to_owned());
+        }
+        let base = Path::new(&plan.target.base_model_path);
+        if base.file_name().and_then(|v| v.to_str()) != Some(BASE_REVISION) {
+            return Err("witness requires the exact pinned base snapshot".to_owned());
+        }
+        let target =
+            sceneworks_core::training::flux3::target(plan.target.kernel == "flux3_klein_edit_lora");
+        sceneworks_core::training::flux3::validate(&target, &plan.config)
+            .map_err(|_| "witness config refused".to_owned())?;
+        crate::flux3_snapshot_member(base, &base.join("config.json"), false)?;
+        if std::fs::metadata(base.join("config.json"))
+            .map_err(|_| "witness config is unavailable".to_owned())?
+            .len()
+            > 1024 * 1024
+        {
+            return Err("witness config exceeds bound".to_owned());
+        }
+        // Pre-download PLANNING witness: config-only metadata (no header/tensor reads), bound to
+        // the catalog base model. Checkpoint identity is the post-download header resolution.
+        let cfg = gen_core::flux3::Flux3MetadataConfig::from_dir(base)
+            .and_then(|metadata| metadata.for_model(BASE_ID))
+            .map_err(|_| "witness config JSON refused".to_owned())?;
+        cfg.validate_supported()
+            .map_err(|_| "witness release format refused".to_owned())?;
+        gen_core::flux3::training::identity::validate_release_config(&cfg)
+            .map_err(|_| "witness requires canonical undistilled graph".to_owned())?;
+        let mut normalized = engine_training_config(plan);
+        normalized.resume = false;
+        // Byte-identical to gen_core::flux3::training::identity::build; not a JS approximation.
+        let config_sha256 = format!(
+            "{:x}",
+            Sha256::digest(
+                format!(
+                    "{normalized:?}|trigger_words={:?}",
+                    plan.output.trigger_words
+                )
+                .as_bytes()
+            )
+        );
+        let targets =
+            gen_core::flux3::training::lora_targets(&cfg.dit, &normalized.lora_target_modules)
+                .map_err(|_| "witness factor selection refused".to_owned())?;
+        let mut factors = BTreeMap::new();
+        for target in targets {
+            factors.insert(
+                format!("{}.lora_A.weight", target.native),
+                vec![normalized.rank as usize, target.input],
+            );
+            factors.insert(
+                format!("{}.lora_B.weight", target.native),
+                vec![target.output, normalized.rank as usize],
+            );
+        }
+        let request = TrainingRequest {
+            items: plan
+                .dataset
+                .items
+                .iter()
+                .map(|item| TrainingItem {
+                    image_path: PathBuf::from(&item.image_path),
+                    caption: item.caption.clone(),
+                    control_image_path: item.control_image_path.as_ref().map(PathBuf::from),
+                    reference_image_paths: item
+                        .reference_image_paths
+                        .iter()
+                        .map(PathBuf::from)
+                        .collect(),
+                    subject_mask_path: None,
+                    model_options: Default::default(),
+                })
+                .collect(),
+            config: normalized.clone(),
+            output_dir: PathBuf::from(&plan.output.output_dir),
+            file_name: plan.output.file_name.clone(),
+            trigger_words: plan.output.trigger_words.clone(),
+            cancel: CancelFlag::new(),
+        };
+        let options = gen_core::flux3::training::options::TrainingOptions::parse(&request)
+            .map_err(|_| "witness source options refused".to_owned())?;
+        let backend = if cfg!(target_os = "macos") {
+            "mlx"
+        } else {
+            "candle-cuda"
+        };
+        let active_factor_keys: Vec<_> = factors
+            .keys()
+            .filter(|name| options.workflow.trains(name.as_str()))
+            .cloned()
+            .collect();
+        let configuration = json!({
+            "optimizer": "adamw",
+            "learning_rate": format!("{:?}", normalized.learning_rate),
+            "rank": normalized.rank.to_string(),
+            "alpha": format!("{:?}", normalized.alpha as f64),
+            "scaling": "alpha/rank",
+            "precision": options.precision.name(),
+            "backend": format!("{backend};os={};arch={}", std::env::consts::OS, std::env::consts::ARCH),
+            "scheduler": format!("{:?};warmup={};cycles={};power={}", options.scheduler, normalized.lr_warmup_steps, options.cycles, options.power),
+            "accumulation": normalized.gradient_accumulation.to_string(),
+            "accumulation_scaling": "loss/configured_N_before_backward; epoch-tail flush",
+            "rng": gen_core::flux3::training::rng::RNG_ALGORITHM,
+            "config_sha256": config_sha256
+        });
+        Ok(json!({
+            "formatVersion": 1,
+            "configSha256": config_sha256,
+            "configuration": configuration,
+            "factors": factors,
+            "activeFactorKeys": active_factor_keys,
+            "trainingReference": gen_core::flux3::training::TRAINING_REFERENCE_REVISION,
+            "rngAlgorithm": gen_core::flux3::training::rng::RNG_ALGORITHM,
+            "baseRepository": BASE_REPO,
+            "baseRevision": BASE_REVISION,
+            "rank": normalized.rank,
+            "alpha": normalized.alpha,
+            "learningRate": normalized.learning_rate,
+            "seed": normalized.seed,
+            "accumulation": normalized.gradient_accumulation,
+            "resolution": normalized.resolution,
+            "steps": normalized.steps
+        }))
+    }
+}
+
 /// Run a `lora_train` job: parse the resolved plan, then either validate it
 /// (dry run, the default) or execute real training. The dry-run/execute split was
 /// ported from the retired Python worker's `run_lora_train_job`.
@@ -851,6 +994,19 @@ fn preflight_training_run(
 }
 
 fn validate_training_target_config(plan: &TrainingPlan) -> WorkerResult<&'static str> {
+    if sceneworks_core::training::flux3::KERNELS.contains(&plan.target.kernel.as_str()) {
+        let target =
+            sceneworks_core::training::flux3::target(plan.target.kernel == "flux3_klein_edit_lora");
+        if plan.target.base_model != target.base_model
+            || plan.target.base_model_repo != target.base_model_repo
+        {
+            return Err(WorkerError::InvalidPayload(
+                "FLUX.3 training requires the publisher base identity.".to_owned(),
+            ));
+        }
+        sceneworks_core::training::validate_training_config_for_target(&target, &plan.config)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    }
     let engine_id = engine_trainer_id_for(&plan.target.kernel, &plan.target.base_model)
         .ok_or_else(|| {
             WorkerError::InvalidPayload(format!(
@@ -1288,6 +1444,10 @@ fn validate_weights_free_training_request(
             "Native trainer '{engine_id}' is not registered in this worker runtime."
         ))
     })?;
+    if engine_id == "flux3_klein_base" {
+        gen_core::flux3::training::options::TrainingOptions::parse(request)
+            .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
+    }
     gen_core::train::validate_control_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
@@ -2270,6 +2430,10 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             "iris_3b_restore" => Some(gen_core::iris::restoration_train::TRAINER_ID),
             _ => None,
         },
+        // Both FLUX.3 workflows share the native trainer, but never the distilled generation base.
+        "flux3_klein_lora" | "flux3_klein_edit_lora" => {
+            (base_model == "flux3_klein_base").then_some("flux3_klein_base")
+        }
         // Qwen Image 2.1 T2I LoRA/LoKr (epic 24107 S11, sc-24159): the engine registers its trainer
         // under the inference-generator id of the training base, `qwen_image_2_1`. Base-gated so a
         // forged plan naming the distinct 2512 `qwen_image` (or the 2512 Edit model) can never load
@@ -2733,10 +2897,31 @@ pub(crate) fn map_engine_config(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn engine_training_config(plan: &TrainingPlan) -> TrainingConfig {
-    crate::iris_curricula::apply_iris_train_dtype(
-        finalize_training_config(map_training_config(&plan.config), plan),
-        plan,
-    )
+    let flux3 = sceneworks_core::training::flux3::KERNELS.contains(&plan.target.kernel.as_str());
+    let mapped = if flux3 {
+        // Legacy clients may omit advanced fields. Seed this family's actual source profile,
+        // rather than inheriting the generic mapper's sigmoid/zero-decay defaults.
+        let mut source = plan.config.clone();
+        let mut defaults =
+            sceneworks_core::training::flux3::target(plan.target.kernel == "flux3_klein_edit_lora")
+                .defaults
+                .advanced;
+        defaults.extend(source.advanced);
+        source.advanced = defaults;
+        map_training_config(&source)
+    } else {
+        map_training_config(&plan.config)
+    };
+    let mut config =
+        crate::iris_curricula::apply_iris_train_dtype(finalize_training_config(mapped, plan), plan);
+    if flux3 {
+        // Common host fields have already been mapped to typed fields. In particular, copying
+        // advanced.resume into the opaque bag changes the native configuration hash on retry even
+        // though native identity deliberately normalizes the typed resume flag. Only source-owned
+        // intent belongs in this namespace; product/provenance keys must not strand checkpoints.
+        config.model_options.retain(|key, _| key == "flux3");
+    }
+    config
 }
 
 /// One progress event streamed from the blocking training thread to the async side.
@@ -2890,6 +3075,25 @@ impl TrainerLoadInputs {
             &plan.target.base_model_path,
             "Training baseModelPath",
         )?;
+        if engine_id == "flux3_klein_base" {
+            use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+            let trusted = crate::flux3_receipted_snapshot(&settings.data_dir, BASE_REPO, BASE_REVISION, BASE_ID)
+                .ok_or_else(|| WorkerError::InvalidPayload("FLUX.3 training requires the installed receipt-backed publisher base at its pinned revision.".to_owned()))?;
+            let actual = std::fs::canonicalize(&weights_dir).map_err(|error| {
+                WorkerError::InvalidPayload(format!("FLUX.3 baseModelPath: {error}"))
+            })?;
+            let expected = std::fs::canonicalize(&trusted).map_err(|error| {
+                WorkerError::InvalidPayload(format!("FLUX.3 publisher base: {error}"))
+            })?;
+            if actual != expected {
+                return Err(WorkerError::InvalidPayload(
+                    "FLUX.3 baseModelPath does not name the pinned publisher training base."
+                        .to_owned(),
+                ));
+            }
+            crate::flux3_runtime_bundle_check(&trusted, BASE_ID)
+                .map_err(WorkerError::InvalidPayload)?;
+        }
         // LTX-2.3's Gemma-3 text encoder lives OUTSIDE `weights_dir` — thread the bundled sibling onto
         // the trainer `LoadSpec` so a self-contained install trains without a separate gemma download
         // (sc-9989).
@@ -4940,6 +5144,147 @@ mod tests {
         serde_json::from_value(value).expect("plan deserializes")
     }
 
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[test]
+    fn flux3_pure_config_witness_needs_no_weights_and_binds_mapper_options() {
+        use sceneworks_core::training::flux3::{BASE_ID, BASE_REPO, BASE_REVISION};
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join(BASE_REVISION);
+        std::fs::create_dir(&base).unwrap();
+        let config = json!({
+            // Real released base key structure (1469d27c): same `model` as distilled, NO
+            // `dit.flow_map` key (absent = false), CFG sampler defaults.
+            "format_version":1,"model":"flux-3-image-klein","quantization":null,
+            "torch_dtype":"bfloat16",
+            "dit":{"hidden":3072,"heads":24,"depth":5,"depth_single":28,
+                "mlp_ratio":3.0,"axes_dim":[32,32,32,32],"theta":10000,
+                "in_channels":{"image":128,"image_cond":128,"text":20480},
+                "out_modes":["image"],"vec_in_dim":null,"image_rope_scale":0.5},
+            "text_encoder":{"path":"text_encoder","tokenizer":"text_encoder",
+                "layers":[4,8,12,16,20,24,28,32],"pad_multiple":80,
+                "max_tokens":8192,"dtype":"bfloat16"},
+            "vae":{"path":"ae.safetensors","dtype":"float32"},
+            "sampler":{"steps":50,"guidance":3.5,"alpha":6.93,"size":[1024,1024]}
+        });
+        std::fs::write(base.join("config.json"), config.to_string()).unwrap();
+        let mut value = plan_json(
+            temp.path(),
+            "flux3_klein_lora",
+            BASE_ID,
+            "lora",
+            &["absent.png"],
+        );
+        value["target"]["family"] = json!("flux3");
+        value["target"]["baseModelRepo"] = json!(BASE_REPO);
+        value["target"]["baseModelPath"] = json!(base);
+        value["config"] =
+            serde_json::to_value(sceneworks_core::training::flux3::target(false).defaults).unwrap();
+        let mut plan = parse(value);
+        let before = flux3_training_config_witness(&plan).unwrap();
+        assert!(before["factors"].as_object().is_some_and(|f| !f.is_empty()));
+        let active = before["activeFactorKeys"].as_array().unwrap();
+        assert!(!active.is_empty());
+        assert!(active.iter().all(|key| {
+            !key.as_str()
+                .unwrap()
+                .starts_with("content_mode_blocks.image_cond.")
+                && before["factors"].get(key.as_str().unwrap()).is_some()
+        }));
+        plan.config.advanced.get_mut("flux3").unwrap()["caption_dropout"] = json!(0.25);
+        let changed = flux3_training_config_witness(&plan).unwrap();
+        assert_ne!(before["configSha256"], changed["configSha256"]);
+        plan.config.advanced.insert("resume".into(), json!(true));
+        assert_eq!(
+            changed["configSha256"],
+            flux3_training_config_witness(&plan).unwrap()["configSha256"]
+        );
+        assert_eq!(
+            std::fs::read_dir(&base).unwrap().count(),
+            1,
+            "only config exists: no weight, tokenizer or dataset reads"
+        );
+        // Compare the witness with the actual native identity builder, not another
+        // independently restated Debug/shape formula. Only a declared tiny byte fixture
+        // is read by request_fingerprint; no weights, preprocessing, tensors or device.
+        let bytes_file = temp.path().join("declared-fingerprint-fixture.bin");
+        std::fs::write(&bytes_file, b"DECLARED_SYNTHETIC_DATASET_BYTES").unwrap();
+        let cfg = gen_core::flux3::Flux3MetadataConfig::from_dir(&base)
+            .and_then(|metadata| metadata.for_model(BASE_ID))
+            .unwrap();
+        for rank in [4, 8] {
+            plan.config.rank = rank;
+            let witness = flux3_training_config_witness(&plan).unwrap();
+            let request = TrainingRequest {
+                items: vec![TrainingItem {
+                    image_path: bytes_file.clone(),
+                    caption: "declared private fixture caption".into(),
+                    control_image_path: None,
+                    reference_image_paths: Vec::new(),
+                    subject_mask_path: None,
+                    model_options: Default::default(),
+                }],
+                config: engine_training_config(&plan),
+                output_dir: temp.path().join("never-written"),
+                file_name: "never-written.safetensors".into(),
+                trigger_words: plan.output.trigger_words.clone(),
+                cancel: CancelFlag::new(),
+            };
+            let options =
+                gen_core::flux3::training::options::TrainingOptions::parse(&request).unwrap();
+            let targets = gen_core::flux3::training::lora_targets(
+                &cfg.dit,
+                &request.config.lora_target_modules,
+            )
+            .unwrap();
+            let backend = if cfg!(target_os = "macos") {
+                "mlx"
+            } else {
+                "candle-cuda"
+            };
+            let mut native = gen_core::flux3::training::identity::build(
+                &request,
+                &cfg,
+                &options,
+                BTreeMap::from([("DECLARED_FIXTURE_ONLY".into(), "d".repeat(64))]),
+                &targets,
+                &[],
+                backend,
+            )
+            .unwrap();
+            assert_eq!(
+                witness["configSha256"],
+                json!(native.configuration["config_sha256"])
+            );
+            assert_eq!(
+                witness["factors"],
+                serde_json::to_value(&native.factors).unwrap()
+            );
+            native.configuration.remove("recipe_sha256");
+            assert_eq!(
+                witness["configuration"],
+                serde_json::to_value(&native.configuration).unwrap()
+            );
+            assert!(!temp.path().join("never-written").exists());
+        }
+        plan.target.base_model = "flux3_klein".into();
+        assert!(flux3_training_config_witness(&plan).is_err());
+    }
+
+    #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+    #[test]
+    fn flux3_witness_neither_backend_is_typed_unsupported_without_io() {
+        let plan = parse(plan_json(
+            Path::new("absent"),
+            "flux3_klein_lora",
+            "flux3_klein_base",
+            "lora",
+            &[],
+        ));
+        assert!(flux3_training_config_witness(&plan)
+            .unwrap_err()
+            .starts_with("unsupported:"));
+    }
+
     /// A dataset of `count` distinct images `img00.png…` under `<data>/datasets/ds-1/images`, with
     /// a stored subject mask for each index in `masked` (all-black when also in `empty`) — the
     /// on-disk state the sc-2126 mask job leaves (content-hash keyed PNG + index record).
@@ -5750,6 +6095,8 @@ mod tests {
         // Iris-3B trainers declare no epic 2123 technique on either backend.
         let expected: &[&str] = if cfg!(target_os = "macos") {
             &[
+                "flux3_klein_lora",
+                "flux3_klein_edit_lora",
                 "ltx_2_5_video_lora",
                 "iris_3b_generation",
                 "iris_3b_depth",
@@ -5758,6 +6105,8 @@ mod tests {
         } else {
             &[
                 "krea_2_control",
+                "flux3_klein_lora",
+                "flux3_klein_edit_lora",
                 "ltx_2_5_video_lora",
                 "iris_3b_generation",
                 "iris_3b_depth",
@@ -5949,6 +6298,8 @@ mod tests {
         assert_eq!(
             withheld,
             [
+                "flux3_klein_lora",
+                "flux3_klein_edit_lora",
                 "ltx_2_5_video_lora",
                 "iris_3b_generation",
                 "iris_3b_depth",
@@ -8684,6 +9035,366 @@ mod tests {
                 .and_then(|value| value.get("frames")),
             Some(&json!(89))
         );
+    }
+
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    #[test]
+    fn flux3_native_request_keeps_options_paths_resume_and_exact_base() {
+        use gen_core::flux3::training::{
+            checkpoint::{publish_bytes, ResumePolicy, TrainingCursor},
+            controller, identity, rng,
+        };
+        use gen_core::flux3::{
+            DitConfig, Flux3Config, SamplerConfig, TextEncoderConfig, VaeConfig,
+        };
+        use sha2::Digest;
+        // A metadata/admission fixture, NOT loaded weights or a native optimizer execution.
+        fn observed_identity(
+            request: &TrainingRequest,
+        ) -> gen_core::flux3::training::ResumeIdentity {
+            let config = Flux3Config {
+                format_version: 1,
+                model: "declared synthetic identity fixture".into(),
+                quantization: None,
+                torch_dtype: "bf16".into(),
+                dit: DitConfig {
+                    hidden: 3072,
+                    heads: 24,
+                    depth: 5,
+                    depth_single: 28,
+                    mlp_ratio: 3.0,
+                    axes_dim: vec![32, 32, 32, 32],
+                    theta: 10000.0,
+                    image_in_channels: 128,
+                    image_cond_in_channels: 128,
+                    text_in_channels: 20480,
+                    out_modes: vec!["image".into()],
+                    vec_in_dim: None,
+                    image_rope_scale: 0.5,
+                    flow_map: false,
+                },
+                text_encoder: TextEncoderConfig {
+                    path: "text_encoder".into(),
+                    tokenizer: "text_encoder".into(),
+                    layers: vec![4, 8, 12, 16, 20, 24, 28, 32],
+                    pad_multiple: 80,
+                    max_tokens: 8192,
+                    dtype: "bf16".into(),
+                },
+                vae: VaeConfig {
+                    path: "ae.safetensors".into(),
+                    dtype: "bf16".into(),
+                },
+                sampler: SamplerConfig {
+                    steps: 50,
+                    guidance: Some(3.5),
+                    alpha: 1.0,
+                    size: [512, 512],
+                },
+            };
+            identity::validate_release_config(&config).unwrap();
+            let options =
+                gen_core::flux3::training::options::TrainingOptions::parse(request).unwrap();
+            let targets = gen_core::flux3::training::lora_targets(
+                &config.dit,
+                &request.config.lora_target_modules,
+            )
+            .unwrap();
+            let artifacts = std::collections::BTreeMap::from([(
+                "declared synthetic artifact".into(),
+                format!(
+                    "{:x}",
+                    sha2::Sha256::digest(b"synthetic bytes, not a production artifact pin")
+                ),
+            )]);
+            identity::build(
+                request,
+                &config,
+                &options,
+                artifacts,
+                &targets,
+                &[],
+                "synthetic-admission-only",
+            )
+            .unwrap()
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("datasets").join("ds-1").join("x.png");
+        let reference = image.with_file_name("ref.png");
+        std::fs::create_dir_all(image.parent().unwrap()).unwrap();
+        std::fs::write(&image, b"synthetic path fixture").unwrap();
+        std::fs::write(&reference, b"synthetic reference fixture").unwrap();
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HOME", ""),
+            ("HF_HUB_CACHE", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let settings = test_settings(dir.path());
+        let placeholder = dir.path().join("models").join("flux3_klein_base");
+        std::fs::create_dir_all(&placeholder).unwrap();
+        std::fs::write(placeholder.join("config.json"), "{}").unwrap();
+        for edit in [false, true] {
+            let target = sceneworks_core::training::flux3::target(edit);
+            let mut value = plan_json(
+                dir.path(),
+                &target.kernel,
+                &target.base_model,
+                "lora",
+                &[&image.display().to_string()],
+            );
+            value["config"] = serde_json::to_value(&target.defaults).unwrap();
+            value["target"]["baseModelRepo"] = json!(target.base_model_repo);
+            value["config"]["advanced"]["flux3"]["caption_dropout"] = json!(0.37);
+            value["config"]["advanced"]["resume"] = json!(true);
+            value["config"]["rank"] = json!(8);
+            value["config"]["alpha"] = json!(12);
+            value["config"]["gradientAccumulation"] = json!(2);
+            if edit {
+                value["dataset"]["items"][0]["referenceImagePaths"] =
+                    json!([reference.display().to_string()]);
+            }
+            let mut plan = parse(value);
+            let mut missing_receipt = plan.clone();
+            missing_receipt.target.base_model_path = placeholder.display().to_string();
+            let error = TrainerLoadInputs::resolve(&settings, &missing_receipt, "flux3_klein_base")
+                .err()
+                .expect("a dry-plan placeholder must never load as an installed base");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(message) if message.contains("receipt-backed"))
+            );
+            let mut omitted = plan.clone();
+            for key in ["timestepType", "weightDecay", "flux3"] {
+                omitted.config.advanced.remove(key);
+            }
+            let legacy = engine_training_config(&omitted);
+            assert_eq!(legacy.timestep_type, "uniform");
+            assert!((legacy.weight_decay - 0.0001).abs() < f32::EPSILON);
+            assert_eq!(
+                legacy.model_options["flux3"]["mode"],
+                json!(if edit { "edit" } else { "captioned" })
+            );
+            std::fs::create_dir_all(&plan.output.output_dir).unwrap();
+            let mut prepared = PreparedTrainingInputs::default();
+            let mut request =
+                training_request_from_plan(&settings, &plan, &mut prepared, false).unwrap();
+            for choice in target.limits["timestepTypes"].as_array().unwrap() {
+                let mut choice_plan = plan.clone();
+                choice_plan
+                    .config
+                    .advanced
+                    .insert("timestepType".into(), choice.clone());
+                let choice_request =
+                    training_request_from_plan(&settings, &choice_plan, &mut prepared, false)
+                        .unwrap();
+                let name = choice.as_str().unwrap();
+                assert_eq!(choice_request.config.timestep_type, name);
+                let expected = match name {
+                    "uniform" | "linear" => gen_core::flux3::training::Weighting::None,
+                    "sigmoid" | "logit_normal" => gen_core::flux3::training::Weighting::LogitNormal,
+                    "mode" => gen_core::flux3::training::Weighting::Mode,
+                    "cosmap" => gen_core::flux3::training::Weighting::Cosmap,
+                    "sigma_sqrt" => gen_core::flux3::training::Weighting::SigmaSqrt,
+                    _ => panic!("unimplemented advertised timestep {name}"),
+                };
+                assert_eq!(
+                    gen_core::flux3::training::options::TrainingOptions::parse(&choice_request)
+                        .unwrap()
+                        .weighting,
+                    expected
+                );
+            }
+            assert_eq!(engine_trainer_id(&plan), Some("flux3_klein_base"));
+            assert!(request.config.resume);
+            assert_eq!(request.config.rank, 8);
+            assert_eq!(request.config.alpha, 12.0);
+            assert_eq!(
+                request.config.model_options["flux3"]["caption_dropout"],
+                json!(0.37)
+            );
+            assert_eq!(
+                request.items[0].reference_image_paths,
+                if edit {
+                    vec![std::fs::canonicalize(&reference).unwrap()]
+                } else {
+                    Vec::new()
+                }
+            );
+            assert_eq!(
+                request.items[0].image_path,
+                std::fs::canonicalize(&image).unwrap()
+            );
+            assert_eq!(
+                request.output_dir,
+                std::fs::canonicalize(&plan.output.output_dir).unwrap()
+            );
+            assert_eq!(request.file_name, plan.output.file_name);
+            gen_core::flux3::training::options::TrainingOptions::parse(&request).unwrap();
+            assert_eq!(
+                request
+                    .config
+                    .model_options
+                    .keys()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+                ["flux3"]
+            );
+            // Simulate the product retry: same stored plan/output/dataset; only advanced.resume
+            // changes. Use the real native identity builder, not a host approximation of its hash.
+            let resumed_identity = observed_identity(&request);
+            plan.config.advanced.insert("resume".into(), json!(false));
+            let original =
+                training_request_from_plan(&settings, &plan, &mut prepared, false).unwrap();
+            resumed_identity
+                .ensure_matches(&observed_identity(&original))
+                .unwrap();
+            let cursor = TrainingCursor {
+                micro_step: 1,
+                update_step: 0,
+                accumulation_count: 1,
+                sampler_epoch: 0,
+                sampler_cursor: 1,
+                rng_state: rng::state_record(request.config.seed, 1),
+                last_loss_bits: Some(0.5f32.to_bits()),
+            };
+            let policy = ResumePolicy {
+                total_micro_steps: request.config.steps as u64,
+                accumulation: 2,
+                sampler_len: 1,
+            };
+            cursor
+                .validate(
+                    policy.total_micro_steps,
+                    policy.accumulation,
+                    policy.sampler_len,
+                )
+                .unwrap();
+            let metadata = json!({"__metadata__": {
+                "format":"flux3-native-training-resume-v1", "identity":resumed_identity.to_metadata().unwrap(),
+                "policy":policy.fingerprint(), "cursor":cursor.to_metadata().unwrap()
+            }, "synthetic.optimizer.exp_avg":{"dtype":"F32","shape":[1],"data_offsets":[0,4]},
+               "synthetic.pending_gradient":{"dtype":"F32","shape":[1],"data_offsets":[4,8]}});
+            let header = serde_json::to_vec(&metadata).unwrap();
+            let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
+            bytes.extend(header);
+            bytes.extend(0.25f32.to_le_bytes());
+            bytes.extend(0.75f32.to_le_bytes());
+            std::fs::create_dir_all(&request.output_dir).unwrap();
+            let stem = controller::output_stem(&request.file_name).unwrap();
+            let saved = publish_bytes(
+                &request.output_dir,
+                &controller::checkpoint_name(stem, 1, true),
+                &bytes,
+                &request.cancel,
+            )
+            .unwrap();
+            let admit = |identity: &gen_core::flux3::training::ResumeIdentity| {
+                controller::find_resume(
+                    &request.output_dir,
+                    stem,
+                    identity,
+                    policy,
+                    "flux3-native-training-resume-v1",
+                    request.config.seed,
+                    &request.cancel,
+                )
+            };
+            assert_eq!(admit(&resumed_identity).unwrap(), Some(saved.clone()));
+            assert_eq!(std::fs::read(&saved).unwrap(),bytes,"optimizer and pending-gradient payload must not be rewritten by retry mapping/admission");
+            let read = gen_core::weightsmeta::safetensors_file_metadata(&saved).unwrap();
+            assert_eq!(
+                TrainingCursor::from_metadata(&read["cursor"]).unwrap(),
+                cursor
+            );
+            // A product duplicate forwards a FRESH checkpoint namespace and resume=false. Even
+            // native checkpoint lookup/owned restart cleanup there cannot touch the source bundle.
+            let mut duplicate_plan = plan.clone();
+            duplicate_plan.output.lora_id = format!("lora_duplicate_{edit}");
+            duplicate_plan.output.output_dir = dir
+                .path()
+                .join("loras")
+                .join(&duplicate_plan.output.lora_id)
+                .display()
+                .to_string();
+            duplicate_plan
+                .config
+                .advanced
+                .insert("resume".into(), json!(false));
+            std::fs::create_dir_all(&duplicate_plan.output.output_dir).unwrap();
+            let duplicate =
+                training_request_from_plan(&settings, &duplicate_plan, &mut prepared, false)
+                    .unwrap();
+            assert!(!duplicate.config.resume);
+            assert_eq!(
+                duplicate.output_dir,
+                std::fs::canonicalize(&duplicate_plan.output.output_dir).unwrap()
+            );
+            assert_ne!(duplicate.output_dir, request.output_dir);
+            assert_eq!(duplicate.file_name, request.file_name);
+            assert_eq!(
+                duplicate.config.model_options,
+                original.config.model_options
+            );
+            assert_eq!(
+                controller::find_resume(
+                    &duplicate.output_dir,
+                    stem,
+                    &observed_identity(&duplicate),
+                    policy,
+                    "flux3-native-training-resume-v1",
+                    duplicate.config.seed,
+                    &duplicate.cancel
+                )
+                .unwrap(),
+                None
+            );
+            assert_eq!(
+                crate::paths::remove_training_resume_bundles(&duplicate.output_dir, stem).unwrap(),
+                0
+            );
+            assert_eq!(std::fs::read(&saved).unwrap(), bytes);
+            assert_eq!(admit(&resumed_identity).unwrap(), Some(saved.clone()));
+            let mut wrong_model = resumed_identity.clone();
+            wrong_model.base_revision = "f".repeat(40);
+            assert!(matches!(
+                admit(&wrong_model),
+                Err(gen_core::Error::Unsupported(_))
+            ));
+            request
+                .config
+                .model_options
+                .get_mut("flux3")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("caption_dropout".into(), json!(0.6));
+            let changed_options = observed_identity(&request);
+            assert!(matches!(
+                admit(&changed_options),
+                Err(gen_core::Error::Unsupported(_))
+            ));
+            request
+                .config
+                .model_options
+                .get_mut("flux3")
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert("caption_dropout".into(), json!(0.37));
+            std::fs::write(&image, b"changed dataset bytes").unwrap();
+            let changed_data = observed_identity(&request);
+            assert!(matches!(
+                admit(&changed_data),
+                Err(gen_core::Error::Unsupported(_))
+            ));
+            std::fs::write(&image, b"synthetic path fixture").unwrap();
+            std::fs::remove_file(saved).unwrap();
+            plan.target.base_model = "flux3_klein".to_owned();
+            assert!(engine_trainer_id(&plan).is_none());
+            assert!(validate_training_target_config(&plan).is_err());
+        }
     }
 
     /// sc-14056 / sc-14980 — the TRAINING seam must ask for the DENSE tier, by name.

@@ -349,7 +349,7 @@ export function catalogAxes(model, backend, poseFamilies, baseProvider) {
   const downloads = (model.downloads ?? [])
     .filter((download) => bundled || servesLane(download))
     .map((download) => download.variant)
-    .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
+    .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|fp8r|int\d+)/.test(variant));
   const dense =
     model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
   const advertised =

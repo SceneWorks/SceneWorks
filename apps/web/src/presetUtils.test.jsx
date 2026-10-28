@@ -81,6 +81,27 @@ describe("loraMatchesModel — Iris task gate (sc-25681)", () => {
   });
 });
 
+describe("loraMatchesModel — exact FLUX3 checkpoint identity", () => {
+  const base = {
+    id: "flux3_klein_base", family: "flux3",
+    loraCompatibility: { families: ["flux3"], baseModel: "black-forest-labs/flux-3-image-klein-base", baseRevision: "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4", adapterKinds: ["lora"] },
+  };
+  const compatible = { id: "adapter", family: "flux3", baseModel: base.loraCompatibility.baseModel, baseRevision: base.loraCompatibility.baseRevision, networkType: "lora" };
+  it.each([
+    ["matching identity", {}, true],
+    ["zero explicit user weight", { weight: 0 }, true],
+    ["another checkpoint", { baseModel: "black-forest-labs/flux-3-image-klein" }, false],
+    ["another revision", { baseRevision: "0000000000000000000000000000000000000000" }, false],
+    ["missing revision", { baseRevision: undefined }, false],
+    ["adapter source revision is not base revision", { baseRevision: undefined, source: { revision: base.loraCompatibility.baseRevision } }, false],
+    ["unsupported LoKr", { networkType: "lokr" }, false],
+    ["unknown kind", { networkType: undefined }, false],
+    ["model id does not replace the training repository", { baseModel: "flux3_klein_base" }, false],
+  ])("%s", (_label, patch, expected) => {
+    expect(loraMatchesModel({ ...compatible, ...patch }, base)).toBe(expected);
+  });
+});
+
 describe("presetMatchesModel", () => {
   it("matches when the preset pins no model", () => {
     expect(presetMatchesModel({ id: "p" }, ltxEros, catalog)).toBe(true);

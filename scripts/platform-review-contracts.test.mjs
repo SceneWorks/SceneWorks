@@ -1444,6 +1444,99 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
   assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
 });
 
+test("hosted-only metadata dispatch excludes every NAX runner before assignment and rejects all conflicting model flags", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  assert.match(workflow, /hosted_only:\n +description: [^\n]+\n +required: false\n +type: boolean\n +default: false/);
+  const hosted = workflowJob(workflow, "macos-checks");
+  const nax = workflowJob(workflow, "nax-worker");
+  const condition = workflowExpression(nax);
+  const route = workflowExpression(nax, "runs-on");
+  const validation = workflowStep(hosted, "Validate hosted-only dispatch intent");
+  const validationCondition = workflowExpression(validation);
+  const flags = ["run_memory_calibration", "run_five_rung_reference", "provision_qwen_snapshot", "provision_z_image_snapshot"];
+  const events = [
+    { event_name: "workflow_dispatch" },
+    { event_name: "push" },
+    { event_name: "merge_group" },
+    { event_name: "pull_request", base: "main", sameRepo: true },
+    { event_name: "pull_request", base: "feature/sc-26233-flux3-image-klein", sameRepo: true },
+    { event_name: "pull_request", base: "main", sameRepo: false },
+  ];
+  const evaluateCondition = (candidate, event, inputs, gate = { result: "success", relevant: "true", canceled: false }) =>
+    Function("github", "inputs", "needs", "cancelled", `return (${candidate});`)(
+      { event_name: event.event_name, repository: "SceneWorks/SceneWorks", event: {
+        pull_request: { base: { ref: event.base }, head: { repo: { full_name: event.sameRepo === false ? "external/fork" : "SceneWorks/SceneWorks" } }, title: "[Mac2] metadata" },
+        head_commit: { message: "[Mac2] metadata" },
+      } }, inputs, { changes: { result: gate.result, outputs: { relevant: gate.relevant } } }, () => gate.canceled,
+    );
+  const validateCondition = (candidate) => {
+    for (let mask = 0; mask < 16; mask++) {
+      const modelFlags = Object.fromEntries(flags.map((flag, i) => [flag, Boolean(mask & (1 << i))]));
+      for (const event of events) for (const hostedOnly of [undefined, false, true]) {
+        const inputs = { ...modelFlags, ...(hostedOnly === undefined ? {} : { hosted_only: hostedOnly }) };
+        const normal = event.event_name !== "merge_group" && (event.event_name !== "pull_request" || (event.base === "main" && event.sameRepo));
+        const excluded = event.event_name === "workflow_dispatch" && hostedOnly === true;
+        const selected = Boolean(evaluateCondition(candidate, event, inputs));
+        assert.equal(selected, Boolean(normal && !excluded), `${event.event_name} flags=${mask} hosted=${hostedOnly}`);
+        // GitHub evaluates a job's if before assigning runs-on. Evaluate the ACTUAL
+        // routing expression only for a selected job; excluded requests assign no runner.
+        let assignments = 0;
+        if (selected) {
+          assignments++;
+          const labels = Function("github", "inputs", "fromJSON", "startsWith", `return (${route});`)(
+            { event_name: event.event_name, event: { pull_request: { title: "[Mac2] metadata" }, head_commit: { message: "[Mac2] metadata" } } },
+            inputs, JSON.parse, (value, prefix) => String(value).startsWith(prefix),
+          );
+          assert(labels.includes("self-hosted"));
+        }
+        if (excluded) assert.equal(assignments, 0, "hosted-only may assign neither primary nor secondary self-hosted runner");
+      }
+    }
+    // The exclusion must dominate the existing fail-open relevance path, too.
+    for (const gate of [
+      { result: "failure", relevant: "false", canceled: false },
+      { result: "success", relevant: "false", canceled: false },
+      { result: "success", relevant: "true", canceled: true },
+    ]) assert.equal(Boolean(evaluateCondition(candidate, events[0], { hosted_only: true }, gate)), false);
+  };
+  validateCondition(condition);
+  for (const mutant of [
+    condition.replace(" && !(github.event_name == 'workflow_dispatch' && inputs.hosted_only)", ""),
+    condition.replace("github.event_name == 'workflow_dispatch' && inputs.hosted_only", "inputs.hosted_only"),
+    condition.replace("inputs.hosted_only", "!inputs.hosted_only"),
+  ]) assert.throws(() => validateCondition(mutant), undefined, "runner exclusion mutation must be rejected");
+  for (const event of events) for (const hostedOnly of [undefined, false, true])
+    assert.equal(Boolean(evaluateWorkflow(validationCondition, event.event_name, { hosted_only: hostedOnly })), event.event_name === "workflow_dispatch" && hostedOnly === true);
+
+  const bindings = [...validation.matchAll(/^ {10}([A-Z_]+): \$\{\{ inputs\.([a-z_]+) \}\}$/gm)];
+  assert.equal(bindings.length, 4);
+  assert.deepEqual(new Set(bindings.map(([, , input]) => input)), new Set(flags));
+  const body = validation.split("        run: |\n")[1].split("\n").map((line) => line.startsWith("          ") ? line.slice(10) : line).join("\n");
+  const runGuard = async (script, values) => {
+    const env = Object.fromEntries(["PATH", "SystemRoot", "TEMP", "TMP"].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
+    for (const [, name, input] of bindings) env[name] = String(values[input]);
+    try { return { code: 0, ...(await promisify(execFile)("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { env, timeout: 10000 })) }; }
+    catch (error) { return { code: error.code, stdout: error.stdout, stderr: error.stderr }; }
+  };
+  for (let mask = 0; mask < 16; mask++) {
+    const values = Object.fromEntries(flags.map((flag, i) => [flag, Boolean(mask & (1 << i))]));
+    const result = await runGuard(body, values);
+    assert.equal(result.code, mask === 0 ? 0 : 1, `actual Bash input guard flags=${mask}: ${result.stderr}`);
+    if (mask) assert.match(result.stdout, /::error::hosted_only requires/);
+  }
+  for (const flag of flags) for (const invalid of ["", "TRUE", "not-a-boolean"]) {
+    const result = await runGuard(body, { ...Object.fromEntries(flags.map((key) => [key, false])), [flag]: invalid });
+    assert.equal(result.code, 1, `${flag} must fail closed on unexpected serialization`);
+  }
+  // Removing any one model/provision flag from the ACTUAL guard must be detected.
+  for (const [, name, input] of bindings) {
+    const mutant = body.replace(` ${name}`, "");
+    const result = await runGuard(mutant, { ...Object.fromEntries(flags.map((key) => [key, false])), [input]: true });
+    assert.equal(result.code, 0, `mutation ${name} demonstrates why every flag is required`);
+  }
+  assert(hosted.indexOf(validation) < hosted.indexOf("dtolnay/rust-toolchain"), "intent validation must precede the hosted build setup");
+});
+
 test("macos-mlx routes an explicit Mac2 final PR and merge push without changing manual routing", async () => {
   const workflow = await source(".github/workflows/macos-mlx.yml");
   const naxWorker = workflow.slice(workflow.indexOf("  nax-worker:"));
@@ -2922,7 +3015,9 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   // The guard must sit on the unconditional PR path, not behind the dispatch-only
   // calibration steps — that placement is exactly the hole this closes.
   const guard = mlx.indexOf("cargo clippy -p sceneworks-memory-adapter");
-  const firstDispatchOnly = mlx.indexOf("if: ${{ github.event_name == 'workflow_dispatch'");
+  // Hosted-only input validation is an early dispatch guard, not an optional model run.
+  // The unconditional lint must precede the actual calibration/provisioning job steps.
+  const firstDispatchOnly = mlx.indexOf("if: ${{ github.event_name == 'workflow_dispatch'", mlx.indexOf("  nax-worker:"));
   assert.ok(guard > 0, "macos-mlx.yml must clippy the MLX memory adapter");
   assert.ok(firstDispatchOnly > 0, "macos-mlx.yml must still have dispatch-only calibration steps");
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
@@ -5003,6 +5098,12 @@ function mlxGuardSteps(workflow) {
 // "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
 const MLX_FATAL_GUARDS = [
   {
+    step: "Validate hosted-only dispatch intent",
+    detects: "a hosted-only artifact dispatch combined with calibration, provisioning, or an unexpected model-flag serialization",
+    branch: ['if [ "${!flag}" != "false" ]; then'],
+    diagnostic: /^echo "::error::hosted_only requires \$flag=false;/,
+  },
+  {
     step: "Verify capabilities.mlx.json content against a fresh dump",
     detects: "the checked-in MLX facts file differs in capability content from a fresh dump at this pin",
     branch: [
@@ -5171,6 +5272,7 @@ const MLX_FATAL_GUARDS = [
 // backed tests fail closed, and `always()` lets the producer and its paired upload still run so
 // the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
+  "Validate hosted-only dispatch intent": "if: ${{ github.event_name == 'workflow_dispatch' && inputs.hosted_only }}",
   "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",

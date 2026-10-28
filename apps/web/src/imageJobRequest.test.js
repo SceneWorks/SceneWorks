@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildImageJobRequest } from "./imageJobRequest.js";
+import { buildImageJobRequest, imageJobReferences } from "./imageJobRequest.js";
 import { serializeCaption } from "./ideogramCaption.js";
 
 // sc-11219 (F-031): the batch job-request builder used to be a hand-copied twin of the single
@@ -97,6 +97,44 @@ function img2imgPidState(overrides = {}) {
 }
 
 describe("buildImageJobRequest", () => {
+  it("sends original layout and attachment ids identically for single and batch overrides", () => {
+    const flux3Layout = { version: 1, boxes: [{ id: "remove", desc: "vase", from: "ref_image_0",
+      reference_id: "instance-b", src_bbox: [0, -0.123456789012345, 1, 1], tgt_bbox: null }] };
+    const state = img2imgPidState({ model: "flux3_klein", mode: "edit_image", multiReference: true,
+      supportsImg2img: false, referenceAssetIds: ["same", "same"], flux3Layout,
+      flux3ReferenceIds: ["instance-a", "instance-b"] });
+    const single = buildImageJobRequest(state);
+    const batch = buildImageJobRequest({ ...state, promptToSend: "batch vase", resolutionOverride: { width: 512, height: 768 } });
+    expect(single.advanced.flux3_layout).toBe(flux3Layout);
+    expect(batch.advanced.flux3_layout).toEqual(single.advanced.flux3_layout);
+    expect(batch.advanced.flux3_reference_ids).toEqual(["instance-a", "instance-b"]);
+    expect(batch.referenceAssetIds).toEqual(["same", "same"]);
+    const unrelated = buildImageJobRequest({ ...state, model: "flux2_dev" });
+    expect(unrelated.advanced).not.toHaveProperty("flux3_layout");
+    expect(unrelated.advanced).not.toHaveProperty("flux3_reference_ids");
+  });
+  it.each([
+    ["hidden stale pickers", { sourceAssetId: "hidden-source", referenceAssetIds: ["hidden-reference"] },
+      { sourceAssetId: null, referenceAssetIds: undefined, referenceAssetId: null }],
+    ["control preprocessing", { controlPreprocessSourceId: "control-source" },
+      { sourceAssetId: "control-source", referenceAssetIds: undefined, referenceAssetId: null }],
+    ["single edit source", { mode: "edit_image", sourceAssetId: "source", controlPreprocessSourceId: "control" },
+      { sourceAssetId: "source", referenceAssetIds: undefined, referenceAssetId: null }],
+    ["ordered edit pair", { mode: "edit_image", sourceAssetId: "source", editSecondPair: ["source", "second"] },
+      { sourceAssetId: null, referenceAssetIds: ["source", "second"], referenceAssetId: null }],
+    ["multi-reference edit", { mode: "edit_image", multiReference: true, sourceAssetId: "hidden", referenceAssetIds: ["first", "second"] },
+      { sourceAssetId: null, referenceAssetIds: ["first", "second"], referenceAssetId: null }],
+    ["source plus references", { mode: "edit_image", sourceWithMultiReference: true, sourceAssetId: "source", referenceAssetIds: ["reference"] },
+      { sourceAssetId: "source", referenceAssetIds: ["reference"], referenceAssetId: null }],
+    ["character over img2img", { mode: "character_image", referenceAssetId: "character", supportsImg2img: true },
+      { sourceAssetId: null, referenceAssetIds: undefined, referenceAssetId: "character" }],
+    ["img2img over hidden character", { referenceAssetId: "hidden-character", supportsImg2img: true },
+      { sourceAssetId: null, referenceAssetIds: undefined, referenceAssetId: "start-image-asset" }],
+  ])("uses identical canonical references for eligibility and submission: %s", (_label, overrides, expected) => {
+    const state = img2imgPidState({ supportsImg2img: false, ...overrides });
+    expect(imageJobReferences(state)).toEqual(expected);
+    expect(buildImageJobRequest(state)).toMatchObject(expected);
+  });
   it("emits Hires.fix only when enabled and preserves inherit semantics", () => {
     const enabled = buildImageJobRequest(
       img2imgPidState({

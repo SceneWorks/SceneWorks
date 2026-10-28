@@ -507,6 +507,7 @@ async fn generate_mage_finetuned_stream(
         conditioning_windows: None,
         negative_branch: false,
         prefix_kv_cache_eligible: false,
+        reference_resources: None,
     };
 
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state(

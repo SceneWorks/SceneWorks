@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "kind": "flux3-terminal-blocked-artifact-prerequisites",
+  "diagnosticOnly": true,
+  "overallTerminalAcceptance": "NOT_PROVEN",
+  "note": "All sixteen REQUIRED canonical anchors are active, published rows: the four base q4/q8 artifact prerequisites were satisfied by genuine converted bytes/SHA and production local-derivation rows (see `activated`). Active is NOT measured: every anchor measurement, resource case and terminal acceptance remains unexecuted and requires its own execution/measurement admission. Never treat activation as PASS.",
+  "obligations": [],
+  "activated": [
+    {
+      "coordinate": "flux3_klein_base:q4:candle",
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "tier": "q4",
+      "repository": "black-forest-labs/flux-3-image-klein-base",
+      "resolvedRevision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+      "conversion": "flux3-candle-ggml-q4_1-v1",
+      "weightsFile": "model.safetensors",
+      "weightsBytes": 4433178832,
+      "weightsSha256": "c62a66ba7b86b4d3b84b043b07bb54307d19b302285aaf111842c0862dfeaa8b",
+      "receiptRecipe": {
+        "algorithm": "ggml-q4_1",
+        "bits": 4,
+        "groupSize": 32,
+        "algorithmVersion": 1
+      },
+      "receiptSha256": "c35cebd266dd53bb3efb40dfdaed6579fb114bfcb67d34c7b1c56d7bd57603c0",
+      "evidence": "Genuine CPU conversion (CUDA_VISIBLE_DEVICES=-1) of the downloaded base snapshot by local_derivation::tests::flux3_capture_conversion_artifacts on 2026-10-21 (SceneWorks 6fe7ecbf, inference da7534d5); passed flux3_converted_bundle_check and capture observation. Converted bytes are not redistributed.",
+      "anchor": "activated in config/memory-calibration-plan.json",
+      "measurement": "NOT_RUN"
+    },
+    {
+      "coordinate": "flux3_klein_base:q8:candle",
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "tier": "q8",
+      "repository": "black-forest-labs/flux-3-image-klein-base",
+      "resolvedRevision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+      "conversion": "flux3-candle-ggml-q8_0-v1",
+      "weightsFile": "model.safetensors",
+      "weightsBytes": 6547108144,
+      "weightsSha256": "b7b35072a153c9cc8a8f5d83babac8a7e1c89dd9cb1f04c6a1235068027fd5f9",
+      "receiptRecipe": {
+        "algorithm": "ggml-q8_0",
+        "bits": 8,
+        "groupSize": 32,
+        "algorithmVersion": 1
+      },
+      "receiptSha256": "477a92c03e3663c91e6324111052c56d2441648e71893aa6adfdb8dcad3ac785",
+      "evidence": "Genuine CPU conversion (CUDA_VISIBLE_DEVICES=-1) of the downloaded base snapshot by local_derivation::tests::flux3_capture_conversion_artifacts on 2026-10-21 (SceneWorks 6fe7ecbf, inference da7534d5); passed flux3_converted_bundle_check and capture observation. Converted bytes are not redistributed.",
+      "anchor": "activated in config/memory-calibration-plan.json",
+      "measurement": "NOT_RUN"
+    },
+    {
+      "coordinate": "flux3_klein_base:q4:mlx",
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "tier": "q4",
+      "repository": "black-forest-labs/flux-3-image-klein-base",
+      "resolvedRevision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+      "conversion": "flux3-mlx-affine-q4-g64-v1",
+      "weightsFile": "model.safetensors",
+      "weightsBytes": 4131240680,
+      "weightsSha256": "371fc8243bb40f06104a468e0097d5ecf1f887262d1cdb541a06e5cd3148d701",
+      "receiptRecipe": {
+        "algorithm": "mlx-affine",
+        "bits": 4,
+        "groupSize": 64,
+        "algorithmVersion": 1
+      },
+      "receiptSha256": "495ec968f21d14c2c8e3c6ea8a6bf56b1174be6cc9a951f6c61ced1e02cdb9be",
+      "evidence": "Genuine CPU conversion (CUDA_VISIBLE_DEVICES=-1) of the downloaded base snapshot by local_derivation::tests::flux3_capture_conversion_artifacts on 2026-10-21 (SceneWorks 6fe7ecbf, inference da7534d5); passed flux3_converted_bundle_check and capture observation. Converted bytes are not redistributed.",
+      "anchor": "activated in config/memory-calibration-plan.json",
+      "measurement": "NOT_RUN"
+    },
+    {
+      "coordinate": "flux3_klein_base:q8:mlx",
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "tier": "q8",
+      "repository": "black-forest-labs/flux-3-image-klein-base",
+      "resolvedRevision": "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4",
+      "conversion": "flux3-mlx-affine-q8-g64-v1",
+      "weightsFile": "model.safetensors",
+      "weightsBytes": 6547160088,
+      "weightsSha256": "1f82b806f7b29b46ee0a083054253fe3990a08634743a095f8993e945ec34df6",
+      "receiptRecipe": {
+        "algorithm": "mlx-affine",
+        "bits": 8,
+        "groupSize": 64,
+        "algorithmVersion": 1
+      },
+      "receiptSha256": "0d859bacd5f162e45e3b8a4f35396ab9016bf702fd8183a467dbf43b5d723f24",
+      "evidence": "Genuine CPU conversion (CUDA_VISIBLE_DEVICES=-1) of the downloaded base snapshot by local_derivation::tests::flux3_capture_conversion_artifacts on 2026-10-21 (SceneWorks 6fe7ecbf, inference da7534d5); passed flux3_converted_bundle_check and capture observation. Converted bytes are not redistributed.",
+      "anchor": "activated in config/memory-calibration-plan.json",
+      "measurement": "NOT_RUN"
+    }
+  ]
+}

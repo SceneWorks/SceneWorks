@@ -269,11 +269,13 @@ fn arm(request: &Value) -> Result<Arm, String> {
 
 /// Whether this arm is one of the four this module implements — asked before `run` commits to it,
 /// so `candle.rs`'s dispatch can route by provider id alone.
+#[cfg(test)]
 pub(super) fn implements(provider: &str) -> bool {
     ARMS.iter().any(|arm| arm.provider == provider)
 }
 
 /// The four provider ids, in arm order, for `candle.rs`'s pre-gate agreement test.
+#[cfg(test)]
 pub(super) fn providers() -> [&'static str; 4] {
     ARMS.map(|arm| arm.provider)
 }

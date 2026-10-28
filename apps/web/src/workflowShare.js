@@ -24,6 +24,7 @@
 
 // `status` values of `POST /api/v1/workflows/inspect`. Both keys are always present in the body,
 // so a reader branches on `status` rather than on the absence of `workflow`.
+import { isFlux3ReferenceRequest } from "./resolutionOverride.js";
 import { reacquireMossTensors } from "./mossImageAdvanced.js";
 export const WORKFLOW_STATUS_WORKFLOW = "workflow";
 export const WORKFLOW_STATUS_NO_WORKFLOW = "no_workflow";
@@ -285,6 +286,8 @@ export const ADVANCED_PREFILL = {
   guidanceScale: { label: "Guidance", prefill: PREFILL_CONTROL },
   guidanceMethod: { label: "Guidance method", prefill: PREFILL_CONTROL },
   enhancePrompt: { label: "Prompt upsampling", prefill: PREFILL_CONTROL },
+  flux3_layout: { label: "Layout guidance", prefill: PREFILL_CONTROL },
+  flux3_reference_ids: { label: "Layout reference attachments", prefill: PREFILL_CONTROL },
   // sc-24113. Restores the toggle, which is the whole of what SceneWorks controls: it keeps the
   // model's alpha channel instead of compositing over white. The prompt that ASKED for a
   // transparent background travels as the prompt, because upstream has no transparency mode — so
@@ -436,6 +439,8 @@ export const ADVANCED_PREFILL = {
 };
 
 function prefillDisposition(key, share) {
+  if ((key === "flux3_layout" || key === "flux3_reference_ids") &&
+      (share.sceneworksWorkflow !== "image" || !/^flux3(?:_|$)/.test(share.model ?? ""))) return PREFILL_NONE;
   return key === "veda" && share.sceneworksWorkflow !== "video"
     ? PREFILL_NONE
     : (ADVANCED_PREFILL[key]?.prefill ?? PREFILL_NONE);
@@ -496,7 +501,7 @@ export function workflowReplaySeed(share) {
 export function recipeFromWorkflowShare(
   share,
   report = null,
-  { substituteModelId = null, referenceAssetIds = [], tensorPicks = {}, assets = [] } = {},
+  { substituteModelId = null, referenceAssetIds = [], sourceAssetId = null, tensorPicks = {}, assets = [] } = {},
 ) {
   if (!share) {
     return null;
@@ -581,6 +586,15 @@ export function recipeFromWorkflowShare(
   const modelId = workflowModelId(report) ?? (substituteModelId || null);
   if (modelId) {
     recipe.model = modelId;
+  }
+  // A shared reference workflow carries authored OPTIONAL axes, not output geometry. Keep this
+  // as UI launch intent: only the worker may write flux3ReferenceEditing provenance/facts.
+  if (share.sceneworksWorkflow === "image" && share.inputs?.some(({ kind }) =>
+    isFlux3ReferenceRequest(modelId, kind === "reference" ? references : kind === "source" ? [sourceAssetId] : []))) {
+    recipe.uiDimensionIntent = {
+      width: Number.isInteger(width) && width > 0 ? width : null,
+      height: Number.isInteger(height) && height > 0 ? height : null,
+    };
   }
   // `stylePreset` is NOT set here even when it resolved. Nothing in `apps/web/src` reads
   // `recipe.stylePreset` — the studio's preset seam is `launchRequest.presetId`, a different

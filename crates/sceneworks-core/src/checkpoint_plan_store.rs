@@ -2409,7 +2409,7 @@ impl CheckpointPlanStore {
         &self,
         checkpoint_id: &str,
     ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
-        self.resolve_with_check(checkpoint_id, &|| Ok(()))
+        self.resolve_with_check_and_verification(checkpoint_id, &|| Ok(()), |_| {})
     }
 
     /// Resolve the same immutable plan, cooperatively stopping between bounded hash reads.
@@ -2418,6 +2418,27 @@ impl CheckpointPlanStore {
         &self,
         checkpoint_id: &str,
         check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        self.resolve_with_check_and_verification(checkpoint_id, check, |_| {})
+    }
+
+    /// Observe actual content verification. `Some(path)` brackets a hash read and `None`
+    /// ends it, including failed reads. Trusted source stamps emit no verification events.
+    pub fn resolve_with_verification(
+        &self,
+        checkpoint_id: &str,
+        observe: impl FnMut(Option<&Path>),
+    ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        self.resolve_with_check_and_verification(checkpoint_id, &|| Ok(()), observe)
+    }
+
+    /// Both: the cooperative `check` between bounded hash reads, and the `observe` brackets
+    /// around each actual content verification.
+    pub fn resolve_with_check_and_verification(
+        &self,
+        checkpoint_id: &str,
+        check: &dyn Fn() -> std::io::Result<()>,
+        mut observe: impl FnMut(Option<&Path>),
     ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
         check().map_err(|error| io_error(&self.root, error))?;
         let record = self.record(checkpoint_id)?;
@@ -2519,6 +2540,7 @@ impl CheckpointPlanStore {
                 // that landed between the two — the hash reads the replacement and refuses on the
                 // digest. The refreshed observation is later than the one it replaces, so a file
                 // that stops changing leaves the racy window after one tick and stays cheap.
+                observe(Some(&path));
                 let verified_stamp = verify_source_and_capture_stamp(
                     checkpoint_id,
                     relative_path,
@@ -2527,7 +2549,9 @@ impl CheckpointPlanStore {
                     current,
                     || {},
                     check,
-                )?;
+                );
+                observe(None);
+                let verified_stamp = verified_stamp?;
                 bindings
                     .stamps
                     .insert(layer.layer_id.clone(), verified_stamp);

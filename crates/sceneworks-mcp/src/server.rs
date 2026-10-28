@@ -579,7 +579,7 @@ impl SceneWorksMcp {
     }
 
     #[tool(
-        description = "List the LoRA adapter catalog (built-in, imported and trained). Returns compact entries: id, name, family, compatibleFamilies, triggerWords, defaultWeight, installState, and for an Iris adapter its irisTask / baseModel / networkType (an Iris image job accepts only generation adapters trained on its engine — a trained full Iris checkpoint runs on iris_3b, so iris_3b adapters apply to it). Optionally filter by model family and/or project."
+        description = "List the LoRA adapter catalog (built-in, imported and trained). Returns compact entries: id, name, family, compatibleFamilies, triggerWords, defaultWeight, installState, checkpoint identity baseModel / baseRevision / networkType when recorded, and for an Iris adapter its irisTask (an Iris image job accepts only generation adapters trained on its engine — a trained full Iris checkpoint runs on iris_3b, so iris_3b adapters apply to it). Optionally filter by model family and/or project."
     )]
     async fn list_loras(
         &self,
@@ -2220,6 +2220,7 @@ pub(crate) fn compact_loras(loras: &Value) -> Value {
                 // family alone cannot tell Iris generation / depth / restoration adapters apart.
                 "irisTask",
                 "baseModel",
+                "baseRevision",
                 "networkType",
             ],
             &mut out,
@@ -2354,6 +2355,23 @@ mod tests {
         assert_eq!(compact[0]["irisTask"], "generation");
         assert_eq!(compact[0]["baseModel"], "iris_3b");
         assert_eq!(compact[0]["networkType"], "lokr");
+        assert!(compact[0].get("source").is_none());
+    }
+
+    #[test]
+    fn compact_loras_keeps_flux3_training_revision_not_adapter_download_revision() {
+        let full = json!([{"id":"base-style","family":"flux3","baseModel":"black-forest-labs/flux-3-image-klein-base","baseRevision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4","networkType":"lora","defaultWeight":0.375,"source":{"revision":"0000000000000000000000000000000000000000"}}]);
+        let compact = compact_loras(&full);
+        assert_eq!(
+            compact[0]["baseRevision"],
+            "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"
+        );
+        assert_eq!(
+            compact[0]["baseModel"],
+            "black-forest-labs/flux-3-image-klein-base"
+        );
+        assert_eq!(compact[0]["networkType"], "lora");
+        assert_eq!(compact[0]["defaultWeight"], 0.375);
         assert!(compact[0].get("source").is_none());
     }
 

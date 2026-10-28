@@ -51,13 +51,14 @@ on:
         required: false
         type: string
         default: ""
+      diagnose_only:
+        description: List the runner's HF cache layout and exit without building or measuring
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
-
-defaults:
-  run:
-    shell: bash
 
 jobs:
   mlx:
@@ -67,13 +68,16 @@ jobs:
     concurrency:
       group: flux3-quant-matrix-mlx-${{ inputs.runner }}
       cancel-in-progress: false
+    defaults:
+      run:
+        shell: bash
     env:
       CARGO_PROFILE_RELEASE_STRIP: "none"
       CARGO_NET_OFFLINE: "true"
-      CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
+      CARGO_TARGET_DIR: /tmp/sc26243-quant-target
       HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || '/Volumes/Models/huggingface' }}
-      SCENEWORKS_DATA_DIR: ${{ github.workspace }}/../sc26243-quant-data
-      FLUX3_FOOTPRINT_OUT_DIR: ${{ github.workspace }}/../sc26243-quant-evidence
+      SCENEWORKS_DATA_DIR: /tmp/sc26243-quant-data
+      FLUX3_FOOTPRINT_OUT_DIR: /tmp/sc26243-quant-evidence
     steps:
       - name: Refuse a runner other than the dispatched Mac
         run: '[[ "$RUNNER_NAME" == "${{ inputs.runner }}" ]] || { echo "::error::dispatched for ${{ inputs.runner }}, running on $RUNNER_NAME"; exit 1; }'
@@ -106,8 +110,11 @@ jobs:
         if: ${{ inputs.prepare_derived }}
         run: |
           set -euo pipefail
+          mkdir -p "$SCENEWORKS_DATA_DIR/models/derived" "$FLUX3_FOOTPRINT_OUT_DIR"
           for model in flux3_klein flux3_klein_base; do
-            snap=$(ls -d "$HF_HOME/hub/models--black-forest-labs--$model"/snapshots/* 2>/dev/null | head -1)
+            repo=flux-3-image-klein
+            [[ "$model" == "flux3_klein_base" ]] && repo=flux-3-image-klein-base
+            snap=$(ls -d "$HF_HOME/hub/models--black-forest-labs--$repo"/snapshots/* 2>/dev/null | head -1)
             [[ -n "$snap" ]] || { echo "::error::pinned $model snapshot missing under $HF_HOME"; exit 1; }
             FLUX3_CAPTURE_MODEL_ID="$model" FLUX3_CAPTURE_SOURCE_DIR="$snap" \
             FLUX3_CAPTURE_OUT_DIR="$SCENEWORKS_DATA_DIR/models/derived" \
@@ -138,7 +145,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: flux3-quant-matrix-mlx-${{ inputs.runner }}-${{ github.run_id }}
-          path: ${{ github.workspace }}/../sc26243-quant-evidence/**
+          path: /tmp/sc26243-quant-evidence/**
           if-no-files-found: warn
           retention-days: 30
 
@@ -150,66 +157,143 @@ jobs:
       group: flux3-quant-matrix-candle-${{ inputs.runner }}
       cancel-in-progress: false
     env:
-      CARGO_PROFILE_RELEASE_STRIP: "none"
-      CARGO_NET_OFFLINE: "true"
       CUDA_VISIBLE_DEVICES: "1"
       SCENEWORKS_GPU_ID: "1"
-      HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:/huggingface' }}
-      SCENEWORKS_DATA_DIR: ${{ github.workspace }}/../sc26243-quant-data
-      FLUX3_FOOTPRINT_OUT_DIR: ${{ github.workspace }}/../sc26243-quant-evidence
+      HF_HOME: ${{ inputs.hf_home != '' && inputs.hf_home || 'E:\huggingface' }}
+      SCENEWORKS_DATA_DIR: E:/tmp/sc26243-quant-data
+      FLUX3_FOOTPRINT_OUT_DIR: E:/tmp/sc26243-quant-evidence
+      VCVARS: C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat
     steps:
       - name: Refuse a runner other than the dispatched Windows box
-        run: '[[ "$RUNNER_NAME" == "${{ inputs.runner }}" ]] || { echo "::error::dispatched for ${{ inputs.runner }}, running on $RUNNER_NAME"; exit 1; }'
+        shell: powershell
+        run: |
+          if ($env:RUNNER_NAME -ne '${{ inputs.runner }}') {
+            Write-Error "dispatched for ${{ inputs.runner }}, running on $env:RUNNER_NAME"
+            exit 1
+          }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 1
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
-        with:
-          toolchain: "1.98.0"
-      - name: Build the release test binary with Candle
-        run: cargo test -p sceneworks-worker --release --features backend-candle --lib --no-run
-      - name: Convert missing Candle q4/q8 packages (CPU only)
-        if: ${{ inputs.prepare_derived }}
+      # The self-hosted cuda box's `bash` is the WSL stub and the dtolnay action cannot run there.
+      # Use the repository action that resolves the real rustup bin for rust-toolchain.toml.
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable the shared sccache wrapper for this heavy lane
+        shell: powershell
         run: |
-          set -euo pipefail
-          for model in flux3_klein flux3_klein_base; do
-            snap=$(ls -d "$HF_HOME/hub/models--black-forest-labs--$model"/snapshots/* 2>/dev/null | head -1)
-            [[ -n "$snap" ]] || { echo "::error::pinned $model snapshot missing under $HF_HOME"; exit 1; }
-            FLUX3_CAPTURE_MODEL_ID="$model" FLUX3_CAPTURE_SOURCE_DIR="$snap" \
-            FLUX3_CAPTURE_OUT_DIR="$SCENEWORKS_DATA_DIR/models/derived" \
-            FLUX3_CAPTURE_CONVERSIONS="flux3-candle-ggml-q4_1-v1,flux3-candle-ggml-q8_0-v1" \
-              cargo test -p sceneworks-worker --release --features backend-candle --lib -- \
-                --ignored --exact local_derivation::tests::flux3_capture_conversion_artifacts --nocapture
-          done
-      - name: Measure requested Candle cells
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - name: Fetch the pinned inference release
+        shell: powershell
+        env:
+          CARGO_NET_OFFLINE: "false"
         run: |
-          set -euo pipefail
-          mkdir -p "$FLUX3_FOOTPRINT_OUT_DIR"
-          all="flux3_candle_footprint::footprint_flux3_klein_candle_bf16
-          flux3_candle_footprint::footprint_flux3_klein_candle_q4
-          flux3_candle_footprint::footprint_flux3_klein_candle_q8
-          flux3_candle_footprint::footprint_flux3_klein_candle_fp8r
-          flux3_candle_footprint::footprint_flux3_klein_candle_nvfp4
-          flux3_candle_footprint::footprint_flux3_klein_base_candle_bf16
-          flux3_candle_footprint::footprint_flux3_klein_base_candle_q4
-          flux3_candle_footprint::footprint_flux3_klein_base_candle_q8
-          flux3_candle_footprint::footprint_flux3_klein_base_candle_fp8r
-          flux3_candle_footprint::footprint_flux3_klein_base_candle_nvfp4"
-          wanted="${{ inputs.cells }}"
-          if [[ -z "$wanted" ]]; then selected="$all"; else selected=$(tr ',' '\n' <<< "$wanted"); fi
-          for cell in $selected; do
-            echo "::group::$cell"
-            cargo test -p sceneworks-worker --release --features backend-candle --lib -- \
-              --ignored --exact "$cell" --nocapture 2>&1 | tee "$FLUX3_FOOTPRINT_OUT_DIR/$(basename "$cell").log"
-            echo "::endgroup::"
-          done
+          cargo fetch --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Locate the pinned FLUX 3 snapshot
+        shell: powershell
+        env:
+          DIAGNOSE_ONLY: ${{ inputs.diagnose_only }}
+        run: |
+          $candidates = @(
+            $env:HF_HOME,
+            'E:\huggingface',
+            'E:\huggingface\hub',
+            'D:\huggingface',
+            'D:\huggingface\hub',
+            (Join-Path $env:USERPROFILE '.cache\huggingface\hub'),
+            'D:\tmp\huggingface',
+            'D:\tmp\huggingface\hub'
+          ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          $hub = $null
+          foreach ($candidate in $candidates) {
+            Write-Host "=== $candidate"
+            Get-ChildItem $candidate -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like 'models--black-forest-labs--flux-3*' } |
+              ForEach-Object {
+                Write-Host "repo: $($_.FullName)"
+                Get-ChildItem $_.FullName -Force -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty Name | ForEach-Object { Write-Host "  $_" }
+                Get-ChildItem (Join-Path $_.FullName 'snapshots') -Directory -ErrorAction SilentlyContinue |
+                  ForEach-Object { Write-Host "  snapshot: $($_.FullName)" }
+                if (Test-Path (Join-Path $_.FullName 'snapshots')) { $hub = $candidate }
+              }
+          }
+          if (-not $hub) {
+            foreach ($drive in @('E:\', 'D:\')) {
+              if (Test-Path $drive) {
+                Write-Host "=== $drive search"
+                Get-ChildItem $drive -Directory -Recurse -Depth 4 -Filter 'models--black-forest-labs--flux-3*' -ErrorAction SilentlyContinue |
+                  Select-Object -ExpandProperty FullName | ForEach-Object { Write-Host $_ }
+              }
+            }
+            if ($env:DIAGNOSE_ONLY -eq 'true') { exit 0 }
+            throw 'pinned FLUX 3 snapshot not found on this runner'
+          }
+          Add-Content -Path $env:GITHUB_ENV -Value "HF_HUB_CACHE=$hub"
+          Write-Host "HF_HUB_CACHE=$hub"
+          if ($env:DIAGNOSE_ONLY -eq 'true') { exit 0 }
+      - name: Build, convert and measure the requested Candle cells
+        if: ${{ !inputs.diagnose_only }}
+        shell: powershell
+        env:
+          CARGO_NET_OFFLINE: "true"
+          CELLS_INPUT: ${{ inputs.cells }}
+          PREPARE_DERIVED: ${{ inputs.prepare_derived }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-PSDrive -PSProvider FileSystem | Select-Object Name, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}} | Format-Table | Out-String | Write-Host
+          function Invoke-Cargo([string[]]$CargoArgs, [string]$LogFile) {
+            $line = "call `"$env:VCVARS`" >nul && set NVCC_CCBIN=!VCToolsInstallDir!bin\Hostx64\x64 && cargo " + ($CargoArgs -join ' ')
+            if ($LogFile) { & cmd /v:on /c $line 2>&1 | Tee-Object -FilePath $LogFile } else { & cmd /v:on /c $line }
+            if ($LASTEXITCODE -ne 0) { throw "cargo failed: $line" }
+          }
+          New-Item -ItemType Directory -Force -Path "$env:SCENEWORKS_DATA_DIR/models/derived", "$env:FLUX3_FOOTPRINT_OUT_DIR" | Out-Null
+          Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--no-run')
+          if ($env:PREPARE_DERIVED -eq 'true') {
+            $repos = @{ 'flux3_klein' = 'flux-3-image-klein'; 'flux3_klein_base' = 'flux-3-image-klein-base' }
+            foreach ($model in @('flux3_klein', 'flux3_klein_base')) {
+              $repo = $repos[$model]
+              $snapRoot = Join-Path (Join-Path $env:HF_HUB_CACHE "models--black-forest-labs--$repo") 'snapshots'
+              Write-Host "snapshot root: $snapRoot"
+              $snap = Get-ChildItem -LiteralPath $snapRoot -Directory -ErrorAction SilentlyContinue | Select-Object -First 1
+              if (-not $snap) { throw "pinned $model snapshot missing under $snapRoot" }
+              Write-Host "snapshot: $($snap.FullName)"
+              $env:FLUX3_CAPTURE_MODEL_ID = $model
+              $env:FLUX3_CAPTURE_SOURCE_DIR = $snap.FullName
+              $env:FLUX3_CAPTURE_OUT_DIR = "$env:SCENEWORKS_DATA_DIR/models/derived"
+              $env:FLUX3_CAPTURE_CONVERSIONS = 'flux3-candle-ggml-q4_1-v1,flux3-candle-ggml-q8_0-v1'
+              Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--', '--ignored', '--exact', 'local_derivation::tests::flux3_capture_conversion_artifacts', '--nocapture')
+            }
+          }
+          # Native cargo output on stderr (e.g. a benign linker warning) must not abort the loop;
+          # Invoke-Cargo checks the real exit code.
+          $ErrorActionPreference = 'Continue'
+          $all = @(
+            'flux3_candle_footprint::footprint_flux3_klein_candle_bf16',
+            'flux3_candle_footprint::footprint_flux3_klein_candle_q4',
+            'flux3_candle_footprint::footprint_flux3_klein_candle_q8',
+            'flux3_candle_footprint::footprint_flux3_klein_candle_fp8r',
+            'flux3_candle_footprint::footprint_flux3_klein_candle_nvfp4',
+            'flux3_candle_footprint::footprint_flux3_klein_base_candle_bf16',
+            'flux3_candle_footprint::footprint_flux3_klein_base_candle_q4',
+            'flux3_candle_footprint::footprint_flux3_klein_base_candle_q8',
+            'flux3_candle_footprint::footprint_flux3_klein_base_candle_fp8r',
+            'flux3_candle_footprint::footprint_flux3_klein_base_candle_nvfp4'
+          )
+          if ([string]::IsNullOrWhiteSpace($env:CELLS_INPUT)) { $selected = $all } else { $selected = $env:CELLS_INPUT.Split(',') }
+          foreach ($cell in $selected) {
+            Write-Host "::group::$cell"
+            $log = Join-Path $env:FLUX3_FOOTPRINT_OUT_DIR ($cell.Split('::')[-1] + '.log')
+            Invoke-Cargo @('test', '-p', 'sceneworks-worker', '--release', '--features', 'backend-candle', '--lib', '--', '--ignored', '--exact', $cell, '--nocapture') $log
+            Write-Host "::endgroup::"
+          }
       - name: Upload PNGs, receipts and logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.0
         with:
           name: flux3-quant-matrix-candle-${{ inputs.runner }}-${{ github.run_id }}
-          path: ${{ github.workspace }}/../sc26243-quant-evidence/**
+          path: E:/tmp/sc26243-quant-evidence/**
           if-no-files-found: warn
           retention-days: 30

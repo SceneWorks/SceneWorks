@@ -171,6 +171,16 @@ export async function prepareCorpusInputs({ inferenceRoot, assetsRoot, permanent
   return "materialize";
 }
 
+// Long FILE paths require an invocation-only Git for Windows opt-in. DIRECTORY/chdir paths
+// have a separate platform limit, admitted below before any filesystem mutation or Git command.
+const checkoutGitOptions = process.platform === "win32" ? ["-c", "core.longpaths=true"] : [];
+function checkoutStagingPath(destination) {
+  const staging = `${destination}.staging-${process.pid}-${randomUUID()}`;
+  if (process.platform === "win32" && (destination.length >= 260 || staging.length >= 260)) {
+    die(`Windows Git checkout directories must be shorter than 260 UTF-16 characters (published=${destination.length}, staging=${staging.length}); choose a shorter checkout root. Long-file support does not remove Git's directory/chdir limit.`);
+  }
+  return staging;
+}
 async function validatePublishedCheckout(destination, revision) {
   const existing = await lstat(destination).catch((error) => error?.code === "ENOENT" ? null : Promise.reject(error));
   if (!existing) return null;
@@ -178,8 +188,8 @@ async function validatePublishedCheckout(destination, revision) {
   let head;
   let dirty;
   try {
-    head = (await execFile("git", ["-C", destination, "rev-parse", "HEAD"])).stdout.trim();
-    dirty = (await execFile("git", ["-C", destination, "status", "--porcelain"])).stdout.trim();
+    head = (await execFile("git", [...checkoutGitOptions, "-C", destination, "rev-parse", "HEAD"])).stdout.trim();
+    dirty = (await execFile("git", [...checkoutGitOptions, "-C", destination, "status", "--porcelain"])).stdout.trim();
   } catch {
     die("published inference checkout is not exact and clean");
   }
@@ -195,13 +205,16 @@ async function validatePublishedCheckout(destination, revision) {
 
 export async function installCheckout(source, destination, revision) {
   if (!REVISION.test(revision) || !path.isAbsolute(source) || !path.isAbsolute(destination)) die("checkout requires absolute roots and an exact SHA");
+  const staging = checkoutStagingPath(destination);
+  return installCheckoutAt(source, destination, revision, staging);
+}
+async function installCheckoutAt(source, destination, revision, staging) {
   const existing = await lstat(destination).catch(() => null);
   if (existing) return validatePublishedCheckout(destination, revision);
   await mkdir(path.dirname(destination), { recursive: true });
-  const staging = `${destination}.staging-${process.pid}-${randomUUID()}`;
   try {
-    await execFile("git", ["clone", "--no-hardlinks", "--no-checkout", source, staging]);
-    await execFile("git", ["-C", staging, "checkout", "--detach", revision]);
+    await execFile("git", [...checkoutGitOptions, "clone", "--no-hardlinks", "--no-checkout", source, staging]);
+    await execFile("git", [...checkoutGitOptions, "-C", staging, "checkout", "--detach", revision]);
     await validatePublishedCheckout(staging, revision);
     try {
       await rename(staging, destination);
@@ -277,7 +290,9 @@ async function withPinnedCheckoutLock(hostRoot, revision, callback, { timeoutMs 
 }
 
 export async function installPinnedCheckout(source, hostRoot, revision) {
+  if (!REVISION.test(revision) || !path.isAbsolute(source) || !path.isAbsolute(hostRoot)) die("checkout requires absolute roots and an exact SHA");
   const roots = await assertTerminalPinPhysicalContainment(hostRoot, revision);
+  const staging = checkoutStagingPath(roots.inferenceRoot);
   await ensureTerminalPhysicalDirectory(roots.hostRoot, roots.pinRoot);
   return withPinnedCheckoutLock(roots.hostRoot, revision, async () => {
     await assertTerminalPhysicalContainment(roots.hostRoot, roots.inferenceRoot);
@@ -291,7 +306,7 @@ export async function installPinnedCheckout(source, hostRoot, revision) {
         await rm(roots.inferenceRoot, { recursive: true, force: true });
       }
     }
-    const published = await installCheckout(source, roots.inferenceRoot, revision);
+    const published = await installCheckoutAt(source, roots.inferenceRoot, revision, staging);
     await assertTerminalPhysicalContainment(roots.hostRoot, roots.inferenceRoot);
     return published;
   });

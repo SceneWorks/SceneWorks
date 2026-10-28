@@ -37,8 +37,7 @@ use sceneworks_core::lora_family::{
 use sceneworks_core::lora_family::read_safetensors_header;
 #[cfg(any(
     target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
+    all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 use sceneworks_core::lora_family::resolve_adapter_in_dir;
 use sceneworks_core::lora_url::{
@@ -56,6 +55,163 @@ use tokio::process::{Child, Command};
 use tokio::time::MissedTickBehavior;
 use tracing::Level;
 use uuid::Uuid;
+
+/// Resolve the same trusted receipt-backed immutable snapshot used by native generation.
+/// May baseline an unstamped, fully identified v2 source receipt; never mints a download receipt
+/// from an arbitrary cache directory, and never repairs an existing corrupt tree stamp.
+pub fn flux3_receipted_snapshot(
+    data_dir: &Path,
+    repo: &str,
+    revision: &str,
+    model: &str,
+) -> Option<PathBuf> {
+    // All these catalog rows download the SAME original whole repository. Derived q4/q8
+    // receipts never authorize an original, and the generic resolver's exact identity policy
+    // stays unchanged (including its legacy `None` => `default` interpretation).
+    ["bf16", "default", "fp8r", "nvfp4"]
+        .into_iter()
+        .find_map(|variant| {
+            model_jobs::huggingface_receipt_weights_dir_at_revision(
+                data_dir,
+                repo,
+                revision,
+                Some(model),
+                Some(variant),
+            )
+        })
+}
+
+/// Validate the canonical FLUX 3 runtime payload independently of download selectors.
+/// This is filesystem/index integrity, not whole-repository download completion or a weights
+/// rehash. It stays backend-neutral so the catalog and neither-backend API can use the exact
+/// pinned inference contract without linking MLX or CUDA. Indexed paths retain the inference
+/// resolver's containment rules and allowance for this HF repository's own blob symlinks.
+pub fn flux3_runtime_bundle_check(
+    package_dir: &Path,
+    model_id: &str,
+) -> std::result::Result<(), String> {
+    let resources = gen_core::flux3::GenerationResources {
+        package_dir: package_dir.to_path_buf(),
+        text_encoder_dir: package_dir.join(gen_core::flux3::TEXT_ENCODER_COMPONENT),
+        autoencoder_file: package_dir.join("ae.safetensors"),
+    };
+    resources
+        .check(model_id)
+        .map_err(|error| error.to_string())?;
+    let roots = gen_core::safetensors_shards::snapshot_shard_roots(&resources.text_encoder_dir)
+        .map_err(|error| error.to_string())?;
+    gen_core::safetensors_shards::resolve_safetensors_shards(
+        &resources.text_encoder_dir,
+        "model",
+        &roots,
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Check one snapshot member by its canonical path. File symlinks may target this HF repository's
+/// own blob store; directory links must stay inside the snapshot. Nothing from a sibling repo or
+/// arbitrary caller path may certify a bundled component.
+pub(crate) fn flux3_snapshot_member(
+    root: &Path,
+    path: &Path,
+    directory: bool,
+) -> Result<(), String> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let target = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let allowed = if directory {
+        target.starts_with(&canonical_root)
+    } else {
+        gen_core::safetensors_shards::snapshot_shard_roots(root)
+            .map_err(|e| e.to_string())?
+            .iter()
+            .any(|allowed| target.starts_with(allowed))
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} resolves outside the pinned snapshot (or its own blob store): {}",
+            path.display(),
+            target.display()
+        ))
+    }
+}
+
+/// Validate the runtime resources for a publisher FLUX 3 tier contained in a whole snapshot.
+/// Whole-repository download completion is separate: a dense bundle alone cannot certify FP8R or
+/// NVFP4. No tensors or accelerator are loaded.
+pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> Result<(), String> {
+    if !matches!(tier, "fp8r" | "nvfp4") {
+        return flux3_runtime_bundle_check(root, model);
+    }
+    let package = root.join("variants").join(tier);
+    flux3_snapshot_member(root, &package, true)?;
+    for name in ["config.json", "model.safetensors"] {
+        flux3_snapshot_member(root, &package.join(name), false)?;
+    }
+    // Header-authoritative checkpoint boundary: flow map from the selected native header.
+    let config = gen_core::flux3::resolve_checkpoint(&package).map_err(|e| e.to_string())?;
+    let storage = gen_core::flux3::artifacts::NativeDitStorage::from_package(&package)
+        .map_err(|e| e.to_string())?;
+    if storage.key().map_err(|e| e.to_string())? != tier {
+        return Err(format!(
+            "{} is not the selected {tier} package",
+            package.display()
+        ));
+    }
+    let te = root.join(&config.text_encoder.path);
+    let ae = root.join(&config.vae.path);
+    flux3_snapshot_member(root, &te, true)?;
+    flux3_snapshot_member(root, &ae, false)?;
+    let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(package))
+        .with_component(
+            gen_core::flux3::TEXT_ENCODER_COMPONENT,
+            gen_core::WeightsSource::Dir(te),
+        )
+        .with_component(
+            gen_core::flux3::AUTOENCODER_COMPONENT,
+            gen_core::WeightsSource::File(ae),
+        );
+    gen_core::flux3::GenerationResources::from_spec(&spec, &config, model)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Check the complete inventory of a locally converted FLUX 3 package: owned outputs and external
+/// encoder/autoencoder files by their conversion receipt, plus the encoder shard set. This is an
+/// integrity check, not a GPU load or memory measurement.
+pub fn flux3_converted_bundle_check(root: &Path, package: &Path) -> Result<(), String> {
+    use gen_core::flux3::conversion::ComponentRole;
+    // Header-authoritative checkpoint boundary for the converted native package.
+    let config = gen_core::flux3::resolve_checkpoint(package).map_err(|e| e.to_string())?;
+    let receipt =
+        gen_core::flux3::conversion::open_conversion(package).map_err(|e| e.to_string())?;
+    let te = root.join(&config.text_encoder.path);
+    let ae = root.join(&config.vae.path);
+    flux3_snapshot_member(root, &te, true)?;
+    flux3_snapshot_member(root, &ae, false)?;
+    let prefix = format!("{}/", config.text_encoder.path);
+    receipt
+        .verify_external_with(|role, path| match role {
+            ComponentRole::TextEncoder => path
+                .strip_prefix(&prefix)
+                .map(|rest| te.join(rest))
+                .ok_or_else(|| {
+                    gen_core::Error::Unsupported(format!("unrecognized encoder path {path}"))
+                }),
+            ComponentRole::Autoencoder if path == config.vae.path => Ok(ae.clone()),
+            other => Err(gen_core::Error::Unsupported(format!(
+                "unexpected external {other:?}: {path}"
+            ))),
+        })
+        .map_err(|e| e.to_string())?;
+    let roots =
+        gen_core::safetensors_shards::snapshot_shard_roots(&te).map_err(|e| e.to_string())?;
+    gen_core::safetensors_shards::resolve_safetensors_shards(&te, "model", &roots)
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
 
 // Shared `advanced` knob accessors (sc-4281). The MLX image/video job paths are macOS-gated; the
 // candle InstantID lane (sc-5491) is the first off-Mac caller, so the module also compiles on the
@@ -303,7 +459,7 @@ pub use iris_curricula::{resolve_iris_config, resolve_iris_plan};
 mod iris_dist;
 pub use iris_dist::iris_rank_entry;
 // The auxiliary-training-model install check (sc-25213), shared with the rust-api submit gate.
-pub use training_jobs::installed_aux_training_model_dir;
+pub use training_jobs::{flux3_training_config_witness, installed_aux_training_model_dir};
 // CUDA/candle VRAM fit-gate + small-card emulation (epic 10765 Phase 0, sc-10766). Pure helpers wired
 // into `generate_candle_stream`; gated to the same candle lane as that consumer so the pub(crate)
 // helpers aren't dead code (→ `-D warnings`) in the non-candle / macOS builds.
@@ -342,6 +498,12 @@ use media_jobs::*;
 mod image_decode;
 mod image_jobs;
 use image_jobs::*;
+
+/// Model-scoped enhancement TOKEN ceiling shared by API enqueue and worker/native parsing.
+/// This is independent of effective-caption Unicode-character admission after enhancement.
+pub fn prompt_enhancement_max_tokens(model_id: &str) -> u64 {
+    u64::from(gen_core::generator::max_enhance_tokens_for_model(model_id))
+}
 mod vector_jobs;
 #[doc(hidden)]
 pub use vector_jobs::build_vector_asset_fact;
@@ -757,6 +919,12 @@ mod voiceclone_smoke;
 // manifest footprint fields.
 #[cfg(all(test, target_os = "macos"))]
 mod footprint_measure;
+// FLUX 3 Image Klein on the Candle/CUDA lane (sc-26243): the off-macOS half of the footprint campaign.
+// Same #[ignore]-gated, one-generation-per-process contract as footprint_measure, but the memory
+// receipt is the whole-GPU delta read from nvidia-smi. Compiled only for non-macOS candle test builds;
+// it runs no model compute unless an operator invokes an ignored campaign test by name.
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+mod flux3_candle_footprint;
 // On-device RESOLUTION sweep of the MLX activation transient (sc-16195, epic 15448). Test-only +
 // macOS-only; the sibling of footprint_measure with the axis rotated — that one measures ONE
 // resolution across tiers, this one measures ONE tier across resolutions, sampling the same
@@ -1289,6 +1457,11 @@ pub async fn run() -> WorkerResult<()> {
         );
     }
     let settings = Settings::from_env();
+    // Refuse the preparation scope before an auto supervisor can enumerate devices.
+    validate_utility_worker_selection(
+        &settings,
+        utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
+    )?;
     // Only the top-level worker process performs conversion recovery. It runs before any utility
     // children are spawned, and the lifecycle lock excludes independently running finalizers.
     // Child restarts must never sweep while sibling utility workers may be converting.
@@ -1689,6 +1862,30 @@ fn reclaim_import_staging(
     sceneworks_core::checkpoint_ingest::sweep_staging(&store, &in_flight)
 }
 
+fn validate_utility_worker_selection(
+    settings: &Settings,
+    scope: UtilityJobScope,
+) -> WorkerResult<()> {
+    if scope == UtilityJobScope::ModelDownload && !is_cpu_worker(&settings.gpu_id) {
+        return Err(WorkerError::InvalidPayload(
+            "model_download utility scope requires the cpu worker".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn initialize_worker_gpu_with(
+    settings: &Settings,
+    scope: UtilityJobScope,
+    apply_limit: impl FnOnce(u64),
+) -> WorkerResult<()> {
+    validate_utility_worker_selection(settings, scope)?;
+    if !is_cpu_worker(&settings.gpu_id) {
+        apply_limit(settings.gpu_memory_limit_bytes);
+    }
+    Ok(())
+}
+
 pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // sc-4482 (epic 3720): log the resolved backend-neutral gen-core contract version at startup
     // so a pin skew that slips past the CI guard (`scripts/check-gen-core-skew.sh`) is
@@ -1704,7 +1901,11 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // upscales, AND LoRA training. When the user configured no ceiling (0) a default derived from
     // physical RAM is applied instead (GitHub #1932) — MLX's own default budget is ~all of unified
     // memory, which starves macOS on a small Mac. No-op on non-macOS/candle builds.
-    generator_cache::apply_gpu_memory_limit(settings.gpu_memory_limit_bytes);
+    initialize_worker_gpu_with(
+        &settings,
+        utility_job_scope(std::env::var("SCENEWORKS_UTILITY_JOBS").ok().as_deref()),
+        generator_cache::apply_gpu_memory_limit,
+    )?;
     // sc-26610: keep proven weight-seal digests across worker restarts, so a restart does not
     // re-hash every multi-GB weight file before its next load.
     gen_core::ArtifactSeal::persist_proven_digests_in(
@@ -2816,3 +3017,41 @@ mod snapshot_install;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cpu_preparation_startup_tests {
+    use super::*;
+    #[test]
+    fn cpu_preparation_startup_never_initializes_gpu_and_wrong_selection_refuses_first() {
+        let temporary = tempfile::tempdir().unwrap();
+        let mut settings = Settings::for_test(temporary.path().to_path_buf());
+        settings.gpu_id = "cpu".to_owned();
+        for scope in [
+            UtilityJobScope::All,
+            UtilityJobScope::Disabled,
+            UtilityJobScope::ModelDownload,
+        ] {
+            initialize_worker_gpu_with(&settings, scope, |_| {
+                panic!("CPU touched GPU memory initialization")
+            })
+            .unwrap();
+            assert!(!should_run_cuda_preflight(&settings));
+        }
+        for id in ["mlx", "0", "1", "auto", "CPU"] {
+            settings.gpu_id = id.to_owned();
+            assert!(initialize_worker_gpu_with(
+                &settings,
+                UtilityJobScope::ModelDownload,
+                |_| panic!("wrong selection touched GPU before refusal")
+            )
+            .is_err());
+            let calls = std::cell::Cell::new(0);
+            initialize_worker_gpu_with(&settings, UtilityJobScope::All, |bytes| {
+                assert_eq!(bytes, settings.gpu_memory_limit_bytes);
+                calls.set(calls.get() + 1);
+            })
+            .unwrap();
+            assert_eq!(calls.get(), 1);
+        }
+    }
+}

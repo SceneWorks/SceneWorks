@@ -12,9 +12,18 @@ enum GenEvent {
     Decoding {
         index: usize,
     },
+    Upsampling {
+        index: usize,
+        tokens: u32,
+        max_tokens: u32,
+    },
     Loading {
         index: usize,
         phase: LoadPhase,
+    },
+    LoadActivity {
+        index: usize,
+        pending: Arc<std::sync::Mutex<load_progress::PendingLoadActivity>>,
     },
     /// One latent-resolution preview frame of image `index`'s developing render (epic 16624,
     /// sc-16904). Forwarded from a [`gen_core::PreviewSink`] by [`preview_sink_for`]; engines
@@ -151,18 +160,61 @@ fn prompt_enhancement_event_sink_for(
     }
 }
 
+fn observe_image_load_activity(
+    tx: &tokio::sync::mpsc::Sender<GenEvent>,
+    index: usize,
+) -> gen_core::LoadActivityObserver {
+    let tx = tx.clone();
+    load_progress::observe(move |pending| {
+        let _ = tx.blocking_send(GenEvent::LoadActivity { index, pending });
+    })
+}
+
+/// Route preparation can hash a changed checkpoint before a generator exists. Run that
+/// read-only work off the async runtime and report only observed hash work; warm source stamps
+/// remain silent. The existing helper keeps heartbeats alive throughout a large file read.
+async fn prepare_image_route_with_progress<T: Send + 'static>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    prepare: impl FnOnce() -> WorkerResult<T> + Send + 'static,
+) -> WorkerResult<T> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let task = tokio::task::spawn_blocking(move || {
+        let _observer = gen_core::LoadActivityObserver::new(move |activity| {
+            let _ = tx.send(activity);
+        });
+        prepare()
+    });
+    let pending = heartbeat_while_blocking(api, settings, job_id, "image source preparation", task);
+    tokio::pin!(pending);
+    let mut open = true;
+    loop {
+        tokio::select! {
+            // Drain the ordered observations before returning a completed prepared route.
+            biased;
+            activity = rx.recv(), if open => {
+                let Some(activity) = activity else { open = false; continue; };
+                update_job(api, job_id, progress_payload(
+                    JobStatus::LoadingModel, ProgressStage::LoadingModel, 0.0,
+                    &format!("{}.", load_activity_message(activity)),
+                    None, None, None,
+                )).await?;
+            }
+            result = &mut pending => return result,
+        }
+    }
+}
+
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
     if matches!(progress, Progress::ConditioningComplete) {
         return;
     }
-    // Prompt-upsampling events (inference 46c22c01e) fire only for a request that asked for
-    // enhancement on a provider that implements it; this lane has no upsampling consumer, so they
-    // stay internal exactly like the conditioning boundary.
-    if matches!(
-        progress,
-        Progress::PromptUpsamplingComplete | Progress::Upsampling { .. }
-    ) {
+    // The prompt-upsampling COMPLETION boundary has no consumer on this lane and stays internal
+    // exactly like the conditioning boundary. Incremental token counts DO reach the job wire: the
+    // FLUX 3 prompt-enhancement surface renders them (sc-26233).
+    if matches!(progress, Progress::PromptUpsamplingComplete) {
         return;
     }
     let event = match progress {
@@ -171,12 +223,12 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             current,
             total,
         },
-        Progress::ConditioningComplete => unreachable!("internal boundary filtered above"),
-        Progress::PromptUpsamplingComplete | Progress::Upsampling { .. } => {
-            unreachable!("prompt-upsampling events filtered above")
+        Progress::ConditioningComplete | Progress::PromptUpsamplingComplete => {
+            unreachable!("internal boundary filtered above")
         }
         Progress::Decoding => GenEvent::Decoding { index },
         Progress::Loading(phase) => GenEvent::Loading { index, phase },
+        Progress::Upsampling { tokens, max_tokens } => GenEvent::Upsampling { index, tokens, max_tokens },
     };
     let _ = tx.blocking_send(event);
 }
@@ -232,6 +284,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
@@ -274,6 +327,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
             index,
@@ -325,6 +379,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
@@ -358,6 +413,7 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
+        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
             index,
@@ -401,6 +457,7 @@ where
     ) -> WorkerResult<(Vec<(u32, u32, Vec<u8>)>, Option<JsonObject>)>,
 {
     let _cache_release = RequestCacheRelease;
+    let _load_observer = observe_image_load_activity(&tx, 0);
     let mut on_progress = |progress| send_gen_progress(&tx, 0, progress);
     let (images, facts) = generate(preview_sink_for(&tx, 0), &mut on_progress)?;
     if images.len() != expected {
@@ -452,11 +509,11 @@ fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
     ));
 }
 
-/// The prompt-upsampling events (inference 46c22c01e) have no consumer on this lane, so they never
-/// reach the job wire: no event, no synthesized step.
+/// Incremental prompt-upsampling token counts DO reach the FLUX 3 surface; only the completion
+/// boundary stays internal (no event, no synthesized step).
 #[cfg(test)]
 #[test]
-fn prompt_upsampling_events_stay_internal() {
+fn prompt_upsampling_tokens_are_emitted_but_completion_stays_internal() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     send_gen_progress(
         &tx,
@@ -466,6 +523,14 @@ fn prompt_upsampling_events_stay_internal() {
             max_tokens: 8,
         },
     );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(GenEvent::Upsampling {
+            index: 0,
+            tokens: 3,
+            max_tokens: 8
+        })
+    ));
     send_gen_progress(&tx, 0, Progress::PromptUpsamplingComplete);
     assert!(matches!(
         rx.try_recv(),

@@ -33,7 +33,7 @@ import { iterateBatch, linkedGroupIssues, missingKeys, parsePromptResolution } f
 import {
   dimensionConstraintMessage,
   evaluateModelDimensions,
-  modelDimensionConstraints,
+  isFlux3ReferenceRequest,
 } from "../resolutionOverride.js";
 // sc-24113. `minStepsForModel` lives in videoModelLimits.js only because video declared
 // `limits.hardMinSteps` first; the reader is model-agnostic and reading it here is what stops this
@@ -46,6 +46,9 @@ import {
 } from "../qwenAlpha.js";
 import { QwenRewritePromptControl } from "../components/QwenRewritePromptControl.jsx";
 import { OrderedReferenceList } from "../components/OrderedReferenceList.jsx";
+import { Flux3LayoutEditor } from "../components/Flux3LayoutEditor.jsx";
+import { assetUrl } from "../components/assetMedia.jsx";
+import { isFlux3LayoutModel, orderedLayoutAssetIds, reconcileLayoutReferences, moveLayoutReference, bindLayoutReferenceIds, recordedLayoutReferences } from "../flux3Layout.js";
 import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { pidDecodeHeadsUp } from "../pidDecodeNotice.js";
 import { promptEnhancementAvailable } from "../promptEnhancement.js";
@@ -65,7 +68,7 @@ import {
   serializeCaption,
   validateCaption,
 } from "../ideogramCaption.js";
-import { buildImageJobRequest, composeImageJobPrompt } from "../imageJobRequest.js";
+import { buildImageJobRequest, composeImageJobPrompt, imageJobReferences } from "../imageJobRequest.js";
 import { reconcileDecoderSelection } from "../imageDecoderSelection.js";
 import {
   usePoseLibrary,
@@ -176,6 +179,8 @@ import {
   installedTiers,
   isBelowFloor,
   modelQualityFloor,
+  nativeTierEligibility,
+  quantizeTier,
   tierLabel,
   tierPickerOptions,
 } from "../quantTier.js";
@@ -194,7 +199,7 @@ import {
 } from "../constants.js";
 import { parseResolution, pickClosestResolution } from "../resolutionMatch.js";
 import { fitsResolutionOptions } from "../resolutionMemory.js";
-import { finiteRecipeNumber, recipeLoraSelection, recipeResolution } from "../recipeFields.js";
+import { finiteRecipeNumber, recipeImageDimensionIntent, recipeLoraSelection, recipeResolution } from "../recipeFields.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
   macAvailableModels,
@@ -387,40 +392,6 @@ export function ImageStudio() {
     visibleWorkers = [],
     preferencesHydrated,
   } = useAppContext();
-  // Krea 2 INT8-ConvRot eligibility (sc-9300, epic 9083): the candle-only tier is offered ONLY when a
-  // live worker advertises the `int8_convrot` capability — which the worker emits solely on the candle
-  // lane AND when its GPU clears the sm_89 compute-cap floor (gpu.rs). So macOS/MLX and pre-Ada NVIDIA
-  // hosts (where no worker advertises it) HIDE the tier gracefully rather than only failing at submit.
-  const convRotEligible = useMemo(
-    () =>
-      visibleWorkers.some(
-        (worker) =>
-          worker?.status !== "offline" &&
-          Array.isArray(worker?.capabilities) &&
-          worker.capabilities.includes("int8_convrot"),
-      ),
-    [visibleWorkers],
-  );
-  // NVFP4 eligibility (sc-11042, epic 11037): identical shape to the ConvRot gate above — the
-  // candle-only FP4 tier is offered ONLY when a live worker advertises the `nvfp4` capability, which
-  // the worker emits solely on the candle lane AND when its GPU clears the sm_120 consumer-Blackwell
-  // compute-cap floor (gpu.rs). macOS/MLX (no FP4 hardware) and pre-Blackwell NVIDIA hosts HIDE the
-  // tier rather than only failing at submit. Hiding is the picker-side gate; the worker independently
-  // re-checks the cap at tier-select, so this is UX, not the security boundary.
-  const nvfp4Eligible = useMemo(
-    () =>
-      visibleWorkers.some(
-        (worker) =>
-          worker?.status !== "offline" &&
-          Array.isArray(worker?.capabilities) &&
-          worker.capabilities.includes("nvfp4"),
-      ),
-    [visibleWorkers],
-  );
-  const tierOptions = useMemo(
-    () => ({ convRotEligible, nvfp4Eligible }),
-    [convRotEligible, nvfp4Eligible],
-  );
   // Prompt-refinement model catalog entry (sc-5605) — drives the "download the
   // refinement model" affordance in RefinePromptControl when Refine fails because the
   // model isn't provisioned on the native worker.
@@ -562,6 +533,10 @@ export function ImageStudio() {
   const [referenceAssetIds, setReferenceAssetIds] = useState(() =>
     Array.isArray(saved.referenceAssetIds) ? saved.referenceAssetIds : [],
   );
+  const [flux3Layout, setFlux3Layout] = useState(saved.flux3Layout ?? { version: 1, boxes: [] });
+  const [flux3ReferenceSlots, setFlux3ReferenceSlots] = useState(saved.flux3ReferenceSlots ?? []);
+  // Explicit ordered ownership survives 2 -> 1 -> 0; length never chooses the character carrier.
+  const [orderedCharacterReferences, setOrderedCharacterReferences] = useState(saved.orderedCharacterReferences === true);
   // Optional SECOND source for a Krea-style two-reference edit (epic 10871 P1.3). Any two images —
   // the `sourceAssetId` above is image 1 (required), this is image 2 (optional), a fixed order (the
   // instruction describes how to combine them). Only surfaced when the model declares
@@ -570,12 +545,12 @@ export function ImageStudio() {
   const [editSecondAssetId, setEditSecondAssetId] = useState("");
   // Edit fit mode (epic 2551): how the source is fitted to the output W×H. Never stretch.
   const [fitMode, setFitMode] = useState(saved.fitMode ?? "crop");
-  const [characterId, setCharacterId] = useState("");
-  const [characterLookId, setCharacterLookId] = useState("");
+  const [characterId, setCharacterId] = useState(saved.characterId ?? "");
+  const [characterLookId, setCharacterLookId] = useState(saved.characterLookId ?? "");
   // Character reference (IP-Adapter / InstantID) — the approved reference image whose
   // identity is carried across variations. `ipAdapterScale` rides in `advanced`; for
   // InstantID, `controlnetScale` (IdentityNet landmark lock) rides there too.
-  const [referenceAssetId, setReferenceAssetId] = useState("");
+  const [referenceAssetId, setReferenceAssetId] = useState(saved.referenceAssetId ?? "");
   const [ipAdapterScale, setIpAdapterScale] = useState(saved.ipAdapterScale ?? 0.6);
   // img2img reference-guided generation (epic 8588 slice A, sc-8593): the reference picked in the
   // "Start from an image" panel (lifted from ReferenceCaptionPicker) drives generation at this
@@ -583,6 +558,34 @@ export function ImageStudio() {
   // above — same picker, different purpose. Default 0.5 (the full-range slider midpoint; the usable
   // band is model-specific, so no clamp beyond the slider's 0–1).
   const [img2imgReferenceAssetId, setImg2imgReferenceAssetId] = useState("");
+  const referenceChangeState = useRef(null);
+  const changeReference = useCallback((field, id, setter, explicit = true) => {
+    const current = referenceChangeState.current;
+    if (current?.available) {
+      // A singular approved choice replaces the ordered set even when its old singular mirror
+      // already names that asset. Bind the OLD slots before dropping any attachment occurrence.
+      setFlux3Layout((layout) => bindLayoutReferenceIds(layout, current.references));
+      if ((field === "referenceAssetId" && current.mode === "character_image") ||
+          (field === "sourceAssetId" && current.mode === "edit_image")) {
+        const ids = id ? [id] : [];
+        setReferenceAssetIds(ids);
+        setFlux3ReferenceSlots(reconcileLayoutReferences(current.references, ids));
+        if (field === "referenceAssetId") setOrderedCharacterReferences(explicit);
+      }
+      if (field === "characterId" && current.characterId !== id) {
+        setReferenceAssetIds([]);
+        setReferenceAssetId("");
+        setFlux3ReferenceSlots([]);
+        setOrderedCharacterReferences(false);
+      }
+    }
+    setter(id);
+  }, []);
+  const changeReferenceAssetId = useCallback((id, explicit = true) => changeReference("referenceAssetId", id, setReferenceAssetId, explicit), [changeReference]);
+  const changeCharacterId = useCallback((id) => changeReference("characterId", id, setCharacterId), [changeReference]);
+  const changeSourceAssetId = useCallback((id) => changeReference("sourceAssetId", id, setSourceAssetId), [changeReference]);
+  const changeEditSecondAssetId = useCallback((id) => changeReference("editSecondAssetId", id, setEditSecondAssetId), [changeReference]);
+  const changeImg2imgReferenceAssetId = useCallback((id) => changeReference("img2imgReferenceAssetId", id, setImg2imgReferenceAssetId), [changeReference]);
   const [img2imgStrength, setImg2imgStrength] = useState(saved.img2imgStrength ?? 0.5);
   // Krea "text style" tap-reweight gain (sc-11878): the ui.textStyleGain slider (Krea/Qwen-family).
   // 1.0 = no-op; >1 warmer/richer (early Qwen3-VL taps), <1 late-biased. Resets to the model default on
@@ -649,6 +652,12 @@ export function ImageStudio() {
   // ride the existing top-level width/height payload; the backend caps each at 256–4096.
   const [widthOverride, setWidthOverride] = useState(saved.widthOverride ?? "");
   const [heightOverride, setHeightOverride] = useState(saved.heightOverride ?? "");
+  // Recipe-only optional axes. Never infer authored intent from the actual output dimensions.
+  const [referenceDimensionIntent, setReferenceDimensionIntent] = useState(saved.referenceDimensionIntent ?? null);
+  const handleResolutionChange = (value) => {
+    setReferenceDimensionIntent(null);
+    setResolution(value);
+  };
   // Flash attention (sc-3674): fused attention on the candle (Windows/CUDA) SDXL backend — faster +
   // less VRAM. Per-payload (sent in `advanced.flashAttn`); the worker honors it only on candle, and
   // ignores it on every other backend. Default on. Sticky pref (persisted), not model-reset.
@@ -659,7 +668,8 @@ export function ImageStudio() {
   const [enhancePrompt, setEnhancePrompt] = useState(saved.enhancePrompt ?? false);
   // Boogu precision toggle (sc-6568): off = the packed Q8 default; on emits `advanced.mlxQuantize: 0`
   // (the full-precision bf16 build, fetched on demand by the worker). Sticky pref, default off (Q8).
-  const [bf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
+  const [pickedBf16Precision, setBf16Precision] = useState(saved.bf16Precision ?? false);
+  const [recipeTierRequest, setRecipeTierRequest] = useState(null);
   // Transparency / RGBA output (sc-24113): on emits `advanced.transparentBackground: true`, which
   // the worker's `qwen_alpha` adapter turns into a four-channel decode and the sc-24111 egress path
   // writes as a genuinely transparent PNG. Sticky pref, default off; the toggle only RENDERS when
@@ -806,9 +816,9 @@ export function ImageStudio() {
 
   useEffect(() => {
     if (mode === "edit_image" && selectedAssetEditableSourceId) {
-      setSourceAssetId(selectedAssetEditableSourceId);
+      changeSourceAssetId(selectedAssetEditableSourceId);
     }
-  }, [mode, selectedAssetEditableSourceId]);
+  }, [mode, selectedAssetEditableSourceId, changeSourceAssetId]);
 
   useEffect(() => {
     if (launchRequest?.view !== "Image") {
@@ -829,6 +839,10 @@ export function ImageStudio() {
       setWorkflowPoses([]);
       setPoseLibraryReplayOpen(false);
       setFaceRestore(false);
+      setFlux3Layout({ version: 1, boxes: [] });
+      setFlux3ReferenceSlots([]);
+      setOrderedCharacterReferences(false);
+      setReferenceDimensionIntent(null);
     }
     if (launchRequest.characterId) {
       setMode(normalizeImageMode(launchRequest.mode ?? "character_image"));
@@ -850,9 +864,14 @@ export function ImageStudio() {
       setModel(launchRequest.model);
     }
     if (launchRequest.mode === "edit_image" && selectedAssetEditableSourceId) {
-      setSourceAssetId(selectedAssetEditableSourceId);
+      changeSourceAssetId(selectedAssetEditableSourceId);
+      if (isFlux3LayoutModel(launchRequest.model ?? referenceChangeState.current?.model)) {
+        // A launch can switch models in this same commit, before changeSource sees the new model.
+        setReferenceAssetIds([selectedAssetEditableSourceId]);
+        setFlux3ReferenceSlots(reconcileLayoutReferences([], [selectedAssetEditableSourceId]));
+      }
     }
-  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId]);
+  }, [launchRequest, selectedAsset?.id, selectedAssetEditableSourceId, changeSourceAssetId]);
 
   // Mac UI gating (sc-3486): on a Mac in MLX-required mode, hide torch-only models from the
   // picker so the user can't select something that would only error. Inert elsewhere.
@@ -922,6 +941,10 @@ export function ImageStudio() {
   // effective model for either rendering defaults or submitting a job.
   const selectedModel = availableModels.find((item) => item.id === model);
   const selectedModelServesMode = Boolean(selectedModel);
+  const tierOptions = useMemo(
+    () => nativeTierEligibility(selectedModel, visibleWorkers),
+    [selectedModel, visibleWorkers],
+  );
   // Qwen-Image 2.1's OFFICIAL prompt rewriters (sc-24113, epic 24107). Two optional, explicitly
   // downloaded checkpoints, and WHICH ONE applies is decided by the request rather than by a
   // picker: references attached ⇒ the editing rewriter, none ⇒ the text-to-image one. The catalog
@@ -1078,6 +1101,9 @@ export function ImageStudio() {
   // Whether the model ships a packed default + a hosted full-precision bf16 build, exposing the
   // Studio "Full precision (bf16)" toggle (sc-6568) — Boogu Base/Turbo/Edit.
   const precisionToggle = Boolean(selectedModel?.ui?.precisionToggle);
+  const precisionReplay = precisionToggle && recipeTierRequest?.model === model &&
+    ["bf16", "q8"].includes(recipeTierRequest?.tier);
+  const bf16Precision = precisionReplay ? recipeTierRequest.tier === "bf16" : pickedBf16Precision;
   // Quant-tier picker state (sc-8515, generalized). `availableTiers` is the SELECTABLE set — tiers that
   // are installed AND complete on disk, and the ONLY tiers we ever send to the worker (the user's bottom
   // line: never generate off a tier that isn't in the cache). `possibleTiers` is the FULL display set —
@@ -1139,9 +1165,10 @@ export function ImageStudio() {
     () => suggestTier(selectedModel, unifiedMemoryGb, { backend: activeBackend }),
     [selectedModel, unifiedMemoryGb, activeBackend],
   );
-  const { quantTier, tierSwitching, handleTierChange, tierExplicit, tierSuggested, confirmTier } =
+  const { quantTier: pickedTier, tierSwitching, handleTierChange: pickTier, tierExplicit: pickedExplicit, tierSuggested, confirmTier } =
     useQuantTierPicker({
       screen: TIER_SCREEN,
+      resolvedTier: precisionReplay ? null : recipeTierRequest?.tier,
       model,
       selectedModel,
       availableTiers,
@@ -1150,6 +1177,17 @@ export function ImageStudio() {
       useGenerationQuality: true,
       preferencesHydrated,
     });
+  // Keep a replay's exact numeric format, not this user's sticky/default. Unavailable recipes
+  // stay blocked until an explicit new pick; no worker or missing artifact can silently change it.
+  const quantTier = pickedTier;
+  const tierExplicit = Boolean(recipeTierRequest) || pickedExplicit;
+  const replayTierUnavailable = recipeTierRequest && !precisionReplay &&
+    (recipeTierRequest.model !== model || !availableTiers.includes(quantTier));
+  const handleTierChange = (tier) => {
+    if (!availableTiers.includes(tier)) return;
+    setRecipeTierRequest(null);
+    pickTier(tier);
+  };
   const possibleTiers = useMemo(
     () => allPossibleTiers(selectedModel, tierOptions),
     [selectedModel, tierOptions],
@@ -1307,6 +1345,15 @@ export function ImageStudio() {
   // for the recipe path, which sets the model AND the tuning together.
   const skipReferenceTuningReset = useRef(false);
   const referenceTuningModel = useRef(saved.ipAdapterScale != null ? model : null);
+  // One declared-default policy for a model switch and the first late catalog resolution.
+  // The effects retain their distinct ownership/skip gates and model-only transient resets.
+  const applyDeclaredReferenceDefaults = useCallback((ui) => {
+    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
+    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
+    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
+    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
+    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
+  }, [setControlScale]);
   useEffect(() => {
     if (referenceTuningModel.current === model) {
       return;
@@ -1317,9 +1364,7 @@ export function ImageStudio() {
       return;
     }
     const ui = imageModels.find((item) => item.id === model)?.ui ?? {};
-    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
-    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
-    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
+    applyDeclaredReferenceDefaults(ui);
     setViewAngle("");
     setSelectedPoseIds([]);
     setWorkflowPoses([]);
@@ -1329,9 +1374,6 @@ export function ImageStudio() {
     // reset the control-scale to the model's manifest default, and clear a stale control image.
     const nextModes = supportedControlModes(imageModels.find((item) => item.id === model));
     setControlMode((current) => (nextModes.includes(current) ? current : nextModes[0] ?? "pose"));
-    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
-    // Krea text-style gain: snap to the new model's declared default (1.0 = no-op when undeclared).
-    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
     setControlImageAssetId("");
     setControlImagePassthrough(false);
     // Clear a stale overlay pick so an id trained for a different backbone can't leak into a submit
@@ -1367,12 +1409,8 @@ export function ImageStudio() {
       return;
     }
     const ui = resolved.ui ?? {};
-    setIpAdapterScale(typeof ui.referenceStrengthDefault === "number" ? ui.referenceStrengthDefault : 0.6);
-    setControlnetScale(typeof ui.identityStructure?.default === "number" ? ui.identityStructure.default : 0.8);
-    setTrueCfgScale(typeof ui.variationStrength?.default === "number" ? ui.variationStrength.default : 4.0);
-    setControlScale(typeof ui.controlScale?.default === "number" ? ui.controlScale.default : null);
-    setTextStyleGain(typeof ui.textStyleGain?.default === "number" ? ui.textStyleGain.default : 1.0);
-  }, [model, imageModels, setControlScale]);
+    applyDeclaredReferenceDefaults(ui);
+  }, [model, imageModels, applyDeclaredReferenceDefaults]);
   // Approved reference images for the selected character (the IP-Adapter identity
   // source). Resolve the full asset from the catalog so thumbnails render even when
   // the character payload only carries assetIds.
@@ -1387,14 +1425,14 @@ export function ImageStudio() {
   // Keep the selected reference valid: default to the first approved reference when
   // none is chosen or the current one no longer belongs to this character.
   useEffect(() => {
-    if (mode !== "character_image") {
+    if (mode !== "character_image" || (isFlux3LayoutModel(model) && orderedCharacterReferences)) {
       return;
     }
     if (characterReferences.some((reference) => reference.assetId === referenceAssetId)) {
       return;
     }
-    setReferenceAssetId(characterReferences[0]?.assetId ?? "");
-  }, [mode, characterReferences, referenceAssetId]);
+    changeReferenceAssetId(characterReferences[0]?.assetId ?? "", false);
+  }, [mode, model, orderedCharacterReferences, characterReferences, referenceAssetId, changeReferenceAssetId]);
   // Seed a character-appropriate default prompt when entering character mode, unless
   // the user has already typed/picked their own. The generic text-to-image default
   // ("neon street at midnight") makes no sense for character variations.
@@ -1717,6 +1755,11 @@ export function ImageStudio() {
   // Guard on a resolved model (sc-11962): before the catalog loads `resolutionOptions`
   // falls back to DEFAULT_RESOLUTION_OPTIONS, so an un-guarded snap would revert a
   // restored model-specific resolution (e.g. 1536x1536) during restart-restore.
+  //
+  // Exception: a FLUX 3 automatic-reference-sized recipe records the reference plan's
+  // resolved canvas (for example 80x64), not a user aspect choice. Snapping that value to
+  // the closest bucket would silently change the requested composition, and the automatic
+  // intent already owns the emitted axes. Fall back to the model's preferred bucket there.
   useEffect(() => {
     if (!selectedModel) {
       return;
@@ -1724,12 +1767,15 @@ export function ImageStudio() {
     if (resolutionOptions.includes(resolution)) {
       return;
     }
-    const dims = parseResolution(resolution);
+    const autoReferenceIntent = referenceDimensionIntent?.model === model &&
+      referenceDimensionIntent?.mode === mode &&
+      (referenceDimensionIntent.width === null || referenceDimensionIntent.height === null);
+    const dims = !autoReferenceIntent && parseResolution(resolution);
     setResolution(
       (dims && pickClosestResolution(dims.width, dims.height, resolutionOptions))
         || preferredResolution(selectedModel, resolutionOptions),
     );
-  }, [resolutionOptions, resolution, selectedModel]);
+  }, [resolutionOptions, resolution, selectedModel, referenceDimensionIntent, model, mode]);
   // Keep the selected quant tier valid for the active model (sc-8515). When the current tier is
   // still installed for this model, leave it; otherwise snap to the model's default selection
   // (sticky-for-this-(screen,model) → declared default → q8 base → q4 → first installed). Clears "" when
@@ -1774,7 +1820,7 @@ export function ImageStudio() {
     fallbackModelId: "z_image_turbo",
     characters,
     characterId,
-    setCharacterId,
+    setCharacterId: changeCharacterId,
     setCharacterLookId,
     assets,
     latestAssets,
@@ -1924,10 +1970,32 @@ export function ImageStudio() {
     const recipe = launchRequest.recipe;
     const settings = recipe.normalizedSettings ?? {};
     const rawSettings = recipe.rawAdapterSettings ?? {};
-    const nextMode = recipeMode(recipe);
+    const restoredTier = rawSettings.quantTier ??
+      (rawSettings.convRot === true ? "int8-convrot" : quantizeTier(rawSettings.mlxQuantize));
+    setRecipeTierRequest(restoredTier ? { model: recipe.model, tier: restoredTier } : null);
+    // Restore the authoring document, never the worker's rounded/locked caption table.
+    setFlux3Layout(rawSettings.flux3_layout ?? rawSettings.flux3Layout?.authoring ?? { version: 1, boxes: [] });
+    const recordedReferences = isFlux3LayoutModel(recipe.model) ? recordedLayoutReferences(rawSettings) : null;
+    const orderedReferences = rawSettings.referenceAssetIds ?? recordedReferences?.assetIds;
+    // Reference-conditioned text uses the existing edit UI. Character jobs retain their actual
+    // identity/mode while the existing plural reference carrier preserves every attachment.
+    const nextMode = isFlux3LayoutModel(recipe.model) && orderedReferences?.length && recipeMode(recipe) === "text_to_image"
+      ? "edit_image" : recipeMode(recipe);
+    const restoredReferenceAssets = orderedReferences ?? (nextMode === "edit_image"
+      ? [rawSettings.referenceAssetId ?? launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId].filter(Boolean)
+      : [rawSettings.referenceAssetId ?? launchRequest.referenceAssetId].filter(Boolean));
+    setOrderedCharacterReferences(isFlux3LayoutModel(recipe.model) && nextMode === "character_image" && Array.isArray(orderedReferences));
+    setFlux3ReferenceSlots(reconcileLayoutReferences([], restoredReferenceAssets,
+      rawSettings.flux3_reference_ids ?? recordedReferences?.referenceIds));
+    const dimensionIntent = recipeImageDimensionIntent(recipe);
     const replayMossEdit = isMossEdit(recipe.model ?? model, nextMode);
-    mossEditTransition.current.replay = isMossEdit(recipe.model ?? model, nextMode) !== mossEditTransition.current.active;
+    mossEditTransition.current.replay = replayMossEdit !== mossEditTransition.current.active;
     const resolutionFromRecipe = recipeResolution(recipe);
+    setReferenceDimensionIntent(dimensionIntent
+      ? { ...dimensionIntent, model: recipe.model, mode: nextMode } : null);
+    // A launch replaces stale custom sides, including when either requested axis was omitted.
+    setWidthOverride(dimensionIntent?.width ?? "");
+    setHeightOverride(dimensionIntent?.height ?? "");
     const { loraIds, loraWeights: loraWeightMap } = recipeLoraSelection(recipe);
 
     // Arm the model-change reset skip only when this recipe actually changes the model. A
@@ -2035,7 +2103,7 @@ export function ImageStudio() {
     }
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
-    setReferenceAssetId(settings.referenceAssetId ?? rawSettings.referenceAssetId ?? launchRequest.referenceAssetId ?? "");
+    setReferenceAssetId(settings.referenceAssetId ?? rawSettings.referenceAssetId ?? recordedReferences?.assetIds[0] ?? launchRequest.referenceAssetId ?? "");
     // sc-15952 / sc-26687: the ordered reference images. Guarded on the KEY rather than assigned
     // unconditionally — a recipe that records neither spelling must not clear a selection the user
     // had already made, while an explicit empty list is authoritative and does clear it.
@@ -2045,17 +2113,20 @@ export function ImageStudio() {
     // edit with the ordered multi-reference conditioning dropped. The recipe now records the list in
     // `normalizedSettings` — the replay record — and that spelling is authoritative. The `advanced`
     // spelling is kept as the fallback for a shared-workflow envelope that carries it there.
-    const recordedReferences =
+    const recordedReferenceIds =
       Array.isArray(settings.referenceAssetIds)
         ? settings.referenceAssetIds
         : Array.isArray(rawSettings.referenceAssetIds)
           ? rawSettings.referenceAssetIds
           : null;
-    if (isMossEdit(recipe.model ?? model, nextMode)) {
+    // FLUX.3 layout recipes restore their recorded layout references (main, sc-26233).
+    if (isFlux3LayoutModel(recipe.model)) {
+      setReferenceAssetIds(restoredReferenceAssets.filter(Boolean));
+    } else if (isMossEdit(recipe.model ?? model, nextMode)) {
       // Missing identities stay visible and block submission; never drop a slot or use the output.
-      setReferenceAssetIds(recordedReferences ?? []);
-    } else if (recordedReferences) {
-      setReferenceAssetIds(recordedReferences.filter(Boolean));
+      setReferenceAssetIds(recordedReferenceIds ?? []);
+    } else if (recordedReferenceIds) {
+      setReferenceAssetIds(recordedReferenceIds.filter(Boolean));
     }
     setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
     setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);
@@ -2116,7 +2187,7 @@ export function ImageStudio() {
     setMultiPhasePhases(restoredPhases);
     setMultiPhaseEnabled(restoredPhases.length > 0);
     if (nextMode === "edit_image") {
-      setSourceAssetId(launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId ?? "");
+      setSourceAssetId(restoredReferenceAssets[0] ?? launchRequest.sourceAssetId ?? launchRequest.assetId ?? settings.sourceAssetId ?? "");
       setFitMode(rawSettings.fitMode ?? settings.fitMode ?? "crop");
     }
     const upscale = rawSettings.upscale ?? settings.upscale;
@@ -2149,7 +2220,62 @@ export function ImageStudio() {
   // Per-model geometry constraints for the free Width/Height override (sc-14058). Native-resolution
   // families (Mage-Flow) declare a ÷16 stride and a 512–2048 native range; every other model keeps the
   // global 256–4096 envelope with no stride. Drives the override inputs' min/max/step affordance below.
-  const dimensionConstraints = modelDimensionConstraints(selectedModel);
+  // Match the references actually emitted by buildImageJobRequest, not hidden/stale picker state.
+  const jobReferences = imageJobReferences({ model, mode, multiReference, orderedCharacterReferences, sourceWithMultiReference,
+    editSecondPair, sourceAssetId, controlPreprocessSourceId, referenceAssetIds, referenceAssetId,
+    supportsImg2img, img2imgReferenceAssetId });
+  const flux3LayoutAvailable = isFlux3LayoutModel(selectedModel);
+  const layoutAssetIds = orderedLayoutAssetIds(jobReferences);
+  const layoutReferences = flux3LayoutAvailable
+    ? reconcileLayoutReferences(flux3ReferenceSlots, layoutAssetIds) : [];
+  // Keep hidden model state intact. Reconcile only the active attachment sequence, without
+  // deduplicating it. Updating our own state here avoids an effect/submit identity race.
+  if (flux3LayoutAvailable && layoutAssetIds.length &&
+      (layoutReferences.length !== flux3ReferenceSlots.length || layoutReferences.some((slot, index) =>
+        slot.assetId !== flux3ReferenceSlots[index]?.assetId || slot.id !== flux3ReferenceSlots[index]?.id))) {
+    setFlux3ReferenceSlots(layoutReferences);
+  }
+  // Stable change callbacks read the OLD complete sequence before their setter runs.
+  // This snapshot also covers approved-reference fallback effects without changing effect cadence.
+  referenceChangeState.current = { available: flux3LayoutAvailable, model, mode, references: layoutReferences,
+    referenceAssetId, characterId, sourceAssetId, editSecondAssetId, img2imgReferenceAssetId };
+  const orderedCharacterActive = flux3LayoutAvailable && mode === "character_image" && orderedCharacterReferences;
+  const characterReferenceError = orderedCharacterActive && !referenceAssetIds.length
+    ? "Select at least one reference image for this character request." : null;
+  const changeReferenceAssetIds = (ids) => {
+    if (flux3LayoutAvailable) {
+      setFlux3Layout(bindLayoutReferenceIds(flux3Layout, layoutReferences));
+      setFlux3ReferenceSlots(reconcileLayoutReferences(layoutReferences, ids));
+    }
+    setReferenceAssetIds(ids);
+    if (flux3LayoutAvailable && mode === "character_image") {
+      setOrderedCharacterReferences(true);
+      setReferenceAssetId(ids[0] ?? "");
+    }
+  };
+  const moveFlux3Reference = (from, to) => {
+    setFlux3Layout(bindLayoutReferenceIds(flux3Layout, layoutReferences));
+    setFlux3ReferenceSlots(moveLayoutReference(layoutReferences, from, to));
+    const ids = moveLayoutReference(referenceAssetIds, from, to);
+    setReferenceAssetIds(ids);
+    if (orderedCharacterActive) setReferenceAssetId(ids[0] ?? "");
+  };
+  const removeFlux3Reference = (index) => {
+    setFlux3Layout(bindLayoutReferenceIds(flux3Layout, layoutReferences));
+    setFlux3ReferenceSlots(layoutReferences.filter((_, slotIndex) => slotIndex !== index));
+    const ids = referenceAssetIds.filter((_, slotIndex) => slotIndex !== index);
+    setReferenceAssetIds(ids);
+    if (orderedCharacterActive) setReferenceAssetId(ids[0] ?? "");
+  };
+  const flux3ReferenceRequest = isFlux3ReferenceRequest(model, Object.values(jobReferences).flat());
+  const activeDimensionIntent = flux3ReferenceRequest && referenceDimensionIntent?.model === model &&
+    referenceDimensionIntent?.mode === mode ? referenceDimensionIntent : null;
+  useEffect(() => {
+    if (referenceDimensionIntent && (referenceDimensionIntent.model !== model ||
+        referenceDimensionIntent.mode !== mode || (selectedModel && !flux3ReferenceRequest))) {
+      setReferenceDimensionIntent(null);
+    }
+  }, [referenceDimensionIntent, model, mode, selectedModel, flux3ReferenceRequest]);
   // A non-empty Width/Height override wins for that axis; empty falls back to the Aspect
   // dropdown. The resulting dims flow through the existing top-level width/height payload,
   // so submit() and the batch builder need no further change. Logic lives in the pure,
@@ -2159,8 +2285,10 @@ export function ImageStudio() {
     resolution,
     widthOverride,
     heightOverride,
+    referenceRequest: flux3ReferenceRequest,
+    dimensionIntent: activeDimensionIntent,
   });
-  const { width, height, invalid: dimensionsInvalid } = dimensionEval;
+  const { width, height, invalid: dimensionsInvalid, constraints: dimensionConstraints } = dimensionEval;
   // A precise, user-facing ERROR (never a raw requirement): names this model's actual range/stride.
   const dimensionError = dimensionConstraintMessage(dimensionEval);
   // sc-25681: a model that shows its patch grid below a declared side (Iris-3B, 1024) says so
@@ -2432,6 +2560,11 @@ export function ImageStudio() {
     heightOverride,
     fitMode,
     referenceAssetIds,
+    referenceDimensionIntent,
+    orderedCharacterReferences,
+    ...(isFlux3LayoutModel(model) && mode === "character_image" ? { characterId, characterLookId, referenceAssetId } : {}),
+    flux3Layout,
+    flux3ReferenceSlots,
     ipAdapterScale,
     controlnetScale,
     trueCfgScale,
@@ -2522,6 +2655,14 @@ export function ImageStudio() {
     // actual authorization to create a job.
     if (!selectedModelServesMode) {
       setSubmitError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
+    if (replayTierUnavailable) {
+      setSubmitError("Recipe tier unavailable. Install it on a supported worker or choose another tier.");
+      return;
+    }
+    if (characterReferenceError) {
+      setSubmitError(characterReferenceError);
       return;
     }
     if (decoderCapabilitiesPending) {
@@ -2657,6 +2798,8 @@ export function ImageStudio() {
     const { foldPrompt, isStructured, promptToSend } = composeJobPrompt(overrides);
     const stackResolution = stackActive && composedStack.resolution ? parseResolution(composedStack.resolution) : null;
     return buildImageJobRequest({
+      flux3Layout,
+      flux3ReferenceIds: layoutReferences.map(({ id }) => id),
       // Overrides — the one legitimate single-vs-batch difference.
       promptToSend,
       submitIntent: overrides.submitIntent,
@@ -2702,6 +2845,7 @@ export function ImageStudio() {
       characterId,
       characterLookId,
       multiReference,
+      orderedCharacterReferences,
       sourceWithMultiReference,
       editSecondPair,
       sourceAssetId: mossEdit ? undefined : sourceAssetId,
@@ -2833,6 +2977,14 @@ export function ImageStudio() {
     }
     if (!selectedModelServesMode) {
       setBatchError(`Install or select a model that supports ${modeLabel} generation.`);
+      return;
+    }
+    if (replayTierUnavailable) {
+      setBatchError("Recipe tier unavailable. Install it on a supported worker or choose another tier.");
+      return;
+    }
+    if (characterReferenceError) {
+      setBatchError(characterReferenceError);
       return;
     }
     if (decoderCapabilitiesPending) {
@@ -3066,6 +3218,7 @@ export function ImageStudio() {
           resolution: `${res.width}x${res.height}`,
           widthOverride: "",
           heightOverride: "",
+          referenceRequest: flux3ReferenceRequest,
         }).invalid,
     );
   // A structured-caption model can batch, but only if the prompt-refiner is available to
@@ -3200,11 +3353,13 @@ export function ImageStudio() {
   // `submitting` is a busy gate, not a rule. `batchTotal === 0` is a requirement (silent),
   // already folded into batchValidity — no need to repeat it here.
   const batchRunDisabled =
-    !batchValidity.ready || !selectedModelServesMode || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
+    !batchValidity.ready || !selectedModelServesMode || replayTierUnavailable || Boolean(characterReferenceError) || !mossComponents.ready || Boolean(mossEditError) || Boolean(batchRun?.submitting);
   // The two conditions whose message has its own home stay explicit gates: a structured
   // caption's field errors live in the builder, and a Mac block prints its own note.
   const generateDisabled =
     submitting ||
+    replayTierUnavailable ||
+    Boolean(characterReferenceError) ||
     !mossComponents.ready ||
     Boolean(mossEditError) ||
     !selectedModelServesMode ||
@@ -3399,6 +3554,9 @@ export function ImageStudio() {
           {/* Auto-expand failure (sc-6501): a structured model couldn't turn the plain-text idea
               into a caption (e.g. the prompt-refiner model isn't installed). We never fall back to
               sending raw plain text, so surface the reason and the path forward. */}
+          {replayTierUnavailable ? (
+            <p role="alert">Recipe {tierLabel(quantTier)} unavailable. Install it on a supported worker, or <button type="button" onClick={() => setRecipeTierRequest(null)}>use current settings</button>.</p>
+          ) : null}
           {submitError ? (
             <p className="structured-error" role="alert">
               {submitError}
@@ -3503,7 +3661,7 @@ export function ImageStudio() {
                     emptyLabel="No reference image selected"
                     importAsset={importAsset}
                     label="Reference image"
-                    onChange={setImg2imgReferenceAssetId}
+                    onChange={changeImg2imgReferenceAssetId}
                     projectId={activeProject?.id}
                     value={img2imgReferenceAssetId}
                   />
@@ -3663,7 +3821,7 @@ export function ImageStudio() {
                       // The aspect suggestion lands on the SAME resolution control the Aspect menu
                       // drives, and only ever with a value that menu already offers — accepting it
                       // is indistinguishable from the user picking it by hand.
-                      onApplyResolution={setResolution}
+                      onApplyResolution={handleResolutionChange}
                       projectId={activeProject?.id ?? ""}
                       prompt={prompt}
                       // The ORDERED list the render will condition on. Same array, same order —
@@ -3679,9 +3837,21 @@ export function ImageStudio() {
             );
           })()}
 
+        {flux3LayoutAvailable ? <Flux3LayoutEditor
+          value={flux3Layout}
+          onChange={setFlux3Layout}
+          width={width || 1024}
+          height={height || 1024}
+          references={layoutReferences.map((slot) => {
+            const asset = assets.find(({ id }) => id === slot.assetId);
+            return { ...slot, label: asset?.displayName ?? asset?.name ?? slot.assetId,
+              url: asset ? assetUrl(asset) : null, width: asset?.width, height: asset?.height };
+          })}
+        /> : null}
+
         {mode === "edit_image" || mode === "character_image" ? (
           <div className="studio-source-band">
-            {mode === "edit_image" ? (
+            {mode === "edit_image" || orderedCharacterActive ? (
               <>
                 {mossEdit ? <>
                   <MossReferencePicker assets={editImageAssets} characters={characters} projectId={activeProject?.id} importAsset={importAsset} assetIds={referenceAssetIds} onChange={setReferenceAssetIds} max={maxStudioReferences} />
@@ -3702,18 +3872,21 @@ export function ImageStudio() {
                         : "Reference images"
                     }
                     multiple
-                    onChange={setReferenceAssetIds}
+                    onChange={changeReferenceAssetIds}
                     values={referenceAssetIds}
                   />
                 ) : null}
                 {/* sc-24113: the ORDER of these references is part of the request for a model whose
-                    template numbers them, so show it and let the user change it. Renders nothing
-                    below two references — there is no order to show with one. */}
+                    template numbers them, so show it and let the user change it. Instance owners
+                    keep removal available through the last reference and the explicit empty state. */}
                 {mossEdit ? null : multiReference ? (
                   <OrderedReferenceList
                     assetIds={referenceAssetIds}
+                    itemKeys={flux3LayoutAvailable ? layoutReferences.map(({ id }) => id) : undefined}
+                    onMove={flux3LayoutAvailable ? moveFlux3Reference : undefined}
+                    onRemove={flux3LayoutAvailable ? removeFlux3Reference : undefined}
                     labelFor={assetLabelFor}
-                    onChange={setReferenceAssetIds}
+                    onChange={changeReferenceAssetIds}
                   />
                 ) : (
                   <>
@@ -3724,7 +3897,7 @@ export function ImageStudio() {
                       emptyLabel="No source image selected"
                       importAsset={importAsset}
                       label={editReferences ? "Image 1" : "Source image"}
-                      onChange={setSourceAssetId}
+                      onChange={changeSourceAssetId}
                       projectId={activeProject?.id}
                       value={sourceAssetId}
                     />
@@ -3741,7 +3914,7 @@ export function ImageStudio() {
                           emptyLabel="No second image selected (optional)"
                           importAsset={importAsset}
                           label={editReferences.secondaryLabel ?? "Image 2 (optional)"}
-                          onChange={setEditSecondAssetId}
+                          onChange={changeEditSecondAssetId}
                           projectId={activeProject?.id}
                           value={editSecondAssetId}
                         />
@@ -3758,7 +3931,7 @@ export function ImageStudio() {
                         emptyLabel="No additional references selected (optional)"
                         label="Additional references (optional)"
                         multiple
-                        onChange={setReferenceAssetIds}
+                        onChange={changeReferenceAssetIds}
                         values={referenceAssetIds}
                       />
                     ) : null}
@@ -3766,7 +3939,7 @@ export function ImageStudio() {
                       <OrderedReferenceList
                         assetIds={referenceAssetIds}
                         labelFor={assetLabelFor}
-                        onChange={setReferenceAssetIds}
+                        onChange={changeReferenceAssetIds}
                       />
                     ) : null}
                   </>
@@ -3831,7 +4004,7 @@ export function ImageStudio() {
                 <div className="control-grid compact-controls">
                   <label>
                     Character
-                    <select onChange={(event) => setCharacterId(event.target.value)} value={characterId}>
+                    <select onChange={(event) => changeCharacterId(event.target.value)} value={characterId}>
                       <option value="">Select character</option>
                       {characters.map((character) => (
                         <option key={character.id} value={character.id}>
@@ -3852,6 +4025,9 @@ export function ImageStudio() {
                     </select>
                   </label>
                 </div>
+                {flux3LayoutAvailable && !orderedCharacterReferences ? <button type="button"
+                  onClick={() => changeReferenceAssetIds(referenceAssetId ? [referenceAssetId] : [])}>Edit reference images</button> : null}
+                {characterReferenceError ? <p className="inline-warning" role="alert">{characterReferenceError}</p> : null}
                 {characterId ? (
                   characterReferences.length ? (
                     <div className="character-reference-picker">
@@ -3863,7 +4039,7 @@ export function ImageStudio() {
                             aria-pressed={reference.assetId === referenceAssetId}
                             className={reference.assetId === referenceAssetId ? "reference-thumb active" : "reference-thumb"}
                             key={reference.assetId}
-                            onClick={() => setReferenceAssetId(reference.assetId)}
+                            onClick={() => changeReferenceAssetId(reference.assetId)}
                             title={reference.asset?.displayName ?? reference.assetId}
                             type="button"
                           >
@@ -4025,7 +4201,7 @@ export function ImageStudio() {
                     {mossDownload.error ? <p role="alert">{mossDownload.error}</p> : null}
               <label className="settings-field settings-field-aspect">
                 Aspect
-                <select onChange={(event) => setResolution(event.target.value)} value={resolution}>
+                <select onChange={(event) => handleResolutionChange(event.target.value)} value={resolution}>
                   {resolutionOptions.map((option) => (
                     <option key={option} value={option}>{formatResolutionLabel(option)}</option>
                   ))}
@@ -4237,8 +4413,11 @@ export function ImageStudio() {
                   min={dimensionConstraints.min}
                   max={dimensionConstraints.max}
                   step={dimensionConstraints.step}
-                  onChange={(event) => setWidthOverride(event.target.value)}
-                  placeholder={String(dropdownWidth)}
+                  onChange={(event) => {
+                    setReferenceDimensionIntent(null);
+                    setWidthOverride(event.target.value);
+                  }}
+                  placeholder={activeDimensionIntent?.width === null ? "Auto (reference canvas)" : String(dropdownWidth)}
                   type="number"
                   value={widthOverride}
                 />
@@ -4249,8 +4428,11 @@ export function ImageStudio() {
                   min={dimensionConstraints.min}
                   max={dimensionConstraints.max}
                   step={dimensionConstraints.step}
-                  onChange={(event) => setHeightOverride(event.target.value)}
-                  placeholder={String(dropdownHeight)}
+                  onChange={(event) => {
+                    setReferenceDimensionIntent(null);
+                    setHeightOverride(event.target.value);
+                  }}
+                  placeholder={activeDimensionIntent?.height === null ? "Auto (reference canvas)" : String(dropdownHeight)}
                   type="number"
                   value={heightOverride}
                 />
@@ -4459,7 +4641,7 @@ export function ImageStudio() {
               {promptEnhance ? (
                 <label
                   className="checkline prompt-enhance-toggle"
-                  title="Have FLUX.2-dev's native prompt enhancer rewrite your prompt before generating. If enhancement safely falls back, the saved recipe records that the original prompt ran. Distinct from Refine; off by default."
+                  title="Have the model's native prompt enhancer rewrite your prompt before generating. FLUX 3 uses its separately installed optional upsampler. The saved recipe records the original and effective prompts, including any safe fallback. Distinct from Refine; off by default."
                 >
                   <input
                     checked={enhancePrompt}
@@ -4476,7 +4658,7 @@ export function ImageStudio() {
                 >
                   <input
                     checked={bf16Precision}
-                    onChange={(event) => setBf16Precision(event.target.checked)}
+                    onChange={(event) => { setRecipeTierRequest(null); setBf16Precision(event.target.checked); }}
                     type="checkbox"
                   />
                   Full precision (bf16)

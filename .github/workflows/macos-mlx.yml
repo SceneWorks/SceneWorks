@@ -117,6 +117,11 @@ on:
     branches: [main, "feature/*"]
   workflow_dispatch:
     inputs:
+      hosted_only:
+        description: "Hosted build/tests/capability artifact only; never self-hosted NAX or model calibration"
+        required: false
+        type: boolean
+        default: false
       run_memory_calibration:
         description: "Build and run the authoritative MLX memory-strategy adapter"
         required: false
@@ -349,6 +354,21 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Validate hosted-only dispatch intent
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.hosted_only }}
+        env:
+          RUN_MEMORY_CALIBRATION: ${{ inputs.run_memory_calibration }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          PROVISION_QWEN_SNAPSHOT: ${{ inputs.provision_qwen_snapshot }}
+          PROVISION_Z_IMAGE_SNAPSHOT: ${{ inputs.provision_z_image_snapshot }}
+        run: |
+          set -euo pipefail
+          for flag in RUN_MEMORY_CALIBRATION RUN_FIVE_RUNG_REFERENCE PROVISION_QWEN_SNAPSHOT PROVISION_Z_IMAGE_SNAPSHOT; do
+            if [ "${!flag}" != "false" ]; then
+              echo "::error::hosted_only requires $flag=false; calibration and provisioning are forbidden in this hosted artifact profile"
+              exit 1
+            fi
+          done
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         with:
           toolchain: "1.98.0"
@@ -521,7 +541,9 @@ jobs:
     # level up. A gate that did not succeed must therefore RUN the lane, matching
     # merge-group-relevance.mjs's own internal fallback. Do not "simplify" this back to a bare
     # `needs.changes.outputs.relevant == 'true'`.
-    if: ${{ !cancelled() && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) }}
+    # An explicitly hosted-only dispatch excludes this ENTIRE job before runner selection.
+    # Its artifact capture is not NAX evidence; default manual and all PR/push routes stay unchanged.
+    if: ${{ !cancelled() && github.event_name != 'merge_group' && (needs.changes.result != 'success' || needs.changes.outputs.relevant == 'true') && (github.event_name != 'pull_request' || (github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository)) && !(github.event_name == 'workflow_dispatch' && inputs.hosted_only) }}
     # The default PR/main path needs only `nax`. A final same-repo PR to `main`
     # whose title starts with `[Mac2]`, and the resulting main push whose merge
     # subject starts with `[Mac2]`, use the `rw-mage` label to select nax-macos-2.

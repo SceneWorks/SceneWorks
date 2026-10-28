@@ -295,7 +295,15 @@ impl ControllerLease {
         api_shutdown: Option<FilmControllerShutdown>,
     ) -> Result<Option<Self>, HarnessError> {
         let (path, lock) = Self::lock(run_dir)?;
-        let interrupted = std::fs::read_to_string(&path)?.lines().any(|line| {
+        // Windows byte-range locks also reject reads through a second handle in this process.
+        // Inspect metadata through the handle that owns the lock, without moving the read before
+        // acquisition (which would race a clean release or another controller's takeover).
+        use std::io::{Read as _, Seek as _};
+        let mut locked_file = lock.file();
+        locked_file.rewind()?;
+        let mut metadata = String::new();
+        locked_file.read_to_string(&mut metadata)?;
+        let interrupted = metadata.lines().any(|line| {
             line.strip_prefix("owner=")
                 .is_some_and(|owner| !owner.is_empty())
         });
@@ -337,8 +345,10 @@ impl ControllerLease {
         api_shutdown: Option<FilmControllerShutdown>,
     ) -> Result<Self, HarnessError> {
         lock.file().set_len(0)?;
-        use std::io::Write as _;
+        use std::io::{Seek as _, Write as _};
         let mut locked_file = lock.file();
+        // Truncation does not reset the cursor advanced by interrupted-owner inspection.
+        locked_file.rewind()?;
         locked_file.write_all(
             format!(
                 "owner={owner}\npid={}\nacquiredAt={}\n",
@@ -6864,10 +6874,13 @@ pub fn fixture_plate_png_sized(
         *pixel = image::Rgb(color);
     }
     let mut bytes = Vec::new();
+    // Fast selects png's FdeflateUltraFast path, not flate2. A fixed Sub filter keeps
+    // flat plates compact (NoFilter stores nearly raw pixels and exceeds the planner
+    // fixture's upload budget), while remaining byte-identical across backend unions.
     let encoder = image::codecs::png::PngEncoder::new_with_quality(
         &mut bytes,
-        image::codecs::png::CompressionType::Default,
-        image::codecs::png::FilterType::NoFilter,
+        image::codecs::png::CompressionType::Fast,
+        image::codecs::png::FilterType::Sub,
     );
     image::ImageEncoder::write_image(
         encoder,
@@ -9153,4 +9166,51 @@ fn picture_item_mut<'a>(
                 "shot {shot_id:?} is not on the sequence's picture track"
             ))
         })
+}
+
+#[cfg(test)]
+mod controller_lease_io_tests {
+    use super::{ControllerLease, CONTROLLER_LOCK_FILE};
+    use std::io::{Read as _, Seek as _};
+
+    #[test]
+    fn interrupted_takeover_reads_owned_handle_and_rewinds_replacement_metadata() {
+        let temporary = tempfile::Builder::new()
+            .prefix(&format!("controller-lease-io-{}-", std::process::id()))
+            .tempdir()
+            .unwrap();
+        let path = temporary.path().join(CONTROLLER_LOCK_FILE);
+        let old_owner = "dead-marker-long-interrupted-owner-".repeat(8);
+        std::fs::write(&path, format!("owner={old_owner}\npid=999999\n")).unwrap();
+
+        let lease = ControllerLease::acquire_interrupted(temporary.path(), "recovered")
+            .unwrap()
+            .expect("OS-released crash metadata is recoverable on Windows and POSIX");
+        let mut file = lease._lock.file();
+        file.rewind().unwrap();
+        let mut metadata = String::new();
+        file.read_to_string(&mut metadata).unwrap();
+        assert!(metadata.starts_with("owner=recovered\n"), "{metadata:?}");
+        assert!(
+            !metadata.contains('\0'),
+            "the old read cursor must not leave NUL padding"
+        );
+        assert!(
+            !metadata.contains("dead-marker"),
+            "the previous owner must be truncated"
+        );
+        assert!(metadata
+            .lines()
+            .any(|line| line == format!("pid={}", std::process::id())));
+        assert!(
+            ControllerLease::acquire(temporary.path(), "competing").is_err(),
+            "inspection must retain exclusive ownership"
+        );
+        drop(lease);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "",
+            "a clean release still clears recovery metadata"
+        );
+    }
 }

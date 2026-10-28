@@ -462,7 +462,7 @@ pub(super) async fn generate_candle_flux2_edit_stream(
     let work = candle_conditioned_edit_work(request);
     let total = work.len();
     let negative = request.negative_prompt.clone();
-    let enhance = PromptEnhance::from_advanced(&request.advanced)?;
+    let enhance = PromptEnhance::from_advanced(&request.model, &request.advanced)?;
     let (cancel, rx, blocking) = start_gen_stream(
         job.id.clone(),
         "flux2_edit",
