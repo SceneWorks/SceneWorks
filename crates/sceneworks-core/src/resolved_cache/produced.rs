@@ -186,11 +186,18 @@ impl ProducedFile {
             ));
         }
         file.flush()?;
+        // Durable before attested: no attestation (and so no content receipt redeemed from it) may
+        // ever describe bytes the OS still only holds in its cache. A failed sync records nothing.
+        file.sync_all()?;
+        #[cfg(test)]
+        record_close_step("sync_all");
         let backdated = self
             .opened_at
             .checked_sub(BACKDATE)
             .ok_or_else(|| std::io::Error::other("system clock is before the backdate window"))?;
         file.set_modified(backdated)?;
+        #[cfg(test)]
+        record_close_step("set_modified");
         drop(file);
         let stamp = SourceStampV1::of(&self.path, StoreClockV1::SYSTEM)?;
         if stamp.size_bytes != self.written || stamp.is_racy() {
@@ -198,6 +205,8 @@ impl ProducedFile {
                 "produced file's closing stamp does not describe the hashed stream",
             ));
         }
+        #[cfg(test)]
+        record_close_step("stamp");
         let digest: [u8; 32] = hasher.finalize().into();
         let seal = gen_core::ArtifactDigestAttestation::capture(&self.path, digest).ok();
         #[cfg(test)]
@@ -240,6 +249,25 @@ thread_local! {
 #[cfg(test)]
 fn count_stream_hash() {
     STREAM_HASH_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+}
+
+// The ordered durability steps each close took, so a test can pin "synced before stamped".
+#[cfg(test)]
+thread_local! {
+    static CLOSE_STEPS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn record_close_step(step: &'static str) {
+    CLOSE_STEPS.with(|steps| steps.borrow_mut().push(step));
+}
+
+/// Runs `body` and reports the durability steps every produced-file close took, in order.
+#[cfg(test)]
+pub(crate) fn observe_close_steps<T>(body: impl FnOnce() -> T) -> (T, Vec<&'static str>) {
+    CLOSE_STEPS.with(|steps| steps.borrow_mut().clear());
+    let value = body();
+    (value, CLOSE_STEPS.with(|steps| steps.borrow().clone()))
 }
 
 /// Runs `body` and reports how many produced files it hashed while writing.

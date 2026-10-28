@@ -2748,6 +2748,29 @@ fn produce_attested(staging: &Path) -> ProducedAttestations {
     attested
 }
 
+/// Durable before attested: every produced file is `sync_all`-ed before its mtime is backdated
+/// and its closing stamp is taken, so no attestation (and no content receipt redeemed from one) can
+/// ever describe bytes that were still only in the OS cache. Both close shapes are covered: the
+/// explicit `finish` (weights) and the drop (the JSON sidecar).
+#[test]
+fn a_produced_file_is_synced_before_its_attestation_is_stamped() {
+    let scratch = TempDir::new().unwrap();
+    let (attested, steps) = produced::observe_close_steps(|| produce_attested(scratch.path()));
+    assert_eq!(attested.len(), 2);
+    assert_eq!(
+        steps,
+        vec![
+            "sync_all",
+            "set_modified",
+            "stamp",
+            "sync_all",
+            "set_modified",
+            "stamp"
+        ],
+        "each close syncs, then backdates, then stamps"
+    );
+}
+
 fn sha256_of(path: &Path) -> String {
     format!("sha256:{:x}", Sha256::digest(std::fs::read(path).unwrap()))
 }
