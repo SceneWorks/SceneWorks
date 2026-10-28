@@ -696,8 +696,12 @@ pub fn duration_limit_error(
     duration: f32,
     model_manifest_entry: &JsonObject,
 ) -> Option<String> {
+    // Manifest bounds are declared to four decimals (`hardMinDuration: 5.1667` for MiniMax-H3's
+    // 124-frame floor, really 124/24 = 5.16666… s). Compare at that precision, or the exact floor
+    // a client derives from frames (5.1666665 as f32) is refused as "under" its own minimum.
+    let declared = |seconds: f32| (f64::from(seconds) * 10_000.0).round();
     if let Some(floor) = hard_min_duration(model_manifest_entry) {
-        if duration < floor {
+        if declared(duration) < declared(floor) {
             return Some(format!(
                 "{model} renders clips of at least {floor}s, but this request asks for \
                  {duration}s. Lengthen the clip to {floor}s or more, or choose a model that \
@@ -706,7 +710,7 @@ pub fn duration_limit_error(
         }
     }
     let cap = hard_max_duration(model_manifest_entry)?;
-    (duration > cap).then(|| {
+    (declared(duration) > declared(cap)).then(|| {
         format!(
             "{model} renders clips up to {cap}s, but this request asks for {duration}s. Shorten \
              the clip to {cap}s or less, or choose a model that renders longer clips."
@@ -4782,6 +4786,21 @@ mod tests {
         assert_eq!(duration_limit_error("mochi_1", 5.0, &mochi), None);
         assert_eq!(duration_limit_error("mochi_1", 1.0, &mochi), None);
         assert!(duration_limit_error("mochi_1", 5.5, &mochi).is_some());
+    }
+
+    /// MiniMax-H3's 124-frame floor is 124/24 = 5.16666… s, declared to four decimals as 5.1667.
+    /// A request for exactly that floor (5.1666665 as f32, what 124 frames at 24 fps comes to)
+    /// must render; the H3 terminal campaign's minimum-length clip was refused as "under" it.
+    #[test]
+    fn a_floor_declared_to_four_decimals_admits_the_exact_frame_floor() {
+        let h3 =
+            payload(json!({ "limits": { "hardMinDuration": 5.1667, "hardMaxDuration": 14.375 } }));
+        assert_eq!(duration_limit_error("minimax_h3", 124.0 / 24.0, &h3), None);
+        assert_eq!(duration_limit_error("minimax_h3", 5.1667, &h3), None);
+        assert_eq!(duration_limit_error("minimax_h3", 14.375, &h3), None);
+        assert!(duration_limit_error("minimax_h3", 5.1666, &h3).is_some());
+        assert!(duration_limit_error("minimax_h3", 3.0, &h3).is_some());
+        assert!(duration_limit_error("minimax_h3", 14.3751, &h3).is_some());
     }
 
     // -----------------------------------------------------------------------
