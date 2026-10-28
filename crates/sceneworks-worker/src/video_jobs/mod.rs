@@ -1840,6 +1840,13 @@ pub(crate) mod reference_audio;
 pub(crate) use reference_audio::resolve_reference_audio_conditioning;
 pub(crate) mod seedvr2;
 pub(crate) mod wan;
+// MiniMax-H3's packed-sequence stall budget (sc-26691): the watchdog arithmetic `wan`'s shared
+// `generate_video` funnel applies to an H3 request.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod minimax_h3_sequence;
 #[cfg(target_os = "macos")]
 use wan::{generate_wan, wan_available, wan_engine_id, wan_raw_settings, WAN_ADAPTER};
 #[cfg(any(

@@ -2316,7 +2316,8 @@ pub(super) fn run_video_generation(
 ///
 /// MiniMax-H3 and the Wan A14B engines are request-aware exceptions: one legitimate step grows
 /// with the request's workload and can exceed this default on a legal clip. See
-/// [`video_stall_timeout_policy`]. `SCENEWORKS_VIDEO_STALL_SECS` remains an absolute operator
+/// [`video_stall_timeout_policy`] and, for H3's packed-sequence model,
+/// [`super::minimax_h3_sequence`]. `SCENEWORKS_VIDEO_STALL_SECS` remains an absolute operator
 /// override for every engine.
 #[cfg(any(
     target_os = "macos",
@@ -2331,15 +2332,19 @@ pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 /// (2.3 GB/min of device memory) and was still loading 13 minutes in, on course for about 25
 /// minutes before its first step, so the 600 s step budget cancelled a healthy render. A load that
 /// truly wedges is still caught, just later. Never shortens a larger per-step budget, and an
-/// operator override stays absolute.
+/// operator override stays absolute. MiniMax-H3 adds its reference-encode allowance and one full
+/// step on top of this (its first `Step` event arrives only after the first step completes); see
+/// [`super::minimax_h3_sequence`].
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) const VIDEO_PRE_STEP_STALL_TIMEOUT: Duration = Duration::from_secs(45 * 60);
 
-/// The stall window in force: the request's per-step budget once a denoise step has arrived,
-/// [`VIDEO_PRE_STEP_STALL_TIMEOUT`] (or the larger per-step budget) before then.
+/// The stall window in force: the request's per-step budget once a denoise step has arrived, the
+/// policy's pre-step window (cold load, reference preparation and, for MiniMax-H3, the first
+/// step itself) before then. Every progress event the engine reports resets the watchdog clock, so
+/// an engine that reports its load phases (MLX H3's `Loading`) gets this window per phase.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -2348,10 +2353,10 @@ pub(super) fn video_stall_window(
     policy: VideoStallTimeoutPolicy,
     first_step_seen: bool,
 ) -> Duration {
-    if first_step_seen || policy.basis == "operator_override" {
+    if first_step_seen {
         policy.timeout
     } else {
-        policy.timeout.max(VIDEO_PRE_STEP_STALL_TIMEOUT)
+        policy.pre_step
     }
 }
 
@@ -2364,8 +2369,27 @@ pub(super) fn video_stall_window(
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VideoStallTimeoutPolicy {
+    /// The silent window allowed between denoise-step events.
     pub(super) timeout: Duration,
+    /// The silent window allowed before the first denoise-step event.
+    pub(super) pre_step: Duration,
     pub(super) basis: &'static str,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl VideoStallTimeoutPolicy {
+    /// A per-step budget whose pre-step window is the generic cold-load window (or the larger
+    /// per-step budget): every engine except MiniMax-H3 and an operator override.
+    pub(super) fn with_generic_pre_step(timeout: Duration, basis: &'static str) -> Self {
+        Self {
+            timeout,
+            pre_step: timeout.max(VIDEO_PRE_STEP_STALL_TIMEOUT),
+            basis,
+        }
+    }
 }
 
 /// Grace period granted after a stall is detected and engine cancellation is requested, before
@@ -2392,18 +2416,23 @@ fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
         input.height,
         input.frames,
         input.guidance,
+        super::minimax_h3_sequence::MinimaxH3StallRequest {
+            prompt: &input.prompt,
+            conditioning: &input.conditioning,
+            reference_image_short_edge: input.reference_image_short_edge,
+        },
     )
 }
 
 /// Resolve the forward-progress timeout without reading process-global state (the test seam).
 ///
-/// A positive `SCENEWORKS_VIDEO_STALL_SECS` value is absolute. Without one, every engine except
-/// MiniMax-H3 and the Wan A14B engines retains the 600-second default. MiniMax-H3 scales only when its effective packed pixel-frame
-/// workload exceeds the measured shortest/full-canvas baseline: `768 * 1344 * 124`. The scale is
-/// linear, rounded up, and bounded at the engine's largest legal workload (`768 * 1344 * 345`).
-/// Small canvases and the shortest full-canvas request therefore retain the existing watchdog,
-/// while a legal 243-frame full-canvas step is not misclassified as the Metal wedge this watchdog
-/// was introduced to catch.
+/// A positive `SCENEWORKS_VIDEO_STALL_SECS` value is absolute, before and after the first step.
+/// Without one, every engine except MiniMax-H3 and the Wan A14B engines retains the 600-second
+/// default. MiniMax-H3 (sc-26691) is budgeted on its **packed DiT sequence** (text, vision tokens,
+/// reference image/clip latents and audio, not just the target canvas) with a linear-plus-quadratic
+/// step cost scaled from the 600 s baseline at the shortest full-canvas request (`768 * 1344 *
+/// 124`); `h3` carries the reference geometry that sequence is derived from. See
+/// [`super::minimax_h3_sequence`] for the estimator, the cost model and the pre-step window.
 ///
 /// The Wan A14B dual-expert engines scale too (sc-10299); see [`wan_a14b_stall_timeout`].
 /// `guidance` is the resolved engine guidance (`None` ⇒ the engine's CFG-on default).
@@ -2418,13 +2447,16 @@ pub(super) fn video_stall_timeout_policy(
     height: u32,
     frames: u32,
     guidance: Option<f32>,
+    h3: super::minimax_h3_sequence::MinimaxH3StallRequest<'_>,
 ) -> VideoStallTimeoutPolicy {
     if let Some(seconds) = raw_override
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
     {
+        let timeout = Duration::from_secs(seconds);
         return VideoStallTimeoutPolicy {
-            timeout: Duration::from_secs(seconds),
+            timeout,
+            pre_step: timeout,
             basis: "operator_override",
         };
     }
@@ -2437,36 +2469,10 @@ pub(super) fn video_stall_timeout_policy(
     }
 
     if engine_id != "minimax_h3" {
-        return VideoStallTimeoutPolicy {
-            timeout: VIDEO_STALL_TIMEOUT,
-            basis: "default",
-        };
+        return VideoStallTimeoutPolicy::with_generic_pre_step(VIDEO_STALL_TIMEOUT, "default");
     }
 
-    let legal_frames = sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
-    let min_frames = u64::from(legal_frames[0]);
-    let max_frames = u64::from(legal_frames[legal_frames.len() - 1]);
-    let max_pixels = u64::from(super::minimax_h3::MINIMAX_H3_CANVAS_MAX_PIXELS);
-    let pixels = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .min(max_pixels);
-    let effective_frames = u64::from(frames).clamp(min_frames, max_frames);
-    let baseline_work = max_pixels.saturating_mul(min_frames);
-    let max_work = max_pixels.saturating_mul(max_frames);
-    let bounded_work = pixels
-        .saturating_mul(effective_frames)
-        .clamp(baseline_work, max_work);
-    let numerator = VIDEO_STALL_TIMEOUT.as_secs().saturating_mul(bounded_work);
-    let seconds = numerator.div_ceil(baseline_work);
-
-    VideoStallTimeoutPolicy {
-        timeout: Duration::from_secs(seconds),
-        basis: if bounded_work == baseline_work {
-            "minimax_h3_baseline"
-        } else {
-            "minimax_h3_pixel_frames"
-        },
-    }
+    super::minimax_h3_sequence::minimax_h3_stall_timeout(width, height, frames, h3)
 }
 
 /// Measured silent gap between consecutive denoise-step events of the candle Wan A14B engine at
@@ -2551,11 +2557,11 @@ fn wan_a14b_stall_timeout(
     let step_secs = (WAN_A14B_REFERENCE_STEP_SECS * passes)
         .saturating_mul(tokens)
         .div_ceil(WAN_A14B_REFERENCE_TOKENS);
-    VideoStallTimeoutPolicy {
-        timeout: WAN_A14B_LOAD_ALLOWANCE
+    VideoStallTimeoutPolicy::with_generic_pre_step(
+        WAN_A14B_LOAD_ALLOWANCE
             + Duration::from_secs(WAN_A14B_STEP_HEADROOM.saturating_mul(step_secs)),
-        basis: "wan_a14b_token_work",
-    }
+        "wan_a14b_token_work",
+    )
 }
 
 /// First-detection handling for the in-loop video cancel poller (sc-5516): trip the engine
@@ -2888,6 +2894,7 @@ pub(super) async fn generate_video_using(
         height = input.height,
         frames = input.frames,
         stallSeconds = stall_timeout.as_secs(),
+        preStepStallSeconds = stall_policy.pre_step.as_secs(),
         basis = stall_policy.basis,
         "selected the request's forward-progress watchdog budget"
     );
