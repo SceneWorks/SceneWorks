@@ -1,0 +1,500 @@
+{
+  "schemaVersion": 1,
+  "profile": "sdxl-cuda-endpoints",
+  "inferencePin": "2f09626718e4d03628e3b7411e8cdc1c3acfbd4e",
+  "artifactInventory": {
+    "root": "E:\\huggingface\\hub\\models--SceneWorks--sdxl-base-mlx\\snapshots\\36699bb8a6353e61c920e3bf19f0e6f8e4151c55\\q4",
+    "files": 23,
+    "bytes": 3042293350,
+    "sha256": "91483a1af351aa68c02270dc7401cb255f840d88382098df8bdb007eda0f3af9",
+    "entries": [
+      {
+        "path": "base/LICENSE.md",
+        "bytes": 14109,
+        "sha256": "19b6998b569b53ac1fc2158a8a3202c8699a9a4605b47075715d9c96be7fb6d0"
+      },
+      {
+        "path": "base/README.md",
+        "bytes": 8668,
+        "sha256": "40d263065b8a3e9a41996c257e11463fd97ae956ebf4e3f8b9625e0d78183893"
+      },
+      {
+        "path": "base/model_index.json",
+        "bytes": 609,
+        "sha256": "6d7b93508390ab91ac5bfbe4aeb4dc2d83f7bb1b05fb069d714b5b0c75f70d44"
+      },
+      {
+        "path": "base/scheduler/scheduler_config.json",
+        "bytes": 479,
+        "sha256": "af3e45a949aff8b8341ab8b811429ec03fee857a700a1d9477363e4fff9666e2"
+      },
+      {
+        "path": "base/text_encoder/config.json",
+        "bytes": 627,
+        "sha256": "7b565020ec0708eba5a5be8febd2b8017b9b52d4139def34bdfef81b0e1bec9c"
+      },
+      {
+        "path": "base/text_encoder/model.safetensors",
+        "bytes": 124067525,
+        "sha256": "70516f8726a0ea23d19b5fde0e8c3fd6dd45758adaedccf37272eb210b52a3cc"
+      },
+      {
+        "path": "base/text_encoder_2/config.json",
+        "bytes": 637,
+        "sha256": "217e2baf11ae361f39cc8eeffa5e527fb1b7fd3700666085e5ff47d136e675ee"
+      },
+      {
+        "path": "base/text_encoder_2/model.safetensors",
+        "bytes": 482676814,
+        "sha256": "f769c5784f90bd397ead8b6ffda029d50306a2ee41c8bfcff03948ac67764eed"
+      },
+      {
+        "path": "base/tokenizer/merges.txt",
+        "bytes": 524619,
+        "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a"
+      },
+      {
+        "path": "base/tokenizer/special_tokens_map.json",
+        "bytes": 472,
+        "sha256": "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac"
+      },
+      {
+        "path": "base/tokenizer/tokenizer_config.json",
+        "bytes": 737,
+        "sha256": "19d7b034cb0cc3ce9766c2231373ab8aa8991fc72e2c8f76558bfaae3de0d563"
+      },
+      {
+        "path": "base/tokenizer/vocab.json",
+        "bytes": 1059962,
+        "sha256": "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349"
+      },
+      {
+        "path": "base/tokenizer_2/merges.txt",
+        "bytes": 524619,
+        "sha256": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a"
+      },
+      {
+        "path": "base/tokenizer_2/special_tokens_map.json",
+        "bytes": 460,
+        "sha256": "f118ab3a983206e4f32583448de6bd6aae4ee21869135cef1f5848a753cdaab6"
+      },
+      {
+        "path": "base/tokenizer_2/tokenizer_config.json",
+        "bytes": 725,
+        "sha256": "c9d23941f76a41cbd50eda9290f57be7828f0a7a677939e9ef181f7e12bd1bdf"
+      },
+      {
+        "path": "base/tokenizer_2/vocab.json",
+        "bytes": 1059962,
+        "sha256": "e089ad92ba36837a0d31433e555c8f45fe601ab5c221d4f607ded32d9f7a4349"
+      },
+      {
+        "path": "base/unet/config.json",
+        "bytes": 1742,
+        "sha256": "fd2253fa9b5cca38e20c36ca156bc478c38f2228e784f9f2ae5446b578e1a31e"
+      },
+      {
+        "path": "base/unet/diffusion_pytorch_model.safetensors",
+        "bytes": 1925923318,
+        "sha256": "37e0f2127c45a19a7e04674bb9e7f976669d5d43b29f042ee8b202f1e72c7b9b"
+      },
+      {
+        "path": "base/vae/config.json",
+        "bytes": 642,
+        "sha256": "0b331c8ac22ded5f9997a144a575c1d113d6169aff262c353f39015bd24a6264"
+      },
+      {
+        "path": "base/vae/diffusion_pytorch_model.fp16.safetensors",
+        "bytes": 167335342,
+        "sha256": "bcb60880a46b63dea58e9bc591abe15f8350bde47b405f9c38f4be70c6161e68"
+      },
+      {
+        "path": "components/tokenizer_clip_bigg/tokenizer.json",
+        "bytes": 2224041,
+        "sha256": "b556ac8c99757ffb677208af34bc8c6721572114111a6e0aaf5fa69ff0b8d842"
+      },
+      {
+        "path": "components/tokenizer_clip_l/tokenizer.json",
+        "bytes": 2224003,
+        "sha256": "a83e0809aa4c3af7208b2df632a7a69668c6d48775b3c3fe4e1b1199d1f8b8f4"
+      },
+      {
+        "path": "components/vae_fp16_fix/diffusion_pytorch_model.safetensors",
+        "bytes": 334643238,
+        "sha256": "1b909373b28f2137098b0fd9dbc6f97f8410854f31f84ddc9fa04b077b0ace2c"
+      }
+    ]
+  },
+  "stagedArtifacts": {
+    "SCENEWORKS_SDXL_REPOSITORY": "SceneWorks/sdxl-base-mlx",
+    "SCENEWORKS_SDXL_REVISION": "36699bb8a6353e61c920e3bf19f0e6f8e4151c55",
+    "SCENEWORKS_SDXL_ROOT": "E:\\huggingface\\hub\\models--SceneWorks--sdxl-base-mlx\\snapshots\\36699bb8a6353e61c920e3bf19f0e6f8e4151c55\\q4",
+    "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_L": "E:\\huggingface\\hub\\models--openai--clip-vit-large-patch14\\snapshots\\32bd64288804d66eefd0ccbe215aa642df71cc41",
+    "SCENEWORKS_SDXL_COMPONENT_TOKENIZER_CLIP_BIGG": "E:\\huggingface\\hub\\models--laion--CLIP-ViT-bigG-14-laion2B-39B-b160k\\snapshots\\743c27bd53dfe508a0ade0f50698f99b39d03bec",
+    "SCENEWORKS_SDXL_COMPONENT_VAE_FP16_FIX": "E:\\huggingface\\hub\\models--madebyollin--sdxl-vae-fp16-fix\\snapshots\\207b116dae70ace3637169f1ddd2434b91b3a8cd"
+  },
+  "resolvedDefaults": {
+    "steps": 30,
+    "guidance": 7,
+    "sampler": "ddim"
+  },
+  "selectedGpu": {
+    "physicalIndex": 1,
+    "uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
+  },
+  "gpuPreflight": {
+    "selected": {
+      "physicalIndex": 1,
+      "uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe"
+    },
+    "inventory": [
+      {
+        "at": "2026-10-27T01:47:46.009Z",
+        "physicalIndex": 0,
+        "uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+        "usedBytes": 19922944,
+        "freeBytes": 102152273920,
+        "gpuUtilization": 0,
+        "memoryUtilization": 0
+      },
+      {
+        "at": "2026-10-27T01:47:46.009Z",
+        "physicalIndex": 1,
+        "uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+        "usedBytes": 1459617792,
+        "freeBytes": 100712579072,
+        "gpuUtilization": 0,
+        "memoryUtilization": 0
+      }
+    ],
+    "samples": [
+      {
+        "elapsedMs": 68.29619999999977,
+        "inventory": [
+          {
+            "at": "2026-10-27T01:47:46.009Z",
+            "physicalIndex": 0,
+            "uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+            "usedBytes": 19922944,
+            "freeBytes": 102152273920,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          },
+          {
+            "at": "2026-10-27T01:47:46.009Z",
+            "physicalIndex": 1,
+            "uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+            "usedBytes": 1459617792,
+            "freeBytes": 100712579072,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          }
+        ]
+      },
+      {
+        "elapsedMs": 330.2087999999994,
+        "inventory": [
+          {
+            "at": "2026-10-27T01:47:46.272Z",
+            "physicalIndex": 0,
+            "uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+            "usedBytes": 19922944,
+            "freeBytes": 102152273920,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          },
+          {
+            "at": "2026-10-27T01:47:46.272Z",
+            "physicalIndex": 1,
+            "uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+            "usedBytes": 1459617792,
+            "freeBytes": 100712579072,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          }
+        ]
+      },
+      {
+        "elapsedMs": 598.0994000000001,
+        "inventory": [
+          {
+            "at": "2026-10-27T01:47:46.540Z",
+            "physicalIndex": 0,
+            "uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+            "usedBytes": 19922944,
+            "freeBytes": 102152273920,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          },
+          {
+            "at": "2026-10-27T01:47:46.540Z",
+            "physicalIndex": 1,
+            "uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+            "usedBytes": 1459617792,
+            "freeBytes": 100712579072,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          }
+        ]
+      },
+      {
+        "elapsedMs": 861.5671999999995,
+        "inventory": [
+          {
+            "at": "2026-10-27T01:47:46.804Z",
+            "physicalIndex": 0,
+            "uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+            "usedBytes": 19922944,
+            "freeBytes": 102152273920,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          },
+          {
+            "at": "2026-10-27T01:47:46.804Z",
+            "physicalIndex": 1,
+            "uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+            "usedBytes": 1459617792,
+            "freeBytes": 100712579072,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          }
+        ]
+      },
+      {
+        "elapsedMs": 1126.3449,
+        "inventory": [
+          {
+            "at": "2026-10-27T01:47:47.068Z",
+            "physicalIndex": 0,
+            "uuid": "GPU-b1a31911-c7b4-2901-3d8b-9a62e228bfc0",
+            "usedBytes": 19922944,
+            "freeBytes": 102152273920,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          },
+          {
+            "at": "2026-10-27T01:47:47.068Z",
+            "physicalIndex": 1,
+            "uuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+            "usedBytes": 1459617792,
+            "freeBytes": 100712579072,
+            "gpuUtilization": 0,
+            "memoryUtilization": 0
+          }
+        ]
+      }
+    ],
+    "stableSamples": 5,
+    "elapsedMs": 1126.3903999999993
+  },
+  "physicalEightGiBDeviceValidated": false,
+  "reserveBytes": 2147483648,
+  "reserveIncludedInMeasuredPeaks": false,
+  "telemetry": "measured sampled physical-device growth under stable pre/post baseline; not a per-process allocator peak or mathematical upper bound",
+  "endpoints": [
+    {
+      "inferencePin": "2f09626718e4d03628e3b7411e8cdc1c3acfbd4e",
+      "engineBuild": {
+        "adapterCandleFeature": true,
+        "cudaComputeCapabilityCompileTarget": "120",
+        "sdxlFlashAttentionKernelCompiled": false
+      },
+      "output": {
+        "path": "D:\\actions-runner-2\\_work\\_temp\\memory-catalog-gi-3197-sdxl-v3-auto-gpu-40434042724\\resident.png",
+        "rgbPath": "D:\\actions-runner-2\\_work\\_temp\\memory-catalog-gi-3197-sdxl-v3-auto-gpu-40434042724\\resident.rgb",
+        "width": 1024,
+        "height": 1024,
+        "channels": 3,
+        "rgbBytes": 3145728,
+        "spatiallyNonFlat": true,
+        "minimumChannel": 0,
+        "maximumChannel": 255,
+        "rgbSha256": "406524bd0f770255c1fa75a18b5adbbe61b0c5eef345ba8c2c6983a96e9c14b6",
+        "pngSha256": "d6ebc54591cd4c0cccd60bcdd25d378cd1e88f52164cef4a019b0a59d749f1ba",
+        "pngBytes": 1491414
+      },
+      "loadPeakBytes": 512753664,
+      "baselineBytes": 1459617792,
+      "wholeRunPeakBytes": 10004463616,
+      "wholeDevicePeakBytes": 11464081408,
+      "offloadPolicy": "resident",
+      "settings": {
+        "prompt": "a photorealistic red apple on a wooden table, studio lighting",
+        "negativePrompt": null,
+        "seed": 16402,
+        "steps": 30,
+        "sampler": null,
+        "scheduler": null,
+        "guidance": 7,
+        "memory": "Some(GenerationMemory { stage_residency: false, tile_vae_decode: false, chunk_attention: false, stream_transformer_blocks: false, decode_tile_edge: None, decode_overlap: None, attention_chunk_size: None, transformer_window_size: None, transformer_window_component: None, graph_eval_cadence: None, ffn_chunk: None, cfg_batching: None, prefix_kv_cache: None, calibration_error_phase: None, calibration_fault_harness_authorized: false })",
+        "flashAttn": true,
+        "count": 1,
+        "cfgInterval": null,
+        "guidanceMethod": null,
+        "schedulerShift": null
+      },
+      "providerDrop": {
+        "beforeBytes": 1459617792,
+        "afterBytes": 2091909120,
+        "generatorDropped": true
+      },
+      "deviceUuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+      "cudaContextUuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+      "logicalCudaDevice": 0,
+      "endpoint": "resident",
+      "cleanup": {
+        "beforeBytes": 1459617792,
+        "afterBytes": 1459617792,
+        "toleranceBytes": 67108864,
+        "adapterProcessExited": true
+      },
+      "recordId": "imc-915cfc33efc058c5060d",
+      "evidenceSha256": "4c00e9cae79d603fd48255a36a7c536e3aaf5ee71c940085df99a7e803281dc3",
+      "planned": {
+        "logicalCaseId": "implan-52ca34a7f0b169be8830",
+        "evidenceScope": "authoritative",
+        "backend": "candle",
+        "loadShape": "eager_materialization",
+        "target": {
+          "provider": "sdxl",
+          "modelId": "sdxl",
+          "tier": "q4",
+          "mode": "text_to_image",
+          "overlay": "none",
+          "geometry": {
+            "width": 1024,
+            "height": 1024,
+            "batch": 1,
+            "frames": 1
+          }
+        },
+        "strategy": {
+          "rung": "resident",
+          "engagedRungs": [
+            "resident"
+          ],
+          "parameters": {}
+        },
+        "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v3",
+        "fixture": "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps",
+        "negative": false,
+        "expectedResult": "passed",
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      "evidencePath": "D:\\actions-runner-2\\_work\\_temp\\memory-catalog-gi-3197-sdxl-v3-auto-gpu-40434042724\\resident-evidence.json"
+    },
+    {
+      "inferencePin": "2f09626718e4d03628e3b7411e8cdc1c3acfbd4e",
+      "engineBuild": {
+        "adapterCandleFeature": true,
+        "cudaComputeCapabilityCompileTarget": "120",
+        "sdxlFlashAttentionKernelCompiled": false
+      },
+      "output": {
+        "path": "D:\\actions-runner-2\\_work\\_temp\\memory-catalog-gi-3197-sdxl-v3-auto-gpu-40434042724\\sequential.png",
+        "rgbPath": "D:\\actions-runner-2\\_work\\_temp\\memory-catalog-gi-3197-sdxl-v3-auto-gpu-40434042724\\sequential.rgb",
+        "width": 1024,
+        "height": 1024,
+        "channels": 3,
+        "rgbBytes": 3145728,
+        "spatiallyNonFlat": true,
+        "minimumChannel": 0,
+        "maximumChannel": 255,
+        "rgbSha256": "cb598dd1b9d3a1f95769fc8b50fce92c49fc0427dae0a5eaa4601dc12f344d76",
+        "pngSha256": "7f4514450ef8d8fd2c7d84fa8a0e23e4b7383cc2ba0c4ef52bf383f3bde79d9e",
+        "pngBytes": 1490986
+      },
+      "loadPeakBytes": 512753664,
+      "baselineBytes": 1459617792,
+      "wholeRunPeakBytes": 3562012672,
+      "wholeDevicePeakBytes": 5021630464,
+      "offloadPolicy": "sequential",
+      "settings": {
+        "prompt": "a photorealistic red apple on a wooden table, studio lighting",
+        "negativePrompt": null,
+        "seed": 16402,
+        "steps": 30,
+        "sampler": null,
+        "scheduler": null,
+        "guidance": 7,
+        "memory": "Some(GenerationMemory { stage_residency: true, tile_vae_decode: true, chunk_attention: true, stream_transformer_blocks: false, decode_tile_edge: Some(256), decode_overlap: Some(64), attention_chunk_size: Some(16777216), transformer_window_size: None, transformer_window_component: None, graph_eval_cadence: None, ffn_chunk: None, cfg_batching: None, prefix_kv_cache: None, calibration_error_phase: None, calibration_fault_harness_authorized: false })",
+        "flashAttn": true,
+        "count": 1,
+        "cfgInterval": null,
+        "guidanceMethod": null,
+        "schedulerShift": null
+      },
+      "providerDrop": {
+        "beforeBytes": 1459617792,
+        "afterBytes": 2091909120,
+        "generatorDropped": true
+      },
+      "deviceUuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+      "cudaContextUuid": "GPU-e4b79931-7be6-f216-460a-f5405cfafffe",
+      "logicalCudaDevice": 0,
+      "endpoint": "sequential",
+      "cleanup": {
+        "beforeBytes": 1459617792,
+        "afterBytes": 1459617792,
+        "toleranceBytes": 67108864,
+        "adapterProcessExited": true
+      },
+      "recordId": "imc-c8dc3c697ce89d3342c7",
+      "evidenceSha256": "707b9085c11e29876da1f70b53b2ee6e72718b98317a936808b215c83c242238",
+      "planned": {
+        "logicalCaseId": "implan-7757e5e8867a4d83281c",
+        "evidenceScope": "authoritative",
+        "backend": "candle",
+        "loadShape": "eager_materialization",
+        "target": {
+          "provider": "sdxl",
+          "modelId": "sdxl",
+          "tier": "q4",
+          "mode": "text_to_image",
+          "overlay": "none",
+          "geometry": {
+            "width": 1024,
+            "height": 1024,
+            "batch": 1,
+            "frames": 1
+          }
+        },
+        "strategy": {
+          "rung": "bounded_attention",
+          "engagedRungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention"
+          ],
+          "parameters": {
+            "stageResidency": true,
+            "decodeTileEdge": 256,
+            "decodeOverlap": 64,
+            "attentionChunkSize": 16777216
+          }
+        },
+        "calibrationFingerprint": "sdxl-candle-sdxl-staged-decode-attention-v3",
+        "fixture": "fresh-five-rung-sdxl-q4-1024-seed16402-default-steps",
+        "negative": false,
+        "expectedResult": "passed",
+        "modelLoadPolicy": "fresh_per_case",
+        "modelLoadGroup": null
+      },
+      "evidencePath": "D:\\actions-runner-2\\_work\\_temp\\memory-catalog-gi-3197-sdxl-v3-auto-gpu-40434042724\\sequential-evidence.json"
+    }
+  ],
+  "qualityComparison": {
+    "result": "measured",
+    "reference": "resident",
+    "selected": "sequential",
+    "channels": 3145728,
+    "maximumAbsoluteRgbDelta255": 82,
+    "meanAbsoluteRgbDelta255": 0.36322689056396484,
+    "maximumAbsoluteError": 0.3215686274509804,
+    "meanAbsoluteError": 0.001424419178682215,
+    "changedChannels": 925327,
+    "identical": false
+  }
+}

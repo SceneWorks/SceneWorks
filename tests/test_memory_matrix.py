@@ -547,8 +547,7 @@ def test_collapsed_cell_state_is_a_pure_function_of_the_published_facts():
 
 
 def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
-    """sc-22511: currency is a REPORT. A staled loader closure means the anchor needs re-extraction,
-    not that the rung stopped existing — so `anchor.current` may not partition the states."""
+    """sc-22511: currency reports capture provenance and cannot partition the states."""
     matrix = load_matrix()
     anchored = [cell for cell in matrix["cells"] if cell["anchor"] is not None]
     assert anchored
@@ -581,21 +580,39 @@ def test_anchor_currency_is_reported_beside_the_state_and_never_moves_it():
     inventory = {row["id"]: row for row in matrix["anchors"]}
     for cell in anchored:
         assert cell["anchor"]["current"] == inventory[cell["anchor"]["id"]]["current"], cell["id"]
-    # And the reported staleness is the store's own, recomputed from the closure ledger.
+    assert matrix["summary"]["staleAnchors"] == sum(
+        1 for row in matrix["anchors"] if not row["current"]
+    )
+    # Historical captures keep their own currency. Judge today's generator against today's
+    # ledger separately, so a pin change cannot require a new matrix or measurement campaign.
+    live = json.loads(
+        subprocess.run(
+            ["node", "--input-type=module", "-e",
+             'import { buildMatrix } from "./scripts/generate-memory-matrix.mjs"; '
+             'const matrix = await buildMatrix(); '
+             'console.log(JSON.stringify({anchors:matrix.anchors, '
+             'cells:matrix.cells.filter(c => c.anchor).map(c => ({id:c.id,anchor:c.anchor})), '
+             'staleAnchors:matrix.summary.staleAnchors}));'],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout
+    )
+    live_anchors = live["anchors"]
+    assert live_anchors and live["cells"], "live currency validation must exercise an anchored cell"
+    live_inventory = {row["id"]: row for row in live_anchors}
+    for cell in live["cells"]:
+        assert cell["anchor"]["current"] == live_inventory[cell["anchor"]["id"]]["current"], cell["id"]
+    assert live["staleAnchors"] == sum(1 for row in live_anchors if not row["current"])
     closures = json.loads(
         (ROOT / "config/anchor-loader-closures.json").read_text(encoding="utf-8")
     )["models"]
     store = json.loads((ROOT / "config/memory-anchors.json").read_text(encoding="utf-8"))
     by_id = {anchor["id"]: anchor for anchor in store["anchors"]}
-    for row in matrix["anchors"]:
+    for row in live_anchors:
         anchor = by_id[row["id"]]
         assert row["current"] == (
             closures.get(f"{anchor['modelId']}:{anchor['backend']}", {}).get("digest")
             == anchor["source"]["loaderClosureDigest"]
         ), row["id"]
-    assert matrix["summary"]["staleAnchors"] == sum(
-        1 for row in matrix["anchors"] if not row["current"]
-    )
 
 
 def test_the_fingerprint_covers_only_the_anchor_and_catalog_sources():
@@ -755,10 +772,13 @@ def implementation_axis(state):
     return "implemented"
 
 
-def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
-    """sc-22513: the per-(modelId, backend, rung) census of implemented / structurally-N/A / missing
-    coordinates, pinned against a fixture NO script regenerates.
+def assert_implementation_census_shape(matrix, pinned):
+    """Preserve each lane's implementation partition, independently of axis cardinality.
 
+    The historical census fixture supplies the expected state proportions, not a population
+    ceiling. Adding supported catalog tiers may scale a lane without changing its classification.
+    Declared axis products still require every coordinate, and fixture/declaration key equality
+    still rejects missing lanes. Anchors and currency cannot change this implementation projection.
     Why it exists: the collapse dropped the rung-4 applicability survey out of the generator's read
     set, and that silently moved the implementation axis on nine lanes — a real MLX rung-4 ladder
     became Missing on Bernini and Krea, six real structural exemptions on Krea's Candle lane became
@@ -911,33 +931,76 @@ def test_the_implementation_axis_census_is_pinned_per_model_backend_rung():
     implementation. That is the shape to check when re-pinning: a lane outside qwen_image_2_1
     moving here would be a real regression, not a re-pin.
     """
-    matrix = load_matrix()
+    axes_by_lane = {
+        (model["id"], backend): axes
+        for model in matrix["models"]
+        for backend, axes in model["axes"].items()
+    }
+    declared_keys = {
+        f"{model_id}:{backend}:{rung}"
+        for (model_id, backend), axes in axes_by_lane.items()
+        for rung in axes["rungs"]
+    }
     census = {}
     for row in matrix["coverage"]:
         tally = {"implemented": 0, "structurally-na": 0, "missing": 0}
         for state, count in row["states"].items():
+            assert isinstance(count, int) and count >= 0, row
             tally[implementation_axis(state)] += count
         key = f"{row['modelId']}:{row['backend']}:{row['rung']}"
         assert key not in census, key
-        census[key] = [tally["implemented"], tally["structurally-na"], tally["missing"]]
+        counts = [tally["implemented"], tally["structurally-na"], tally["missing"]]
+        census[key] = counts
+        axes = axes_by_lane[(row["modelId"], row["backend"])]
+        coordinates = len(axes["tiers"]) * len(axes["modes"]) * len(axes["overlays"])
+        assert coordinates > 0, key
+        assert sum(counts) == row["coordinates"] == coordinates, key
+        assert counts[0] == row["implemented"], key
 
-    pinned = json.loads(
+    assert census.keys() == declared_keys == pinned.keys(), {
+        "undeclared lanes": sorted(census.keys() - declared_keys),
+        "missing declared lanes": sorted(declared_keys - census.keys()),
+        "unpinned lanes": sorted(census.keys() - pinned.keys()),
+        "vanished lanes": sorted(pinned.keys() - census.keys()),
+    }
+    for key, counts in census.items():
+        expected = pinned[key]
+        assert len(expected) == 3 and sum(expected) > 0, key
+        # Exact rational comparison: preserve classification, not a pinned tier population.
+        assert [count * sum(expected) for count in counts] == [
+            count * sum(counts) for count in expected
+        ], {"lane": key, "expected partition": expected, "actual partition": counts}
+
+
+def implementation_census_fixture():
+    return json.loads(
         (ROOT / "tests/fixtures/memory-matrix-implementation-census.json").read_text(
             encoding="utf-8"
         )
     )
-    assert census.keys() == pinned.keys(), {
-        "unpinned lanes": sorted(census.keys() - pinned.keys()),
-        "vanished lanes": sorted(pinned.keys() - census.keys()),
-    }
-    moved = {
-        key: {"pinned": pinned[key], "generated": census[key]}
-        for key in sorted(census)
-        if census[key] != pinned[key]
-    }
-    assert not moved, moved
-    # The census is a partition of the resolved coordinates, so it also has to add up.
-    for row in matrix["coverage"]:
-        key = f"{row['modelId']}:{row['backend']}:{row['rung']}"
-        assert sum(pinned[key]) == row["coordinates"], key
-        assert pinned[key][0] == row["implemented"], key
+
+
+def test_the_implementation_axis_census_preserves_per_lane_state_partition():
+    assert_implementation_census_shape(load_matrix(), implementation_census_fixture())
+
+
+@pytest.mark.parametrize("mutation", ["drop_lane", "drop_tier", "change_classification"])
+def test_implementation_census_rejects_lost_lane_tier_and_classification(mutation):
+    matrix = load_matrix()
+    if mutation == "drop_lane":
+        matrix["coverage"].pop()
+    elif mutation == "drop_tier":
+        axes = next(
+            axes
+            for model in matrix["models"]
+            for axes in model["axes"].values()
+            if len(axes["tiers"]) > 1
+        )
+        axes["tiers"].pop()
+    else:
+        row = next(row for row in matrix["coverage"] if row["states"].get("Implemented", 0))
+        row["states"]["Implemented"] -= 1
+        row["states"]["Missing"] = row["states"].get("Missing", 0) + 1
+        row["implemented"] -= 1
+    with pytest.raises(AssertionError):
+        assert_implementation_census_shape(matrix, implementation_census_fixture())

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { createPortal } from "react-dom";
 import { Stage, Layer, Group, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
 import { apiFetch, inspectWorkflowFile, isAbortError } from "../api.js";
+import { nonCanvasJobOutputs } from "../editorScratch.js";
 import { terminalStatuses } from "../jobTypes.js";
 import { useAppContext } from "../context/AppContext.js";
 import { useScreenActive } from "../context/ScreenActiveContext.js";
@@ -26,6 +27,9 @@ import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.j
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
 import { guidanceDefaultFromModel } from "../samplerOptions.js";
+import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
+import { mossAdvancedIssue } from "../mossImageAdvancedValidation.js";
+import { isMossImage, mossEditDefaults, mossEditGenerationDefaults, mossComponentState, mossEditWireOptions, mossEditControlsError } from "../mossImage.js";
 import {
   BLEND_MODES,
   DEFAULT_BLEND_MODE,
@@ -1212,6 +1216,7 @@ export function ImageEditor() {
     requestedGpu,
     jobs,
     importAsset,
+    confirmWorkflowEmbeddingBeforeGeneration,
     purgeAsset,
     // App-level scratch-op survivor coordination (sc-8850). The editor stages an ephemeral
     // scratch asset per AI op; these let App purge it (and the result) even if the user
@@ -1370,13 +1375,17 @@ export function ImageEditor() {
 
   // AI prompt edit (sc-2435): an edit-capable model + instruction + optional seed,
   // run against the working image through the existing edit_image flow.
-  const editModels = editCapableModels(imageModels);
+  const editModels = editCapableModels(imageModels, macCapabilities);
   const [editModel, setEditModel] = useState("");
   const [editPrompt, setEditPrompt] = useState("");
   const [editSeed, setEditSeed] = useState("");
+  const [nativeEditResults, setNativeEditResults] = useState([]);
   // Guidance override (sc-10275): "" = use the edit model's default (shown as the
   // input placeholder); a finite value rides advanced.guidanceScale.
   const [editGuidance, setEditGuidance] = useState("");
+  const [mossImageEdit, setMossImageEdit] = useState(mossEditDefaults);
+  const [mossEditSettings, setMossEditSettings] = useState(() => ({ ...mossEditGenerationDefaults(), max_sequence_length: 4096, training_shift: 1, negativePrompt: "", mossImageAdvanced: mossAdvancedDefaults() }));
+  const mossEdit = isMossImage(editModel);
   // Canvas-extend / outpaint (sc-2556): target output aspect (default "match" = the
   // working size) and how to fill it (crop trims, pad bars, outpaint generates).
   const [editAspect, setEditAspect] = useState("match");
@@ -1430,9 +1439,9 @@ export function ImageEditor() {
   // Default the edit-model selection to the first edit-capable model once the model
   // list loads, and recover if the current pick stops being edit-capable.
   useEffect(() => {
-    const caps = editCapableModels(imageModels);
+    const caps = editCapableModels(imageModels, macCapabilities);
     if (caps.length && !caps.some((model) => model.id === editModel)) setEditModel(caps[0].id);
-  }, [imageModels, editModel]);
+  }, [imageModels, editModel, macCapabilities]);
 
   // Same default/self-heal for the detail backbone.
   useEffect(() => {
@@ -1442,6 +1451,15 @@ export function ImageEditor() {
 
   // The chosen edit model + whether it accepts an inpaint mask (gates the mask tool).
   const selectedEditModel = editModels.find((model) => model.id === editModel) ?? null;
+  const mossEditReady = !mossEdit || mossComponentState(selectedEditModel, null, "edit_image").ready;
+  let mossEditError = "";
+  if (mossEdit) {
+    mossEditError = mossEditControlsError(mossEditSettings);
+    mossEditError ||= mossAdvancedIssue(mossEditSettings.mossImageAdvanced, { assets, prompt: editPrompt, prompts: mossEditSettings.promptBatch ?? [], negativePrompt: mossEditSettings.negativePrompt, width: mossEditSettings.width, height: mossEditSettings.height, context: mossEditSettings.max_sequence_length });
+    try { mossEditWireOptions(mossImageEdit); } catch (error) { mossEditError = error.message; }
+    if (![mossEditSettings.width, mossEditSettings.height].every((size) => Number.isInteger(size) && size >= 16 && size <= 4096 && size % 16 === 0)) mossEditError = "MOSS edit dimensions must be multiples of 16 in 16–4096.";
+    if (refAssetIds.length > 3 || refAssetIds.some((id) => !(assets ?? []).some((asset) => asset.id === id && assetCanRenderAsImage(asset)))) mossEditError = "An ordered MOSS reference is missing or exceeds four total slots. Reacquire it before editing.";
+  }
   const selectedDetailModel = detailModels.find((model) => model.id === detailModel) ?? null;
   const canMask = modelIsInpaintCapable(selectedEditModel);
   // Style/subject LoRAs for the AI Edit tool (sc-10254). Same family-gated selection +
@@ -2770,7 +2788,8 @@ export function ImageEditor() {
   // it as scratch and purges it with the result, so it never lands in the Library.
   async function runBoxEdit() {
     if (!boxes.length || !editModel || !working || aiOp) return;
-    const prompt = editPrompt.trim();
+    if (!mossEditReady || mossEditError) return;
+    const prompt = mossEdit ? editPrompt : editPrompt.trim();
     let sourceFile;
     try {
       sourceFile = await bakeBoxesToFile();
@@ -2791,6 +2810,9 @@ export function ImageEditor() {
           project: activeProject,
           requestedGpu,
           sourceAssetId: scratch.id,
+          mossImageEdit,
+          mossEditSettings,
+          referenceAssetIds: mossEdit ? [scratch.id, ...refAssetIds] : null,
           model: editModel,
           prompt,
           seed: editSeed,
@@ -2915,6 +2937,11 @@ export function ImageEditor() {
       let scratch;
       let maskScratch = null;
       try {
+        // Share the durable recipe choice while retaining this scratch job's
+        // original transport and cleanup (no deferred library-retry callback).
+        if (endpoint === "/api/v1/image/jobs") {
+          if ((await confirmWorkflowEmbeddingBeforeGeneration()) === false || !mountedRef.current) return false;
+        }
         const staged =
           sourceFile ?? (layerSource === "composite" ? await workingImageToFile() : await activeLayerToFile());
         scratch = await importAsset(staged, { throwOnError: true });
@@ -2956,7 +2983,7 @@ export function ImageEditor() {
         return false;
       }
     },
-    [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, token, purgeAsset, trackEditorScratchOp],
+    [working, aiOp, activeProject, workingImageToFile, activeLayerToFile, confirmFlatten, importAsset, confirmWorkflowEmbeddingBeforeGeneration, token, purgeAsset, trackEditorScratchOp],
   );
   // Keep the mask hook's bridge pointed at the latest runAiOp (sc-9752) — runSmartSelect
   // stages a scratch image_segment job through this exact seam.
@@ -3029,17 +3056,18 @@ export function ImageEditor() {
   }
 
   async function runEdit() {
-    const prompt = editPrompt.trim();
-    if (!prompt || !editModel || !working) return;
+    const prompt = mossEdit ? editPrompt : editPrompt.trim();
+    if ((!prompt && !(mossEdit && mossEditSettings.mossImageAdvanced?.positive)) || !editModel || !working) return;
     // A required image-edit LoRA that isn't downloaded yet blocks the run (worker R5): the source
     // band renders the actionable Download note (epic 10871, sc-11069). Defensive — the Generate
     // button is already disabled on this condition.
     if (editLoraRequiredMissing) return;
+    if (!mossEditReady || mossEditError) return;
     // Canvas-extend / outpaint (sc-2556): resolve the output W×H from the chosen aspect
     // and fit mode (outpaint coerced away when the model can't inpaint). "match" keeps
     // the working size, so the existing same-size edit behavior is unchanged.
     const fitMode = effectiveFitMode(editFitMode, canMask);
-    const { width: outWidth, height: outHeight } = editOutputDims(working.width, working.height, editAspect, fitMode);
+    const { width: outWidth, height: outHeight } = mossEdit ? mossEditSettings : editOutputDims(working.width, working.height, editAspect, fitMode);
     // Same-size edit → active layer; a canvas-extend / outpaint (dims change) →
     // document-level flatten (sc-6119 tool matrix).
     const dimsChange = outWidth !== working.width || outHeight !== working.height;
@@ -3079,7 +3107,7 @@ export function ImageEditor() {
               // sc-24113: cap at the MODEL's ceiling, not the module constant. The working scratch
               // image occupies the first slot, so the list is (1 + attached) and both halves are
               // bounded by the same per-model number.
-              ? editReferenceIds(scratch.id, refAssetIds, maxEditReferences)
+              ? mossEdit ? [scratch.id, ...refAssetIds] : editReferenceIds(scratch.id, refAssetIds, maxEditReferences)
               : null,
           model: editModel,
           prompt,
@@ -3087,13 +3115,15 @@ export function ImageEditor() {
           width: outWidth,
           height: outHeight,
           fitMode,
-          loras: editLoraSelection.serializedLoras,
+          loras: mossEdit ? [] : editLoraSelection.serializedLoras,
           // Auto-apply the model's managed image-edit LoRA (R5) when installed — deduped inside
           // buildEditJobBody, so a run needs no manual picking (epic 10871, sc-11069).
           editLora: managedEditLoraId ? editLora : null,
           // Identity strength (sc-11798): the user's edit-LoRA weight override, or the default.
           editLoraWeight: managedEditLoraId ? editLoraSelection.weightFor(editLora) : null,
           guidanceScale: editGuidance,
+          mossImageEdit,
+          mossEditSettings,
         }),
     });
   }
@@ -3112,6 +3142,16 @@ export function ImageEditor() {
         if (!resultAsset) {
           setStatus({ loading: false, error: job.error ?? job.message ?? "The operation failed." });
           return;
+        }
+        const outputs = nonCanvasJobOutputs(job);
+        setNativeEditResults(outputs);
+        if (outputs.length) {
+          if (outputs.every((asset) => asset.type === "tensor")) {
+            // Real tensors remain downloadable Library assets. They never enter the image
+            // decoder, canvas writeback, or generic ephemeral-result purge path.
+            setStatus({ loading: false, error: "" });
+            return;
+          }
         }
         // Smart-select (sc-3751): the caller's `onComplete` consumes the result asset itself (loads
         // the mask into the mask layer) — it does NOT replace the working image, so skip the install
@@ -3518,6 +3558,8 @@ export function ImageEditor() {
     editAspect,
     editFitMode,
     editGuidance,
+    mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, tensorAssets: assets, importTensorAsset: importAsset, characters, projectId: activeProject?.id,
+    jobs,
     editLora,
     editLoraDownloadRequested,
     editLoraInstalled,
@@ -3980,6 +4022,10 @@ export function ImageEditor() {
       ) : null}
 
       <main className="ie-canvas" onDragOver={(event) => event.preventDefault()} onDrop={handleDrop} ref={containerRef}>
+        {nativeEditResults.length ? <section className="ie-native-results" aria-label="Native edit outputs">
+          <p>This job produced {nativeEditResults.length} {nativeEditResults[0].type === "tensor" ? "tensor outputs" : "images"}. The outputs and edit inputs are available in Library for download and replay. {nativeEditResults[0].type === "tensor" ? "Tensor output leaves the canvas unchanged." : "The first image is applied to the canvas."}</p>
+          {nativeEditResults.map((asset, index) => <span key={asset.id}><a href={assetUrl(asset)} download>Output {index + 1}: {asset.type === "tensor" ? "FP32 NPY tensor" : "image"}</a>{asset.extra?.workflowCompanion?.path ? <a href={assetUrl({ projectId: asset.projectId, file: { path: asset.extra.workflowCompanion.path } })} download>Portable workflow</a> : null}</span>)}
+        </section> : null}
         {status.error ? (
           <div
             className="ie-hint"

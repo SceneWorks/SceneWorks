@@ -10,7 +10,7 @@ pub(crate) async fn list_assets(
         Some("library") => sceneworks_core::project_store::AssetScope::Library,
         _ => sceneworks_core::project_store::AssetScope::All,
     };
-    let (assets, filesystem_operations) = project_call(state, move |store| {
+    let (assets, filesystem_operations) = project_call(state.clone(), move |store| {
         store.list_assets_with_filesystem_operations(
             &project_id,
             query.include_rejected.unwrap_or(false),
@@ -81,9 +81,12 @@ pub(crate) async fn get_asset(
     State(state): State<AppState>,
     Path((project_id, asset_id)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    Ok(Json(
-        project_call(state, move |store| store.get_asset(&project_id, &asset_id)).await?,
-    ))
+    let lookup = project_id.clone();
+    let asset = project_call(state.clone(), move |store| {
+        store.get_asset(&lookup, &asset_id)
+    })
+    .await?;
+    Ok(Json(asset))
 }
 
 pub(crate) async fn get_asset_poster(
@@ -146,7 +149,21 @@ pub(crate) async fn import_asset(
                     }
                     let filename = field.file_name().unwrap_or("upload").to_owned();
                     let content_type = field.content_type().map(str::to_owned);
-                    let temp_path = write_upload_field_to_temp_file(&state, field).await?;
+                    let tensor = filename.to_ascii_lowercase().ends_with(".npy")
+                        || content_type.as_deref() == Some(sceneworks_core::tensor_artifact::MIME);
+                    let temp_path = if tensor {
+                        write_upload_field_to_dir_bounded(
+                            &state,
+                            field,
+                            "uploads",
+                            sceneworks_core::tensor_artifact::MAX_DATA_BYTES
+                                + sceneworks_core::tensor_artifact::MAX_HEADER_BYTES
+                                + 12,
+                        )
+                        .await?
+                    } else {
+                        write_upload_field_to_temp_file(&state, field).await?
+                    };
                     file = Some((filename, content_type, temp_path));
                 }
                 Some("sourceAssetId") => {
@@ -252,6 +269,15 @@ pub(crate) async fn write_upload_field_to_dir(
     field: axum::extract::multipart::Field<'_>,
     subdir: &str,
 ) -> Result<PathBuf, ApiError> {
+    write_upload_field_to_dir_bounded(state, field, subdir, MAX_UPLOAD_BYTES).await
+}
+
+async fn write_upload_field_to_dir_bounded(
+    state: &AppState,
+    field: axum::extract::multipart::Field<'_>,
+    subdir: &str,
+    limit: usize,
+) -> Result<PathBuf, ApiError> {
     let upload_dir = state.settings.data_dir.join("cache").join(subdir);
     tokio::fs::create_dir_all(&upload_dir)
         .await
@@ -262,7 +288,7 @@ pub(crate) async fn write_upload_field_to_dir(
     stream_multipart_field_to_file(
         field,
         &temp_path,
-        MAX_UPLOAD_BYTES,
+        limit,
         || "Uploaded file is too large".to_owned(),
         || async {
             let _ = tokio::fs::remove_file(&temp_path).await;

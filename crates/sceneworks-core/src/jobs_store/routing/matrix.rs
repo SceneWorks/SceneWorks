@@ -1090,6 +1090,10 @@ pub(crate) fn expected_backend_local_trainer_id(
         ("iris_3b_restore", "iris_3b_restore", "iris_train") => {
             ("iris_3b_restore", "iris_3b_restore")
         }
+        ("flux3_klein_lora", "flux3_klein_base", "flux3_klein_lora")
+        | ("flux3_klein_edit_lora", "flux3_klein_base", "flux3_klein_edit_lora") => {
+            ("flux3_klein_base", "flux3_klein_base")
+        }
         ("qwen_image_2_1_lora", "qwen_image_2_1", "qwen_image_2_1_lora")
         | ("qwen_image_2_1_edit_lora", "qwen_image_2_1", "qwen_image_2_1_edit_lora") => {
             ("qwen_image_2_1", "qwen_image_2_1")
@@ -2313,6 +2317,11 @@ fn precision_payload(
         "q4" => Some(json!({ "mlxQuantize": 4 })),
         "q8" => Some(json!({ "mlxQuantize": 8 })),
         "nvfp4" => Some(json!({ "quantTier": "nvfp4" })),
+        // sc-26241: the publisher FP8 rowwise package is named by tier identity, exactly like
+        // NVFP4 — it has no honest `mlxQuantize` bit width.
+        crate::image_request::FP8R_QUANT_TIER => {
+            Some(json!({ "quantTier": crate::image_request::FP8R_QUANT_TIER }))
+        }
         "int8-convrot" => Some(json!({ "convRot": true })),
         other => {
             return Err(format!(

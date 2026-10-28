@@ -725,8 +725,7 @@ export function ConfigureJobPanel({
               <label>
                 Output scope
                 <p className="training-field-hint">
-                  A full base fine-tune is registered as a model in your global model library, so it is available in
-                  every project. Only adapters are scoped to a single project.
+                  Full base fine-tunes enter the global model library, available in every project. Only adapters support project scope.
                 </p>
               </label>
             ) : (
@@ -1193,14 +1192,14 @@ export function ConfigureJobPanel({
               <textarea
                 disabled={upstreamPrompts}
                 onChange={(event) => updateConfigDraft("samplePrompts", event.target.value)}
-                placeholder="One prompt per line. Leave blank to use the trigger-phrase defaults."
+                placeholder="Blank uses trigger-phrase defaults."
                 rows={4}
                 value={configDraft.samplePrompts ?? ""}
               />
               <span className="training-field-hint">
                 {upstreamPrompts
-                  ? "Iris' seven built-in validation prompts replace these for this run (Iris training options → Previews)."
-                  : "One prompt per line. Renders one preview per prompt, up to the sample count."}
+                  ? "Iris' seven built-in validation prompts replace these."
+                  : "One per line; previews capped by Sample count."}
               </span>
             </label>
             )}
@@ -1250,7 +1249,7 @@ export function ConfigureJobPanel({
                     updateConfigDraft("gradientNoiseEta", event.target.checked ? String(gradientNoiseEtaSuggested) : "");
                     updateConfigDraft("gradientNoiseGamma", event.target.checked ? String(gradientNoiseGammaDefault) : "");
                   }}
-                  title="Add seeded Gaussian noise to the adapter gradients that fades out over the run (eta / (1 + step)^gamma) — helps escape poor early minima. Off by default."
+                  title="Seeded Gaussian adapter-gradient noise: eta / (1 + step)^gamma. Helps escape poor early minima. Off by default."
                 />
               ) : null}
               {resolutionBucketsSupported || resolutionBuckets ? (
@@ -1263,7 +1262,7 @@ export function ConfigureJobPanel({
                       event.target.checked ? seedResolutionBuckets(selectedTarget, configDraft.resolution) : null,
                     )
                   }
-                  title="Train every image at several resolutions, each with its own repeat count per epoch (e.g. 512/768/1024 at 16/4/1). Replaces the single Resolution above. Off by default."
+                  title="Train each image at several resolutions with per-epoch repeats (e.g. 512/768/1024 at 16/4/1), replacing Resolution. Off by default."
                 />
               ) : null}
               {auxLosses.map((loss) => (
@@ -1284,11 +1283,23 @@ export function ConfigureJobPanel({
                   invalid={invalidProps(configValidity, "subjectMaskLoss")}
                   label="Subject-masked loss"
                   onChange={(event) => updateConfigDraft("subjectMaskLoss", event.target.checked)}
-                  title="Weight the training loss by each image's subject mask so the adapter learns the subject, not the background. Needs a subject mask on every image; missing ones are generated with SAM3 when training starts. On in the Z-Image character presets, off otherwise."
+                  title="Subject-focused loss uses a mask on every image; missing masks are generated with SAM3 at training start. On in Z-Image character presets, otherwise off."
                 />
               ) : null}
             </div>
 
+            {selectedTarget?.family === "flux3" ? (
+              <label>
+                Source options (JSON)
+                <textarea
+                  title={selectedTarget.ui.description}
+                  value={configDraft.flux3 ?? "{}"}
+                  onChange={(event) => updateConfigDraft("flux3", event.target.value)}
+                  rows={6}
+                  {...invalidProps(configValidity, "flux3")}
+                />
+              </label>
+            ) : null}
             {iris ? (
               <IrisTrainingOptions
                 captionFieldOptions={irisContext.captionFieldOptions}

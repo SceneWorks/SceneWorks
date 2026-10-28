@@ -15,6 +15,8 @@ import React, { act } from "react";
 import JSON5 from "json5";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AppContext } from "../context/AppContext.js";
+import { configure, configureReferences } from '../testUtils/imageControls.js';
+import { terminalBrowserDom } from '../testUtils/terminalBrowserDom.js';
 import { SimpleShell } from "./SimpleShell.jsx";
 import { click, mountRoot, setInput, unmountRoot } from "../testUtils/dom.js";
 
@@ -155,6 +157,25 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
     // ... and the settings bar above it is untouched: Model, Resolution and Variations stay where
     // Simple's design puts them, so the fold ADDS a surface rather than moving one.
     expect(fold.contains(container.querySelector(".su-chips"))).toBe(false);
+  });
+  it.each(["moss_image_base", "moss_image_sft"])("Simple submits %s ordered repeated edit slots with visible controls and component readiness", async (id) => {
+    const model={...manifestModels.find((entry)=>entry.id===id),capabilities:["text_to_image","edit_image"],installState:"installed",conditionalPurposes:{moss_image_edit:{installState:"installed"}}};
+    const assets=[{id:"wide",type:"frame",projectId:"project-1",displayName:"Wide"},{id:"tall",type:"upload",file:{mimeType:"image/png"},projectId:"project-1",displayName:"Tall"}];
+    const context=await openImage(baseContext({imageModels:[model],models:[model],assets,recentImageAssets:assets}));
+    await click([...container.querySelectorAll('[role="tab"]')].find((tab)=>tab.textContent==="Edit"));await openAdvanced();
+    const label=(text)=>[...container.querySelectorAll("label")].find((node)=>node.textContent.startsWith(text))?.querySelector("input,select");
+    await configureReferences(terminalBrowserDom(document.body), ["wide","tall","wide","tall"], []);
+    await act(async()=>setInput(label("Reference maximum edge"),"768"));
+    await click(label("Cache reference K/V"));
+    await act(async()=>setTextarea(fieldById("su-image-prompt"),"make the second image blue"));
+    expect(container.querySelector(".su-generate").disabled).toBe(false);
+    await click(container.querySelector(".su-generate"));
+    const body=context.createImageJob.mock.calls.at(-1)[0];
+    expect(body.referenceAssetIds).toEqual(["wide","tall","wide","tall"]);expect(body.sourceAssetId).toBeUndefined();
+    expect(body.width).toBe(512);expect(body.height).toBe(512);expect(body.advanced).toMatchObject({steps:30,guidanceScale:4,schedulerShift:5,mossImageEdit:{reference_max_edge:768,use_kv_cache:false}});
+    await openImage({...context,imageModels:[{...model,conditionalPurposes:{moss_image_edit:{installState:"incomplete"}}}]});
+    expect(container.querySelector(".su-generate").disabled).toBe(true);
+    expect(container.textContent).toContain("incomplete, corrupt, or blocked");
   });
 
   it("offers steps at the MODEL's floor, plus seed, negative prompt and true-CFG guidance", async () => {
@@ -297,4 +318,11 @@ describe("SimpleImageStudio with Qwen Image 2.1 (sc-24113)", () => {
     const request = context.createImageJob.mock.calls[0][0];
     expect(request.advanced.transparentBackground).toBe(true);
   });
+  it("production terminal configures actual Simple controls and submits ordered repeated references",async()=>{
+    const model={...manifestModels.find(entry=>entry.id==='moss_image_sft'),capabilities:['text_to_image','edit_image'],installState:'installed',conditionalPurposes:{moss_image_edit:{installState:'installed'}}},assets=[{id:'wide',type:'image',projectId:'project-1',displayName:'Wide'},{id:'tall',type:'image',projectId:'project-1',displayName:'Tall'}];
+    const context=await openImage(baseContext({imageModels:[model],models:[model],assets,recentImageAssets:assets}));await click([...container.querySelectorAll('[role="tab"]')].find(tab=>tab.textContent==='Edit'));
+    const expected={model:model.id,prompt:'make second blue',negativePrompt:'',referenceAssetIds:['wide','tall','wide','tall'],width:512,height:512,count:1,seed:173,advanced:{steps:3,guidanceScale:4,schedulerShift:5,mossImage:{training_shift:1,max_sequence_length:4096},mossImageEdit:{reference_max_edge:512,use_kv_cache:true}}};
+    await configure(terminalBrowserDom(document.body),expected,'simple',[]);await click(container.querySelector('.su-generate'));const body=context.createImageJob.mock.calls.at(-1)[0];expect(body.referenceAssetIds).toEqual(expected.referenceAssetIds);expect(body).toMatchObject({prompt:expected.prompt,width:512,height:512,seed:173});expect(body.advanced).toMatchObject(expected.advanced);
+  });
+
 });

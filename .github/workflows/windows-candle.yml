@@ -129,6 +129,7 @@ on:
       - "rust-toolchain.toml"
       - ".cargo/config.toml"
       - ".github/actions/prepare-rust-runner/**"
+      - ".github/actions/cleanup-runner-storage/**"
       - ".github/workflows/windows-candle.yml"
   pull_request:
     branches: [main]
@@ -388,7 +389,7 @@ jobs:
       # Automatic PR/push tests use physical GPU 1; logical CUDA device 0 maps to it.
       # Preserve the existing manual-dispatch default and its step-local overrides.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && '0' || '1' }}
+      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && '1' || github.event_name == 'workflow_dispatch' && '0' || '1' }}
       CAPABILITY_FACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only }}
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
@@ -417,6 +418,11 @@ jobs:
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Register before builds so post cleanup also covers failed/cancelled jobs.
+      - uses: ./.github/actions/cleanup-runner-storage
+      - name: Test runner storage cleanup guards
+        shell: powershell
+        run: node --test scripts/runner-storage-cleanup.test.mjs
       - name: Refuse combined manual measurement profiles
         if: ${{ github.event_name == 'workflow_dispatch' }}
         shell: powershell
@@ -1493,8 +1499,6 @@ jobs:
       HF_HUB_CACHE: 'E:\huggingface\hub'
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
-      MODEL_PROOF_OUTPUT_DIR: '${{ runner.temp }}\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}'
-      MODEL_PROOF_RESOURCE_DIR: '${{ runner.temp }}\imported-nvfp4-resource-${{ github.run_id }}-${{ github.run_attempt }}'
       SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\huggingface\hub\models--Comfy-Org--Krea-2\snapshots\952f49d49653cb42e7d6cf7cbfad74738073ec7d\diffusion_models\krea2_turbo_nvfp4.safetensors'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1514,6 +1518,7 @@ jobs:
         run: |
           $otherProfiles = @($env:FIVE_RUNG, $env:PROVISION, $env:LTX_EROS, $env:EPIC_20738, $env:YUE2, $env:YUE2_ACCEPTANCE, $env:YUE2_FP8, $env:IRIS, $env:SUPRA2, $env:FACTS)
           if ($otherProfiles -contains 'true') { throw 'run_imported_nvfp4_proof cannot be combined with another manual measurement profile' }
+      - uses: ./.github/actions/cleanup-runner-storage
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the imported NVFP4 smoke
         shell: powershell
@@ -1537,6 +1542,9 @@ jobs:
         run: cargo fetch --locked
       - name: Run the imported NVFP4 worker smoke
         shell: cmd
+        env:
+          MODEL_PROOF_OUTPUT_DIR: '${{ runner.temp }}\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}'
+          MODEL_PROOF_RESOURCE_DIR: '${{ runner.temp }}\imported-nvfp4-resource-${{ github.run_id }}-${{ github.run_attempt }}'
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
@@ -1546,7 +1554,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: imported-nvfp4-worker-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ env.MODEL_PROOF_OUTPUT_DIR }}/artifact
+          path: ${{ runner.temp }}\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}/artifact
           if-no-files-found: error
 
   # SC-23002 (epic 22988) terminal evidence for YuE2 on CUDA: the acceptance matrix through the real
@@ -1578,6 +1586,7 @@ jobs:
       YUE2_TERMINAL_STATE: 'E:\sceneworks-terminal\sc-23002-yue2\${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/cleanup-runner-storage
       - name: Validate the YuE2 terminal dispatch
         shell: powershell
         env:
@@ -1797,6 +1806,7 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/cleanup-runner-storage
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the Iris worker smoke
         shell: powershell
@@ -1911,6 +1921,7 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/cleanup-runner-storage
       - uses: ./.github/actions/prepare-rust-runner
       - name: Disable unstable sccache wrapper for the Supra2 worker smoke
         shell: powershell

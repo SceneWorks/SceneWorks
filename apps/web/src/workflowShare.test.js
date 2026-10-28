@@ -117,6 +117,38 @@ describe("looksLikeWorkflowCandidate", () => {
 });
 
 describe("recipeFromWorkflowShare", () => {
+  it("retains original layout JSON and attachment-instance order when binding replacement reference assets", () => {
+    const layout = { version: 1, boxes: [
+      { id: "label", desc: '猫 "vase"', bbox: [0, -0.123456789012345, 1, 1] },
+      { id: "removal", desc: "remove", from: "ref_image_1", reference_id: "second-instance", src_bbox: [0, 0, 1, 1], tgt_bbox: null },
+    ] };
+    const recipe = recipeFromWorkflowShare(share({ mode: "edit_image", model: "flux3_klein",
+      advanced: { flux3_layout: layout, flux3_reference_ids: ["first-instance", "second-instance"] } }),
+    report({ model: { state: "resolved", catalogId: "flux3_klein" } }),
+    { referenceAssetIds: ["local-duplicate", "local-duplicate"] });
+    expect(recipe.rawAdapterSettings.flux3_layout).toEqual(layout);
+    expect(recipe.rawAdapterSettings.flux3_reference_ids).toEqual(["first-instance", "second-instance"]);
+    expect(recipe.rawAdapterSettings.referenceAssetIds).toEqual(["local-duplicate", "local-duplicate"]);
+  });
+  it("only assigns optional reference geometry intent to FLUX3 image workflows with picked reference slots", () => {
+    const workflow = share({ model: "flux3_klein", width: 16, height: undefined,
+      inputs: [{ kind: "reference", count: 1 }] });
+    const resolved = report({ model: { state: "resolved", catalogId: "flux3_klein" } });
+    const picked = { referenceAssetIds: ["reference-83x67"] };
+    const recipe = recipeFromWorkflowShare(workflow, resolved, picked);
+    expect(recipe.uiDimensionIntent).toEqual({ width: 16, height: null });
+    expect(recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
+    expect(recipeFromWorkflowShare(workflow, resolved)).not.toHaveProperty("uiDimensionIntent");
+    expect(recipeFromWorkflowShare({ ...workflow, inputs: [] }, resolved, picked)).not.toHaveProperty("uiDimensionIntent");
+    expect(recipeFromWorkflowShare({ ...workflow, sceneworksWorkflow: "video" }, resolved, picked)).not.toHaveProperty("uiDimensionIntent");
+    expect(recipeFromWorkflowShare(share(), report(), picked)).not.toHaveProperty("uiDimensionIntent");
+    const sourceWorkflow = { ...workflow, inputs: [{ kind: "source", count: 1 }] };
+    expect(recipeFromWorkflowShare(sourceWorkflow, resolved, { sourceAssetId: "source-83x67" })
+      .uiDimensionIntent).toEqual({ width: 16, height: null });
+    expect(recipeFromWorkflowShare(sourceWorkflow, resolved)).not.toHaveProperty("uiDimensionIntent");
+    expect(recipeFromWorkflowShare(sourceWorkflow, resolved, { sourceAssetId: " " }))
+      .not.toHaveProperty("uiDimensionIntent");
+  });
   it("populates the fields the studio's injection effect reads", () => {
     const recipe = recipeFromWorkflowShare(share(), report());
     expect(recipe.mode).toBe("text_to_image");
@@ -444,6 +476,10 @@ function sharedAdvancedKeysFromTheContract() {
 // A plausible value per key, so one envelope can carry the whole table.
 function sampleValueFor(key) {
   switch (key) {
+    case "mossImageAdvanced":
+      return { output: "images" };
+    case "promptBatch":
+      return ["one", "two"];
     case "poses":
       return [{ keypoints: [1, 2] }, { keypoints: [3, 4] }];
     case "phases":
@@ -563,10 +599,14 @@ describe("ADVANCED_PREFILL is the source of truth for both the prefill and the p
       "bridgeRightVideoConditioningStrength",
       "cnScale",
       "distilledVariant",
+      "flux3_layout",
+      "flux3_reference_ids",
       "imageGuidanceScale",
       "lightning",
       "ltxPipeline",
+      "mossImageEditExecutionReport",
       "mossImageExecutionReport",
+      "mossImageSampleIndex",
       "motion",
       "structuredPrompt",
       "systemMessage",

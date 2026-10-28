@@ -1,4 +1,5 @@
 import { buildImageJobRequest } from "../imageJobRequest.js";
+import { isMossEdit } from "../mossImage.js";
 import { composeStyledPrompt } from "../styleComposer.js";
 import { serializeLora } from "../presetUtils.js";
 import { styleTextForId } from "../data/styleCatalog.js";
@@ -47,10 +48,11 @@ export function resolveSimpleTier(model, screen, options = {}) {
   const {
     convRotEligible = false,
     nvfp4Eligible = false,
+    fp8rEligible = false,
     unifiedMemoryGb = null,
     backend = "mlx",
   } = options;
-  const tierOptions = { convRotEligible, nvfp4Eligible };
+  const tierOptions = { convRotEligible, nvfp4Eligible, fp8rEligible };
   const available = installedTiers(model, tierOptions);
   if (available.length === 0) {
     return { quantTier: "", tierExplicit: false };
@@ -225,6 +227,12 @@ export function buildSimpleImageRequest({
   guidance = "",
   width: widthOverride = null,
   height: heightOverride = null,
+  mossImageEdit = undefined,
+  schedulerShift = null,
+  maxSequenceLength = 4096,
+  trainingShift = 1,
+  mossImageAdvanced,
+  mossPromptBatch,
 }) {
   const size = parseResolutionPair(resolution);
   if (!size) {
@@ -237,6 +245,7 @@ export function buildSimpleImageRequest({
   const height =
     Number.isFinite(heightOverride) && heightOverride > 0 ? heightOverride : size.height;
   const editing = mode === "edit_image";
+  const mossEdit = isMossEdit(model, mode);
   // Only claim img2img on the text path AND on a model that advertises it — the flag is
   // what makes buildImageJobAdvanced emit `advanced.strength`, so claiming it for a model
   // without the capability would send a knob the engine has no use for.
@@ -259,7 +268,7 @@ export function buildSimpleImageRequest({
   return buildImageJobRequest({
     ...IMAGE_DEFAULTS,
     loras,
-    sourceAssetId: editing ? referenceAssetId || null : null,
+    sourceAssetId: editing && !mossEdit ? referenceAssetId || null : null,
     supportsImg2img: img2imgActive,
     img2imgReferenceAssetId: img2imgActive ? referenceAssetId : null,
     img2imgStrength,
@@ -271,6 +280,11 @@ export function buildSimpleImageRequest({
     // sc-24113: the advanced fold's knobs, through the SAME builder the full studio uses
     // (`stepsOverride` / `guidanceOverride` are its names for "" = use the model default).
     referenceAssetIds,
+    mossImageEdit,
+    mossImage: mossEdit ? { max_sequence_length: maxSequenceLength, training_shift: trainingShift } : undefined,
+    mossImageAdvanced: mossEdit ? mossImageAdvanced : undefined,
+    mossPromptBatch: mossEdit ? mossPromptBatch : undefined,
+    schedulerShift,
     stepsOverride: steps,
     guidanceOverride: guidance,
     negativePrompt,

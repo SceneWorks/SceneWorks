@@ -16,6 +16,7 @@ import {
   isNvfp4Tier,
   isSelectableTier,
   modelQualityFloor,
+  nativeTierEligibility,
   shouldShowTierPicker,
   tierLabel,
   quantizeTier,
@@ -1018,5 +1019,40 @@ describe("a derivation-pending tier is installable (sc-22999)", () => {
       ),
     };
     expect(lightestInstallableTier(unpublished)).toBe("q8");
+  });
+});
+
+
+describe("FLUX 3 native format capability and installed artifacts", () => {
+  const worker = (capabilities, status = "online") => ({ capabilities, status });
+  const model = { id: "flux3_klein", hasVariantMatrix: true, variants: [
+    { variant: "q4", installState: "installed" },
+    { variant: "fp8r", installState: "installed" },
+    { variant: "nvfp4", installState: "missing" },
+  ] };
+  it("requires provider-specific live caps, not an engine advertisement or legacy NVFP4", () => {
+    for (const workers of [[], [worker(["candle", "nvfp4"])], [worker(["fp8r", "flux3_nvfp4"], "offline")]]) {
+      expect(installedTiers(model, nativeTierEligibility(model, workers))).toEqual(["q4"]);
+      expect(allPossibleTiers(model, nativeTierEligibility(model, workers))).toEqual(["q4"]);
+    }
+    const caps = nativeTierEligibility(model, [worker(["fp8r", "flux3_nvfp4"])]);
+    expect(installedTiers(model, caps)).toEqual(["q4", "fp8r"]);
+    expect(tierPickerOptions(model, caps)).toEqual([
+      { tier: "q4", label: "Q4 (smallest)", disabled: false },
+      { tier: "nvfp4", label: "NVFP4 (candle, Blackwell sm_120+) — not downloaded", disabled: true },
+      { tier: "fp8r", label: "FP8R (candle, sm_89+)", disabled: false },
+    ]);
+    expect(nativeTierEligibility({ id: "flux2_dev" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(true);
+    expect(nativeTierEligibility({ id: "flux3_klein_base" }, [worker(["nvfp4"]) ]).nvfp4Eligible).toBe(false);
+  });
+  it("does not invent unavailable base derivations or alias FP8R to affine quantization", () => {
+    const base = { ...model, id: "flux3_klein_base", variants: [{ variant: "bf16", installState: "missing" }] };
+    const caps = nativeTierEligibility(base, [worker(["fp8r", "flux3_nvfp4"])]);
+    expect(installedTiers(base, caps)).toEqual([]);
+    expect(allPossibleTiers(base, caps)).toEqual(["bf16"]);
+    expect(tierQuantize("fp8r")).toBeNull();
+    expect(isSelectableTier("fp8r")).toBe(true);
+    expect(GENERATION_QUALITY_TIERS).not.toContain("fp8r");
+    expect(defaultTierSelection(model, "fp8r", nativeTierEligibility(model, [worker(["fp8r"]) ]))).toBe("fp8r");
   });
 });

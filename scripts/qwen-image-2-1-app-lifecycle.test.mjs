@@ -148,26 +148,45 @@ function assertDispatcherIsolation(workflow) {
   assert.match(workflow, /profile:[\s\S]*?default: catalog/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/qwen-image-2-1-app-lifecycle.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
   assert.match(workflow, /uses: \.\/\.github\/workflows\/iris-mlx-real-weights.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
-  assert.match(workflow, /uses: \.\/\.github\/workflows\/supra2-mlx-real-weights.yml\n    with:\n      source_sha: \$\{\{ inputs.ref \}\}/);
-  assert.match(workflow, /inference_sha: \$\{\{ inputs.inference_sha \}\}/);
+  assert.match(workflow, /uses: \.\/\.github\/workflows\/flux3-image-klein-app-lifecycle\.yml\n    with:\n      source_sha: \$\{\{ inputs\.ref \}\}/);
+  assert.match(workflow, /uses: \.\/\.github\/workflows\/supra2-mlx-real-weights\.yml\n    with:\n      source_sha: \$\{\{ inputs\.ref \}\}/);
+  assert.match(workflow, /inference_sha: \$\{\{ inputs\.inference_sha \}\}/);
   assert.match(workflow, /qwen_app_runner_target:[\s\S]*?options:\s*\n\s*- primary\s*\n\s*- secondary[\s\S]*?default: primary/);
-  assert.match(workflow, /runner_target: \$\{\{ inputs.qwen_app_runner_target \}\}/);
-  const jobs = [...workflow.slice(workflow.indexOf("\njobs:\n")).matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)].map((match) => match[1]);
-  assert.deepEqual(jobs, ["qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  assert.match(workflow, /runner_target: \$\{\{ inputs\.qwen_app_runner_target \}\}/);
+  const jobsText = workflow.slice(workflow.indexOf("\njobs:\n"));
+  const headers = [...jobsText.matchAll(/^  ([a-z][a-z0-9-]*):\n/gm)];
+  const jobs = headers.map((match) => match[1]);
+  assert.deepEqual(jobs, ["flux3-app-lifecycle", "flux3-terminal-host", "flux3-terminal-queue", "qwen-app-lifecycle", "iris-mlx-real-weights", "supra2-mlx-real-weights", "mlx", "candle"], "all dispatcher jobs must have an explicit profile gate");
+  const jobBlock = (name) => {
+    const index = jobs.indexOf(name), header = headers[index];
+    return header && jobsText.slice(header.index + header[0].length, headers[index + 1]?.index);
+  };
   const runs = (profile, backend) => jobs.filter((job) => {
-    const condition = new RegExp(`^  ${job}:\\n    if: \\$\\{\\{ (.+) \\}\\}$`, "m").exec(workflow)?.[1];
-    assert.ok(condition, `missing ${job} dispatch predicate`);
+    const expression = /^    if: (.+)$/m.exec(jobBlock(job))?.[1];
+    assert.ok(expression, `missing ${job} dispatch predicate`);
+    // GitHub permits both a bare job expression and its explicit ${{ ... }} form.
+    const predicate = expression.match(/^\$\{\{ (.+) \}\}$/)?.[1] ?? expression;
+    const inputs = { profile, backend };
+    const condition = predicate;
     // Evaluate only the tiny predicate grammar, never a workflow step or command.
     assert.match(condition, /^[a-z0-9_. '=()&|!-]+$/);
-    return Function("inputs", `return (${condition})`)({ profile, backend });
+    return Function("inputs", `return (${condition})`)(inputs);
   });
   for (const backend of ["mlx", "candle"]) {
-    assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
-    assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
-    assert.deepEqual(runs("supra2-mlx-real-weights", backend), ["supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
-    assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
-    assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
-    assert.deepEqual(runs("unknown", backend), [], "unknown profiles must fail closed");
+      assert.deepEqual(runs("qwen-image-2-1-app-lifecycle", backend), ["qwen-app-lifecycle"], "app proof must skip all catalog mutation steps");
+      assert.deepEqual(runs("flux3-image-klein-app-lifecycle", backend), ["flux3-app-lifecycle"], "FLUX3 proof must skip all catalog mutation steps");
+      assert.deepEqual(runs("iris-mlx-real-weights", backend), ["iris-mlx-real-weights"], "Iris evidence must skip all catalog mutation steps");
+      assert.deepEqual(runs("supra2-mlx-real-weights", backend), ["supra2-mlx-real-weights"], "Supra2 evidence must skip all catalog mutation steps");
+      assert.deepEqual(runs("flux3-image-klein-terminal-host", backend), ["flux3-terminal-host"], "FLUX3 terminal host step must skip all catalog mutation steps");
+      assert.deepEqual(runs("flux3-image-klein-terminal-queue", backend), ["flux3-terminal-queue"], "FLUX3 queue must skip all catalog mutation steps");
+      assert.deepEqual(runs("catalog", backend), [backend], "default catalog contract must remain unchanged");
+      assert.deepEqual(runs("", backend), [backend], "omitted profile preserves catalog behavior");
+      // Preserve bounded SDXL profile isolation.
+      for (const profile of ["sdxl-cuda-endpoints", "sdxl-cuda-admitted-replay"]) {
+        assert.deepEqual(runs(profile, backend), ["candle"], "bounded SDXL profiles must skip all unrelated jobs");
+      }
+      assert.deepEqual(runs("sdxl-cuda-unknown", backend), [], "the SDXL prefix alone must not dispatch compute");
+      assert.deepEqual(runs("unknown", backend), [], "unknown profiles must fail closed");
   }
 }
 test("registered dispatcher isolates app proof from both catalog lanes and their publication", () => {
@@ -175,9 +194,20 @@ test("registered dispatcher isolates app proof from both catalog lanes and their
   assertDispatcherIsolation(workflow);
   const guard = "(inputs.profile == '' || inputs.profile == 'catalog') && ";
   const mutants = [workflow.replace(guard, ""), workflow.replaceAll(guard, ""), workflow.replace("inputs.profile == 'qwen-image-2-1-app-lifecycle'", "inputs.backend == 'mlx'"), workflow.replace("default: catalog", "default: qwen-image-2-1-app-lifecycle"), workflow.replace("source_sha: ${{ inputs.ref }}", "source_sha: ${{ github.ref }}"), workflow.replace("runner_target: ${{ inputs.qwen_app_runner_target }}", "runner_target: primary"), workflow + "\n  publish:\n    if: ${{ inputs.backend == 'mlx' }}\n    runs-on: ubuntu-latest\n", workflow + "\n  unguarded-publish:\n    runs-on: ubuntu-latest\n"];
-  for (const mutant of mutants) assert.throws(() => assertDispatcherIsolation(mutant));
+  for (const [index, mutant] of mutants.entries()) {
+    assert.notEqual(mutant, workflow, "each mutation must change the dispatcher");
+    assert.throws(() => assertDispatcherIsolation(mutant), `dispatcher mutant ${index} must fail`);
+  }
 });
-
+test("dispatcher isolation accepts both GitHub job-if forms without borrowing another job's gate", () => {
+  const workflow = read(".github/workflows/memory-catalog-campaign.yml").replace(/\r\n/g, "\n");
+  const line = /^  qwen-app-lifecycle:\n(    if: (.+))$/m.exec(workflow);
+  assert.ok(line, "app lifecycle job must have its own predicate");
+  const predicate = line[2].match(/^\$\{\{ (.+) \}\}$/)?.[1] ?? line[2];
+  assertDispatcherIsolation(workflow.replace(line[1], `    if: \${{ ${predicate} }}`));
+  assertDispatcherIsolation(workflow.replace(line[1], `    if: ${predicate}`));
+  assert.throws(() => assertDispatcherIsolation(workflow.replace(line[1] + "\n", "")), /missing qwen-app-lifecycle dispatch predicate/);
+});
 test("frozen dense snapshot uses processor tokenizer files and rejects the older tokenizer layout", async () => {
   const base = await mkdtemp(path.join(tmpdir(), "qwen-21-layout-"));
   try {

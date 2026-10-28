@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import { providerClosureDigest } from "./inference-closure-digest.mjs";
 import { connectWatchdogCompletion } from "./lib/watchdog-completion.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
+import { OWNED_ACCOUNTING_KIND, validateOwnedProcessAccountingRecord } from "./lib/flux3-owned-accounting-contract.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CALIBRATION_SCHEMA = JSON.parse(
@@ -719,7 +720,9 @@ function validateComplete(record) {
     fail(`${record.id}: complete evidence cannot come from a dirty repository`);
   }
   validatePredicted(record.predictedPeakBytes, `${record.id}.predictedPeakBytes`);
-  validatePhaseMetrics(record.observedMemory, `${record.id}.observedMemory`);
+  if (record.measurementKind !== OWNED_ACCOUNTING_KIND) {
+    validatePhaseMetrics(record.observedMemory, `${record.id}.observedMemory`);
+  }
   object(record.sweep, `${record.id}.sweep`);
   if (!Array.isArray(record.sweep.axes)) {
     fail(`${record.id}: sweep axes must be an array`);
@@ -813,6 +816,9 @@ function validateComplete(record) {
 // that completed (a real LTX render co-existed 7.46 GiB above recommendedMaxWorkingSetSize). This
 // used to read `deviceBytes`, which was that bound under another name.
 function assertResidencyFitsHardware(record) {
+  // Owned-process WDDM working-set samples certify an observed operating envelope only.
+  // The shared contract validates them; none is an allocator/live-array residency metric.
+  if (record.measurementKind === OWNED_ACCOUNTING_KIND) return;
   const resident = record.observedMemory.overall.activeBytes;
   if (resident > record.hardware.memoryBytes) {
     fail(`${record.id}: overall resident bytes exceed probed hardware memory`);
@@ -851,7 +857,9 @@ function validateRuntimeComplete(record) {
     fail(`${record.id}: runtime-complete evidence cannot come from a dirty repository`);
   }
   validateRuntimePredicted(record.predictedPeakBytes, `${record.id}.predictedPeakBytes`);
-  validateRuntimeObserved(record.observedMemory, `${record.id}.observedMemory`);
+  if (record.measurementKind !== OWNED_ACCOUNTING_KIND) {
+    validateRuntimeObserved(record.observedMemory, `${record.id}.observedMemory`);
+  }
   const [soleCase] = record.sweep.cases;
   if (
     record.sweep.rangeVerified !== true ||
@@ -1010,6 +1018,11 @@ export function validateRecord(record) {
   object(record.quality, `${record.id}.quality`);
   if (record.quality.audio !== undefined) validateAudioQuality(record);
   if (!Array.isArray(record.scenarios)) fail(`${record.id}: scenarios must be an array`);
+  if (["measurementKind", "ownedProcessMemory", "observedExecutionRecipe", "observedExecutionRecipeSha256", "observedOperatingConditions", "unavailableMetrics"].some((key) => Object.hasOwn(record, key))) {
+    // Fail closed for incomplete/unknown accounting dialects too, including non-complete records.
+    // Do not project these samples into observedMemory or predictive-fit authorization.
+    validateOwnedProcessAccountingRecord(record);
+  }
   validateDiagnosticCeilingAgreesWithTypedField(record);
   if (record.status === "complete") validateComplete(record);
   if (record.status === "runtime_complete") validateRuntimeComplete(record);
@@ -1576,7 +1589,7 @@ function loadAnchorStrategy() {
 export const ANCHOR_STRATEGY = loadAnchorStrategy();
 
 /** `<modelId>:<tier>:<backend>` — the anchor plan's key, and the cell identity itself. */
-const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16):(mlx|candle)$/;
+const ANCHOR_KEY = /^([a-z][a-z0-9_]*):(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$/;
 
 export function parseAnchorKey(key) {
   const match = ANCHOR_KEY.exec(typeof key === "string" ? key : "");

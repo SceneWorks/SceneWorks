@@ -1,0 +1,14 @@
+name: Clean completed Windows build storage
+description: Remove disposable job targets after cache uploads; optionally retire inactive private MOSS copies.
+inputs:
+  moss:
+    description: Sweep completed private MOSS run caches on this listener
+    default: 'false'
+  token:
+    description: Read-only Actions token for verifying historical MOSS run attempts
+    default: ${{ github.token }}
+runs:
+  using: node24
+  main: index.mjs
+  post: index.mjs
+  post-if: always()

@@ -140,6 +140,7 @@ import insightfaceModelNotice from "../../../desktop/licenses/insightface/Insigh
 // Production third-party source/data compiled into the inference runtimes (sc-14403).
 import cephesBsd3Clause from "../../../desktop/licenses/cephes/BSD-3-Clause.txt?url&no-inline";
 import mageMit from "../../../desktop/licenses/mage/MIT.txt?url&no-inline";
+import flux3ImageKleinFLUXKommunityLicense from "../../../desktop/licenses/flux3-image-klein/FLUX-Kommunity-License-v1.0.md?url&no-inline";
 import iris3bApache20 from "../../../desktop/licenses/iris-3b/Apache-2.0.txt?url&no-inline";
 import supra2ImgApache20 from "../../../desktop/licenses/supra2-img/Apache-2.0.txt?url&no-inline";
 import supra2ImgSdVaeMit from "../../../desktop/licenses/supra2-img/SD-VAE-FT-MSE-MIT-DECLARATION.txt?url&no-inline";
@@ -276,6 +277,7 @@ const DOCUMENT_URL = {
   "insightface-model-notice": insightfaceModelNotice,
   "cephes-bsd-3-clause": cephesBsd3Clause,
   "mage-mit": mageMit,
+  "flux3-image-klein-flux-kommunity-license": flux3ImageKleinFLUXKommunityLicense,
   "iris-3b-apache": iris3bApache20,
   "supra2-img-apache": supra2ImgApache20,
   "supra2-img-sd-vae-mit": supra2ImgSdVaeMit,

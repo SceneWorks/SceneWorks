@@ -105,6 +105,7 @@ const L_ANGLE = "the head angle or turnaround the run asked for";
 const L_POSES =
   "the pose, hand and face coordinates a pose selection produced — landmark arrays derived from a reference photo, facial landmarks included";
 const L_PHASES = "the multi-phase denoise schedule, with each phase's steps, guidance and LoRA weights";
+const L_LAYOUT = "the authored layout labels, placement and source/target boxes, including object removals and reference-slot identities — not input images or asset IDs";
 const L_INPUTS =
   "which kinds of input image or CLIP the recipe needs and how many of each, but never which ones";
 // The video lane (sc-15956). Its knobs are the same CLASS as the image ones — what to make,
@@ -156,6 +157,11 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["loras[].hash", L_LORAS],
   ["advanced", L_SETTINGS],
   ["advanced.mossImage", L_SETTINGS],
+  ["advanced.mossImageAdvanced", L_SETTINGS],
+  ["advanced.mossImageSampleIndex", L_SETTINGS],
+  ["advanced.promptBatch", L_SETTINGS],
+  ["advanced.mossImageEdit", L_SETTINGS],
+  ["advanced.mossImageEditExecutionReport", L_SETTINGS],
   ["advanced.mossImageExecutionReport", L_SETTINGS],
   ["advanced.sampler", L_SETTINGS],
   ["advanced.scheduler", L_SETTINGS],
@@ -187,6 +193,8 @@ export const WORKFLOW_FIELDS_IN_FILE = Object.freeze([
   ["advanced.angleSet", L_ANGLE],
   ["advanced.poses", L_POSES],
   ["advanced.phases", L_PHASES],
+  ["advanced.flux3_layout", L_LAYOUT],
+  ["advanced.flux3_reference_ids", L_LAYOUT],
   ["inputs[].kind", L_INPUTS],
   ["inputs[].count", L_INPUTS],
   ["inputs[].controlMode", L_INPUTS],

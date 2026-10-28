@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { fetchAssetWorkflow, inspectWorkflowFile, isAbortError } from "../api.js";
+import { apiFetch, fetchAssetWorkflow, inspectWorkflowFile, isAbortError } from "../api.js";
 import {
   keptSubstituteModelId,
+  mossWorkflowReplayIssue,
   workflowPoseReplayCapability,
   pickedReferenceAssetIds,
   pickedSourceAssetId,
@@ -88,6 +89,7 @@ export function useWorkflowDrop({
   // sc-15952. The installed models the studio would actually offer, so a substitute the user picked
   // is re-checked against the live list on every render rather than trusted once at pick time.
   models = [],
+  assets = [],
   // The FULL model catalog — every type, installed or not — used only to resolve an install
   // requirement's id to its real entry before handing it to `installModel` (sc-17227). Distinct
   // from `models` above, which is the IMAGE picker's list: it is type-filtered, so resolving
@@ -491,7 +493,16 @@ export function useWorkflowDrop({
       if (!row?.id || fixes.installing[key] || queued[key]) {
         return;
       }
-      const start = row.kind === "model" ? installModel : installLora;
+      const component = row.kind === "component";
+      // Only the locally implemented purpose and current catalog model can create this action;
+      // never execute a path carried by imported metadata.
+      const start = component ? async () => {
+        if (row.purpose !== "moss_image_edit" || !["moss_image_base", "moss_image_sft"].includes(row.modelId) || !row.licenseAcknowledged || !catalogModels.some((model) => model.id === row.modelId)) return null;
+        const result = await apiFetch(`/api/v1/models/${row.modelId}/conditional-components/moss_image_edit/download`, token, {
+          method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
+        });
+        return result.jobs?.[0] ?? null;
+      } : row.kind === "model" ? installModel : installLora;
       if (typeof start !== "function") {
         return;
       }
@@ -501,17 +512,24 @@ export function useWorkflowDrop({
       }));
       const catalog = row.kind === "model" ? catalogModels : catalogLoras;
       const entry = catalog.find((candidate) => candidate?.id === row.id);
-      const job = await start(entry ?? { id: row.id });
+      let job;
+      try {
+        job = await start(entry ?? { id: row.id });
+      } catch (error) {
+        setFixes((current) => ({ ...current, installing: { ...current.installing, [key]: false }, installErrors: { ...current.installErrors, [key]: error.message || "Package installation failed." } }));
+        return;
+      }
       setFixes((current) => ({
         ...current,
         installing: { ...current.installing, [key]: false },
+        installErrors: { ...current.installErrors, [key]: "" },
         // The JOB ID, not a boolean. "Queued" disables the only button that can retry, so the flag
         // has to be revocable — and the only thing that can revoke it honestly is the job it
         // stands for. A boolean has no way back: see `queued` below.
         queued: { ...current.queued, [key]: job?.id ?? Boolean(job) },
       }));
     },
-    [fixes.installing, queued, installModel, installLora, catalogModels, catalogLoras],
+    [fixes.installing, queued, installModel, installLora, catalogModels, catalogLoras, token],
   );
 
   // "Use this workflow" — build the recipe and hand it to the SAME launch the viewer's
@@ -538,6 +556,11 @@ export function useWorkflowDrop({
       models,
       macCapabilities,
     });
+    const mossReplayIssue = mossWorkflowReplayIssue({ share: current.share, report: current.report, models, assets, inputPicks: fixes.inputPicks, macCapabilities });
+    if (mossReplayIssue) {
+      setOffer((existing) => existing ? { ...existing, launchError: mossReplayIssue } : existing);
+      return;
+    }
     if (!clickPoseReplay.ready) {
       setOffer((existing) =>
         existing ? { ...existing, launchError: clickPoseReplay.issue } : existing,
@@ -549,6 +572,10 @@ export function useWorkflowDrop({
       // click, and a substitute the studio's list no longer offers would seed a blank control.
       substituteModelId: keptSubstituteModelId(fixes.substituteModelId, substituteModels),
       referenceAssetIds: pickedReferenceAssetIds(current.report, fixes.inputPicks),
+      // Geometry intent depends on the real source binding too; source-only edits have no plural refs.
+      sourceAssetId: pickedSourceAssetId(current.report, fixes.inputPicks) || null,
+      tensorPicks: fixes.inputPicks,
+      assets,
     });
     const outcome = await launchRecipe({
       recipe,
@@ -574,6 +601,7 @@ export function useWorkflowDrop({
     fixes.inputPicks,
     substituteModels,
     models,
+    assets,
     macCapabilities,
   ]);
 
@@ -602,11 +630,13 @@ export function useWorkflowDrop({
       installing: fixes.installing,
       installed: queued,
       installFailed,
+      installErrors: fixes.installErrors ?? {},
       onInstall: installRequirement,
       substituteModelId: keptSubstituteModelId(fixes.substituteModelId, substituteModels),
       poseSubstituteRequired,
       poseSubstituteDetail,
       poseReplayIssue: poseReplay.issue,
+      mossReplayIssue: mossWorkflowReplayIssue({ share: offer?.share, report: offer?.report, models, assets, inputPicks: fixes.inputPicks, macCapabilities }),
       onSubstituteModel: chooseSubstituteModel,
       inputPicks: fixes.inputPicks,
       onPickInput: pickInput,
@@ -622,6 +652,7 @@ export function useWorkflowDrop({
       poseSubstituteRequired,
       poseSubstituteDetail,
       poseReplay.issue,
+      offer, models, assets, macCapabilities,
     ],
   );
 

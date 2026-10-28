@@ -2,60 +2,60 @@
   "schemaVersion": 4,
   "generatedBy": "cargo run -p sceneworks-core --bin dump-backend-capability-matrix",
   "summary": {
-    "modelCount": 140,
+    "modelCount": 143,
     "importedFamilyCount": 4,
-    "cellCount": 1085,
+    "cellCount": 1122,
     "mlxOnlyCellCount": 44,
-    "candleOnlyCellCount": 82,
+    "candleOnlyCellCount": 86,
     "exceptionCount": 10
   },
   "sources": {
-    "apiContractEntry": "11e60250c082eea0308173fe57806d7ad737af0f3f338470313e7495ecd69f2d",
-    "apiDto": "38c95e12fdd4c1facba43752daf8ec836a7928872c21ec39f86b8d400b063ca8",
-    "apiGeneration": "cb7e49a6a155156761fa4dc9dcdf3252b7fe6494daf0e0d1f30887524ab10b5f",
-    "apiValidation": "84800587d53fbd412c15c6286b5e5d26908f677795242f57803aaccec162c9d4",
-    "baseWeightImports": "7ea040d63eb6d684ed3403777d38e862da1e56b58779e1ed9fb8a7d17c8a5dd2",
-    "descriptorAudioFacts": "266b74befb28664b357e63b434b9bec40c1d0e409cc6c4455888aabde914be24",
-    "descriptorCandleFacts": "e12d2434407a4d456a18cae4e12e4ed683890731ae2af7ff0f77c1f533f5d6b5",
-    "descriptorCandleRuntime": "a37a89e9e3fb7caa9c520b8057eecfa667652c15399525d07e2cee4d73c4fff1",
-    "descriptorMlxFacts": "55f6669329dddac663e6b8cb404b53b24b660ff518474503cda48632e2b86b6c",
-    "descriptorMlxRuntime": "f7e5c87b2ba14c7c6a0524b2b55d859beadefa8fa4997d97aec828bc14401862",
-    "descriptorPreviewFacts": "bca2b74afd97bfe69e37414fa482b05f993b224714cecac902017d850a56757f",
+    "apiContractEntry": "8faab99a38cf9d3acddc0442bbbfbf782951e3b296bd165396830abe5f2a8ee3",
+    "apiDto": "878142c6a7c6ccd64ab4be31c7666159c404639e2ed58bd6d9a970d25f23212b",
+    "apiGeneration": "66bb54772d3715f2d0951ce854c27ddde34d2e9e9e7ccafcab265833ea67b03a",
+    "apiValidation": "4c623e219f19a20f2271f241a1f4d9a6c396b187e57f15fcb8cce44594f88987",
+    "baseWeightImports": "ca3ea20b1dfdc231041fa9ae5f02f4d5e5cebf5f264d3fabc6ba3983cf6d80ed",
+    "descriptorAudioFacts": "16b9574047352bed4ea4d7bf34b851034abdcad98b0ea51ee1746c36b9821ef2",
+    "descriptorCandleFacts": "6ed4b3b35cdb9f4c67ad78c65fd8e3be56b44487f1f1ce911292a5e28aae7a8a",
+    "descriptorCandleRuntime": "a18c160575f7fc8a36b89e3c3e16d049aff0fd4aba45bf88aaa117c95bdbf145",
+    "descriptorMlxFacts": "c3437d01209a5383d3c81ad843544c9b60ce7feaa64809951d17c1394d85e8c6",
+    "descriptorMlxRuntime": "77d572bc7f353bee5169b03adf331433c7c699b411bfc60ff7e79e42cc97bc8c",
+    "descriptorPreviewFacts": "430fa9ad62d128796703750c0c720a22950496361da108338529ffeeefbfe79a",
     "exceptionRegister": "8ff35696469e9265dd3a42b9dc6fbe324842d6be2381295d3de83b558477efc6",
-    "manifest": "f30beb3cffa10920a4b70a2f258f02a24a98a8551c5c8c9dd1ef9b95a1ad9e0e",
-    "modelImportDefaults": "b72858fe7ef1ac1ff3dc40f1426e129c7e054a6a8bf923dd5226050986b1a937",
-    "routerCandle": "85bf9d1148f34da6339806d5ee1da1da90974ea8817f156aecb9f3ad681cc239",
-    "routerCatalog": "ce451d9021cd163ecdaead101d92b7fa4d6de64877418cd47934c2c40aa49bb1",
-    "routerGaps": "3fa551c4f05d2ff4d0afa3d7943b47808f32d03216e38cc9f60e16e2b60bcd01",
-    "routerMlx": "053871fea26b55aeb5412b9b59580ae7c599e188a7a08ca55a8e25e2546ceaac",
-    "scheduler": "600ae3bb26536146035c8bd8c81c112596c5886fd0f8dd0c18dafe448f971dac",
-    "trainingCatalog": "1031f303dacbe0f576da6e048e55ddb515bf7cdd6fb0a60c01485d407f9904e9",
+    "manifest": "a7233360db6d9c3335b26eed339b3dca85d32918803e3e2737284f0e30b0bae9",
+    "modelImportDefaults": "89a8ffccfa2f1325a77c64027052659f7d6ed2132a1596a66517e3de6ff00ae3",
+    "routerCandle": "3973f3cb9e817f12a33ee4ea5dc45ea3bf5b08a5b0ef97c4c135898202dc7faa",
+    "routerCatalog": "9a8c835408104063504f2139f41c48b5c3382379f3b348f1c65750d0d029167d",
+    "routerGaps": "82a5614be45a167e5bccb83ccde406b9ec63ccd69504fda35984c51ae44b7cab",
+    "routerMlx": "b0657306b8a4950f185013b41f00a038f4e8bafc57359f5258b116cbe40b4a6a",
+    "scheduler": "0c9ab8b7589d566298880296d79c3370858782163b9c5f2657fad590b330cde9",
+    "trainingCatalog": "7a657b985900d1b5502776d374fe429d958f30d59e7682e693d32074bae47f3a",
     "webAudioStudio": "b62f3532d31454fe50fde80f4761b0cd1032acec7817a0254c2e87380e430b7f",
     "webFallbackCatalog": "a8d3849a7f9766683ec223e26d1ad470695cecc20f3eda44f85f5ddfa5c0963d",
-    "webImageAdvanced": "c99975b860ed59b20e1ec7a039f7a44c602efd65350bd8fbc250cddff1fbf9a1",
-    "webImageRequest": "4b9eb564dec18a44de0f3ec272457f6b1b8c9639a7104d73a203f09fb89de74a",
+    "webImageAdvanced": "048920c22b2f634d737e15a4f9e621f61257af5ec8e371eec1685b84f6b19e64",
+    "webImageRequest": "9cb1dc6eaab2169c18e39afebb852b3137c3abea5fa79e533985c094f4f522e5",
     "webMacGating": "edd5caead44b6cd56f0306fbcf2078e2a6b391fcb130ad1f859cda6cc3aa9ae3",
     "webPreviewGating": "0db03f8997f27f8e205ed262ac2ed951d6002c29b53aeea4bae38da40739c077",
     "webSimpleAudio": "b2782f4e1363bfc0f5c71402261b8863cd7f47d0b5545fc975c1cd4dd87b03c4",
     "webSimpleAudioStudio": "7ffbd94e291de76958b928b467591f153116362400be9c7deaa730b925538ae5",
-    "webSimpleJobs": "fbd28fe740e0ab6f4a48ebec918509bc137f80b088358cd28c32eeb14d0df1f2",
+    "webSimpleJobs": "c9249878a1cfec6d3987b6272dad862d50e7709b1fbed8ed0ed6090669c3772b",
     "webSimpleVideo": "97eaf71fc8aa99d0d032e83acbb6e075fe7a6caf72d21c2f867aa9728c5e12a3",
     "webUpscaleEngines": "0d80f32e7e14a97773e5c8cc05a31c2dd9ea2657aa41904a5cc0123382dfee38",
     "webVideoStudio": "9e53fef095f4066aac8a5174179b438e99d6682acf800383eb7c526a54abd09c",
     "webVideoUpscale": "2efa76213ce9b6e6e2b958e0aadd77f2f0f91b70c1d25d11e083b3d627472daa",
     "webVideoValidation": "f8d5e8f33bf58687cf233e54c4d4bade0f2f62d8657ded2845debb6410bf54d2",
     "workerAudioDispatch": "89fc2afad3421e34d0fc8616a1cc93e88e8ccdeffaada3b3b42d58d2742744c7",
-    "workerDispatch": "4c58ac14401b23be7d265309dc70613efe370200c0914e93e05fc6657e62306e",
-    "workerEngineTable": "14de886ba30b7e908be1f96cd9a04449d51ff01b963aa16bd933a787182388f9",
-    "workerGpuCapabilities": "9cccada57ee5c4585ed467af6485922bd84c16751168395d9f503acfb40e5fe5",
-    "workerImageDispatch": "9bed315ba5b9dbae0a191d8b9e9c2ab779f2526bcbc0fd4717af8a7bae86a48b",
-    "workerImageKreaImported": "52ab0f4bbba5eaedc5dfd8eb23de9d7bb1d973c9a7278d8669e110f763dd0bfe",
-    "workerImageMageFinetuned": "7ad3b152e5bce567fd1187fff95f7e0f0546a6f91be117ec0ad0d0e925689680",
-    "workerImagePulid": "7bf3952d8b26d24ee17fd7e624828e0f68924cc71bfe7b279b87d30fe7d032fb",
+    "workerDispatch": "7bc4f142ef0e71d17b8cd32219ea0f8737264572eda6333e48c36ab8ba1bca92",
+    "workerEngineTable": "7b0bbbe8e76abc25ce5ead6f344f3e313dce7086b76bfe7d20abf2f37fc7167a",
+    "workerGpuCapabilities": "b508baca03d3900f621e7ebeb3ea0782eb43ebcfbb7fd55c63f6a2e18ca09d3e",
+    "workerImageDispatch": "697e01bd6f1fcd8a7c409f28ec57aa07f953e246777de03ebe4fc1bc22d9f28d",
+    "workerImageKreaImported": "242e817d227fed3ae4571cac3c585a71b7e8e66543d17377459ef91b1b1da9a3",
+    "workerImageMageFinetuned": "66bd8388d8139bc6b0b307fe3d7eb3c890532481f5981cfc9d0ed67af44b80a5",
+    "workerImagePulid": "f59b2cc49e92532a80e9feb88b3237fd25b8fcc3a682f05087c890f1f42e0420",
     "workerImagePulidCandle": "37bccf519697d03bfe50339fa41a65a0c2dad36a68725af35f37ea5857e57703",
-    "workerImageQwenEditCandle": "7e52f36666892c8c2ab937528edf1daab22a59e35ba917eab6e53ca11175ba05",
+    "workerImageQwenEditCandle": "06cd3e4552fc130e377775f63467f9f757eb881aca5cab4fbb0100a320440a31",
     "workerImageSdxlImported": "cefdeb14f5977f963a77ffb8662509580739c06985b815eb2afe83652dd6e3e1",
-    "workerTrainingDispatch": "14208b1a60b21fea666670e1df66e2c51318f1f3955526ac102ca8a01ee7f7d1",
+    "workerTrainingDispatch": "8da716960d11cd0dbf907f44d64788bae6d62098570a01ad2d96b6c438011006",
     "workerUtilityDispatch": "888e127be2e7590424f045a93db36d5602e8b10ec630a0e40c36a63a7ae92467",
     "workerVideoBernini": "bbadb80fbdf709d4f9262f2679c42fe3ac6389d042e2ec57bae086df9539c206",
     "workerVideoCandle": "35e11de3fb10ef2573722f99f24aefa7768d1cdef492003c9437a6c71ee0149e",
@@ -1552,6 +1552,241 @@
         "capability": "live_preview",
         "mlx": null,
         "candle": null
+      }
+    },
+    {
+      "id": "flux3_image_klein_pup",
+      "family": "flux3",
+      "modelType": "utility",
+      "manifestOperations": [],
+      "evaluatedOperations": [],
+      "operationAndMode": [],
+      "conditioningShape": [],
+      "userAdapters": [],
+      "precisionTier": [],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": null,
+        "candle": null
+      }
+    },
+    {
+      "id": "flux3_klein",
+      "family": "flux3",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "character_image",
+        "edit_image",
+        "image_to_image",
+        "prompt_enhancement",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "prompt_enhancement",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "referenceRgba",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "fp8r",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "nvfp4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
+      }
+    },
+    {
+      "id": "flux3_klein_base",
+      "family": "flux3",
+      "modelType": "image",
+      "manifestOperations": [
+        "character_image",
+        "edit_image",
+        "image_to_image",
+        "text_to_image"
+      ],
+      "evaluatedOperations": [
+        "character_image",
+        "edit_image",
+        "image_to_image",
+        "prompt_enhancement",
+        "text_to_image"
+      ],
+      "operationAndMode": [
+        {
+          "capability": "character_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "edit_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "image_to_image",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "prompt_enhancement",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "text_to_image",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "reference",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "referenceRgba",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "userAdapters": [
+        {
+          "capability": "lora",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "lokr",
+          "mlx": false,
+          "candle": false
+        }
+      ],
+      "precisionTier": [
+        {
+          "capability": "bf16",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "fp8r",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "nvfp4",
+          "mlx": false,
+          "candle": true,
+          "preservedCandleOnly": true
+        },
+        {
+          "capability": "q4",
+          "mlx": true,
+          "candle": true
+        },
+        {
+          "capability": "q8",
+          "mlx": true,
+          "candle": true
+        }
+      ],
+      "guidanceMethod": [],
+      "preview": {
+        "capability": "live_preview",
+        "mlx": false,
+        "candle": false
       }
     },
     {
@@ -4162,7 +4397,13 @@
           "candle": true
         }
       ],
-      "conditioningShape": [],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": false,
+          "candle": false
+        }
+      ],
       "userAdapters": [
         {
           "capability": "lora",
@@ -4206,7 +4447,13 @@
           "candle": true
         }
       ],
-      "conditioningShape": [],
+      "conditioningShape": [
+        {
+          "capability": "multiReference",
+          "mlx": false,
+          "candle": false
+        }
+      ],
       "userAdapters": [
         {
           "capability": "lora",
@@ -8481,6 +8728,28 @@
       "target": "anima_base_lora",
       "baseModel": "anima_base",
       "kernel": "anima_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "flux3_klein_edit_lora",
+      "baseModel": "flux3_klein_base",
+      "kernel": "flux3_klein_edit_lora",
+      "networkType": "lora",
+      "support": {
+        "capability": "train",
+        "mlx": true,
+        "candle": true
+      }
+    },
+    {
+      "target": "flux3_klein_lora",
+      "baseModel": "flux3_klein_base",
+      "kernel": "flux3_klein_lora",
       "networkType": "lora",
       "support": {
         "capability": "train",

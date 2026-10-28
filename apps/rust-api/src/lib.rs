@@ -1474,6 +1474,8 @@ fn create_app_with_state_mode(
         #[cfg(test)]
         catalog_scan_contention_backoff_started: Arc::new(tokio::sync::Notify::new()),
         #[cfg(test)]
+        catalog_scan_busy_lease_cancel_barrier_once: Arc::new(Mutex::new(None)),
+        #[cfg(test)]
         progress_before_accept_once: Arc::new(Mutex::new(None)),
         #[cfg(test)]
         sse_snapshot_before_subscribe_once: Arc::new(Mutex::new(None)),
@@ -3877,6 +3879,19 @@ fn public_queue_summary(mut summary: QueueSummary) -> QueueSummary {
 /// job for lifecycle work. Redact at the serialization boundary so no new producer can accidentally
 /// publish the worker-private selection receipt. `jobs.snapshot` is currently built directly in the
 /// SSE bootstrap; supporting it here keeps this boundary safe if that snapshot becomes live later.
+///
+/// sc-8953 follow-through (2026-10-27): `job.updated` ALSO slims the live payload here — for a
+/// NON-terminal job, `result.assets` (the fully-built normalized asset records, KBs each, one per
+/// finished image) is dropped from the EVENT while `assetIds` stays. Every SSE tick used to carry
+/// the whole accumulated array (a 260-image batch ≈ 650 KB+ per tick, thousands of ticks), and the
+/// WebView2 renderer `JSON.parse`d every one — cumulative multi-GB allocation churn that hit V8's
+/// ~4 GB old-space ceiling and OOM-killed the renderer mid-batch (Crashpad `0xE0000008`, daily
+/// since 2026-10-24), leaving the desktop app a dead white window. The frontend resolves job
+/// outputs id-first (`jobResultAssets.js`: `assetIds` is its FIRST preference, `assets` only a
+/// pre-catalog fallback) and re-fetches the catalog on every asset-count change, so a live event
+/// without the embedded records renders identically; terminal events keep the full `assets` (the
+/// durable row's enrichment contract, `persist_reported_assets`). Snapshots stay full — bootstrap
+/// is once per connect, not per tick.
 fn redact_private_job_metadata_from_event(event: &str, value: &mut Value) {
     fn redact_job(value: &mut Value) {
         let Ok(job) = serde_json::from_value::<JobSnapshot>(value.clone()) else {
@@ -3885,7 +3900,11 @@ fn redact_private_job_metadata_from_event(event: &str, value: &mut Value) {
             *value = Value::Null;
             return;
         };
-        *value = serde_json::to_value(public_job_snapshot(job)).unwrap_or(Value::Null);
+        let mut job = public_job_snapshot(job);
+        if !sceneworks_core::jobs_store::TERMINAL_STATUSES.contains(&job.status.as_str()) {
+            job.result.remove("assets");
+        }
+        *value = serde_json::to_value(job).unwrap_or(Value::Null);
     }
 
     match event {
@@ -4926,14 +4945,17 @@ fn validate_prompt_extras(negative_prompt: &str, advanced: &JsonObject) -> Resul
     Ok(())
 }
 
-const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
 const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
 const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
 
 /// Validate the typed, bounded part of the FLUX.2 prompt-enhancement request at every image enqueue
 /// boundary. `advanced` is otherwise intentionally extensible, but these fields cross into a native
 /// LLM sampler and must never inherit the old truthy/coercing behavior.
-fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, ApiError> {
+fn validate_prompt_enhancement_fields(
+    model_id: &str,
+    advanced: &JsonObject,
+) -> Result<bool, ApiError> {
+    let max_tokens = sceneworks_worker::prompt_enhancement_max_tokens(model_id);
     if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
         return Err(ApiError::bad_request(format!(
             "advanced.{PROMPT_ENHANCEMENT_FACT_KEY} is worker-owned and cannot be supplied by a client"
@@ -4970,9 +4992,9 @@ fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, Api
         let tokens = value
             .as_u64()
             .ok_or_else(|| ApiError::bad_request("advanced.enhanceMaxTokens must be an integer"))?;
-        if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&tokens) {
+        if !(1..=max_tokens).contains(&tokens) {
             return Err(ApiError::bad_request(format!(
-                "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+                "advanced.enhanceMaxTokens must be between 1 and {max_tokens}"
             )));
         }
         if !enabled {
@@ -4984,10 +5006,7 @@ fn validate_prompt_enhancement_fields(advanced: &JsonObject) -> Result<bool, Api
     Ok(enabled)
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
     payload
         .get(key)
@@ -4995,10 +5014,7 @@ fn prompt_enhancement_payload_string(payload: &JsonObject, key: &str) -> bool {
         .is_some_and(|value| !value.trim().is_empty())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
     prompt_enhancement_payload_string(payload, "referenceAssetId")
         || payload
@@ -5012,14 +5028,23 @@ fn prompt_enhancement_payload_references(payload: &JsonObject) -> bool {
 }
 
 fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiError> {
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
     let mode = payload
         .get("mode")
         .and_then(Value::as_str)
         .unwrap_or("text_to_image");
+    // The API may be a CPU-only Docker service serving a native worker. Its own compiled
+    // inference backends are not evidence of that worker's capabilities. FLUX 3 validates shape
+    // here; the selected worker independently requires an enabled native backend and installed PUP.
+    if matches!(
+        payload.get("model").and_then(Value::as_str),
+        Some("flux3_klein" | "flux3_klein_base")
+    ) {
+        // Generation references are AE-only conditioning; the existing separate PUP consumes the
+        // ORIGINAL ordered images. The same pure shape policy validates both modes before enqueue.
+        sceneworks_core::image_request::flux3::parse(payload).map_err(ApiError::bad_request)?;
+        return Ok(());
+    }
 
     #[cfg(target_os = "macos")]
     if !matches!(
@@ -5078,8 +5103,9 @@ fn validate_prompt_enhancement_route(payload: &JsonObject) -> Result<(), ApiErro
 
 /// Validate the canonical, post-preset image payload. Enhancement is deliberately scoped to the
 /// actual native backend route: MLX owns base/edit/character plus the defensive legacy style alias,
-/// while Candle owns only base and its bespoke `edit_image` lane. It is not inherited by Klein,
-/// strict control, backendless builds,
+/// while Candle owns only base and its bespoke `edit_image` lane. FLUX 3 Image Klein uses the same
+/// optional upsampler for text or ordered reference conditioning; FLUX.2-Klein remains unsupported. Neither
+/// grants enhancement to strict control or backendless builds,
 /// or a reference-bearing mode that would fall through to a plain base render. Keeping this check
 /// on the final payload also covers presets and retry/duplicate's shallow-merged canonical payload.
 fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiError> {
@@ -5088,16 +5114,16 @@ fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiEr
         .get("advanced")
         .and_then(Value::as_object)
         .unwrap_or(&empty);
-    if !validate_prompt_enhancement_fields(advanced)? {
-        return Ok(());
-    }
     let model = payload
         .get("model")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if model != "flux2_dev" {
+    if !validate_prompt_enhancement_fields(model, advanced)? {
+        return Ok(());
+    }
+    if !matches!(model, "flux2_dev" | "flux3_klein" | "flux3_klein_base") {
         return Err(ApiError::bad_request(
-            "advanced.enhancePrompt is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it",
+            "advanced.enhancePrompt is supported only by FLUX.2-dev and FLUX 3 Image Klein; FLUX.2-Klein and other models reject it",
         ));
     }
     let strict_control = advanced
@@ -5109,7 +5135,7 @@ fn validate_prompt_enhancement_payload(payload: &JsonObject) -> Result<(), ApiEr
         || advanced.contains_key("controlMode");
     if strict_control {
         return Err(ApiError::bad_request(
-            "advanced.enhancePrompt cannot be combined with FLUX.2-dev strict control",
+            "advanced.enhancePrompt cannot be combined with strict control",
         ));
     }
     validate_prompt_enhancement_route(payload)
@@ -5155,7 +5181,30 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         return Err(ApiError::bad_request("projectId is required"));
     }
     validate_model_id(&payload.model)?;
-    if payload.prompt.is_empty() || payload.prompt.chars().count() > MAX_PROMPT_CHARS {
+    if (payload.moss_image_advanced.is_some()
+        || payload
+            .advanced
+            .contains_key(sceneworks_core::moss_image_advanced::KEY))
+        && (payload.mode != "edit_image" || !sceneworks_core::moss_image::is_moss(&payload.model))
+    {
+        return Err(ApiError::bad_request(
+            "mossImageAdvanced tensor/output controls require explicit MOSS edit_image mode",
+        ));
+    }
+    let positive_tensor = payload.mode == "edit_image"
+        && sceneworks_core::moss_image::is_moss(&payload.model)
+        && (payload
+            .moss_image_advanced
+            .as_ref()
+            .is_some_and(|a| a.positive.is_some())
+            || payload
+                .advanced
+                .get(sceneworks_core::moss_image_advanced::KEY)
+                .and_then(|v| v.get("positive"))
+                .is_some_and(|v| !v.is_null()));
+    if (!positive_tensor && payload.prompt.is_empty())
+        || payload.prompt.chars().count() > MAX_PROMPT_CHARS
+    {
         return Err(ApiError::bad_request(
             "prompt must be between 1 and 4000 characters",
         ));
@@ -5173,7 +5222,14 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
         ));
     }
     validate_prompt_extras(&payload.negative_prompt, &payload.advanced)?;
-    validate_prompt_enhancement_fields(&payload.advanced)?;
+    validate_prompt_enhancement_fields(&payload.model, &payload.advanced)?;
+    // sc-26241: a FLUX 3 request names exactly one of its packages, and the publisher FP8R tier
+    // exists only for the model that ships it. Which backend and worker can load it is routing's.
+    if let Some(reason) =
+        sceneworks_core::image_request::image_quant_tier_refusal(&payload.model, &payload.advanced)
+    {
+        return Err(ApiError::bad_request(reason));
+    }
     validate_image_pose_count(&payload.advanced)?;
     if payload.loras.len() > sceneworks_core::lora_family::MAX_JOB_LORAS {
         return Err(ApiError::bad_request(format!(
@@ -5213,21 +5269,31 @@ fn validate_image_job(payload: &ImageJobRequest) -> Result<(), ApiError> {
     // `requiresDimensionsMultipleOf`, and an image model that declares NO floor falls back to
     // `HISTORICAL_MIN_IMAGE_DIMENSION` — the same 256 this line used to enforce. So a 64-px request
     // to any pre-existing model still 400s, just one layer down and with the model named.
+    // Reference output can be one 16px token wide. A preset's model is not canonical yet, so
+    // allow that outer shape for reference-bearing presets too; the post-preset model/family
+    // validation still enforces the actual floor and never loosens another model's envelope.
+    let has_reference = !payload.reference_asset_ids.is_empty()
+        || payload
+            .reference_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+        || payload
+            .source_asset_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+    let shape_floor = if has_reference
+        && (sceneworks_core::image_request::flux3::is_model(&payload.model)
+            || payload.recipe_preset_id.is_some())
+    {
+        16
+    } else {
+        SHAPE_MIN_IMAGE_DIMENSION
+    };
     if let Some(width) = payload.width {
-        validate_dimension_in(
-            width,
-            "width",
-            SHAPE_MIN_IMAGE_DIMENSION,
-            MAX_IMAGE_DIMENSION,
-        )?;
+        validate_dimension_in(width, "width", shape_floor, MAX_IMAGE_DIMENSION)?;
     }
     if let Some(height) = payload.height {
-        validate_dimension_in(
-            height,
-            "height",
-            SHAPE_MIN_IMAGE_DIMENSION,
-            MAX_IMAGE_DIMENSION,
-        )?;
+        validate_dimension_in(height, "height", shape_floor, MAX_IMAGE_DIMENSION)?;
     }
     if payload.upscale.enabled {
         if payload.upscale.engine.trim().is_empty() {

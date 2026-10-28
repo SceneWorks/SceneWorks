@@ -20,6 +20,7 @@ import {
   buildMatrix,
   buildStoryBackendScope,
   cellState,
+  COMPOSITE_STORY_OWNERSHIP,
   declarationModelForCoordinate,
   familyGroup,
   familyStory,
@@ -31,6 +32,7 @@ import {
   isImplemented,
   isPublishableCell,
   MODEL_STORIES,
+  PAIRED_MODEL_STORIES,
   modelStory,
   OUT_OF_MATRIX_CATALOG_ENTRIES,
   IMAGE_CANDLE_DERIVATION_ENTRY_POINTS,
@@ -347,7 +349,32 @@ test("ownership lookups resolve per backend and refuse to invent a twin", () => 
   // by its own throw-mutation cases below.
 });
 
-test("the ownership tables scope every story to exactly one backend", () => {
+test("FLUX 3 Candle model and resource family have distinct existing owners", () => {
+  assert.equal(modelStory("flux3_klein", "mlx"), 26234);
+  assert.equal(modelStory("flux3_klein", "candle"), 26235);
+  assert.equal(familyStory("flux3_klein", "mlx"), 26233);
+  assert.equal(familyStory("flux3_klein", "candle"), 26241);
+  const scope = buildStoryBackendScope();
+  assert.deepEqual(scope.get(26235), { backend: "candle", role: "model story", owner: "flux3_klein" });
+  assert.deepEqual(scope.get(26241), { backend: "candle", role: "family story", owner: "family SC-26233" });
+
+  // A missing family twin must fail closed, even when the per-model Candle owner is present.
+  const family = FAMILY_STORIES[26233];
+  const candleOwner = family.candle;
+  try {
+    delete family.candle;
+    assert.throws(() => familyStory("flux3_klein", "candle"), /owns no candle story/);
+  } finally {
+    family.candle = candleOwner;
+  }
+  // Reusing the model owner as the family owner is not an acceptable substitute for the twin.
+  assert.throws(() => buildStoryBackendScope(MODEL_STORIES, {
+    ...FAMILY_STORIES,
+    26233: { ...FAMILY_STORIES[26233], candle: 26235 },
+  }), /exactly one owner and one backend/);
+});
+
+test("the ownership tables resolve every story to one exact declared scope", () => {
   // One scope entry per distinct story, with exact multi-owner claims only where declared.
   //
   // sc-22512 replaced the pinned `146` with that relation, derived from the tables themselves: the
@@ -361,7 +388,7 @@ test("the ownership tables scope every story to exactly one backend", () => {
   assert.equal(
     scope.size,
     new Set(scopedStoryIds).size,
-    "every declared (story, backend) pair resolves to exactly one scope entry",
+    "every distinct story resolves once, including exact declared paired and composite claims",
   );
   assert.deepEqual(scope.get(15475), { backend: "mlx", role: "model story", owner: "boogu_image_turbo" });
   assert.deepEqual(scope.get(15827), {
@@ -389,6 +416,89 @@ test("the ownership tables scope every story to exactly one backend", () => {
     () => buildStoryBackendScope({ alpha: { mlx: 1 }, beta: { mlx: 1 } }, {}),
     /exactly one owner and one backend/,
   );
+});
+
+test("explicit paired same-model ownership covers both backends and no other scope", () => {
+  const models = { flux3_klein_base: { mlx: 26239, candle: 26239 } };
+  const families = { 26233: { mlx: 26233, candle: 26241 } };
+  const pairs = { flux3_klein_base: 26239 };
+  let scope;
+  assert.doesNotThrow(() => { scope = buildStoryBackendScope(models, families, pairs); });
+  for (const backend of ["mlx", "candle"]) {
+    assert.doesNotThrow(() => assertCellOwnershipIsBackendScoped([{
+      id: `base-${backend}`, modelId: "flux3_klein_base", backend,
+      owningModelStory: 26239, owningFamilyStory: families[26233][backend],
+    }], scope));
+  }
+  assert.throws(() => buildStoryBackendScope(models, families, {}), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ ...models, other: { mlx: 26239 } }, families, pairs), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ ...models, other: { mlx: 26239, candle: 26239 } }, families, { ...pairs, other: 26239 }), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope(models, { 26233: { mlx: 26239 } }, pairs), /exactly one owner and one backend/);
+  assert.throws(() => buildStoryBackendScope({ flux3_klein_base: { mlx: 26239, candle: 26240 } }, {}, pairs), /paired/);
+  assert.throws(() => buildStoryBackendScope(models, families, { absent: 26239 }), /paired/);
+});
+
+test("paired FLUX3 and composite MOSS ownership coexist without widening either scope", () => {
+  const scope = buildStoryBackendScope();
+  assert.deepEqual(PAIRED_MODEL_STORIES, { flux3_klein_base: 26239 });
+  assert.deepEqual(COMPOSITE_STORY_OWNERSHIP, [
+    { story: 26323, backend: "mlx", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+    { story: 26324, backend: "candle", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
+  ]);
+  assert.deepEqual(scope.get(26239), {
+    backend: "paired", backends: ["mlx", "candle"], role: "model story", owner: "flux3_klein_base",
+  });
+  for (const { story, backend, family, model_ids: modelIds } of COMPOSITE_STORY_OWNERSHIP) {
+    assert.deepEqual(scope.get(story), {
+      backend, role: "composite story", owner: `family SC-${family}`,
+      claims: [
+        ...modelIds.map((owner) => ({ role: "model story", owner })),
+        { role: "family story", owner: `family SC-${family}` },
+      ],
+    });
+  }
+  const cells = ["flux3_klein", "flux3_klein_base", "moss_image_base", "moss_image_sft"]
+    .flatMap((modelId) => ["mlx", "candle"].map((backend) => ({
+      id: `${modelId}:${backend}`, modelId, backend,
+      owningModelStory: modelStory(modelId, backend),
+      owningFamilyStory: familyStory(modelId, backend),
+    })));
+  assert.doesNotThrow(() => assertCellOwnershipIsBackendScoped(cells, scope));
+  for (const cell of cells) {
+    const foreign = cell.modelId.startsWith("moss") ? 26239 : cell.backend === "mlx" ? 26323 : 26324;
+    assert.throws(() => assertCellOwnershipIsBackendScoped([
+      { ...cell, owningModelStory: foreign },
+    ], scope), /this cell needs/);
+    assert.throws(() => assertCellOwnershipIsBackendScoped([
+      { ...cell, owningFamilyStory: foreign },
+    ], scope), /this cell needs/);
+    if (cell.modelId.startsWith("moss")) {
+      const otherBackendStory = cell.backend === "mlx" ? 26324 : 26323;
+      for (const field of ["owningModelStory", "owningFamilyStory"]) {
+        assert.throws(() => assertCellOwnershipIsBackendScoped([
+          { ...cell, [field]: otherBackendStory },
+        ], scope), /is scoped to .* but the cell is/);
+      }
+    }
+  }
+  const models = structuredClone(MODEL_STORIES);
+  const families = structuredClone(FAMILY_STORIES);
+  assert.deepEqual(buildStoryBackendScope(models, families, PAIRED_MODEL_STORIES), scope);
+  assert.throws(() => buildStoryBackendScope(models, families, {}), /exactly one owner and one backend/);
+  for (const modelId of ["moss_image_base", "moss_image_sft"]) {
+    const missing = structuredClone(models);
+    delete missing[modelId].mlx;
+    assert.throws(() => buildStoryBackendScope(missing, families, PAIRED_MODEL_STORIES), /incomplete declared composite scope/);
+  }
+  const missingFamily = structuredClone(families);
+  delete missingFamily[26323].candle;
+  assert.throws(() => buildStoryBackendScope(models, missingFamily, PAIRED_MODEL_STORIES), /incomplete declared composite scope/);
+  assert.throws(() => buildStoryBackendScope(models, families, {
+    ...PAIRED_MODEL_STORIES, moss_image_base: 26323,
+  }), /paired model ownership must declare exactly/);
+  assert.throws(() => buildStoryBackendScope({
+    ...models, intruder: { mlx: 26323 },
+  }, families, PAIRED_MODEL_STORIES), /outside its declared composite scope/);
 });
 
 test("a cell may never name a story scoped to the other backend", () => {
@@ -1555,6 +1665,25 @@ test("the staged column tells structural truth apart from undelivered work (sc-2
   assert.match(row("svd", "candle"), /Missing/);
 });
 
+function assertPackagedMatrixPair(matrix, markdown) {
+  assert.equal(markdown, renderMarkdown(matrix));
+}
+
+test("packaged matrix provenance rejects source-revision and markdown mutations", async () => {
+  const matrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
+  const markdown = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
+  assertPackagedMatrixPair(matrix, markdown);
+  const changedSource = structuredClone(matrix);
+  changedSource.generatedFrom.sceneWorksRevision = `source-tree:${"0".repeat(64)}`;
+  assert.notEqual(changedSource.generatedFrom.sceneWorksRevision, matrix.generatedFrom.sceneWorksRevision);
+  assert.throws(() => assertPackagedMatrixPair(changedSource, markdown), { code: "ERR_ASSERTION" });
+  const changedMarkdown = markdown.replace(matrix.generatedFrom.sceneWorksRevision, "mutated-provenance");
+  assert.notEqual(changedMarkdown, markdown);
+  assert.throws(() => assertPackagedMatrixPair(matrix, changedMarkdown), { code: "ERR_ASSERTION" });
+});
+
 test("an Anchored rollup carries (stale) exactly when every anchor behind it is stale (sc-22513)", async () => {
   const matrix = await buildMatrix();
   const row = (markdown, id, backend) =>
@@ -1610,9 +1739,22 @@ test("an Anchored rollup carries (stale) exactly when every anchor behind it is 
         ),
     );
   assert.doesNotMatch(row(allStale, unanchored[0], unanchored[1]), /\(stale\)/);
-  // The shipped artifact agrees with the renderer.
+  // Packaged artifacts must agree with each other, not with the live source-tree revision:
+  // later code/pin changes may leave historical matrix provenance stale without demanding a
+  // measurement refresh. The controlled currency cases above exercise the live renderer.
+  const shippedMatrix = JSON.parse(
+    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
+  );
   const shipped = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
-  assert.equal(shipped, renderMarkdown(matrix));
+  assertPackagedMatrixPair(shippedMatrix, shipped);
+  // Currency changes labels, never the lane's state. Historical published artifacts retain
+  // their captured source/currency metadata; they need not equal today's live renderer.
+  const laneRows = (markdown) => markdown.split("## Measured anchors")[0].split("\n")
+    .filter((line) => line.startsWith("| `"))
+    .map((line) => line.replaceAll(" (stale)", ""));
+  assert.deepEqual(laneRows(allStale), laneRows(allCurrent));
+  // Rendering identical captured input stays deterministic without demanding a new capture.
+  assert.equal(renderMarkdown(structuredClone(matrix)), renderMarkdown(matrix));
 });
 
 // ── sc-22513: the collapse ─────────────────────────────────────────────────────────────────────

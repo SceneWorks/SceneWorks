@@ -36,6 +36,11 @@ use sceneworks_core::workflow_share::{
 };
 use std::sync::Arc;
 
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+mod load_progress;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+use load_progress::message as load_activity_message;
+
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
 // bundle explicitly owns its provider catalog; this product module names only contract types and
 // the few bespoke utility APIs that do not implement the general registry traits.
@@ -49,6 +54,21 @@ use gen_core::{
     AdapterKind, AdapterSpec, CancelFlag, Conditioning, GenerationOutput, GenerationRequest,
     Generator, Image, LoadPhase, LoadSpec, Progress, Quant, WeightsSource,
 };
+// These helpers are tensor-neutral and identical in the two native lanes. CPU unit tests compile
+// this same implementation without pulling in an accelerator runtime bundle.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) mod flux3_references;
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+mod prompt_upsampling;
+// sc-26241: FLUX 3 package selection (bf16 / derived q4 q8 / publisher fp8r nvfp4). The request
+// check compiles on every lane, so the worker trust-boundary refusal holds even without a native
+// backend; package resolution compiles with the native lanes.
+pub(crate) mod flux3_precision;
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+use prompt_upsampling::prompt_enhancement_fact;
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+use prompt_upsampling::{attach_prompt_upsampler, publish_upsampling_progress, PromptEnhance};
+
 // `IdentityWeights` (the PuLID-FLUX `LoadSpec::identity` seam, sc-8827) is used only by the macOS MLX
 // PuLID path (`image_jobs/pulid.rs`); gate it so the candle lane's `-D warnings` sees no unused import.
 #[cfg(target_os = "macos")]
@@ -242,10 +262,10 @@ fn requested_decoder_id(
 /// both upscalers became cache-only resolvers (sc-17633 / sc-17632). The likeness/tier staging this
 /// handler still triggers builds its own context inside `image_jobs/base.rs`.
 const PROMPT_ENHANCEMENT_FACT_KEY: &str = "promptEnhancement";
-const PROMPT_ENHANCE_MAX_TOKENS: u64 = 2048;
 const PROMPT_ENHANCE_MAX_TEMPERATURE: f64 = 2.0;
 
 fn parse_prompt_enhancement_fields(
+    model_id: &str,
     advanced: &JsonObject,
 ) -> WorkerResult<(bool, Option<f32>, Option<u32>)> {
     if advanced.contains_key(PROMPT_ENHANCEMENT_FACT_KEY) {
@@ -281,6 +301,7 @@ fn parse_prompt_enhancement_fields(
             Ok(value as f32)
         })
         .transpose()?;
+    let max_token_limit = crate::prompt_enhancement_max_tokens(model_id);
     let max_tokens = advanced
         .get("enhanceMaxTokens")
         .map(|value| {
@@ -289,9 +310,9 @@ fn parse_prompt_enhancement_fields(
                     "advanced.enhanceMaxTokens must be an integer".to_owned(),
                 )
             })?;
-            if !(1..=PROMPT_ENHANCE_MAX_TOKENS).contains(&value) {
+            if !(1..=max_token_limit).contains(&value) {
                 return Err(WorkerError::InvalidPayload(format!(
-                    "advanced.enhanceMaxTokens must be between 1 and {PROMPT_ENHANCE_MAX_TOKENS}"
+                    "advanced.enhanceMaxTokens must be between 1 and {max_token_limit}"
                 )));
             }
             Ok(value as u32)
@@ -372,14 +393,17 @@ fn validate_prompt_enhancement_route(
     settings: &Settings,
 ) -> WorkerResult<()> {
     let mode = request.mode.as_str();
+    let flux3 = sceneworks_core::image_request::flux3::is_model(&request.model);
 
     #[cfg(target_os = "macos")]
     {
         let _ = settings;
-        if !matches!(
-            mode,
-            "text_to_image" | "edit_image" | "character_image" | "style_variations"
-        ) {
+        if !flux3
+            && !matches!(
+                mode,
+                "text_to_image" | "edit_image" | "character_image" | "style_variations"
+            )
+        {
             return Err(WorkerError::InvalidPayload(format!(
                 "prompt enhancement on MLX does not support image mode {mode}"
             )));
@@ -394,7 +418,7 @@ fn validate_prompt_enhancement_route(
                     .to_owned(),
             ));
         }
-        if !matches!(mode, "text_to_image" | "edit_image") {
+        if !flux3 && !matches!(mode, "text_to_image" | "edit_image") {
             return Err(WorkerError::InvalidPayload(format!(
                 "prompt enhancement on Candle supports only text_to_image and edit_image; mode {mode} is unsupported"
             )));
@@ -406,7 +430,7 @@ fn validate_prompt_enhancement_route(
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
     {
-        let _ = (mode, settings);
+        let _ = (mode, settings, flux3);
         Err(WorkerError::InvalidPayload(
             "prompt enhancement requires a native MLX or Candle image backend".to_owned(),
         ))
@@ -417,6 +441,12 @@ fn validate_prompt_enhancement_route(
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     {
+        if flux3 {
+            // The renderer receives the same immutable original references as PUP. Validate the
+            // live slot identity and source size intent here without decoding or loading weights.
+            let _ = flux3_references::validated_request(request)?;
+            return Ok(());
+        }
         if mode == "text_to_image" && prompt_enhancement_has_edit_input(request) {
             return Err(WorkerError::InvalidPayload(
                 "prompt enhancement text_to_image cannot include source or reference image assets"
@@ -447,13 +477,16 @@ fn validate_prompt_enhancement_request(
     request: &ImageRequest,
     settings: &Settings,
 ) -> WorkerResult<()> {
-    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.advanced)?;
+    let (enabled, _, _) = parse_prompt_enhancement_fields(&request.model, &request.advanced)?;
     if !enabled {
         return Ok(());
     }
-    if request.model != "flux2_dev" {
+    if !matches!(
+        request.model.as_str(),
+        "flux2_dev" | "flux3_klein" | "flux3_klein_base"
+    ) {
         return Err(WorkerError::InvalidPayload(
-            "prompt enhancement is supported only by FLUX.2-dev; FLUX.2-Klein and other models reject it"
+            "prompt enhancement is supported only by FLUX.2-dev and FLUX 3 Image Klein; FLUX.2-Klein and other models reject it"
                 .to_owned(),
         ));
     }
@@ -467,10 +500,89 @@ fn validate_prompt_enhancement_request(
         || request.advanced.contains_key("controlMode");
     if strict_control {
         return Err(WorkerError::InvalidPayload(
-            "prompt enhancement cannot be combined with FLUX.2-dev strict control".to_owned(),
+            "prompt enhancement cannot be combined with strict control".to_owned(),
         ));
     }
     validate_prompt_enhancement_route(request, settings)
+}
+
+fn require_legacy_fallback_allowed(model: &str) -> WorkerResult<()> {
+    if matches!(model, "flux3_klein" | "flux3_klein_base") {
+        return Err(WorkerError::InvalidPayload(format!("unsupported: {model} requires its native MLX/Candle handler and verified pinned components. No native handler completed this request; update/enable the native worker and check the selected operation. Procedural or text-to-image fallback is disabled")));
+    }
+    Ok(())
+}
+
+/// The production dispatch/fallback decision, with the real stub invocation supplied by the
+/// caller. Kept backend-neutral so a missing/unlinked/disabled backend is testable without GPU.
+pub(super) async fn dispatch_legacy_fallback<F, Fut>(
+    model: &str,
+    handled: bool,
+    stub: F,
+) -> WorkerResult<()>
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = WorkerResult<()>>,
+{
+    if handled {
+        return Ok(());
+    }
+    require_legacy_fallback_allowed(model)?;
+    stub().await
+}
+
+// Backend-neutral filesystem part of the actual canonical package resolution. Never infer
+// revision from cache HEAD or a directory name; use the worker-owned immutable receipt.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+fn resolve_pinned_native_package(
+    data_dir: &std::path::Path,
+    repo: &str,
+    revision: &str,
+    model: &str,
+    explicit: Option<&std::path::Path>,
+) -> WorkerResult<PathBuf> {
+    let pinned = crate::flux3_receipted_snapshot(data_dir, repo, revision, model)
+        .ok_or_else(|| WorkerError::InvalidPayload(format!("{model} has no verified exact-revision install receipt for {repo}@{revision}; install or re-install that gated catalog package with its authorized credential. Unpinned cache snapshots are not a fallback")))?;
+    crate::flux3_runtime_bundle_check(&pinned, model).map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "{model} pinned package is incomplete or invalid: {error}"
+        ))
+    })?;
+    if let Some(explicit) = explicit {
+        if !explicit
+            .canonicalize()
+            .ok()
+            .zip(pinned.canonicalize().ok())
+            .is_some_and(|(explicit, pinned)| explicit == pinned)
+        {
+            return Err(WorkerError::InvalidPayload(format!("{model} modelPath does not match verified {repo}@{revision}; remove the override or install the pinned package")));
+        }
+    }
+    Ok(pinned)
+}
+
+/// Reject raw queued layout controls before dispatch, including routes that do not use the
+/// generic native render surface. Unsupported models must never silently ignore a box request.
+fn validate_flux3_layout_request(request: &ImageRequest) -> WorkerResult<()> {
+    let has_controls = ["flux3_layout", "flux3_reference_ids"].iter().any(|key| {
+        request
+            .advanced
+            .get(*key)
+            .is_some_and(|value| !value.is_null())
+    });
+    if !sceneworks_core::image_request::flux3::is_model(&request.model) {
+        if has_controls {
+            return Err(WorkerError::InvalidPayload(format!(
+                "{}: FLUX.3 layout controls are unsupported; remove them or select FLUX.3",
+                request.model
+            )));
+        }
+        return Ok(());
+    }
+    if let Some(Err(error)) = &request.flux3_reference_request {
+        return Err(WorkerError::InvalidPayload(error.clone()));
+    }
+    Ok(())
 }
 
 /// Run one image generate/edit job. A failure on a convert-at-install model with an engine pin
@@ -518,8 +630,16 @@ async fn run_image_generate_job_unexplained(
             "Missing payload.projectId".to_owned(),
         ));
     }
+    validate_flux3_layout_request(&request)?;
     validate_hires_fix_request(&request)?;
     validate_prompt_enhancement_request(&request, settings)?;
+    // sc-26241: a named precision tier is honored only on the model and lane that can load it;
+    // raw queue writes and stored jobs never passed the API validator.
+    flux3_precision::validate_image_quant_tier_request(
+        &request.model,
+        &request.advanced,
+        flux3_precision::ImageLane::current(),
+    )?;
     // sc-24112: the declared request-geometry envelope, checked ONCE here rather than per lane.
     // The joint attention sequence a route like `qwen_image_2_1` runs over grows with the reference
     // count as well as the target area, and no resolution menu can express that — so a request can
@@ -589,7 +709,14 @@ async fn run_image_generate_job_unexplained(
     // the plan so the generation set + streamed `expectedCount` match what lands in
     // the gallery.
     #[cfg(target_os = "macos")]
-    let route = prepare_image_route(&request, settings)?;
+    let route = {
+        let request = request.clone();
+        let route_settings = settings.clone();
+        prepare_image_route_with_progress(api, settings, &job.id, move || {
+            prepare_image_route(&request, &route_settings)
+        })
+        .await?
+    };
     // Whether — and from what — every image this job writes embeds its sanitized workflow
     // (sc-15948). Resolved once here so the base write and the inline-upscale write share one
     // answer, and read live off the config dir so flipping the Settings toggle takes effect on the
@@ -615,7 +742,14 @@ async fn run_image_generate_job_unexplained(
     // (sc-5491 InstantID; sc-11171 F-009 strict-pose). `resolve_candle_image_route` returns `None` when
     // candle is disabled, so any other job (or a disabled backend) keeps `request.count`.
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-    let route = prepare_candle_image_route(&request, settings)?;
+    let route = {
+        let request = request.clone();
+        let route_settings = settings.clone();
+        prepare_image_route_with_progress(api, settings, &job.id, move || {
+            prepare_candle_image_route(&request, &route_settings)
+        })
+        .await?
+    };
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     let plan = ImagePlan::with_count_and_adapter(
         &request,
@@ -1624,7 +1758,9 @@ async fn run_image_generate_job_unexplained(
                 // an edit without its required source can never fall through as plain T2I; both variants
                 // use the same generic stream once their request shapes are resolved.
                 CandleImageRoute::MageEdit
+                | CandleImageRoute::MossImageEdit
                 | CandleImageRoute::QwenImage21Edit
+                | CandleImageRoute::Flux3Reference
                 | CandleImageRoute::SenseNovaEdit
                 | CandleImageRoute::KolorsEdit
                 | CandleImageRoute::CandleTxt2Img => {
@@ -1679,7 +1815,7 @@ async fn run_image_generate_job_unexplained(
         }
     }
 
-    if !handled {
+    dispatch_legacy_fallback(&request.model, handled, || async {
         if request.hires_fix.enabled {
             return Err(WorkerError::InvalidPayload(
                 "Hires.fix requires a native image engine with img2img support; this job resolved only to the procedural stub."
@@ -1695,8 +1831,8 @@ async fn run_image_generate_job_unexplained(
             backend,
             &mut asset_writes,
         )
-        .await?;
-    }
+        .await
+    }).await?;
 
     // sc-8091: Image Studio "Upscale" toggle. The native worker never ported the Python inline-upscale
     // path, so the UI's `upscale` request was silently dropped (images came out at the base size). Mirror
@@ -1746,7 +1882,7 @@ async fn run_image_generate_job_unexplained(
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
     let warnings: Vec<String> = Vec::new();
-    let mut message = format!("Generated {} image(s).", plan.image_count);
+    let mut message = format!("Generated {} output(s).", plan.image_count);
     if !warnings.is_empty() {
         message.push_str(&format!(" Warning: {}", warnings.join(" ")));
     }
@@ -1811,6 +1947,11 @@ async fn generate_stub_stream(
                 ProgressStage::Generating,
                 progress,
                 &format!("Generated image {}/{}.", index + 1, request.count),
+                // Full fact set on the per-image tick: this is the stub lane's
+                // `Image`-equivalent arm (the fact set JUST grew by this image), and
+                // the count tick is O(images), not O(images² · steps) — the next image's
+                // POST is what re-streams it. Kept as `streaming_result` so the durable
+                // row keeps every accumulated write.
                 Some(streaming_result(plan, asset_writes)),
                 backend,
             ),
@@ -1939,22 +2080,7 @@ fn cached_model_hash_for_file(file: &Path, marker: &JsonObject) -> Option<String
     test
 ))]
 pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
-    for key in ["installedPath", "sourcePath", "path"] {
-        if let Some(value) = lora
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return Some(PathBuf::from(value));
-        }
-    }
-    lora.get("source")
-        .and_then(|source| source.get("path"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    sceneworks_core::lora_family::adapter_record_path(lora)
 }
 
 /// The exact adapter filename a manifest declares when its LoRA path is a directory.
@@ -1964,12 +2090,7 @@ pub(crate) fn lora_path(lora: &Value) -> Option<PathBuf> {
     test
 ))]
 pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
-    lora.get("files")
-        .and_then(Value::as_array)
-        .and_then(|files| files.first())
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    sceneworks_core::lora_family::declared_adapter_file(lora)
 }
 
 /// Resolve the exact adapter file inference will load. Attribution calls this same function before
@@ -1979,20 +2100,21 @@ pub(crate) fn declared_adapter_file(lora: &Value) -> Option<&str> {
     all(not(target_os = "macos"), feature = "backend-candle"),
     test
 ))]
-fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathBuf> {
+fn resolve_adapter_file(lora: &Value, settings: &Settings, model: &str) -> WorkerResult<PathBuf> {
     let raw = lora_path(lora)
         .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
     let path = crate::normalize_app_managed_lora_path(settings, &raw)?;
-    let file = if path.is_dir() {
-        crate::resolve_adapter_in_dir(&path, declared_adapter_file(lora)).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                path.display()
-            ))
-        })?
-    } else {
-        path
-    };
+    let file = sceneworks_core::lora_family::resolve_adapter_for_model(
+        &path,
+        declared_adapter_file(lora),
+        model,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "LoRA selected file is missing, invalid or outside its adapter root: {}",
+            path.display()
+        ))
+    })?;
     if !file.exists() {
         return Err(WorkerError::InvalidPayload(format!(
             "LoRA file is missing: {}",
@@ -2012,20 +2134,29 @@ fn resolve_adapter_file(lora: &Value, settings: &Settings) -> WorkerResult<PathB
 fn resolve_prepared_adapter_file(
     lora: &Value,
     settings: &Settings,
+    model: &str,
 ) -> WorkerResult<gen_core::PinnedWeightsFile> {
     let raw = lora_path(lora)
         .ok_or_else(|| WorkerError::InvalidPayload("LoRA is missing a usable path.".to_owned()))?;
     let confined = crate::normalize_app_managed_lora_path(settings, &raw)?;
-    let candidate = if confined.is_dir() {
-        let directory = confined;
-        crate::resolve_adapter_in_dir(&directory, declared_adapter_file(lora)).ok_or_else(|| {
-            WorkerError::InvalidPayload(format!(
-                "LoRA has no .safetensors under {}",
-                directory.display()
-            ))
-        })?
-    } else {
+    let candidate = sceneworks_core::lora_family::resolve_adapter_for_model(
+        &confined,
+        declared_adapter_file(lora),
+        model,
+    )
+    .ok_or_else(|| {
+        WorkerError::InvalidPayload(format!(
+            "LoRA selected file is missing, invalid or outside its adapter root: {}",
+            confined.display()
+        ))
+    })?;
+    // Legacy direct-file routes have always owned the original lexical entry, so a symlink
+    // retarget between selection and dispatch must still invalidate their prepared token.
+    // Confinement and shared selection above remain mandatory before retaining that entry.
+    let candidate = if !matches!(model, "flux3_klein" | "flux3_klein_base") && !confined.is_dir() {
         raw
+    } else {
+        candidate
     };
     crate::paths::pin_app_managed_model_file(settings, &candidate, "LoRA file")
 }
@@ -2241,7 +2372,7 @@ async fn trusted_loras_for_share(
     let mut used_names = std::collections::HashSet::new();
     let mut loras = Vec::with_capacity(request.loras.len());
     for raw in &request.loras {
-        let file = match resolve_adapter_file(raw, settings) {
+        let file = match resolve_adapter_file(raw, settings, &request.model) {
             Ok(file) => file,
             Err(error) => {
                 tracing::warn!(%error, "LoRA attribution could not resolve the inference file");
@@ -2824,6 +2955,22 @@ pub(crate) fn reattach_alpha(
 /// every image of the batch so reopening any one restores the batch.
 pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
 
+fn moss_input_parents(raw: &JsonObject) -> WorkerResult<Vec<String>> {
+    let mut parents = sceneworks_core::moss_image::edit_reference_slots(raw)
+        .map_err(WorkerError::InvalidPayload)?;
+    if let Some(value) = raw.get(sceneworks_core::moss_image_advanced::KEY) {
+        let options: sceneworks_core::moss_image_advanced::EditAdvanced =
+            serde_json::from_value(value.clone())
+                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        for reference in sceneworks_core::moss_image_advanced::references(&options) {
+            if !parents.contains(&reference.asset_id) {
+                parents.push(reference.asset_id.clone());
+            }
+        }
+    }
+    Ok(parents)
+}
+
 /// Save image `index` (its engine `pixels`, 3- or 4-channel) under `assets/images/` and return the
 /// flat fact the API turns into an indexed asset (every key here is consumed by
 /// `build_image_sidecar_parts`). Shared by the stub and real paths.
@@ -2831,7 +2978,7 @@ pub(crate) const PROMPT_BATCH_KEY: &str = "promptBatch";
 pub(crate) fn write_image_asset(
     plan: &ImagePlan,
     index: usize,
-    seed: i64,
+    seed: impl Into<Option<i64>>,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
@@ -2839,6 +2986,7 @@ pub(crate) fn write_image_asset(
     mut raw_settings: JsonObject,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
+    let seed = seed.into();
     let request = &plan.request;
     // The three checkpoint facts (sc-21484, epic 11037), stamped here because EVERY generated image
     // asset funnels through this one function — so the source codec a checkpoint stores, the host's
@@ -2892,6 +3040,21 @@ pub(crate) fn write_image_asset(
     if !request.prompts.is_empty() {
         raw_settings.insert(PROMPT_BATCH_KEY.to_owned(), json!(request.prompts));
     }
+    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+        // Lineage anchors the first source only. History needs every semantic slot, including
+        // repeated identities; never trust a stale reference vector supplied inside `advanced`.
+        let carriers = json!({"referenceAssetIds":request.reference_asset_ids,"sourceAssetId":request.source_asset_id,"referenceAssetId":request.reference_asset_id});
+        let ids = sceneworks_core::moss_image::edit_reference_slots(
+            carriers.as_object().expect("carriers object"),
+        )
+        .map_err(WorkerError::InvalidPayload)?;
+        if ids.is_empty() || ids.len() > 4 {
+            return Err(WorkerError::InvalidPayload(
+                "MOSS history requires 1–4 ordered reference slots".to_owned(),
+            ));
+        }
+        raw_settings.insert("referenceAssetIds".to_owned(), json!(ids));
+    }
 
     // Typed by the engine's channel count, not assumed to be three (sc-24111). See
     // `GeneratedPixels` for why this is the load-bearing line rather than the writer below.
@@ -2927,7 +3090,7 @@ pub(crate) fn write_image_asset(
                 prompt: prompt.clone(),
                 negative_prompt: request.negative_prompt.clone(),
                 // THIS image's seed, not the batch base the payload carries.
-                seed,
+                seed: seed.unwrap_or_default(),
                 width: Some(width),
                 height: Some(height),
             },
@@ -2942,6 +3105,15 @@ pub(crate) fn write_image_asset(
             share.advanced.insert("sampler".to_owned(), json!(sampler));
         }
         if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(index) = raw_settings
+                .get("mossImageSampleIndex")
+                .and_then(Value::as_u64)
+                .filter(|index| *index < 8)
+            {
+                share
+                    .advanced
+                    .insert("mossImageSampleIndex".into(), json!(index));
+            }
             if let Some(report) = raw_settings
                 .get(sceneworks_core::moss_image::REPORT_KEY)
                 .and_then(sceneworks_core::workflow_share::sanitize_moss_execution_report)
@@ -2953,6 +3125,22 @@ pub(crate) fn write_image_asset(
                 share
                     .advanced
                     .insert(sceneworks_core::moss_image::REPORT_KEY.to_owned(), report);
+            }
+        }
+        if sceneworks_core::moss_image::is_moss(&request.model) {
+            if let Some(report) = raw_settings
+                .get(sceneworks_core::moss_image::EDIT_REPORT_KEY)
+                .and_then(sceneworks_core::workflow_share::sanitize_moss_edit_execution_report)
+            {
+                if let Some(steps) = report.pointer("/base/resolved/steps") {
+                    share.advanced.insert("steps".into(), steps.clone());
+                }
+                if raw_settings.contains_key(sceneworks_core::moss_image_advanced::KEY) {
+                    share.seed = seed;
+                }
+                share
+                    .advanced
+                    .insert(sceneworks_core::moss_image::EDIT_REPORT_KEY.into(), report);
             }
         }
         share.model_hash = plan.model_hash.clone();
@@ -3009,8 +3197,10 @@ pub(crate) fn write_image_asset(
         "mimeType": "image/png",
         "width": width,
         "height": height,
-        "normalizedWidth": request.width,
-        "normalizedHeight": request.height,
+        // Reference-derived/cropped output is not the original plan's generic numeric default.
+        // Authored nullable sides live separately in the resolver-owned reference fact.
+        "normalizedWidth": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { width } else { request.width },
+        "normalizedHeight": if request.flux3_reference_request.as_ref().is_some_and(|intent| intent.as_ref().is_ok_and(|intent| !intent.asset_ids.is_empty())) { height } else { request.height },
         // MOSS records the whole native prompt batch in the recipe. Its replay count is
         // images per prompt; the generation set and expectedCount retain the total.
         "count": if sceneworks_core::moss_image::is_moss(&request.model) { request.count } else { plan.image_count },
@@ -3031,7 +3221,12 @@ pub(crate) fn write_image_asset(
         "sourceAssetId": source_asset_id,
         "rawAdapterSettings": raw_settings,
     });
-    Ok(fact.as_object().cloned().expect("json! object literal"))
+    let mut fact = fact.as_object().cloned().expect("json! object literal");
+    if sceneworks_core::moss_image::is_moss(&request.model) && request.mode == "edit_image" {
+        fact.insert("parents".into(), json!(moss_input_parents(&raw_settings)?));
+        fact.insert("batchIndex".into(), json!(index));
+    }
+    Ok(fact)
 }
 
 /// Normalise the UI's upscale engine id to the canonical worker id. SeedVR2 stays itself;
@@ -3460,12 +3655,19 @@ fn write_upscaled_asset(
 /// The job-result shape the API streams from: `assetWrites` + the `generationSet`
 /// fact drive `persist_reported_assets` (idempotent per progress update).
 ///
-/// ACCEPTED TRADEOFF (sc-8953 / F-151): this deep-clones the whole `asset_writes` vec into the
-/// result on every call, and the generation loop calls it on each `GenEvent::Step` — so the total
-/// serialization work is O(images² · steps) as `asset_writes` grows one entry per finished image.
-/// At current image counts (a handful per set) and step counts this is negligible next to the
-/// generation itself, so it is left as-is; if sets grow large, stream this only on `Image` /
-/// `Decoding` events (where the fact set actually changes) rather than on every step.
+/// RESOLVED TRADEOFF (sc-8953 / F-151, 2026-10-27): the original comment accepted an
+/// O(images² · steps) deep-clone of the whole `asset_writes` vec on every `GenEvent::Step`
+/// because image counts were small. Real batches grew (260-image angle sets), and the
+/// accumulated fact set — each finished image's full normalized sidecar, several KB — rode
+/// every per-step POST to the API, which re-published the full snapshot to every SSE
+/// subscriber on every tick (~5,200 ticks ≈ multi-GB cumulative `JSON.parse` churn in the
+/// WebView2 renderer). V8 old-space hit its ~4 GB ceiling and Chromium killed the renderer
+/// (managed OOM exception 0xE0000008; daily Crashpad dumps since 2026-10-24), leaving the
+/// desktop app a dead white window mid-batch. The step ticks now post
+/// [`slim_step_result`] instead: the fact set streams ONLY where it actually changes
+/// (`Image` / `Decoding` / `Loading` events and every terminal post), and the store
+/// (`jobs_store::merge_progress_result_accumulations`) restores an omitted accumulation
+/// from the previous stored result so a slim tick never regresses the durable row.
 fn streaming_result(plan: &ImagePlan, asset_writes: &[Value]) -> JsonObject {
     let mut result = json!({
         "generationSetId": plan.genset_id,
@@ -3506,6 +3708,33 @@ fn job_prefix_kv_cache_records(asset_writes: &[Value]) -> Vec<Value> {
                 .cloned()
         })
         .collect()
+}
+
+/// The STEP-tick job-result shape (sc-8953 follow-through, 2026-10-27): the small identity keys
+/// plus the live preview frame, WITHOUT the accumulated `assetWrites` / `generationSet` /
+/// `prefixKvCache` fact sets. See [`streaming_result`] for why the per-step cadence must stay
+/// O(1) in the finished-image count. Everything a RUNNING job's UI consumes stays present —
+/// `previewFrame` (live denoise), `generationSetId` / `expectedCount` (skeleton cells, refresh
+/// triggering), `adapter` / `model` (the architecture pill) — and the durable row keeps its
+/// accumulated facts via the store-side merge, so nothing a later Image-event post or a terminal
+/// post needs is lost.
+///
+/// Gated like its only callers (the `include!`d `base.rs` step arm, reached on macOS and the
+/// candle lane) so the default lane never dead-code warns.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+fn slim_step_result(plan: &ImagePlan) -> JsonObject {
+    json!({
+        "generationSetId": plan.genset_id,
+        "expectedCount": plan.image_count,
+        "adapter": plan.adapter,
+        "model": plan.request.model,
+    })
+    .as_object()
+    .cloned()
+    .expect("json! object literal")
 }
 
 /// Request-only fallback used by test plans and the backend-less stub plan. Production MLX/candle

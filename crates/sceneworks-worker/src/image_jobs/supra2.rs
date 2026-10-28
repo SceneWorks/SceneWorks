@@ -1922,7 +1922,7 @@ mod tests {
             let seed = lane::resolve_seed(request, 0);
             let steps = lane::resolve_steps(request, &model);
             let guidance = lane::resolve_guidance(request, &model);
-            let enhance = lane::PromptEnhance::from_advanced(&request.advanced)?;
+            let enhance = lane::PromptEnhance::from_advanced(&request.model, &request.advanced)?;
             let cancel = CancelFlag::new();
             lane::drive_native_prompt_batch(
                 tx,
@@ -2112,7 +2112,7 @@ mod tests {
                     seeds.push(seed);
                 }
             }
-            assert_eq!(seeds, vec![41]);
+            assert_eq!(seeds, vec![Some(41)]);
         }
 
         /// The default API path: no `seed`, a `seeds` batch. The one engine call draws image k's
@@ -2140,7 +2140,10 @@ mod tests {
                     published.push((index, seed));
                 }
             }
-            assert_eq!(published, vec![(0, 9000), (1, 9001), (2, 9002)]);
+            assert_eq!(
+                published,
+                vec![(0, Some(9000)), (1, Some(9001)), (2, Some(9002))]
+            );
         }
 
         /// A cancel inside the one call publishes NOTHING.
@@ -2448,6 +2451,7 @@ mod tests {
                     "cuda",
                     &mut asset_writes,
                     loader,
+                    Arc::new(lane::NativeMossStreamRuntime),
                 );
                 let outcome = tokio::time::timeout(std::time::Duration::from_secs(120), arm)
                     .await

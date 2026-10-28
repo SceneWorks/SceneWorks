@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir, totalmem } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -21,6 +21,7 @@ import {
   metalSubmissionsIgnored, parseWatchdogPeak, parseWatchdogHardStop, recordExceededBound,
 } from "./memory-calibration-harness.mjs";
 import { anchorCandidate } from "./extract-memory-anchors.mjs";
+import { declaredSyntheticOwnedAccounting } from "./lib/flux3-owned-accounting-fixture.mjs";
 
 /**
  * A one-anchor plan in the collapsed format (sc-22514). Every runner test drives exactly one
@@ -67,8 +68,13 @@ test("diagnostic LTX safety canary output is structurally non-ingestible", () =>
   }
 });
 
-async function cleanFixtureRepo() {
+async function cleanFixtureRepo(t, files = {}) {
   const root = await mkdtemp(path.join(tmpdir(), "memory-harness-repo-"));
+  t?.after(() => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  for (const [relative, bytes] of Object.entries(files)) {
+    await mkdir(path.dirname(path.join(root, relative)), { recursive: true });
+    await writeFile(path.join(root, relative), bytes);
+  }
   await mkdir(path.join(root, "docs/generated"), { recursive: true });
   await writeFile(
     path.join(root, "docs/generated/memory-matrix.json"),
@@ -77,7 +83,7 @@ async function cleanFixtureRepo() {
   await execFileAsync("git", ["init", root]);
   await execFileAsync("git", ["-C", root, "config", "user.email", "fixture@example.invalid"]);
   await execFileAsync("git", ["-C", root, "config", "user.name", "Fixture"]);
-  await execFileAsync("git", ["-C", root, "add", "docs/generated/memory-matrix.json"]);
+  await execFileAsync("git", ["-C", root, "add", "."]);
   await execFileAsync("git", ["-C", root, "commit", "-m", "fixture"]);
   return root;
 }
@@ -343,6 +349,58 @@ function runtimeComplete() {
   record.id = recordId(record);
   return record;
 }
+
+// Shared DECLARED_SYNTHETIC CPU fixture, never hardware/model evidence.
+function ownedAccountingFixture(runtime = false) {
+  const record = declaredSyntheticOwnedAccounting(runtime ? runtimeComplete() : complete());
+  record.target.modelId = record.target.provider;
+  record.artifact.variant = record.target.tier;
+  record.logicalCaseId = logicalCaseId(record); record.id = recordId(record);
+  return record;
+}
+
+test("owned-process accounting complete and runtime records retain typed operating envelopes without physical aliases", () => {
+  for(const runtime of [false,true]) {
+    const record = ownedAccountingFixture(runtime);
+    assert.equal(validateRecord(record),record);
+    validateBundle({schemaVersion:SCHEMA_VERSION,harnessVersion:HARNESS_VERSION,records:[record]});
+    assert.equal(record.observedMemory,undefined);
+    assert.equal(record.ownedProcessMemory.unavailableMetrics.activeBytes,null);
+    assert.equal(record.observedOperatingConditions.fitAuthorization,false);
+    // A process working-set counter is not compared as physical live-array residency.
+    record.hardware.memoryBytes = 1;record.id = recordId(record);
+    assert.equal(validateRecord(record),record);
+  }
+});
+test("owned-process accounting fails closed on metric aliases provenance and completion-evidence mutations", () => {
+  for(const runtime of [false,true]) {
+    const original=ownedAccountingFixture(runtime);
+    const mutations=[
+      r=>r.observedMemory={overall:{activeBytes:300}},
+      r=>r.measurementKind="unknown-accounting",
+      r=>delete r.measurementKind,
+      r=>delete r.ownedProcessMemory,
+      r=>r.ownedProcessMemory.overall.activeBytes=300,
+      r=>r.diagnostics={metrics:{overallDevicePeakDelta:300}},
+      r=>delete r.ownedProcessMemory.phases.decode,
+      r=>r.ownedProcessMemory.sampling.maxObservedReadSkewMs=251,
+      r=>r.ownedProcessMemory.phases.denoise.maxGapMs=1501,
+      r=>r.ownedProcessMemory.unavailableMetrics.activeBytes=300,
+      r=>r.observedOperatingConditions.fitAuthorization=true,
+      r=>r.observedOperatingConditions.physicalResidencyClaim=true,
+      r=>r.observedOperatingConditions.gpuUuid="GPU-deadbeef",
+      r=>r.observedExecutionRecipeSha256="0".repeat(64),
+      r=>r.strategy.parameters.decodeTileEdge=1024,
+      r=>r.quality.result="failed",
+      r=>r.quality.maximumError=1,
+      r=>r.sweep.rangeVerified=false,
+      r=>r.sweep.cases=[],
+      r=>r.scenarios.find(s=>s.name==="loadability").result="not_run",
+      r=>r.loadability.result="failed",
+    ];
+    for(const mutate of mutations) {const record=structuredClone(original);mutate(record);record.logicalCaseId=logicalCaseId(record);record.id=recordId(record);assert.throws(()=>validateRecord(record));}
+  }
+});
 
 function qwenPositiveComplete() {
   const record = complete({
@@ -1179,7 +1237,7 @@ test("the anchor plan schema cannot express a duplicate cell or any sweep", asyn
   assert.equal(ANCHOR_PLAN_SCHEMA.properties.anchors.type, "object");
   assert.equal(
     ANCHOR_PLAN_SCHEMA.properties.anchors.propertyNames.pattern,
-    "^[a-z][a-z0-9_]*:(q4|q8|bf16):(mlx|candle)$",
+    "^[a-z][a-z0-9_]*:(q4|q8|bf16|fp8r|nvfp4):(mlx|candle)$",
   );
   const keys = Object.keys(plan.anchors);
   assert.equal(new Set(keys).size, keys.length);
@@ -1703,7 +1761,8 @@ test("parameterless strategies use a truthful degenerate sweep instead of a fabr
   );
 });
 
-test("executable runner handles a fragmented response and writes exactly one record", async () => {
+test("executable runner handles a fragmented response and writes exactly one record", async (t) => {
+  const cleanRepo = await cleanFixtureRepo(t);
   const plan = anchorPlanFixture("fixture_model:q4:candle");
   const actions = [];
   const executeProvider = async (command, args, input) => {
@@ -1739,8 +1798,8 @@ test("executable runner handles a fragmented response and writes exactly one rec
       process.execPath,
       fileURLToPath(new URL("./fixtures/memory-provider-fragmented-fixture.mjs", import.meta.url)),
     ],
-    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-    inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+    sceneWorksRepo: cleanRepo,
+    inferenceRepo: cleanRepo,
     executeProvider,
   });
   // ONE command, ONE render, ONE record — the whole point of the collapse. A second record cannot
@@ -2156,7 +2215,8 @@ test("physical MLX receipts reject traversal prefixes and outputs outside the ra
   );
 });
 
-test("provider early exit is rejected without an unhandled stdin EPIPE", async () => {
+test("provider early exit is rejected without an unhandled stdin EPIPE", async (t) => {
+  const cleanRepo = await cleanFixtureRepo(t);
   await assert.rejects(
     captureAnchor({
       closureDigestFor: stubClosureDigest,
@@ -2166,14 +2226,15 @@ test("provider early exit is rejected without an unhandled stdin EPIPE", async (
         process.execPath,
         fileURLToPath(new URL("./fixtures/memory-provider-early-exit-fixture.mjs", import.meta.url)),
       ],
-      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
     }),
     /closed its provider-protocol stdin|Unexpected end of JSON input/,
   );
 });
 
-test("provider execution rejects an adapter-attested composition that differs from the anchor", async () => {
+test("provider execution rejects an adapter-attested composition that differs from the anchor", async (t) => {
+  const cleanRepo = await cleanFixtureRepo(t);
   await assert.rejects(
     captureAnchor({
       closureDigestFor: stubClosureDigest,
@@ -2186,14 +2247,15 @@ test("provider execution rejects an adapter-attested composition that differs fr
           import.meta.url,
         )),
       ],
-      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
     }),
     /adapter measured strategy does not match the anchor composition/,
   );
 });
 
-test("the measured load shape is a receipt field, never copied from the plan", async () => {
+test("the measured load shape is a receipt field, never copied from the plan", async (t) => {
+  const cleanRepo = await cleanFixtureRepo(t);
   // Before this, the runner wrote `loadShape: planned.loadShape` onto every record: the adapter was
   // never asked, so the field recorded the plan's CLAIM rather than what the run did, and no
   // divergence was detectable. That is the same backfill sc-16482 forbids for historical receipts,
@@ -2204,8 +2266,8 @@ test("the measured load shape is a receipt field, never copied from the plan", a
       plan: anchorPlanFixture("fixture_model:q4:candle"),
       anchorKey: "fixture_model:q4:candle",
       providerCommand: [process.execPath, fileURLToPath(new URL(fixture, import.meta.url))],
-      sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
-      inferenceRepo: fileURLToPath(new URL("..", import.meta.url)),
+      sceneWorksRepo: cleanRepo,
+      inferenceRepo: cleanRepo,
     });
 
   // 1. An adapter that measured a different shape than the plan declared is rejected outright.
@@ -2226,6 +2288,112 @@ test("the measured load shape is a receipt field, never copied from the plan", a
   const result = await run("./fixtures/memory-provider-fixture.mjs");
   assert.equal(result.records.length, 1);
   assert.equal(result.records[0].loadShape, "eager_materialization");
+});
+
+// Exercise the real Git probes, not a snapshot counter or a replacement stability predicate.
+// The provider is intentionally invalid only at the later composition check: with stable sources
+// we must reach that check, while any actual selected-source movement must win over it.
+function compositionCapture({ sceneWorksRepo, inferenceRepo, onAction = async () => {} }) {
+  return captureAnchor({
+    closureDigestFor: stubClosureDigest,
+    plan: anchorPlanFixture("fixture_model:q4:candle"),
+    anchorKey: "fixture_model:q4:candle",
+    providerCommand: ["injected-fixture-only"],
+    sceneWorksRepo,
+    inferenceRepo,
+    executeProvider: async (_command, _args, input) => {
+      const request = JSON.parse(input);
+      await onAction(request.action);
+      return JSON.stringify(request.action === "probe"
+        ? { hardware: {} }
+        : { strategy: {
+          ...request.planned.strategy,
+          ...(request.planned.strategy.rung === "bounded_decode"
+            ? { rung: "resident", engagedRungs: ["resident"] }
+            : { rung: "bounded_decode", engagedRungs: ["resident", "bounded_decode"] }),
+        } });
+    },
+  });
+}
+
+test("isolated stable repositories reach the intended adapter error", async (t) => {
+  const sceneWorksRepo = await cleanFixtureRepo(t);
+  const inferenceRepo = await cleanFixtureRepo(t);
+  const actions = [];
+  await assert.rejects(
+    compositionCapture({ sceneWorksRepo, inferenceRepo, onAction: async (action) => actions.push(action) }),
+    /adapter measured strategy does not match the anchor composition/,
+  );
+  assert.deepEqual(actions, ["probe", "run"]);
+});
+
+test("actual selected repository mutations trigger the source stability guard", async (t) => {
+  for (const selected of ["sceneWorksRepo", "inferenceRepo"]) {
+    for (const phase of ["probe", "run"]) {
+      for (const mutation of ["HEAD", "tracked", "untracked"]) {
+        await t.test(`${selected} ${phase} ${mutation}`, async (t) => {
+          const repos = {
+            sceneWorksRepo: await cleanFixtureRepo(t),
+            inferenceRepo: await cleanFixtureRepo(t),
+          };
+          const root = repos[selected];
+          const before = (await execFileAsync("git", ["-C", root, "rev-parse", "HEAD"])).stdout;
+          const actions = [];
+          await assert.rejects(compositionCapture({
+            ...repos,
+            onAction: async (action) => {
+              actions.push(action);
+              if (action !== phase) return;
+              if (mutation === "HEAD") {
+                await execFileAsync("git", ["-C", root, "commit", "--allow-empty", "-m", "moved HEAD"]);
+              } else {
+                const relative = mutation === "tracked"
+                  ? "docs/generated/memory-matrix.json"
+                  : "untracked-source.txt";
+                await writeFile(path.join(root, relative), mutation === "tracked"
+                  ? JSON.stringify({ generatedFrom: { sceneWorksRevision: `source-tree:${"1".repeat(64)}` }, changed: true })
+                  : "actual untracked source mutation");
+              }
+            },
+          }), /repository HEAD or dirty state changed during provider execution/);
+          assert.deepEqual(actions, phase === "probe" ? ["probe"] : ["probe", "run"]);
+          const after = (await execFileAsync("git", ["-C", root, "rev-parse", "HEAD"])).stdout;
+          const status = (await execFileAsync("git", ["-C", root, "status", "--porcelain"])).stdout;
+          if (mutation === "HEAD") {
+            assert.notEqual(after, before, "the fixture really moved HEAD");
+            assert.equal(status, "", "HEAD movement is tested independently of dirty state");
+          } else {
+            assert.equal(after, before, "dirty movement is tested independently of HEAD");
+            assert.match(status, mutation === "tracked" ? / M docs\/generated\/memory-matrix.json/ : /\?\? untracked-source.txt/);
+          }
+        });
+      }
+    }
+  }
+});
+
+test("activity in another worktree cannot move the selected frozen checkout", async (t) => {
+  const sceneWorksRepo = await cleanFixtureRepo(t);
+  const inferenceRepo = await cleanFixtureRepo(t);
+  const other = await mkdtemp(path.join(tmpdir(), "memory-harness-other-worktree-"));
+  t.after(() => rm(other, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+  await execFileAsync("git", ["-C", sceneWorksRepo, "worktree", "add", "--detach", other, "HEAD"]);
+  const before = (await execFileAsync("git", ["-C", sceneWorksRepo, "rev-parse", "HEAD"])).stdout;
+  await assert.rejects(compositionCapture({
+    sceneWorksRepo,
+    inferenceRepo,
+    onAction: async (action) => {
+      if (action === "probe") {
+        await execFileAsync("git", ["-C", other, "commit", "--allow-empty", "-m", "other worktree HEAD"]);
+      } else {
+        await writeFile(path.join(other, "untracked-source.txt"), "other worktree only");
+      }
+    },
+  }), /adapter measured strategy does not match the anchor composition/);
+  assert.equal((await execFileAsync("git", ["-C", sceneWorksRepo, "rev-parse", "HEAD"])).stdout, before);
+  assert.equal((await execFileAsync("git", ["-C", sceneWorksRepo, "status", "--porcelain"])).stdout, "");
+  assert.notEqual((await execFileAsync("git", ["-C", other, "rev-parse", "HEAD"])).stdout, before);
+  assert.match((await execFileAsync("git", ["-C", other, "status", "--porcelain"])).stdout, /\?\? untracked-source.txt/);
 });
 
 // Harness version is capture provenance. Record shape, not instrument age, decides validity.
@@ -2740,7 +2908,7 @@ test("a non-authoritative anchor derives no digest at all", async () => {
   assert.equal(result.records[0].repositories.inference.closureDigest, undefined);
 });
 
-test("an undeclared lane is CAPTURED without a currency term, never refused", async () => {
+test("an undeclared lane is CAPTURED without a currency term, never refused", async (t) => {
   // sc-22512 inverted this test. It used to assert that an undeclared lane `rejects` BEFORE the
   // first capture — which meant a lane nobody had declared could not be measured at all, so the
   // absence of bookkeeping blocked the measurement that would have relieved it. That is the exact
@@ -2748,9 +2916,13 @@ test("an undeclared lane is CAPTURED without a currency term, never refused", as
   //
   // The capture now runs and the record carries NO closure digest, which is the conservative
   // answer: `evidenceSemantics` reads such a record `historical`, so it can never certify a cell.
-  // This still drives the REAL deriver (no `closureDigestFor`) against the real declarations file,
-  // so it is the production path and not a stub.
-  const cleanRepo = await cleanFixtureRepo();
+  // This still drives the REAL deriver (no `closureDigestFor`) against the real declarations bytes,
+  // committed into an isolated checkout so concurrent scaffold tests cannot move capture provenance.
+  const cleanRepo = await cleanFixtureRepo(t, {
+    "config/inference-provider-closures.json": await readFile(
+      new URL("../config/inference-provider-closures.json", import.meta.url),
+    ),
+  });
   const invocations = [];
   // The MODEL id is real (validatePlan requires one the memory matrix names); the LANE
   // `candle:never_declared_provider` is what is undeclared, and the lane is what the digest is
@@ -2766,7 +2938,7 @@ test("an undeclared lane is CAPTURED without a currency term, never refused", as
       process.execPath,
       fileURLToPath(new URL("./fixtures/memory-provider-fixture.mjs", import.meta.url)),
     ],
-    sceneWorksRepo: fileURLToPath(new URL("..", import.meta.url)),
+    sceneWorksRepo: cleanRepo,
     inferenceRepo: cleanRepo,
     onProviderInvocation: (invocation) => invocations.push(invocation),
   });

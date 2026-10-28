@@ -1593,11 +1593,25 @@ pub(crate) fn validate_lora_specs_for_model(
         .unwrap_or_default();
     let mut normalized_loras = Vec::new();
     for attached_lora in attached_loras {
-        let Some((lora_id, lora, normalized_lora, catalog_backed)) =
+        if matches!(model_id, "flux3_klein" | "flux3_klein_base")
+            && job_lora_id(attached_lora).is_none_or(|id| id.trim().is_empty())
+        {
+            return Err(ApiError::bad_request("FLUX3 requires an explicit adapter id; omit unselected adapters instead of sending an empty or malformed LoRA"));
+        }
+        let Some((lora_id, lora, mut normalized_lora, catalog_backed)) =
             hydrate_lora_spec(catalog_loras, attached_lora, allow_inline_loras, lora_label)?
         else {
             continue;
         };
+        if catalog_backed && matches!(model_id, "flux3_klein" | "flux3_klein_base") {
+            for key in ["installedPath", "sourcePath", "path", "source"] {
+                if let Some(value) = lora.get(key) {
+                    normalized_lora[key] = value.clone();
+                } else {
+                    normalized_lora.as_object_mut().unwrap().remove(key);
+                }
+            }
+        }
         let install_state = lora.get("installState").and_then(Value::as_str);
         if install_state.is_some_and(|state| state != "installed")
             || (catalog_backed && install_state.is_none())
@@ -1606,7 +1620,21 @@ pub(crate) fn validate_lora_specs_for_model(
                 "{lora_label} is not installed: {lora_id}"
             )));
         }
-        let header = validate_lora_safetensors_header(lora_id, lora)?;
+        let inspected_lora = if matches!(model_id, "flux3_klein" | "flux3_klein_base") {
+            &normalized_lora
+        } else {
+            lora
+        };
+        let inspected =
+            validate_lora_safetensors_header_for_model(lora_id, inspected_lora, model_id)?;
+        let header = inspected.as_ref().map(|(header, _)| header.clone());
+        if matches!(model_id, "flux3_klein" | "flux3_klein_base") {
+            if let Some((_, file)) = &inspected {
+                // Bind forwarding to the exact entry just inspected, including a legacy scan
+                // when no filename was declared; the worker must not scan a second time.
+                normalized_lora["installedPath"] = json!(file);
+            }
+        }
         if let Some(header) = &header {
             let h3_expected = model_families.iter().any(|family| family == "minimax-h3");
             validate_minimax_h3_trainer_header(header, h3_expected).map_err(|error| {
@@ -1711,6 +1739,29 @@ pub(crate) fn validate_lora_specs_for_model(
         ) {
             return Err(ApiError::bad_request(message));
         }
+        if let Some(message) = sceneworks_core::lora_family::flux3_adapter_refusal(
+            model,
+            model_id,
+            lora_id,
+            lora,
+            header.as_ref(),
+        ) {
+            return Err(ApiError::bad_request(message));
+        }
+        if matches!(model_id, "flux3_klein" | "flux3_klein_base") {
+            let selected = attached_lora
+                .get("weight")
+                .or_else(|| lora.get("defaultWeight"))
+                .or_else(|| lora.get("weight"));
+            let weight = match selected {
+                None => crate::recipe_presets::DEFAULT_LORA_WEIGHT,
+                Some(value) => value.as_f64()
+                    .or_else(|| value.as_str().and_then(|value| value.trim().parse::<f64>().ok()))
+                    .filter(|weight| weight.is_finite() && (*weight as f32).is_finite())
+                    .ok_or_else(|| ApiError::bad_request(format!("LoRA {lora_id}: FLUX3 weight must be an explicit finite scale (zero is allowed)")))?,
+            };
+            normalized_lora["weight"] = json!(weight);
+        }
         let declared_model_ids = lora_model_ids(lora);
         if !declared_model_ids.is_empty() && !declared_model_ids.iter().any(|id| id == model_id) {
             return Err(ApiError::bad_request(format!(
@@ -1813,19 +1864,35 @@ pub(crate) fn validate_lora_safetensors_header(
     lora_id: &str,
     lora: &Value,
 ) -> Result<Option<Value>, ApiError> {
-    let Some(path) = lora
-        .get("installedPath")
-        .or_else(|| lora.get("sourcePath"))
-        .or_else(|| lora.get("path"))
-        .and_then(Value::as_str)
-    else {
+    validate_lora_safetensors_header_for_model(lora_id, lora, "")
+        .map(|found| found.map(|(header, _)| header))
+}
+
+fn validate_lora_safetensors_header_for_model(
+    lora_id: &str,
+    lora: &Value,
+    model: &str,
+) -> Result<Option<(Value, PathBuf)>, ApiError> {
+    let Some(path) = sceneworks_core::lora_family::adapter_record_path(lora) else {
         return Ok(None);
     };
-    let path = PathBuf::from(path);
-    let Some(safetensors_path) = first_safetensors_path(&path) else {
+    // Preserve legacy family-assignment semantics for non-safetensors file formats. FLUX3
+    // inspects the selected bytes (including trusted HF extensionless blobs) unconditionally.
+    if !matches!(model, "flux3_klein" | "flux3_klein_base")
+        && path.is_file()
+        && !sceneworks_core::lora_family::is_safetensors_file(&path)
+    {
+        return Ok(None);
+    }
+    let file = sceneworks_core::lora_family::resolve_adapter_for_model(
+        &path,
+        sceneworks_core::lora_family::declared_adapter_file(lora),
+        model,
+    );
+    let Some(file) = file else {
         return Ok(None);
     };
-    read_safetensors_header_for_api(lora_id, &safetensors_path).map(Some)
+    read_safetensors_header_for_api(lora_id, &file).map(|header| Some((header, file)))
 }
 
 pub(crate) fn read_safetensors_header_for_api(
@@ -2551,6 +2618,10 @@ mod base_model_gating_tests {
 
     /// The SHIPPED `iris_3b` row (sc-25681).
     fn shipped_iris_model() -> Value {
+        shipped_adapter_model("iris_3b")
+    }
+
+    fn shipped_adapter_model(id: &str) -> Value {
         let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
             sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
                 .iter()
@@ -2563,9 +2634,512 @@ mod base_model_gating_tests {
             .as_array()
             .expect("models array")
             .iter()
-            .find(|model| model["id"] == "iris_3b")
-            .expect("iris_3b is shipped")
+            .find(|model| model["id"] == id)
+            .expect("model is shipped")
             .clone()
+    }
+
+    fn write_flux3_adapter(path: &std::path::Path, change: impl FnOnce(&mut Value)) {
+        let mut header = json!({
+            "__metadata__": {"base_model":"black-forest-labs/flux-3-image-klein-base", "base_revision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4", "lora_alpha":"6", "rank":"2"},
+            "transformer.mode_blocks.image.1.attn.to_q.lora_A.weight": {"dtype":"F32", "shape":[2,3072]},
+            "transformer.mode_blocks.image.1.attn.to_q.lora_B.weight": {"dtype":"F32", "shape":[3072,2]}
+        });
+        change(&mut header);
+        let mut offset = 0u64;
+        for (key, tensor) in header.as_object_mut().unwrap() {
+            if key == "__metadata__" {
+                continue;
+            }
+            let bytes = tensor["shape"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|axis| axis.as_u64().unwrap())
+                .product::<u64>()
+                * 4;
+            tensor["data_offsets"] = json!([offset, offset + bytes]);
+            offset += bytes;
+        }
+        let json = serde_json::to_vec(&header).unwrap();
+        let mut bytes = (json.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&json);
+        bytes.resize(bytes.len() + offset as usize, 0);
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[test]
+    fn flux3_hydrated_scales_preserve_numbers_strings_defaults_and_refuse_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter.safetensors");
+        write_flux3_adapter(&path, |_| {});
+        let models = vec![shipped_adapter_model("flux3_klein_base")];
+        let catalog = json!({"id":"scaled", "family":"flux3", "installedPath":path,
+            "installState":"installed", "networkType":"lora", "defaultWeight":0.625,
+            "baseModel":"black-forest-labs/flux-3-image-klein-base",
+            "baseRevision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"});
+        for weight in [
+            json!(0),
+            json!(0.375),
+            json!(-0.25),
+            json!("0"),
+            json!("0.375"),
+            json!("-0.25"),
+        ] {
+            let expected = weight
+                .as_f64()
+                .or_else(|| weight.as_str().unwrap().parse::<f64>().ok())
+                .unwrap();
+            for inline in [false, true] {
+                let mut selected = if inline {
+                    catalog.clone()
+                } else {
+                    json!({"id":"scaled"})
+                };
+                selected["weight"] = weight.clone();
+                let result = validate_lora_specs_for_model(
+                    &models,
+                    std::slice::from_ref(&catalog),
+                    "flux3_klein_base",
+                    &[selected],
+                    inline,
+                    "LoRA",
+                )
+                .unwrap();
+                assert_eq!(
+                    result[0]["weight"].as_f64(),
+                    Some(expected),
+                    "inline={inline}, input={weight}"
+                );
+            }
+        }
+        let result = validate_lora_specs_for_model(
+            &models,
+            std::slice::from_ref(&catalog),
+            "flux3_klein_base",
+            &[json!({"id":"scaled"})],
+            false,
+            "LoRA",
+        )
+        .unwrap();
+        assert_eq!(result[0]["weight"], 0.625);
+        let mut no_default = catalog.clone();
+        no_default.as_object_mut().unwrap().remove("defaultWeight");
+        let result = validate_lora_specs_for_model(
+            &models,
+            &[no_default],
+            "flux3_klein_base",
+            &[json!({"id":"scaled"})],
+            false,
+            "LoRA",
+        )
+        .unwrap();
+        assert_eq!(
+            result[0]["weight"],
+            crate::recipe_presets::DEFAULT_LORA_WEIGHT
+        );
+        for invalid in [
+            json!("oops"),
+            json!("NaN"),
+            json!("inf"),
+            json!("1e1000"),
+            json!(1e100),
+            json!(null),
+            json!(true),
+            json!({}),
+        ] {
+            let error = validate_lora_specs_for_model(
+                &models,
+                std::slice::from_ref(&catalog),
+                "flux3_klein_base",
+                &[json!({"id":"scaled","weight":invalid})],
+                false,
+                "LoRA",
+            )
+            .unwrap_err();
+            assert!(error.detail.contains("finite"), "{}", error.detail);
+        }
+    }
+
+    #[test]
+    fn flux3_api_rejects_a_directory_link_escaping_the_adapter_root() {
+        use sceneworks_core::lora_family::{first_safetensors_path, resolve_adapter_for_model};
+        let parent = tempfile::tempdir().unwrap();
+        let root = parent.path().join("adapter");
+        let outside = parent.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        write_flux3_adapter(&outside.join("outside.safetensors"), |_| {});
+        let link = root.join("linked");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(&link)
+                .arg(&outside)
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "junction fixture creation failed: {:?}",
+                result
+            );
+        }
+        assert!(
+            first_safetensors_path(&root).is_some(),
+            "the legacy scanner really traverses this link"
+        );
+        for model in ["flux3_klein", "flux3_klein_base"] {
+            assert!(
+                resolve_adapter_for_model(&root, None, model).is_none(),
+                "shared worker/API selector must reject canonical escape"
+            );
+        }
+        let model = shipped_adapter_model("flux3_klein_base");
+        let lora = json!({"id":"escape","family":"flux3","path":root});
+        assert!(validate_lora_specs_for_model(
+            &[model],
+            &[],
+            "flux3_klein_base",
+            &[lora],
+            true,
+            "LoRA"
+        )
+        .is_err());
+        #[cfg(windows)]
+        std::fs::remove_dir(&link).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(&link).unwrap();
+        assert!(
+            outside.join("outside.safetensors").is_file(),
+            "fixture cleanup never follows the link"
+        );
+    }
+
+    #[test]
+    fn flux3_api_inspects_the_same_declared_adapter_the_worker_selects() {
+        use sceneworks_core::lora_family::{
+            declared_adapter_file, first_safetensors_path, resolve_adapter_in_dir,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("one.safetensors");
+        let second = dir.path().join("two.safetensors");
+        write_flux3_adapter(&first, |_| {});
+        write_flux3_adapter(&second, |_| {});
+        let scan = first_safetensors_path(dir.path()).unwrap();
+        let selected = if scan == first { second } else { first };
+        // Determine the actual scan choice, then make it disagree with the manifest selection.
+        write_flux3_adapter(&scan, |header| {
+            header["__metadata__"]["base_model"] = json!("black-forest-labs/flux-3-image-klein");
+            header["__metadata__"]["base_revision"] =
+                json!("8454017f9ebaada30c998fccd9f67a80c7580f68");
+        });
+        let unstamped = dir.path().join("unstamped.safetensors");
+        write_flux3_adapter(&unstamped, |header| {
+            header["__metadata__"]
+                .as_object_mut()
+                .unwrap()
+                .remove("base_revision");
+        });
+        let models = vec![shipped_adapter_model("flux3_klein_base")];
+        let lora = json!({"id":"declared", "family":"flux3","installedPath":dir.path(),"installState":"installed",
+            "files":[selected.file_name().unwrap().to_str().unwrap()],"networkType":"lora",
+            "baseModel":"black-forest-labs/flux-3-image-klein-base", "baseRevision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"});
+        let normalize = || {
+            validate_lora_specs_for_model(
+                &models,
+                std::slice::from_ref(&lora),
+                "flux3_klein_base",
+                &[json!({"id":"declared","weight":0.375})],
+                false,
+                "LoRA",
+            )
+        };
+        let hydrated = normalize().unwrap();
+        let redirected =
+            json!({"id":"declared","files":[scan.file_name().unwrap().to_str().unwrap()]});
+        assert!(
+            validate_lora_specs_for_model(
+                &models,
+                std::slice::from_ref(&lora),
+                "flux3_klein_base",
+                &[redirected],
+                false,
+                "LoRA"
+            )
+            .is_err(),
+            "validate the actual forwarded file, not a different catalog sibling"
+        );
+        let worker_path =
+            resolve_adapter_in_dir(dir.path(), declared_adapter_file(&hydrated[0])).unwrap();
+        assert_eq!(worker_path, selected);
+        let api_header = validate_lora_safetensors_header("declared", &lora)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            api_header,
+            sceneworks_core::lora_family::read_safetensors_header(&worker_path).unwrap()
+        );
+        for outside in [
+            "../outside.safetensors".to_owned(),
+            scan.canonicalize().unwrap().display().to_string(),
+        ] {
+            let selected_override = json!({"id":"declared","files":[outside]});
+            assert!(validate_lora_specs_for_model(
+                &models,
+                std::slice::from_ref(&lora),
+                "flux3_klein_base",
+                &[selected_override],
+                false,
+                "LoRA"
+            )
+            .is_err());
+        }
+        let wrong_path = json!({"id":"declared","installedPath":scan});
+        let normalized = validate_lora_specs_for_model(
+            &models,
+            std::slice::from_ref(&lora),
+            "flux3_klein_base",
+            &[wrong_path],
+            false,
+            "LoRA",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::canonicalize(normalized[0]["installedPath"].as_str().unwrap()).unwrap(),
+            std::fs::canonicalize(&selected).unwrap(),
+            "client path overrides cannot change the trusted catalog selection"
+        );
+        let external = tempfile::tempdir().unwrap();
+        let external_file = external.path().join("external.safetensors");
+        write_flux3_adapter(&external_file, |_| {});
+        let link = dir.path().join("linked.safetensors");
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(&external_file, &link);
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(&external_file, &link);
+        if linked.is_ok() {
+            for model in ["flux3_klein_base", "flux3_klein"] {
+                assert!(sceneworks_core::lora_family::resolve_adapter_for_model(
+                    dir.path(),
+                    Some("linked.safetensors"),
+                    model
+                )
+                .is_none());
+            }
+            let redirect = json!({"id":"declared","files":["linked.safetensors"]});
+            assert!(validate_lora_specs_for_model(
+                &models,
+                std::slice::from_ref(&lora),
+                "flux3_klein_base",
+                &[redirect],
+                false,
+                "LoRA"
+            )
+            .is_err());
+            std::fs::remove_file(&link).unwrap();
+        } else {
+            eprintln!(
+                "host disallows file symlink creation; non-symlink confinement cases still ran"
+            );
+        }
+        std::fs::write(&selected, b"corrupt selected file").unwrap();
+        assert!(normalize().unwrap_err().detail.contains("header"));
+        // An absent declaration uses the SAME fallback as the worker, never a different valid sibling.
+        std::fs::remove_file(&selected).unwrap();
+        // `first_safetensors_path` is deliberately unordered; leave only the scan candidate so this
+        // fallback assertion cannot depend on directory iteration order.
+        std::fs::remove_file(&unstamped).unwrap();
+        assert_eq!(
+            resolve_adapter_in_dir(dir.path(), declared_adapter_file(&lora)),
+            Some(scan.clone())
+        );
+        assert!(sceneworks_core::lora_family::resolve_adapter_for_model(
+            dir.path(),
+            declared_adapter_file(&lora),
+            "flux3_klein_base"
+        )
+        .is_none());
+        assert!(normalize().is_err());
+        write_flux3_adapter(&selected, |header| {
+            header["__metadata__"]
+                .as_object_mut()
+                .unwrap()
+                .remove("base_revision");
+        });
+        assert!(normalize().unwrap_err().detail.contains("base_revision"));
+    }
+
+    #[test]
+    fn flux3_identity_uses_current_file_header_not_forged_entry_or_adapter_source_revision() {
+        let models = vec![
+            shipped_adapter_model("flux3_klein_base"),
+            shipped_adapter_model("flux3_klein"),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adapter.safetensors");
+        write_flux3_adapter(&path, |_| {});
+        let lora = json!({"id":"base-lora", "family":"flux3", "families":["flux3"], "path":path,
+            "baseModel":"black-forest-labs/flux-3-image-klein-base", "baseRevision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4", "networkType":"lora", "weight":-0.25});
+        let normalized = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .unwrap();
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0]["weight"], -0.25);
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("base_model"));
+        for weight in [json!(0), json!(0.375)] {
+            let mut selected = lora.clone();
+            selected["weight"] = weight.clone();
+            let result = validate_lora_specs_for_model(
+                &models,
+                &[],
+                "flux3_klein_base",
+                &[selected],
+                true,
+                "LoRA",
+            )
+            .unwrap();
+            assert_eq!(result[0]["weight"].as_f64(), weight.as_f64());
+        }
+        write_flux3_adapter(&path, |header| {
+            header["__metadata__"]
+                .as_object_mut()
+                .unwrap()
+                .remove("lora_alpha");
+            header["__metadata__"]["alpha"] = "6".into();
+        });
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .unwrap();
+        write_flux3_adapter(&path, |header| {
+            header["__metadata__"]
+                .as_object_mut()
+                .unwrap()
+                .remove("lora_alpha");
+            header["__metadata__"]["lora_adapter_metadata"] =
+                json!({"r":2,"lora_alpha":6,"use_rslora":false,"alpha_pattern":{}})
+                    .to_string()
+                    .into();
+        });
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .unwrap();
+        write_flux3_adapter(&path, |header| {
+            header["__metadata__"]["lora_adapter_metadata"] =
+                json!({"use_rslora":true}).to_string().into()
+        });
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("use_rslora"));
+        write_flux3_adapter(&path, |_| {});
+        let mut invalid = lora.clone();
+        invalid["weight"] = "NaN".into();
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            &[invalid],
+            true,
+            "LoRA",
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("finite"));
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            &[json!({})],
+            true,
+            "LoRA",
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("adapter id"));
+        // Same path/selection, different file after the first successful selection: re-read wins.
+        write_flux3_adapter(&path, |header| {
+            header["__metadata__"]["base_revision"] =
+                "0000000000000000000000000000000000000000".into()
+        });
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("base_revision"));
+        write_flux3_adapter(&path, |header| {
+            header["__metadata__"]
+                .as_object_mut()
+                .unwrap()
+                .remove("base_revision");
+        });
+        let mut forged = lora.clone();
+        forged["source"] = json!({"revision":"1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4"});
+        assert!(validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            &[forged],
+            true,
+            "LoRA"
+        )
+        .is_err());
+        write_flux3_adapter(&path, |header| header["__metadata__"]["rank"] = "3".into());
+        let error = validate_lora_specs_for_model(
+            &models,
+            &[],
+            "flux3_klein_base",
+            std::slice::from_ref(&lora),
+            true,
+            "LoRA",
+        )
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("rank"));
+        write_flux3_adapter(&path, |header| {
+            header["ignored.weight"] = json!({"shape":[1],"dtype":"F32"});
+        });
+        let error =
+            validate_lora_specs_for_model(&models, &[], "flux3_klein_base", &[lora], true, "LoRA")
+                .unwrap_err();
+        assert!(format!("{error:?}").contains("ignored.weight"));
     }
 
     fn write_stamped_adapter(dir: &std::path::Path, name: &str, metadata: Value) -> String {

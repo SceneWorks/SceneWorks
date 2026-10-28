@@ -8,6 +8,26 @@ use super::{
 };
 use serde_json::json;
 
+#[test]
+fn flux3_layout_raw_queue_refuses_unsupported_models_and_malformed_boxes_before_dispatch() {
+    for payload in [
+        json!({"model":"flux2_dev","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","bbox":[0,0,1,1]}]}}}),
+        json!({"model":"flux3_klein","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","bbox":[0,false,1,1]}]}}}),
+        json!({"model":"flux3_klein","referenceAssetIds":["same","same"],"advanced":{"flux3_reference_ids":["slot","slot"]}}),
+    ] {
+        let request = ImageRequest::from_payload(payload.as_object().unwrap());
+        assert!(matches!(
+            validate_flux3_layout_request(&request),
+            Err(WorkerError::InvalidPayload(_))
+        ));
+    }
+    let valid = json!({"model":"flux3_klein","advanced":{"flux3_layout":{"version":1,"boxes":[{"id":"a","desc":"cat","bbox":[0.1,0.2,0.7,0.8]}]}}});
+    assert!(
+        validate_flux3_layout_request(&ImageRequest::from_payload(valid.as_object().unwrap()))
+            .is_ok()
+    );
+}
+
 #[cfg(target_os = "macos")]
 fn assert_route_retarget_artifact_seal_mismatch(
     error: WorkerError,
@@ -200,6 +220,226 @@ use crate::test_env::EnvVars;
 
 fn request(value: Value) -> ImageRequest {
     ImageRequest::from_payload(&value.as_object().cloned().unwrap())
+}
+
+/// Execute the actual production dispatch/fallback seam, not a copy of its classification.
+/// Mutations: delete require_legacy_fallback_allowed CALL inside it, or remove the root callsite.
+#[tokio::test]
+async fn flux3_missing_native_handler_never_invokes_procedural_fallback() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let production = include_str!("../image_jobs.rs");
+    let call = production
+        .find("dispatch_legacy_fallback(&request.model, handled,")
+        .expect("real dispatcher calls the shared decision seam");
+    let stub = production[call..]
+        .find("generate_stub_stream(")
+        .expect("real stub closure is guarded");
+    assert!(stub > 0);
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let called = AtomicBool::new(false);
+        let error = dispatch_legacy_fallback(model, false, || async {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(message) if message.contains("unsupported") && message.contains(model))
+        );
+        assert!(
+            !called.load(Ordering::Relaxed),
+            "{model} produced fake procedural success"
+        );
+        dispatch_legacy_fallback(model, true, || async {
+            called.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert!(!called.load(Ordering::Relaxed));
+    }
+    let called = AtomicBool::new(false);
+    dispatch_legacy_fallback("test_stub_model", false, || async {
+        called.store(true, Ordering::Relaxed);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert!(
+        called.load(Ordering::Relaxed),
+        "legacy non-FLUX3 stub behavior must remain"
+    );
+}
+
+#[test]
+fn flux3_weights_require_exact_receipts_and_never_fall_back_to_distilled_or_cache_head() {
+    let root = tempfile::tempdir().unwrap();
+    let hub = root.path().join("hub");
+    std::fs::create_dir_all(&hub).unwrap();
+    let _hf = crate::test_env::EnvVars::set(&[
+        ("HF_HUB_CACHE", hub.to_str().unwrap()),
+        ("HUGGINGFACE_HUB_CACHE", ""),
+        ("HF_HOME", ""),
+    ]);
+    let repo = "black-forest-labs/flux-3-image-klein-base";
+    let revision = "1469d27cfb9bb1bd81d3a93f5a023b39dbf136e4";
+    let stage = |repo: &str, revision: &str| {
+        let library = sceneworks_core::hf_home::model_source_library(root.path());
+        let cache = library.repository_root(repo).unwrap();
+        let snapshot = library
+            .snapshots_root_from_repository_root(&cache)
+            .unwrap()
+            .join(revision);
+        std::fs::create_dir_all(&snapshot).unwrap();
+        std::fs::write(
+            snapshot.join("model.safetensors"),
+            b"tiny source fixture, not model weights",
+        )
+        .unwrap();
+        std::fs::create_dir_all(snapshot.join("text_encoder")).unwrap();
+        for file in [
+            "config.json",
+            "ae.safetensors",
+            "text_encoder/config.json",
+            "text_encoder/tokenizer.json",
+            "text_encoder/tokenizer_config.json",
+            "text_encoder/model-00001-of-00002.safetensors",
+            "text_encoder/model-00002-of-00002.safetensors",
+        ] {
+            std::fs::write(snapshot.join(file), b"{}").unwrap();
+        }
+        std::fs::write(snapshot.join("text_encoder/model.safetensors.index.json"), serde_json::to_vec(&json!({"weight_map":{"first":"model-00001-of-00002.safetensors","last":"model-00002-of-00002.safetensors"}})).unwrap()).unwrap();
+        std::fs::create_dir_all(cache.join("refs")).unwrap();
+        std::fs::write(cache.join("refs/main"), revision).unwrap();
+        snapshot
+    };
+    let expected = stage(repo, revision);
+    let write_receipt = |repo: &str, revision: &str, snapshot: &std::path::Path| {
+        let marker = root.path().join("models").join("flux3_klein_base");
+        std::fs::create_dir_all(&marker).unwrap();
+        let stamp =
+            crate::model_jobs::resolved_files_tree_stamp(snapshot, &["model.safetensors"]).unwrap();
+        std::fs::write(marker.join(crate::INSTALL_MARKER), serde_json::to_vec(&json!({
+            "schemaVersion":2,"repo":repo,"modelId":"flux3_klein_base","variant":"default",
+            "snapshotRevision":revision,"resolvedFiles":["model.safetensors"],"artifactTreeStamp":stamp
+        })).unwrap()).unwrap();
+    };
+    let resolve =
+        || resolve_pinned_native_package(root.path(), repo, revision, "flux3_klein_base", None);
+    let error = resolve().unwrap_err();
+    assert!(error.to_string().contains("exact-revision install receipt"));
+    let distilled_repo = "black-forest-labs/flux-3-image-klein";
+    let distilled_revision = "8454017f9ebaada30c998fccd9f67a80c7580f68";
+    let distilled = stage(distilled_repo, distilled_revision);
+    write_receipt(distilled_repo, distilled_revision, &distilled);
+    assert!(resolve().is_err());
+    let wrong_revision = "0000000000000000000000000000000000000000";
+    let wrong = stage(repo, wrong_revision);
+    write_receipt(repo, wrong_revision, &wrong);
+    assert!(resolve().is_err());
+    write_receipt(repo, revision, &expected);
+    // Compare filesystem identity, not Windows path spelling (`\\?\` extended form).
+    assert_eq!(
+        std::fs::canonicalize(resolve().unwrap()).unwrap(),
+        std::fs::canonicalize(&expected).unwrap()
+    );
+    std::fs::remove_file(expected.join("ae.safetensors")).unwrap();
+    assert!(resolve()
+        .unwrap_err()
+        .to_string()
+        .contains("ae.safetensors"));
+    std::fs::write(expected.join("ae.safetensors"), b"{}").unwrap();
+    std::fs::remove_file(expected.join("text_encoder/model-00002-of-00002.safetensors")).unwrap();
+    assert!(resolve()
+        .unwrap_err()
+        .to_string()
+        .contains("model-00002-of-00002.safetensors"));
+    std::fs::write(
+        expected.join("text_encoder/model-00002-of-00002.safetensors"),
+        b"{}",
+    )
+    .unwrap();
+    let wrong_override = root.path().join("models/another-checkpoint");
+    std::fs::create_dir_all(&wrong_override).unwrap();
+    assert!(resolve_pinned_native_package(
+        root.path(),
+        repo,
+        revision,
+        "flux3_klein_base",
+        Some(&wrong_override)
+    )
+    .is_err());
+    std::fs::write(
+        expected.join("model.safetensors"),
+        b"changed under same snapshot path",
+    )
+    .unwrap();
+    assert!(resolve().is_err());
+}
+
+#[test]
+fn flux3_enhancement_worker_guard_remains_authoritative_for_actual_native_availability() {
+    let _env = crate::test_env::env_lock();
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = false;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        let req = request(
+            json!({"model":model,"mode":"text_to_image","prompt":"a fox","advanced":{"enhancePrompt":true,"enhanceMaxTokens":3584}}),
+        );
+        let result = validate_prompt_enhancement_request(&req, &settings);
+        #[cfg(target_os = "macos")]
+        assert!(result.is_ok(), "{result:?}");
+        #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("enabled native Candle"));
+        #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("native MLX or Candle"));
+    }
+}
+
+#[test]
+fn flux3_enhancement_uses_the_same_ordered_reference_shape_without_loading_assets() {
+    let _env = crate::test_env::env_lock();
+    let mut settings = crate::test_env::offline_settings();
+    settings.backend_candle_enabled = true;
+    for model in ["flux3_klein", "flux3_klein_base"] {
+        for mode in ["text_to_image", "edit_image", "character_image"] {
+            let req = request(
+                json!({"model":model,"mode":mode,"referenceAssetIds":vec!["duplicate-slot";10],"advanced":{"enhancePrompt":true}}),
+            );
+            let result = validate_prompt_enhancement_request(&req, &settings);
+            #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+            assert!(result.is_ok(), "{model}/{mode}: {result:?}");
+            #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
+            assert!(result
+                .unwrap_err()
+                .to_string()
+                .contains("native MLX or Candle"));
+        }
+        for extra in [
+            json!({"referenceAssetIds":vec!["same";11]}),
+            json!({"referenceAssetIds":["a",null]}),
+            json!({"referenceAssetId":"a","maskAssetId":"mask"}),
+            json!({"referenceAssetId":"a","advanced":{"enhancePrompt":true,"referenceStrength":1.0}}),
+        ] {
+            let mut payload =
+                json!({"model":model,"mode":"edit_image","advanced":{"enhancePrompt":true}})
+                    .as_object()
+                    .unwrap()
+                    .clone();
+            payload.extend(extra.as_object().unwrap().clone());
+            assert!(validate_prompt_enhancement_request(
+                &ImageRequest::from_payload(&payload),
+                &settings
+            )
+            .is_err());
+        }
+    }
 }
 
 #[cfg(any(
@@ -2377,6 +2617,54 @@ fn lora_resource_keys_come_from_exact_filenames_and_stay_unique() {
 }
 
 #[test]
+fn flux3_worker_adapter_selection_is_declared_and_confined() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut settings = settings_with_config_dir(&temp.path().join("config"));
+    settings.data_dir = temp.path().join("data");
+    let dir = settings.data_dir.join("loras/selected");
+    std::fs::create_dir_all(&dir).unwrap();
+    let selected = dir.join("final.safetensors");
+    std::fs::write(&selected, b"selected file").unwrap();
+    std::fs::write(dir.join("other.safetensors"), b"wrong sibling").unwrap();
+    for model in ["flux3_klein_base", "flux3_klein"] {
+        let record = json!({"installedPath":dir,"files":["final.safetensors"]});
+        let file = resolve_adapter_file(&record, &settings, model).unwrap();
+        assert_eq!(
+            std::fs::canonicalize(file).unwrap(),
+            std::fs::canonicalize(&selected).unwrap()
+        );
+        for name in [
+            "../outside.safetensors".to_owned(),
+            selected.canonicalize().unwrap().display().to_string(),
+            "missing.safetensors".into(),
+        ] {
+            let invalid = json!({"installedPath":dir,"files":[name]});
+            assert!(
+                resolve_adapter_file(&invalid, &settings, model).is_err(),
+                "{model}/{name}"
+            );
+        }
+    }
+    let external = temp.path().join("outside.safetensors");
+    std::fs::write(&external, b"outside adapter root").unwrap();
+    let link = dir.join("link.safetensors");
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(&external, &link);
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(&external, &link);
+    if linked.is_ok() {
+        for model in ["flux3_klein_base", "flux3_klein"] {
+            assert!(resolve_adapter_file(
+                &json!({"installedPath":dir,"files":["link.safetensors"]}),
+                &settings,
+                model
+            )
+            .is_err());
+        }
+    }
+}
+
+#[test]
 fn lora_attribution_resolves_the_manifest_declared_inference_file() {
     let dir = tempfile::tempdir().unwrap();
     let mut settings = settings_with_config_dir(&dir.path().join("config"));
@@ -2394,7 +2682,7 @@ fn lora_attribution_resolves_the_manifest_declared_inference_file() {
     });
     assert_eq!(lora_weight(&raw), 0.7);
     assert_eq!(
-        resolve_adapter_file(&raw, &settings).unwrap(),
+        resolve_adapter_file(&raw, &settings, "test").unwrap(),
         std::fs::canonicalize(final_file).unwrap(),
         "attribution and inference must choose the same manifest-declared adapter"
     );
@@ -3242,6 +3530,47 @@ fn streaming_result_carries_facts_for_api_persistence() {
     assert_eq!(result["adapter"], json!(plan.adapter));
 }
 
+/// sc-8953 follow-through (2026-10-27): the STEP-tick result omits the accumulated fact sets
+/// (`assetWrites` / `generationSet` / `prefixKvCache`) on purpose — the per-step cadence is
+/// steps × images and the accumulated set had begun OOM-killing the WebView2 renderer
+/// mid-batch. The slim shape keeps every key a RUNNING job's UI consumes.
+///
+/// Gated like `slim_step_result` itself (macOS / the candle lane) so the default lane
+/// never dead-code warns and the parity lane never sees an out-of-scope symbol.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn slim_step_result_omits_the_accumulated_fact_sets() {
+    // `count: 8` is the payload-sanity clamp (`MAX_COUNT`), but the assertion is on the
+    // PLAN's field, not the literal — a large real batch (a 260-image angle set) streams
+    // the same shape with a bigger `expectedCount`.
+    let plan = ImagePlan::new(&request(
+        json!({ "projectId": "p", "prompt": "x", "count": 8 }),
+    ));
+    let result = slim_step_result(&plan);
+    // The accumulated sets the API would otherwise re-serialize and re-broadcast
+    // per step — all absent.
+    assert!(
+        !result.contains_key("assetWrites"),
+        "slim step result must not deep-clone the accumulated asset writes"
+    );
+    assert!(
+        !result.contains_key("generationSet"),
+        "slim step result must not carry the generation-set fact"
+    );
+    assert!(
+        !result.contains_key("prefixKvCache"),
+        "slim step result must not carry the prefix-KV-cache summary"
+    );
+    // The running-UI identity keys stay present.
+    assert_eq!(result["generationSetId"], json!(plan.genset_id));
+    assert_eq!(result["expectedCount"], json!(plan.image_count));
+    assert_eq!(result["adapter"], json!(plan.adapter));
+    assert_eq!(result["model"], json!(plan.request.model));
+}
+
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
@@ -3384,9 +3713,16 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         1,
         "candle route and payload File tokens must be prepared exactly once per job"
     );
-    let route_binding = run_job
-        .find("let route = prepare_candle_image_route")
-        .expect("one route binding");
+    let route_preparation = run_job
+        .find("prepare_candle_image_route(")
+        .expect("one candle route preparation");
+    let route_binding = run_job[..route_preparation]
+        .rfind("let route = {")
+        .expect("the prepared candle route is bound once");
+    assert!(
+        run_job[route_binding..route_preparation].contains("prepare_image_route_with_progress("),
+        "candle route preparation must report real source-verification progress"
+    );
     let plan_use = run_job[route_binding..]
         .find("ImagePlan::with_count_and_adapter")
         .expect("the resolved route feeds the plan");
@@ -3423,8 +3759,20 @@ fn image_review_wiring_remains_single_route_lazy_and_adapter_aware() {
         .find("CandleImageRoute::PoseReject => {")
         .expect("PoseReject dispatch arm");
     let stub_fallback = run_job
-        .find("if !handled {\n        if request.hires_fix.enabled")
-        .expect("procedural-stub fallback");
+        .find("dispatch_legacy_fallback(&request.model, handled, || async {")
+        .expect("model-bound guarded procedural-stub fallback");
+    assert_eq!(
+        run_job.matches("generate_stub_stream(").count(),
+        1,
+        "the single procedural stub must remain inside the guarded fallback"
+    );
+    let stub_call = run_job
+        .find("generate_stub_stream(")
+        .expect("single stub invocation");
+    assert!(
+        stub_fallback < stub_call,
+        "the model-bound no-fallback guard must run before the procedural stub"
+    );
     assert!(
         pose_reject_dispatch < stub_fallback,
         "PoseReject dispatch must execute before the procedural-stub fallback"
@@ -7666,6 +8014,7 @@ fn flux2_edit_memory_tier_follows_the_resolved_fallback_directory() {
 fn prompt_enhance_reads_advanced_settings() {
     // Absent → disabled with no overrides (the default for every model/job).
     let off = PromptEnhance::from_advanced(
+        "flux2_dev",
         &request(json!({
             "projectId": "p", "model": "flux2_dev", "prompt": "a fox"
         }))
@@ -7678,7 +8027,7 @@ fn prompt_enhance_reads_advanced_settings() {
 
     // The dev Image-Studio toggle sets `enhancePrompt`; optional temperature / max-tokens follow
     // (same keys as the LTX-2.3 video path).
-    let on = PromptEnhance::from_advanced(&request(json!({
+    let on = PromptEnhance::from_advanced("flux2_dev", &request(json!({
         "projectId": "p", "model": "flux2_dev", "prompt": "a fox",
         "advanced": { "enhancePrompt": true, "enhanceTemperature": 0.2, "enhanceMaxTokens": 256 }
     }))
@@ -7716,10 +8065,12 @@ fn prompt_enhance_rejects_untyped_unbounded_and_unsupported_routes() {
             "worker-owned",
         ),
     ] {
-        let error =
-            parse_prompt_enhancement_fields(&request(json!({ "advanced": advanced })).advanced)
-                .expect_err("invalid settings reject")
-                .to_string();
+        let error = parse_prompt_enhancement_fields(
+            "flux2_dev",
+            &request(json!({ "advanced": advanced })).advanced,
+        )
+        .expect_err("invalid settings reject")
+        .to_string();
         assert!(error.contains(expected), "{error}");
     }
 
@@ -8001,10 +8352,10 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
     .unwrap_err()
     .to_string()
     .contains("duplicate"));
-    let fact = take_prompt_enhancement_fact(&mut reports, 0)
+    let fact = take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .expect("the report remains available for its image");
     assert_eq!(fact["effectivePrompt"], "a red fox");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("no prompt-enhancement report"));
@@ -8018,7 +8369,7 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
         enhanced("another prompt", "a red fox"),
     )
     .expect("the carrier accepts the typed provider report");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("did not match"));
@@ -8032,7 +8383,7 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
         enhanced("a fox", "a fox"),
     )
     .expect("the carrier accepts the typed provider report");
-    assert!(take_prompt_enhancement_fact(&mut reports, 0)
+    assert!(take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev")
         .unwrap_err()
         .to_string()
         .contains("did not rewrite"));
@@ -8058,11 +8409,11 @@ fn prompt_enhancement_reports_are_exactly_once_and_bound_to_an_image() {
     )
     .expect("first image report is accepted second");
     assert_eq!(
-        take_prompt_enhancement_fact(&mut reports, 0).unwrap()["effectivePrompt"],
+        take_prompt_enhancement_fact(&mut reports, 0, "flux2_dev").unwrap()["effectivePrompt"],
         "a fox in snowfall"
     );
     assert_eq!(
-        take_prompt_enhancement_fact(&mut reports, 1).unwrap()["effectivePrompt"],
+        take_prompt_enhancement_fact(&mut reports, 1, "flux2_dev").unwrap()["effectivePrompt"],
         "a moonlit owl"
     );
 }
@@ -8519,6 +8870,73 @@ fn prepared_krea_imported_route_rejects_selection_to_dispatch_retarget() {
     )
     .expect_err("dispatch rejects a retargeted prepared entry");
     assert_route_retarget_artifact_seal_mismatch(error, "test imported route", &sealed_path);
+}
+
+/// A direct legacy adapter must retain its lexical entry even when confinement resolves a
+/// filesystem alias. A distinct sibling and an alias retarget must never pass as that entry.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn legacy_direct_adapter_pin_retains_lexical_alias_and_rejects_retarget() {
+    fn link_directory(target: &Path, link: &Path) {
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).expect("directory symlink fixture");
+        #[cfg(windows)]
+        {
+            let result = std::process::Command::new("cmd.exe")
+                .args(["/d", "/c", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("create directory junction fixture");
+            assert!(
+                result.status.success(),
+                "junction creation failed: {result:?}"
+            );
+        }
+    }
+    fn unlink_directory(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).expect("remove directory symlink");
+        #[cfg(windows)]
+        std::fs::remove_dir(link).expect("remove directory junction without traversing it");
+    }
+
+    let data = tempfile::tempdir().expect("data root");
+    let mut settings = Settings::from_env();
+    settings.data_dir = data.path().to_path_buf();
+    settings.external_model_roots = Vec::new();
+    let first = data.path().join("loras").join("first");
+    let second = data.path().join("loras").join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    write_min_lora(&first.join("adapter.safetensors"));
+    write_min_lora(&second.join("adapter.safetensors"));
+    let alias = data.path().join("loras").join("selected");
+    link_directory(&first, &alias);
+    let lexical = alias.join("adapter.safetensors");
+    let sibling = second.join("adapter.safetensors");
+    let pin = resolve_prepared_adapter_file(
+        &json!({ "path": lexical.display().to_string() }),
+        &settings,
+        "imported_krea_control_route_pin",
+    )
+    .expect("validated legacy adapter is pinned");
+    assert_eq!(pin.loader_path(), lexical);
+    assert_eq!(
+        pin.canonical_target_path(),
+        first.join("adapter.safetensors").canonicalize().unwrap()
+    );
+    assert_ne!(pin.canonical_target_path(), sibling.canonicalize().unwrap());
+    pin.ensure_unchanged().expect("original alias is unchanged");
+
+    unlink_directory(&alias);
+    link_directory(&second, &alias);
+    let refused = pin.ensure_unchanged().is_err();
+    unlink_directory(&alias);
+    assert!(
+        refused,
+        "retargeted lexical adapter must invalidate its token"
+    );
 }
 
 /// The strict-pose imported route owns three independently mutable payload classes: the primary DiT,
@@ -18659,18 +19077,23 @@ fn candle_sana_routes_pin_dense_artifacts_and_admit_both_hires_contexts() {
         .0;
     assert!(final_mode.contains("sana_1600m") && final_mode.contains("image_to_image"));
     let final_selector = source
-        .split_once(
-            "let shared_memory = crate::candle_memory_strategy::evaluate_shared_image_priced(",
-        )
+        .split_once("let shared_memory = if let Some(references) = flux3_references.as_ref() {")
         .expect("final-pass selector")
         .1
         .split_once("let first_pass_shared_memory")
         .expect("end final-pass selector")
         .0;
+    let final_selector = final_selector
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     assert!(
-        final_selector.contains("hires_fix.is_some(),\n        hires_fix.is_some(),"),
+        final_selector.contains("hires_fix.is_some(), hires_fix.is_some(),"),
         "SANA Hires final pass must carry worker multipass and typed hasPhases authority"
     );
+    assert!(final_selector.contains("evaluate_shared_image_priced("));
+    assert!(final_selector.contains("evaluate_shared_image_priced_with_resources("));
+    assert!(final_selector.contains("Some(&references.resources)"));
     let first_mode = source
         .split_once("let first_pass_shared_memory = if hires_fix.is_some()")
         .expect("first-pass admission")
@@ -21692,6 +22115,8 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // network overlaid, and the route reaches the generic `generate_candle_stream` base-model
         // admission gate. Structurally the SenseNova case, not the ControlNet case.
         "QwenImage21Edit",
+        // FLUX.3 references use the base autoencoder, not an additional conditioning network.
+        "Flux3Reference",
         "KreaEdit",
         // SenseNova references are consumed by the unified MoT base's built-in vision/VAE path; no
         // separately loaded conditioning network is overlaid. The route then uses the generic
@@ -21701,6 +22126,10 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
         // unlike the dedicated IP-Adapter/ControlNet routes, it loads no second conditioning network
         // and reaches the generic `generate_candle_stream` base-model admission gate.
         "KolorsEdit",
+        // MOSS retains edit rank A/B tensors on its existing base projections, with no second
+        // independently loaded conditioning network. Its native edit peak includes those tensors
+        // and the reference workspace; the exact cold estimate and loader gate are checked below.
+        "MossImageEdit",
         // Krea sampling-regime lanes: the same base, a different schedule / phase list.
         "KreaTurboOnRaw",
         "KreaMultiPhase",
@@ -21731,6 +22160,18 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
     // them. Their companion snapshot's transformer is replaced by the primary File and must not be
     // double-priced; routing through the cache does not replace Candle's live-VRAM admission.
     const BASE_ADMITTED: &[(&str, &str, &str, &str)] = &[
+        (
+            "Flux3Reference",
+            "base.rs",
+            include_str!("base.rs"),
+            "evaluate_shared_image_priced_with_resources(",
+        ),
+        (
+            "MossImageEdit",
+            "moss.rs",
+            include_str!("moss.rs"),
+            "runtime.cold_peak(",
+        ),
         (
             "SdxlEdit",
             "sdxl_edit_candle.rs",
@@ -21859,6 +22300,7 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             "start_cached_gen_stream(",
             "start_cached_gen_stream_with_request_state(",
             "start_cached_gen_stream_after_cold_admission(",
+            "start_cached_gen_stream_with_request_state_using_owned(",
         ]
         .iter()
         .filter_map(|needle| {
@@ -21887,6 +22329,68 @@ fn every_candle_conditioning_route_is_admitted_through_a_gate() {
             );
         }
     }
+
+    // MOSS computes its exact edit peak before the cache handoff and admits inside the actual
+    // cache-miss loader. Check the Candle arm specifically, so the parallel MLX arm cannot carry
+    // this assertion, then bind the production loader callback to the admitted factory boundary.
+    let moss = include_str!("moss.rs");
+    let native_runtime = moss
+        .split_once("impl MossStreamRuntime for NativeMossStreamRuntime")
+        .expect("native MOSS defaults must exist")
+        .1;
+    let peak_lines: Vec<_> = native_runtime.lines().collect();
+    let candle_start = peak_lines
+        .windows(2)
+        .position(|lines| {
+            lines[0].trim()
+                == "#[cfg(all(not(target_os = \"macos\"), feature = \"backend-candle\"))]"
+                && lines[1].trim() == "let peak = if edit {"
+        })
+        .expect("native defaults must retain the Candle cold-peak arm");
+    assert!(
+        peak_lines[candle_start + 2..]
+            .iter()
+            .take_while(|line| !line.contains("} else {"))
+            .any(|line| line.contains("moss_edit_cold_peak(variant,")
+                && !line.trim_start().starts_with("//")),
+        "MOSS Candle edit must use the exact native edit peak before the cache handoff"
+    );
+    let loader = moss
+        .split_once("load: move |id: &str, spec: &LoadSpec| {")
+        .expect("MOSS must retain its actual cache-miss loader")
+        .1
+        .split_once("\n        },")
+        .expect("MOSS loader callback must end")
+        .0;
+    let live_loader = loader
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        live_loader.contains("moss_load_admitted(")
+            && live_loader.contains("|| load_generator(id, spec)"),
+        "MOSS actual provider construction must remain inside the admitted loader closure"
+    );
+    let factory = moss
+        .split_once("fn moss_load_admitted<T>(")
+        .expect("MOSS admitted factory must exist")
+        .1
+        .split_once("\n}\n")
+        .expect("MOSS admitted factory must end")
+        .0;
+    let live_factory = factory
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let admission = live_factory
+        .find("moss_admit(peak, 0, budget)")
+        .expect("MOSS cold admission must grant no residency credit");
+    let load = live_factory
+        .find("\n    load()")
+        .expect("MOSS admitted factory must invoke the supplied loader");
+    assert!(admission < load, "MOSS must admit before provider loading");
 
     // Imported single-file lanes use the same provider registry and generator cache as snapshot-backed
     // lanes. Their primary source must remain `File`, their companion snapshot must be explicit, and the
@@ -22239,7 +22743,7 @@ mod preview_stream_tests {
                     ..
                 } => {
                     assert_eq!(index, expected_index);
-                    assert_eq!(actual_seed, seed);
+                    assert_eq!(actual_seed, Some(seed));
                     assert_eq!(face_likeness.unwrap()["score"], likeness);
                 }
                 other => panic!("expected a scored image, got {}", gen_event_name(&other)),
@@ -22323,7 +22827,7 @@ mod preview_stream_tests {
             other => panic!("expected a step event, got {}", gen_event_name(&other)),
         }
         match rx.try_recv().expect("image 0 completes") {
-            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, 70)),
+            GenEvent::Image { index, seed, .. } => assert_eq!((index, seed), (0, Some(70))),
             other => panic!("expected an image event, got {}", gen_event_name(&other)),
         }
         assert!(
@@ -22338,10 +22842,13 @@ mod preview_stream_tests {
             GenEvent::Step { .. } => "Step",
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
+            GenEvent::Upsampling { .. } => "Upsampling",
+            GenEvent::LoadActivity { .. } => "LoadActivity",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
             GenEvent::ImageFacts { .. } => "ImageFacts",
+            GenEvent::AssetWritten { .. } => "AssetWritten",
             GenEvent::Image { .. } => "Image",
         }
     }
@@ -22360,11 +22867,13 @@ mod preview_stream_tests {
         assert_eq!((decoded.width(), decoded.height()), (2, 2));
     }
 
-    /// The frame rides `result.previewFrame` as a single slot on the EXISTING streaming result —
+    /// The frame rides `result.previewFrame` as a single slot on the SLIM STEP result —
     /// `result` is replaced wholesale per accepted POST, so a result built without the slot (the
-    /// final/terminal posts) is what clears it. Both halves are pinned here.
+    /// full Image/Decoding posts and every terminal post) is what clears it. Both halves are
+    /// pinned here, plus the sc-8953 follow-through contract: the step result carries NO
+    /// accumulated fact sets.
     #[test]
-    fn streaming_result_carries_the_preview_slot_and_omits_it_when_cleared() {
+    fn slim_step_result_carries_the_preview_slot_and_omits_it_when_cleared() {
         let plan = ImagePlan::new(&request(
             json!({ "projectId": "p", "prompt": "x", "count": 1 }),
         ));
@@ -22374,7 +22883,7 @@ mod preview_stream_tests {
             total: 20,
             data_url: "data:image/jpeg;base64,QQ==".to_owned(),
         };
-        let with = streaming_result_with_preview(&plan, &[], Some(&slot));
+        let with = slim_step_result_with_preview(&plan, Some(&slot));
         let frame = with
             .get("previewFrame")
             .and_then(Value::as_object)
@@ -22387,13 +22896,13 @@ mod preview_stream_tests {
             Some("data:image/jpeg;base64,QQ==")
         );
 
-        let without = streaming_result_with_preview(&plan, &[], None);
+        let without = slim_step_result_with_preview(&plan, None);
         assert!(
             !without.contains_key("previewFrame"),
             "a result built with no live slot must omit the key entirely"
         );
-        // Every other key matches the plain streaming result — the preview is strictly additive.
-        assert_eq!(without, streaming_result(&plan, &[]));
+        // Every other key matches the plain slim step result — the preview is strictly additive.
+        assert_eq!(without, slim_step_result(&plan));
     }
 }
 
@@ -22424,12 +22933,12 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         .expect("the Preview arm of consume_gen_events");
     let arm_end = arm_start
         + base[arm_start..]
-            .find("\n            GenEvent::Image {")
-            .expect("the Preview arm is followed by the Image arm");
+            .find("\n            GenEvent::")
+            .expect("the Preview arm is followed by another event arm");
     let arm = &base[arm_start..arm_end];
     assert!(
         !arm.contains("update_job("),
-        "GenEvent::Preview must NOT post — the frame rides the next Step/Decoding update, which is \
+        "GenEvent::Preview must NOT post — the frame rides the next Step update, which is \
          why the first `generating` POST carries no previewFrame and why previewSupport.js holds \
          its placeholder across denoise step 1. Arm:\n{arm}"
     );
@@ -22437,14 +22946,24 @@ fn the_preview_arm_never_posts_so_frame_one_rides_the_next_step_update() {
         arm.contains("latest_preview = Some(slot)"),
         "the Preview arm must park the frame in the single latest-wins slot for the next POST"
     );
-    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked.
+    // The counterpart: the Step arm is what actually posts, and it attaches whatever is parked
+    // on the SLIM step result (sc-8953 follow-through — no accumulated fact sets per step).
     let step_start = base
         .find("GenEvent::Step {")
         .expect("the Step arm of consume_gen_events");
-    let step_arm = &base[step_start..(step_start + 2000).min(base.len())];
+    let step_arm = &base[step_start..(step_start + 2600).min(base.len())];
     assert!(
-        step_arm.contains("update_job(") && step_arm.contains("streaming_result_with_preview("),
-        "the Step arm is the POST that carries the parked frame"
+        step_arm.contains("update_job(") && step_arm.contains("slim_step_result_with_preview("),
+        "the Step arm is the POST that carries the parked frame on the slim step result"
+    );
+    // And the full fact set streams on the arms where it can actually change.
+    let image_start = base
+        .find("GenEvent::Image {")
+        .expect("the Image arm of consume_gen_events");
+    let image_arm = &base[image_start..(image_start + 6000).min(base.len())];
+    assert!(
+        image_arm.contains("streaming_result(plan, asset_writes)"),
+        "the Image arm must post the FULL result (the fact set just grew by this image)"
     );
 }
 
@@ -27721,9 +28240,37 @@ fn sdxl_bespoke_routes_preserve_ordered_adapters_and_hires_context_identity() {
     assert!(detail.contains("raw_adapter_settings[\"memoryEvidenceRevision\"]"));
     assert!(!detail.contains("packed/request-quantized detail is not supported"));
     assert!(base.contains("context.mode = if reference_count == 0"));
-    assert!(base.contains(
-        "let shared_request_mode = candle_base_memory_request_mode(engine_id, &request.mode)"
-    ));
+    let mode_call = base
+        .split_once("let shared_request_mode = candle_base_memory_request_mode(")
+        .expect("shared mode must use the family-specific mode mapper")
+        .1
+        .split_once(");")
+        .expect("shared mode mapper call must terminate")
+        .0;
+    // rustfmt may wrap this call without changing its executed family/reference identity.
+    // Keep the complete argument/branch contract, not independent tokens from unrelated code.
+    let reference_mode_contract = |call: &str| {
+        call.split_whitespace().collect::<Vec<_>>().join(" ")
+            == "engine_id, if flux3_references.is_some() { \"edit_image\" } else { &request.mode },"
+    };
+    assert!(
+        reference_mode_contract(mode_call),
+        "actual FLUX3 references select edit_image; every other family preserves authored mode"
+    );
+    for (required, mutation) in [
+        ("engine_id,", "\"sdxl\","),
+        ("flux3_references.is_some()", "false"),
+        ("\"edit_image\"", "\"text_to_image\""),
+        ("&request.mode", "\"edit_image\""),
+    ] {
+        let mutated = mode_call.replacen(required, mutation, 1);
+        assert_ne!(mutated, mode_call, "mutation must change the actual call");
+        assert!(
+            !reference_mode_contract(&mutated),
+            "the actual normalized guard must reject changing {required}"
+        );
+    }
+    assert!(reference_mode_contract(mode_call));
     assert!(base.contains("let shared_admission_mode = if hires_fix.is_some()"));
     assert!(base.contains("let first_pass_shared_memory = if hires_fix.is_some()"));
     assert!(base.contains("| \"sdxl\""));
@@ -27742,8 +28289,8 @@ fn candle_receipt_authority_is_family_agnostic_and_compared_after_cache_rebindin
     // is the ordering of receipt authority versus cache rebinding rather than a provider result.
     let base = include_str!("base.rs");
     let body = base
-        .split_once("async fn generate_candle_stream_using(")
-        .expect("missing production function marker generate_candle_stream_using")
+        .split_once("async fn generate_candle_registry_stream_using(")
+        .expect("missing production generic Candle function marker")
         .1
         .split_once("\n}\n")
         .expect("generate_candle_stream has no top-level end marker")
@@ -28087,39 +28634,76 @@ fn candle_stream_emits_the_ladder_selection_and_charges_the_reserve_from_the_raw
         !stream.contains("ladder_reserve_gb(budget"),
         "the ladder reserve must never be derived from the reclaimable-credited budget"
     );
-    // The final pass is the priced twin (epic 25899: it carries the prefix-KV-cache surcharge);
-    // the hires first pass is the plain selection.
-    let shared_calls = stream
+    // Exactly one final-pass branch runs: the legacy priced twin for no references, or the
+    // reference-aware twin. The optional hires first pass remains the plain selection.
+    assert!(stream
+        .contains("let shared_memory = if let Some(references) = flux3_references.as_ref() {"));
+    // Per-tier preflight also uses the shared selector before generation-memory construction.
+    // This guard concerns the final render pass and its independent Hires first pass.
+    let render_selectors = stream
+        .split_once("let mut generation_memory:")
+        .expect("render selection begins after the per-tier capability clamp")
+        .1;
+    let shared_calls = render_selectors
         .match_indices("crate::candle_memory_strategy::evaluate_shared_image(")
         .count()
-        + stream
+        + render_selectors
             .match_indices("crate::candle_memory_strategy::evaluate_shared_image_priced(")
+            .count()
+        + render_selectors
+            .match_indices(
+                "crate::candle_memory_strategy::evaluate_shared_image_priced_with_resources(",
+            )
             .count();
     assert_eq!(
-        shared_calls, 2,
-        "the final-pass and hires first-pass shared selections"
+        shared_calls, 3,
+        "the mutually exclusive final-pass branches and the hires first-pass selection"
     );
+    let normalized_stream = stream.split_whitespace().collect::<Vec<_>>().join(" ");
     assert_eq!(
-        stream
-            .match_indices("budget,\n        shared_reserve_gb,\n        shared_predicted_peak_gb,")
-            .count()
-            + stream
-                .match_indices(
-                    "budget,\n            shared_reserve_gb,\n            shared_predicted_peak_gb,"
-                )
-                .count(),
-        2,
-        "both shared selections must pass the raw-probe reserve explicitly after the budget"
+        normalized_stream
+            .match_indices("budget, shared_reserve_gb, shared_predicted_peak_gb,")
+            .count(),
+        3,
+        "every shared call must pass the raw-probe reserve explicitly after the budget"
     );
 
     // Deference arm: gated on sequential capability AND a staging-engaging selection.
-    let deference = stream
-        .split_once("} else if sequential_capable\n                && memory_strategy_selection")
+    let deference = normalized_stream
+        .split_once("} else if sequential_capable")
         .expect("the legacy gate's deference arm is gated on sequential_capable")
         .1
         .split_once("match (needed, budget) {")
         .expect("deference arm body")
         .0;
+    // Rustfmt may split a long method chain before the dot (`memory_strategy_selection\n
+    // .is_some_and(...)`), which is semantically identical and must not red this guard. Normalize
+    // whitespace before a dot once, then both the contract check and the mutation replacen below see
+    // the same spelling.
+    let deference = format!("sequential_capable{deference}").replace(" .", ".");
+    let deference_contract = |arm: &str| {
+        arm.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replace(" .", ".")
+            .starts_with(
+            "sequential_capable && memory_strategy_selection.is_some_and(|selection| selection.strategy.is_optimized()) && generation_memory.is_some_and(|memory| memory.stage_residency) {",
+        )
+    };
+    assert!(deference_contract(&deference));
+    for required in [
+        "sequential_capable",
+        "memory_strategy_selection.is_some_and(|selection| selection.strategy.is_optimized())",
+        "generation_memory.is_some_and(|memory| memory.stage_residency)",
+    ] {
+        let mutated = deference.replacen(required, "true", 1);
+        assert_ne!(mutated, deference, "mutation must change the actual arm");
+        assert!(
+            !deference_contract(&mutated),
+            "the actual normalized guard must reject removing {required}"
+        );
+    }
+    assert!(deference_contract(&deference));
     assert!(
         deference.contains(".is_some_and(|selection| selection.strategy.is_optimized())"),
         "the deference arm requires an optimized selection"
@@ -29592,7 +30176,7 @@ async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_res
         for (index, seed) in [(0_usize, 5_i64), (1, 6)] {
             let _ = tx.blocking_send(GenEvent::Image {
                 index,
-                seed,
+                seed: Some(seed),
                 width: 64,
                 height: 64,
                 pixels: stub_rgb8(64, 64, seed),

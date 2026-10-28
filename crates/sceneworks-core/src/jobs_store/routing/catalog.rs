@@ -1168,6 +1168,11 @@ pub(crate) const IMAGE_MODEL_CAPS: &[ModelCaps] = &[
     // including generation-task LoRA / LoKr adapters. `IrisSurface` keeps the request shapes
     // identical across backends (`iris_mlx_eligible`).
     ModelCaps::new("iris_3b", true, true, false, false, true),
+    // FLUX 3 Image Klein, distilled (sc-26234/5): the same plain text-to-image request on native
+    // MLX and Candle/CUDA. S6 adds the base checkpoint and exact-identity LoRA; S8 owns
+    // native precision packages. Missing base converted pins never become a dense fallback.
+    ModelCaps::new("flux3_klein", true, true, false, false, true),
+    ModelCaps::new("flux3_klein_base", true, true, false, false, true),
     // Supra2-IMG (sc-24213 MLX / sc-24214 Candle, epic 24212): `candle-gen-supra2` registers the SAME
     // engine id `supra2_img` as `mlx-gen-supra2`, so the one plain text-to-image contract that routes
     // to MLX on a Mac routes off-Mac too, through the generic candle txt2img lane. No quant tier, no
@@ -2224,6 +2229,8 @@ pub const MLX_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S13, sc-24161): the same MLX trainer in
     // edit mode. The Candle twin (sc-24162) is in the candle set too.
     "qwen_image_2_1_edit_lora",
+    "flux3_klein_lora",
+    "flux3_klein_edit_lora",
 ];
 
 /// SceneWorks training kernels with a native candle trainer that needs no base-model disambiguation
@@ -2257,6 +2264,8 @@ pub(crate) const CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 instruction-EDIT LoRA/LoKr (epic 24107 S14, sc-24162): the same Candle trainer
     // in edit mode (`max_reference_images` 10), base-gated the same way.
     "qwen_image_2_1_edit_lora",
+    "flux3_klein_lora",
+    "flux3_klein_edit_lora",
 ];
 
 /// Whether an off-Mac (candle) worker can run this training kernel at all. A real training run on a
@@ -2287,6 +2296,8 @@ pub(crate) const MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
     // Qwen Image 2.1 edit (sc-24161/sc-24162): native MLX + Candle trainers and no generic one, so
     // a generic worker refuses it while the candle exception admits it (it is candle-routed).
     "qwen_image_2_1_edit_lora",
+    "flux3_klein_lora",
+    "flux3_klein_edit_lora",
 ];
 
 #[cfg(test)]
@@ -2427,12 +2438,16 @@ mod tests {
         "anima_aesthetic",
         "anima_turbo",
         "iris_3b",
+        "flux3_klein",
+        "flux3_klein_base",
         "moss_image_base",
         "moss_image_sft",
         "supra2_img",
     ];
 
     const EXPECTED_CANDLE_ROUTED_MODELS: &[&str] = &[
+        "flux3_klein",
+        "flux3_klein_base",
         "mage_flow_base",
         "mage_flow",
         "mage_flow_turbo",
@@ -2524,6 +2539,9 @@ mod tests {
         "flux2_klein_9b",
         "flux2_klein_9b_kv",
         "flux2_dev",
+        // sc-26239 + sc-26241: additive LoRA on every native FLUX 3 package.
+        "flux3_klein",
+        "flux3_klein_base",
         "sdxl",
         "realvisxl",
         "illustrious_xl_v1",
@@ -2655,6 +2673,8 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24161: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native MLX trainer.
         "qwen_image_2_1_edit_lora",
+        "flux3_klein_lora",
+        "flux3_klein_edit_lora",
     ];
 
     const EXPECTED_CANDLE_ROUTED_TRAINING_KERNELS: &[&str] = &[
@@ -2676,6 +2696,8 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24162: Qwen Image 2.1 instruction-edit LoRA/LoKr on the native Candle trainer.
         "qwen_image_2_1_edit_lora",
+        "flux3_klein_lora",
+        "flux3_klein_edit_lora",
     ];
 
     const EXPECTED_MLX_ONLY_TRAINING_KERNELS: &[&str] = &[
@@ -2691,6 +2713,8 @@ mod tests {
         "qwen_image_2_1_lora",
         // sc-24162: native-Rust-only like its T2I sibling, so it stays here although candle-routed.
         "qwen_image_2_1_edit_lora",
+        "flux3_klein_lora",
+        "flux3_klein_edit_lora",
     ];
 
     #[test]

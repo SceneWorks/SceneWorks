@@ -1314,6 +1314,27 @@
       ]
     },
     {
+      "id": "flux3-image-klein",
+      "models": [
+        "flux3_klein"
+      ],
+      "name": "FLUX 3 Image Klein (black-forest-labs/flux-3-image-klein) + bundled Qwen3-VL-4B-Instruct text encoder",
+      "publisher": "Black Forest Labs; Alibaba Qwen Team",
+      "license": "FLUX Kommunity License v1.0 (weights); Apache-2.0 (text encoder)",
+      "homepage": "https://huggingface.co/black-forest-labs/flux-3-image-klein",
+      "usage": "Native MLX (Apple Silicon) text-to-image from the distilled FLUX 3 Image Klein package (the 5.6B flow-map transformer and its autoencoder, downloaded on install from the gated upstream repository at the pinned revision — NOT re-hosted by SceneWorks). The weights are licensed under the FLUX Kommunity License v1.0: non-commercial use, with a commercial-OUTPUT exception for Qualifying Users (gross annualized revenue under US$5,000,000) subject to its content-filter and AI-disclosure conditions; it is not a licence to train, fine-tune, distil or redistribute the weights commercially. The package's bundled text encoder is a byte-identical copy of Qwen/Qwen3-VL-4B-Instruct (Apache-2.0). Also covers the Rust source port of the black-forest-labs/flux-3-image-klein reference pipeline (Apache-2.0).",
+      "documents": [
+        {
+          "label": "FLUX Kommunity License v1.0",
+          "key": "flux3-image-klein-flux-kommunity-license"
+        },
+        {
+          "label": "Apache License 2.0 (Qwen3-VL-4B-Instruct text encoder)",
+          "key": "iris-3b-apache"
+        }
+      ]
+    },
+    {
       "id": "iris-3b",
       "models": [
         "iris_3b",

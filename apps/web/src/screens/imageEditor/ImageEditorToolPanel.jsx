@@ -1,4 +1,6 @@
 import React from "react";
+import { MossImageEditControls } from "../../components/MossImageEditControls.jsx";
+import { MossReferencePicker } from "../../components/MossReferencePicker.jsx";
 import { EditPromptTemplates } from "../../components/EditPromptTemplates.jsx";
 import { assetDisplayUrl } from "../../components/assetMedia.jsx";
 // sc-24113 — the ordered-reference helpers. Pure and shared with the Studio so the rail, the
@@ -50,6 +52,7 @@ function samePanelProps(previous, next) {
 }
 
 export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ scope }) {
+  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs } = scope;
   const { EDIT_OUTPUT_ASPECTS, EditorLoraPanel, FitModeControl, maxEditReferences, StudioUpdateBadge, StudioUpdateNotice, aiOp, canMask, clearMask, createLoraDownloadJob, createModelDownloadJob, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, effectiveFitMode, guidanceDefaultFromModel, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskHasContent, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, refineMask, editTransparent, setEditTransparent, requestEditLoraDownload, requestSmartSelectDownload, runEdit, selectedEditLoras, selectedEditModel, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, updateOptionLabel } = scope;
   const renderPanel = () => {
     if (editModels.length === 0) {
@@ -166,6 +169,13 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
           )
         ) : null}
 
+        {mossEdit ? <>
+          <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} sharedGuidance onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
+          <p>The working image is Image 1. Additional slots follow it in order.</p>
+          <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
+          {mossEditError ? <p role="alert">{mossEditError}</p> : null}
+        </> : null}
+        <div hidden={mossEdit}>
         <EditorLoraPanel
           selectedModel={selectedEditModel}
           selectedLoras={selectedEditLoras}
@@ -209,6 +219,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
           ) : null}
         </div>
 
+        </div>
         {canMask ? (
           <div className="ie-section">
             <div className="ie-sec-title">
@@ -352,7 +363,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
           </div>
         ) : null}
 
-        {multiRefCapable ? (
+        {multiRefCapable && !mossEdit ? (
           <div className="ie-section">
             <div className="ie-sec-title">Reference images</div>
             {/* sc-24113 — the reference list is ORDERED, and the order is semantic. The engine's
@@ -439,6 +450,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
                 style={{ fontFamily: "var(--ie-mono)" }}
                 type="number"
                 value={editSeed}
+                disabled={mossEdit && Boolean(mossEditSettings.mossImageAdvanced?.noise)}
               />
             </div>
             <div className="ie-field">
@@ -448,18 +460,19 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
               <input
                 className="ie-input"
                 min={0}
-                onChange={(event) => setEditGuidance(event.target.value)}
+                onChange={(event) => mossEdit ? setMossEditSettings({ ...mossEditSettings, guidanceScale: Number(event.target.value) }) : setEditGuidance(event.target.value)}
                 placeholder={guidanceDefaultFromModel(selectedEditModel)?.toString() ?? "Default"}
                 step={0.1}
                 style={{ fontFamily: "var(--ie-mono)" }}
                 type="number"
-                value={editGuidance}
+                value={mossEdit ? mossEditSettings.guidanceScale : editGuidance}
+                aria-label="Guidance"
               />
             </div>
           </div>
           <button
             className="ie-btn block primary"
-            disabled={!editPrompt.trim() || !!aiOp || editLoraRequiredMissing}
+            disabled={(!editPrompt.trim() && !(mossEdit && mossEditSettings.mossImageAdvanced?.positive)) || !!aiOp || editLoraRequiredMissing || (mossEdit && (!mossEditReady || Boolean(mossEditError)))}
             onClick={runEdit}
             type="button"
           >
@@ -473,6 +486,7 @@ export const ImageEditorEditPanel = React.memo(function ImageEditorEditPanel({ s
 }, samePanelProps);
 
 export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({ scope }) {
+  const { mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, token, jobs, imageAssets, refAssetIds, setRefAssetIds, maxEditReferences } = scope;
   const { BOX_PALETTE, MAX_BOX_PALETTE, StudioUpdateBadge, StudioUpdateNotice, addPaletteColor, aiOp, boxColor, boxMetadataGaps, boxes, chooseBoxColor, clearBoxes, composedPrompt, createModelDownloadJob, deleteBox, editModel, editModels, editPrompt, removePaletteColor, runBoxEdit, selectedBox, selectedBoxGaps, selectedBoxId, selectedEditModel, setEditModel, setEditPrompt, setSelectedBoxId, updateBox, updateOptionLabel } = scope;
   const renderPanel = () => (
     <>
@@ -623,6 +637,12 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
       {boxes.length ? (
         <div className="ie-section">
           <div className="ie-sec-title">Generate</div>
+          {mossEdit ? <>
+            <MossImageEditControls model={selectedEditModel} token={token} jobs={jobs} options={mossImageEdit} onChange={setMossImageEdit} generation={mossEditSettings} onGenerationChange={setMossEditSettings} advanced={mossEditSettings.mossImageAdvanced} onAdvancedChange={(value) => setMossEditSettings({ ...mossEditSettings, mossImageAdvanced: value })} assets={scope.tensorAssets} importAsset={scope.importTensorAsset} promptBatch={mossEditSettings.promptBatch} onPromptBatchChange={(batch) => { setMossEditSettings({ ...mossEditSettings, promptBatch: batch }); if (batch.length) setEditPrompt(batch[0]); }} />
+            <p>The baked working image is Image 1. Additional slots follow it in order.</p>
+            <MossReferencePicker assets={imageAssets} characters={scope.characters} projectId={scope.projectId} importAsset={scope.importTensorAsset} assetIds={refAssetIds} onChange={setRefAssetIds} max={maxEditReferences - 1} firstOrdinal={2} />
+            {mossEditError ? <p role="alert">{mossEditError}</p> : null}
+          </> : null}
           {editModels.length ? (
             <>
               <select className="ie-select" onChange={(event) => setEditModel(event.target.value)} value={editModel}>
@@ -647,7 +667,7 @@ export const ImageEditorBoxesPanel = React.memo(function ImageEditorBoxesPanel({
                 <button className="ie-btn" disabled={!composedPrompt} onClick={() => setEditPrompt(composedPrompt)} type="button">
                   Auto-prompt
                 </button>
-                <button className="ie-btn primary" disabled={!!aiOp || !editModel} onClick={runBoxEdit} type="button">
+                <button className="ie-btn primary" disabled={!!aiOp || !editModel || (mossEdit && (!mossEditReady || Boolean(mossEditError)))} onClick={runBoxEdit} type="button">
                   Generate
                 </button>
               </div>

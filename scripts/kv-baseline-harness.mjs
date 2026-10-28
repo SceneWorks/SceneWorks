@@ -7,7 +7,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, readFileSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // v5 (sc-20671): per-repeat decode throughput is a dedicated fixed-length steady decode recorded
 // beside each timing sample, and provenance records power mode and thermal state at row start/end.
@@ -3217,4 +3217,4 @@ async function main() {
   process.exitCode = 2;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) await main();

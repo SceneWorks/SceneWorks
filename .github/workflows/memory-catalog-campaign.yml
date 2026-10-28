@@ -17,6 +17,14 @@
 # jobs, including every plan/walk/branch/push/PR step described below. Catalog is
 # still the default profile; no app run can publish catalog measurements.
 #
+# The issue-3197 sdxl-cuda-endpoints profile reuses the candle build, pin and cache setup,
+# then captures only resident maximum + fully optimized sequential minimum in fresh processes.
+# It retains JSON evidence and PNG output as artifacts; it makes no branch, commit, push or PR.
+# After packaging the pair, sdxl-cuda-admitted-replay exercises one ordinary owned API/worker
+# request at a six-GiB admission cap, with selected-card activity/peak and real served PNG output.
+# CI_IMPACT: manual only, two real renders, 60 minutes each; 180-minute job ceiling includes
+# the existing native CUDA build. Normal CI adds only a small pure metadata test.
+#
 # WHAT IT PRODUCES. A NEW branch `story/<campaign>-<backend>-campaign-<run_id>` carrying one commit
 # per measured anchor, pushed as the walk proceeds (never only at the end), plus a work-dir artifact
 # with the summary JSON, the per-anchor logs and the retained raw bundles. The last step opens a PR
@@ -65,14 +73,19 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: "Catalog by default; Qwen app lifecycle runs only the reusable app proof, with no catalog walk or publication."
+        description: "Catalog by default; Qwen/FLUX3 app lifecycle profiles run only their reusable app proof, with no catalog walk or publication."
         required: false
         type: choice
         options:
           - catalog
           - qwen-image-2-1-app-lifecycle
+          - flux3-image-klein-app-lifecycle
+          - flux3-image-klein-terminal-host
+          - flux3-image-klein-terminal-queue
           - iris-mlx-real-weights
           - supra2-mlx-real-weights
+          - sdxl-cuda-endpoints
+          - sdxl-cuda-admitted-replay
         default: catalog
       inference_sha:
         description: "App lifecycle only: exact final inference pin (40 hex). The dispatched branch/tag must resolve to the exact source SHA supplied as ref."
@@ -87,6 +100,43 @@ on:
           - primary
           - secondary
         default: primary
+      flux3_app_runner_target:
+        description: "FLUX3 app smoke only: secondary=rw-mage; primary=rw-starvector. Reserve an idle physical Mac before dispatch."
+        required: false
+        type: choice
+        options:
+          - secondary
+          - primary
+        default: secondary
+      flux3_terminal_host:
+        description: "FLUX3 terminal host step only (sc-26243): nax-macos (dataset host) | nax-macos-2. The default none is refused, so an empty value never picks a Mac."
+        required: false
+        type: choice
+        options:
+          - none
+          - nax-macos
+          - nax-macos-2
+        default: none
+      flux3_terminal_step:
+        description: "FLUX3 terminal host step only: prepare | self-test | run (run is refused until that host lane's addendum is recorded). The default none is refused."
+        required: false
+        type: choice
+        options:
+          - none
+          - prepare
+          - self-test
+          - run
+        default: none
+      flux3_terminal_control_sha256:
+        description: "FLUX3 terminal host step only: sha256 of $HOME/sc26243-run/control/<host>/<step>.json on that Mac. The default none is refused."
+        required: false
+        type: string
+        default: none
+      flux3_queue_control_sha256:
+        description: "FLUX3 Windows queue only: sha256 of local D:/tmp/sc26243-run/queue-control.json. Default none refuses; an empty input never starts a campaign."
+        required: false
+        type: string
+        default: none
       iris_smoke_filter:
         description: "Iris MLX real-weights only (sc-25690): all | inference | training | full_ft | <one smoke test name> | cleanup."
         required: false
@@ -205,7 +255,7 @@ on:
         default: ""
 
 # `gh pr create` and the branch pushes both run as the default GITHUB_TOKEN. The only other secret
-# this workflow reads is `HF_TOKEN`, scoped to the two walk steps that can fetch
+# this workflow reads is `HF_TOKEN`, scoped to the walk and SDXL endpoint steps that can fetch
 # missing Hugging Face snapshots when `download_missing` is enabled.
 permissions:
   contents: write
@@ -237,6 +287,45 @@ env:
   INPUT_PULID_WEIGHTS: ${{ inputs.pulid_weights }}
 
 jobs:
+  flux3-app-lifecycle:
+    if: ${{ inputs.profile == 'flux3-image-klein-app-lifecycle' }}
+    permissions:
+      contents: read
+    # One ordinary installed-model/API/worker/saved-asset smoke. No catalog jobs,
+    # measurements, pin edits, branch publication or PR. Relative call = exact SHA.
+    uses: ./.github/workflows/flux3-image-klein-app-lifecycle.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      runner_target: ${{ inputs.flux3_app_runner_target }}
+  flux3-terminal-host:
+    if: ${{ inputs.profile == 'flux3-image-klein-terminal-host' }}
+    permissions:
+      contents: read
+    # One coordinator-approved MLX terminal step on one named Mac. No artifact upload, catalog
+    # walk, measurement publication, pin edit or PR. Relative call = exact SHA.
+    uses: ./.github/workflows/flux3-image-klein-terminal-host.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      host: ${{ inputs.flux3_terminal_host }}
+      step: ${{ inputs.flux3_terminal_step }}
+      control_sha256: ${{ inputs.flux3_terminal_control_sha256 }}
+  flux3-terminal-queue:
+    if: ${{ inputs.profile == 'flux3-image-klein-terminal-queue' }}
+    # Serialize WHOLE campaigns, not individual matrix slots. Otherwise two dispatches can each
+    # occupy half the box. One stable group across branches/approvals; no second inner group.
+    concurrency:
+      group: flux3-terminal-queue-physical-host
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/flux3-image-klein-terminal-queue.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      control_sha256: ${{ inputs.flux3_queue_control_sha256 }}
   qwen-app-lifecycle:
     if: ${{ inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     permissions:
@@ -430,7 +519,7 @@ jobs:
         run: bash scripts/ci/memory-catalog/pr.sh
 
   candle:
-    if: ${{ (inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle' }}
+    if: ${{ inputs.profile == 'sdxl-cuda-endpoints' || inputs.profile == 'sdxl-cuda-admitted-replay' || ((inputs.profile == '' || inputs.profile == 'catalog') && inputs.backend == 'candle') }}
     name: candle catalog campaign
     # The one self-hosted CUDA pool, exactly as desktop-windows.yml spells it. There is no runner
     # choice here: all four Windows listeners are processes on ONE box.
@@ -440,15 +529,17 @@ jobs:
       cancel-in-progress: false
     # Shorter than the MLX ceiling because the candle plan is a smaller set of anchors, but still a
     # day: same reasoning -- a wedge ceiling, not a measured budget.
-    timeout-minutes: 1440
+    timeout-minutes: ${{ startsWith(inputs.profile, 'sdxl-cuda-') && 180 || 1440 }}
     env:
       # Native sm_120 (Blackwell) -- this runner IS the RTX PRO 6000 box, same as windows-candle.yml.
       CUDA_COMPUTE_CAP: "120"
-      # The runbook keeps exactly one device visible on the CUDA capture host; the harness's own
-      # preflight refuses the walk when this is unset.
+      # Catalog defaults to GPU1. After compilation the manual SDXL controller selects one idle
+      # physical GPU0/1 and gives each child a matching single-device visibility/identity binding.
       CUDA_VISIBLE_DEVICES: "1"
+      SCENEWORKS_GPU_ID: "1"
       CARGO_NET_OFFLINE: "true"
       BACKEND: candle
+      MEMORY_CAMPAIGN_PROFILE: ${{ inputs.profile || 'catalog' }}
       DEFAULT_HF_CACHE: 'E:\huggingface\hub'
       # The persistent inference clone, on the drive this runner already keeps its per-runner caches
       # on. Deliberately NOT under $GITHUB_WORKSPACE or $RUNNER_TEMP: both are wiped between jobs,
@@ -534,6 +625,7 @@ jobs:
           Write-Host "bash for this job: $bash"
 
       - name: Cut the campaign branch
+        if: ${{ !startsWith(inputs.profile, 'sdxl-cuda-') }}
         id: branch
         run: bash scripts/ci/memory-catalog/branch.sh
 
@@ -623,8 +715,40 @@ jobs:
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo build --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           if errorlevel 1 exit /b 1
+          rem CI_IMPACT: manual SDXL profiles only; three pure binding/clock contracts, no GPU or model calls.
+          if "%MEMORY_CAMPAIGN_PROFILE:~0,10%"=="sdxl-cuda-" (
+            cargo test --release --locked -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter sdxl_endpoint_ -- --nocapture
+            if errorlevel 1 exit /b 1
+          )
           rem Workspace target belongs to this runner service, which schedules one job at a time.
           echo ADAPTER=%GITHUB_WORKSPACE%\target\release\memory-candle-adapter.exe>>%GITHUB_ENV%
+
+      # CI_IMPACT: explicit replay only. Reuses this job's native CUDA toolchain and caches,
+      # runs the new pure gate contracts and strict worker Clippy, then builds the real app/worker.
+      # No normal-CI inference is added; the single real render is the next explicit replay step.
+      - name: Validate the SDXL gate and build the native app for admitted replay
+        if: ${{ inputs.profile == 'sdxl-cuda-admitted-replay' }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test --release --locked -p sceneworks-core --lib sdxl_endpoint_ -- --nocapture
+          if errorlevel 1 exit /b 1
+          cargo test --release --locked -p sceneworks-worker --features backend-candle --lib candle_memory_strategy::tests::sdxl_ -- --nocapture
+          if errorlevel 1 exit /b 1
+          cargo test --release --locked -p sceneworks-worker --features backend-candle --lib generator_cache::tests::sdxl_cuda_policy_transitions_reload_without_fragmenting_other_provider_caches -- --exact --nocapture
+          if errorlevel 1 exit /b 1
+          rem CI_IMPACT: reuse the built test binary for the pure production component/inventory contracts.
+          cargo test --release --locked -p sceneworks-worker --features backend-candle --lib image_jobs::sdxl_endpoint_inventory_tests -- --nocapture
+          if errorlevel 1 exit /b 1
+          cargo clippy --release --locked -p sceneworks-worker --features backend-candle --lib -- -D warnings
+          if errorlevel 1 exit /b 1
+          rem Preserve linked capability output from this already-required worker build; no weights or inference.
+          cargo run --release --locked -p sceneworks-worker --no-default-features --features backend-candle --bin dump-engine-capabilities -- "%RUNNER_TEMP%\memory-catalog-%CAMPAIGN%-%GITHUB_RUN_ID%\engine-capability-facts"
+          if errorlevel 1 exit /b 1
+          cargo build --release --locked -p sceneworks-rust-api --features backend-candle --bin sceneworks-rust-api
+          if errorlevel 1 exit /b 1
+          echo SDXL_REPLAY_API=%GITHUB_WORKSPACE%\target\release\sceneworks-rust-api.exe>>%GITHUB_ENV%
 
       # The owned UUID guard below supplies trusted inventory and idle/post-idle checks without
       # the former name-based process reap or CUDA-ordinal-as-NVML-index ambiguity.
@@ -632,9 +756,21 @@ jobs:
         run: bash scripts/ci/memory-catalog/stage-identity-bundles.sh
 
       - name: Plan the walk
+        if: ${{ !startsWith(inputs.profile, 'sdxl-cuda-') }}
         run: bash scripts/ci/memory-catalog/plan.sh
 
+      - name: Measure the two SDXL q4 CUDA endpoints
+        if: ${{ inputs.profile == 'sdxl-cuda-endpoints' }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: bash scripts/ci/memory-catalog/sdxl-endpoints.sh
+
+      - name: Replay one ordinary admitted SDXL q4 app job
+        if: ${{ inputs.profile == 'sdxl-cuda-admitted-replay' }}
+        run: bash scripts/ci/memory-catalog/sdxl-endpoints.sh
+
       - name: Walk the catalog
+        if: ${{ !startsWith(inputs.profile, 'sdxl-cuda-') }}
         id: walk
         shell: powershell
         env:
@@ -644,7 +780,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'owned CUDA catalog walk failed' }
 
       - name: Push whatever landed
-        if: ${{ always() }}
+        if: ${{ always() && !startsWith(inputs.profile, 'sdxl-cuda-') }}
         run: bash scripts/ci/memory-catalog/push.sh
 
       - name: Upload the campaign work dir
@@ -657,7 +793,7 @@ jobs:
           retention-days: 30
 
       - name: Open the results PR
-        if: ${{ always() }}
+        if: ${{ always() && !startsWith(inputs.profile, 'sdxl-cuda-') }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci/memory-catalog/pr.sh

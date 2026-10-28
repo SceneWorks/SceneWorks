@@ -1,7 +1,8 @@
-import { isMossImage, mossWireOptions, mossAccelerated } from "./mossImage.js";
+import { isMossImage, isMossEdit, mossWireOptions, mossAccelerated, buildMossEditJobAdvanced } from "./mossImage.js";
 import { buildStructuredPromptRecipe } from "./ideogramCaption.js";
-import { tierQuantize, isConvRotTier, isNvfp4Tier, NVFP4_TIER } from "./quantTier.js";
+import { tierQuantize, isConvRotTier, isNvfp4Tier, isFp8rTier } from "./quantTier.js";
 import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
+import { isFlux3LayoutModel } from "./flux3Layout.js";
 
 // sc-8854 (F-052): pure builder for the Image Studio job's `advanced` payload. Extracted
 // verbatim from ImageStudio.submit() — the ~110-line object literal that assembled the
@@ -18,6 +19,9 @@ import { modelSupportsAlphaOutput } from "./qwenAlpha.js";
 export function buildImageJobAdvanced(state) {
   const {
     resolution,
+    model,
+    flux3Layout,
+    flux3ReferenceIds,
     // Structured-prompt recipe round-trip (sc-6147).
     sendStructured,
     submitIntent,
@@ -105,12 +109,31 @@ export function buildImageJobAdvanced(state) {
   } = state;
 
   const moss = isMossImage(state.model ?? selectedModel?.id);
+  const mossEdit = isMossEdit(state.model ?? selectedModel?.id, mode);
+  const editAdvanced = mossEdit ? buildMossEditJobAdvanced(state) : null;
   const dmd = moss && mossAccelerated(state.mossImage);
   const effectiveSteps = dmd ? state.mossDmdSteps ?? 8 : stepsOverride;
   return {
+    ...(mossEdit ? {
+      resolution,
+      mossImage: editAdvanced.mossImage,
+      mossImageEdit: editAdvanced.mossImageEdit,
+      ...(editAdvanced.mossImageAdvanced ? { mossImageAdvanced: editAdvanced.mossImageAdvanced } : {}),
+      ...(editAdvanced.promptBatch ? { promptBatch: editAdvanced.promptBatch } : {}),
+      steps: editAdvanced.steps,
+      guidanceScale: editAdvanced.guidanceScale,
+      schedulerShift: editAdvanced.schedulerShift,
+      ...(styleId ? { styleId: editAdvanced.styleId, ...(Object.hasOwn(editAdvanced, "stylePrompt") ? { stylePrompt: editAdvanced.stylePrompt } : {}) } : {}),
+
+    } : {
     ...(moss ? { mossImage: mossWireOptions(state.mossImage) } : {}),
     ...(dmd && state.mossOrdinarySettings ? { mossOrdinarySettings: state.mossOrdinarySettings } : {}),
     resolution,
+    ...(isFlux3LayoutModel(model) && flux3Layout?.boxes?.length ? {
+      // Preserve the original document and current attachment order, never a rounded table.
+      flux3_layout: flux3Layout,
+      flux3_reference_ids: flux3ReferenceIds ?? [],
+    } : {}),
     // Structured-prompt recipe round-trip (sc-6147): persist the full caption +
     // original intent + magic-prompt backend alongside the job so "Use this recipe"
     // can rehydrate the builder rather than replay the serialized JSON as a plain
@@ -237,7 +260,10 @@ export function buildImageJobAdvanced(state) {
     // Emitted ONLY when the picker is shown AND the user explicitly picked nvfp4 — disjoint from both
     // spreads above. This is the SC#5 opt-in at the payload layer: absent this deliberate pick no
     // request ever carries the label, so no q4 render can be silently upgraded to NVFP4 on Blackwell.
-    ...(showTierPicker && isNvfp4Tier(quantTier) ? { quantTier: NVFP4_TIER } : {}),
+    // FP8R must identify even a single installed tier (including Simple's hidden picker).
+    // Unlike the legacy NVFP4 opt-in, omitting it would request a different dense format.
+    ...(isFp8rTier(quantTier) || ((showTierPicker || tierExplicit) && isNvfp4Tier(quantTier))
+      ? { quantTier } : {}),
     // PiD decoder (epic 7840, sc-7851): emit usePid:true only when the toggle is shown
     // (model PiD-eligible AND checkpoint installed) AND on. The worker swaps the native
     // VAE for the PiD decode + 2K/4K super-resolve pass; it rides `advanced` (opaque
@@ -327,5 +353,7 @@ export function buildImageJobAdvanced(state) {
     // { steps, guidance, loras:[{ index, weight? }] } shape the worker parses; the omit-when-inactive
     // rule keeps the round-trip lossless.
     ...(multiPhaseActive && Array.isArray(phases) && phases.length ? { phases } : {}),
+
+    }),
   };
 }

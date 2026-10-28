@@ -202,6 +202,35 @@ test("checked-in terminal profile is the exact serialized 19-cell campaign", asy
   }
 });
 
+test("frozen download profiles reject selected gated authorities, not unrelated catalog entries", async () => {
+  const checked = profile();
+  const evidence = JSON.parse(await readFile("config/download-pattern-evidence.json", "utf8"));
+  const expected = expectedArtifactFilesFromEvidence(checked, evidence);
+  const selected = Object.values(checked.artifacts)[0];
+  const selectedKey = `${selected.repository}@${selected.revision}`;
+  // An unrelated selective source may legitimately be gated even though this historical
+  // campaign consumes only ungated authorities. FLUX 3 itself is now whole-repo, not a row here.
+  const gatedRepo = "fixture/unrelated-gated-source", gatedRevision = "a".repeat(40);
+  const gatedKey = `${gatedRepo}@${gatedRevision}`;
+  evidence.repos.push({ key: gatedKey, repo: gatedRepo, revision: gatedRevision,
+    resolvedSha: gatedRevision, servedRepo: gatedRepo, gated: "auto", files: ["config.json"] });
+  for (const gated of ["auto", "manual"]) {
+    const unrelated = structuredClone(evidence);
+    unrelated.repos.find((row) => row.key === gatedKey).gated = gated;
+    assert.deepEqual(expectedArtifactFilesFromEvidence(checked, unrelated), expected);
+    const selectedMutation = structuredClone(evidence);
+    selectedMutation.repos.find((row) => row.key === selectedKey).gated = gated;
+    assert.throws(() => expectedArtifactFilesFromEvidence(checked, selectedMutation),
+      /selected authority must be ungated/);
+  }
+  for (const gated of [true, null, "unknown"]) {
+    const malformed = structuredClone(evidence);
+    malformed.repos.find((row) => row.key === gatedKey).gated = gated;
+    assert.throws(() => expectedArtifactFilesFromEvidence(checked, malformed),
+      /not an exact immutable file census/);
+  }
+});
+
 test("current and legacy Illustrious download selectors fail closed independently", async () => {
   const checked = profile();
   const evidenceBytes = await readFile("config/download-pattern-evidence.json", "utf8");
@@ -215,6 +244,9 @@ test("current and legacy Illustrious download selectors fail closed independentl
   // decoded-x0 losses (137 keys), the Iris-3B epic's six (sc-25678: 143 keys), the
   // sc-25140 MiniMax-H3 Veda sparse predictor (144 keys), the relicensed SANA / SANA-Sprint
   // mirror revisions (same 144 keys), and epic 25899's base NOTICE re-record and published Turbo
+  // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys).
+  // sc-26234's whole-repo FLUX 3 entry adds no selective row; main's honest evidence re-record
+  // and digest are retained. The Illustrious
   // re-host (sc-25909: 145 keys), plus sc-26325's two frozen official MOSS listings (147 keys), plus sc-24213's three pinned
   // Supra2-IMG components (150 keys). The Illustrious
   // file censuses below are
@@ -4206,6 +4238,6 @@ test("schemas, clean Node dependencies, and workflow preserve the opt-in single-
   assert.equal(packageJson.devDependencies.ajv, "8.20.0");
   assert.equal(packageJson.devDependencies["ajv-formats"], "3.0.1");
   assert.equal(packageLock.packages[""].devDependencies.ajv, "8.20.0");
-  assert.match(checks, /parity-scaffold:[\s\S]*?npm ci --ignore-scripts[\s\S]*?npm run check/);
+  assert.match(checks, /parity-scaffold:[\s\S]*?npm ci --ignore-scripts[\s\S]*?node scripts\/scaffold-test-selection\.mjs --portable/);
   assert.match(workflow, /name: Upload every epic-20738 terminal receipt[\s\S]*?if: \$\{\{ always\(\)/);
 });

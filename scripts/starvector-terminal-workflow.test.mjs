@@ -34,6 +34,16 @@ async function availableLoopbackPort() {
 
 async function executableAlias(destination) {
   await mkdir(path.dirname(destination), { recursive: true });
+  if (process.platform === "win32") {
+    // Node 20/libuv cannot unlink another hardlink of its own live executable on Windows.
+    // An independent equal-byte copy keeps fixture cleanup independent of the test runner.
+    await copyFile(process.execPath, destination);
+    const [source, target] = await Promise.all([stat(process.execPath), stat(destination)]);
+    assert.notEqual(target.ino, source.ino, "Windows executable fixture must not hardlink the live test runner");
+    assert.equal(target.nlink, 1, "Windows executable fixture must own its file identity");
+    assert.equal(hash(await readFile(destination)), hash(await readFile(process.execPath)));
+    return;
+  }
   let copied = false;
   try { await link(process.execPath, destination); } catch (error) {
     if (!["EXDEV", "EPERM", "EACCES"].includes(error.code)) throw error;
@@ -43,7 +53,25 @@ async function executableAlias(destination) {
   if (copied && process.platform !== "win32") await chmod(destination, 0o755);
 }
 
-async function productServiceFixture({ tamperRelocation = false, tuple = process.platform === "win32" ? "candle-cuda:1b" : "mlx:1b" } = {}) {
+test("Windows executable fixture copies retain exact bytes with independent identity and clean up", { timeout: 15_000, skip: process.platform !== "win32" }, async () => {
+  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-executable-copy-"));
+  let verifiedCopy = false;
+  try {
+    const alias = path.join(sandbox, "fixture.exe");
+    await executableAlias(alias);
+    verifiedCopy = true;
+    assert.notEqual((await stat(alias)).ino, (await stat(process.execPath)).ino);
+    assert.equal((await stat(alias)).nlink, 1);
+    assert.equal(hash(await readFile(alias)), hash(await readFile(process.execPath)));
+  } finally {
+    // Retain any failed identity fixture as evidence rather than trying to unlink a live-image
+    // hardlink. Valid independent copies must clean up under the ordinary bounded test runtime.
+    if (verifiedCopy) await rm(sandbox, { recursive: true, force: true });
+  }
+  await assert.rejects(stat(sandbox), { code: "ENOENT" });
+});
+
+async function productServiceFixture({ tamperRelocation = false, deferRegistrationUntilPoll = false, tuple = process.platform === "win32" ? "candle-cuda:1b" : "mlx:1b" } = {}) {
   const sandbox = await realpath(await mkdtemp(path.join(tmpdir(), "starvector-service-detach-")));
   const root = path.join(sandbox, "repo"), output = path.join(sandbox, "tuple"), weightsRoot = path.join(sandbox, "weights"), shimRoot = path.join(sandbox, "bin");
   await mkdir(root); await mkdir(shimRoot); await mkdir(path.join(weightsRoot, "app"), { recursive: true }); await mkdir(path.join(weightsRoot, "hf"), { recursive: true });
@@ -94,7 +122,12 @@ if (process.argv.length === 1) {
   const fs = require("node:fs");
   const registrationPath = path.join(process.env.SCENEWORKS_DATA_DIR, "fixture-worker.json");
   if (worker && process.env.STARVECTOR_TEST_FAIL_RELOAD === "1") process.exit(3);
-  if (worker) fs.writeFileSync(registrationPath, JSON.stringify({ id: process.env.SCENEWORKS_WORKER_ID, pid: process.pid }));
+  if (worker) {
+    const register = () => fs.writeFileSync(registrationPath, JSON.stringify({ id: process.env.SCENEWORKS_WORKER_ID, pid: process.pid }));
+    if (process.env.STARVECTOR_TEST_DEFER_REGISTRATION === "1") {
+      const poll = setInterval(() => { if (fs.existsSync(registrationPath + ".polled")) { clearInterval(poll); register(); } }, 5);
+    } else register();
+  }
   let relocatedLibrary;
   let server;
   const timer = setInterval(() => {
@@ -122,12 +155,16 @@ if (process.argv.length === 1) {
         return;
       }
       if (request.method === "GET" && request.url === "/api/v1/workers") {
-        // The real API returns no registration until its worker arrives, not an ENOENT crash.
-        if (!fs.existsSync(registrationPath)) { response.writeHead(200, { "content-type": "application/json" }); response.end("[]"); return; }
+        let registration;
+        try { registration = JSON.parse(fs.readFileSync(registrationPath, "utf8")); }
+        catch (error) {
+          if (error.code !== "ENOENT") throw error;
+          if (process.env.STARVECTOR_TEST_DEFER_REGISTRATION === "1") fs.writeFileSync(registrationPath + ".polled", "missing registration observed");
+        }
         const mlx = process.env.SCENEWORKS_GPU_ID === "mlx";
         const capabilities = mlx ? ["gpu", "vector_image_to_svg"] : ["gpu", "nvidia", "candle", "vector_image_to_svg"];
         response.writeHead(200, { "content-type": "application/json" });
-        response.end(JSON.stringify([{ id: JSON.parse(fs.readFileSync(registrationPath, "utf8")).id, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU (32768 MB)", status: "idle", currentJobId: null, capabilities }]));
+        response.end(JSON.stringify(registration ? [{ id: registration.id, gpuId: process.env.SCENEWORKS_GPU_ID, gpuName: mlx ? "Apple Silicon (MLX)" : "NVIDIA Fixture GPU (32768 MB)", status: "idle", currentJobId: null, capabilities }] : []));
         return;
       }
       if (request.method === "GET" && request.url === "/api/v1/models") {
@@ -168,7 +205,7 @@ if (process.argv.length === 1) {
   const manifestPath = path.join(weightsRoot, "starvector-terminal-weights-v1.json");
   await writeFile(manifestPath, JSON.stringify(manifest));
   const contract = terminalProductWorkerContract(tuple);
-  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime.replaceAll("\\", "/")}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TERMINAL_GPU_ID: contract.gpu_id, STARVECTOR_TEST_TUPLE: tuple, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0" };
+  const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime.replaceAll("\\", "/")}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TERMINAL_GPU_ID: contract.gpu_id, STARVECTOR_TEST_TUPLE: tuple, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0", STARVECTOR_TEST_DEFER_REGISTRATION: deferRegistrationUntilPoll ? "1" : "0" };
   // Programmatic test-only lease injection; the actual production CLI/path remains fixed.
   // This wrapper calls the actual service implementations and preserves their real child PIDs.
   const actualService = path.resolve("scripts/starvector-terminal-product-service.mjs");
@@ -880,11 +917,13 @@ test("owned reload rejects changed binary and preserves an unloaded API for fina
 });
 
 test("failed headless reload retains lifecycle evidence and final stop cleans current ownership", { timeout: PRODUCT_SERVICE_TEST_BACKSTOP_MS, skip: !productServiceSupported }, async () => {
-  const fixture = await productServiceFixture(), port = await availableLoopbackPort();
+  // Force the real readiness poll to observe an empty worker list before registration.
+  const fixture = await productServiceFixture({ deferRegistrationUntilPoll: true }), port = await availableLoopbackPort();
   let record;
   try {
     await runProductServiceCli(fixture, "start", port);
     record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
+    assert.equal(await readFile(path.join(fixture.output, record.state_root, "data", "fixture-worker.json.polled"), "utf8"), "missing registration observed");
     await runProductServiceCli(fixture, "unload-worker", 0);
     fixture.cliEnv.STARVECTOR_TEST_FAIL_RELOAD = "1";
     await assert.rejects(() => runProductServiceCli(fixture, "reload-worker", 0), /reloaded worker exited before fresh registration/);

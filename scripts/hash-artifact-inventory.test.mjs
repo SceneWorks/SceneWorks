@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { hashArtifactInventory, listCachedArtifactFiles } from "./hash-artifact-inventory.mjs";
+import { hashArtifactInventory, listCachedArtifactFiles, artifactInventoryReceipt } from "./hash-artifact-inventory.mjs";
 
 test("artifact inventory binds sorted relative paths, sizes, and exact content hashes", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "artifact-inventory-"));
@@ -146,4 +146,22 @@ test("artifact inventory ignores dotfiles and dot-directories, so the receipt is
       "model_index.json", "unet/.gitattributes", "unet/model.safetensors",
     ],
   );
+});
+
+// CI_IMPACT: small local byte fixtures only; no model data, inference, network or build.
+test("opt-in inventory entries preserve every default digest and bind the emitted order", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "artifact-inventory-entries-"));
+  await writeFile(path.join(root, "a.bin"), "alpha");
+  await writeFile(path.join(root, "z.bin"), "zeta");
+  const ordinary = await hashArtifactInventory(root);
+  const detailed = await hashArtifactInventory(root, { includeEntries: true });
+  const { entries, ...unchanged } = detailed;
+  assert.deepEqual(unchanged, ordinary);
+  assert.deepEqual(entries.map((entry) => entry.path), ["a.bin", "z.bin"]);
+  assert.deepEqual(artifactInventoryReceipt(entries), { files: detailed.files, bytes: detailed.bytes, sha256: detailed.sha256, entries });
+  assert.notEqual(artifactInventoryReceipt([...entries].reverse()).sha256, detailed.sha256);
+  for (const patch of [{ path: "../escape" }, { path: "x\\y" }, { path: "C:/outside" }, { bytes: 0 }, { sha256: "not-a-hash" }]) {
+    assert.throws(() => artifactInventoryReceipt([{ ...entries[0], ...patch }]));
+  }
+  assert.throws(() => artifactInventoryReceipt([entries[0], entries[0]]));
 });

@@ -132,6 +132,21 @@ pub(crate) async fn create_image_job(
     let project_id = Some(payload.project_id.clone());
     let project_name = payload.project_name.clone();
     let mut job_payload = to_json_object(&payload)?;
+    if let Some(advanced) = job_payload.remove("mossImageAdvanced") {
+        let map = job_payload
+            .entry("advanced".to_owned())
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .ok_or_else(|| ApiError::bad_request("advanced must be an object"))?;
+        if map
+            .insert(sceneworks_core::moss_image_advanced::KEY.into(), advanced)
+            .is_some()
+        {
+            return Err(ApiError::bad_request(
+                "supply mossImageAdvanced once, not at both request boundaries",
+            ));
+        }
+    }
     job_payload.remove("requestedGpu");
     if payload.recipe_preset_id.is_none() {
         job_payload.remove("recipePresetId");
@@ -199,13 +214,23 @@ pub(crate) async fn create_image_job(
     // chroma1_flash's declared 768. Silent: geometry coerces, so nothing ever errored (sc-12400).
     //
     // Written back per side only when the caller named none, so a caller's own size is untouched.
+    let reference_derived_size = if sceneworks_core::image_request::flux3::is_model(&model_id) {
+        !sceneworks_core::image_request::flux3::parse(&job_payload)
+            .map_err(ApiError::bad_request)?
+            .asset_ids
+            .is_empty()
+    } else {
+        false
+    };
     if let Some(entry) = model_manifest_entry.as_object() {
         let (default_width, default_height) =
             image_default_resolution(entry).unwrap_or((1024, 1024));
-        if !job_payload.contains_key("width") {
+        // Preserve omitted sides through storage/retry. The worker derives their actual canvas
+        // from the owned decoded references before admission; numeric defaults are not intent.
+        if !reference_derived_size && !job_payload.contains_key("width") {
             job_payload.insert("width".to_owned(), Value::from(default_width));
         }
-        if !job_payload.contains_key("height") {
+        if !reference_derived_size && !job_payload.contains_key("height") {
             job_payload.insert("height".to_owned(), Value::from(default_height));
         }
         // `defaults.count`, the resolution key's other half — 29 of the 45 image models declare
@@ -349,8 +374,11 @@ pub(crate) async fn create_image_job(
         // byte-for-byte unchanged.
         if let Some(message) = sceneworks_core::video_request::image_reference_limit_error(
             &model_id,
-            sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
-                .map_or(0, |ids| ids.len()),
+            sceneworks_core::image_request::ordered_image_reference_ids_for_model(
+                &model_id,
+                &job_payload,
+            )
+            .map_or(0, |ids| ids.len()),
             entry,
         ) {
             return Err(ApiError::bad_request(message));
@@ -372,15 +400,19 @@ pub(crate) async fn create_image_job(
             job_payload.get("height").and_then(Value::as_u64),
         ) {
             if let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) {
-                if let Some(message) = sceneworks_core::video_request::image_dimension_error(
-                    &model_id,
-                    width,
-                    height,
-                    entry,
-                    crate::HISTORICAL_MIN_IMAGE_DIMENSION,
-                    crate::MAX_IMAGE_DIMENSION,
-                ) {
-                    return Err(ApiError::bad_request(message));
+                // FLUX.3 reference sides were validated independently by the family parser:
+                // positive 16px grid, not the descriptor's historical 64px T2I floor.
+                if !reference_derived_size {
+                    if let Some(message) = sceneworks_core::video_request::image_dimension_error(
+                        &model_id,
+                        width,
+                        height,
+                        entry,
+                        crate::HISTORICAL_MIN_IMAGE_DIMENSION,
+                        crate::MAX_IMAGE_DIMENSION,
+                    ) {
+                        return Err(ApiError::bad_request(message));
+                    }
                 }
                 // The declared request-geometry ENVELOPE (sc-24112, `admissionGeometry`): the
                 // largest-preset area, the reference count and the batch, jointly. Per-side bounds
@@ -390,8 +422,11 @@ pub(crate) async fn create_image_job(
                 // the worker calls, over the same ordered reference list the worker renders.
                 // ABSENT block ⇒ inert.
                 let reference_count =
-                    sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
-                        .map_or(0, |ids| ids.len());
+                    sceneworks_core::image_request::ordered_image_reference_ids_for_model(
+                        &model_id,
+                        &job_payload,
+                    )
+                    .map_or(0, |ids| ids.len());
                 let batch = job_payload
                     .get("count")
                     .and_then(Value::as_u64)
@@ -423,8 +458,11 @@ pub(crate) async fn create_image_job(
         // owns. Needs the asset store, so it cannot live in the pure core helper. Only runs for a
         // model that declares the cap — no other image model pays an asset read it never paid.
         if sceneworks_core::video_request::image_max_reference_assets(entry).is_some() {
-            let ordered = sceneworks_core::image_request::ordered_image_reference_ids(&job_payload)
-                .unwrap_or_default();
+            let ordered = sceneworks_core::image_request::ordered_image_reference_ids_for_model(
+                &model_id,
+                &job_payload,
+            )
+            .unwrap_or_default();
             if !ordered.is_empty() {
                 validate_ordered_image_references(
                     state.clone(),
@@ -775,7 +813,37 @@ async fn validate_vector_source_asset(
 /// Deliberately serial rather than a join: the sets are at most ten entries, the store call is a
 /// blocking task, and the first bad entry is the one the caller has to fix — reporting it in
 /// request order is more useful than reporting whichever read finished first.
-async fn validate_ordered_image_references(
+/// Retry/duplicate revalidate the exact authored reference slots against the owning job project,
+/// not a project id the payload patch can replace. No native or model code runs in the API.
+pub(crate) async fn validate_flux3_reference_payload(
+    state: AppState,
+    project_id: Option<&str>,
+    payload: &JsonObject,
+) -> Result<(), ApiError> {
+    let model = payload
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if !sceneworks_core::image_request::flux3::is_model(model) {
+        return Ok(());
+    }
+    let references =
+        sceneworks_core::image_request::flux3::parse(payload).map_err(ApiError::bad_request)?;
+    if references.asset_ids.is_empty() {
+        return Ok(());
+    }
+    let project_id = project_id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| ApiError::bad_request("FLUX.3 references require an owning projectId"))?;
+    if payload.get("projectId").and_then(Value::as_str) != Some(project_id) {
+        return Err(ApiError::bad_request(
+            "FLUX.3 reference payload projectId must match the owning job project",
+        ));
+    }
+    validate_ordered_image_references(state, project_id.to_owned(), references.asset_ids).await
+}
+
+pub(crate) async fn validate_ordered_image_references(
     state: AppState,
     project_id: String,
     asset_ids: Vec<String>,

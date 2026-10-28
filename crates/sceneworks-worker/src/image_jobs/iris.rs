@@ -1031,6 +1031,7 @@ mod tests {
                     "cuda",
                     &mut asset_writes,
                     loader,
+                    Arc::new(super::super::NativeMossStreamRuntime),
                 );
                 let outcome = tokio::time::timeout(Duration::from_secs(60), arm)
                     .await

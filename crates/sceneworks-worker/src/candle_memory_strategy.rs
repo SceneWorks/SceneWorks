@@ -22,6 +22,7 @@ use gen_core::{
     MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryParityContract, MemoryParityResult,
     MemoryRunContext, MemorySelection, MemoryStrategy, Precision, Quant,
 };
+use sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::SdxlCudaMemoryEndpoints;
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, CalibrationBinding, EvidenceQuery, EvidenceVerdict,
     Geometry as CalibrationGeometry, LoadShapeKey, QualityResult, RequiredNullable, StrategyRung,
@@ -45,7 +46,7 @@ const IDEOGRAM_REQUEST_EVIDENCE_REVISION: &str =
 pub(crate) const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str =
     "sc-15839-candle-pulid-flux-request-scope-v1";
 const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
-pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v1";
+pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v3";
 const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sha256:";
 const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additive.sha256:";
@@ -76,6 +77,11 @@ fn is_ideogram(engine_id: &str) -> bool {
 
 fn is_sana(engine_id: &str) -> bool {
     matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
+}
+
+/// The FLUX 3 Image Klein provider ids, whose packages include the publisher FP8R/NVFP4 tiers.
+fn is_flux3(engine_id: &str) -> bool {
+    matches!(engine_id, "flux3_klein" | "flux3_klein_base")
 }
 
 pub(crate) fn is_sd35(engine_id: &str) -> bool {
@@ -686,6 +692,9 @@ pub(crate) struct CandleMemoryEvaluation {
     pub memory: Option<GenerationMemory>,
     pub context: MemoryRunContext,
     pub predicted_peak_gb: f64,
+    /// A literal endpoint's observed whole-run peak. Admission uncertainty and reserve are
+    /// reported separately; an intermediate derived configuration carries no measured claim.
+    pub measured_endpoint_peak_bytes: Option<u64>,
     /// The exact lower-peak staged candidate for a receipt-priced provider. A warm cache entry may
     /// already have been loaded under `Sequential` even when this request's least-cost cold
     /// selection is Resident. In that case the cache policy requires the tighter loaded shape; this
@@ -754,6 +763,7 @@ impl CandleMemoryEvaluation {
             "overlay": self.context.overlay.clone(),
             "strategy": strategy_label(selection.strategy),
             "parameters": {
+                "stageResidency": self.memory.as_ref().is_some_and(|memory| memory.stage_residency),
                 "decodeTileEdge": parameters.decode_tile_edge,
                 "decodeOverlap": parameters.decode_overlap,
                 "attentionChunkSize": parameters.attention_chunk_size,
@@ -770,6 +780,7 @@ impl CandleMemoryEvaluation {
                 MemoryCacheState::Warm => "warm",
             },
             "predictedPeakBytes": self.context.predicted_peak_bytes,
+            "measuredEndpointPeakBytes": self.measured_endpoint_peak_bytes,
             "phasePeakBytes": self.phase_peaks.map(|phases| serde_json::json!({
                 "conditioning": phases.conditioning,
                 "denoise": phases.denoise,
@@ -853,6 +864,11 @@ fn numeric_tier(engine_id: &str, tier: &str) -> Option<MemoryNumericTier> {
         "q4" => Some(Quant::Q4),
         "q8" => Some(Quant::Q8),
         "bf16" => None,
+        // sc-26241: FLUX 3's publisher packages are real numeric tiers of its provider (its memory
+        // contract prices each from the package's own tensor headers), so the selector binds them
+        // by identity. Other families keep NVFP4 off the shared selector.
+        "fp8r" if is_flux3(engine_id) => Some(Quant::Fp8Rowwise),
+        "nvfp4" if is_flux3(engine_id) => Some(Quant::Nvfp4),
         _ => return None,
     };
     Some(MemoryNumericTier {
@@ -935,12 +951,13 @@ fn parse_parameters(
     engaged: &[StrategyRung],
     parameters: &JsonObject<String, Value>,
 ) -> Option<gen_core::MemoryStrategyParameters> {
-    const KEYS: [&str; 5] = [
+    const KEYS: [&str; 6] = [
         "decodeTileEdge",
         "decodeOverlap",
         "attentionChunkSize",
         "transformerWindowSize",
         "transformerWindowComponent",
+        "stageResidency",
     ];
     if parameters.keys().any(|key| !KEYS.contains(&key.as_str())) {
         return None;
@@ -977,8 +994,16 @@ fn parse_parameters(
         }),
         Some(_) => return None,
     };
+    // Staging is an independent, explicit composition choice on gen-core selections. A record
+    // cannot add it without declaring the same engaged rung, disable a prerequisite, or turn a
+    // numeric/string value into permission to evict components.
+    let stage_residency = match parameters.get("stageResidency") {
+        None => None,
+        Some(Value::Bool(true)) if engaged.contains(&StrategyRung::StagedResidency) => Some(true),
+        Some(_) => return None,
+    };
     Some(gen_core::MemoryStrategyParameters {
-        stage_residency: None,
+        stage_residency,
         decode_tile_edge: integer("decodeTileEdge", 1),
         decode_overlap: integer("decodeOverlap", 0),
         attention_chunk_size: integer("attentionChunkSize", 1),
@@ -1454,7 +1479,24 @@ fn synthesize_estimate_floors(
         None
     };
     let mut synthesized = Vec::new();
-    for strategy in MemoryStrategy::ALL {
+    // Scratch-bounding rungs remain independently usable with resident weights. SDXL additionally
+    // offers their explicit staged composition, so the selector can reach the measured fully
+    // optimized endpoint without changing the provider's cost-order defaults or bespoke support.
+    for (strategy, explicit_staging) in MemoryStrategy::ALL.into_iter().flat_map(|strategy| {
+        std::iter::once((strategy, false)).chain(
+            (engine_id == "sdxl"
+                && model_id == "sdxl"
+                && mode.mode == MemoryMode::TextToImage
+                && geometry.reference_count == 0
+                && geometry.batch == 1
+                && matches!(overlay, None | Some("lora"))
+                && matches!(
+                    strategy,
+                    MemoryStrategy::BoundedDecode | MemoryStrategy::BoundedAttention
+                ))
+            .then_some((strategy, true)),
+        )
+    }) {
         if strategy == MemoryStrategy::Resident {
             // The resident live estimate is already submitted on every request.
             continue;
@@ -1466,9 +1508,10 @@ fn synthesize_estimate_floors(
             continue;
         }
         let engaged = contract.engaged_composition(strategy);
-        let Some(parameters) = estimate_floor_parameters(contract, &engaged) else {
+        let Some(mut parameters) = estimate_floor_parameters(contract, &engaged) else {
             continue;
         };
+        parameters.stage_residency = explicit_staging.then_some(true);
         let selection = MemorySelection {
             strategy,
             parameters,
@@ -1477,6 +1520,7 @@ fn synthesize_estimate_floors(
         if contract.validate_selection(&selection).is_err() {
             continue;
         }
+        let engaged = contract.engaged_composition_for_selection(&selection);
         let staged = engaged.contains(&MemoryStrategy::StagedResidency);
         // The rung's own regime: its engaged composition and the parameters it was selected with.
         // Every rung is priced from THIS, never from the staged rung's number (sc-22664).
@@ -1632,6 +1676,103 @@ pub(crate) struct EstimateCandidate {
     /// or from the manifest row as a pseudo-anchor). `None` for an unscaled row and for the
     /// resident clamp.
     pub phase_peaks: Option<sceneworks_core::memory_anchor::AnchorDerivedPhases>,
+}
+
+/// Price a validated endpoint at its literal coordinate, or derive the same executable
+/// composition at another geometry. The capture measures memory, not numerical parity: it
+/// supplies an estimate-scoped candidate with the normal uncertainty and a separate reserve.
+fn sdxl_endpoint_candidate(
+    contract: &gen_core::MemoryProviderContract,
+    resident: &MemoryEvidence,
+    anchor: &sceneworks_core::memory_anchor::MemoryAnchor,
+    selection: MemorySelection,
+    load_peak_bytes: u64,
+) -> Option<EstimateCandidate> {
+    use sceneworks_core::memory_anchor::{
+        AnchorBackend, AnchorDerivedPhases, AnchorLoadShape, ImageDeriveRequest,
+    };
+
+    let geometry = resident.key.geometry;
+    let load_shape = match anchor.load_shape {
+        AnchorLoadShape::EagerMaterialization => gen_core::LoadShape::EagerMaterialization,
+        AnchorLoadShape::DeferredMaterialization => gen_core::LoadShape::DeferredMaterialization,
+    };
+    if anchor.model_id != "sdxl"
+        || anchor.provider != contract.provider_id
+        || anchor.route != resident.key.resolved_route
+        || anchor.backend != AnchorBackend::Candle
+        || anchor.tier != "q4"
+        || anchor.mode != resident.key.mode.as_key()
+        || anchor.overlay.is_some()
+        || resident.key.overlay.is_some()
+        || anchor.reference_count != 0
+        || geometry.reference_count != 0
+        || geometry.batch != 1
+        || geometry.frames != 1
+        || load_shape != contract.load_shape
+        || !contract
+            .calibration
+            .as_ref()
+            .is_some_and(|identity| identity.fingerprint == anchor.source.calibration_fingerprint)
+        || contract.validate_selection(&selection).is_err()
+    {
+        return None;
+    }
+    let engaged = contract.engaged_composition_for_selection(&selection);
+    let regime = request_regime(&engaged, &selection.parameters)?;
+    // A bounded endpoint can only price its own exact bounded composition. The pair loader binds
+    // the actual numeric knobs; this check also prevents borrowing it for an unbounded request.
+    if anchor.measured_regime.staged != regime.staged
+        || anchor.measured_regime.decode_tiled != regime.decode_tile.is_some()
+        || anchor.measured_regime.attention_chunked != regime.attention_chunk_scores.is_some()
+        || anchor.measured_regime.transformer_windowed != regime.transformer_window.is_some()
+    {
+        return None;
+    }
+    let exact_geometry =
+        geometry.width == anchor.geometry.width && geometry.height == anchor.geometry.height;
+    let phases = if exact_geometry {
+        AnchorDerivedPhases {
+            conditioning: anchor.phase_active_peak_bytes.conditioning,
+            denoise: anchor.phase_active_peak_bytes.denoise,
+            decode: anchor.phase_active_peak_bytes.decode,
+        }
+    } else {
+        anchor.derive_phase_peaks(
+            &ImageDeriveRequest {
+                width: geometry.width,
+                height: geometry.height,
+                batch: 1,
+                conditioning_tokens: None,
+                regime,
+            },
+            crate::video_admission::anchor_component_bytes(contract.asset_facts),
+            crate::video_admission::architecture_facts_from_contract(contract),
+        )?
+    };
+    let peak = if exact_geometry {
+        anchor.overall_allocator_envelope_bytes
+    } else {
+        phases.peak_bytes().max(load_peak_bytes)
+    };
+    let mut evidence = resident.clone();
+    evidence.key.strategy = selection.strategy;
+    evidence.key.parameters = selection.parameters;
+    evidence.key.engaged_composition = engaged;
+    evidence.predicted_peak_bytes = peak;
+    evidence.observed_peak_bytes = exact_geometry.then_some(peak);
+    Some(EstimateCandidate {
+        selection,
+        evidence,
+        basis: if exact_geometry {
+            crate::memory_strategy::CandidateBasis::EstimateMeasuredEndpoint
+        } else {
+            crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                lane: crate::memory_strategy::AnchorDerivationLane::Image,
+            }
+        },
+        phase_peaks: Some(phases),
+    })
 }
 
 /// The anchor store and architecture facts the candle ladder prices from (sc-22664).
@@ -1870,16 +2011,14 @@ fn memory_for_selection(
     selection: MemorySelection,
 ) -> Option<GenerationMemory> {
     (selection.strategy != MemoryStrategy::Resident).then(|| GenerationMemory {
-        stage_residency: contract.engages(selection.strategy, MemoryStrategy::StagedResidency),
-        tile_vae_decode: contract.engages(selection.strategy, MemoryStrategy::BoundedDecode),
+        stage_residency: contract.engages_selection(&selection, MemoryStrategy::StagedResidency),
+        tile_vae_decode: contract.engages_selection(&selection, MemoryStrategy::BoundedDecode),
         decode_tile_edge: selection.parameters.decode_tile_edge,
         decode_overlap: selection.parameters.decode_overlap,
-        chunk_attention: contract.engages(selection.strategy, MemoryStrategy::BoundedAttention),
+        chunk_attention: contract.engages_selection(&selection, MemoryStrategy::BoundedAttention),
         attention_chunk_size: selection.parameters.attention_chunk_size,
-        stream_transformer_blocks: contract.engages(
-            selection.strategy,
-            MemoryStrategy::BoundedTransformerResidency,
-        ),
+        stream_transformer_blocks: contract
+            .engages_selection(&selection, MemoryStrategy::BoundedTransformerResidency),
         transformer_window_size: selection.parameters.transformer_window_size,
         transformer_window_component: selection.parameters.transformer_window_component,
         ..Default::default()
@@ -1912,7 +2051,62 @@ pub(crate) fn evaluate_shared_image_priced(
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
     prefix_kv_cache_surcharge: Option<u64>,
+    sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_priced_with_resources(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        has_phases,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        prefix_kv_cache_surcharge,
+        None,
+        sdxl_endpoints,
+    )
+}
+
+/// Reference-aware admission; facts originate only in the owned-asset resolver.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn evaluate_shared_image_priced_with_resources(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    has_phases: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    prefix_kv_cache_surcharge: Option<u64>,
+    reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+    sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    // Resolve the backend-owned bound before contract derivation or any fit decision. A provider
+    // with references but no pricer is a typed refusal, never a zero-priced legacy fallthrough.
+    let reference_workspace_bytes =
+        crate::memory_strategy::reference_workspace_bytes(engine_id, spec, reference_resources)?;
     evaluate_shared_image_dispatch(
         engine_id,
         model_id,
@@ -1933,6 +2127,9 @@ pub(crate) fn evaluate_shared_image_priced(
         runtime_overlay_bytes,
         cache_state,
         prefix_kv_cache_surcharge,
+        reference_resources,
+        reference_workspace_bytes,
+        sdxl_endpoints,
     )
 }
 
@@ -1977,6 +2174,9 @@ pub(crate) fn evaluate_shared_image(
         runtime_overlay_bytes,
         cache_state,
         None,
+        None,
+        0,
+        None,
     )
 }
 
@@ -2001,6 +2201,9 @@ fn evaluate_shared_image_dispatch(
     runtime_overlay_bytes: u64,
     cache_state: MemoryCacheState,
     prefix_kv_cache_surcharge: Option<u64>,
+    reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+    reference_workspace_bytes: u64,
+    sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let (contract_override, provider_overlay_override, provider_mode_override) =
         if spec.load_shape_declaration_result == gen_core::LoadShapeDeclarationResult::Eligible {
@@ -2064,7 +2267,7 @@ fn evaluate_shared_image_dispatch(
         .then(|| sdxl_provider_overlay(spec))
         .flatten();
     let provider_overlay = exact_sdxl_overlay.as_deref().or(provider_overlay);
-    evaluate_shared_image_inner_priced(
+    evaluate_shared_image_inner_priced_with_resources(
         engine_id,
         model_id,
         spec,
@@ -2089,6 +2292,9 @@ fn evaluate_shared_image_dispatch(
         None,
         None,
         prefix_kv_cache_surcharge,
+        reference_resources,
+        reference_workspace_bytes,
+        sdxl_endpoints,
     )
 }
 
@@ -2299,6 +2505,7 @@ fn evaluate_shared_image_inner(
         request_evidence_revision_override,
         ladder_anchors_override,
         None,
+        None,
     )
 }
 
@@ -2328,6 +2535,68 @@ fn evaluate_shared_image_inner_priced(
     request_evidence_revision_override: Option<&'static str>,
     ladder_anchors_override: Option<CandleLadderAnchors<'_>>,
     prefix_kv_cache_surcharge: Option<u64>,
+    sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
+) -> WorkerResult<Option<CandleMemoryEvaluation>> {
+    evaluate_shared_image_inner_priced_with_resources(
+        engine_id,
+        model_id,
+        spec,
+        artifact_is_certified,
+        manifest,
+        tier_key,
+        request_mode_value,
+        overlay,
+        provider_overlay,
+        geometry,
+        has_reference,
+        use_pid,
+        worker_multipass,
+        request_has_phases,
+        budget,
+        reserve_gb,
+        predicted_peak_gb,
+        runtime_overlay_bytes,
+        cache_state,
+        provider_mode_override,
+        contract_override,
+        request_evidence_revision_override,
+        ladder_anchors_override,
+        prefix_kv_cache_surcharge,
+        None,
+        0,
+        sdxl_endpoints,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_shared_image_inner_priced_with_resources(
+    engine_id: &'static str,
+    model_id: &str,
+    spec: &LoadSpec,
+    artifact_is_certified: bool,
+    manifest: &JsonObject<String, Value>,
+    tier_key: &str,
+    request_mode_value: &str,
+    overlay: Option<&str>,
+    provider_overlay: Option<&str>,
+    geometry: MemoryGeometry,
+    has_reference: bool,
+    use_pid: bool,
+    worker_multipass: bool,
+    request_has_phases: bool,
+    budget: Option<VramBudget>,
+    reserve_gb: f64,
+    predicted_peak_gb: Option<f64>,
+    runtime_overlay_bytes: u64,
+    cache_state: MemoryCacheState,
+    provider_mode_override: Option<&str>,
+    contract_override: Option<gen_core::MemoryProviderContract>,
+    request_evidence_revision_override: Option<&'static str>,
+    ladder_anchors_override: Option<CandleLadderAnchors<'_>>,
+    prefix_kv_cache_surcharge: Option<u64>,
+    reference_resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+    reference_workspace_bytes: u64,
+    sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
         "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => {
@@ -2564,6 +2833,55 @@ fn evaluate_shared_image_inner_priced(
         runtime_overlay_bytes
     };
     account_for_runtime_overlay_bytes(&mut verified, runtime_overlay_bytes);
+    let sdxl_endpoints = sdxl_endpoints.filter(|pair| {
+        engine_id == "sdxl"
+            && model_id == "sdxl"
+            && tier_key == "q4"
+            && artifact_is_certified
+            && mode.mode == MemoryMode::TextToImage
+            && !has_reference
+            && !use_pid
+            && !worker_multipass
+            && geometry.batch == 1
+            && geometry.frames == 1
+            && geometry.reference_count == 0
+            && provider_overlay.is_none()
+            && runtime_overlay_bytes == 0
+            && spec.resolved_route.as_deref() == Some("sdxl")
+            && calibration.is_some_and(|identity| {
+                identity.fingerprint == pair.resident.source.calibration_fingerprint
+            })
+            && manifest
+                .get("downloads")
+                .and_then(Value::as_array)
+                .is_some_and(|downloads| {
+                    downloads.iter().any(|download| {
+                        download.get("repo").and_then(Value::as_str)
+                            == Some(pair.artifact.repository.as_str())
+                            && download.get("revision").and_then(Value::as_str)
+                                == Some(pair.artifact.resolved_revision.as_str())
+                            && download.get("variant").and_then(Value::as_str)
+                                == Some(pair.artifact.variant.as_str())
+                    })
+                })
+    });
+    let resident_endpoint = sdxl_endpoints.and_then(|pair| {
+        sdxl_endpoint_candidate(
+            &contract,
+            &resident,
+            &pair.resident,
+            resident_selection,
+            pair.resident_load_peak_bytes,
+        )
+    });
+    let resident_basis = resident_endpoint.as_ref().map_or(
+        crate::memory_strategy::CandidateBasis::Measured,
+        |candidate| candidate.basis,
+    );
+    let resident_has_manifest_pad = resident_endpoint.is_none();
+    if let Some(candidate) = &resident_endpoint {
+        resident = candidate.evidence.clone();
+    }
     if let Some(exact) = verified.first() {
         resident
             .inference_revision
@@ -2583,7 +2901,26 @@ fn evaluate_shared_image_inner_priced(
     // recoverable does not make a wrong prediction safe. An uncertified artifact therefore keeps
     // its resident-estimate-only behavior, byte-for-byte as before this story. The sibling control
     // lane gates its floors the same way (`krea_control_fit.rs`, `runtime_verified`).
-    let synthesized = if artifact_is_certified {
+    // Reuse the existing image derivation law for intermediate configurations. The endpoint pair
+    // has its own source-validated store, leaving the general catalog's unique-anchor policy intact.
+    let endpoint_anchor_store =
+        sdxl_endpoints.map(|pair| sceneworks_core::memory_anchor::MemoryAnchorStore {
+            schema_version: sceneworks_core::memory_anchor::MEMORY_ANCHOR_SCHEMA_VERSION,
+            anchors: vec![pair.resident.clone()],
+            analytic_only: Vec::new(),
+            component_deltas: Vec::new(),
+            exceeded_bounds: Vec::new(),
+            // The endpoint pair is a measured capacity capture, not an owned-process accounting
+            // observation; the ladder store carries no operating envelopes.
+            observed_operating_envelopes: Vec::new(),
+        });
+    let endpoint_anchors = endpoint_anchor_store
+        .as_ref()
+        .map(|store| CandleLadderAnchors {
+            store: Some(store),
+            facts: crate::video_admission::architecture_facts_from_contract(&contract),
+        });
+    let mut synthesized = if artifact_is_certified {
         synthesize_estimate_floors(
             engine_id,
             model_id,
@@ -2594,14 +2931,78 @@ fn evaluate_shared_image_inner_priced(
             &mode,
             provider_overlay,
             geometry,
-            resident.predicted_peak_bytes,
+            if resident_endpoint.is_some() {
+                (resident_peak_gb * BYTES_PER_GIB).ceil() as u64
+            } else {
+                resident.predicted_peak_bytes
+            },
             runtime_overlay_bytes,
             request_evidence_revision,
-            ladder_anchors_override.unwrap_or_else(|| CandleLadderAnchors::packaged(&contract)),
+            endpoint_anchors
+                .or(ladder_anchors_override)
+                .unwrap_or_else(|| CandleLadderAnchors::packaged(&contract)),
         )
     } else {
         Vec::new()
     };
+    // This is a separate request demand, NOT an adapter overlay or a text-token hint. Charge
+    // every complete candidate exactly once, after receipt overlay normalization and phase-law
+    // synthesis but BEFORE selector grading. Keeping the source evidence objects charged also
+    // keeps selected-context and warm-alternative peak reporting identical to the demand graded.
+    account_for_runtime_overlay_bytes(
+        std::slice::from_mut(&mut resident),
+        reference_workspace_bytes,
+    );
+    account_for_runtime_overlay_bytes(&mut verified, reference_workspace_bytes);
+    for candidate in &mut synthesized {
+        account_for_runtime_overlay_bytes(
+            std::slice::from_mut(&mut candidate.evidence),
+            reference_workspace_bytes,
+        );
+    }
+    if let Some(pair) = sdxl_endpoints {
+        for candidate in &mut synthesized {
+            if matches!(
+                candidate.basis,
+                crate::memory_strategy::CandidateBasis::EstimateAnchorDerived { .. }
+            ) {
+                let load_peak = if contract
+                    .engages_selection(&candidate.selection, MemoryStrategy::StagedResidency)
+                {
+                    pair.sequential_load_peak_bytes
+                } else {
+                    pair.resident_load_peak_bytes
+                };
+                candidate.evidence.predicted_peak_bytes =
+                    candidate.evidence.predicted_peak_bytes.max(load_peak);
+            }
+        }
+        let engaged = [
+            StrategyRung::Resident,
+            StrategyRung::StagedResidency,
+            StrategyRung::BoundedDecode,
+            StrategyRung::BoundedAttention,
+        ];
+        if let Some(parameters) = parse_parameters(&engaged, &pair.sequential_parameters) {
+            let selection = MemorySelection {
+                strategy: MemoryStrategy::BoundedAttention,
+                parameters,
+                tier,
+            };
+            if let Some(endpoint) = sdxl_endpoint_candidate(
+                &contract,
+                &resident,
+                &pair.sequential,
+                selection,
+                pair.sequential_load_peak_bytes,
+            ) {
+                // A prediction of this same exact composition must not supersede its observed
+                // endpoint. Other compositions retain their independently derived estimates.
+                synthesized.retain(|candidate| candidate.selection != endpoint.selection);
+                synthesized.push(endpoint);
+            }
+        }
+    }
     let capacity = verified.len() + synthesized.len() + 1;
     let mut selections = Vec::with_capacity(capacity);
     let mut evidence = Vec::with_capacity(capacity);
@@ -2610,7 +3011,7 @@ fn evaluate_shared_image_inner_priced(
     let mut candidate_bases = Vec::with_capacity(capacity);
     selections.push(resident_selection);
     evidence.push(&resident);
-    candidate_bases.push(crate::memory_strategy::CandidateBasis::Measured);
+    candidate_bases.push(resident_basis);
     for item in &verified {
         selections.push(MemorySelection {
             strategy: item.key.strategy,
@@ -2663,7 +3064,7 @@ fn evaluate_shared_image_inner_priced(
         reserved_headroom_gb: reserve_gb,
     });
     let pad_carrying = |candidate: &Candidate<'_>| {
-        std::ptr::eq(candidate.evidence, &resident)
+        (resident_has_manifest_pad && std::ptr::eq(candidate.evidence, &resident))
             || candidate.basis == crate::memory_strategy::CandidateBasis::EstimateFloor
     };
     let reserve_charge = crate::memory_strategy::ReserveCharge::ExceptPadCarrying(&pad_carrying);
@@ -2759,7 +3160,11 @@ fn evaluate_shared_image_inner_priced(
                 && item.key.tier == selection.tier
         };
         if selection.strategy == MemoryStrategy::Resident {
-            Some((&resident, false, None))
+            Some((
+                &resident,
+                resident_basis.is_estimate(),
+                resident_endpoint.as_ref(),
+            ))
         } else if let Some(item) = verified.iter().find(|item| matches_selection(item)) {
             Some((item, false, None))
         } else {
@@ -2798,7 +3203,7 @@ fn evaluate_shared_image_inner_priced(
             use_pid,
             has_phases: request_has_phases,
             geometry,
-            reference_resources: None,
+            reference_resources: reference_resources.cloned(),
             overlay: provider_overlay.map(str::to_owned),
             budget: gen_core::MemoryBudget {
                 total_bytes: to_bytes(budget.total_gb),
@@ -2808,7 +3213,9 @@ fn evaluate_shared_image_inner_priced(
             },
             predicted_peak_bytes: selected_evidence.predicted_peak_bytes,
             cache_state,
-            evidence_revision: if selection.strategy == MemoryStrategy::Resident || estimate_scoped
+            evidence_revision: if (selection.strategy == MemoryStrategy::Resident
+                && selected_evidence.conformance != MemoryConformanceState::Verified)
+                || estimate_scoped
             {
                 request_evidence_revision.to_owned()
             } else {
@@ -2874,14 +3281,25 @@ fn evaluate_shared_image_inner_priced(
     Ok(Some(CandleMemoryEvaluation {
         memory,
         prefix_kv_cache,
+        measured_endpoint_peak_bytes: (selected_estimate.is_some_and(|candidate| {
+            candidate.basis == crate::memory_strategy::CandidateBasis::EstimateMeasuredEndpoint
+        }))
+        .then_some(selected_evidence.observed_peak_bytes)
+        .flatten(),
         predicted_peak_gb: selected_evidence
             .predicted_peak_bytes
             .saturating_add(prefix_kv_cache_extra) as f64
             / BYTES_PER_GIB,
         context: selected_context,
         warm_staged,
-        basis: selected_estimate.map_or(
-            crate::memory_strategy::CandidateBasis::Measured,
+        basis: selected_estimate.map_or_else(
+            || {
+                if selection.strategy == MemoryStrategy::Resident {
+                    resident_basis
+                } else {
+                    crate::memory_strategy::CandidateBasis::Measured
+                }
+            },
             |candidate| candidate.basis,
         ),
         phase_peaks: selected_estimate.and_then(|candidate| candidate.phase_peaks),
@@ -2899,6 +3317,430 @@ mod tests {
     use gen_core::WeightsSource;
     use serde_json::json;
     use std::path::PathBuf;
+
+    /// sc-26241: every FLUX 3 package is a numeric tier the selector can bind by identity — the
+    /// publisher FP8R/NVFP4 as their own quant, never bf16 — while other families keep NVFP4 (and
+    /// the FP8R label) off the shared selector.
+    #[test]
+    fn flux3_packages_are_numeric_tiers_by_identity() {
+        for (tier, quant) in [
+            ("bf16", None),
+            ("q4", Some(Quant::Q4)),
+            ("q8", Some(Quant::Q8)),
+            ("fp8r", Some(Quant::Fp8Rowwise)),
+            ("nvfp4", Some(Quant::Nvfp4)),
+        ] {
+            let numeric = numeric_tier("flux3_klein", tier).unwrap_or_else(|| panic!("{tier}"));
+            assert_eq!(numeric.quant, quant, "{tier}");
+            assert_eq!(numeric.precision, Precision::Bf16, "{tier}");
+        }
+        assert!(numeric_tier("z_image_turbo", "nvfp4").is_none());
+        assert!(numeric_tier("z_image_turbo", "fp8r").is_none());
+        assert!(numeric_tier("flux3_klein", "int8-convrot").is_none());
+    }
+
+    /// Requires the actual retained CUDA captures. No synthetic endpoint bytes establish fit.
+    #[test]
+    fn sdxl_packaged_endpoints_price_measured_1024_and_estimated_768_without_certification() {
+        let pair = sceneworks_core::memory_anchor::sdxl_cuda_memory_endpoints::packaged_sdxl_cuda_memory_endpoints()
+            .expect("the SDXL CUDA repair must ship both authenticated endpoint captures");
+        let registry = crate::inference_runtime::memory_contract_surface_registry().unwrap();
+        let contract = registry
+            .memory_contract_surfaces()
+            .unwrap()
+            .into_iter()
+            .find(|surface| {
+                surface.contract.provider_id == "sdxl"
+                    && surface.selector.tier == gen_core::MemoryContractSurfaceTier::Q4
+                    && surface.contract.load_shape == gen_core::LoadShape::EagerMaterialization
+            })
+            .expect("registered q4 SDXL contract")
+            .contract;
+        let geometry = MemoryGeometry {
+            width: 1024,
+            height: 1024,
+            batch: 1,
+            frames: 1,
+            reference_count: 0,
+        };
+        let tier = numeric_tier("sdxl", "q4").unwrap();
+        let resident_selection = MemorySelection {
+            strategy: MemoryStrategy::Resident,
+            parameters: Default::default(),
+            tier,
+        };
+        let seed = MemoryEvidence {
+            key: MemoryEvidenceKey {
+                model_family: "sdxl".into(),
+                resolved_route: "sdxl".into(),
+                backend: MemoryBackend::Candle,
+                tier,
+                mode: MemoryMode::TextToImage,
+                reference_shape: gen_core::MemoryReferenceShape::None,
+                load_shape: contract.load_shape,
+                overlay: None,
+                geometry,
+                frames_per_second: None,
+                strategy: MemoryStrategy::Resident,
+                engaged_composition: vec![MemoryStrategy::Resident],
+                parameters: Default::default(),
+            },
+            conformance: MemoryConformanceState::ImplementedUnverified,
+            dimensions: MemoryEvidenceDimensions {
+                static_implementation: MemoryEvidenceVerdict::Satisfied,
+                declared_calibration: MemoryEvidenceVerdict::Missing,
+                historical_verification: MemoryEvidenceVerdict::Missing,
+                current_environment_verification: MemoryEvidenceVerdict::Missing,
+                canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
+                exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
+            },
+            calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
+            calibration_fingerprint: contract.calibration.as_ref().unwrap().fingerprint.clone(),
+            sceneworks_revision: SDXL_REQUEST_EVIDENCE_REVISION.into(),
+            inference_revision: crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION.into(),
+            harness_version: String::new(),
+            predicted_peak_bytes: 0,
+            observed_peak_bytes: None,
+            parity: MemoryParityContract::Exact,
+            parity_result: MemoryParityResult::NotRun,
+        };
+        let resident = sdxl_endpoint_candidate(
+            &contract,
+            &seed,
+            &pair.resident,
+            resident_selection,
+            pair.resident_load_peak_bytes,
+        )
+        .unwrap();
+        let parameters = parse_parameters(
+            &[
+                StrategyRung::Resident,
+                StrategyRung::StagedResidency,
+                StrategyRung::BoundedDecode,
+                StrategyRung::BoundedAttention,
+            ],
+            &pair.sequential_parameters,
+        )
+        .unwrap();
+        let selection = MemorySelection {
+            strategy: MemoryStrategy::BoundedAttention,
+            parameters,
+            tier,
+        };
+        let minimum = sdxl_endpoint_candidate(
+            &contract,
+            &seed,
+            &pair.sequential,
+            selection,
+            pair.sequential_load_peak_bytes,
+        )
+        .unwrap();
+        for (candidate, anchor) in [(&resident, &pair.resident), (&minimum, &pair.sequential)] {
+            assert_eq!(
+                candidate.basis,
+                crate::memory_strategy::CandidateBasis::EstimateMeasuredEndpoint
+            );
+            assert_eq!(
+                candidate.evidence.predicted_peak_bytes,
+                anchor.overall_allocator_envelope_bytes
+            );
+            assert_eq!(
+                candidate.evidence.observed_peak_bytes,
+                Some(anchor.overall_allocator_envelope_bytes)
+            );
+            assert_eq!(candidate.evidence.parity_result, MemoryParityResult::NotRun);
+            assert_eq!(
+                candidate.evidence.conformance,
+                MemoryConformanceState::ImplementedUnverified
+            );
+        }
+        let memory = memory_for_selection(&contract, minimum.selection).unwrap();
+        assert!(memory.stage_residency && memory.tile_vae_decode && memory.chunk_attention);
+        let candidate = Candidate {
+            selection: minimum.selection,
+            evidence: &minimum.evidence,
+            basis: minimum.basis,
+            unmodeled_activation_bytes: None,
+        };
+        let request = RequestScope {
+            resolved_route: "sdxl",
+            backend: "candle",
+            tier,
+            mode: "text_to_image",
+            overlay: None,
+            geometry,
+        };
+        assert!(!matches!(
+            crate::memory_strategy::select_strategy(request, &contract, None, &[candidate],),
+            Selection::Selected { .. }
+        ));
+        let raw = minimum.evidence.predicted_peak_bytes;
+        let allowance = crate::ladder_margin_policy::admission_allowance(
+            crate::ladder_margin_policy::AdmissionSubject {
+                backend: MemoryBackend::Candle,
+                basis: minimum.basis,
+                unmodeled_activation_bytes: None,
+            },
+        )
+        .bytes(raw, 0);
+        let reserve_gb = crate::vram_gate::HEADROOM_GB;
+        let budget = |peak_bytes| {
+            Some(Budget {
+                available_gb: peak_bytes as f64 / BYTES_PER_GIB + reserve_gb,
+                reclaimable_gb: 0.0,
+                total_gb: 96.0,
+                reserved_headroom_gb: reserve_gb,
+            })
+        };
+        assert!(
+            !matches!(
+                crate::memory_strategy::select_strategy(
+                    request,
+                    &contract,
+                    budget(raw),
+                    &[candidate],
+                ),
+                Selection::Selected { .. }
+            ),
+            "raw measured memory still pays admission uncertainty"
+        );
+        let admitted = crate::memory_strategy::select_strategy(
+            request,
+            &contract,
+            budget(raw.saturating_add(allowance).saturating_add(1)),
+            &[candidate],
+        );
+        assert!(
+            matches!(admitted, Selection::Selected { selection, .. } if selection == minimum.selection),
+            "one uncertainty charge and one reserve must be sufficient"
+        );
+        assert!(
+            matches!(
+                crate::memory_strategy::select_strategy(
+                    request,
+                    &contract,
+                    Some(Budget {
+                        available_gb: 6.0,
+                        total_gb: 8.0,
+                        reclaimable_gb: 0.0,
+                        reserved_headroom_gb: crate::vram_gate::HEADROOM_GB,
+                    }),
+                    &[candidate],
+                ),
+                Selection::Selected { selection, .. } if selection == minimum.selection
+            ),
+            "the actual packaged minimum ({raw} bytes + {allowance} allowance bytes) must fit an \
+             8 GiB device with 6 GiB free while retaining the normal 2 GiB reserve"
+        );
+        let mut smaller = seed.clone();
+        smaller.key.geometry.width = 768;
+        smaller.key.geometry.height = 768;
+        let derived = sdxl_endpoint_candidate(
+            &contract,
+            &smaller,
+            &pair.sequential,
+            selection,
+            pair.sequential_load_peak_bytes,
+        )
+        .unwrap();
+        assert_eq!(derived.selection, minimum.selection);
+        assert_eq!(derived.evidence.observed_peak_bytes, None);
+        assert_eq!(
+            derived.basis,
+            crate::memory_strategy::CandidateBasis::EstimateAnchorDerived {
+                lane: crate::memory_strategy::AnchorDerivationLane::Image,
+            }
+        );
+        assert!(derived.evidence.predicted_peak_bytes >= pair.sequential_load_peak_bytes);
+
+        let mut refused = contract.clone();
+        refused
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::StagedResidency)
+            .unwrap()
+            .support = gen_core::MemoryStrategySupport::Missing;
+        assert!(sdxl_endpoint_candidate(
+            &refused,
+            &seed,
+            &pair.sequential,
+            selection,
+            pair.sequential_load_peak_bytes
+        )
+        .is_none());
+        let mut crossed = contract.clone();
+        crossed.calibration.as_mut().unwrap().fingerprint =
+            "sdxl-candle-different-semantics-v3".into();
+        assert!(sdxl_endpoint_candidate(
+            &crossed,
+            &seed,
+            &pair.sequential,
+            selection,
+            pair.sequential_load_peak_bytes
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn sdxl_explicit_staging_preserves_independent_bounded_compositions() {
+        let unstaged = [
+            StrategyRung::Resident,
+            StrategyRung::BoundedDecode,
+            StrategyRung::BoundedAttention,
+        ];
+        let staged = [
+            StrategyRung::Resident,
+            StrategyRung::StagedResidency,
+            StrategyRung::BoundedDecode,
+            StrategyRung::BoundedAttention,
+        ];
+        let parameters = json!({
+            "stageResidency": true,
+            "decodeTileEdge": 512,
+            "decodeOverlap": 128,
+            "attentionChunkSize": 1024,
+        });
+        let mut parameters = parameters.as_object().unwrap().clone();
+        let exact = parse_parameters(&staged, &parameters).expect("typed staged composition");
+        assert!(parse_parameters(&unstaged, &parameters).is_none());
+        for invalid in [json!(false), json!(1), json!("true"), Value::Null] {
+            parameters.insert("stageResidency".to_owned(), invalid);
+            assert!(parse_parameters(&staged, &parameters).is_none());
+        }
+        parameters.remove("stageResidency");
+        let independent =
+            parse_parameters(&unstaged, &parameters).expect("resident scratch bounds");
+        let contract = composition_probe_contract(true, false);
+        let selection = |parameters| MemorySelection {
+            strategy: MemoryStrategy::BoundedAttention,
+            parameters,
+            tier: numeric_tier("sdxl", "q4").unwrap(),
+        };
+        let staged = selection(exact);
+        let unstaged = selection(independent);
+        contract.validate_selection(&staged).unwrap();
+        contract.validate_selection(&unstaged).unwrap();
+        let staged_memory = memory_for_selection(&contract, staged).unwrap();
+        let unstaged_memory = memory_for_selection(&contract, unstaged).unwrap();
+        assert!(staged_memory.stage_residency);
+        assert!(!unstaged_memory.stage_residency);
+        assert!(staged_memory.tile_vae_decode && staged_memory.chunk_attention);
+        assert!(unstaged_memory.tile_vae_decode && unstaged_memory.chunk_attention);
+        assert_eq!(staged_memory.decode_tile_edge, Some(512));
+        assert_eq!(staged_memory.attention_chunk_size, Some(1024));
+
+        // A bespoke surface implementing the same scratch bounds but no staging still refuses
+        // this exact request. A deep rung and a true boolean cannot manufacture lifecycle support.
+        let bespoke = composition_probe_contract(false, false);
+        assert!(bespoke.validate_selection(&staged).is_err());
+        bespoke.validate_selection(&unstaged).unwrap();
+        parameters.insert("unknownOptimization".to_owned(), json!(true));
+        assert!(parse_parameters(&[StrategyRung::Resident], &parameters).is_none());
+    }
+
+    #[test]
+    fn sdxl_staged_estimates_preserve_geometry_and_charge_actual_adapter_bytes() {
+        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
+        let catalog: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let manifest = catalog["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|model| model["id"] == "sdxl")
+            .unwrap()
+            .as_object()
+            .unwrap();
+        let mut contract = composition_probe_contract(true, false);
+        contract.provider_id = "sdxl".to_owned();
+        let tier = numeric_tier("sdxl", "q4").unwrap();
+        let resident = crate::vram_gate::predicted_peak_gb(manifest, "q4").unwrap();
+        let candidates = |edge, overlay_bytes| {
+            synthesize_estimate_floors(
+                "sdxl",
+                "sdxl",
+                &contract,
+                manifest,
+                "q4",
+                tier,
+                &request_mode("sdxl", "text_to_image"),
+                None,
+                MemoryGeometry {
+                    width: edge,
+                    height: edge,
+                    batch: 1,
+                    frames: 1,
+                    reference_count: 0,
+                },
+                (resident * BYTES_PER_GIB).ceil() as u64,
+                overlay_bytes,
+                SDXL_REQUEST_EVIDENCE_REVISION,
+                no_anchors(),
+            )
+        };
+        let full = candidates(1024, 0);
+        let small = candidates(768, 0);
+        let with_adapter = candidates(1024, 4096);
+        let minimum = |rows: &[EstimateCandidate]| {
+            rows.iter()
+                .find(|candidate| {
+                    candidate.selection.strategy == MemoryStrategy::BoundedAttention
+                        && candidate.selection.parameters.stage_residency == Some(true)
+                })
+                .unwrap()
+                .clone()
+        };
+        let full_min = minimum(&full);
+        let small_min = minimum(&small);
+        assert!(full.iter().any(|candidate| {
+            candidate.selection.strategy == MemoryStrategy::BoundedAttention
+                && candidate.selection.parameters.stage_residency.is_none()
+        }));
+        for candidate in [&full_min, &small_min] {
+            assert_eq!(
+                candidate.basis,
+                crate::memory_strategy::CandidateBasis::EstimateFloor
+            );
+            assert_eq!(
+                candidate.evidence.conformance,
+                MemoryConformanceState::ImplementedUnverified
+            );
+            assert_eq!(candidate.evidence.observed_peak_bytes, None);
+        }
+        assert_eq!(full_min.evidence.key.geometry.width, 1024);
+        assert_eq!(small_min.evidence.key.geometry.width, 768);
+        assert!(small_min.phase_peaks.unwrap().decode < full_min.phase_peaks.unwrap().decode);
+        assert_eq!(
+            minimum(&with_adapter).evidence.predicted_peak_bytes,
+            full_min.evidence.predicted_peak_bytes + 4096
+        );
+        contract
+            .strategies
+            .iter_mut()
+            .find(|capability| capability.strategy == MemoryStrategy::StagedResidency)
+            .unwrap()
+            .support = gen_core::MemoryStrategySupport::Missing;
+        let refused = synthesize_estimate_floors(
+            "sdxl",
+            "sdxl",
+            &contract,
+            manifest,
+            "q4",
+            tier,
+            &request_mode("sdxl", "text_to_image"),
+            None,
+            full_min.evidence.key.geometry,
+            (resident * BYTES_PER_GIB).ceil() as u64,
+            0,
+            SDXL_REQUEST_EVIDENCE_REVISION,
+            no_anchors(),
+        );
+        assert!(refused.iter().all(|candidate| candidate
+            .selection
+            .parameters
+            .stage_residency
+            .is_none()));
+    }
 
     /// sc-17728, the Candle sibling of the MLX fit gate's coverage. The required parameter set
     /// follows the ENGAGED composition, so a provider that implements rung 4 with rungs 2 and 3
@@ -4157,6 +4999,7 @@ mod tests {
                 Some(CHROMA_REQUEST_EVIDENCE_REVISION),
                 None,
                 surcharge,
+                None,
             )
         };
         let mut lowest_staged_cached = f64::INFINITY;
@@ -6259,6 +7102,7 @@ mod tests {
             anchors: vec![z_image_q4_anchor()],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: Vec::new(),
         }
     }
@@ -6337,6 +7181,167 @@ mod tests {
             Z_IMAGE_REQUEST_EVIDENCE_REVISION,
             anchors,
         )
+    }
+
+    #[test]
+    fn reference_workspace_is_charged_before_candle_fit_and_none_matches_the_legacy_path() {
+        fn descriptor() -> gen_core::ModelDescriptor {
+            gen_core::ModelDescriptor {
+                id: "z_image_turbo",
+                family: "test",
+                backend: "candle",
+                modality: gen_core::Modality::Image,
+                capabilities: gen_core::Capabilities {
+                    min_size: 16,
+                    max_size: 4096,
+                    max_count: 1,
+                    ..Default::default()
+                },
+                encoder_contract: None,
+                denoiser_output_latent_space: None,
+                required_components: &[],
+                control_kinds: None,
+            }
+        }
+        fn no_load(_: &LoadSpec) -> gen_core::Result<Box<dyn gen_core::Generator>> {
+            panic!("pricing may not load weights")
+        }
+        fn price(
+            _: &LoadSpec,
+            facts: &gen_core::MemoryReferenceResourceFacts,
+        ) -> gen_core::Result<u64> {
+            assert_eq!(facts.conditioning_tokens, 16);
+            assert_eq!(facts.prepared_canvases, [(64, 64)]);
+            Ok((16.0 * BYTES_PER_GIB) as u64)
+        }
+        let registry = gen_core::ProviderRegistryBuilder::new()
+            .register_generator(gen_core::ModelRegistration {
+                descriptor,
+                load: no_load,
+                footprint: None,
+            })
+            .register_reference_workspace(gen_core::ReferenceWorkspaceRegistration {
+                provider_id: "z_image_turbo",
+                reference_workspace_bytes: price,
+            })
+            .build()
+            .unwrap();
+        let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("must-not-be-opened")));
+        let facts = gen_core::MemoryReferenceResourceFacts {
+            conditioning_tokens: 16,
+            prepared_canvases: vec![(64, 64)],
+        };
+        let bytes = crate::memory_strategy::reference_workspace_bytes_using(
+            &registry,
+            "z_image_turbo",
+            &spec,
+            Some(&facts),
+        )
+        .unwrap();
+        let evaluate = |budget: VramBudget,
+                        cache_state: MemoryCacheState,
+                        resources: Option<&gen_core::MemoryReferenceResourceFacts>,
+                        bytes: u64| {
+            evaluate_shared_image_inner_priced_with_resources(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &z_image_fixture_manifest(),
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                MemoryGeometry {
+                    reference_count: u32::from(resources.is_some()),
+                    ..Z_IMAGE_FIXTURE_GEOMETRY
+                },
+                resources.is_some(),
+                false,
+                false,
+                false,
+                Some(budget),
+                reserve_for(Some(budget)),
+                Some(18.4 + crate::vram_gate::HEADROOM_GB),
+                0,
+                cache_state,
+                None,
+                Some(z_image_fixture_contract()),
+                None,
+                None,
+                None,
+                resources,
+                bytes,
+                None,
+            )
+        };
+        for cache_state in [MemoryCacheState::Cold, MemoryCacheState::Warm] {
+            let budget = VramBudget {
+                free_gb: 128.0,
+                total_gb: 128.0,
+            };
+            let legacy = evaluate_shared_image_inner_priced(
+                "z_image_turbo",
+                "z_image_turbo",
+                &spec,
+                true,
+                &z_image_fixture_manifest(),
+                "q4",
+                "text_to_image",
+                None,
+                None,
+                Z_IMAGE_FIXTURE_GEOMETRY,
+                false,
+                false,
+                false,
+                false,
+                Some(budget),
+                reserve_for(Some(budget)),
+                Some(18.4 + crate::vram_gate::HEADROOM_GB),
+                0,
+                cache_state,
+                None,
+                Some(z_image_fixture_contract()),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            let none = evaluate(budget, cache_state, None, 0).unwrap().unwrap();
+            assert_eq!(
+                format!("{:?}", legacy.context),
+                format!("{:?}", none.context)
+            );
+            let priced = evaluate(budget, cache_state, Some(&facts), bytes)
+                .unwrap()
+                .unwrap();
+            assert!(priced.context.predicted_peak_bytes > none.context.predicted_peak_bytes);
+            assert_eq!(priced.context.reference_resources, Some(facts.clone()));
+            let mut rejected_only_with_references = 0;
+            for free in 8..40 {
+                let budget = VramBudget {
+                    free_gb: f64::from(free),
+                    total_gb: 96.0,
+                };
+                if evaluate(budget, cache_state, None, 0)
+                    .ok()
+                    .flatten()
+                    .is_some()
+                    && evaluate(budget, cache_state, Some(&facts), bytes)
+                        .ok()
+                        .flatten()
+                        .is_none()
+                {
+                    rejected_only_with_references += 1;
+                }
+            }
+            assert!(
+                rejected_only_with_references > 0,
+                "reference workspace never changed Candle fit"
+            );
+        }
     }
 
     /// The whole shared-image entry point, as `generate_candle_stream` reaches it for
@@ -6499,6 +7504,9 @@ mod tests {
 
         // E7: the event names the rung and its three derived phase peaks.
         let telemetry = evaluation.selection_telemetry("z_image_turbo", "q4");
+        // CI_IMPACT: one assertion on the existing pure selector fixture; no model execution.
+        // Staging is engaged even though its optional explicit parameter is absent above.
+        assert_eq!(telemetry["parameters"]["stageResidency"], true);
         assert_eq!(telemetry["strategy"], "bounded_transformer_residency");
         assert_eq!(telemetry["basis"], "anchor_derived");
         assert_eq!(telemetry["authority"], "estimated");
@@ -7053,6 +8061,10 @@ mod tests {
             near_idle.context.selection.strategy,
             MemoryStrategy::Resident
         );
+        assert_eq!(
+            near_idle.selection_telemetry("sd3_5_large", "q4")["parameters"]["stageResidency"],
+            false
+        );
         assert_eq!(near_idle.admitted.reserve_gb, reserve_gb);
         assert_eq!(
             near_idle.admitted.available_gb, 23.0,
@@ -7197,6 +8209,7 @@ mod tests {
             anchors: vec![foreign],
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: Vec::new(),
         };
         let absent_cell = z_image_fixture_floors(
@@ -7743,6 +8756,7 @@ mod tests {
             // (sc-22510) is not read by it.
             analytic_only: Vec::new(),
             component_deltas: Vec::new(),
+            observed_operating_envelopes: Vec::new(),
             exceeded_bounds: Vec::new(),
         };
         // Every guard of `candle_image_anchor` -- identity only, since sc-22738 retired the
@@ -7808,6 +8822,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![mutated],
             };
@@ -7843,6 +8858,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![moved_closure],
             };
@@ -7865,6 +8881,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![rotated],
             };
@@ -7926,6 +8943,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![relabelled],
             };
@@ -7958,6 +8976,7 @@ mod tests {
                 schema_version: MEMORY_ANCHOR_SCHEMA_VERSION,
                 analytic_only: Vec::new(),
                 component_deltas: Vec::new(),
+                observed_operating_envelopes: Vec::new(),
                 exceeded_bounds: Vec::new(),
                 anchors: vec![foreign],
             };

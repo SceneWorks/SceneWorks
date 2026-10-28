@@ -3032,6 +3032,7 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
     let mut streamed = fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]);
     streamed.phase_facts = Some(gen_core::MemoryPhaseFacts {
         architecture: None,
+        native_quant: None,
         staged_weights: gen_core::StagedWeightSchedule::TwoStage,
         transformer_stream: Some(gen_core::StreamedWeightFacts {
             resident_bytes: 0,
@@ -4674,6 +4675,7 @@ fn wan_i2v_candle_anchor_store() -> sceneworks_core::memory_anchor::MemoryAnchor
         }],
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        observed_operating_envelopes: Vec::new(),
         exceeded_bounds: Vec::new(),
     }
 }
@@ -5082,6 +5084,7 @@ fn bernini_bound_store(
         anchors: Vec::new(),
         analytic_only: Vec::new(),
         component_deltas: Vec::new(),
+        observed_operating_envelopes: Vec::new(),
         exceeded_bounds: vec![anchor::ExceededBound {
             id: "exceeded:bernini:mlx:q8:base:base:fp:exc-0".to_owned(),
             model_id: "bernini".to_owned(),

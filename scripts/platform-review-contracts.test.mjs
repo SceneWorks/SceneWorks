@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
+import { historyRequirements } from "./prepare-inference-history.mjs";
 import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
 import { bindQwenPersistentCache } from "./ci/memory-catalog/bind-qwen-persistent-cache.mjs";
 
@@ -53,18 +54,22 @@ function workflowStep(job, name) {
 
 test("RunPod validation provisions the same inference fixtures as PR scaffold checks", async () => {
   const publish = workflowJob(await source(".github/workflows/publish-runpod.yml"), "publish");
-  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-scaffold");
+  const scaffold = workflowJob(await source(".github/workflows/check.yml"), "parity-history");
   const fetchName = "Fetch the pinned inference source for the anchor-closure suite";
   const fetch = workflowStep(publish, fetchName);
-  const shellBody = (step) => step.split("\n").filter((line) => /^ {10}\S|^ {12}/.test(line)).join("\n");
-  assert.equal(shellBody(fetch), shellBody(workflowStep(scaffold, fetchName)));
+  const requirements = historyRequirements(process.cwd());
+  assert.ok(fetch.includes('--anchor-revisions'));
+  assert.ok(fetch.includes('checkout -q "$pin"'));
+  assert.ok(scaffold.includes('node scripts/prepare-inference-history.mjs'));
+  assert.ok(scaffold.includes('node scripts/scaffold-test-selection.mjs --history'));
   const validation = workflowStep(publish, "Validate scaffold and RunPod publication contracts");
   assert.ok(validation.includes("INFERENCE_REPO: ${{ runner.temp }}/inference"));
   assert.ok(validation.includes("npm run check"));
   assert.ok(publish.indexOf(fetch) < publish.indexOf(validation));
   const terminalFetchName = "Fetch the exact public inference terminal contract";
   const terminalFetch = workflowStep(publish, terminalFetchName);
-  assert.equal(shellBody(terminalFetch), shellBody(workflowStep(scaffold, terminalFetchName)));
+  assert.ok(terminalFetch.includes(`fetch --depth=2 origin ${requirements.terminal}`));
+  assert.ok(terminalFetch.includes(`rev-parse HEAD)" = ${requirements.terminal}`));
   assert.ok(terminalFetch.includes('echo "STARVECTOR_TERMINAL_INFERENCE_TEST_ROOT=$inference_root" >> "$GITHUB_ENV"'));
   assert.ok(publish.indexOf(terminalFetch) < publish.indexOf(validation));
   const dependencies = workflowStep(publish, "Install pinned scaffold dependencies");
@@ -117,7 +122,8 @@ function assertAdvisoryGate(workflow) {
 
   const parity = workflowJob(workflow, "parity");
   assert.match(parity, /needs: \[[^\]]*supply-chain[^\]]*\]/);
-  assert.match(parity, /if \[ "\$count" -lt 5 \]; then/);
+  assert.match(parity, /run: node scripts\/check-job-relevance\.mjs --assert-results/);
+  assert.match(parity, /needs: \[[^\]]*changes[^\]]*\]/);
 }
 
 test("required parity fails closed over an unconditional advisory gate", async () => {
@@ -893,19 +899,14 @@ test("windows-candle captures and schema-checks the SC-21714 Krea anchor record"
   // probe while another gained a second, still green. Naming the owner closes both. The only probe
   // that does not certify an idle GPU BEFORE it samples is the LTX-2.5 capture's, which proves
   // idleness on its own rendered baseline instead because that arm renders first.
-  const owners = [];
-  let owner = null;
-  for (const line of adapter.split("\n")) {
-    const fn = /^(?:pub(?:\([a-z]+\))? )?fn ([a-z_0-9]+)/.exec(line);
-    if (fn) owner = fn[1];
-    const probe = /let mut vram\s*=\s*([^;]+);/.exec(line);
-    if (probe) owners.push([owner, probe[1].trim()]);
-  }
+  const nameAt = enclosingFunctions(adapter);
+  const owners = [...adapter.matchAll(/let mut vram\s*=\s*([^;]+);/g)]
+    .map((match) => [nameAt(match.index), match[1].trim().replace(/\s+/g, " ")]);
   assert.deepEqual(
     owners.sort(([a], [b]) => a.localeCompare(b)),
     [
       // Krea five-rung reference (and the registry-loaded providers that ride it).
-      ["load_five_rung_generator", "certifying_vram_probe()"],
+      ["load_five_rung_generator", 'if request.get("sdxlEndpoint").is_some() { endpoint_vram_probe()? } else { certifying_vram_probe() }'],
       // The Mage-Flow loader (sc-22733 — its own loader because a Mage load binds two artifact triples).
       ["load_mage_generator", "certifying_vram_probe()"],
       // The inline Krea arm.
@@ -952,6 +953,92 @@ function enclosingFunctions(source) {
   return (index) => starts.filter((entry) => entry.at <= index).at(-1)?.name ?? "(top level)";
 }
 
+// CI_IMPACT: pure source-contract checks for one dispatch-only probe; no CUDA or model execution.
+function assertSdxlEndpointProbeGuards(adapter) {
+  const body = (name) => {
+    const at = adapter.indexOf(`fn ${name}(`);
+    assert.ok(at >= 0, `${name} exists`);
+    const next = adapter.slice(at + 1).search(/^fn /m);
+    return adapter.slice(at, next < 0 ? undefined : at + 1 + next);
+  };
+  const binding = body("validate_sdxl_endpoint_binding");
+  assert.match(binding, /!matches!\(visible, "0" \| "1"\) \|\| visible != physical \|\| !valid_sdxl_gpu_uuid\(uuid\)/);
+  const uuid = body("valid_sdxl_gpu_uuid");
+  assert.match(uuid, /strip_prefix\("GPU-"\)/);
+  assert.match(uuid, /uuid\.len\(\) == 36/);
+  assert.match(uuid, /\[8, 13, 18, 23\]/);
+  assert.match(uuid, /byte\.is_ascii_digit\(\) \|\| \(b'a'\.\.=b'f'\)\.contains/);
+  const expected = body("sdxl_endpoint_expected_uuid");
+  for (const variable of ["CUDA_VISIBLE_DEVICES", "SCENEWORKS_GPU_ID", "SCENEWORKS_SDXL_EXPECTED_GPU_UUID"]) {
+    assert.match(expected, new RegExp(`protocol::required_env\\("${variable}"\\)\\?`));
+  }
+  assert.match(expected, /validate_sdxl_endpoint_binding\(&visible, &physical, &expected\)\?/);
+  const probe = body("endpoint_vram_probe");
+  assert.match(probe, /let expected = sdxl_endpoint_expected_uuid\(\)\?/);
+  assert.match(probe, /query_bounded\("uuid", Duration::from_secs\(5\)\)\?/);
+  assert.match(probe, /if physical_uuid != expected/);
+  assert.match(probe, /Instant::now\(\)/);
+  assert.match(probe, /wait_for_sdxl_idle\(/);
+  assert.match(probe, /memory\.used,memory\.free,utilization\.gpu,utilization\.memory/);
+  assert.match(probe, /\|\| started\.elapsed\(\)/);
+  assert.match(probe, /sdxl_endpoint_context_uuid\(\)\?/);
+  assert.match(probe, /if uuid != expected/);
+  assert.doesNotMatch(probe, /pure_compute|assert_idle|assert_stable_idle/, "unused contexts remain part of the measured baseline");
+  const idle = body("wait_for_sdxl_idle");
+  assert.match(idle, /let timeout = Duration::from_secs\(30\)/);
+  assert.match(idle, /while elapsed\(\) < timeout/);
+  assert.match(idle, /saturating_sub\(elapsed\(\)\)[\s\S]*?\.min\(Duration::from_secs\(5\)\)/);
+  assert.match(idle, /parse::<u64>\(\)/);
+  assert.match(idle, /values\.len\(\) != 4[\s\S]*?values\[2\] > 100[\s\S]*?values\[3\] > 100/);
+  assert.match(idle, /values\[1\] < 16 \* 1024 \|\| values\[2\] != 0 \|\| values\[3\] != 0/);
+  assert.match(idle, /used\.iter\(\)\.max\(\)\.unwrap\(\) - used\.iter\(\)\.min\(\)\.unwrap\(\) > 64/);
+  assert.match(idle, /used\.clear\(\)/);
+  assert.match(idle, /used\.len\(\) == 5 && elapsed\(\) <= timeout/);
+  assert.match(idle, /Duration::from_millis\(200\)\.min\(timeout\.saturating_sub\(elapsed\(\)\)\)/);
+  assert.match(idle, /samples=\{samples:\?\}/);
+  const context = body("sdxl_endpoint_context_uuid");
+  assert.match(context, /candle_gen::default_device\(\)/);
+  assert.match(context, /\.as_cuda_device\(\)/);
+  assert.match(context, /\.cuda_stream\(\)[\s\S]*?\.context\(\)[\s\S]*?\.uuid\(\)/);
+  for (const name of ["run_sdxl_endpoint", "probe_sdxl_endpoint"]) {
+    const endpoint = body(name);
+    assert.match(endpoint, /let expected = sdxl_endpoint_expected_uuid\(\)\?/);
+    assert.match(endpoint, /query_bounded\("uuid", Duration::from_secs\(5\)\)\?/);
+    assert.match(endpoint, /if uuid != expected/);
+  }
+  const endpoint = body("run_sdxl_endpoint");
+  assert.match(endpoint, /if context_uuid != expected/);
+  assert.match(endpoint, /planned_provider\(request\)\? != SDXL_ID/);
+  assert.match(endpoint, /planned_tier\(request\)\? != "q4"/);
+}
+
+test("manual SDXL probe exception rejects missing activity, headroom, stability or actual-device guards", async () => {
+  const adapter = await source("crates/sceneworks-memory-adapter/src/bin/candle.rs");
+  assertSdxlEndpointProbeGuards(adapter);
+  for (const [owner, from, to] of [
+    ["wait_for_sdxl_idle", "Duration::from_secs(30)", "Duration::from_secs(31)"],
+    ["wait_for_sdxl_idle", "while elapsed() < timeout", "while true"],
+    ["wait_for_sdxl_idle", "values[1] < 16 * 1024", "values[1] < 1"],
+    ["wait_for_sdxl_idle", "values[2] != 0", "values[2] > 100"],
+    ["wait_for_sdxl_idle", "values[3] != 0", "values[3] > 100"],
+    ["wait_for_sdxl_idle", "used.len() == 5", "used.len() == 1"],
+    ["wait_for_sdxl_idle", "elapsed() <= timeout", "true"],
+    ["endpoint_vram_probe", 'sdxl_endpoint_context_uuid()?', 'String::from("unverified")'],
+    ["endpoint_vram_probe", "if uuid != expected", "if false"],
+    ["endpoint_vram_probe", 'query_bounded("uuid", Duration::from_secs(5))?', 'query_bounded("uuid", Duration::from_secs(30))?'],
+    ["validate_sdxl_endpoint_binding", "visible != physical", "false"],
+    ["sdxl_endpoint_expected_uuid", "SCENEWORKS_SDXL_EXPECTED_GPU_UUID", "UNVERIFIED_UUID"],
+    ["run_sdxl_endpoint", "if context_uuid != expected", "if false"],
+  ]) {
+    const start = adapter.indexOf(`fn ${owner}(`);
+    const next = adapter.slice(start + 1).search(/^fn /m);
+    const end = next < 0 ? adapter.length : start + 1 + next;
+    const original = adapter.slice(start, end);
+    assert.ok(original.includes(from), `${owner} owns the mutated guard`);
+    assert.throws(() => assertSdxlEndpointProbeGuards(adapter.slice(0, start) + original.replace(from, to) + adapter.slice(end)), `${owner}: ${from}`);
+  }
+});
+
 function assertEveryVramProbeIsCertifying(adapter) {
   const nameAt = enclosingFunctions(adapter);
   // Every probe CONSTRUCTION in the file, whichever spelling it uses.
@@ -964,6 +1051,11 @@ function assertEveryVramProbeIsCertifying(adapter) {
     // The certifying constructor's own definition is the one place `start_rendered` may appear
     // without being a capture arm's ad-hoc probe.
     if (site.fn === "certifying_vram_probe") continue;
+    if (site.fn === "endpoint_vram_probe") {
+      assert.equal(site.text, "VramProbe::start_rendered()", "manual endpoint probe construction changed");
+      assertSdxlEndpointProbeGuards(adapter);
+      continue;
+    }
     if (site.text.startsWith("certifying_vram_probe")) {
       certifying.add(site.fn);
       continue;
@@ -1049,6 +1141,99 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
     "pure provisioning retains its compatibility group; guarded GPU execution uses per-run queue keys, not a GHA mutex",
   );
   assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
+});
+
+test("hosted-only metadata dispatch excludes every NAX runner before assignment and rejects all conflicting model flags", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  assert.match(workflow, /hosted_only:\n +description: [^\n]+\n +required: false\n +type: boolean\n +default: false/);
+  const hosted = workflowJob(workflow, "macos-checks");
+  const nax = workflowJob(workflow, "nax-worker");
+  const condition = workflowExpression(nax);
+  const route = workflowExpression(nax, "runs-on");
+  const validation = workflowStep(hosted, "Validate hosted-only dispatch intent");
+  const validationCondition = workflowExpression(validation);
+  const flags = ["run_memory_calibration", "run_five_rung_reference", "provision_qwen_snapshot", "provision_z_image_snapshot"];
+  const events = [
+    { event_name: "workflow_dispatch" },
+    { event_name: "push" },
+    { event_name: "merge_group" },
+    { event_name: "pull_request", base: "main", sameRepo: true },
+    { event_name: "pull_request", base: "feature/sc-26233-flux3-image-klein", sameRepo: true },
+    { event_name: "pull_request", base: "main", sameRepo: false },
+  ];
+  const evaluateCondition = (candidate, event, inputs, gate = { result: "success", relevant: "true", canceled: false }) =>
+    Function("github", "inputs", "needs", "cancelled", `return (${candidate});`)(
+      { event_name: event.event_name, repository: "SceneWorks/SceneWorks", event: {
+        pull_request: { base: { ref: event.base }, head: { repo: { full_name: event.sameRepo === false ? "external/fork" : "SceneWorks/SceneWorks" } }, title: "[Mac2] metadata" },
+        head_commit: { message: "[Mac2] metadata" },
+      } }, inputs, { changes: { result: gate.result, outputs: { relevant: gate.relevant } } }, () => gate.canceled,
+    );
+  const validateCondition = (candidate) => {
+    for (let mask = 0; mask < 16; mask++) {
+      const modelFlags = Object.fromEntries(flags.map((flag, i) => [flag, Boolean(mask & (1 << i))]));
+      for (const event of events) for (const hostedOnly of [undefined, false, true]) {
+        const inputs = { ...modelFlags, ...(hostedOnly === undefined ? {} : { hosted_only: hostedOnly }) };
+        const normal = event.event_name !== "merge_group" && (event.event_name !== "pull_request" || (event.base === "main" && event.sameRepo));
+        const excluded = event.event_name === "workflow_dispatch" && hostedOnly === true;
+        const selected = Boolean(evaluateCondition(candidate, event, inputs));
+        assert.equal(selected, Boolean(normal && !excluded), `${event.event_name} flags=${mask} hosted=${hostedOnly}`);
+        // GitHub evaluates a job's if before assigning runs-on. Evaluate the ACTUAL
+        // routing expression only for a selected job; excluded requests assign no runner.
+        let assignments = 0;
+        if (selected) {
+          assignments++;
+          const labels = Function("github", "inputs", "fromJSON", "startsWith", `return (${route});`)(
+            { event_name: event.event_name, event: { pull_request: { title: "[Mac2] metadata" }, head_commit: { message: "[Mac2] metadata" } } },
+            inputs, JSON.parse, (value, prefix) => String(value).startsWith(prefix),
+          );
+          assert(labels.includes("self-hosted"));
+        }
+        if (excluded) assert.equal(assignments, 0, "hosted-only may assign neither primary nor secondary self-hosted runner");
+      }
+    }
+    // The exclusion must dominate the existing fail-open relevance path, too.
+    for (const gate of [
+      { result: "failure", relevant: "false", canceled: false },
+      { result: "success", relevant: "false", canceled: false },
+      { result: "success", relevant: "true", canceled: true },
+    ]) assert.equal(Boolean(evaluateCondition(candidate, events[0], { hosted_only: true }, gate)), false);
+  };
+  validateCondition(condition);
+  for (const mutant of [
+    condition.replace(" && !(github.event_name == 'workflow_dispatch' && inputs.hosted_only)", ""),
+    condition.replace("github.event_name == 'workflow_dispatch' && inputs.hosted_only", "inputs.hosted_only"),
+    condition.replace("inputs.hosted_only", "!inputs.hosted_only"),
+  ]) assert.throws(() => validateCondition(mutant), undefined, "runner exclusion mutation must be rejected");
+  for (const event of events) for (const hostedOnly of [undefined, false, true])
+    assert.equal(Boolean(evaluateWorkflow(validationCondition, event.event_name, { hosted_only: hostedOnly })), event.event_name === "workflow_dispatch" && hostedOnly === true);
+
+  const bindings = [...validation.matchAll(/^ {10}([A-Z_]+): \$\{\{ inputs\.([a-z_]+) \}\}$/gm)];
+  assert.equal(bindings.length, 4);
+  assert.deepEqual(new Set(bindings.map(([, , input]) => input)), new Set(flags));
+  const body = validation.split("        run: |\n")[1].split("\n").map((line) => line.startsWith("          ") ? line.slice(10) : line).join("\n");
+  const runGuard = async (script, values) => {
+    const env = Object.fromEntries(["PATH", "SystemRoot", "TEMP", "TMP"].filter((key) => process.env[key] !== undefined).map((key) => [key, process.env[key]]));
+    for (const [, name, input] of bindings) env[name] = String(values[input]);
+    try { return { code: 0, ...(await promisify(execFile)("bash", ["--noprofile", "--norc", "-e", "-o", "pipefail", "-c", script], { env, timeout: 10000 })) }; }
+    catch (error) { return { code: error.code, stdout: error.stdout, stderr: error.stderr }; }
+  };
+  for (let mask = 0; mask < 16; mask++) {
+    const values = Object.fromEntries(flags.map((flag, i) => [flag, Boolean(mask & (1 << i))]));
+    const result = await runGuard(body, values);
+    assert.equal(result.code, mask === 0 ? 0 : 1, `actual Bash input guard flags=${mask}: ${result.stderr}`);
+    if (mask) assert.match(result.stdout, /::error::hosted_only requires/);
+  }
+  for (const flag of flags) for (const invalid of ["", "TRUE", "not-a-boolean"]) {
+    const result = await runGuard(body, { ...Object.fromEntries(flags.map((key) => [key, false])), [flag]: invalid });
+    assert.equal(result.code, 1, `${flag} must fail closed on unexpected serialization`);
+  }
+  // Removing any one model/provision flag from the ACTUAL guard must be detected.
+  for (const [, name, input] of bindings) {
+    const mutant = body.replace(` ${name}`, "");
+    const result = await runGuard(mutant, { ...Object.fromEntries(flags.map((key) => [key, false])), [input]: true });
+    assert.equal(result.code, 0, `mutation ${name} demonstrates why every flag is required`);
+  }
+  assert(hosted.indexOf(validation) < hosted.indexOf("dtolnay/rust-toolchain"), "intent validation must precede the hosted build setup");
 });
 
 test("macos-mlx routes an explicit Mac2 final PR and merge push without changing manual routing", async () => {
@@ -1163,6 +1348,14 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
     assert.match(job, /^ {6}HF_HUB_CACHE: 'E:\\huggingface\\hub'$/m);
     assert.match(job, /SCENEWORKS_IMPORTED_NVFP4_CHECKPOINT: 'E:\\huggingface\\hub\\models--Comfy-Org--Krea-2\\snapshots\\952f49d49653cb42e7d6cf7cbfad74738073ec7d\\diffusion_models\\krea2_turbo_nvfp4\.safetensors'/);
     assert.match(job, /python -I scripts\/ci\/imported-nvfp4-cuda-guard\.py/);
+    // CI_IMPACT: source-only scope checks; runner context is valid in steps, not job env.
+    assert.doesNotMatch(job.slice(0, job.indexOf("    steps:")), /\$\{\{ runner\./);
+    const execute = workflowStep(job, "Run the imported NVFP4 worker smoke");
+    for (const [name, directory] of [["OUTPUT", "proof"], ["RESOURCE", "resource"]]) {
+      assert.ok(execute.includes(`MODEL_PROOF_${name}_DIR: '\${{ runner.temp }}\\imported-nvfp4-${directory}-\${{ github.run_id }}-\${{ github.run_attempt }}'`));
+    }
+    const upload = workflowStep(job, "Upload only bounded owned model-validation evidence");
+    assert.ok(upload.includes("path: ${{ runner.temp }}\\imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}/artifact"));
     assert.doesNotMatch(job, /cargo (?:test|run).*imported_nvfp4_worker_gpu_smoke|continue-on-error:/);
   }
   const reject = workflowStep(bridge, "Refuse combined imported NVFP4 proof profiles");
@@ -1236,6 +1429,7 @@ test("Windows Candle and manual NVFP4 jobs keep their physical GPU choices expli
     assert.equal(evaluateWorkflow(route, event), expected, event);
     assert.equal(evaluateWorkflow(route, event, { capability_facts_only: false }), expected, event);
   }
+  assert.equal(evaluateWorkflow(route, "workflow_dispatch", { run_imported_nvfp4_proof: true }), "1");
   assert.match(imported, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
   assert.match(imported, /^ {6}CUDA_VISIBLE_DEVICES: "1"$/m);
 
@@ -1814,11 +2008,15 @@ test("the PR-reachable candle lane typechecks the memory adapter's TESTS, not ju
   assert.match(await source("package.json"), /"rust:check:candle": "node scripts\/check-candle-build\.mjs"/);
 });
 
-test("Docker relevance gate paginates and checks for truncated file lists", async () => {
+test("Docker relevance step consumes the exhaustive shared diff and fails safe on missing selection", async () => {
   const workflow = await source(".github/workflows/check.yml");
-  assert.match(workflow, /gh api --paginate/);
-  assert.match(workflow, /docker-smoke-relevance\.mjs --expected-count/);
-  assert.doesNotMatch(workflow, /gh pr view .*--json files/);
+  const gate = workflowStep(workflowJob(workflow, "parity-docker"), "Decide whether to run the Docker runtime smoke");
+  assert.match(gate, /SELECTED: \$\{\{ needs.changes.outputs.docker \}\}/);
+  assert.match(gate, /if \[ "\$SELECTED" = "false" \]; then/);
+  assert.match(gate, /else\n            echo "run=true"/);
+  const selector = await source("scripts/check-job-relevance.mjs");
+  assert.match(selector, /"--name-only", "--no-renames", "-z"/);
+  assert.match(selector, /dockerSmokeDecision\(files.length, files\)/);
 });
 
 test("every release job is confined to refs/tags/v", async () => {
@@ -2590,7 +2788,9 @@ test("the MLX memory adapter is guarded on a PR lane, like its Candle twin", asy
   // The guard must sit on the unconditional PR path, not behind the dispatch-only
   // calibration steps — that placement is exactly the hole this closes.
   const guard = mlx.indexOf("cargo clippy -p sceneworks-memory-adapter");
-  const firstDispatchOnly = mlx.indexOf("if: ${{ github.event_name == 'workflow_dispatch'");
+  // Hosted-only input validation is an early dispatch guard, not an optional model run.
+  // The unconditional lint must precede the actual calibration/provisioning job steps.
+  const firstDispatchOnly = mlx.indexOf("if: ${{ github.event_name == 'workflow_dispatch'", mlx.indexOf("  nax-worker:"));
   assert.ok(guard > 0, "macos-mlx.yml must clippy the MLX memory adapter");
   assert.ok(firstDispatchOnly > 0, "macos-mlx.yml must still have dispatch-only calibration steps");
   assert.ok(guard < firstDispatchOnly, "MLX adapter guard must precede the dispatch-only steps");
@@ -2967,6 +3167,7 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
         ".cargo/config.toml", // git-fetch-with-cli, without which the token-injected inference fetch breaks
         ".github/actions/prepare-rust-runner/**", // the job's own first step
+        ".github/actions/cleanup-runner-storage/**", // registered post action; Windows guard tests exercise its Cargo locks and path checks
         ".github/workflows/windows-candle.yml", // the lane itself
       ],
     },
@@ -4672,6 +4873,12 @@ function mlxGuardSteps(workflow) {
 // "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
 const MLX_FATAL_GUARDS = [
   {
+    step: "Validate hosted-only dispatch intent",
+    detects: "a hosted-only artifact dispatch combined with calibration, provisioning, or an unexpected model-flag serialization",
+    branch: ['if [ "${!flag}" != "false" ]; then'],
+    diagnostic: /^echo "::error::hosted_only requires \$flag=false;/,
+  },
+  {
     step: "Verify capabilities.mlx.json content against a fresh dump",
     detects: "the checked-in MLX facts file differs in capability content from a fresh dump at this pin",
     branch: [
@@ -4840,6 +5047,7 @@ const MLX_FATAL_GUARDS = [
 // backed tests fail closed, and `always()` lets the producer and its paired upload still run so
 // the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
+  "Validate hosted-only dispatch intent": "if: ${{ github.event_name == 'workflow_dispatch' && inputs.hosted_only }}",
   "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
   "Validate Z-Image provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",
@@ -5509,5 +5717,13 @@ test("the rejected LTX Eros CUDA baseline keeps renderer and product timelines d
       mutation.expected,
       `${mutation.name} must be killed by the acceptance contract`,
     );
+  }
+});
+
+
+test("hosted macOS aligns dev/test and proc-macro debug settings", async () => {
+  const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
+  for (const profile of ["DEV", "TEST", "DEV_BUILD_OVERRIDE", "TEST_BUILD_OVERRIDE"]) {
+    assert.ok(hosted.includes(`CARGO_PROFILE_${profile}_DEBUG: line-tables-only`), profile);
   }
 });

@@ -116,8 +116,9 @@ const GENERATION_CAPABILITIES = new Set([
 // source-owned EXPECTED_IMAGE_IDS list and the shipped manifest below.
 //
 // SC-15812: ownership is keyed BY BACKEND, not by model. An MLX story cannot be closed from CUDA
-// hardware and a Candle story cannot be closed from a Mac, so a dual-backend entry has two owners
-// and a cell must name the one that actually covers it. An mlx-only entry simply has no `candle`
+// hardware and a Candle story cannot be closed from a Mac. Separate backend stories have separate
+// owners; an explicitly declared paired SAME-model story must prove both lanes (S6/sc-26239).
+// A cell must name the story that actually covers it. An mlx-only entry simply has no `candle`
 // key: a missing mapping then fails loudly at generation time instead of silently attributing
 // Candle cells to a story scoped to Metal — which is precisely the false green this epic exists to
 // prevent, and which shipped in the generated matrix until this change.
@@ -144,6 +145,11 @@ export const MODEL_STORIES = {
   // Iris-3B (epic 25678): ported to MLX by sc-25679 and to Candle/CUDA by sc-25680 (S2) — each
   // backend's cells are owned by the story that brought that lane through SceneWorks.
   iris_3b: { mlx: 25679, candle: 25680 },
+  // FLUX 3 Image Klein (epic 26233): the distilled text-to-image route ported to MLX by sc-26234
+  // (S1). The Candle/CUDA key lands WITH that backend (sc-26235, S2), never ahead of it — the
+  // entry is MLX-only until then, so a Candle cell cannot be attributed to a Metal-scoped story.
+  flux3_klein: { mlx: 26234, candle: 26235 },
+  flux3_klein_base: { mlx: 26239, candle: 26239 },
   // Supra2-IMG (epic 24212): ported to MLX by sc-24213 and to Candle by sc-24214 — each backend's
   // cells are owned by the story that brought that lane through SceneWorks.
   supra2_img: { mlx: 24213, candle: 24214 },
@@ -225,6 +231,10 @@ export const FAMILY_STORIES = {
   // exists for either lane (the epic-end campaign owns anchors), so the cells stay
   // Implemented/Missing by implementation, never Anchored.
   25678: { mlx: 25678, candle: 25684 },
+  // FLUX 3 Image Klein: the MLX family remains owned by its epic (sc-26233). The native Candle
+  // model cells belong to sc-26235, so the distinct Candle resource-family owner is sc-26241
+  // (S8). One id may own only one thing; neither mapping claims a measured memory anchor.
+  26233: { mlx: 26233, candle: 26241 },
   // Supra2-IMG: the MLX family is owned by its epic (sc-24212); the model stories sc-24213/sc-24214
   // own the supra2_img cells, and one id may own only one thing. The Candle family twin is sc-24217,
   // the epic's terminal story that owns the one measurement campaign (memory included).
@@ -377,6 +387,7 @@ export function familyGroup(modelId) {
   if (modelId === "pulid_flux_dev") return 15527;
   if (modelId === "bernini_image") return 15528;
   if (modelId.startsWith("iris")) return 25678;
+  if (modelId.startsWith("flux3")) return 26233;
   if (modelId === "moss_image_base" || modelId === "moss_image_sft") return 26323;
   if (modelId === "supra2_img") return 24212;
   throw new Error(`no family story for ${modelId}`);
@@ -418,9 +429,14 @@ export function modelStory(modelId, backend) {
  * it finds — the backend and the owner — so the map has to answer unambiguously. It is a plain `Map`,
  * so a repeated id is last-write-wins: the guard would then check every cell naming that id against
  * whichever claimant happened to be indexed last, quietly passing that one's cells and rejecting the
- * other's. Not vacuous, but no longer proof of anything. So one id means one owner and one backend,
- * enforced here rather than assumed downstream.
+ * other's. Not vacuous, but no longer proof of anything. One id means one owner/role and one backend
+ * unless a checked PAIRED_MODEL_STORIES declaration names that exact model on exactly both lanes,
+ * or COMPOSITE_STORY_OWNERSHIP names the exact model/family claims on one native backend.
  */
+// Explicit story-local dual-backend scope, never inferred from repeated ids. S6's two native
+// implementations are one SAME-model story; both backend receipts are still required separately.
+export const PAIRED_MODEL_STORIES = { flux3_klein_base: 26239 };
+
 // The approved MOSS backend stories each implement both exact variants and their family.
 // This declaration permits only these three claims per story, on its single native backend.
 // It does not relax the legacy one-owner rule for any other story, model or family.
@@ -429,14 +445,27 @@ export const COMPOSITE_STORY_OWNERSHIP = Object.freeze([
   { story: 26324, backend: "candle", family: 26323, model_ids: ["moss_image_base", "moss_image_sft"] },
 ]);
 
-export function buildStoryBackendScope(modelStories = MODEL_STORIES, familyStories = FAMILY_STORIES) {
+export function buildStoryBackendScope(
+  modelStories = MODEL_STORIES,
+  familyStories = FAMILY_STORIES,
+  pairedModelStories = modelStories === MODEL_STORIES ? PAIRED_MODEL_STORIES : {},
+) {
+  for (const [modelId, storyId] of Object.entries(pairedModelStories)) {
+    const declared = modelStories[modelId];
+    if (!Number.isInteger(storyId) || !declared ||
+        Object.keys(declared).sort().join(",") !== "candle,mlx" ||
+        declared.mlx !== storyId || declared.candle !== storyId) {
+      throw new Error(`${modelId}: paired model ownership must declare exactly mlx+candle with the same integer story id`);
+    }
+  }
   const scope = new Map();
   const claim = (storyId, backend, role, owner) => {
     if (!Number.isInteger(storyId)) {
       throw new Error(`${role} for ${owner}: story id ${JSON.stringify(storyId)} is not an integer`);
     }
-    // Every undeclared repeat is a defect: two models sharing a legacy story would
-    // under-count the split, and a story used as both a model and a family owner is a typo.
+    // Only exact declared same-model pairs or exact single-backend composite claims may repeat.
+    // Cross-model/role reuse outside those declarations remains a defect, never last-write-wins.
+    const paired = role === "model story" && pairedModelStories[owner] === storyId;
     const existing = scope.get(storyId);
     const composite = COMPOSITE_STORY_OWNERSHIP.find((entry) => entry.story === storyId);
     if (composite) {
@@ -451,11 +480,14 @@ export function buildStoryBackendScope(modelStories = MODEL_STORIES, familyStori
       return;
     }
     if (existing) {
+      if (paired && existing.backend === "paired" && existing.role === role && existing.owner === owner) return;
       throw new Error(
         `SC-${storyId} is claimed as the ${existing.backend} ${existing.role} of ${existing.owner} and as the ${backend} ${role} of ${owner}: an ownership story belongs to exactly one owner and one backend`,
       );
     }
-    scope.set(storyId, { backend, role, owner });
+    scope.set(storyId, paired
+      ? Object.freeze({ backend: "paired", backends: Object.freeze(["mlx", "candle"]), role, owner })
+      : { backend, role, owner });
   };
   for (const [modelId, byBackend] of Object.entries(modelStories)) {
     for (const [backend, storyId] of Object.entries(byBackend)) claim(storyId, backend, "model story", modelId);
@@ -522,7 +554,12 @@ export function assertCellOwnershipIsBackendScoped(
       if (!owner) {
         throw new Error(`${cell.id}: ${field} SC-${storyId} is not a known backend-scoped ownership story`);
       }
-      if (owner.backend !== cell.backend) {
+      const paired = owner.backend === "paired";
+      if (paired && (owner.role !== "model story" || !Array.isArray(owner.backends) ||
+          [...owner.backends].sort().join(",") !== "candle,mlx")) {
+        throw new Error(`${cell.id}: invalid paired model ownership scope`);
+      }
+      if (paired ? !owner.backends.includes(cell.backend) : owner.backend !== cell.backend) {
         throw new Error(
           `${cell.id}: ${field} SC-${storyId} is scoped to ${owner.backend}, but the cell is ${cell.backend} — a ${cell.backend} cell cannot be covered by a ${owner.backend} story`,
         );
@@ -1287,7 +1324,7 @@ function tiersFor(model, backend, backendTierOverrides, routeLaneTiers, route) {
       (download) => bundledLane || servesLane(download) || routedTiers.has(download.variant),
     )
     .map((download) => download.variant)
-    .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|int\d+)/.test(variant));
+    .filter((variant) => typeof variant === "string" && /^(bf16|fp16|q\d+|nvfp4|fp8r|int\d+)/.test(variant));
   const inferred = model[backend]?.quantize === 4 ? ["q4"] : model[backend]?.quantize === 8 ? ["q8"] : [];
   // sc-22738: every lane UNIONS the three sources. There used to be a candle-only short-circuit
   // here — `backend === "candle" && backendTiers.length ? backendTiers : [...]` — which, the moment

@@ -59,7 +59,16 @@ const UNSUPPORTED_ADVANCED: &[&str] = &[
     "mlxQuantizeExplicit",
     // MOSS-Image's own wire objects (`imageJobAdvanced.js` / the MCP image tool).
     "mossImage",
+    "mossImageEdit",
+    "mossImageAdvanced",
+    "promptBatch",
     "mossOrdinarySettings",
+    // FLUX.3's authored layout controls (`imageJobAdvanced.js`): the shared studio builder emits
+    // them only for the FLUX 3 models, but the same static key extractor that demands this
+    // classification reads the builder's source, so Supra2 refuses them by wire name like every
+    // other engine-specific object it has no input for.
+    "flux3_layout",
+    "flux3_reference_ids",
     // The character lane's Angle Set / Key Point Library extras (`characterPanels.jsx`).
     "angleSet",
     "keypointCollectionId",

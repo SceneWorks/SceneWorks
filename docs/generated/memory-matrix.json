@@ -1,31 +1,31 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:c432c6c64ebe0e024b0b95837591bf981990ea5197697ad884bc1000f6baf44e",
+    "sceneWorksRevision": "source-tree:5c86ebee2368855083d2dc4500cbca7d88d4a78bd89234292307e6d153f0347a",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "82ea553e725fc21e371624573929402576326cb1311134b713a503402e0d9529"
+        "sha256": "4816a919e43fb25fdf86e9e995fd6fb25abdadf347ab47176ff8df25f7d828e2"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "efcd393df0977f30f9ed95ca375df4f8c3da334bb5c39c7edb5c513efecbc8d3"
+        "sha256": "4b187436bf26dc9db1ef0b8acf950f88b3c5b0d7e82b8714db9ff54b84f2924c"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "23f0b07513e9533219728f048d2de6262ddf03636b0347e87b52c2db2e4a0aad"
+        "sha256": "b3a1494e9e33ba804bff85974f71f41ec615e53bef9b08d61276273f5ad4ad20"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "d8995c8b538220de69feb1aefdd0cbe7960ee6c1c9834eaae4ecb2176ad688f3"
+        "sha256": "b80ba8af21a192221746713f86b77d187923d20c70e36ac23724de0e99c9fc65"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "efee30667978d3624ac86a34fec51dcfa0bcdfa139e32d6002151fd456d24497"
+        "sha256": "970c9c02164802fd0e1f4a1fab0f1d2bb1a5d0cfeb44f07e76e4089f87c5dbc2"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "443f2d2e6af710359920d947389b2eaaba78f8b3a8c77e7e4a5823b6149b1671"
+        "sha256": "dbf3340ed5ca7fcf6ed8aa6f54cb6b851c582ec4cdaba57b4d3a00fc18bd9e81"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
@@ -57,11 +57,11 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "8f1116de3c80b70a24a06ef58f5c8f4b0474ac77bb9b1ad5eda936d11ed5a42a"
+        "sha256": "f870527b86a04245b6b07f50f5332c8c825e78508c3a05e5a4c475a7fd8a791e"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
-        "sha256": "159d9ced96a7d80a9299e6a42d02196438586b3ebdf32249816634c1130eda86"
+        "sha256": "34a204ca7425c2eb945f45f663d4448a32aa4b8eba040dbaa751c199650161aa"
       },
       "instantId": {
         "path": "crates/sceneworks-worker/src/image_jobs/instantid.rs",
@@ -69,15 +69,15 @@
       },
       "anchorStore": {
         "path": "config/memory-anchors.json",
-        "sha256": "2fa84ddec270226a0bd3365811db56764375337064fff705d51377194e4a49c7"
+        "sha256": "27383c2876fc277b9b6762aae69c8be47661b5bc83dde0cc4c5cdba240778e98"
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "a18e3a741a1beb4f0b2eb03f4b814bd47e8682c3d3fb672eafaa73218998f873"
+        "sha256": "add2ec29f9d7768d14162fd79e8aaaae8e53829e5fc3c95ed2c6c94f6942c39d"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
-        "sha256": "30aeb5e63b011e16a0c6486df6a335fec75463ed10c506ad7e6c4c80f72a1238"
+        "sha256": "afe1c9a1f21d866989e652aa465f0697caa789165bb8f9565822b0082cb6b7b4"
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
@@ -85,15 +85,15 @@
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "7a4487c758a9d18e4e294130b34ce0784ac68b42c7e6c79875d44374c31eac87"
+        "sha256": "3f293dcd1fdd4b4b1725c168c9f4d7b0aaa5366213e430bd44cb446048c28a0b"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
-        "sha256": "dd26ee205ec7303b28a6298e7b06eb0d67769d32d3660481a206ead9beb29b9d"
+        "sha256": "79f6f7640da5c3a82650bab6b5b7311b30875ea448b6e57f681a96cdc5477a2d"
       },
       "anchorExtractor": {
         "path": "scripts/extract-memory-anchors.mjs",
-        "sha256": "7a9a8c71b7f812eca8c25f1755f316cfa7206756faf02a05c702aa102a80b758"
+        "sha256": "ef370884a4c18032def5ccaa2995802755c9fea9f0ceb89b5d2fd9625c8ec3a1"
       }
     }
   },
@@ -132,21 +132,21 @@
     "anchor"
   ],
   "summary": {
-    "catalogEntries": 70,
+    "catalogEntries": 72,
     "catalogEntriesByModality": {
-      "image": 59,
+      "image": 61,
       "video": 11
     },
-    "cells": 9810,
+    "cells": 11010,
     "publishedCells": 3988,
-    "elidedCells": 5822,
+    "elidedCells": 7022,
     "elidedByState": {
-      "Implemented": 1238,
-      "Missing": 4584
+      "Implemented": 1598,
+      "Missing": 5424
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
-    "mlxStagedStaticCoverage": 50,
-    "mlxStagedStaticCoverageDenominator": 59,
+    "mlxStagedStaticCoverage": 52,
+    "mlxStagedStaticCoverageDenominator": 61,
     "videoMlxStagedStaticCoverage": 9,
     "videoMlxStagedStaticCoverageDenominator": 11,
     "unroutedEntries": [],
@@ -175,9 +175,9 @@
       }
     ],
     "anchors": 259,
-    "analyticOnlyCells": 104,
+    "analyticOnlyCells": 124,
     "anchoredCells": 3988,
-    "staleAnchors": 258,
+    "staleAnchors": 259,
     "attestedAnchors": 0,
     "fullModels": 0
   },
@@ -1363,6 +1363,168 @@
         "candle": {
           "tiers": [
             "default"
+          ],
+          "modes": [
+            "character_image",
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "flux3_klein",
+      "name": "FLUX 3 Image Klein",
+      "modality": "image",
+      "familyGroup": 26233,
+      "family": "flux3",
+      "resolvedRoute": "flux3_klein",
+      "resolvedRoutes": {
+        "mlx": "flux3_klein",
+        "candle": "flux3_klein"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 26233,
+        "candle": 26241
+      },
+      "owningModelStories": {
+        "mlx": 26234,
+        "candle": 26235
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "fp8r",
+            "nvfp4",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "character_image",
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "fp8r",
+            "nvfp4",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "character_image",
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        }
+      }
+    },
+    {
+      "id": "flux3_klein_base",
+      "name": "FLUX 3 Image Klein Base",
+      "modality": "image",
+      "familyGroup": 26233,
+      "family": "flux3",
+      "resolvedRoute": "flux3_klein_base",
+      "resolvedRoutes": {
+        "mlx": "flux3_klein_base",
+        "candle": "flux3_klein_base"
+      },
+      "routeKind": "registry",
+      "backends": [
+        "mlx",
+        "candle"
+      ],
+      "owningFamilyStories": {
+        "mlx": 26233,
+        "candle": 26241
+      },
+      "owningModelStories": {
+        "mlx": 26239,
+        "candle": 26239
+      },
+      "axes": {
+        "mlx": {
+          "tiers": [
+            "bf16",
+            "fp8r",
+            "nvfp4",
+            "q4",
+            "q8"
+          ],
+          "modes": [
+            "character_image",
+            "edit_image",
+            "image_to_image",
+            "text_to_image"
+          ],
+          "overlays": [
+            "identity",
+            "lora",
+            "none"
+          ],
+          "rungs": [
+            "resident",
+            "staged_residency",
+            "bounded_decode",
+            "bounded_attention",
+            "bounded_transformer_residency"
+          ]
+        },
+        "candle": {
+          "tiers": [
+            "bf16",
+            "fp8r",
+            "nvfp4",
+            "q4",
+            "q8"
           ],
           "modes": [
             "character_image",
@@ -9373,7 +9535,7 @@
         "fps": null
       },
       "source": "docs/calibration/sc-24217/supra2-img-bf16-mlx-evidence.json",
-      "current": true,
+      "current": false,
       "currencyAttestation": null,
       "cells": 2
     },
@@ -12873,6 +13035,246 @@
           "lora": 0,
           "none": 12
         }
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein_base",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_attention",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_decode",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "resident",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "candle",
+      "rung": "staged_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "bounded_attention",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "bounded_decode",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "bounded_transformer_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 0,
+      "states": {
+        "Missing": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "resident",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
+      }
+    },
+    {
+      "modelId": "flux3_klein",
+      "backend": "mlx",
+      "rung": "staged_residency",
+      "coordinates": 60,
+      "published": 0,
+      "elided": 60,
+      "implemented": 60,
+      "states": {
+        "Implemented": 60
       }
     },
     {
@@ -70051,13 +70453,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -70116,7 +70520,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -70232,13 +70637,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -70297,7 +70704,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -70470,13 +70878,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -70535,7 +70945,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -70708,13 +71119,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -70773,7 +71186,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -70889,13 +71303,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -70954,7 +71370,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -71127,13 +71544,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -71192,7 +71611,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -71365,13 +71785,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -71430,7 +71852,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -71546,13 +71969,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -71611,7 +72036,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -71784,13 +72210,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -71849,7 +72277,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -72022,13 +72451,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -72087,7 +72518,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -72203,13 +72635,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -72268,7 +72702,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -72441,13 +72876,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -72506,7 +72943,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -72679,13 +73117,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -72744,7 +73184,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -72860,13 +73301,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -72925,7 +73368,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -73094,13 +73538,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -73159,7 +73605,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -73328,13 +73775,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -73393,7 +73842,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -73509,13 +73959,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -73574,7 +74026,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -73747,13 +74200,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -73812,7 +74267,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -73985,13 +74441,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -74050,7 +74508,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -74166,13 +74625,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -74231,7 +74692,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -74404,13 +74866,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -74469,7 +74933,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -74642,13 +75107,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -74707,7 +75174,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -74823,13 +75291,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -74888,7 +75358,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -75061,13 +75532,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -75126,7 +75599,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -75299,13 +75773,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -75364,7 +75840,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -75480,13 +75957,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -75545,7 +76024,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -75718,13 +76198,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -75783,7 +76265,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -75956,13 +76439,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -76021,7 +76506,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -76137,13 +76623,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -76202,7 +76690,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -76371,13 +76860,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -76436,7 +76927,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -76605,13 +77097,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -76670,7 +77164,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -76786,13 +77281,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -76851,7 +77348,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -77024,13 +77522,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -77089,7 +77589,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -77262,13 +77763,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -77327,7 +77830,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -77443,13 +77947,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -77508,7 +78014,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -77681,13 +78188,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -77746,7 +78255,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -77919,13 +78429,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -77984,7 +78496,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -78100,13 +78613,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -78165,7 +78680,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -78338,13 +78854,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -78403,7 +78921,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -78576,13 +79095,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -78641,7 +79162,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -78757,13 +79279,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -78822,7 +79346,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -78995,13 +79520,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -79060,7 +79587,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -79233,13 +79761,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -79298,7 +79828,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -79414,13 +79945,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -79479,7 +80012,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -79648,13 +80182,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -79713,7 +80249,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -79880,13 +80417,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -79943,7 +80482,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -80055,13 +80595,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -80118,7 +80660,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -80285,13 +80828,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -80348,7 +80893,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -80515,13 +81061,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -80578,7 +81126,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -80690,13 +81239,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -80753,7 +81304,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -80920,13 +81472,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -80983,7 +81537,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -81150,13 +81705,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -81213,7 +81770,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -81325,13 +81883,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -81388,7 +81948,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -81555,13 +82116,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -81618,7 +82181,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -81785,13 +82349,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -81848,7 +82414,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -81960,13 +82527,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -82023,7 +82592,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -82190,13 +82760,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -82253,7 +82825,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -82420,13 +82993,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -82483,7 +83058,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -82595,13 +83171,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -82658,7 +83236,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -82821,13 +83400,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -82884,7 +83465,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -83047,13 +83629,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -83110,7 +83694,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -83222,13 +83807,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -83285,7 +83872,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -83452,13 +84040,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -83515,7 +84105,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -83682,13 +84273,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -83745,7 +84338,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -83857,13 +84451,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -83920,7 +84516,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -84087,13 +84684,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -84150,7 +84749,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -84317,13 +84917,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -84380,7 +84982,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -84492,13 +85095,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -84555,7 +85160,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -84722,13 +85328,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -84785,7 +85393,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -84952,13 +85561,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -85015,7 +85626,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -85127,13 +85739,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -85190,7 +85804,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -85357,13 +85972,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -85420,7 +86037,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -85587,13 +86205,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -85650,7 +86270,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -85762,13 +86383,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -85825,7 +86448,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -85988,13 +86612,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -86051,7 +86677,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -86214,13 +86841,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -86277,7 +86906,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -86389,13 +87019,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -86452,7 +87084,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -86619,13 +87252,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -86682,7 +87317,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -86849,13 +87485,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -86912,7 +87550,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -87024,13 +87663,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -87087,7 +87728,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -87254,13 +87896,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -87317,7 +87961,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -87484,13 +88129,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -87547,7 +88194,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -87659,13 +88307,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -87722,7 +88372,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -87889,13 +88540,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -87952,7 +88605,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -88119,13 +88773,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -88182,7 +88838,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -88294,13 +88951,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -88357,7 +89016,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -88524,13 +89184,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -88587,7 +89249,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -88754,13 +89417,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -88817,7 +89482,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -88929,13 +89595,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -88992,7 +89660,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -89155,13 +89824,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -89218,7 +89889,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -167778,13 +168450,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -167842,7 +168516,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -168008,13 +168683,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -168072,7 +168749,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -168238,13 +168916,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -168302,7 +168982,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -168468,13 +169149,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -168532,7 +169215,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -168698,13 +169382,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -168762,7 +169448,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -168928,13 +169615,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -168992,7 +169681,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -169158,13 +169848,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -169222,7 +169914,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -169336,13 +170029,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -169400,7 +170095,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -169570,13 +170266,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -169634,7 +170332,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -169804,13 +170503,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -169868,7 +170569,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -169982,13 +170684,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -170046,7 +170750,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -170216,13 +170921,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -170280,7 +170987,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -170450,13 +171158,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -170514,7 +171224,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -170628,13 +171339,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -170692,7 +171405,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -170862,13 +171576,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -170926,7 +171642,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -171096,13 +171813,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -171160,7 +171879,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -171274,13 +171994,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -171338,7 +172060,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -171508,13 +172231,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -171572,7 +172297,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -171742,13 +172468,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -171806,7 +172534,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -171920,13 +172649,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -171984,7 +172715,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -172150,13 +172882,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -172214,7 +172948,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -172380,13 +173115,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -172444,7 +173181,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -172558,13 +173296,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -172622,7 +173362,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -172792,13 +173533,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -172856,7 +173599,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -173026,13 +173770,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -173090,7 +173836,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -173204,13 +173951,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -173268,7 +174017,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -173438,13 +174188,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -173502,7 +174254,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -173672,13 +174425,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -173736,7 +174491,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -173850,13 +174606,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -173914,7 +174672,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -174084,13 +174843,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -174148,7 +174909,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -174318,13 +175080,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -174382,7 +175146,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -174496,13 +175261,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -174560,7 +175327,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -174730,13 +175498,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -174794,7 +175564,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -174964,13 +175735,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -175028,7 +175801,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -175142,13 +175916,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -175206,7 +175982,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -175372,13 +176149,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -175436,7 +176215,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -175602,13 +176382,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -175666,7 +176448,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -175780,13 +176563,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -175844,7 +176629,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -176014,13 +176800,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -176078,7 +176866,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -176248,13 +177037,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -176312,7 +177103,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -176426,13 +177218,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -176490,7 +177284,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -176660,13 +177455,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -176724,7 +177521,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -176894,13 +177692,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -176958,7 +177758,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -177072,13 +177873,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -177136,7 +177939,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -177306,13 +178110,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -177370,7 +178176,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -177540,13 +178347,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -177604,7 +178413,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -177718,13 +178528,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -177782,7 +178594,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -177952,13 +178765,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -178016,7 +178831,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -178186,13 +179002,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -178250,7 +179068,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -178364,13 +179183,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -178428,7 +179249,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -178594,13 +179416,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -178658,7 +179482,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -185352,13 +186177,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -185416,7 +186243,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -185530,13 +186358,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -185594,7 +186424,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -185764,13 +186595,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -185828,7 +186661,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -185998,13 +186832,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -186062,7 +186898,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -186176,13 +187013,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -186240,7 +187079,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -186410,13 +187250,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -186474,7 +187316,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -186644,13 +187487,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -186708,7 +187553,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -186822,13 +187668,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -186886,7 +187734,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -187056,13 +187905,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -187120,7 +187971,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -187290,13 +188142,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -187354,7 +188208,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -187468,13 +188323,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -187532,7 +188389,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -187702,13 +188560,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -187766,7 +188626,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -187936,13 +188797,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -188000,7 +188863,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -188114,13 +188978,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -188178,7 +189044,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -188344,13 +189211,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -188408,7 +189277,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -188574,13 +189444,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -188638,7 +189510,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -188752,13 +189625,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -188816,7 +189691,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -188986,13 +189862,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -189050,7 +189928,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -189220,13 +190099,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -189284,7 +190165,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -189398,13 +190280,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -189462,7 +190346,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -189632,13 +190517,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -189696,7 +190583,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -189866,13 +190754,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -189930,7 +190820,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -190044,13 +190935,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -190108,7 +191001,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -190278,13 +191172,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -190342,7 +191238,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -190512,13 +191409,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -190576,7 +191475,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -190690,13 +191590,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -190754,7 +191656,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -190924,13 +191827,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -190988,7 +191893,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -191158,13 +192064,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -191222,7 +192130,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -191336,13 +192245,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -191400,7 +192311,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -191566,13 +192478,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -191630,7 +192544,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -191796,13 +192711,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -191860,7 +192777,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -191974,13 +192892,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -192038,7 +192958,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -192208,13 +193129,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -192272,7 +193195,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -192442,13 +193366,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -192506,7 +193432,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -192620,13 +193547,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -192684,7 +193613,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -192854,13 +193784,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -192918,7 +193850,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -193088,13 +194021,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -193152,7 +194087,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -193266,13 +194202,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -193330,7 +194268,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -193500,13 +194439,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -193564,7 +194505,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -193734,13 +194676,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -193798,7 +194742,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -193912,13 +194857,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -193976,7 +194923,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -194146,13 +195094,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -194210,7 +195160,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -194380,13 +195331,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -194444,7 +195397,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -194558,13 +195512,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -194622,7 +195578,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -194788,13 +195745,15 @@
         "attentionChunkSize": 67108864,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
           ],
           "attentionChunkSizes": [
-            67108864
+            67108864,
+            16777216
           ]
         }
       },
@@ -194852,7 +195811,8 @@
         "decodeOverlap": 64,
         "publishedRanges": {
           "decodeTileEdges": [
-            512
+            512,
+            256
           ],
           "decodeOverlaps": [
             64
@@ -229572,7 +230532,7 @@
         "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
         "tier": "bf16",
         "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -229616,7 +230576,7 @@
         "id": "supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
         "tier": "bf16",
         "source": "config/memory-anchors.json#supra2_img:mlx:bf16:base:base:supra2-img-mlx-resident-v1:imc-130e60e9f989be2191bc",
-        "current": true,
+        "current": false,
         "currencyAttestation": null,
         "derivable": true
       },
@@ -250806,6 +251766,8 @@
       "flux2_klein_9b_kv:flux2_klein_9b:mlx:q8:text_to_image:none:staged_residency"
     ],
     "flux2_klein_9b_true_v2": [],
+    "flux3_klein": [],
+    "flux3_klein_base": [],
     "ideogram_4": [
       "ideogram_4:ideogram_4:candle:bf16:edit_image:lora:bounded_attention",
       "ideogram_4:ideogram_4:candle:bf16:edit_image:lora:bounded_decode",

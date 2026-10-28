@@ -22,6 +22,8 @@
 //! `shipped_image_geometry_is_within_the_pinned_engine_envelope`. So the manifest may
 //! only advertise buckets the engine honors, and no app-layer refit is needed or wanted.
 
+pub mod flux3;
+
 use serde_json::Value;
 
 use crate::contracts::{HiresFixRequest, ImageUpscaleRequest, JsonObject};
@@ -172,6 +174,9 @@ pub struct ImageRequest {
     /// singular `reference_asset_id`; the FLUX.2-dev multi-image Image-Studio picker sends these.
     /// Empty for every single-reference / character flow (which keeps using `reference_asset_id`).
     pub reference_asset_ids: Vec<String>,
+    /// Family-local raw carrier validation and authored dimension intent, captured before tolerant
+    /// parsing/defaults can erase malformed slots or make an omitted dimension look explicit.
+    pub flux3_reference_request: Option<Result<flux3::ReferenceRequest, String>>,
     pub mask_asset_id: Option<String>,
     /// One of crop/pad/outpaint/stretch (default crop).
     pub fit_mode: String,
@@ -208,8 +213,24 @@ impl ImageRequest {
 
     /// The images this request produces: `count`, or `prompts × count` for a native prompt batch.
     pub fn image_count(&self) -> u32 {
-        self.count
-            .saturating_mul(u32::try_from(self.prompts.len().max(1)).unwrap_or(u32::MAX))
+        let embedding_batch =
+            if crate::moss_image::is_moss(&self.model) && self.mode == "edit_image" {
+                self.advanced
+                    .get(crate::moss_image_advanced::KEY)
+                    .and_then(|v| v.get("positive"))
+                    .and_then(|v| v.get("values"))
+                    .and_then(|v| v.get("metadata"))
+                    .and_then(|v| v.get("shape"))
+                    .and_then(|v| v.get(0))
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n <= 8)
+                    .unwrap_or(1) as usize
+            } else {
+                1
+            };
+        self.count.saturating_mul(
+            u32::try_from(self.prompts.len().max(embedding_batch).max(1)).unwrap_or(u32::MAX),
+        )
     }
 
     /// Parse a job payload (the `payload` object of a `JobSnapshot`). Infallible:
@@ -271,6 +292,12 @@ impl ImageRequest {
             source_asset_id: optional_id(payload, "sourceAssetId"),
             reference_asset_id: optional_id(payload, "referenceAssetId"),
             reference_asset_ids: string_list(payload, "referenceAssetIds"),
+            flux3_reference_request: flux3::is_model(&nonempty_string_or(
+                payload,
+                "model",
+                DEFAULT_MODEL,
+            ))
+            .then(|| flux3::parse(payload)),
             mask_asset_id: optional_id(payload, "maskAssetId"),
             fit_mode: normalize_fit_mode(payload.get("fitMode").and_then(Value::as_str)),
             model_manifest_entry,
@@ -424,6 +451,20 @@ pub(crate) fn normalize_fit_mode(value: Option<&str>) -> String {
 /// why the order is semantic rather than bookkeeping.
 pub use crate::jobs_store::qwen_image_2_1_reference_ids as ordered_image_reference_ids;
 
+/// The family-specific flattened list. FLUX.3 retains duplicate slots and refuses masks; the
+/// historical Qwen helper deliberately deduplicates and treats a mask as an ordinary reference.
+/// These policies must not be shared merely because both engines consume an ordered list.
+pub fn ordered_image_reference_ids_for_model(
+    model: &str,
+    payload: &JsonObject,
+) -> Option<Vec<String>> {
+    if flux3::is_model(model) {
+        flux3::reference_ids(payload).ok()
+    } else {
+        ordered_image_reference_ids(payload)
+    }
+}
+
 /// Reject an `edit_image` / `character_image` request for a model whose route is ONE ordered
 /// conditioning list, or `None` when the request is admissible (sc-24110).
 ///
@@ -450,6 +491,20 @@ pub fn ordered_image_reference_error(
     payload: &JsonObject,
     model_manifest_entry: &JsonObject,
 ) -> Option<String> {
+    if flux3::is_model(model) {
+        return flux3::parse(payload).err();
+    }
+    if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(|advanced| {
+            ["flux3_layout", "flux3_reference_ids"]
+                .iter()
+                .any(|key| advanced.get(*key).is_some_and(|value| !value.is_null()))
+        })
+    {
+        return Some(format!("{model}: FLUX.3 layout and attachment-instance controls are unsupported; remove them or select FLUX.3."));
+    }
     let cap = crate::video_request::image_max_reference_assets(model_manifest_entry)?;
     let mode = payload.get("mode").and_then(Value::as_str).unwrap_or("");
     // sc-24114: `image_to_image` is the declared single-reference face of the same call, so it is
@@ -507,6 +562,246 @@ fn ordered_image_reference_strength_error(model: &str, payload: &JsonObject) -> 
         }
     }
     None
+}
+
+/// The `advanced.quantTier` label of the publisher FP8 rowwise package (sc-26241): the inference
+/// `Quant::Fp8Rowwise` tier, wire key `fp8r`. It is a tier IDENTITY, never a point on the
+/// `mlxQuantize` bits ladder — aliasing it to q8 would load different numerics than the request
+/// named.
+pub const FP8R_QUANT_TIER: &str = "fp8r";
+
+/// The image models whose precision is one of the [`Flux3Tier`] packages (sc-26241). FLUX 3 Image
+/// Klein (distilled) is the only catalog FLUX 3 model; it is also the only model that ships a
+/// publisher FP8R package, so `quantTier: "fp8r"` anywhere else is refused rather than run at some
+/// other precision.
+pub const FLUX3_TIERED_MODEL_IDS: &[&str] = &["flux3_klein", "flux3_klein_base"];
+
+/// The `advanced` keys that select a FLUX 3 precision. A consumer that judges the rest of the
+/// request surface strips exactly these once [`flux3_requested_tier`] has accepted them.
+pub const FLUX3_PRECISION_CARRIERS: &[&str] =
+    &["quantTier", "mlxQuantize", "mlxQuantizeExplicit", "convRot"];
+
+/// One FLUX 3 Image Klein weight package (sc-26241). Every tier is a DIFFERENT artifact, never a
+/// load-time transform of another:
+///
+/// * `bf16` — the dense package at the pinned snapshot root (both backends);
+/// * `q4` / `q8` — native packages converted on this machine from that dense package
+///   (`localDerivation`): Candle GGML Q4_1 / Q8_0 off-Mac, MLX affine W4/W8 (group 64) on macOS;
+/// * `fp8r` / `nvfp4` — the publisher packages at `variants/<tier>` inside the same snapshot, loaded
+///   as shipped by the Candle provider on CUDA hardware that clears their device floor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Flux3Tier {
+    Bf16,
+    Q4,
+    Q8,
+    Fp8Rowwise,
+    Nvfp4,
+}
+
+impl Flux3Tier {
+    pub const ALL: [Self; 5] = [
+        Self::Bf16,
+        Self::Q4,
+        Self::Q8,
+        Self::Fp8Rowwise,
+        Self::Nvfp4,
+    ];
+
+    /// The tier key every consumer names it by (manifest `variant`, fit gate, telemetry).
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Bf16 => "bf16",
+            Self::Q4 => "q4",
+            Self::Q8 => "q8",
+            Self::Fp8Rowwise => FP8R_QUANT_TIER,
+            Self::Nvfp4 => "nvfp4",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tier| tier.key() == key)
+    }
+
+    /// Whether the native MLX provider has this package (its descriptor advertises q4/q8 only).
+    pub const fn served_by_mlx(self) -> bool {
+        matches!(self, Self::Bf16 | Self::Q4 | Self::Q8)
+    }
+
+    /// Whether the native Candle provider has this package (q4/q8 on every build; fp8r/nvfp4 on
+    /// CUDA, gated per worker by [`Self::required_worker_capability`]).
+    pub const fn served_by_candle(self) -> bool {
+        true
+    }
+
+    /// The `mlxQuantize` bit width the recipe records, when the tier has an honest one.
+    pub const fn recipe_bits(self) -> Option<i64> {
+        match self {
+            Self::Q4 => Some(4),
+            Self::Q8 => Some(8),
+            Self::Bf16 | Self::Fp8Rowwise | Self::Nvfp4 => None,
+        }
+    }
+
+    /// The device-floor marker a Candle worker must advertise to be handed this tier: FP8R needs
+    /// sm_89+ and NVFP4 sm_120+ (the inference `DitFormat::check_device` floors). `None` for the
+    /// tiers every Candle device runs.
+    pub const fn required_worker_capability(self) -> Option<&'static str> {
+        match self {
+            Self::Fp8Rowwise => Some(FP8R_QUANT_TIER),
+            Self::Nvfp4 => Some("flux3_nvfp4"),
+            Self::Bf16 | Self::Q4 | Self::Q8 => None,
+        }
+    }
+
+    /// A publisher package shipped inside the pinned snapshot at `variants/<key>`.
+    pub const fn is_publisher_variant(self) -> bool {
+        matches!(self, Self::Fp8Rowwise | Self::Nvfp4)
+    }
+
+    /// A package converted locally from the dense one (a `localDerivation` catalog row).
+    pub const fn is_local_derivation(self) -> bool {
+        matches!(self, Self::Q4 | Self::Q8)
+    }
+}
+
+/// Whether `advanced.quantTier` names the FP8R tier (trimmed, ASCII case-insensitive — the same
+/// normalization every other named-tier reader applies).
+pub fn requests_fp8r_tier(advanced: &JsonObject) -> bool {
+    advanced
+        .get("quantTier")
+        .and_then(Value::as_str)
+        .is_some_and(|tier| tier.trim().eq_ignore_ascii_case(FP8R_QUANT_TIER))
+}
+
+/// The FLUX 3 package a request's precision carriers name. Both public spellings are accepted —
+/// the named `quantTier` and the studio's `mlxQuantize` bit width (`0` dense, `4`, `8`) — and they
+/// must agree when both are present. Absent carriers mean the dense `bf16` package, never the
+/// app-wide `q8` default: a FLUX 3 tier is an installed artifact the request chooses.
+pub fn flux3_requested_tier(advanced: &JsonObject) -> Result<Flux3Tier, String> {
+    let named = match advanced.get("quantTier") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(tier)) if tier.trim().is_empty() => None,
+        Some(Value::String(tier)) => {
+            let key = tier.trim().to_ascii_lowercase();
+            Some(match key.as_str() {
+                "dense" => Flux3Tier::Bf16,
+                other => Flux3Tier::from_key(other).ok_or_else(|| {
+                    format!(
+                        "advanced.quantTier {tier:?} is not a FLUX 3 Image Klein package; the \
+                         packages are bf16, q4, q8, fp8r and nvfp4"
+                    )
+                })?,
+            })
+        }
+        Some(other) => {
+            return Err(format!(
+                "advanced.quantTier must be a tier name, not {other}"
+            ))
+        }
+    };
+    let bits = match advanced.get("mlxQuantize") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let bits = value
+                .as_i64()
+                .or_else(|| value.as_str()?.trim().parse().ok())
+                .ok_or_else(|| format!("advanced.mlxQuantize must be an integer, not {value}"))?;
+            Some(match bits {
+                bits if bits <= 0 => Flux3Tier::Bf16,
+                4 => Flux3Tier::Q4,
+                8 => Flux3Tier::Q8,
+                other => {
+                    return Err(format!(
+                        "advanced.mlxQuantize {other} is not a FLUX 3 Image Klein package; the bit \
+                         tiers are 0 (bf16), 4 and 8"
+                    ))
+                }
+            })
+        }
+    };
+    if advanced
+        .get("convRot")
+        .is_some_and(|convrot| !matches!(convrot, Value::Null | Value::Bool(false)))
+    {
+        return Err("advanced.convRot is not a FLUX 3 Image Klein package".to_owned());
+    }
+    match (named, bits) {
+        (None, None) => Ok(Flux3Tier::Bf16),
+        (Some(tier), None) | (None, Some(tier)) => Ok(tier),
+        (Some(named), Some(bits)) if named == bits => Ok(named),
+        (Some(named), Some(bits)) => Err(format!(
+            "advanced.quantTier {:?} and advanced.mlxQuantize ({}) name different FLUX 3 \
+             packages; send one",
+            named.key(),
+            bits.key()
+        )),
+    }
+}
+
+/// The request-shape rule for named precision tiers, shared by the API (typed 400), routing (the
+/// candle gap wording) and the worker trust boundary (raw queue writes, stored jobs). `None` =
+/// acceptable; `Some(reason)` = refuse.
+///
+/// * A [`FLUX3_TIERED_MODEL_IDS`] model must name exactly one of its packages
+///   ([`flux3_requested_tier`]).
+/// * Only those models ship a publisher FP8R package.
+///
+/// Backend capability (MLX serves bf16/q4/q8; FP8R/NVFP4 need a CUDA worker past their device
+/// floor) is NOT judged here: routing owns which lane and worker may run the tier.
+pub fn image_quant_tier_refusal(model: &str, advanced: &JsonObject) -> Option<String> {
+    if FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return flux3_requested_tier(advanced)
+            .err()
+            .map(|reason| format!("{model}: {reason}"));
+    }
+    requests_fp8r_tier(advanced).then(|| {
+        format!(
+            "advanced.quantTier \"{FP8R_QUANT_TIER}\" selects a publisher FP8 rowwise package, and \
+             {model} ships none (only {FLUX3_TIERED_MODEL_IDS:?} do)"
+        )
+    })
+}
+
+/// Refuse a FLUX 3 package absent from the authoritative catalog. Tier routing is a native
+/// capability, not proof that an artifact has verified pins. In particular, base q4/q8 cannot
+/// borrow distilled conversion hashes or silently fall through to the default dense row.
+/// The API applies this after preset/model canonicalization; workers independently verify the
+/// selected package and its conversion pins before loading it.
+pub fn flux3_catalog_tier_refusal(
+    model: &str,
+    advanced: &JsonObject,
+    manifest: &Value,
+) -> Option<String> {
+    if !FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return None;
+    }
+    let tier = match flux3_requested_tier(advanced) {
+        Ok(tier) => tier,
+        Err(reason) => return Some(format!("{model}: {reason}")),
+    };
+    let declared =
+        manifest
+            .get("downloads")
+            .and_then(Value::as_array)
+            .is_some_and(|rows| {
+                rows.iter().any(|row| {
+            row.get("coRequisite").and_then(Value::as_bool) != Some(true)
+                && row.get("variant").and_then(Value::as_str) == Some(tier.key())
+                && !crate::model_artifacts::artifact_selection::is_pending_artifact_download(row)
+                && (!matches!(tier, Flux3Tier::Q4 | Flux3Tier::Q8)
+                    || crate::model_artifacts::artifact_selection::local_derivation(row).is_some())
+        })
+            });
+    if declared {
+        return None;
+    }
+    let evidence = if model == "flux3_klein_base" && matches!(tier, Flux3Tier::Q4 | Flux3Tier::Q8) {
+        " Verified base conversion output size and SHA-256 pins are required before installation \
+         can be offered. Distilled pins cannot be reused."
+    } else {
+        " Install a catalog-declared package with verified artifact pins."
+    };
+    Some(format!("{model}: the {} package has no verified catalog artifact.{evidence} No dense fallback is permitted.", tier.key()))
 }
 
 #[cfg(test)]
@@ -723,5 +1018,160 @@ mod tests {
         // A plain text-to-image request is untouched.
         assert_eq!(check(json!({ "mode": "text_to_image" })), None);
         assert_eq!(check(json!({ "advanced": { "strength": 0.4 } })), None);
+    }
+    #[test]
+    fn flux3_requested_tier_accepts_each_package_spelling_and_refuses_conflicts() {
+        let advanced = |value: Value| value.as_object().cloned().unwrap();
+        for (value, tier) in [
+            (json!({}), Flux3Tier::Bf16),
+            (
+                json!({"quantTier": null, "mlxQuantize": null}),
+                Flux3Tier::Bf16,
+            ),
+            (
+                json!({"mlxQuantize": 0, "mlxQuantizeExplicit": true}),
+                Flux3Tier::Bf16,
+            ),
+            (json!({"quantTier": " BF16 "}), Flux3Tier::Bf16),
+            (json!({"mlxQuantize": 4}), Flux3Tier::Q4),
+            (json!({"mlxQuantize": "8"}), Flux3Tier::Q8),
+            (json!({"quantTier": "q8", "mlxQuantize": 8}), Flux3Tier::Q8),
+            (json!({"quantTier": "fp8r"}), Flux3Tier::Fp8Rowwise),
+            (json!({"quantTier": " FP8R "}), Flux3Tier::Fp8Rowwise),
+            (
+                json!({"quantTier": "nvfp4", "mlxQuantize": null}),
+                Flux3Tier::Nvfp4,
+            ),
+            (json!({"convRot": false}), Flux3Tier::Bf16),
+        ] {
+            assert_eq!(
+                flux3_requested_tier(&advanced(value.clone())),
+                Ok(tier),
+                "{value}"
+            );
+        }
+        // An absent tier is the dense package, never the app-wide q8 default.
+        assert_ne!(
+            flux3_requested_tier(&advanced(json!({}))),
+            Ok(Flux3Tier::Q8)
+        );
+        for value in [
+            json!({"mlxQuantize": 6}),
+            json!({"mlxQuantize": "x"}),
+            json!({"quantTier": "int8-convrot"}),
+            json!({"quantTier": 8}),
+            json!({"convRot": true}),
+            json!({"quantTier": "fp8r", "mlxQuantize": 8}),
+            json!({"quantTier": "nvfp4", "mlxQuantize": 4}),
+            json!({"quantTier": "q4", "mlxQuantize": 8}),
+        ] {
+            assert!(
+                flux3_requested_tier(&advanced(value.clone())).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn flux3_tiers_name_their_lane_marker_and_recipe_bits_by_identity() {
+        assert_eq!(Flux3Tier::Fp8Rowwise.key(), "fp8r");
+        assert_eq!(Flux3Tier::Fp8Rowwise.recipe_bits(), None);
+        assert_eq!(Flux3Tier::Nvfp4.recipe_bits(), None);
+        assert_eq!(Flux3Tier::Q4.recipe_bits(), Some(4));
+        assert_eq!(Flux3Tier::Q8.recipe_bits(), Some(8));
+        assert_eq!(
+            Flux3Tier::Fp8Rowwise.required_worker_capability(),
+            Some("fp8r")
+        );
+        assert_eq!(
+            Flux3Tier::Nvfp4.required_worker_capability(),
+            Some("flux3_nvfp4")
+        );
+        assert_eq!(Flux3Tier::Q8.required_worker_capability(), None);
+        let mlx: Vec<_> = Flux3Tier::ALL
+            .into_iter()
+            .filter(|t| t.served_by_mlx())
+            .collect();
+        assert_eq!(mlx, [Flux3Tier::Bf16, Flux3Tier::Q4, Flux3Tier::Q8]);
+        assert!(Flux3Tier::ALL.into_iter().all(Flux3Tier::served_by_candle));
+        for tier in Flux3Tier::ALL {
+            assert_eq!(Flux3Tier::from_key(tier.key()), Some(tier));
+        }
+    }
+
+    #[test]
+    fn flux3_catalog_requires_a_real_row_for_the_requested_package() {
+        let advanced = |tier| payload(json!({"quantTier":tier}));
+        let dense_only = json!({"downloads":[{"variant":"bf16","default":true}]});
+        assert!(
+            flux3_catalog_tier_refusal("flux3_klein_base", &advanced("bf16"), &dense_only)
+                .is_none()
+        );
+        for tier in ["q4", "q8"] {
+            let reason =
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &dense_only)
+                    .unwrap();
+            assert!(
+                reason.contains(tier) && reason.contains("SHA-256") && !reason.contains("403"),
+                "{reason}"
+            );
+            assert!(reason.contains("No dense fallback"), "{reason}");
+            let malformed = json!({"downloads":[{"variant":tier,"localDerivation":{}}]});
+            assert!(
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &malformed)
+                    .is_some()
+            );
+            // SYNTHETIC pins test the shared path only, never production base weight evidence.
+            let pinned = json!({"downloads":[{"variant":tier,"localDerivation":{
+                "fromVariant":"bf16","conversion":"fixture-only","weightsFile":"model.safetensors",
+                "weightsBytes":1,"weightsSha256":"a".repeat(64)
+            }}]});
+            assert!(
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &pinned).is_none()
+            );
+        }
+        for tier in ["fp8r", "nvfp4"] {
+            assert!(
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &dense_only)
+                    .is_some()
+            );
+            let declared = json!({"downloads":[{"variant":tier}]});
+            assert!(
+                flux3_catalog_tier_refusal("flux3_klein_base", &advanced(tier), &declared)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn image_quant_tier_refusal_is_flux3_shaped_and_fp8r_is_flux3_only() {
+        let advanced = |value: Value| value.as_object().cloned().unwrap();
+        assert_eq!(
+            image_quant_tier_refusal("z_image", &advanced(json!({}))),
+            None
+        );
+        assert_eq!(
+            image_quant_tier_refusal("z_image", &advanced(json!({"quantTier": "nvfp4"}))),
+            None
+        );
+        assert_eq!(
+            image_quant_tier_refusal("flux3_klein", &advanced(json!({"quantTier": "fp8r"}))),
+            None
+        );
+        assert_eq!(
+            image_quant_tier_refusal("flux3_klein_base", &advanced(json!({"quantTier": "fp8r"}))),
+            None
+        );
+        for model in ["flux2_klein_9b", "krea_2_turbo", "z_image"] {
+            let reason = image_quant_tier_refusal(model, &advanced(json!({"quantTier": "fp8r"})))
+                .expect("non-FLUX3 fp8r must be refused");
+            assert!(reason.contains(model), "{reason}");
+        }
+        let reason = image_quant_tier_refusal(
+            "flux3_klein",
+            &advanced(json!({"quantTier": "fp8r", "mlxQuantize": 8})),
+        )
+        .expect("conflict refused");
+        assert!(reason.contains("flux3_klein"), "{reason}");
     }
 }

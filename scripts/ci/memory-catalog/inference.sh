@@ -35,6 +35,9 @@
 # walks, and needs no clone -- it IS the fetch list for a shallow clone, and deriving it from the
 # store is what stops the two drifting apart. A revision missing here surfaces as a stamping failure
 # hours into the walk, so the fetch of the list is a hard failure, not a warning.
+# The bounded SDXL endpoint profile has no ingest/extract/stamp walk and needs only the current pin.
+# CI_IMPACT: removes historical source fetches only from that explicit manual profile; catalog
+# revision resolution and normal CI remain unchanged.
 #
 # The clone must sit OUTSIDE the checkout: the harness asserts the SceneWorks tree stays clean for
 # the whole walk and counts untracked paths.
@@ -85,11 +88,15 @@ fi
 # The pin first, then every revision the packaged anchors cite. `--anchor-revisions` reads only
 # checked-in JSON, so it runs against THIS checkout and needs no clone of its own.
 WANTED=("$PIN")
-while IFS= read -r rev; do
-  [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || continue
-  [[ "$rev" == "$PIN" ]] && continue
-  WANTED+=("$rev")
-done < <(node scripts/anchor-loader-closure.mjs --anchor-revisions)
+if [[ "${MEMORY_CAMPAIGN_PROFILE:-catalog}" == "sdxl-cuda-endpoints" || "${MEMORY_CAMPAIGN_PROFILE:-catalog}" == "sdxl-cuda-admitted-replay" ]]; then
+  echo "SDXL endpoint capture needs the current pin only; no historical anchor ingestion"
+else
+  while IFS= read -r rev; do
+    [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || continue
+    [[ "$rev" == "$PIN" ]] && continue
+    WANTED+=("$rev")
+  done < <(node scripts/anchor-loader-closure.mjs --anchor-revisions)
+fi
 echo "revisions this walk needs: ${#WANTED[@]} (pin + $(( ${#WANTED[@]} - 1 )) anchor revisions)"
 
 # A space-separated string, not an array: the macOS runners' `bash` is 3.2, where `${#arr[@]}` on an

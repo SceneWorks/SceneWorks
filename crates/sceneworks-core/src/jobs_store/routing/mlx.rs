@@ -4,6 +4,7 @@
 use serde_json::{Map, Value};
 
 use crate::contracts::{JobSnapshot, JobType};
+use crate::image_request::Flux3Tier;
 use crate::jobs_store::routing::catalog::{
     imported_image_request_provider_eligible, MLX_ONLY_TRAINING_KERNELS, MLX_ROUTED_MODELS,
     MLX_ROUTED_TRAINING_KERNELS, VIDEO_MLX_ROUTED_MODELS,
@@ -52,6 +53,20 @@ pub(crate) fn image_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
 /// API projects the same provider facts into imported catalog affordances, while
 /// [`model_mac_support`] remains the builtin-default probe.
 pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Value>) -> bool {
+    // sc-26241: no MLX descriptor advertises the publisher FP8 rowwise tier (it is a CUDA format),
+    // so an `advanced.quantTier: "fp8r"` request is `mlx_unsupported` for EVERY model rather than
+    // reaching a per-family predicate that might not read `quantTier` and render dense instead. A
+    // malformed named-tier request is refused here too, before any family predicate sees it.
+    if payload
+        .get("advanced")
+        .and_then(Value::as_object)
+        .is_some_and(|advanced| {
+            crate::image_request::requests_fp8r_tier(advanced)
+                || crate::image_request::image_quant_tier_refusal(model, advanced).is_some()
+        })
+    {
+        return false;
+    }
     if !MLX_ROUTED_MODELS.contains(&model) {
         // Exact imported-provider fallback for a novel id outside the builtin table (sc-14109,
         // refined by sc-18312). The stamped manifest family is necessary but insufficient: the
@@ -106,6 +121,7 @@ pub(crate) fn image_request_mlx_eligible(model: &str, payload: &Map<String, Valu
             crate::moss_image::native_request(payload, &entry).is_ok()
         }
         "iris_3b" => iris_mlx_eligible(payload),
+        "flux3_klein" | "flux3_klein_base" => flux3_mlx_eligible(payload),
         "supra2_img" => supra2_mlx_eligible(payload),
         // Every model in MLX_ROUTED_MODELS must have an arm — enforced by
         // `every_mlx_routed_model_has_a_dispatch_arm` below, not just by this comment.
@@ -518,6 +534,60 @@ fn iris_quantize_is_a_tier(payload: &Map<String, Value>) -> bool {
             Some(0 | 4 | 8)
         ),
     }
+}
+
+/// FLUX 3 Image Klein base and distilled: text-to-image on the native MLX provider in one of the
+/// packages it serves — bf16, or the locally converted MLX affine q4/q8 (sc-26241). The publisher
+/// FP8R/NVFP4 packages are CUDA formats the MLX descriptor does not advertise, so they keep the
+/// job off MLX. Every other carrier is judged by [`flux3_surface_eligible`].
+pub(crate) fn flux3_mlx_eligible(payload: &Map<String, Value>) -> bool {
+    flux3_payload_tier(payload).is_ok_and(Flux3Tier::served_by_mlx)
+        && flux3_surface_eligible(payload)
+}
+
+/// The FLUX 3 package a payload names ([`crate::image_request::flux3_requested_tier`]); an absent
+/// `advanced` is the dense package, a non-object one is malformed.
+pub(crate) fn flux3_payload_tier(payload: &Map<String, Value>) -> Result<Flux3Tier, String> {
+    match payload.get("advanced") {
+        None | Some(Value::Null) => Ok(Flux3Tier::Bf16),
+        Some(Value::Object(advanced)) => crate::image_request::flux3_requested_tier(advanced),
+        Some(other) => Err(format!("advanced must be an object, not {other}")),
+    }
+}
+
+/// The FLUX 3 request surface other than precision, shared by both lanes: the `flux3_klein`
+/// engine takes no source, reference, mask, control or pose on this route (references and boxes
+/// are sc-26236/7), admits identity-checked LoRA (sc-26239), and refuses hires fix like
+/// Iris (its second pass is an img2img refinement the engine refuses). Judged with the precision
+/// carriers removed, since [`flux3_payload_tier`] owns them.
+pub(crate) fn flux3_surface_eligible(payload: &Map<String, Value>) -> bool {
+    let Ok(references) = crate::image_request::flux3::parse(payload) else {
+        return false;
+    };
+    let mut surface = payload.clone();
+    if !references.asset_ids.is_empty() {
+        for key in ["sourceAssetId", "referenceAssetId", "referenceAssetIds"] {
+            surface.remove(key);
+        }
+        surface.insert("mode".to_owned(), Value::String("text_to_image".to_owned()));
+    }
+    if let Some(advanced) = surface.get_mut("advanced").and_then(Value::as_object_mut) {
+        for carrier in crate::image_request::FLUX3_PRECISION_CARRIERS {
+            advanced.remove(*carrier);
+        }
+    }
+    iris_mlx_eligible(&surface)
+        && payload.get("loras").is_none_or(|value| {
+            value.is_null()
+                || value.as_array().is_some_and(|loras| {
+                    loras.iter().all(|lora| {
+                        lora.as_str()
+                            .or_else(|| lora.get("id").and_then(Value::as_str))
+                            .or_else(|| lora.get("loraId").and_then(Value::as_str))
+                            .is_some_and(|id| !id.trim().is_empty())
+                    })
+                })
+        })
 }
 
 /// Supra2-IMG (sc-24213) is plain text-to-image at 256x256: the `supra2_img` engine takes no source,
@@ -1189,6 +1259,19 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
         return false;
     }
+    if crate::training::flux3::KERNELS.contains(&kernel) {
+        return plan
+            .get("target")
+            .and_then(|t| t.get("baseModel"))
+            .and_then(Value::as_str)
+            == Some(crate::training::flux3::BASE_ID)
+            && plan
+                .get("config")
+                .and_then(|c| c.get("advanced"))
+                .and_then(|a| a.get("networkType"))
+                .map_or(Some("lora"), Value::as_str)
+                == Some("lora");
+    }
     // LoKr-on-Wan is refused (no Kronecker merge in the mlx Wan path).
     if matches!(kernel, "wan_lora" | "wan_moe_lora") && training_plan_is_lokr(plan) {
         return false;
@@ -1318,6 +1401,68 @@ pub(crate) fn training_plan_is_lokr(plan: &Map<String, Value>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn moss_edit_routes_one_to_four_ordered_reference_slots() {
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for references in [
+                json!(["ref"]),
+                json!(["ref", "other"]),
+                json!(["ref", "other", "ref"]),
+                json!(["other", "ref", "third", "ref"]),
+            ] {
+                let payload = json!({
+                    "model":model,"mode":"edit_image","prompt":"blue cup",
+                    "referenceAssetIds":references,"sourceAssetId":references[0],
+                    "referenceAssetId":references[0],
+                    "modelManifestEntry":{"limits":{"minDimension":16,"maxDimension":4096}},
+                    "advanced":{"mossImageEdit":{"use_kv_cache":false}}
+                })
+                .as_object()
+                .unwrap()
+                .clone();
+                assert_eq!(
+                    json!(crate::moss_image::edit_reference_ids(&payload).unwrap()),
+                    references
+                );
+                assert!(
+                    super::image_request_mlx_eligible(model, &payload),
+                    "{payload:?}"
+                );
+                for patch in [
+                    json!({"referenceAssetIds":[],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":null,"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other","ref","other","ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other",null],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other",3],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other","ref",""],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":["ref","other"," ref"],"sourceAssetId":null,"referenceAssetId":null}),
+                    json!({"referenceAssetIds":"ref"}),
+                    json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"],"referenceAssetId":null}),
+                    json!({"referenceAssetId":"conflict","referenceAssetIds":["ref"],"sourceAssetId":null}),
+                    json!({"maskAssetId":"mask"}),
+                    json!({"loras":[{"id":"custom"}]}),
+                    json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
+                    json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
+                    json!({"advanced":{"mossImageEdit":{"unknown":true}}}),
+                    json!({"advanced":{"controlImage":"pose"}}),
+                    json!({"mode":"text_to_image","advanced":{}}),
+                ] {
+                    let mut invalid = payload.clone();
+                    invalid.extend(patch.as_object().unwrap().clone());
+                    assert!(
+                        !super::image_request_mlx_eligible(model, &invalid),
+                        "{invalid:?}"
+                    );
+                }
+            }
+            let ordinary = json!({"model":model,"mode":"text_to_image","prompt":"blue cup"})
+                .as_object()
+                .unwrap()
+                .clone();
+            assert!(super::image_request_mlx_eligible(model, &ordinary));
+        }
+    }
+
     use serde_json::{json, Map, Value};
 
     use super::{image_request_mlx_eligible, MLX_ROUTED_MODELS};

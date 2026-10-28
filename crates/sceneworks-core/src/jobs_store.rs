@@ -412,7 +412,9 @@ pub struct PlatformReachabilitySweepStats {
 /// Bump this whenever [`ClaimRoutingFacts::from_job`] changes meaning. Startup
 /// backfills every older row before workers can claim it, keeping policy changes
 /// out of the latency-sensitive claim transaction.
-const CLAIM_ROUTING_FACTS_VERSION: i64 = 2;
+// sc-26241: FLUX 3 exact package eligibility and publisher-tier device markers change both
+// eligible flags and required_capability. Recompute persisted pre-tier facts at startup.
+const CLAIM_ROUTING_FACTS_VERSION: i64 = 3;
 
 /// Payload-derived facts needed by worker compatibility and affinity scoring.
 ///
@@ -2001,6 +2003,26 @@ impl JobsStore {
         job_id: &str,
         request: DuplicateJob,
     ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_optional_id(None, job_id, request)
+    }
+
+    /// Duplicate under a preallocated id when the copied product plan must reference its own new
+    /// job id before it becomes claimable, just like `create_job_with_id` at initial submission.
+    pub fn duplicate_job_with_id(
+        &self,
+        id: String,
+        job_id: &str,
+        request: DuplicateJob,
+    ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_optional_id(Some(id), job_id, request)
+    }
+
+    fn duplicate_job_with_optional_id(
+        &self,
+        id: Option<String>,
+        job_id: &str,
+        request: DuplicateJob,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -2024,7 +2046,7 @@ impl JobsStore {
                 // claimable — never `pending_caption` (sc-9120).
                 initial_status: None,
             },
-            None,
+            id,
         )?;
         transaction.commit()?;
         Ok(job)
@@ -3112,6 +3134,13 @@ impl JobsStore {
             // Reuse the result we already read above (same transaction/row) rather
             // than re-selecting result_json each update (sc-4274 / F-CORE-14).
             merge_training_sample_history(Some(&current.result), result);
+            // Same wholesale-replace hazard, image lane (sc-8953 follow-through,
+            // 2026-10-27): the worker posts a SLIM result on every denoise step
+            // (`slim_step_result` — the accumulated `assetWrites`/`generationSet`/
+            // `prefixKvCache` ride only the per-image / terminal posts, or the
+            // per-step SSE fan-out OOM-kills the WebView2 renderer mid-batch). A slim
+            // tick omitting them must not blank them off the durable row.
+            merge_progress_result_accumulations(Some(&current.result), result);
         }
         transaction.execute(
             "
@@ -4200,6 +4229,35 @@ fn persist_claim_routing_facts(
     Ok(())
 }
 
+/// Progress-result keys whose ABSENCE from an incoming result means "keep the
+/// stored value" rather than "delete it" (the result column is replaced
+/// wholesale, sc-8953 follow-through). These are the image lane's accumulated
+/// fact sets — grown per finished image, streamed on the per-image / terminal
+/// posts, and deliberately omitted from every per-step tick
+/// (`image_jobs::slim_step_result`) so the step cadence stays O(1).
+const PROGRESS_RESULT_ACCUMULATION_KEYS: [&str; 3] =
+    ["assetWrites", "generationSet", "prefixKvCache"];
+
+/// Merge the image lane's accumulated fact keys into an incoming progress
+/// result, mirroring [`merge_training_sample_history`]: a worker result that
+/// omits an accumulation key keeps the stored value instead of clearing it.
+/// The worker only ever APPENDS to these (one `assetWrites` entry per finished
+/// image; `generationSet` is fixed per job), so the stored value is always at
+/// least as current as anything a slim tick would carry — and the full posts
+/// that DO carry them land after every append, keeping the row in step.
+fn merge_progress_result_accumulations(
+    existing_result: Option<&Map<String, Value>>,
+    incoming: &mut Map<String, Value>,
+) {
+    for key in PROGRESS_RESULT_ACCUMULATION_KEYS {
+        if !incoming.contains_key(key) {
+            if let Some(value) = existing_result.and_then(|result| result.get(key)) {
+                incoming.insert(key.to_owned(), value.clone());
+            }
+        }
+    }
+}
+
 /// Merge accumulated `trainingSamples` history into an incoming progress
 /// result. `existing_result` is the job's current result, which
 /// `update_job_progress` has already read in the same transaction — so this no
@@ -5064,11 +5122,43 @@ fn required_capability(job: &JobSnapshot) -> &str {
         // may claim it. `audio_generate` is advertised exactly when that lane is linked
         // (`inference_runtime::audio()`); the utility worker of a server build without the lane
         // (the Docker image) therefore leaves it queued for the GPU worker instead of failing it.
+        // A FLUX 3 local derivation (sc-26241: the q4/q8 native packages) runs the image lane's
+        // own converter, so only an image worker may claim it.
+        JobType::ModelDownload
+            if job
+                .payload
+                .get("localDerivation")
+                .and_then(|block| block.get("conversion"))
+                .and_then(Value::as_str)
+                .is_some_and(|conversion| conversion.starts_with(FLUX3_CONVERSION_PREFIX)) =>
+        {
+            WorkerCapability::ImageGenerate.as_str()
+        }
         JobType::ModelDownload if job.payload.contains_key("localDerivation") => {
             WorkerCapability::AudioGenerate.as_str()
         }
+        // sc-26241: a FLUX 3 publisher package (FP8R, NVFP4) runs only past its CUDA device floor.
+        // The worker advertises the floor's marker exactly when its GPU clears it, so the job
+        // stays queued for a capable worker instead of being claimed and refused at load.
+        JobType::ImageGenerate | JobType::ImageEdit => {
+            flux3_required_worker_capability(job).unwrap_or_else(|| job.job_type.as_str())
+        }
         _ => job.job_type.as_str(),
     }
+}
+
+/// The `localDerivation.conversion` prefix of every FLUX 3 native conversion (sc-26241).
+pub const FLUX3_CONVERSION_PREFIX: &str = "flux3-";
+
+/// The device-floor marker a FLUX 3 image job's package requires, if any.
+fn flux3_required_worker_capability(job: &JobSnapshot) -> Option<&'static str> {
+    let model = job.payload.get("model").and_then(Value::as_str)?;
+    if !crate::image_request::FLUX3_TIERED_MODEL_IDS.contains(&model) {
+        return None;
+    }
+    routing::mlx::flux3_payload_tier(&job.payload)
+        .ok()?
+        .required_worker_capability()
 }
 
 /// True when a person detection/tracking job explicitly opts into the procedural

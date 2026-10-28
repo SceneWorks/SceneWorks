@@ -128,6 +128,43 @@ pub enum QuantFormat {
     /// (`~/models/kreamania_variant4.safetensors`) is not mislabelled as the
     /// unloadable fp4 bucket.
     Int8TensorwisePerRow,
+    /// ComfyUI `comfy_quant` **scalar-scaled fp8** (E4M3FN): each quantized Linear's weight is a
+    /// plain `F8_E4M3` tensor with an `F32` **scalar** `.weight_scale` sibling — one scale for the
+    /// whole tensor — and a `.comfy_quant` descriptor reading `{"format":"float8_e4m3fn"}` (or the
+    /// same plus `"full_precision_matrix_mult": true`). Dequant: `w = e4m3(v) * scale`.
+    ///
+    /// **Distinct from [`Self::Fp8E4m3`]**, which is the plain `weight_dtype=fp8_e4m3fn` cast with
+    /// NO companion and therefore **unit** scale. The two decode differently: a file classified as
+    /// the plain cast when it carries a real per-tensor scale loses that scale and decodes to
+    /// plausible-looking noise (sc-27092). This is the convention of the published
+    /// `kreamania_variant1_fp8` / `variant2_fp8` artifacts and of every ComfyUI `ModelSave` of an
+    /// fp8-scaled Krea 2 DiT.
+    Fp8E4M3Scalar,
+    /// ComfyUI `comfy_quant` **scalar-scaled fp8** (E5M2): the E5M2 sibling of
+    /// [`Self::Fp8E4M3Scalar`], told apart by the weight dtype. No backend has a native E5M2
+    /// matmul, so it always takes the dense fallback.
+    Fp8E5M2Scalar,
+    /// ComfyUI/Kitchen **MXFP8**: an `F8_E4M3` weight on a 32-aligned grid with a `U8` block-scale
+    /// `.weight_scale` companion — one E8M0 shared exponent per 32-element block, in the cuBLAS
+    /// 128×4 swizzled layout. Dequant: `w = e4m3(v) * 2^(e8m0 - 127)`, unpadded to the logical
+    /// shape.
+    ///
+    /// Unlike the scalar-fp8 conventions above it is usually declared **file-level**
+    /// (`__metadata__.quant_format = "MXFP8"`, or a `_quantization_metadata` table whose every layer
+    /// says `mxfp8`), so the Kitchen export carries NO per-layer `.comfy_quant` blob at all. Its
+    /// block scale is what tells it apart from the FLUX.2 inline-scale convention
+    /// ([`Self::Fp8InlineScale`], an `F32` scale plus an `input_scale`): the scale here is `U8` and
+    /// rank-2, not a scalar. The Kitchen converter's MXFP8 export
+    /// (`kreamania_variant8_3315189.safetensors`) was classified as inline-scale fp8 before this
+    /// variant existed — the `.weight_scale` arm matched before the file's own metadata was read
+    /// (sc-27092).
+    Mxfp8,
+    /// A file whose described projections **disagree** about their quantization convention — e.g.
+    /// some layers scalar-fp8 and others int8-per-row. A checkpoint is stored in one convention,
+    /// and the engine's per-layer codec plan would decode each layer by its own descriptor, so
+    /// there is no single codec id to name for the file. Emitted so the import fails closed with a
+    /// reason instead of claiming a convention that is wrong for some of its layers (sc-27092).
+    MixedQuantFormats,
     /// NVIDIA NVFP4 as serialized by the ComfyUI Kitchen converter: each quantized Linear is a
     /// U8 `[out,in/2]` E2M1 weight plus an F8_E4M3 blocked `.weight_scale` and scalar F32
     /// `.weight_scale_2`. The converter declares `quant_format=NVFP4` in safetensors metadata.
@@ -159,6 +196,10 @@ impl QuantFormat {
             Self::Fp8InlineScale => "fp8_inline_scale",
             Self::ComfyQuantPacked => "comfy_quant_packed",
             Self::Int8TensorwisePerRow => "int8_tensorwise_per_row",
+            Self::Fp8E4M3Scalar => "fp8_e4m3_scalar",
+            Self::Fp8E5M2Scalar => "fp8_e5m2_scalar",
+            Self::Mxfp8 => "mxfp8",
+            Self::MixedQuantFormats => "mixed_quant_formats",
             Self::Nvfp4 => "nvfp4",
             Self::Gguf => "gguf",
             Self::UnrecognizedScaling => "unrecognized_scaling",
@@ -182,6 +223,10 @@ impl QuantFormat {
             "fp8_inline_scale" => Some(Self::Fp8InlineScale),
             "comfy_quant_packed" => Some(Self::ComfyQuantPacked),
             "int8_tensorwise_per_row" => Some(Self::Int8TensorwisePerRow),
+            "fp8_e4m3_scalar" => Some(Self::Fp8E4M3Scalar),
+            "fp8_e5m2_scalar" => Some(Self::Fp8E5M2Scalar),
+            "mxfp8" => Some(Self::Mxfp8),
+            "mixed_quant_formats" => Some(Self::MixedQuantFormats),
             "nvfp4" => Some(Self::Nvfp4),
             "gguf" => Some(Self::Gguf),
             "unrecognized_scaling" => Some(Self::UnrecognizedScaling),
@@ -216,12 +261,21 @@ impl QuantFormat {
             Self::F16 => Some(facts::DENSE_F16_CODEC_ID),
             Self::F32 => Some(facts::DENSE_F32_CODEC_ID),
             Self::Int8TensorwisePerRow => Some(facts::INT8_PER_ROW_CODEC_ID),
+            // The descriptor-gated scalar-fp8 and MXFP8 conventions ARE the engine's registered
+            // codecs: `fp8-e4m3-scalar-v1` claims the described `float8_e4m3fn` form, and
+            // `mxfp8-v1` the `mxfp8` form. Naming them here is what makes the source-codec fact
+            // (and with it the facts object, the asset receipt and the telemetry row) report what
+            // the checkpoint is actually stored as (sc-27092).
+            Self::Fp8E4M3Scalar => Some(facts::FP8_E4M3_SCALAR_CODEC_ID),
+            Self::Fp8E5M2Scalar => Some(facts::FP8_E5M2_SCALAR_CODEC_ID),
+            Self::Mxfp8 => Some(facts::MXFP8_CODEC_ID),
             Self::Nvfp4 => Some(facts::NVFP4_CODEC_ID),
             Self::Gguf => Some(facts::GGUF_CONTAINER_CODEC_ID),
             Self::Fp8E4m3
             | Self::ScaledFp8Companion
             | Self::Fp8InlineScale
             | Self::ComfyQuantPacked
+            | Self::MixedQuantFormats
             | Self::UnrecognizedScaling => None,
         }
     }
@@ -365,20 +419,28 @@ pub fn imported_model_primary_weight_file(source: &Path) -> Option<PathBuf> {
 /// Written as a `match` with **one arm per supported loader** so a follow-on family / component /
 /// quant (the S0c assembly slice and the epic's later families) is a single added arm, not a
 /// rewrite. Today a Krea 2 transformer is loadable as dense `bf16`, descriptor-gated
-/// [`QuantFormat::Int8TensorwisePerRow`], or Kitchen [`QuantFormat::Nvfp4`]; all three reuse the
-/// existing Krea engine via the family-routing path. A FLUX.2 transformer (sc-11043, epic 11037)
+/// [`QuantFormat::Int8TensorwisePerRow`], descriptor-gated scalar fp8
+/// ([`QuantFormat::Fp8E4M3Scalar`] / [`QuantFormat::Fp8E5M2Scalar`]), Kitchen
+/// [`QuantFormat::Mxfp8`], or Kitchen [`QuantFormat::Nvfp4`]; all of them reuse the existing Krea
+/// engine via the family-routing path. A FLUX.2 transformer (sc-11043, epic 11037)
 /// is loadable as [`QuantFormat::Nvfp4`] and nothing else — the single-file Klein BFL export
 /// through the shared `nvfp4-v1` codec — an SDXL all-in-one checkpoint as `f16`/`bf16`/`f32`, and a
 /// Mage-Flow transformer DIRECTORY as dense `bf16`. Everything else — an unrecognized/absent family, a
 /// non-transformer component (VAE / text encoder / all-in-one checkpoint), or a deferred quant
-/// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, GGUF) — is refused with a specific reason.
+/// (plain/scaled/inline fp8, `comfy_quant` fp4-packed, GGUF, a file mixing conventions) — is refused
+/// with a specific reason.
 pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
     match (verdict.family.as_deref(), verdict.component, verdict.quant) {
         // --- Supported loaders: one arm per landed loader (add the next family/quant here) ---
         (
             Some("krea_2"),
             ComponentRole::Transformer,
-            QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow | QuantFormat::Nvfp4,
+            QuantFormat::Bf16
+                | QuantFormat::Int8TensorwisePerRow
+                | QuantFormat::Fp8E4M3Scalar
+                | QuantFormat::Fp8E5M2Scalar
+                | QuantFormat::Mxfp8
+                | QuantFormat::Nvfp4,
         ) => Ok(()),
         // sc-11043 (epic 11037): the FLUX.2 Klein single-file BFL export, NVFP4 only. Its
         // architecture mapping (fused QKV rows, the AdaLN half-swap) rides sc-21485's declarative
@@ -397,11 +459,21 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         (Some("mage-flow"), ComponentRole::Transformer, QuantFormat::Bf16) => Ok(()),
 
         // --- Refusals: most specific first, each with an actionable, client-facing reason ---
+        // A file whose layers disagree about their quantization convention has no single codec to
+        // name: the engine would decode each layer by its own descriptor, but the persisted
+        // source-codec fact is one id. Refused rather than named for some of its layers (sc-27092).
+        (_, _, QuantFormat::MixedQuantFormats) => Err(
+            "This checkpoint mixes quantization conventions across its layers (for example fp8 and \
+             int8 projections). A checkpoint is stored in one convention, so the import is refused \
+             rather than loaded under a name that would be wrong for some of its layers."
+                .to_owned(),
+        ),
         (None, _, _) => Err(
             "The architecture family could not be identified from the file, so the import is \
              refused rather than guessing at a loader."
                 .to_owned(),
         ),
+        (Some("flux3"), _, _) => Err("The 'flux3' family requires its pinned package directory with config, DiT, autoencoder and Qwen3-VL encoder. Install the base or distilled model from the catalog; a lone checkpoint file is not that package.".to_owned()),
         (Some(family), _, _) if !IMPORT_SUPPORTED_FAMILIES.contains(&family) => Err(format!(
             "Model import does not yet support the '{family}' family. Supported today: {}.",
             IMPORT_SUPPORTED_FAMILIES.join(", ")
@@ -431,8 +503,8 @@ pub fn import_supported(verdict: &BaseWeightVerdict) -> Result<(), String> {
         }
         (Some("krea_2"), _, quant) => Err(format!(
             "Model import for the 'krea_2' family supports dense bf16, descriptor-gated \
-             int8-per-row, or NVIDIA Kitchen NVFP4 weights, not {quant}. Re-export the checkpoint \
-             in bf16."
+             int8-per-row, descriptor-gated scalar fp8, Kitchen MXFP8, or NVIDIA Kitchen NVFP4 \
+             weights, not {quant}. Re-export the checkpoint in bf16."
         )),
         (Some("sdxl"), _, quant) => Err(format!(
             "Model import for the 'sdxl' family supports dense f16, bf16, or f32 fused checkpoints, \
@@ -569,12 +641,24 @@ fn any_key_contains(keys: &[&str], needle: &str) -> bool {
 ///    `nvfp4` — plus an exact U8/F8/F32 triplet surface → [`QuantFormat::Nvfp4`]. Both pieces are
 ///    required; metadata alone is never trusted, and a `.comfy_quant` descriptor is tolerated only
 ///    over a projection whose triplet already proved out (see [`has_nvfp4_triplets`]).
-/// 2. `.comfy_quant` present → split by dtype: bulk `I8` weights ⇒ int8-tensorwise
-///    per-row ([`QuantFormat::Int8TensorwisePerRow`], a loadable-in-principle quant);
-///    otherwise fp4/mxfp4-packed `U8` nibbles ([`QuantFormat::ComfyQuantPacked`]).
-/// 3. a top-level `scaled_fp8` marker or a `.scale_weight` companion →
+/// 2. an explicit MXFP8 declaration in the file's own global metadata — Kitchen's
+///    `quant_format=MXFP8`, or a `_quantization_metadata` `layers` map whose every entry is
+///    `mxfp8` — plus an exact `F8_E4M3`/`U8` block-scale surface →
+///    [`QuantFormat::Mxfp8`]. Both pieces are required, exactly as for NVFP4: the Kitchen MXFP8
+///    export declares its quantization FILE-LEVEL and carries no per-layer `.comfy_quant` blob,
+///    so without this arm it fell through to the `.weight_scale` arm and was labelled FLUX.2
+///    inline-scale fp8 (sc-27092).
+/// 3. `.comfy_quant` present → the convention of each described projection, read from the
+///    companion geometry the header carries (see [`classify_comfy_quant_projections`]):
+///    `I8` weights ⇒ int8-tensorwise per-row ([`QuantFormat::Int8TensorwisePerRow`]);
+///    `F8_E4M3` weights with an `F32` **scalar** scale ⇒ scalar-scaled fp8
+///    ([`QuantFormat::Fp8E4M3Scalar`] / [`QuantFormat::Fp8E5M2Scalar`]); `F8_E4M3` weights with a
+///    `U8` block-scale ⇒ [`QuantFormat::Mxfp8`]; `U8` weights ⇒ fp4/mxfp4-packed nibbles
+///    ([`QuantFormat::ComfyQuantPacked`], still refused). Projections that disagree are refused
+///    as [`QuantFormat::MixedQuantFormats`].
+/// 4. a top-level `scaled_fp8` marker or a `.scale_weight` companion →
 ///    [`QuantFormat::ScaledFp8Companion`] (wan / Kijai / umt5).
-/// 4. a `.weight_scale`/`.input_scale` inline triplet →
+/// 5. a `.weight_scale`/`.input_scale` inline triplet →
 ///    [`QuantFormat::Fp8InlineScale`] (flux2).
 ///
 /// Only if none matches do dtypes decide. `scale_shift` keys are deliberately
@@ -590,26 +674,28 @@ fn detect_quant_format(
     // tokenizer bytes (`spiece_model`, `tekken_model`) or `I64` bookkeeping
     // (`num_batches_tracked`) that carry no numeric weight signal.
     let packed_u8 = count("U8") > 4;
-    // Bulk `I8` weight tensors are the header-only signal that a `.comfy_quant`
-    // file is int8-tensorwise-per-row rather than fp4/mxfp4-packed (sc-14026). The
-    // int8 export stores each quantized Linear's weight as `I8` (variant4: 264 of
-    // them); a genuine fp4 file packs nibbles into `U8` and carries no `I8` weight.
-    // A `>4` floor (matching `packed_u8`) shrugs off a stray bookkeeping `I8`.
-    let int8_bulk = count("I8") > 4;
 
     if metadata_declares_nvfp4(entries) && has_nvfp4_triplets(entries) {
         return QuantFormat::Nvfp4;
     }
 
+    // MXFP8: declared FILE-LEVEL by the ComfyUI Kitchen converter (`quant_format = "MXFP8"`, or a
+    // `_quantization_metadata` table whose every layer says `mxfp8`), with `U8` block-scale
+    // companions. Checked BEFORE the `.comfy_quant` branch — an MXFP8 export carries no per-layer
+    // descriptor at all — and before the `.weight_scale` branch, which would otherwise claim it
+    // as FLUX.2 inline-scale fp8 (sc-27092).
+    if metadata_declares_mxfp8(entries) && has_mxfp8_block_scales(entries) {
+        return QuantFormat::Mxfp8;
+    }
+
     if any_key_contains(keys, ".comfy_quant") || keys.contains(&"comfy_quant") {
-        // Both int8-tensorwise and fp4-packed ride the `.comfy_quant` marker (and
-        // both carry bulk `U8` — int8's are its per-Linear descriptor blobs), so
-        // the marker alone can't separate them. The `I8` weight dtype is decisive:
-        // present ⇒ loadable int8-per-row (sc-14023 loader); absent ⇒ fp4 reject.
-        if int8_bulk {
-            return QuantFormat::Int8TensorwisePerRow;
-        }
-        return QuantFormat::ComfyQuantPacked;
+        // The `.comfy_quant` marker alone does NOT mean fp4-packed. The same marker rides
+        // ComfyUI's scalar-scaled fp8 exports, whose weights are `F8_E4M3` with an `F32` scalar
+        // companion, and MXFP8's, whose weights are `F8_E4M3` with a `U8` block-scale companion.
+        // The descriptor's `format` string is tensor DATA — unreadable from a header-only
+        // classifier — so the convention is told apart by the companion geometry the header DOES
+        // carry, and a file whose projections disagree is refused rather than guessed (sc-27092).
+        return classify_comfy_quant_projections(entries);
     }
     let has_companion_scale = any_key_contains(keys, ".scale_weight")
         || any_key_contains(keys, ".scale_input")
@@ -646,6 +732,187 @@ fn detect_quant_format(
         return QuantFormat::F32;
     }
     QuantFormat::UnrecognizedScaling
+}
+
+/// The convention shared by every `.comfy_quant`-described projection in the file.
+///
+/// [`QuantFormat::MixedQuantFormats`] when the projections DISAGREE: a checkpoint is stored in one
+/// convention, and the engine's per-layer codec plan would decode each layer by its own
+/// descriptor, so there is no single codec id to name for the file. Refusing it is what keeps the
+/// persisted source-codec fact true.
+fn classify_comfy_quant_projections(entries: &serde_json::Map<String, Value>) -> QuantFormat {
+    let mut agreed: Option<QuantFormat> = None;
+    for name in entries.keys() {
+        let Some(base) = name.strip_suffix(".comfy_quant") else {
+            continue;
+        };
+        let Some(convention) = classify_projection_convention(entries, base) else {
+            continue;
+        };
+        match agreed {
+            None => agreed = Some(convention),
+            Some(existing) if existing == convention => {}
+            Some(_) => return QuantFormat::MixedQuantFormats,
+        }
+    }
+    // A `.comfy_quant` marker whose projections name no convention this build knows more precisely
+    // is the refuse bucket — never a guess.
+    agreed.unwrap_or(QuantFormat::ComfyQuantPacked)
+}
+
+/// The convention of ONE quantized projection, read from the header's weight dtype and the dtype
+/// and shape of its `.weight_scale` companion.
+///
+/// The descriptor's `format` string is tensor DATA — a header-only classifier cannot read it — so
+/// the convention is told apart by the geometry the header DOES carry. That geometry is also what
+/// makes the scalar-fp8 class distinct from the plain `F8_E4M3` cast: a real per-tensor scale is
+/// an `F32` **scalar**, and a file that carries one must not be decoded at unit scale.
+fn classify_projection_convention(
+    entries: &serde_json::Map<String, Value>,
+    base: &str,
+) -> Option<QuantFormat> {
+    let weight_dtype = tensor_dtype(entries, &format!("{base}.weight"))?;
+    if weight_dtype.eq_ignore_ascii_case("i8") {
+        return Some(QuantFormat::Int8TensorwisePerRow);
+    }
+    if weight_dtype.eq_ignore_ascii_case("u8") {
+        // Nibble-packed fp4/mxfp4 — the refuse bucket.
+        return Some(QuantFormat::ComfyQuantPacked);
+    }
+    let is_e4m3 = matches!(
+        weight_dtype.to_ascii_uppercase().as_str(),
+        "F8_E4M3" | "F8E4M3" | "FLOAT8_E4M3FN"
+    );
+    let is_e5m2 = matches!(
+        weight_dtype.to_ascii_uppercase().as_str(),
+        "F8_E5M2" | "F8E5M2" | "FLOAT8_E5M2"
+    );
+    if !is_e4m3 && !is_e5m2 {
+        return None;
+    }
+    // A described fp8 weight with no readable scale companion cannot be named more precisely than
+    // the refuse bucket: without a provable scale, "scalar fp8" would be a claim, not a fact.
+    let Some((scale_dtype, scale_shape)) = tensor_header(entries, &format!("{base}.weight_scale"))
+    else {
+        return Some(QuantFormat::ComfyQuantPacked);
+    };
+    if scale_dtype.eq_ignore_ascii_case("f32") && is_scalar_scale_shape(&scale_shape) {
+        return Some(if is_e4m3 {
+            QuantFormat::Fp8E4M3Scalar
+        } else {
+            QuantFormat::Fp8E5M2Scalar
+        });
+    }
+    if scale_dtype.eq_ignore_ascii_case("u8") && scale_shape.len() == 2 {
+        return Some(QuantFormat::Mxfp8);
+    }
+    Some(QuantFormat::ComfyQuantPacked)
+}
+
+/// Whether a scale companion's shape is a **per-tensor scalar** — ComfyUI's fp8 convention stores
+/// one `F32` for the whole tensor (`[]` or `[1]`).
+fn is_scalar_scale_shape(shape: &[u64]) -> bool {
+    shape.is_empty() || shape == [1]
+}
+
+/// MXFP8's shared-exponent block length (the OCP MX spec; `comfy_kitchen.MXFP8_BLOCK_SIZE`).
+const MXFP8_BLOCK: u64 = 32;
+/// ComfyUI pads MXFP8 storage to multiples of 32 on both axes.
+const MXFP8_PAD: u64 = 32;
+
+/// Whether the file's own global metadata DECLARES that its packed projections are MXFP8.
+///
+/// Two spellings, both written by the ComfyUI Kitchen converter. Neither is trusted on its own —
+/// the caller pairs it with [`has_mxfp8_block_scales`], which proves the declared surface is
+/// actually present.
+///
+/// 1. `__metadata__.quant_format = "MXFP8"` — the converter's single global marker.
+/// 2. `__metadata__._quantization_metadata` — a JSON **string** carrying a `layers` map, one entry
+///    per quantized projection with its own `format`.
+///
+/// **Every declared layer must say `mxfp8`**, exactly as [`metadata_declares_nvfp4`] requires of
+/// `nvfp4`: a table that mixes formats is a multi-codec export this classifier has no single
+/// answer for.
+fn metadata_declares_mxfp8(entries: &serde_json::Map<String, Value>) -> bool {
+    let Some(metadata) = entries.get("__metadata__").and_then(Value::as_object) else {
+        return false;
+    };
+    if metadata
+        .get("quant_format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format.eq_ignore_ascii_case("mxfp8"))
+    {
+        return true;
+    }
+    let Some(raw) = metadata
+        .get("_quantization_metadata")
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(raw) else {
+        return false;
+    };
+    let Some(layers) = parsed.get("layers").and_then(Value::as_object) else {
+        return false;
+    };
+    !layers.is_empty()
+        && layers.values().all(|layer| {
+            layer
+                .get("format")
+                .and_then(Value::as_str)
+                .is_some_and(|format| format.eq_ignore_ascii_case("mxfp8"))
+        })
+}
+
+/// Header-only proof of the MXFP8 tensor surface the shared `mxfp8-v1` codec accepts: an
+/// `F8_E4M3` weight on a 32-aligned grid with a `U8` block-scale companion of exactly the cuBLAS
+/// 128×4 swizzled shape.
+///
+/// The global metadata declares the convention; this proves the bytes are shaped like it, so a
+/// stale or forged declaration cannot open the loader.
+fn has_mxfp8_block_scales(entries: &serde_json::Map<String, Value>) -> bool {
+    let mut fp8_weights = 0_usize;
+    let mut matched = 0_usize;
+    for name in entries.keys() {
+        let Some(base) = name.strip_suffix(".weight") else {
+            continue;
+        };
+        let Some((weight_dtype, weight_shape)) = tensor_header(entries, name) else {
+            continue;
+        };
+        if !matches!(
+            weight_dtype.to_ascii_uppercase().as_str(),
+            "F8_E4M3" | "F8E4M3" | "FLOAT8_E4M3FN"
+        ) {
+            continue;
+        }
+        fp8_weights += 1;
+        let [rows, cols] = weight_shape.as_slice() else {
+            continue;
+        };
+        if *rows == 0 || *cols == 0 || rows % MXFP8_PAD != 0 || cols % MXFP8_PAD != 0 {
+            continue;
+        }
+        let Some((scale_dtype, scale_shape)) =
+            tensor_header(entries, &format!("{base}.weight_scale"))
+        else {
+            continue;
+        };
+        if !scale_dtype.eq_ignore_ascii_case("u8") {
+            continue;
+        }
+        let [scale_rows, scale_cols] = scale_shape.as_slice() else {
+            continue;
+        };
+        // The cuBLAS 128×4 swizzled block-scale tile: `⌈rows/128⌉·128` by `⌈(cols/32)/4⌉·4`.
+        let expected_rows = round_up_u64(*rows, 128);
+        let expected_cols = round_up_u64(cols / MXFP8_BLOCK, 4);
+        if expected_rows == Some(*scale_rows) && expected_cols == Some(*scale_cols) {
+            matched += 1;
+        }
+    }
+    fp8_weights > 4 && matched == fp8_weights
 }
 
 /// Whether the file's own global metadata DECLARES that its packed projections are NVFP4.
@@ -723,6 +990,15 @@ fn nvfp4_layer_descriptor_is_decodable(layer: &Value) -> bool {
         None | Some(Value::Null) => true,
         Some(value) => value.as_u64() == Some(NVFP4_GROUP_SIZE),
     }
+}
+
+/// A tensor's declared dtype, WITHOUT requiring a shape.
+///
+/// The dtype alone separates the conventions whose storage type differs (int8 codes, fp8 values,
+/// nibble-packed `U8`); the shape is only needed to tell ComfyUI's scalar fp8 (one `F32` for the
+/// whole tensor) from MXFP8 (a block-scale grid).
+fn tensor_dtype<'a>(entries: &'a serde_json::Map<String, Value>, name: &str) -> Option<&'a str> {
+    entries.get(name)?.get("dtype")?.as_str()
 }
 
 fn tensor_header<'a>(
@@ -986,6 +1262,14 @@ fn detect_transformer_family(keys: &[&str]) -> Option<&'static str> {
     {
         return Some("ltx-video");
     }
+    // FLUX3 (sc-26239): mode-specific image blocks + separate text blocks + shared single
+    // stream. This classifies identity only; it does NOT add a single-file import loader.
+    if any_key_contains(keys, "content_mode_blocks.image.")
+        && any_key_contains(keys, "txt_mode_blocks.")
+        && any_key_contains(keys, "single_blocks.")
+    {
+        return Some("flux3");
+    }
     // FLUX.2 (epic 6564): shared-modulation tensors across all blocks.
     if any_key_contains(keys, "double_stream_modulation_")
         || any_key_contains(keys, "single_stream_modulation.")
@@ -1097,6 +1381,36 @@ mod tests {
         map.insert("__metadata__".to_owned(), json!({"format": "pt"}));
         for (name, dtype) in entries {
             map.insert((*name).to_owned(), json!({ "dtype": dtype }));
+        }
+        Value::Object(map)
+    }
+
+    #[test]
+    fn flux3_checkpoint_identity_is_distinct_without_claiming_single_file_import() {
+        let header = header(&[
+            ("content_mode_blocks.image.0.q_proj.weight", "BF16"),
+            ("txt_mode_blocks.0.q_proj.weight", "BF16"),
+            ("single_blocks.0.q_proj.weight", "BF16"),
+        ]);
+        let verdict = recognized(classify_base_header(&header));
+        assert_eq!(verdict.family.as_deref(), Some("flux3"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert!(!IMPORT_SUPPORTED_FAMILIES.contains(&"flux3"));
+        assert!(import_supported(&verdict).unwrap_err().contains("catalog"));
+    }
+
+    /// The shape-carrying sibling of [`header`], for the conventions whose identity is the
+    /// companion's GEOMETRY: ComfyUI's scalar fp8 stores one `F32` for the whole tensor (`[]`),
+    /// while MXFP8 stores a `U8` block-scale GRID (rank 2). A dtype-only header cannot tell them
+    /// apart, so these tests carry shapes.
+    fn shaped_header(entries: &[(String, &str, Vec<u64>)]) -> Value {
+        let mut map = serde_json::Map::new();
+        map.insert("__metadata__".to_owned(), json!({"format": "pt"}));
+        for (name, dtype, shape) in entries {
+            map.insert(
+                name.clone(),
+                json!({ "dtype": dtype, "shape": shape.clone() }),
+            );
         }
         Value::Object(map)
     }
@@ -1224,6 +1538,209 @@ mod tests {
         assert_eq!(verdict.quant, QuantFormat::Int8TensorwisePerRow);
     }
 
+    /// sc-27092: a ComfyUI **scalar-scaled fp8** Krea 2 export — `F8_E4M3` weights with an `F32`
+    /// per-tensor `.weight_scale` and a `.comfy_quant` descriptor per projection.
+    ///
+    /// Before this, every `.comfy_quant` file carrying no bulk `I8` weight was filed as
+    /// `ComfyQuantPacked` — the fp4/mxfp4 bucket — so this file was refused with a reason naming a
+    /// format it does not use. It is ALSO not the plain `F8_E4M3` cast: that one has no companion
+    /// and decodes at **unit** scale, while this file's scale is real, so the two must not share a
+    /// classification.
+    #[test]
+    fn krea2_scalar_scaled_fp8_is_neither_the_plain_cast_nor_the_packed_bucket() {
+        let mut entries = vec![
+            (
+                "model.diffusion_model.blocks.0.mod.lin".to_owned(),
+                "BF16",
+                vec![36864],
+            ),
+            (
+                "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+                "F32",
+                vec![256, 256],
+            ),
+        ];
+        for index in 0..6 {
+            let base = format!("model.diffusion_model.blocks.{index}.attn.wq");
+            entries.push((format!("{base}.weight"), "F8_E4M3", vec![6144, 6144]));
+            // ONE F32 for the whole tensor — the geometry that makes it scalar-scaled.
+            entries.push((format!("{base}.weight_scale"), "F32", vec![]));
+            entries.push((format!("{base}.comfy_quant"), "U8", vec![46]));
+        }
+        let verdict = recognized(classify_base_header(&shaped_header(&entries)));
+        assert_eq!(verdict.family.as_deref(), Some("krea_2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Fp8E4M3Scalar);
+        assert!(
+            import_supported(&verdict).is_ok(),
+            "the scalar-fp8 Krea 2 DiT has a landed single-file loader"
+        );
+    }
+
+    /// sc-27092: the Kitchen **MXFP8** export — the quantization is declared FILE-LEVEL (the
+    /// export carries no per-layer `.comfy_quant` blob at all), the weights are `F8_E4M3` on a
+    /// 32-aligned grid, and each carries a `U8` block-scale companion in the cuBLAS 128×4 swizzled
+    /// layout.
+    ///
+    /// Before this, the file matched the `.weight_scale` arm and was labelled FLUX.2 inline-scale
+    /// fp8 — a convention it is not — and was refused under that name.
+    #[test]
+    fn krea2_kitchen_mxfp8_is_named_mxfp8_and_not_inline_scale_fp8() {
+        let mut map = serde_json::Map::new();
+        let mut declared = serde_json::Map::new();
+        for index in 0..6 {
+            declared.insert(
+                format!("model.diffusion_model.blocks.{index}.attn.wq"),
+                json!({"format": "mxfp8"}),
+            );
+        }
+        map.insert(
+            "__metadata__".to_owned(),
+            json!({
+                "format": "pt",
+                "quant_format": "MXFP8",
+                "_quantization_metadata":
+                    serde_json::to_string(&json!({"format_version": "1.0", "layers": declared}))
+                        .unwrap(),
+            }),
+        );
+        map.insert(
+            "model.diffusion_model.blocks.0.mod.lin".to_owned(),
+            json!({"dtype": "BF16", "shape": [36864]}),
+        );
+        map.insert(
+            "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+            json!({"dtype": "F32", "shape": [256, 256]}),
+        );
+        for index in 0..6 {
+            let base = format!("model.diffusion_model.blocks.{index}.attn.wq");
+            // 128 rows x 128 cols -> 4 blocks per row -> the swizzled scale tile is
+            // round_up(128, 128) x round_up(4, 4) = 128 x 4.
+            map.insert(
+                format!("{base}.weight"),
+                json!({"dtype": "F8_E4M3", "shape": [128, 128]}),
+            );
+            map.insert(
+                format!("{base}.weight_scale"),
+                json!({"dtype": "U8", "shape": [128, 4]}),
+            );
+        }
+        let verdict = recognized(classify_base_header(&Value::Object(map)));
+        assert_eq!(verdict.family.as_deref(), Some("krea_2"));
+        assert_eq!(verdict.component, ComponentRole::Transformer);
+        assert_eq!(verdict.quant, QuantFormat::Mxfp8);
+        assert!(
+            import_supported(&verdict).is_ok(),
+            "the MXFP8 Krea 2 DiT has a landed single-file loader"
+        );
+    }
+
+    /// sc-27092: a file whose described projections DISAGREE — one layer scalar-fp8, another
+    /// int8-per-row — has no single codec to name. It is refused with a reason rather than
+    /// classified under one of the two, because the persisted source-codec fact is one id and the
+    /// engine would decode each layer by its own descriptor.
+    #[test]
+    fn a_file_mixing_quantization_conventions_is_refused_not_guessed() {
+        let mut entries = vec![
+            (
+                "model.diffusion_model.blocks.0.mod.lin".to_owned(),
+                "BF16",
+                vec![36864],
+            ),
+            (
+                "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+                "F32",
+                vec![256, 256],
+            ),
+        ];
+        for index in 0..3 {
+            let base = format!("model.diffusion_model.blocks.{index}.attn.wq");
+            entries.push((format!("{base}.weight"), "F8_E4M3", vec![6144, 6144]));
+            entries.push((format!("{base}.weight_scale"), "F32", vec![]));
+            entries.push((format!("{base}.comfy_quant"), "U8", vec![46]));
+        }
+        for index in 3..6 {
+            let base = format!("model.diffusion_model.blocks.{index}.attn.wq");
+            entries.push((format!("{base}.weight"), "I8", vec![6144, 6144]));
+            entries.push((format!("{base}.weight_scale"), "F32", vec![6144, 1]));
+            entries.push((format!("{base}.comfy_quant"), "U8", vec![46]));
+        }
+        let verdict = recognized(classify_base_header(&shaped_header(&entries)));
+        assert_eq!(verdict.quant, QuantFormat::MixedQuantFormats);
+        let reason = import_supported(&verdict).expect_err("a mixed file must be refused");
+        assert!(
+            reason.contains("mixes quantization conventions"),
+            "the reason must say why: {reason}"
+        );
+    }
+
+    /// sc-27092: a `.comfy_quant` file whose projections carry NO readable scale cannot be named
+    /// more precisely than the packed bucket — without a provable scale, "scalar fp8" would be a
+    /// claim, not a fact. It stays in the refuse bucket rather than decoding at a scale nobody
+    /// proved.
+    #[test]
+    fn a_described_fp8_weight_with_no_readable_scale_stays_refused() {
+        let mut entries = vec![
+            (
+                "model.diffusion_model.blocks.0.mod.lin".to_owned(),
+                "BF16",
+                vec![36864],
+            ),
+            (
+                "model.diffusion_model.txtfusion.projector.weight".to_owned(),
+                "F32",
+                vec![256, 256],
+            ),
+        ];
+        for index in 0..6 {
+            let base = format!("model.diffusion_model.blocks.{index}.attn.wq");
+            entries.push((format!("{base}.weight"), "F8_E4M3", vec![6144, 6144]));
+            entries.push((format!("{base}.comfy_quant"), "U8", vec![46]));
+        }
+        let verdict = recognized(classify_base_header(&shaped_header(&entries)));
+        assert_eq!(verdict.quant, QuantFormat::ComfyQuantPacked);
+        assert!(import_supported(&verdict).is_err());
+    }
+
+    /// sc-27092: the REAL published artifacts this classifier exists for.
+    ///
+    /// The fp8-scalar export is a ComfyUI `ModelSave` of an fp8-scaled Krea 2 DiT (256 `F8_E4M3`
+    /// weights, 256 `F32` scalar scales, 256 `.comfy_quant` descriptors, 174 BF16); the MXFP8 one
+    /// is the Kitchen converter's export (224 `F8_E4M3` weights, 224 `U8` block scales, 206 BF16,
+    /// quantization declared FILE-LEVEL). Both were refused before this story — the first as "not
+    /// comfy_quant_packed" (a format it does not use) and the second as "not fp8_inline_scale" (a
+    /// format it is not).
+    ///
+    /// ```text
+    /// SCENEWORKS_SCALAR_FP8_CHECKPOINT='C:\Users\Michael\Downloads\krea2SATDirtyrealism_krea2SATDirtyuncut_fp8.safetensors' \
+    /// SCENEWORKS_MXFP8_CHECKPOINT='C:\Users\Michael\Downloads\kreamania_variant8_3315189.safetensors' \
+    ///   cargo test -p sceneworks-core --lib base_weights::tests::real_comfy_quant_krea_2_artifacts -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn real_comfy_quant_krea_2_artifacts() {
+        for (variable, expected) in [
+            (
+                "SCENEWORKS_SCALAR_FP8_CHECKPOINT",
+                QuantFormat::Fp8E4M3Scalar,
+            ),
+            ("SCENEWORKS_MXFP8_CHECKPOINT", QuantFormat::Mxfp8),
+        ] {
+            let path = std::env::var(variable).unwrap_or_else(|_| panic!("set ${variable}"));
+            let path = std::path::Path::new(&path);
+            assert!(path.is_file(), "{} is not a file", path.display());
+            let detection = detect_base_weight_file(path).expect("the header parses");
+            let verdict = recognized(detection);
+            assert_eq!(verdict.family.as_deref(), Some("krea_2"), "{variable}");
+            assert_eq!(verdict.component, ComponentRole::Transformer, "{variable}");
+            assert_eq!(verdict.quant, expected, "{variable}");
+            assert!(
+                import_supported(&verdict).is_ok(),
+                "{variable} must be importable"
+            );
+        }
+    }
+
     /// The header classification → engine codec-id bridge (sc-21484). Pinned rather than left to
     /// the match arms because the whole point of the bridge is that `Nvfp4` reaches the codec
     /// vocabulary as `"nvfp4-v1"` and NEVER as the request tier `"nvfp4"` or as a `q4` alias.
@@ -1247,13 +1764,28 @@ mod tests {
             QuantFormat::Gguf.source_codec_id(),
             Some("gguf-container-v1")
         );
+        // The descriptor-gated scalar-fp8 and MXFP8 conventions ARE registered engine codecs
+        // (sc-27092): `fp8-e4m3-scalar-v1` claims the described `float8_e4m3fn` form and
+        // `mxfp8-v1` the `mxfp8` form, so a classification that names them names a codec the
+        // engine really owns.
+        assert_eq!(
+            QuantFormat::Fp8E4M3Scalar.source_codec_id(),
+            Some("fp8-e4m3-scalar-v1")
+        );
+        assert_eq!(
+            QuantFormat::Fp8E5M2Scalar.source_codec_id(),
+            Some("fp8-e5m2-scalar-v1")
+        );
+        assert_eq!(QuantFormat::Mxfp8.source_codec_id(), Some("mxfp8-v1"));
 
-        // The fp8 family has no proved one-to-one mapping, so it stays absent rather than guessing.
+        // The remaining fp8 family has no proved one-to-one mapping, so it stays absent rather than
+        // guessing.
         for unmapped in [
             QuantFormat::Fp8E4m3,
             QuantFormat::ScaledFp8Companion,
             QuantFormat::Fp8InlineScale,
             QuantFormat::ComfyQuantPacked,
+            QuantFormat::MixedQuantFormats,
             QuantFormat::UnrecognizedScaling,
         ] {
             assert_eq!(
@@ -1274,6 +1806,10 @@ mod tests {
             QuantFormat::Fp8InlineScale,
             QuantFormat::ComfyQuantPacked,
             QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Fp8E4M3Scalar,
+            QuantFormat::Fp8E5M2Scalar,
+            QuantFormat::Mxfp8,
+            QuantFormat::MixedQuantFormats,
             QuantFormat::Nvfp4,
             QuantFormat::Gguf,
             QuantFormat::UnrecognizedScaling,
@@ -1295,6 +1831,9 @@ mod tests {
             QuantFormat::F16,
             QuantFormat::F32,
             QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Fp8E4M3Scalar,
+            QuantFormat::Fp8E5M2Scalar,
+            QuantFormat::Mxfp8,
             QuantFormat::Nvfp4,
             QuantFormat::Gguf,
         ] {
@@ -2191,6 +2730,9 @@ mod tests {
         for quant in [
             QuantFormat::Bf16,
             QuantFormat::Int8TensorwisePerRow,
+            QuantFormat::Fp8E4M3Scalar,
+            QuantFormat::Fp8E5M2Scalar,
+            QuantFormat::Mxfp8,
             QuantFormat::Nvfp4,
         ] {
             assert!(
@@ -2232,8 +2774,12 @@ mod tests {
         ))
         .expect_err("packed quant must be refused");
         assert!(
-            reason.contains("bf16") && reason.contains("int8") && reason.contains("NVFP4"),
-            "reason should name the required quant: {reason}"
+            reason.contains("bf16")
+                && reason.contains("int8")
+                && reason.contains("fp8")
+                && reason.contains("MXFP8")
+                && reason.contains("NVFP4"),
+            "reason should name every accepted quant: {reason}"
         );
         assert!(
             reason.contains(QuantFormat::ComfyQuantPacked.as_str()),
@@ -2452,8 +2998,8 @@ mod tests {
         // and makes adding a family an explicit row here rather than a silent pass.
         //
         // Failing mutations: drop `QuantFormat::Bf16 | QuantFormat::Int8TensorwisePerRow` from the
-        // krea_2 arm; add a dense arm for flux2; add a family to IMPORT_SUPPORTED_FAMILIES without
-        // a row below.
+        // krea_2 arm; drop one of the scalar-fp8 / MXFP8 encodings from it; add a dense arm for
+        // flux2; add a family to IMPORT_SUPPORTED_FAMILIES without a row below.
         let expected: &[(&str, ComponentRole, &[QuantFormat])] = &[
             (
                 "krea_2",
@@ -2461,6 +3007,9 @@ mod tests {
                 &[
                     QuantFormat::Bf16,
                     QuantFormat::Int8TensorwisePerRow,
+                    QuantFormat::Fp8E4M3Scalar,
+                    QuantFormat::Fp8E5M2Scalar,
+                    QuantFormat::Mxfp8,
                     QuantFormat::Nvfp4,
                 ],
             ),
@@ -2494,6 +3043,9 @@ mod tests {
                 QuantFormat::F16,
                 QuantFormat::F32,
                 QuantFormat::Int8TensorwisePerRow,
+                QuantFormat::Fp8E4M3Scalar,
+                QuantFormat::Fp8E5M2Scalar,
+                QuantFormat::Mxfp8,
                 QuantFormat::Nvfp4,
             ]
             .into_iter()

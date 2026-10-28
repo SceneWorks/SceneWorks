@@ -215,6 +215,11 @@ pub trait WorkflowCatalogs {
     /// The model catalog's row for an envelope's `model` slug.
     fn model(&self, slug: &str) -> Option<CatalogEntry>;
 
+    /// Mode-specific pinned packages are independent of the installed backbone.
+    fn conditional_component(&self, _model: &str, _purpose: &str) -> Option<CatalogEntry> {
+        None
+    }
+
     /// The unique LoRA catalog row with this exact full SHA-256. A digest-bearing envelope never
     /// falls back to repo or name: doing so could silently substitute different bytes.
     fn lora_by_hash(&self, _hash: &str) -> Option<CatalogEntry> {
@@ -280,6 +285,7 @@ pub trait WorkflowCatalogs {
 #[derive(Debug, Clone, Default)]
 pub struct StaticCatalogs {
     pub models: Vec<CatalogEntry>,
+    pub conditional_components: Vec<CatalogEntry>,
     pub loras: Vec<CatalogEntry>,
     pub styles: Vec<CatalogEntry>,
     pub recipe_presets: Vec<CatalogEntry>,
@@ -408,6 +414,10 @@ impl StaticCatalogs {
 impl WorkflowCatalogs for StaticCatalogs {
     fn model(&self, slug: &str) -> Option<CatalogEntry> {
         find_by_id(&self.models, slug)
+    }
+
+    fn conditional_component(&self, model: &str, purpose: &str) -> Option<CatalogEntry> {
+        find_by_id(&self.conditional_components, &format!("{model}:{purpose}"))
     }
 
     fn lora_by_hash(&self, hash: &str) -> Option<CatalogEntry> {
@@ -615,7 +625,11 @@ pub struct OmittedCollection {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolutionReport {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tensors: Vec<crate::moss_image_advanced::TensorRequirement>,
     pub model: ModelRequirement,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub components: Vec<ComponentRequirement>,
     /// Every LoRA the envelope named, in envelope order. Unresolvable entries are listed, not
     /// dropped.
     pub loras: Vec<LoraRequirement>,
@@ -645,6 +659,17 @@ pub struct ResolutionReport {
     pub input_images_required: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComponentRequirement {
+    pub model_id: String,
+    pub purpose: String,
+    pub component_id: String,
+    pub state: RequirementState,
+    pub install: Option<InstallAction>,
+    pub detail: String,
+}
+
 impl ResolutionReport {
     /// Both flags at once: this install can run it AND there is nothing left for the user to
     /// supply. The condition under which sc-15952 may offer a true one-click "use this recipe".
@@ -653,7 +678,7 @@ impl ResolutionReport {
     /// re-derived DIFFERENTLY) by each reader.
     #[must_use]
     pub const fn one_click_replayable(&self) -> bool {
-        self.runnable && self.input_images_required == 0
+        self.runnable && self.input_images_required == 0 && self.tensors.is_empty()
     }
 
     /// Every requirement that is not [`RequirementState::Resolved`], as sentences — the "name what
@@ -664,6 +689,12 @@ impl ResolutionReport {
         if self.model.state.blocks_replay() {
             out.push(self.model.detail.as_str());
         }
+        out.extend(
+            self.components
+                .iter()
+                .filter(|component| component.state.blocks_replay())
+                .map(|component| component.detail.as_str()),
+        );
         out.extend(
             self.loras
                 .iter()
@@ -723,6 +754,24 @@ pub fn build_resolution_report(
     catalogs: &dyn WorkflowCatalogs,
 ) -> ResolutionReport {
     let model = classify_model(&share.model, catalogs);
+    let components = if crate::moss_image::is_moss(&share.model) && share.mode == "edit_image" {
+        let entry = catalogs.conditional_component(&share.model, crate::moss_image::EDIT_PURPOSE);
+        let state = state_for(entry.as_ref());
+        vec![ComponentRequirement {
+            model_id: model.catalog_id.clone().unwrap_or_else(|| share.model.clone()),
+            purpose: crate::moss_image::EDIT_PURPOSE.to_owned(),
+            component_id: "moss-image-edit".to_owned(),
+            state,
+            install: install_for(entry.as_ref(), state),
+            detail: match state {
+                RequirementState::Resolved => "The exact pinned MOSS edit adapter is installed.".to_owned(),
+                RequirementState::Installable => "Install or repair the exact pinned MOSS edit adapter before replay; its weight license is unspecified.".to_owned(),
+                _ => "The exact MOSS edit adapter is unavailable or blocked. Resolve the package in Models before replay.".to_owned(),
+            },
+        }]
+    } else {
+        Vec::new()
+    };
     let loras = share
         .loras
         .iter()
@@ -756,6 +805,9 @@ pub fn build_resolution_report(
     // "This install can run it" — the LOOKED-UP requirements only. Input images are counted
     // separately rather than folded in; see `ResolutionReport::runnable`.
     let runnable = !model.state.blocks_replay()
+        && components
+            .iter()
+            .all(|component| !component.state.blocks_replay())
         && loras.iter().all(|lora| !lora.state.blocks_replay())
         && styles.iter().all(|style| !style.state.blocks_replay())
         && omitted.is_empty();
@@ -767,7 +819,13 @@ pub fn build_resolution_report(
         .fold(0u32, u32::saturating_add);
 
     ResolutionReport {
+        tensors: share
+            .advanced
+            .get(crate::moss_image_advanced::KEY)
+            .map(crate::moss_image_advanced::requirements)
+            .unwrap_or_default(),
         model,
+        components,
         loras,
         styles,
         inputs,

@@ -49,8 +49,12 @@ export function useQuantTierPicker({
   useGenerationQuality = false,
   reseedOnModelChange = false,
   preferencesHydrated = true,
+  // A recipe's numeric format is authoritative while replay is active. Derive the label,
+  // suggestion, confirmation and sticky writes from the SAME tier as the submitted request.
+  resolvedTier = null,
 }) {
-  const [quantTier, setQuantTier] = useState("");
+  const [pickedTier, setQuantTier] = useState("");
+  const quantTier = resolvedTier ?? pickedTier;
   const [tierSwitching, setTierSwitching] = useState("");
   // Bumped by `confirmTier` so the sticky it writes re-derives `tierExplicit` even though the
   // selected tier itself does not change.

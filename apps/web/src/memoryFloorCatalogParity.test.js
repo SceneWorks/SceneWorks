@@ -29,6 +29,7 @@ import {
 } from "./tierSuggestion.js";
 import { isSelectableTier, tierHostEligible, tierQuantize } from "./quantTier.js";
 import { needsLabel } from "./simple/SimpleModelManager.jsx";
+import { sdxlCudaMemoryEstimate } from "./sdxlCudaMemoryEndpoints.js";
 
 // CATALOG-DRIVEN memory-floor guard (sc-15400 review). Sibling of controlModesParity.test.js /
 // videoGeometryParity.test.js, which established the pattern of asserting against the REAL
@@ -635,8 +636,21 @@ for (const os of OSES) {
 
 // Pull the integer out of "needs N GB" / "from N GB". null when the row shows no number at all.
 function shownGb(label) {
-  const match = /(?:needs|from) (\d+) GB/.exec(label ?? "");
+  const match = /(?:needs|from) (\d+) GB/.exec(label ?? "")
+    ?? /Q4 optimized ~(\d+(?:\.\d+)?) GiB/.exec(label ?? "");
   return match ? Number(match[1]) : null;
+}
+
+// The separately authenticated CUDA pair supersedes the legacy estimated resident floor only for
+// this explicitly scoped label. Mixed installs and every other model/lane retain the old criterion.
+// CI_IMPACT: reuses the existing metadata sweep; no additional cases, model calls or device work.
+function endpointForLabel(row, tier = "q4") {
+  if (!row.label?.startsWith("Q4 optimized ")) return null;
+  const endpoint = sdxlCudaMemoryEstimate({ id: row.id }, tier, row.backend);
+  expect(endpoint).not.toBeNull();
+  expect(row.label).toBe(endpoint.label);
+  expect(row.subset.length === 0 || (row.subset.length === 1 && row.subset[0] === "q4")).toBe(true);
+  return endpoint;
 }
 
 describe("catalog memory floors: the COMPOSED label never under-states an installed tier", () => {
@@ -676,7 +690,7 @@ describe("catalog memory floors: the COMPOSED label never under-states an instal
         asserted++;
         // The host size THAT LANE's gate requires for this tier's evidence. The label must be at least
         // this, or a user who installed exactly this subset is told a number their own gate rejects.
-        const required = hostGbForPeakGb(peak, row.backend);
+        const required = endpointForLabel(row, tier)?.optimizedHostGb ?? hostGbForPeakGb(peak, row.backend);
         if (shown === null || shown < required) {
           failures.push(
             `${row.id} on ${row.os} [${row.subset.join(",")}]: label ${JSON.stringify(row.label)} but ${tier} peak ${peak} needs a ${required} GB host`,
@@ -722,7 +736,7 @@ describe("catalog memory floors: the COMPOSED label never under-states an instal
       expect(shown, `${row.id} on ${row.os} must quote an entry floor`).not.toBeNull();
       // A FLOOR, so it answers for the CHEAPEST tier — not for every tier (which is what "from" means).
       expect(shown, `${row.id} on ${row.os} 'from' floor`).toBeGreaterThanOrEqual(
-        hostGbForPeakGb(Math.min(...evidence), row.backend),
+        endpointForLabel(row)?.optimizedHostGb ?? hostGbForPeakGb(Math.min(...evidence), row.backend),
       );
     }
     expect(checked, "must cover some uninstalled models with evidence").toBeGreaterThanOrEqual(8);
@@ -799,8 +813,8 @@ describe("catalog memory floors: an UNCALIBRATED lane is floored at its curated 
       }
       expect(
         shownGb(row.label),
-        `${row.id} [${row.subset.join(",")}] must not undercut its curated blanket`,
-      ).toBeGreaterThanOrEqual(blanket);
+        `${row.id} [${row.subset.join(",")}] must cover its scoped evidence or curated blanket`,
+      ).toBeGreaterThanOrEqual(endpointForLabel(row)?.optimizedHostGb ?? blanket);
     }
   });
 
@@ -1359,6 +1373,10 @@ describe("catalog memory floors: the shapes the round-4 guards depend on", () =>
         "acestep_v15_turbo",
         "chatterbox_tts",
         "chatterbox_ve",
+        // sc-26235: the native Candle BF16 floor is declared, not measured.
+        "flux3_klein",
+        // sc-26239: separate base CFG checkpoint, also an unmeasured declaration.
+        "flux3_klein_base",
         "kokoro_82m",
         "moss_sfx_v2",
         "moss_tts_realtime",

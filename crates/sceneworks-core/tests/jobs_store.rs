@@ -3675,6 +3675,49 @@ fn cancel_retry_and_duplicate_preserve_python_metadata_shapes() {
 }
 
 #[test]
+fn preallocated_duplicate_id_is_atomic_unique_and_preserves_the_source() {
+    let store = store("preallocated-training-duplicate");
+    let original = store
+        .create_job(image_job(object(json!({"prompt":"original"}))))
+        .unwrap();
+    let id = "job_preallocated_training_duplicate";
+    let duplicate = store
+        .duplicate_job_with_id(
+            id.to_owned(),
+            &original.id,
+            DuplicateJob {
+                payload_changes: object(json!({"plan":{"jobId":id}})),
+                requested_gpu: Some("gpu-1".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(duplicate.id, id);
+    assert_eq!(duplicate.payload["plan"]["jobId"], id);
+    assert_eq!(
+        duplicate.duplicate_of_job_id.as_deref(),
+        Some(original.id.as_str())
+    );
+    assert_eq!(duplicate.requested_gpu, "gpu-1");
+    let count = store.list_jobs(None, None, 100).unwrap().len();
+    assert!(store
+        .duplicate_job_with_id(
+            id.to_owned(),
+            &original.id,
+            DuplicateJob {
+                payload_changes: object(json!({"prompt":"must not replace"})),
+                requested_gpu: None,
+            }
+        )
+        .is_err());
+    assert_eq!(store.list_jobs(None, None, 100).unwrap().len(), count);
+    assert_eq!(store.get_job(id).unwrap().payload, duplicate.payload);
+    assert_eq!(
+        store.get_job(&original.id).unwrap().payload,
+        original.payload
+    );
+}
+
+#[test]
 fn stale_sweep_marks_worker_offline_and_job_interrupted() {
     let store = store("stale-sweep");
     register_image_worker(&store);
@@ -9471,6 +9514,99 @@ fn resume_checkpoint_step_survives_later_results_and_an_interrupt() {
     assert_eq!(job.status, JobStatus::Interrupted);
     assert_eq!(job.result.get("resumeCheckpointStep"), Some(&json!(100)));
     assert_eq!(job.result.get("other"), Some(&json!(true)));
+}
+
+/// sc-8953 follow-through (2026-10-27): the image worker posts a SLIM result on every denoise
+/// step (`image_jobs::slim_step_result`) — the accumulated `assetWrites`/`generationSet`/
+/// `prefixKvCache` fact sets ride only the per-image and terminal posts, or the per-step SSE
+/// fan-out OOM-kills the WebView2 renderer mid-batch. The result column is replaced wholesale,
+/// so a slim tick omitting them must not blank them off the durable row:
+/// `merge_progress_result_accumulations` restores each from the stored value.
+///
+/// *Mutation that reds this:* posting `Some(object(json!({})))` (an empty result) instead of the
+/// slim shape, or dropping the merge from `update_job_progress_internal`.
+#[test]
+fn slim_step_progress_results_keep_the_accumulated_fact_sets() {
+    let store = store("slim-step-keeps-accumulations");
+    register_image_worker(&store);
+    let created = store
+        .create_job(image_job(object(json!({ "prompt": "p" }))))
+        .expect("job creates");
+    store.claim_next_job("worker-1").expect("claim ok");
+    let report = |result: serde_json::Value| ProgressUpdate {
+        status: JobStatus::Running,
+        stage: ProgressStage::Running,
+        progress: 0.5,
+        message: "running".to_owned(),
+        error: None,
+        result: Some(object(result)),
+        eta_seconds: None,
+        peak_gpu_memory_pct: None,
+        peak_gpu_load_pct: None,
+        backend: None,
+        worker_id: Some("worker-1".to_owned()),
+    };
+    // A full post first (the first finished image): the fact set lands on the row.
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({
+                "generationSetId": "genset-1",
+                "generationSet": { "id": "genset-1", "count": 260 },
+                "assetWrites": [{ "id": "asset-1" }],
+                "prefixKvCache": [{ "cache": "hit" }],
+            })),
+        )
+        .expect("full progress");
+    // Then a slim STEP tick: the accumulations are absent ON PURPOSE.
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({ "generationSetId": "genset-1", "expectedCount": 260 })),
+        )
+        .expect("slim progress");
+    let job = store.get_job(&created.id).expect("job loads");
+    // The durable row keeps every accumulation the slim tick omitted...
+    assert_eq!(
+        job.result.get("generationSet"),
+        Some(&json!({ "id": "genset-1", "count": 260 }))
+    );
+    assert_eq!(
+        job.result.get("assetWrites"),
+        Some(&json!([{ "id": "asset-1" }]))
+    );
+    assert_eq!(
+        job.result.get("prefixKvCache"),
+        Some(&json!([{ "cache": "hit" }]))
+    );
+    // ...and carries the slim tick's own keys verbatim.
+    assert_eq!(job.result.get("expectedCount"), Some(&json!(260)));
+
+    // A full post that DOES carry an accumulation REPLACES the stored one (the
+    // worker is the authority; the merge is absence-only, never sticky).
+    store
+        .update_job_progress(
+            &created.id,
+            report(json!({
+                "generationSetId": "genset-1",
+                "assetWrites": [{ "id": "asset-1" }, { "id": "asset-2" }],
+            })),
+        )
+        .expect("second full progress");
+    let job = store.get_job(&created.id).expect("job loads");
+    assert_eq!(
+        job.result.get("assetWrites"),
+        Some(&json!([{ "id": "asset-1" }, { "id": "asset-2" }]))
+    );
+    // `generationSet`/`prefixKvCache` absent from that post: still restored.
+    assert_eq!(
+        job.result.get("generationSet"),
+        Some(&json!({ "id": "genset-1", "count": 260 }))
+    );
+    assert_eq!(
+        job.result.get("prefixKvCache"),
+        Some(&json!([{ "cache": "hit" }]))
+    );
 }
 
 /// sc-25907 (epic 25899 E3): a Qwen Image 2.1 TURBO image job — plain text-to-image and an ordered

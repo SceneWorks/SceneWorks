@@ -379,7 +379,7 @@ fn qwen_image_2_1_edit_target_mirrors_the_t2i_rules_and_caps_references_at_the_m
     for other in registry
         .targets
         .iter()
-        .filter(|target| target.id != edit.id)
+        .filter(|target| target.id != edit.id && target.id != "flux3_klein_edit_lora")
     {
         assert_eq!(
             training_target_max_reference_images(other),
@@ -466,6 +466,34 @@ fn plan_for(target_id: &str, dataset: &TrainingDataset) -> Result<TrainingPlan, 
         file_name: "edit.safetensors".to_owned(),
         created_at: "2026-10-02T00:00:00Z".to_owned(),
     })
+}
+
+#[test]
+fn flux3_plans_preserve_single_reference_edit_and_captioned_intent() {
+    for (target, dataset, references) in [
+        ("flux3_klein_lora", dataset_fixture(), 0),
+        ("flux3_klein_edit_lora", edit_dataset(&[1, 1]), 1),
+    ] {
+        let plan = plan_for(target, &dataset).unwrap();
+        assert_eq!(plan.target.base_model, "flux3_klein_base");
+        assert_eq!(plan.config.rank, 4);
+        assert!(plan
+            .dataset
+            .items
+            .iter()
+            .all(|item| item.reference_image_paths.len() == references));
+        if references == 1 {
+            assert!(plan.dataset.items[0].reference_image_paths[0].ends_with("item_0000_ref0.png"));
+            assert_eq!(
+                plan.dataset.items[0].caption,
+                "replace the sky with image 2"
+            );
+        }
+    }
+    for dataset in [dataset_fixture(), edit_dataset(&[2]), edit_dataset(&[1, 0])] {
+        assert!(plan_for("flux3_klein_edit_lora", &dataset).is_err());
+    }
+    assert!(plan_for("flux3_klein_lora", &edit_dataset(&[1])).is_err());
 }
 
 /// sc-24161: the plan threads every edit item's references into `referenceImagePaths` in STORED
@@ -568,7 +596,8 @@ fn kernel_edit_shape_floor_follows_the_targets_reference_caps() {
         "qwen_image_2_1_edit_lora"
     ));
     for target in builtin_training_targets().targets {
-        if target.kernel != "qwen_image_2_1_edit_lora" {
+        if !["qwen_image_2_1_edit_lora", "flux3_klein_edit_lora"].contains(&target.kernel.as_str())
+        {
             assert!(
                 !training_kernel_trains_edit_pairs(&target.kernel),
                 "{}",
@@ -3038,7 +3067,8 @@ fn adapter_noise_is_gated_on_the_target_flags() {
         .filter(|target| target.output_kind != TrainingOutputKind::ControlBranch)
         .filter(|target| {
             // The Iris-3B trainers declare no epic 2123 technique, so they advertise neither flag.
-            let iris = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel);
+            let iris = sceneworks_core::training::iris::is_iris_training_kernel(&target.kernel)
+                || sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str());
             if iris {
                 assert!(!target_supports_weight_noise(target), "{}", target.id);
                 assert!(!target_supports_gradient_noise(target), "{}", target.id);
@@ -3115,6 +3145,8 @@ fn resolution_buckets_are_refused_at_submit_on_targets_that_do_not_advertise_the
     assert_eq!(
         withheld,
         [
+            "flux3_klein_lora",
+            "flux3_klein_edit_lora",
             "ltx_2_5_video_lora",
             "iris_3b_generation",
             "iris_3b_depth",
@@ -3191,6 +3223,8 @@ fn depth_anchoring_is_refused_at_submit_on_targets_that_do_not_advertise_it() {
         unsupported,
         [
             "krea_2_control",
+            "flux3_klein_lora",
+            "flux3_klein_edit_lora",
             "iris_3b_generation",
             "iris_3b_depth",
             "iris_3b_restore"
@@ -3243,6 +3277,8 @@ fn subject_mask_loss_is_refused_at_submit_on_targets_that_do_not_advertise_it() 
         unsupported,
         [
             "krea_2_control",
+            "flux3_klein_lora",
+            "flux3_klein_edit_lora",
             "ltx_2_5_video_lora",
             "iris_3b_generation",
             "iris_3b_depth",
@@ -3792,6 +3828,8 @@ fn face_losses_are_refused_at_submit_on_targets_that_do_not_advertise_them() {
             unsupported,
             [
                 "krea_2_control",
+                "flux3_klein_lora",
+                "flux3_klein_edit_lora",
                 "iris_3b_generation",
                 "iris_3b_depth",
                 "iris_3b_restore"

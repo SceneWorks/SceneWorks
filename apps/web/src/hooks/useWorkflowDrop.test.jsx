@@ -304,6 +304,25 @@ describe("useWorkflowDrop", () => {
     expect(hook.offer).toBeNull();
   });
 
+  it("hands source-only FLUX3 workflow geometry intent and its picked source to the launch", async () => {
+    const body = workflowBody();
+    body.workflow = { ...body.workflow, mode: "edit_image", model: "flux3_klein",
+      width: undefined, height: 48, inputs: [{ kind: "source", count: 1 }] };
+    body.resolution.model = { state: "resolved", catalogId: "flux3_klein" };
+    body.resolution.inputs = [{ kind: "source", count: 1 }];
+    inspectWorkflowFile.mockResolvedValue(body);
+    const launchRecipe = vi.fn(async () => true);
+    await render({ launchRecipe });
+    await act(async () => { await hook.handleDroppedFile(pngFile()); });
+    await act(async () => { hook.missing.onPickInput("source-0-0", "picked-source"); });
+    await act(async () => { await hook.useWorkflow(); });
+    expect(launchRecipe).toHaveBeenCalledTimes(1);
+    const launched = launchRecipe.mock.calls[0][0];
+    expect(launched.sourceAssetId).toBe("picked-source");
+    expect(launched.recipe.uiDimensionIntent).toEqual({ width: null, height: 48 });
+    expect(launched.recipe.rawAdapterSettings).not.toHaveProperty("flux3ReferenceEditing");
+  });
+
   it("imports through the ordinary upload path and keeps the offer open", async () => {
     inspectWorkflowFile.mockResolvedValue(workflowBody());
     const importAsset = vi.fn(async () => ({ id: "asset_9" }));

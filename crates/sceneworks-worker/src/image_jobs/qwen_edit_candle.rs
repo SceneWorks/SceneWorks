@@ -10,8 +10,8 @@ use super::{
     resolve_advanced_or_manifest_f32, resolve_advanced_or_manifest_u32_with, resolve_seed,
     standard_tier_subdir, start_gen_stream, tier_key_from_resolved_dir, vram_reject_tail_for_tier,
     AdapterKind, AdapterSpec, ApiClient, Image, ImagePlan, ImageRequest, JobSnapshot, JsonObject,
-    Path, PathBuf, PoseInput, QwenEdit, QwenEditPaths, QwenEditRequest, Settings, Value,
-    WorkerError, WorkerResult,
+    Path, PathBuf, PoseInput, QwenEdit, QwenEditPaths, QwenEditRequest, ResolutionLever, Settings,
+    Value, WorkerError, WorkerResult,
 };
 use super::{huggingface_snapshot_dir, resolve_app_managed_model_dir};
 use serde_json::json;
@@ -973,8 +973,14 @@ pub(super) async fn generate_candle_qwen_edit_stream(
         let evaluation = evaluate_memory(budget)?;
         if matches!(plan, crate::vram_gate::LoadPlan::Reject) {
             let available_gb = budget.map_or(0.0, |item| item.free_gb);
-            let reject_tail =
-                vram_reject_tail_for_tier(installed_tier_keys(request, settings), tier);
+            let reject_tail = vram_reject_tail_for_tier(
+                installed_tier_keys(request, settings),
+                tier,
+                // This lane rejects on the shared memory-strategy selector, which prices by
+                // geometry: a smaller output can bring an out-of-envelope request back inside
+                // the measured hull it can price at all, so the knob is real (issue #3197).
+                ResolutionLever::Priced,
+            );
             return Err(WorkerError::InvalidPayload(format!(
                 "{model} at the {tier} tier has no exact memory strategy that fits GPU {gpu}'s \
                  ~{available} GB available budget (artifact certified: {artifact_certified}; \
@@ -1799,12 +1805,12 @@ mod qwen_edit_tier_reconcile_tests {
 
     #[test]
     fn reject_advice_names_only_smaller_installed_tiers() {
-        let none = vram_reject_tail_for_tier(vec!["q8"], "q8");
+        let none = vram_reject_tail_for_tier(vec!["q8"], "q8", ResolutionLever::Priced);
         assert!(none.contains("No smaller tier is installed"));
         assert!(!none.contains("Pick a lower tier"));
         assert!(!none.contains("Q4/Q8"));
 
-        let q4 = vram_reject_tail_for_tier(vec!["bf16", "q8", "q4"], "q8");
+        let q4 = vram_reject_tail_for_tier(vec!["bf16", "q8", "q4"], "q8", ResolutionLever::Priced);
         assert!(q4.contains("(Q4)"));
         assert!(!q4.contains("BF16"));
         assert!(!q4.contains("Q8 /"));
