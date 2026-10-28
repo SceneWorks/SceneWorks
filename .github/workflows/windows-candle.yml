@@ -32,9 +32,8 @@ name: Windows Candle worker
 # 14.51, sc-3676). The runner reuses its `_work` target dir, so candle compiles
 # once and is incremental across runs. The real-weight GPU smokes stay `#[ignore]`d
 # (the ~logic tests run driver-free); add `-- --ignored` by hand for a GPU pass.
-# Exception: `cuda_quant_smoke` (sc-13510) is weightless and fast, so it runs
-# un-ignored here — it exercises the patched candle-kernels quant kernels on the
-# real GPU every time this lane fires.
+# The synthetic `cuda_quant_smoke` inference kernel is also ignored here; its
+# unchanged assertions run only in the dispatched quant_kernel_only profile.
 #
 # Runner prerequisites: Windows 11 + NVIDIA driver, CUDA Toolkit 12.9, VS2022
 # BuildTools (MSVC 14.44), a Rust toolchain, registered with the `cuda` label.
@@ -160,6 +159,15 @@ on:
   # provisioning path; platform-review-contracts.test.mjs enforces the real cap.
   workflow_dispatch:
     inputs:
+      quant_kernel_only:
+        description: "Run only the shared synthetic Q4/Q8 CUDA kernel validation (no model proof)"
+        type: boolean
+        default: false
+      quant_kernel_physical_index:
+        description: "Exact physical GPU index for the shared kernel validation"
+        type: choice
+        options: ['1', '0']
+        default: '1'
       run_imported_nvfp4_proof:
         description: "Run only the fixed imported NVFP4 model proof at this selected ref (manual only)"
         required: false
@@ -328,7 +336,7 @@ on:
 #   2. Narrowing by TARGET (`--lib`, or naming individual `--test`s) would drop build
 #      work, but drops the wrong things: the four integration targets cost seconds in
 #      total, and `--lib` would discard `cuda_quant_smoke` (0.18s, the sc-13510 quant-
-#      kernel scar, deliberately un-`#[ignore]`d here) and `candle_kernels_patch_guard`
+#      kernel scar, compiled here and dispatched separately) and `candle_kernels_patch_guard`
 #      -- the two targets whose whole reason to exist is that only this box runs them.
 #      For scale: `Clippy (candle worker) --all-targets` costs 31 - 63s warm at the end
 #      of this same job, so the extra targets are not where the minutes are.
@@ -363,7 +371,7 @@ jobs:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner. A YuE2 terminal
     # dispatch (sc-23002) runs only its own job below: every `cuda` listener is the same physical
     # box, so this lane's compile/test would share the GPU the terminal job measures with nvidia-smi.
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && !inputs.capability_facts_only) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
     # Actions keys retain each guarded execution request; they are not GPU mutexes.
     # Actual GPU execution takes the shared host-global UUID lease and owned Windows Job.
     # Pure file provisioning retains its existing compatibility group.
@@ -386,10 +394,10 @@ jobs:
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
       SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
-      # Automatic PR/push tests use physical GPU 1; logical CUDA device 0 maps to it.
+      # Automatic PR/push tests are model-free and do not open a CUDA device.
       # Preserve the existing manual-dispatch default and its step-local overrides.
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && '1' || github.event_name == 'workflow_dispatch' && '0' || '1' }}
+      CUDA_VISIBLE_DEVICES: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && '-1' || github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && '1' || github.event_name == 'workflow_dispatch' && '0' || '-1' }}
       CAPABILITY_FACTS_ONLY: ${{ github.event_name == 'workflow_dispatch' && inputs.capability_facts_only }}
       # Native sm_120 (Blackwell) — this runner IS the RTX PRO 6000 box; nvcc emits
       # SASS directly (no load-time JIT). compute_80 PTX would also forward-JIT.
@@ -850,15 +858,13 @@ jobs:
       - name: Test the candle GPU worker (backend-candle)
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference) }}
         shell: cmd
-        env:
-          SCENEWORKS_CUDA_KERNEL_REQUIRED: "1"
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           cargo test -p sceneworks-worker --features backend-candle --no-run
           if errorlevel 1 exit /b 1
           if "%CAPABILITY_FACTS_ONLY%"=="true" exit /b 0
-          python -I scripts/ci/windows_cuda_execution.py --actor ordinary-worker-tests --budget-minutes %SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES% --cuda-ordinals 0 -- cargo test -p sceneworks-worker --features backend-candle
+          cargo test -p sceneworks-worker --features backend-candle
           if errorlevel 1 exit /b 1
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
       # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
@@ -1484,7 +1490,7 @@ jobs:
           if-no-files-found: warn
 
   imported-nvfp4-worker-smoke:
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && inputs.run_imported_nvfp4_proof }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
     # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
       group: imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1571,7 +1577,7 @@ jobs:
   # path exits non-zero and fails this job; the AT2 transcription path is now an executable case.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
     concurrency:
       group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-yue2-terminal-cuda
       cancel-in-progress: false
@@ -1789,7 +1795,7 @@ jobs:
 
   iris-worker-smoke:
     needs: candle-worker
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
     concurrency:
       group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-iris-worker-smoke
       cancel-in-progress: false
@@ -1905,7 +1911,7 @@ jobs:
   #   gh workflow run windows-candle.yml --ref <branch> -f run_supra2_worker_smoke=true
   supra2-worker-smoke:
     needs: candle-worker
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_supra2_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_supra2_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
     concurrency:
       group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-supra2-worker-smoke
       cancel-in-progress: false
@@ -1980,3 +1986,62 @@ jobs:
           name: supra2-candle-worker-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}\supra2-worker-evidence
           if-no-files-found: warn
+
+  quant-kernel:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only }}
+    concurrency:
+      group: cuda-quant-kernel-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    runs-on: [self-hosted, Windows, X64, cuda]
+    timeout-minutes: 60
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: '-1'
+      CUDA_COMPUTE_CAP: '120'
+      CARGO_NET_OFFLINE: 'true'
+      KERNEL_DISPATCH_INPUTS: ${{ toJSON(inputs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Refuse mixed kernel/model profiles before setup
+        run: python -I scripts/ci/cuda_quant_kernel_validation.py --check-dispatch
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable unstable sccache wrapper
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Select isolated persistent Cargo cache
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Cargo cache selection failed' }
+      - name: Test kernel controller without CUDA execution
+        run: python -I scripts/ci/test_windows_cuda_execution.py
+      - name: Fetch locked dependencies
+        env:
+          CARGO_NET_OFFLINE: 'false'
+        run: cargo fetch --locked
+      - name: Compile the ignored quant kernel
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          cargo test --locked -p sceneworks-worker --features backend-candle --test cuda_quant_smoke --no-run
+          if errorlevel 1 exit /b 1
+      - name: Run exactly the ignored quant kernel on the declared shared device
+        shell: powershell
+        env:
+          KERNEL_PHYSICAL_INDEX: ${{ inputs.quant_kernel_physical_index }}
+        run: |
+          python -I scripts/ci/cuda_quant_kernel_validation.py --physical-index $env:KERNEL_PHYSICAL_INDEX
+          if ($LASTEXITCODE -ne 0) { throw 'required shared quant kernel validation failed' }
+      - name: Upload shared kernel result (not model or VRAM evidence)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cuda-quant-kernel-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\cuda-kernel-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error

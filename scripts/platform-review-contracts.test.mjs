@@ -1334,7 +1334,7 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
   assert.doesNotMatch(events, /pull_request|push|schedule|workflow_call/);
   const bridge = workflowJob(ordinary, "imported-nvfp4-worker-smoke");
   const validateBridge = (job) => {
-    assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && !inputs\.capability_facts_only && inputs\.run_imported_nvfp4_proof \}\}$/m);
+    assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && !inputs\.capability_facts_only && inputs\.run_imported_nvfp4_proof && !\(github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only\) \}\}$/m);
     assert.doesNotMatch(job, /github\.event_name == 'push'|github\.event\.pull_request/);
   };
   validateBridge(bridge);
@@ -1397,18 +1397,32 @@ test("fixed physical CUDA ownership guard has CPU-only mock coverage in ordinary
   }
 });
 
-test("ordinary CUDA kernel tests compile outside the lease and retain full original runtime coverage", async () => {
+test("ordinary CUDA tests retain the full suite while the unchanged kernel is dispatch-only", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const step = workflowStep(workflowJob(workflow, "candle-worker"), "Test the candle GPU worker (backend-candle)");
-  assert.match(step, /SCENEWORKS_CUDA_KERNEL_REQUIRED: "1"/);
   assert.match(step, /cargo test -p sceneworks-worker --features backend-candle --no-run/);
-  assert.ok(step.indexOf("--no-run") < step.indexOf("python -I scripts/ci/windows_cuda_execution.py"));
-  assert.match(step, /python -I scripts\/ci\/windows_cuda_execution\.py[^\n]* -- cargo test -p sceneworks-worker --features backend-candle\s*$/m);
-  assert.doesNotMatch(step, /--skip|--lib|--test cuda_quant_smoke/);
+  assert.match(step, /^\s+cargo test -p sceneworks-worker --features backend-candle\s*$/m);
+  assert.doesNotMatch(step, /SCENEWORKS_CUDA_KERNEL_REQUIRED|windows_cuda_execution|--skip|--lib|--test /);
   const kernel = await source("crates/sceneworks-worker/tests/cuda_quant_smoke.rs");
+  assert.match(kernel, /#\[test\]\n#\[ignore = "inference kernel; run the windows-candle quant_kernel_only dispatch"\]\nfn cuda_qmatmul_matches_cpu/);
   assert.match(kernel, /SCENEWORKS_CUDA_KERNEL_REQUIRED/);
   assert.ok(kernel.indexOf("required CUDA kernel validation") < kernel.indexOf("SKIP cuda_qmatmul_matches_cpu"));
   assert.doesNotMatch(kernel, /MODEL_INFERENCE_BODY_COMPLETED|MODEL_INFERENCE_DEVICE/);
+  const manual = workflowJob(workflow, "quant-kernel");
+  assert.match(manual, /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only \}\}/);
+  assert.match(manual, /runs-on: \[self-hosted, Windows, X64, cuda\]/);
+  assert.match(manual, /cancel-in-progress: false/);
+  assert.match(manual, /cargo test --locked -p sceneworks-worker --features backend-candle --test cuda_quant_smoke --no-run/);
+  assert.match(manual, /python -I scripts\/ci\/cuda_quant_kernel_validation\.py --physical-index \$env:KERNEL_PHYSICAL_INDEX/);
+  assert.ok(manual.indexOf("--check-dispatch") < manual.indexOf("uses: ./.github/actions/prepare-rust-runner"));
+  for (const name of ["candle-worker", "imported-nvfp4-worker-smoke", "yue2-terminal-cuda", "iris-worker-smoke", "supra2-worker-smoke"]) {
+    const route = workflowExpression(workflowJob(workflow, name));
+    assert.equal(evaluateWorkflow(route, "workflow_dispatch", { quant_kernel_only: true,
+      run_yue2_terminal_cuda: true, run_imported_nvfp4_proof: true, run_iris_worker_smoke: true,
+      run_supra2_worker_smoke: true }), false, name);
+  }
+  const helper = await source("scripts/ci/cuda_quant_kernel_validation.py");
+  assert.doesNotMatch(helper, /claim_uuids|prepared_components|sample_baseline|guard\.idle|PUBLIC/);
 });
 
 // One job's text: from its header to the next top-level job header (or the end of the file), so a
@@ -1425,7 +1439,7 @@ test("Windows Candle and manual NVFP4 jobs keep their physical GPU choices expli
   const imported = jobBlock(candle, candle.indexOf("  imported-nvfp4-worker-smoke:\n"));
   assert.match(worker, /^ {6}CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
   const route = workflowExpression(worker, "CUDA_VISIBLE_DEVICES");
-  for (const [event, expected] of [["pull_request", "1"], ["push", "1"], ["workflow_dispatch", "0"]]) {
+  for (const [event, expected] of [["pull_request", "-1"], ["push", "-1"], ["workflow_dispatch", "0"]]) {
     assert.equal(evaluateWorkflow(route, event), expected, event);
     assert.equal(evaluateWorkflow(route, event, { capability_facts_only: false }), expected, event);
   }
@@ -1463,7 +1477,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   const at = workflow.indexOf("  yue2-terminal-cuda:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
   const job = jobBlock(workflow, at);
-  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only && !inputs\.run_imported_nvfp4_proof \}\}$/m);
+  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only && !inputs\.run_imported_nvfp4_proof && !\(github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only\) \}\}$/m);
   assert.match(job, /^ {6}group: windows-candle-gpu-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}-yue2-terminal-cuda$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
@@ -2997,7 +3011,7 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
   const worker = workflowJob(workflow, "candle-worker");
   const visible = workflowExpression(worker, "CUDA_VISIBLE_DEVICES");
   assert.equal(evaluateWorkflow(visible, "workflow_dispatch", { capability_facts_only: true }), "-1");
-  for (const event of ["push", "pull_request"]) assert.equal(evaluateWorkflow(visible, event, { capability_facts_only: true }), "1");
+  for (const event of ["push", "pull_request"]) assert.equal(evaluateWorkflow(visible, event, { capability_facts_only: true }), "-1");
   const profile = workflowExpression(worker, "CAPABILITY_FACTS_ONLY");
   assert.equal(evaluateWorkflow(profile, "workflow_dispatch", { capability_facts_only: true }), true);
   for (const event of ["push", "pull_request", "workflow_dispatch"]) assert.equal(Boolean(evaluateWorkflow(profile, event)), false);
@@ -3010,9 +3024,9 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
     if (name === "Test the candle GPU worker (backend-candle)") {
       const compile = step.indexOf(`${command} --no-run`);
       const exit = step.indexOf('if "%CAPABILITY_FACTS_ONLY%"=="true" exit /b 0');
-      const execute = step.indexOf("python -I scripts/ci/windows_cuda_execution.py");
+      const execute = step.indexOf(`\n          ${command}\n`);
       assert.ok(compile >= 0 && exit > compile && execute > exit,
-        "facts-only compiles, then exits before physical admission and test execution");
+        "facts-only compiles, then exits before the full ordinary test execution");
       continue;
     }
     assert.ok(step.includes('set "capability_facts_test_args="'));

@@ -11,9 +11,8 @@
 //! workspace, and the regression (sc-13510) happened in the *SceneWorks* workspace build, which
 //! resolved candle-kernels from upstream with nothing watching. This copy closes that gap: it
 //! exercises the actual kernels linked into the worker's own graph, on the GPU, in the
-//! windows-candle CI lane (`cargo test -p sceneworks-worker --features backend-candle` on the
-//! self-hosted CUDA box). It is weightless (no checkpoints) and skips gracefully when no CUDA
-//! device is available, so non-GPU builds stay green.
+//! separately dispatched windows-candle quant_kernel_only profile. Ordinary CI compiles this target
+//! and ignores this inference kernel; the manual route requires its declared CUDA device.
 //!
 //! Note the lane builds at the box's native cap=120, where even a single-arch build would pass —
 //! the cap=80 *fatbin* guarantees are held by `candle_kernels_patch_guard.rs` (lockfile) and the
@@ -80,6 +79,7 @@ fn all_finite(t: &Tensor) -> bool {
 /// On the broken single-arch packaging the CUDA result is all-zeros/garbage (cos≈0) — this fails
 /// loudly. With the multi-arch fatbin (native sm_120 cubin) it passes.
 #[test]
+#[ignore = "inference kernel; run the windows-candle quant_kernel_only dispatch"]
 fn cuda_qmatmul_matches_cpu() {
     let device = match Device::new_cuda(0) {
         Ok(d) => d,
@@ -92,7 +92,7 @@ fn cuda_qmatmul_matches_cpu() {
                 "required CUDA kernel validation could not open its declared device: {e}"
             );
             // Generic CPU-only users may lack CUDA. This return is not GPU evidence;
-            // the ordinary hardware lane explicitly requires the device above.
+            // the dedicated manual workflow explicitly requires the device above.
             eprintln!("SKIP cuda_qmatmul_matches_cpu: no CUDA device ({e})");
             return;
         }

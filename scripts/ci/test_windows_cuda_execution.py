@@ -230,5 +230,82 @@ class HostServiceTransactionTests(unittest.TestCase):
                 shared.service_identity(url)
 
 
+class SharedKernelTests(unittest.TestCase):
+    def setUp(self):
+        self.kernel = load("cuda_quant_kernel_validation")
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.out = Path(self.temp.name)
+        self.good_output = "test cuda_qmatmul_matches_cpu ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;\n"
+        self.device = {"index": 1, "uuid": "GPU-two"}
+        self.binding = {"devices": [self.device], "key": [(0, "GPU-two")]}
+        self.resolve = Mock(return_value=self.binding)
+        self.execute = Mock(side_effect=self.child)
+        self.result = {"returncode": 0, "timeout": False, "owned_tree_empty": True}
+
+    def child(self, args, out, deadline, job_type, env):
+        (out / "proof.stdout.log").write_text(self.good_output, encoding="utf-8")
+        self.assertEqual(tuple(args), self.kernel.COMMAND)
+        self.assertEqual(env["CUDA_VISIBLE_DEVICES"], "GPU-two")
+        self.assertEqual(env["SCENEWORKS_CUDA_KERNEL_REQUIRED"], "1")
+        return self.result
+
+    def validate(self, index="1"):
+        return self.kernel.validate(index, {}, self.out, time.monotonic()+30, object(), object(),
+                                    resolve=self.resolve, execute=self.execute)
+
+    def test_shared_identity_queries_no_memory_utilization_or_processes(self):
+        run = Mock(return_value=SimpleNamespace(stdout="0, GPU-one\n1, GPU-two\n"))
+        identity = self.kernel.DeviceIdentity("trusted-smi", run)
+        devices, processes = identity.inventory(self.out, "binding", time.monotonic()+30)
+        self.assertEqual(devices, [{"index": 0, "uuid": "GPU-one"}, self.device])
+        self.assertEqual(processes, [])
+        self.assertEqual(run.call_args.args[0], ["trusted-smi", "--query-gpu=index,uuid", "--format=csv,noheader,nounits"])
+        for invalid in ["0, GPU-one\n0, GPU-two", "0, GPU-one\n1, GPU-one", "1, invalid", ""]:
+            run.return_value.stdout = invalid
+            with self.assertRaises(RuntimeError):
+                identity.inventory(self.out, "binding", time.monotonic()+30)
+
+    def test_fixed_body_selected_physical_zero_or_one_and_owned_cleanup_required(self):
+        for index in ("0", "1"):
+            self.validate(index)
+            self.assertEqual(self.resolve.call_args_list[-3].kwargs, {"physical_indices": index})
+        self.assertIn("--ignored", self.kernel.COMMAND)
+        self.assertIn("--exact", self.kernel.COMMAND)
+        for result in [{"returncode": 3, "timeout": False, "owned_tree_empty": True},
+                       {"returncode": 0, "timeout": True, "owned_tree_empty": True},
+                       {"returncode": 0, "timeout": False, "owned_tree_empty": False}]:
+            self.result = result
+            with self.assertRaisesRegex(RuntimeError, "owned kernel child"):
+                self.validate()
+
+    def test_no_wrong_device_fallback_or_zero_match_false_green(self):
+        self.resolve.side_effect = [self.binding, {"devices": [{"index": 0, "uuid": "GPU-one"}], "key": [(0, "GPU-one")]}]
+        with self.assertRaisesRegex(RuntimeError, "physical index/UUID"):
+            self.validate()
+        self.execute.assert_not_called()
+        self.resolve.side_effect = [self.binding, self.binding,
+                                   {"devices": [self.device], "key": [(0, "GPU-remapped")]}]
+        with self.assertRaisesRegex(RuntimeError, "mapping changed"):
+            self.validate()
+        self.resolve.side_effect = None
+        self.good_output = "test result: ok. 0 passed; 0 failed; 0 ignored; 1 filtered out;\n"
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            self.validate()
+        with self.assertRaisesRegex(RuntimeError, "explicit physical"):
+            self.validate("2")
+
+    def test_only_dedicated_dispatch_can_enter_shared_route(self):
+        good = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_WORKFLOW_REF":
+                "SceneWorks/SceneWorks/.github/workflows/windows-candle.yml@refs/heads/main",
+                "KERNEL_DISPATCH_INPUTS": json.dumps({"quant_kernel_only": True, "quant_kernel_physical_index": "1"})}
+        self.kernel.require_dispatch(good)
+        for wrong in [dict(good, KERNEL_DISPATCH_INPUTS=json.dumps({"quant_kernel_only": True, "quant_kernel_physical_index": "1", "run_iris_worker_smoke": True})),
+                      dict(good, KERNEL_DISPATCH_INPUTS="{}"), dict(good, GITHUB_EVENT_NAME="push"), dict(good, GITHUB_WORKFLOW_REF="other"),
+                      dict(good, **{shared.ACTIVE_KEY: "1"})]:
+            with self.assertRaises(RuntimeError):
+                self.kernel.require_dispatch(wrong)
+
+
 if __name__ == "__main__":
     unittest.main()
