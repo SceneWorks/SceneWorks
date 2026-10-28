@@ -1,7 +1,7 @@
 {
   "_comment": "Audit inventory reviewed at inference revision 6f9bc0f2: 786 provenance candidates and 117 production-Rust crate prefixes, derived by the current scan. Compared with the previous shipped pin dad3036a, this advance adds first-party observational loading progress in gen-core and Candle Krea plus hash-progress observations. It adds no provider crate, model capability, external source, or license terms. Existing classification context: The Supra2-IMG MLX and Candle provider crates remain classified as native architecture reimplementations of the frozen SupraLabs/Supra2-IMG SupraDiT, with the Supra2-IMG/Flan-T5-Base Apache-2.0 and SD VAE ft-MSE MIT terms disclosed in About. The FLUX.3 crates remain left to their own epic and continue to be reported as open advisory items under sc-19751; earlier MOSS-Image and body/perceptual dispositions are unchanged, and other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; the generated inventories and digests describe this exact source without a measurement currency claim.",
-  "inferenceRevision": "6f9bc0f23fe74a223e843a5c76208e8541c2a2ff",
-  "auditDigest": "304fb287e078ffa55b51e321b7c2f82363cabc5ac4f09f40239317ecaf70603f",
+  "inferenceRevision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
+  "auditDigest": "b0135fe9989d079accae1fb5d0f97cbba64c1be04c56e621d3cba1990def44b5",
   "artifacts": [
     {
       "id": "cmudict",
@@ -17,12 +17,12 @@
   "provenanceScan": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "candidateList": "config/inference-provenance-candidates.tsv",
-    "revision": "6f9bc0f23fe74a223e843a5c76208e8541c2a2ff",
+    "revision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
     "pathFilter": "production .rs; exclude tests, testdata, benches, examples, and _vendor path segments",
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
-    "matchedFiles": 786,
-    "populationSha256": "b444bfc0ddde63be5bffe98a242f9a09fcd7427ce0c76a882620f5febbf235f9"
+    "matchedFiles": 797,
+    "populationSha256": "8b5e79d28383e4d5e6bdd1fc63b5849e5a7f13b20bff351c811d3d5f1ff985c1"
   },
   "portedSourceAreas": [
     {
@@ -994,10 +994,10 @@
   "crateCoverage": {
     "scanner": "scripts/scan-inference-provenance.mjs",
     "crateList": "config/inference-crate-prefixes.txt",
-    "revision": "6f9bc0f23fe74a223e843a5c76208e8541c2a2ff",
+    "revision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
     "rule": "Every production-Rust crate prefix in the pinned revision must be covered by a portedSourceAreas entry OR carry an explicit crateDispositions decision. Anything else FAILS check-license-coverage.mjs.",
-    "cratePrefixes": 117,
-    "cratePopulationSha256": "8106ac353eb40b1a3d336adc246a037292c0e9fbf88bdac577d3e060a3ee4e00"
+    "cratePrefixes": 123,
+    "cratePopulationSha256": "8f6fdad8781d4c1fa0ba280e92eb8dad50371495ee4c6ab5ba2f8df74342cf50"
   },
   "crateDispositions": [
     {

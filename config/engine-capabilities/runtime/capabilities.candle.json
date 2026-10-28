@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "6f9bc0f23fe74a223e843a5c76208e8541c2a2ff",
+    "inferenceRevision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -1124,7 +1124,10 @@
         "conditioning": [],
         "supports_lora": true,
         "supports_lokr": true,
-        "supported_quants": [],
+        "supported_quants": [
+          "q8",
+          "q4"
+        ],
         "supports_preview": true,
         "supports_prompt_enhancement": false,
         "samplers": [

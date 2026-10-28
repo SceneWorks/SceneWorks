@@ -2,6 +2,8 @@
 // Source-owned production entrypoint. It only uses the typed Vector Studio route
 // and the checked-in metrics script; no runner supplied program can author
 // canonical evidence.
+import { metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
+import { execFileWithFds } from "./lib/exec-file-with-fds.mjs";
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { appendFile, lstat, mkdir, readdir, realpath, readFile, stat, writeFile } from "node:fs/promises";
@@ -480,7 +482,7 @@ async function main() {
   const runtimePath = path.join(output, "runtime.json"); await writeFile(runtimePath, JSON.stringify(runtime, null, 2) + "\n");
   const transcriptSha = sha(await readFile(transcript));
   const metricScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "starvector-terminal-metrics.py"); await stat(metricScript);
-  await execFile(python, [metricScript, "measure", "--bundle", bundlePath, "--events", eventsPath, "--runtime", runtimePath, "--output", path.join(output, "metrics.json"), "--tuple", tuple, "--transcript-sha256", transcriptSha], { env: { ...process.env, STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1" } });
+  await execFileWithFds(python, [metricScript, "measure", "--bundle", bundlePath, "--events", eventsPath, "--runtime", runtimePath, "--output", path.join(output, "metrics.json"), "--tuple", tuple, "--transcript-sha256", transcriptSha], metalChildOptions({ env: { ...process.env, STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1" } }), execFile);
   const metrics = await json(path.join(output, "metrics.json"));
   if (metrics?.tuple !== tuple || metrics.route_transcript_sha256 !== transcriptSha || !Array.isArray(metrics.image_quality_facts)) die("source-owned metric script did not emit bound per-case facts");
   const run = assembleRun(tuple, cases, events, metrics);

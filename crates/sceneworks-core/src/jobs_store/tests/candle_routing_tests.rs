@@ -5821,8 +5821,8 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
     use crate::jobs_store::routing::mlx::image_request_mlx_eligible;
 
     assert!(CANDLE_ROUTED_MODELS.contains(&"iris_3b"));
-    // sc-25681: generation-task adapters apply on the candle lane too; still no quant tier.
-    assert!(candle_family_serves_lora("iris_3b") && !candle_family_serves_quant("iris_3b"));
+    // sc-26266: load-time quantization and generation-task adapters apply on both lanes.
+    assert!(candle_family_serves_lora("iris_3b") && candle_family_serves_quant("iris_3b"));
     let eligible = |payload: Value| image_request_candle_eligible("iris_3b", &object(payload));
     assert!(eligible(
         json!({ "model": "iris_3b", "mode": "text_to_image" })
@@ -5868,7 +5868,7 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
         json!({ "maskAssetId": "a" }),
         json!({ "controls": [{}] }),
         json!({ "advanced": { "poses": [{}] } }),
-        json!({ "advanced": { "mlxQuantize": 8 } }),
+        json!({ "advanced": { "mlxQuantize": 2 } }),
         json!({ "advanced": { "quantTier": "nvfp4" } }),
         json!({ "hiresFix": { "enabled": true } }),
         json!({ "mode": "reference" }),
@@ -5899,6 +5899,33 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
             "{refused}: {reason:?}"
         );
     }
+    // Both tier carrier shapes used by the UI route on both lanes, with or without adapters.
+    for bits in [
+        json!(0),
+        json!(4),
+        json!(8),
+        json!("0"),
+        json!("4"),
+        json!("8"),
+    ] {
+        for loras in [json!([]), json!([{ "id": "l", "weight": 0.8 }])] {
+            let payload =
+                json!({ "model": "iris_3b", "advanced": { "mlxQuantize": bits }, "loras": loras });
+            assert!(eligible(payload.clone()), "{payload}");
+            assert_eq!(
+                candle_image_first_refusal("iris_3b", &object(payload.clone())),
+                None
+            );
+            assert!(
+                image_request_mlx_eligible("iris_3b", &object(payload.clone())),
+                "{payload}"
+            );
+            assert!(
+                worker_supports_job(&candle, &image_generate_job(payload.clone())),
+                "{payload}"
+            );
+        }
+    }
     // The carriers ONLY the Iris check closes are named by it.
     for iris_only in [
         json!({ "model": "iris_3b", "controls": [{}] }),
@@ -5911,6 +5938,7 @@ fn iris_routes_to_candle_for_plain_text_to_image_only() {
             "{iris_only}"
         );
         let reason = classify_candle_image_gap(&object(iris_only.clone()));
+        assert!(!reason.detail.contains("Apple Silicon only"), "{reason:?}");
         assert!(
             reason.feature.contains("Iris-3B") && reason.detail.contains("Re-submit"),
             "{iris_only}: {reason:?}"

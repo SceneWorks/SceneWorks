@@ -3654,6 +3654,30 @@ def test_guidance_taking_image_models_declare_nothing():
         )
 
 
+def test_iris_all_native_tiers_share_the_dense_snapshot_and_encoder():
+    """Iris loads bf16/q8/q4 from one upstream install on every native platform."""
+    model = _image_models_by_id()["iris_3b"]
+    assert model.get("macOnly") is False
+    assert model["mlx"]["quantize"] == 0
+    primaries = [row for row in model["downloads"] if not row.get("coRequisite")]
+    assert sorted(row["variant"] for row in primaries) == ["bf16", "q4", "q8"]
+    assert [row["variant"] for row in primaries if row.get("default")] == ["bf16"]
+    for row in primaries:
+        assert not row.get("platforms"), row
+        assert row["repo"] == "speridlabs/iris-3b"
+        assert row["revision"] == "7445443349bc9abe3c96f01ff793e2098ca012b3"
+        assert row["files"] == ["config.yaml", "model.safetensors"]
+        assert row["estimatedSizeBytes"] == primaries[0]["estimatedSizeBytes"]
+    components = [row for row in model["downloads"] if row.get("coRequisite")]
+    assert len(components) == 1
+    encoder = components[0]
+    assert encoder["componentId"] == "text_encoder"
+    assert encoder["repo"] == "Qwen/Qwen3-VL-4B-Instruct"
+    assert encoder["revision"] == "ebb281ec70b05090aa6165b016eac8ec08e71b17"
+    assert not encoder.get("platforms")
+    assert "model-*.safetensors" in encoder["files"]
+
+
 def test_negative_prompt_requires_guidance_keeps_both_axes_live():
     """sc-25679: `image.negativePromptRequiresGuidance` says the negative prompt IS the CFG
     unconditional (the engine refuses one at guidance 1.0). It only makes sense on an engine that

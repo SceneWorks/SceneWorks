@@ -125,7 +125,7 @@ function assertWorkflowScope(workflow) {
   assert.match(workflow, /- name: Build and exercise the owned API and MLX worker\n        run: node scripts\/qwen-image-2-1-app-lifecycle\.mjs\n        env:\n          QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(workflow, /path: \$\{\{ runner\.temp \}\}\/qwen-image-2-1-app-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}\/evidence\//);
   assert.doesNotMatch(workflow, /^      QWEN_APP_OUTPUT: \$\{\{ runner\.temp \}\}/m, "runner.temp is unavailable in job-level env");
-  assert.equal((workflow.match(/^    concurrency:$/gm) ?? []).length, 1); assert.match(workflow, /group: qwen-image-2-1-app-lifecycle-primary-mac/);
+  assert.equal((workflow.match(/^    concurrency:$/gm) ?? []).length, 1); assert.match(workflow, /group: qwen-image-2-1-app-lifecycle-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
   assert.match(workflow, /cancel-in-progress: false/); assert.match(workflow, /if: always\(\)/);
   assert.match(workflow, /--build-type Release --github-env/);
   assert.doesNotMatch(workflow, /measure-memory|download-missing|gh pr|git push|bump-inference/);
@@ -135,6 +135,7 @@ test("reusable app workflow selects one exact app runner while preserving immuta
   const runnerTempAtJobScope = workflow.replace("      QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}\n      QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}", "      QWEN_APP_SOURCE_SHA: ${{ inputs.source_sha }}\n      QWEN_APP_INFERENCE_SHA: ${{ inputs.inference_sha }}\n      QWEN_APP_OUTPUT: ${{ runner.temp }}/qwen-image-2-1-app-${{ github.run_id }}-${{ github.run_attempt }}");
   assert.throws(() => assertWorkflowScope(runnerTempAtJobScope), /runner\.temp is unavailable in job-level env/);
   for (const mutant of [workflow.replace("workflow_call:", "workflow_dispatch:"), workflow.replace('"rw-mage"', '"nax"'), workflow.replace('"rw-starvector"', '"nax"'), workflow.replace("--preflight-only", "--route-check-only"), workflow.replace("inputs.source_sha", "github.ref"), workflow.replace("if: always()", "if: success()"), workflow + "\nrun: node scripts/measure-memory-catalog.mjs\n"]) assert.throws(() => assertWorkflowScope(mutant));
+  assert.throws(() => assertWorkflowScope(workflow.replace("group: qwen-image-2-1-app-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}", "group: qwen-image-2-1-app-lifecycle-primary-mac")));
   const harness = read("scripts/qwen-image-2-1-app-lifecycle.mjs");
   assert.match(harness, /SCENEWORKS_CREDENTIALS_DIR: path.join\(state, "credentials"\)/);
   assert.match(harness, /HF_HUB_OFFLINE: "1"/); assert.match(harness, /SCENEWORKS_WORKER_ONLY: "1"/);

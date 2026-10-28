@@ -12,10 +12,31 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { parseCliArgs, withInferenceCheckout } from "./bump-inference.mjs";
+import { parseCliArgs, prepareInferencePatches, withInferenceCheckout } from "./bump-inference.mjs";
+import { SECURITY_BACKPORT } from "./ci/zip9-source-overrides.mjs";
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "bump-inference.mjs");
 const SHA = "a".repeat(40);
+
+test("a newer inference pin retires only the exact old engine security overrides", () => {
+  const manifest = '[patch."https://github.com/huggingface/candle"]\n'
+    + 'candle-core = { path = "vendor/zip9-candle-core" }\n'
+    + '[patch.crates-io]\ntauri-plugin-updater = { path = "vendor/zip9-tauri-plugin-updater" }\n'
+    + '# Exact 91ff leaf source with ZIP9 security ports, not an inference-pin advance.\n'
+    + '[patch."https://github.com/SceneWorks/inference"]\n'
+    + 'candle-core = { path = "vendor/zip9-candle-core" }\n'
+    + 'candle-audio-kokoro = { path = "vendor/zip9-candle-audio-kokoro" }\n'
+    + 'mlx-gen = { path = "vendor/zip9-mlx-gen" }\n';
+  assert.equal(prepareInferencePatches(manifest, SECURITY_BACKPORT.engine_revision), manifest);
+  const next = prepareInferencePatches(manifest, SHA);
+  assert(next.includes(`candle-core = { git = "https://github.com/SceneWorks/inference", rev = "${SHA}" }`));
+  assert(!next.includes('[patch."https://github.com/SceneWorks/inference"]'));
+  assert(next.includes('tauri-plugin-updater = { path = "vendor/zip9-tauri-plugin-updater" }'));
+  assert.equal(prepareInferencePatches(next, SHA), next, 'a completed transition is idempotent');
+  assert.throws(() => prepareInferencePatches(manifest.replace(
+    'mlx-gen = { path = "vendor/zip9-mlx-gen" }', 'mlx-gen = { path = "vendor/unreviewed" }'), SHA),
+  /review changed inference security overrides/);
+});
 
 // Stands in for the shallow fetch: records where it was asked to clone and leaves clone-shaped
 // content there, including a read-only pack file like the ones git writes. `fail` models a fetch

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { enterMacMetalExecution, metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { link, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -2030,11 +2031,11 @@ function ltx25InputContentIdentity(input) {
 function execute(command, args, input, { env } = {}) {
   return new Promise((resolve, reject) => {
     const hasInput = input !== undefined;
-    const child = spawn(command, args, {
+    const child = spawn(command, args, metalChildOptions({
       stdio: [hasInput ? "pipe" : "ignore", "pipe", "pipe"],
       windowsHide: true,
       ...(env ? { env } : {}),
-    });
+    }));
     let stdout = "";
     let stderr = "";
     let spawnError;
@@ -2776,8 +2777,14 @@ async function main() {
     try {
       let failure = null;
       try {
+        // Resource/plan refusals must take the same completion-handshake failure path. The
+        // entry helper refuses fresh acquisition inside an existing physical watchdog; real
+        // catalog captures inherit the lease acquired outside that watchdog.
+        const executionPlan = await readJson(value("--plan") ?? ANCHOR_PLAN_PATH);
+        const executionCase = planAnchor(executionPlan, value("--anchor"));
+        if (executionCase.backend === "mlx" && await enterMacMetalExecution(1800)) return process.exitCode;
         await atomicWrite(output, await captureAnchor({
-          plan: await readJson(value("--plan") ?? ANCHOR_PLAN_PATH),
+          plan: executionPlan,
           anchorKey: value("--anchor"),
           providerCommand: JSON.parse(value("--provider-command")),
           sceneWorksRepo: path.resolve(value("--sceneworks-repo")),

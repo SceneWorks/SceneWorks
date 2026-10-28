@@ -2,7 +2,7 @@ import { INFERENCE_REVISION } from "./starvector-terminal-campaign.mjs";
 import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, copyFile, link, lstat, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, writeFile, realpath } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -18,6 +18,7 @@ const workflow = await readFile(".github/workflows/starvector-terminal.yml", "ut
 const readiness = await readFile(".github/workflows/starvector-terminal-readiness.yml", "utf8");
 const producer = await readFile("scripts/starvector-terminal-producer.mjs", "utf8");
 const route = await readFile("scripts/starvector-terminal-route.mjs", "utf8");
+const tupleLauncher = await readFile("scripts/starvector-terminal-owned-tuple.mjs", "utf8");
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const pin = INFERENCE_REVISION;
 const execFile = promisify(execFileCallback);
@@ -71,11 +72,14 @@ test("Windows executable fixture copies retain exact bytes with independent iden
 });
 
 async function productServiceFixture({ tamperRelocation = false, deferRegistrationUntilPoll = false, tuple = process.platform === "win32" ? "candle-cuda:1b" : "mlx:1b" } = {}) {
-  const sandbox = await mkdtemp(path.join(tmpdir(), "starvector-service-detach-"));
+  const sandbox = await realpath(await mkdtemp(path.join(tmpdir(), "starvector-service-detach-")));
   const root = path.join(sandbox, "repo"), output = path.join(sandbox, "tuple"), weightsRoot = path.join(sandbox, "weights"), shimRoot = path.join(sandbox, "bin");
   await mkdir(root); await mkdir(shimRoot); await mkdir(path.join(weightsRoot, "app"), { recursive: true }); await mkdir(path.join(weightsRoot, "hf"), { recursive: true });
   await writeFile(path.join(root, ".gitignore"), "target/\n");
   await writeFile(path.join(root, "Cargo.toml"), `[dependencies]\ncandle-core = { git = "https://github.com/SceneWorks/inference", rev = "${pin}" }\n`);
+  // Opaque CPU-only Cargo/native fixtures exercise the real binder, never a backend build.
+  const nativePin = "fe22998bf73e5e785d7659beb2f24d624b785bda";
+  await writeFile(path.join(root, "Cargo.lock"), `[[package]]\nname = "pmetal-mlx-sys"\nversion = "0.2.4"\nsource = "git+https://github.com/michaeltrefry/mlx-rs?rev=${nativePin}#${nativePin}"\n`);
   await execFile("git", ["init", "-q", root]);
   await execFile("git", ["-C", root, "add", "."]);
   await execFile("git", ["-C", root, "-c", "user.name=SceneWorks Test", "-c", "user.email=test@sceneworks.invalid", "commit", "-qm", "fixture"]);
@@ -96,7 +100,22 @@ childProcess.execFile[require("node:util").promisify.custom] = (...args) => new 
   childProcess.execFile(...args, (error, stdout, stderr) => error ? reject(error) : resolve({ stdout, stderr }));
 });
 require("node:module").syncBuiltinESMExports();
-if (path.basename(process.argv[1] ?? "") === "build") process.exit(process.argv.includes("--release") ? 0 : 1);
+if (path.basename(process.argv[1] ?? "") === "build") {
+  if (!process.argv.includes("--release")) process.exit(1);
+  const fs = require("node:fs"), root = process.cwd();
+  const out = path.join(root, "target", "release", "build", "pmetal-mlx-sys-cpu-fixture", "out"), lib = path.join(out, "lib");
+  fs.mkdirSync(lib, { recursive: true });
+  for (const name of ["libmlx.a", "libmlxc.a", "mlx.metallib"]) fs.writeFileSync(path.join(lib, name), "opaque CPU fixture: never linked or executed");
+  fs.writeFileSync(path.join(lib, "pmetal-mlx-prebuilt.txt"), "schema=1\\nbuild_type=Release\\ntarget=aarch64-apple-darwin\\nfeatures=accelerate,metal\\ndeployment_target=26.2\\nfingerprint=" + "a".repeat(64) + "\\n");
+  fs.writeFileSync(path.join(path.dirname(out), "output"), "cargo:metallib=" + path.join(lib, "mlx.metallib") + "\\n");
+  const messages = [
+    { reason: "build-script-executed", package_id: "git+https://github.com/michaeltrefry/mlx-rs?rev=fe22998bf73e5e785d7659beb2f24d624b785bda#pmetal-mlx-sys@0.2.4", out_dir: out, linked_paths: ["native=" + lib] },
+    { reason: "compiler-artifact", target: { name: "sceneworks-rust-api" }, executable: path.join(root, "target", "release", "sceneworks-rust-api"), profile: { debug_assertions: false, test: false } },
+    { reason: "build-finished", success: true },
+  ];
+  for (const message of messages) console.log(JSON.stringify(message));
+  process.exit(0);
+}
 if (process.argv.length === 1 && process.env.SCENEWORKS_GPU_CHECK === "1") process.exit(0);
 if (process.argv.length === 1) {
   const worker = process.env.SCENEWORKS_WORKER_ONLY === "1";
@@ -187,8 +206,37 @@ if (process.argv.length === 1) {
   await writeFile(manifestPath, JSON.stringify(manifest));
   const contract = terminalProductWorkerContract(tuple);
   const cliEnv = { ...process.env, NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --require="${runtime.replaceAll("\\", "/")}"`.trim(), PATH: `${shimRoot}${path.delimiter}${process.env.PATH ?? ""}`, STARVECTOR_TERMINAL_GPU_ID: contract.gpu_id, STARVECTOR_TEST_TUPLE: tuple, STARVECTOR_TEST_TAMPER_RELOCATION: tamperRelocation ? "1" : "0", STARVECTOR_TEST_DEFER_REGISTRATION: deferRegistrationUntilPoll ? "1" : "0" };
-  const serviceScript = path.resolve("scripts/starvector-terminal-product-service.mjs");
-  return { sandbox, root, output, weightsRoot, manifest, manifestPath, tuple, cliEnv, serviceScript };
+  // Programmatic test-only lease injection; the actual production CLI/path remains fixed.
+  // This wrapper calls the actual service implementations and preserves their real child PIDs.
+  const actualService = path.resolve("scripts/starvector-terminal-product-service.mjs");
+  const leaseModule = path.resolve("scripts/lib/apple-metal-lease.mjs");
+  const actualBridge = path.resolve("scripts/ci/metal_execution_node_bridge.py");
+  const privateLock = path.join(sandbox, "cpu-metal.lock"), privateBridge = path.join(sandbox, "cpu-metal-bridge.py");
+  await writeFile(privateLock, "");
+  await writeFile(privateBridge, `import importlib.util,sys\nfrom pathlib import Path\ns=importlib.util.spec_from_file_location('cpu_service_bridge',${JSON.stringify(actualBridge)});m=importlib.util.module_from_spec(s);sys.modules[s.name]=m;s.loader.exec_module(m)\nm.protocol.CANONICAL_PATH=Path(${JSON.stringify(privateLock)})\ntry:raise SystemExit(m.main())\nexcept (ValueError,OSError,TimeoutError) as e:print(str(e),file=sys.stderr);raise SystemExit(1)\n`);
+  const serviceScript = path.join(sandbox, "cpu-service-cli.mjs");
+  await writeFile(serviceScript, `import { pathToFileURL } from "node:url";
+const service = await import(pathToFileURL(${JSON.stringify(actualService)}));
+const lease = await import(pathToFileURL(${JSON.stringify(leaseModule)}));
+const acquire = lease.createMacMetalLeaseFactory({ canonicalPath: ${JSON.stringify(privateLock)}, bridge: ${JSON.stringify(privateBridge)} });
+const [command, ...args] = process.argv.slice(2);
+const invoke = async () => {
+  if (command === "start") return service.startProductService({ root: args[0], output: args[1], permanentPin: args[2], url: args[3], weightsRoot: args[4], tuple: args[5] });
+  if (command === "reload-worker") return service.reloadOwnedWorker(args[0], args[1]);
+  if (command === "unload-worker") return service.unloadOwnedWorker(args[0]);
+  if (command === "stop") return service.stopProductService(args[0]);
+  throw new Error("unsupported CPU fixture command");
+};
+try {
+  const result = command === "start" || command === "reload-worker"
+    ? await lease.withMacMetalExecutionLeaseUsing(acquire, 30, invoke) : await invoke();
+  console.log(JSON.stringify(result));
+} catch (error) { console.error(error.message); process.exitCode = 1; }
+`);
+  cliEnv.RUNNER_TEMP = sandbox;
+  delete cliEnv.PMETAL_METALLIB_PATH; delete cliEnv.PMETAL_MLX_PREBUILT_DIR;
+  delete cliEnv.SCENEWORKS_METAL_EXECUTION_LOCK_FD;
+  return { sandbox, root, output, weightsRoot, manifest, manifestPath, tuple, cliEnv, serviceScript, privateLock, privateBridge };
 }
 
 // Hang backstops only: nothing asserts on them. A real `start` hashes the fixture weights and boots
@@ -203,6 +251,10 @@ async function runProductServiceCli(fixture, command, port, timeout = PRODUCT_SE
     : command === "reload-worker" ? [fixture.serviceScript, command, fixture.root, fixture.output]
     : [fixture.serviceScript, command, fixture.output];
   return execFile(process.execPath, args, { env: fixture.cliEnv, timeout });
+}
+
+function privateLeaseProbe(fixture) {
+  return execFile("python3.12", ["-I", "-c", "import fcntl,os,sys;fd=os.open(sys.argv[1],os.O_RDWR)\ntry:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)\nexcept BlockingIOError:raise SystemExit(17)\n", fixture.privateLock]);
 }
 
 function assertPidsRunning(record) {
@@ -222,15 +274,17 @@ test("terminal workflow is dispatch-only, serial, and seals raw evidence", () =>
   assert.doesNotMatch(workflow, /^\s+(push|pull_request|schedule):/m);
   for (const edge of ["needs: mlx-1b", "needs: mlx-8b", "needs: cuda-1b"]) assert.match(workflow, new RegExp(edge));
   assert.match(workflow, /needs: \[mlx-1b, mlx-8b, cuda-1b, cuda-8b\]/);
-  assert.match(workflow, /starvector-terminal-producer\.mjs run/g);
+  assert.equal((workflow.match(/starvector-terminal-owned-tuple\.mjs/g) ?? []).length, 4);
+  assert.match(tupleLauncher, /starvector-terminal-producer\.mjs/);
+  assert.match(tupleLauncher, /\["run", root, "release\/starvector-terminal-campaign-v1\.json"/);
   assert.match(workflow, /starvector-terminal-producer\.mjs seal/);
   assert.match(workflow, /STARVECTOR_TERMINAL_LEASE_ROOT: \/Users\/Shared\/SceneWorks\/terminal-leases/);
   assert.match(workflow, /STARVECTOR_TERMINAL_LEASE_ROOT: C:\\\\ProgramData\\\\SceneWorks\\\\terminal-leases/);
   assert.match(workflow, /scripts\/starvector-terminal-route\.mjs/);
-  assert.equal((workflow.match(/starvector-terminal-product-service\.mjs start/g) ?? []).length, 4);
-  assert.equal((workflow.match(/starvector-terminal-product-service\.mjs stop/g) ?? []).length, 4);
-  assert.equal((workflow.match(/starvector-terminal-case-bundle\.mjs/g) ?? []).length, 4);
-  assert.equal((workflow.match(/starvector-terminal-assets\.mjs/g) ?? []).length, 4);
+  assert.match(tupleLauncher, /await start\(calls.start\)/);
+  assert.equal((tupleLauncher.match(/await stop\(options.output\)/g) ?? []).length, 1);
+  assert.equal((tupleLauncher.match(/starvector-terminal-case-bundle\.mjs/g) ?? []).length, 1);
+  assert.equal((tupleLauncher.match(/starvector-terminal-assets\.mjs/g) ?? []).length, 1);
   assert.match(workflow, /starvector_terminal_lease/);
   assert.equal((workflow.match(/cargo build --release --locked -p sceneworks-worker --bin starvector_terminal_lease/g) ?? []).length, 5);
   assert.doesNotMatch(workflow, /RUNNER_TEMP[^\n]*\.lease/);
@@ -240,18 +294,31 @@ test("terminal workflow is dispatch-only, serial, and seals raw evidence", () =>
   assert.equal((workflow.match(/timeout-minutes: 1440/g) ?? []).length, 1);
   assert.equal((workflow.match(/STARVECTOR_TERMINAL_GPU_ID: mlx/g) ?? []).length, 2);
   assert.equal((workflow.match(/STARVECTOR_TERMINAL_GPU_ID: "0"/g) ?? []).length, 3);
-  for (const tuple of ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"]) assert.match(workflow, new RegExp(`product-service\\.mjs start[^\\n]+ ${tuple.replace(":", "\\:")}`));
+  for (const tuple of ["mlx:1b", "mlx:8b", "candle-cuda:1b", "candle-cuda:8b"]) assert.match(workflow, new RegExp(`owned-tuple\\.mjs[^\\n]+ ${tuple.replace(":", "\\:")}`));
   assert.doesNotMatch(workflow, /STARVECTOR_TERMINAL_GPU_ID:\s*auto/);
 });
 
-test("every tuple stops its service before uploading final logs and stop provenance", () => {
+function assertClosedTupleBeforeUpload(candidate, launcher) {
   const jobs = ["mlx-1b", "mlx-8b", "cuda-1b", "cuda-8b"];
   for (let index = 0; index < jobs.length; index += 1) {
-    const start = workflow.indexOf(`  ${jobs[index]}:`), end = index + 1 < jobs.length ? workflow.indexOf(`  ${jobs[index + 1]}:`) : workflow.indexOf("  seal-receipt:");
-    const job = workflow.slice(start, end), stop = job.indexOf("starvector-terminal-product-service.mjs stop"), upload = job.indexOf("uses: actions/upload-artifact@");
-    assert.ok(stop >= 0 && upload >= 0 && stop < upload, `${jobs[index]} must stop and seal logs before artifact upload`);
-    assert.match(job.slice(job.lastIndexOf("- name:", stop), upload), /if: \$\{\{ always\(\) \}\}/);
+    const start = candidate.indexOf(`  ${jobs[index]}:`), end = index + 1 < jobs.length ? candidate.indexOf(`  ${jobs[index + 1]}:`) : candidate.indexOf("  seal-receipt:");
+    const item = candidate.slice(start, end), owned = item.indexOf("starvector-terminal-owned-tuple.mjs"), upload = item.indexOf("uses: actions/upload-artifact@");
+    assert.ok(owned >= 0 && upload >= 0 && owned < upload, `${jobs[index]} closed transaction must finish before upload`);
+    assert.match(item.slice(item.lastIndexOf("- name:", upload), upload), /if: \$\{\{ always\(\) \}\}/);
+    assert.doesNotMatch(item, /product-service\.mjs stop/, "no second non-idempotent stop");
+    if (jobs[index].startsWith("cuda")) assert.match(item, /--service-url "\$env:STARVECTOR_TERMINAL_API_URL" --physical-indices 0 -- node scripts\/starvector-terminal-owned-tuple/);
   }
+  assert.equal((launcher.match(/await stop\(options.output\)/g) ?? []).length, 1);
+  assert.ok(launcher.indexOf("await start(calls.start)") < launcher.indexOf("for (const [script, args] of calls.commands)"));
+  assert.ok(launcher.indexOf("for (const [script, args] of calls.commands)") < launcher.indexOf("catch (error) { primary = error; }"));
+  assert.ok(launcher.indexOf("catch (error) { primary = error; }") < launcher.indexOf("await stop(options.output)"));
+  assert.ok(launcher.indexOf("await stop(options.output)") < launcher.indexOf("if (primary) throw primary"));
+}
+test("every tuple stops its service before uploading final logs and stop provenance", () => {
+  assertClosedTupleBeforeUpload(workflow, tupleLauncher);
+  assert.throws(() => assertClosedTupleBeforeUpload(workflow.replace("scripts/starvector-terminal-owned-tuple.mjs", "scripts/unguarded.mjs"), tupleLauncher));
+  assert.throws(() => assertClosedTupleBeforeUpload(workflow, tupleLauncher.replace("await stop(options.output)", "await forgottenStop(options.output)")));
+  assert.throws(() => assertClosedTupleBeforeUpload(workflow.replace('--service-url "$env:STARVECTOR_TERMINAL_API_URL" ', ""), tupleLauncher));
 });
 
 test("terminal workflow has no install or model download step", () => {
@@ -260,7 +327,8 @@ test("terminal workflow has no install or model download step", () => {
   assert.match(workflow, /STARVECTOR_TERMINAL_METRICS_ROOT/);
   assert.match(workflow, /STARVECTOR_TERMINAL_METRICS_PYTHON/);
   assert.match(workflow, /STARVECTOR_TERMINAL_CASE_BUNDLE/);
-  assert.match(workflow, /STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT/);
+  assert.match(tupleLauncher, /env\.STARVECTOR_TERMINAL_CORPUS_ASSETS_ROOT/);
+  assert.match(tupleLauncher, /required.some\([\s\S]*exact existing terminal tuple inputs are required/);
   assert.match(workflow, /STARVECTOR_TERMINAL_NO_JOB_DOWNLOADS: "1"/);
   assert.match(workflow, /cross-repository lease/);
   assert.match(workflow, /starvector-terminal-metrics-environment-v1\.json/);
@@ -456,6 +524,10 @@ test("product service start CLI exits while durable-log services remain alive an
     await runProductServiceCli(fixture, "start", port);
     record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
     assertPidsRunning(record);
+    if (process.platform === "darwin") {
+      await assert.rejects(privateLeaseProbe(fixture), { code: 17 },
+        "actual worker retains the private kernel lease after start CLI exit");
+    }
     const contract = terminalProductWorkerContract(fixture.tuple);
     assert.equal(record.tuple, fixture.tuple);
     assert.equal(record.worker.worker_id, terminalProductWorkerId(fixture.tuple, record.instance_token));
@@ -661,7 +733,9 @@ test("readiness workflow is an identity-only dispatch on both campaign hosts", (
   assert.equal((readiness.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 2);
   assert.equal((workflow.match(/starvector-terminal-pin-paths\.mjs/g) ?? []).length, 6);
   assert.equal((readiness.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 1);
-  assert.equal((workflow.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 2);
+  assert.equal((workflow.match(/\$\{\{ inputs\.permanent_pin \}\}/g) ?? []).length, 1);
+  assert.match(workflow, /STARVECTOR_TERMINAL_PERMANENT_PIN: \$\{\{ inputs\.permanent_pin \}\}/);
+  assert.match(workflow, /group: starvector-terminal-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}/);
   assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]inference(?:[\\/]|\s|$)/);
   assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]inference-preflight(?:[\\/]|\s|$)/);
   assert.doesNotMatch(`${workflow}\n${readiness}`, /starvector-terminal[\\/]corpora[\\/]starvector-terminal-v1/);
@@ -778,6 +852,9 @@ test("owned headless worker unload/reload preserves API and projects, proves exi
     assert.doesNotThrow(() => process.kill(initial.api_pid, 0));
     record = JSON.parse(await readFile(path.join(fixture.output, "product-service-provenance.json"), "utf8"));
     assert.equal(record.worker_pid, null);
+    if (process.platform === "darwin") {
+      await privateLeaseProbe(fixture);
+    } // API is still live, but its CPU-only descriptor cannot retain the unloaded worker lease.
     assert.equal((await fetch(`http://127.0.0.1:${port}/api/v1/health`)).status, 200);
     await assert.rejects(() => runProductServiceCli(fixture, "unload-worker", 0), /already unloaded/);
     await runProductServiceCli(fixture, "reload-worker", 0);

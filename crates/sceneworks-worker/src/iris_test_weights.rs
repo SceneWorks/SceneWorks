@@ -97,6 +97,10 @@ pub(crate) const TEXT_ENCODER_LANGUAGE_SHARD: &str = "model-00001-of-00002.safet
 /// The files of a Qwen3-VL text-encoder snapshot both Iris engines can PRICE: a miniature tower
 /// config (the shape of the engines' own tiny snapshot), the shard index, and two header-valid
 /// shards — one language-tower tensor (resident) and one vision-tower tensor (never materialized).
+///
+/// The MLP width is 64, not the engines' miniature 48 (sc-26266): the MLX tower packs every
+/// projection at ONE affine group size, so a q8 / q4 contract exists only for a tower whose
+/// widths a group (32 or 64) divides. 48 has none, and the pre-load contract refuses the tier.
 pub(crate) fn priceable_text_encoder_files() -> Vec<(&'static str, Vec<u8>)> {
     let config = serde_json::json!({
         "architectures": ["Qwen3VLForConditionalGeneration"],
@@ -110,7 +114,7 @@ pub(crate) fn priceable_text_encoder_files() -> Vec<(&'static str, Vec<u8>)> {
             "hidden_act": "silu",
             "hidden_size": 32,
             "initializer_range": 0.02,
-            "intermediate_size": 48,
+            "intermediate_size": 64,
             "max_position_embeddings": 4096,
             "model_type": "qwen3_vl_text",
             "num_attention_heads": 4,

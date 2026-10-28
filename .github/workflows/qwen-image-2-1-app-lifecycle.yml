@@ -25,7 +25,7 @@ jobs:
     runs-on: ${{ inputs.runner_target == 'secondary' && fromJSON('["self-hosted","macOS","ARM64","rw-mage"]') || fromJSON('["self-hosted","macOS","ARM64","rw-starvector"]') }}
     timeout-minutes: 720
     concurrency:
-      group: qwen-image-2-1-app-lifecycle-primary-mac
+      group: qwen-image-2-1-app-lifecycle-${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false
     defaults:
       run:
