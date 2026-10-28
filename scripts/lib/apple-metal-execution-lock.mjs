@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 export const METAL_LOCK_PROTOCOL = "sceneworks-host-metal-flock-v1";
 export const METAL_LOCK_PATH = "/Users/Shared/SceneWorks/gpu-locks/apple-metal.lock";
 export const METAL_LOCK_FD = "SCENEWORKS_METAL_EXECUTION_LOCK_FD";
-const helper = fileURLToPath(new URL("../ci/metal_execution_lock.py", import.meta.url));
+const helper = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../ci/metal_execution_lock.py");
 
 export function metalExecutionWaitSeconds(env = process.env, existingBudgetSeconds = 1800) {
   // This bounds acquisition WAIT only; it is not a queue-size/submission/model-runtime cap.
