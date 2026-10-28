@@ -354,7 +354,7 @@ test("browser fixture conflicts execute rejection before checkout or compiler se
   assert.ok(body.indexOf("Reject conflicting browser fixture selectors") < body.indexOf("actions/checkout"));
   assert.ok(body.indexOf("Reject conflicting browser fixture selectors") < body.indexOf("dtolnay/rust-toolchain"));
   const script = step.split("        run: |\n")[1].split("\n").map(line => line.startsWith("          ") ? line.slice(10) : line).join("\n");
-  const selectors = ["RUN_MEMORY_CALIBRATION", "RUN_FIVE_RUNG_REFERENCE", "PROVISION_QWEN_SNAPSHOT", "PROVISION_Z_IMAGE_SNAPSHOT", "RUN_MOSS_NATIVE_VALIDATION"];
+  const selectors = ["RUN_MEMORY_CALIBRATION", "RUN_FIVE_RUNG_REFERENCE", "PROVISION_QWEN_SNAPSHOT", "PROVISION_Z_IMAGE_SNAPSHOT", "RUN_MOSS_NATIVE_VALIDATION", "HOSTED_ONLY"];
   const clean = Object.fromEntries(selectors.map(key => [key, "false"]));
   assert.equal(condition(name, "workflow_dispatch", name), true);
   assert.equal(spawnSync("bash", ["-c", script], { env: { ...process.env, ...clean }, encoding: "utf8" }).status, 0);
