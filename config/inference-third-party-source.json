@@ -1,7 +1,7 @@
 {
   "_comment": "Audit inventory reviewed at inference revision 232f3f24 (epic sc-26679 final pin, inference main): 786 provenance candidates and 117 production-Rust crate prefixes. This pin advances from dad3036a with inference main's later commits and the epic's inference work (SceneWorks/inference#1367): imported-checkpoint evidence and the MiniMax-H3 reference-clip vision fix, which touch only first-party code under crates/media/{candle,mlx}-gen (*-boogu vision preprocessing; *-minimax-h3 model, reference and text_encoder modules) and scripts/; no new ported or vendored source.",
   "inferenceRevision": "9ddabbea258f2faf1333a45b9186288110af4e45",
-  "auditDigest": "4fdef8e0c7f34f97584458fe3b71d055dba3789cde40a997b329a811ab53d7aa",
+  "auditDigest": "211e726595d0f1e6246c37c00e1ae5dd262127358f1317d2462b13de2c733d58",
   "artifacts": [
     {
       "id": "cmudict",
@@ -471,6 +471,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/vendor/candle-flash-attn",
+      "pathPrefix": "crates/media/candle-gen/vendor/candle-flash-attn/",
+      "provenance": "Vendored Hugging Face Candle candle-flash-attn 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (multi-arch fatbin fork, sc-26691, documented in VENDORED.md), wrapping the FlashAttention-2 CUDA kernels (Tri Dao, BSD-3-Clause) built on NVIDIA CUTLASS (BSD-3-Clause); the directory ships LICENSE-FLASH-ATTENTION, AUTHORS-FLASH-ATTENTION and LICENSE-CUTLASS.txt.",
+      "disposition": "about-license",
+      "component": "flash-attention"
     },
     {
       "id": "architecture:crates/media/mlx-gen",

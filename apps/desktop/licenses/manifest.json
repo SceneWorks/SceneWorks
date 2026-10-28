@@ -68,6 +68,29 @@
       ]
     },
     {
+      "id": "flash-attention",
+      "models": [],
+      "name": "FlashAttention-2 and CUTLASS",
+      "publisher": "Tri Dao / NVIDIA",
+      "license": "BSD-3-Clause",
+      "homepage": "https://github.com/Dao-AILab/flash-attention",
+      "platforms": [
+        "windows",
+        "linux"
+      ],
+      "usage": "The native CUDA backend links FlashAttention-2 kernels (vendored via Candle) built on NVIDIA CUTLASS.",
+      "documents": [
+        {
+          "label": "FlashAttention BSD 3-Clause License",
+          "key": "flash-attention-license"
+        },
+        {
+          "label": "CUTLASS BSD 3-Clause License",
+          "key": "cutlass-license"
+        }
+      ]
+    },
+    {
       "id": "wan2.2-ti2v-5b",
       "models": [
         "wan_2_2"
