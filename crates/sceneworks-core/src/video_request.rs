@@ -192,6 +192,18 @@ pub fn requested_reference_image_resize_mode(
         })
 }
 
+/// Whether a job payload renders through the MiniMax-H3 engine (sc-26691): a catalog
+/// `minimax_h3*` id, or an imported H3 checkpoint, whose own id carries no such prefix but whose
+/// resolved `modelManifestEntry` is of the `minimax-h3` family.
+pub fn payload_is_minimax_h3(payload: &JsonObject) -> bool {
+    is_minimax_h3_model(&payload_model_id(payload))
+        || payload
+            .get("modelManifestEntry")
+            .and_then(|entry| entry.get("family"))
+            .and_then(Value::as_str)
+            == Some(crate::minimax_h3_import::MINIMAX_H3_IMPORT_FAMILY)
+}
+
 /// Validate and STAMP the resize mode on a video job payload at a creation boundary (sc-26691).
 ///
 /// A MiniMax-H3 payload leaves this function carrying an explicit, valid
@@ -214,7 +226,7 @@ pub fn stamp_reference_image_resize_mode(
         Some(advanced) => requested_reference_image_resize_mode(advanced)?,
         None => None,
     };
-    if !is_minimax_h3_model(&model) {
+    if !payload_is_minimax_h3(payload) {
         if requested.is_some() {
             return Err(format!(
                 "advanced.{REFERENCE_IMAGE_RESIZE_MODE_KEY} is a MiniMax-H3 reference control and \
@@ -253,7 +265,7 @@ pub fn stamp_reference_image_resize_mode(
 /// was claimed — and rendered — before the upgrade. A malformed value is left for the worker to
 /// refuse by name; another family is untouched.
 pub fn stamp_claimed_reference_image_resize_mode(payload: &mut JsonObject) -> bool {
-    if !is_minimax_h3_model(&payload_model_id(payload)) {
+    if !payload_is_minimax_h3(payload) {
         return false;
     }
     let advanced = payload
@@ -291,7 +303,7 @@ pub fn replay_reference_image_resize_mode_default(
     persisted: &JsonObject,
     persisted_rendered: bool,
 ) -> ReferenceImageResizeMode {
-    let unstamped_h3 = is_minimax_h3_model(&payload_model_id(persisted))
+    let unstamped_h3 = payload_is_minimax_h3(persisted)
         && !persisted
             .get("advanced")
             .and_then(Value::as_object)
@@ -317,7 +329,7 @@ pub fn stamp_replayed_reference_image_resize_mode(
     persisted_rendered: bool,
     changes: &JsonObject,
 ) -> Result<(), String> {
-    if !is_minimax_h3_model(&payload_model_id(merged)) && !changes.contains_key("advanced") {
+    if !payload_is_minimax_h3(merged) && !changes.contains_key("advanced") {
         if let Some(advanced) = merged.get_mut("advanced").and_then(Value::as_object_mut) {
             advanced.remove(REFERENCE_IMAGE_RESIZE_MODE_KEY);
         }
@@ -3136,6 +3148,38 @@ mod tests {
                 .unwrap_err()
                 .contains("not supported by mochi_1")
         );
+    }
+
+    /// sc-26691. An imported H3 checkpoint carries no `minimax_h3` id prefix; its resolved
+    /// `modelManifestEntry` family is what makes it an H3 payload at every resize-mode boundary.
+    #[test]
+    fn an_imported_h3_checkpoint_is_an_h3_payload_at_every_resize_boundary() {
+        let imported = || {
+            payload(json!({
+                "model": "singularity_fl2va_dense",
+                "advanced": {},
+                "modelManifestEntry": { "id": "singularity_fl2va_dense", "family": "minimax-h3" }
+            }))
+        };
+        assert!(payload_is_minimax_h3(&imported()));
+        let mut fresh = imported();
+        stamp_reference_image_resize_mode(&mut fresh, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT).unwrap();
+        assert_eq!(stamped_mode(&fresh), Some("match"));
+        let mut named = imported();
+        named["advanced"]["referenceImageResizeMode"] = json!("max");
+        stamp_reference_image_resize_mode(&mut named, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT)
+            .expect("an imported H3 checkpoint accepts the key");
+        let mut claimed = imported();
+        assert!(stamp_claimed_reference_image_resize_mode(&mut claimed));
+        assert_eq!(
+            replay_reference_image_resize_mode_default(&imported(), true),
+            ReferenceImageResizeMode::Diffusers
+        );
+        let other = payload(json!({
+            "model": "singularity_sdxl",
+            "modelManifestEntry": { "family": "sdxl" }
+        }));
+        assert!(!payload_is_minimax_h3(&other));
     }
 
     /// sc-26691, the upgrade window. A MiniMax-H3 job QUEUED before the upgrade reaches the claim

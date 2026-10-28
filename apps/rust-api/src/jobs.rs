@@ -1048,18 +1048,6 @@ async fn validate_and_canonicalize_merged_generation_payload(
             | JobType::VideoBridge
             | JobType::PersonReplace
     ) {
-        // sc-26691. A replay keeps the resize mode its record names (the shallow merge carried it).
-        // Every creation boundary and every claim since stamps the key, so a MiniMax-H3 record that
-        // names NONE and COMPLETED rendered before the upgrade, under the forced short edge, and
-        // replays as `diffusers`; an unstamped record that never rendered takes today's `match`.
-        // See `stamp_replayed_reference_image_resize_mode`.
-        sceneworks_core::video_request::stamp_replayed_reference_image_resize_mode(
-            &mut merged,
-            &persisted,
-            persisted_rendered,
-            payload_changes,
-        )
-        .map_err(ApiError::bad_request)?;
         let model_id = merged
             .get("model")
             .and_then(Value::as_str)
@@ -1096,6 +1084,19 @@ async fn validate_and_canonicalize_merged_generation_payload(
         }
         canonical_selection = true;
         merged.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+        // sc-26691. A replay keeps the resize mode its record names (the shallow merge carried it).
+        // Every creation boundary and every claim since stamps the key, so a MiniMax-H3 record that
+        // names NONE and COMPLETED rendered before the upgrade, under the forced short edge, and
+        // replays as `diffusers`; an unstamped record that never rendered takes today's `match`.
+        // Applied after the CURRENT entry lands, so an imported H3 checkpoint is recognised by its
+        // resolved family. See `stamp_replayed_reference_image_resize_mode`.
+        sceneworks_core::video_request::stamp_replayed_reference_image_resize_mode(
+            &mut merged,
+            &persisted,
+            persisted_rendered,
+            payload_changes,
+        )
+        .map_err(ApiError::bad_request)?;
     }
     if matches!(job_type, JobType::ImageGenerate | JobType::ImageEdit) {
         if let Some(advanced) = merged.get("advanced").and_then(Value::as_object) {
