@@ -7,7 +7,7 @@
   "missing": [],
   "unproven": [],
   "failureReason": null,
-  "manifestSha256": "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1",
+  "manifestSha256": "c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd",
   "caseId": "mlx/base/lora",
   "identity": {
     "rulebook": "sc-26584/moss-image-training-acceptance/v1",
@@ -799,31 +799,28 @@
         },
         "cpuReference": false
       },
-      "ownedProcesses": [
-        {
-          "pid": 1,
-          "birthIdentity": "SCHEMA_TEST_ONLY_NOT_A_CROSS_PROCESS",
-          "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE",
-          "role": "api-worker",
-          "releaseObserved": true
-        }
-      ],
-      "aggregateRssSamples": [
+      "rootProcess": {
+        "scope": "native-api-worker-root",
+        "pid": 1,
+        "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE",
+        "binarySha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "releaseObserved": true,
+        "metadataHelperAbsenceClaim": false
+      },
+      "rootRssSamples": [
         {
           "at": "2000-01-02T00:00:00Z",
-          "bytes": 200,
-          "ownedProcessCount": 1
+          "bytes": 200
         },
         {
           "at": "2000-01-02T00:00:01Z",
-          "bytes": 250,
-          "ownedProcessCount": 1
+          "bytes": 250
         }
       ],
       "positiveInitialMeasurement": true,
       "telemetryComplete": true,
       "missingMeasurementCount": 0,
-      "allChildrenReleased": true,
+      "nativeRootReleased": true,
       "releaseReceipt": {
         "path": "SCHEMA_TEST_ONLY/cross-release.json",
         "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
@@ -975,30 +972,27 @@
     }
   },
   "cleanup": {
-    "ownedProcesses": [
-      {
-        "pid": 1,
-        "birthIdentity": "SCHEMA_TEST_ONLY_NOT_A_PROCESS",
-        "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE",
-        "role": "api-worker",
-        "releaseObserved": true
-      }
-    ],
-    "allChildrenReleased": true,
+    "rootProcess": {
+      "scope": "native-api-worker-root",
+      "pid": 1,
+      "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE",
+      "binarySha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "releaseObserved": true,
+      "metadataHelperAbsenceClaim": false
+    },
+    "nativeRootReleased": true,
     "releaseReceipt": {
       "path": "SCHEMA_TEST_ONLY/release.json",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     },
-    "aggregateRssSamples": [
+    "rootRssSamples": [
       {
         "at": "2000-01-01T00:00:00Z",
-        "bytes": 200,
-        "ownedProcessCount": 1
+        "bytes": 200
       },
       {
         "at": "2000-01-01T00:00:01Z",
-        "bytes": 250,
-        "ownedProcessCount": 1
+        "bytes": 250
       }
     ],
     "positiveInitialMeasurement": true,

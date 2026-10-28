@@ -778,6 +778,51 @@ class StaticContractTests(unittest.TestCase):
         with self.assertRaises(verifier.EvidenceError):
             verifier.recompute_factor_delta(left, right)
 
+    def test_native_root_controller_receipt_binds_pid_binary_joins_and_closed_stdio(self):
+        # Literal files only: never starts an API, process query or model.
+        case = self.root / "case"
+        case.mkdir()
+        entry = {"caseId":"mlx/base/lora", "rawEvidence":"case/evidence.json",
+                 "counts":{"passed":1,"failed":0,"ignored":0,"exit_code":0},
+                 "caseStartedAt":"2000-01-01T00:00:00Z"}
+        identity = {"scope":"native-api-worker-root","pid":123,"executable":"literal-api",
+                    "binarySha256":"a"*64}
+        state = {"rootProcess":identity,"cleanup":{"scope":"native-api-worker-root",
+                 "released":True,"stdioClosed":True,"metadataHelperAbsenceClaim":False}}
+        receipt = {"backend":"mlx","executable":{"path":"literal-api","sha256":"a"*64},
+                   "source":{"workflowSource":"b"*40,"inferencePin":"c"*40,"manifestSha256":verifier.MANIFEST_SHA256},
+                   "preparationStartedAt":"2000-01-01T00:00:00Z","preparationFinishedAt":"2000-01-01T00:00:00Z",
+                   "commands":[{"log":"case-base-lora.log","exitCode":0,"supervision":state,
+                                "finishedAt":"2000-01-01T00:00:02Z"}]}
+        preflight = {**receipt["source"],"caseId":entry["caseId"],"backend":"mlx","phase":"capture",
+                     "verdict":"admitted","refusalReason":None,"offline":True,"weightsLoaded":False,
+                     "modelRevisions":{"literal":"d"*40},"resolvedCapProvenance":"literal",
+                     "headerDemandProvenance":"literal","weights":[{"present":True}],"resolvedCapBytes":600}
+        native = {"raw":{"serverJoined":True,"nativeBodyReturnedAtUnixMs":946684801000,
+                  "rootProcess":{"scope":"native-api-worker-root","pid":123,
+                  "measurement":"native-current-process-rss-sampled-maximum","metadataHelperAbsenceClaim":False,
+                  "firstFailure":None,"missingMeasurementCount":0,"resolvedCeilingBytes":600,
+                  "sampledPeakBytes":250,"samples":copy.deepcopy(fixtures.record["cleanup"]["rootRssSamples"])}}}
+        (case / "devicepreflight.json").write_text(json.dumps(preflight))
+        for mutation in ("valid","pid","binary","join","stdio","cap","missing","claim","canceled"):
+            r, n = copy.deepcopy(receipt), copy.deepcopy(native)
+            if mutation == "pid": n["raw"]["rootProcess"]["pid"] = 456
+            if mutation == "binary": r["commands"][0]["supervision"]["rootProcess"]["binarySha256"] = "f"*64
+            if mutation == "join": n["raw"]["serverJoined"] = False
+            if mutation == "stdio": r["commands"][0]["supervision"]["cleanup"]["stdioClosed"] = False
+            if mutation == "cap": n["raw"]["rootProcess"]["resolvedCeilingBytes"] = 601
+            if mutation == "missing": n["raw"]["rootProcess"]["missingMeasurementCount"] = 1
+            if mutation == "claim": n["raw"]["rootProcess"]["metadataHelperAbsenceClaim"] = True
+            if mutation == "canceled": r["commands"][0]["supervision"]["cancelled"] = True
+            (case / "evidence.json").write_text(json.dumps(n))
+            (self.root / "driver.json").write_text(json.dumps(r))
+            if mutation == "valid":
+                guard, _, _ = verifier.controller_observations(self.root, r, entry, "capture")
+                verifier.verify_rss(guard, 600, verifier.timestamp(entry["caseStartedAt"]), verifier.timestamp(r["commands"][0]["finishedAt"]))
+            else:
+                with self.assertRaises(verifier.EvidenceError, msg=mutation):
+                    verifier.controller_observations(self.root, r, entry, "capture")
+
     def test_missing_and_zero_rss_fail_closed(self):
         guard = copy.deepcopy(fixtures.record["cleanup"])
         start = verifier.timestamp(guard["caseStartedAt"])
@@ -786,9 +831,9 @@ class StaticContractTests(unittest.TestCase):
         for mutation in ("empty", "zero", "missing"):
             broken = copy.deepcopy(guard)
             if mutation == "empty":
-                broken["aggregateRssSamples"] = []
+                broken["rootRssSamples"] = []
             elif mutation == "zero":
-                broken["aggregateRssSamples"][0]["bytes"] = 0
+                broken["rootRssSamples"][0]["bytes"] = 0
             else:
                 broken["missingMeasurementCount"] = 1
             with self.assertRaises(verifier.EvidenceError):

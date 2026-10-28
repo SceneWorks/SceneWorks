@@ -291,6 +291,7 @@ pub async fn acceptance_api_cancel_controller(
     stop: Arc<AtomicBool>,
     cancel_file: Option<PathBuf>,
     deadline: Instant,
+    mut check: impl FnMut() -> gen_core::Result<()>,
 ) -> gen_core::Result<()> {
     validate_acceptance_cancel_target(settings, job_id)?;
     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -307,6 +308,7 @@ pub async fn acceptance_api_cancel_controller(
                 "acceptance API cancellation controller deadline exceeded",
             ));
         }
+        check()?;
         let waiting = {
             let observation = lock_until(&ledger, deadline)?;
             observation

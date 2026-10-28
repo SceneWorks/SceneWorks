@@ -86,5 +86,12 @@
     "runtimeEvidence": false
   },
   "CI_IMPACT": "Focused pure JS/Python regressions and native metadata-only contracts add no model inference, training, workflow jobs or broad matrix to normal CI. Manual campaign retains eight training cells and eight ordinary cross-loads, all learning/recovery/precision assertions and resource guards. Per-import clocks exclude separately bounded preparation; human inspection remains required before acceptance. Full inventory hashing remains unchanged except unused cross-load DMD files are excluded.",
+  "nativeRootSupervisionRevision": {
+    "recordedAt": "2026-10-28",
+    "scope": "The owned Rust libtest process contains the API, worker, training and generation. Reuse the protected native current-process RSS syscall in existing control/check seams; retain positive fail-closed samples, unchanged product cap, first failure cancellation and original one-hour case deadline. The reported peak is a sampled maximum, not a kernel lifetime high-water measurement.",
+    "release": "The native receipt requires returned work and joined API; the parent binds PID and exact binary SHA and waits for its own child exit/stdio closure. No metadata-helper PID absence, full process tree or foreign ownership claim is made. Unclosed native writers remain unsafe and unsealed.",
+    "contract": "This explicitly replaces the earlier campaign-added all-descendant census/RSS proof. E1-E7, model/data/settings/numerics, full eight cases, recovery and real memory refusal are unchanged. The manifest seal changes; historical failed or unsafe producers are not relabeled or accepted.",
+    "CI_IMPACT": "Deletes MOSS-only process-tree/census tests and the existing Windows prefix extension; preserves generic CPU preparation/driver tests. Adds literal receipt/control regressions only. Manual native control polls reuse the existing 100ms loop without subprocesses, new threads, jobs, profiles or dependencies; actual runtime impact is unmeasured."
+  },
   "checkpointStallInvariant": "Observe and forward the native checkpoint event only after the step-20 optimizer update and durable state land. Never wait between a loss computation and its pending update, and never skip or replay an update. Compare final reference and canceled/resumed factors exactly."
 }

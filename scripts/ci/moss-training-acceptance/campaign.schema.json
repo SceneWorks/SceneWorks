@@ -161,9 +161,9 @@
       }
     },
     "resources": {
-      "description": "Use product fraction caps on real capacity, preserve stricter admission/safety limits and separately enforce positive fail-closed aggregate owned RSS.",
+      "description": "Preserve product/device caps and enforce positive native API/worker-root RSS samples; the parent proves owned Rust root exit and stdio closure, not metadata-helper absence.",
       "type": "object",
-      "required": ["capMechanism", "settingsScope", "backends", "resolveAbsoluteCeilingBeforeWeightsLoad", "preserveExistingProductRoundingAndSafetyIntersections", "requireActualClaimedDeviceIdentity", "requireRealHeaderDerivedAllPhaseDemand", "refuseProjectedDemandAboveResolvedCeiling", "allowMidCampaignCeilingIncrease", "aggregateRssWatchdog", "lowCapControl"],
+      "required": ["capMechanism", "settingsScope", "backends", "resolveAbsoluteCeilingBeforeWeightsLoad", "preserveExistingProductRoundingAndSafetyIntersections", "requireActualClaimedDeviceIdentity", "requireRealHeaderDerivedAllPhaseDemand", "refuseProjectedDemandAboveResolvedCeiling", "allowMidCampaignCeilingIncrease", "rootRssWatchdog", "lowCapControl"],
       "const": {
         "capMechanism": "global-gpuMemoryLimitFraction-product-handoff",
         "settingsScope": "owned-isolated-campaign-config-only",
@@ -177,14 +177,16 @@
         "requireRealHeaderDerivedAllPhaseDemand": true,
         "refuseProjectedDemandAboveResolvedCeiling": true,
         "allowMidCampaignCeilingIncrease": false,
-        "aggregateRssWatchdog": {
-          "scope": "owned-api-worker-and-all-descendants",
+        "rootRssWatchdog": {
+          "scope": "native-api-worker-root",
+          "measurement": "native-current-process-rss-sampled-maximum",
+          "metadataHelperAbsenceClaim": false,
           "ceilingSource": "same-resolved-absolute-product-ceiling",
           "requirePositiveInitialMeasurement": true,
           "requireContinuousPositiveMeasurements": true,
           "missingMeasurement": "fail-case",
           "onCeilingOrDeadline": "fail-and-propagate-owned-cancellation",
-          "requireOwnedChildReleaseBeforeContinuation": true,
+          "requireOwnedRootExitAndStdioBeforeContinuation": true,
           "allowBroadProcessKilling": false,
           "allowForcedMlxKillMidBuffer": false
         },

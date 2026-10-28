@@ -897,78 +897,19 @@ test("Windows real CPU preparation handles fast metadata before compilation",{sk
     assert.equal(result.exit,code);assert.match(result.output,output);assert.equal(state.completion.completed,true);assert.equal(state.cleanup,undefined);
     t.diagnostic(JSON.stringify({name,completion:state.completion}));
   }
-  // Exercise the actual native supervisor and Toolhelp reader with CPU processes before any compiler/model.
-  // The helper exits cooperatively only after a prior authenticated RSS sample contains both PIDs.
-  const {executeSupervised,processRows,recheckWindowsRows}=await import("./moss-training-acceptance.mjs");
-  const releaseFile=path.join(root,"owned-guard-release"),log=path.join(root,"owned-guard.log"),state={};
-  const helperCode="const fs=require('node:fs');setInterval(()=>{if(fs.existsSync(process.argv[1])||fs.existsSync(process.env.MOSS_ACCEPTANCE_CANCEL_FILE))process.exit(0);},20);setTimeout(()=>process.exit(9),25000);";
-  const ownedCode=`const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(helperCode)},${JSON.stringify(releaseFile)}],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({rootPid:process.pid,childPid:child.pid}));child.on('error',()=>process.exit(9));child.on('close',code=>{if(code!==0)process.exit(code??9);const short=spawn(process.execPath,['-e',\"console.log('short metadata')\"],{stdio:'ignore',windowsHide:true});console.log(JSON.stringify({shortPid:short.pid}));short.on('error',()=>process.exit(9));short.on('close',exit=>{console.log(JSON.stringify({shortExit:exit}));setTimeout(()=>process.exit(exit??9),1500);});});setTimeout(()=>process.exit(9),26000);`;
-  let identities=null,released=false,result,masked=false;const actualRechecks=[],queryMarkers=[];let compilations=0,loads=0,readerAssembly=null;
-  const markedQuery=(program,args,options)=>{
-    if(args.at(-1).includes("Add-Type -TypeDefinition")){
-      compilations++;readerAssembly=/^'@ -OutputAssembly '((?:[^']|'')+)'$/m.exec(args.at(-1))[1].replaceAll("''","'");
-    }else loads++;
-    const result=spawnSync(program,args,options);
-    if(!queryMarkers.length && !result.error && result.status===0){
-      const markers=(result.stderr??"").split(/\r?\n/).filter(line=>/^MOSS_PROCESS /.test(line));
-      assert.equal(markers.length,4);
-      assert.match(markers[0],/^MOSS_PROCESS script_entry utc_ms=\d+ elapsed_ms=\d+$/);
-      assert.match(markers[1],/^MOSS_PROCESS type_ready source_sha256=[a-f0-9]{64} assembly_sha256=[a-f0-9]{64} elapsed_ms=\d+$/);
-      assert.match(markers[2],/^MOSS_PROCESS snapshot_returned elapsed_ms=\d+$/);
-      assert.match(markers[3],/^MOSS_PROCESS json_completed elapsed_ms=\d+$/);
-      const parsed=JSON.parse(result.stdout),self=(Array.isArray(parsed)?parsed:[parsed]).find(row=>row.pid===process.pid);
-      assert.equal(self?.ppid,process.ppid);assert.equal(self.path.toLowerCase(),process.execPath.toLowerCase());
-      assert.ok(Number.isSafeInteger(self.birthMs)&&self.birthMs>0&&self.birthMs<=Date.now());
-      assert.ok(Number.isSafeInteger(self.rssBytes)&&self.rssBytes>0);
-      assert.ok(markers.join("\n").length<512);
-      const elapsed=markers.map(line=>Number(/elapsed_ms=(\d+)$/.exec(line)[1]));
-      assert.ok(elapsed.every((value,index)=>index===0||elapsed[index-1]<=value));
-      queryMarkers.push(...markers);
-    }
-    return result;
-  };
-  t.after(()=>disposeWindowsProcessReader(markedQuery));
-  const query=(platform,onFailure,_run,timeoutMs)=>{
-    const rows=processRows(platform,onFailure,markedQuery,timeoutMs);
-    const line=readFileSync(log,"utf8").split("\n").find(value=>value.startsWith('{"rootPid":'));
-    if(line)identities=JSON.parse(line);
-    if(!released&&identities&&state.rssSamples?.some(sample=>sample.ownedPids.includes(identities.rootPid)&&sample.ownedPids.includes(identities.childPid))){
-      // Force one missing path on a real live child; the production exact reader must resolve it.
-      if(!masked){const row=rows.get(identities.childPid);assert.ok(row?.executable);rows.set(row.pid,{...row,path:"",executable:""});masked=true;}
-      else {
-        assert.ok(actualRechecks.some(check=>check.pids.includes(identities.childPid)&&check.rows?.some(row=>row.pid===identities.childPid&&row.executable)));
-        writeFileSync(releaseFile,"cooperative release");released=true;
-      }
-    }
-    return rows;
-  };
-  try{result=await executeSupervised(ROOT,[process.execPath,"-e",ownedCode],log,30_000,state,{query,capBytes:512*1024*1024,recheckWindows:(pids,timeoutMs,onFailure)=>{
-    const rows=recheckWindowsRows(pids,timeoutMs,onFailure,markedQuery);actualRechecks.push({pids,rows:rows?[...rows.values()]:null});return rows;
-  }});}
-  catch(error){t.diagnostic(JSON.stringify({kind:"owned-native-guard-failure",identities,identityFailure:state.identityFailure??null,telemetryFailure:state.telemetryFailure??null,cleanup:state.cleanup??null,unsafe:state.unsafe??null,compilations,loads,queryMarkers,released,masked}));throw error;}
-  assert.equal(result.exit,0);assert.equal(released,true);assert.ok(state.rssFirstBytes>0);assert.equal(state.cleanup.released,true);assert.notEqual(state.unsafe,true);
-  for(const pid of [identities.rootPid,identities.childPid]){const identity=state.cleanup.observedIdentities.find(row=>row.pid===pid);assert.ok(Number.isSafeInteger(identity?.birthMs)&&identity.executable);}
-  assert.match(result.output,/"shortExit":0/);assert.equal(masked,true);
-  assert.equal(queryMarkers.length,4);
-  t.diagnostic(JSON.stringify({kind:"owned-native-guard",identities,injectedMissingPath:masked,actualRechecks,samples:state.rssSamples.length,cleanup:state.cleanup,queryMarkers,compilations,loads}));
-  const after=queryWindowsProcesses({pids:[identities.childPid],timeoutMs:5000,run:markedQuery});
-  assert.equal(compilations,1);assert.ok(loads>=2,"full and selected rereads reuse the same compiled reader");
-  assert.ok(after instanceof Map);assert.notEqual(after.get(identities.childPid)?.birthMs,state.cleanup.observedIdentities.find(row=>row.pid===identities.childPid).birthMs,"the exact old child birth must be absent after release");
-  assert.ok(readerAssembly);disposeWindowsProcessReader(markedQuery);
-  assert.equal(existsSync(path.dirname(readerAssembly)),false,'the invocation-private compiled reader must be removed');
 
 });
 
 test("manual Windows capture checks actual preparation supervision before its first compiler command", () => {
   const capture = readFileSync(path.join(ROOT, ".github/workflows/moss-training-acceptance.yml"), "utf8").split("  cross-load:")[0];
-  const check = capture.indexOf("- name: Check Windows owned CPU preparation before compilation");
+  const check = capture.indexOf("- name: Check Windows bounded CPU metadata before compilation");
   assert.ok(check > 0 && check < capture.indexOf("- name: Capture and publish base/lora before continuing"));
   const step = capture.slice(check, capture.indexOf("      - ", check + 1));
   assert.match(step, /if: \$\{\{ matrix\.backend == 'cuda' \}\}/);
   assert.match(step, /node --test --test-name-pattern="\^Windows real CPU preparation" scripts\/moss-native-api-validation\.test\.mjs/);
   const normal=readFileSync(path.join(ROOT,".github/workflows/windows-candle.yml"),"utf8").split("  imported-nvfp4-worker-smoke:")[0];
   for(const family of ["scripts/moss-native-api-validation*.mjs","scripts/moss-training-acceptance*.mjs"])assert.ok(normal.includes(`      - "${family}"`),`Windows probe must be selected when ${family} changes`);
-  const early=normal.indexOf("- name: Check Windows owned CPU preparation before compilation");
+  const early=normal.indexOf("- name: Check Windows bounded CPU metadata before compilation");
   assert.ok(early>normal.indexOf("- name: Set up Node for Cargo cache selection")&&early<normal.indexOf("- name: Isolate Cargo dependency checkout")&&early<normal.indexOf("- name: Fetch the pinned inference release"));
   const normalStep=normal.slice(early,normal.indexOf("      - ",early+1));
   assert.match(normalStep,/if: \$\{\{ github\.event_name != 'workflow_dispatch' \}\}/);assert.match(normalStep,/timeout-minutes: 3/);

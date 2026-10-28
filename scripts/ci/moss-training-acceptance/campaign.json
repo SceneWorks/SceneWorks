@@ -111,14 +111,16 @@
     "requireRealHeaderDerivedAllPhaseDemand": true,
     "refuseProjectedDemandAboveResolvedCeiling": true,
     "allowMidCampaignCeilingIncrease": false,
-    "aggregateRssWatchdog": {
-      "scope": "owned-api-worker-and-all-descendants",
+    "rootRssWatchdog": {
+      "scope": "native-api-worker-root",
+      "measurement": "native-current-process-rss-sampled-maximum",
+      "metadataHelperAbsenceClaim": false,
       "ceilingSource": "same-resolved-absolute-product-ceiling",
       "requirePositiveInitialMeasurement": true,
       "requireContinuousPositiveMeasurements": true,
       "missingMeasurement": "fail-case",
       "onCeilingOrDeadline": "fail-and-propagate-owned-cancellation",
-      "requireOwnedChildReleaseBeforeContinuation": true,
+      "requireOwnedRootExitAndStdioBeforeContinuation": true,
       "allowBroadProcessKilling": false,
       "allowForcedMlxKillMidBuffer": false
     },

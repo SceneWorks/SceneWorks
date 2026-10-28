@@ -1,8 +1,8 @@
 //! Manual, published-weight GPU acceptance. No fixture model, synthetic worker,
 //! downloaded weight, alternate trainer, or fabricated native receipt is used.
 //! Every entry point is ignored; an absent explicit admission is an ERROR.
-//! Raw observations are retained before validation. The supervisor, not this
-//! still-live process, owns the final RSS/release and human-inspection evidence.
+//! Raw native root RSS observations are retained before validation. The parent
+//! authenticates this exact launched process's exit/stdio, never a descendant census.
 
 use super::support::*;
 use futures_util::FutureExt;
@@ -23,7 +23,7 @@ use std::{
 };
 
 type Result<T> = std::result::Result<T, String>;
-const SEAL: &str = "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1";
+const SEAL: &str = "c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd";
 const PROMPT: &str = "sksmoss red circle centered on a pale background";
 const WALL: u64 = 3600;
 
@@ -150,6 +150,69 @@ fn source_pin() -> Result<String> {
     Ok(text(&source, "inferenceRevision")?.to_owned())
 }
 
+// Samples the process containing the API, worker and all learned native work.
+// This is a sampled maximum, not a kernel lifetime peak or a child-process census.
+#[derive(Default)]
+pub(super) struct RootProcessResources {
+    samples: Vec<Value>,
+    peak: u64,
+    missing: u64,
+    first_failure: Option<String>,
+    last_sample: Option<Instant>,
+    ceiling: Option<u64>,
+}
+impl RootProcessResources {
+    pub(super) fn with_ceiling(ceiling: u64) -> Self {
+        Self {
+            ceiling: Some(ceiling),
+            ..Default::default()
+        }
+    }
+    pub(super) fn observe(&mut self, bytes: Option<u64>, at: String) -> Result<()> {
+        if let Some(bytes) = bytes.filter(|bytes| *bytes > 0) {
+            self.peak = self.peak.max(bytes);
+            self.samples.push(json!({"at":at,"bytes":bytes}));
+            if let Some(ceiling) = self.ceiling.filter(|ceiling| self.peak > *ceiling) {
+                let peak = self.peak;
+                self.first_failure.get_or_insert_with(|| {
+                    format!("native root RSS exceeded frozen cap ({peak} > {ceiling})")
+                });
+            }
+        } else {
+            self.missing += 1;
+            self.first_failure
+                .get_or_insert_with(|| "native root RSS unavailable or zero".into());
+        }
+        self.result()
+    }
+    fn result(&self) -> Result<()> {
+        self.first_failure
+            .as_ref()
+            .map_or(Ok(()), |error| Err(error.clone()))
+    }
+    fn sample(&mut self, force: bool) -> Result<()> {
+        if !force
+            && self
+                .last_sample
+                .is_some_and(|at| at.elapsed() < Duration::from_millis(100))
+        {
+            return self.result();
+        }
+        self.last_sample = Some(Instant::now());
+        self.observe(
+            gen_core::h3_terminal_telemetry::host_process_rss_bytes(),
+            observed_iso_time()?,
+        )
+    }
+    fn receipt(&self) -> Value {
+        json!({"scope":"native-api-worker-root", "pid":std::process::id(),
+            "measurement":"native-current-process-rss-sampled-maximum", "sampleIntervalMs":100,
+            "samples":self.samples,"sampledPeakBytes":self.peak,"missingMeasurementCount":self.missing,
+            "resolvedCeilingBytes":self.ceiling,"firstFailure":self.first_failure,
+            "metadataHelperAbsenceClaim":false})
+    }
+}
+
 struct Case {
     source_backend: String,
     backend: &'static str,
@@ -164,6 +227,7 @@ struct Case {
     preflight_only: bool,
     cross: bool,
     record: Value,
+    resources: Arc<Mutex<RootProcessResources>>,
 }
 impl Case {
     fn admitted(
@@ -297,6 +361,14 @@ impl Case {
             preflight_only: preflight,
             cross,
             record,
+            resources: Arc::new(Mutex::new(RootProcessResources {
+                ceiling: std::env::var("MOSS_ACCEPTANCE_RESOLVED_CAP_BYTES")
+                    .ok()
+                    .map(|value| value.parse::<u64>().map_err(|error| error.to_string()))
+                    .transpose()?
+                    .filter(|value| *value > 0),
+                ..Default::default()
+            })),
         })
     }
     fn base(&self) -> String {
@@ -309,7 +381,18 @@ impl Case {
             0.85
         }
     }
+    fn check_resources(&self, force: bool) -> Result<()> {
+        self.resources
+            .lock()
+            .map_err(|error| error.to_string())?
+            .sample(force)
+    }
+    fn check_control(&self, cancel_file: Option<&Path>) -> gen_core::Result<()> {
+        self.check_resources(false).map_err(gen_core::Error::Msg)?;
+        check_preflight_control(self.deadline, cancel_file)
+    }
     fn check_clock(&self) -> Result<()> {
+        self.check_resources(false)?;
         require(
             Instant::now() < self.deadline,
             "frozen case deadline exceeded",
@@ -354,7 +437,13 @@ impl Case {
         Ok(file)
     }
     fn persist(&self) -> Result<()> {
-        let bytes = serde_json::to_vec_pretty(&self.record).map_err(|e| e.to_string())?;
+        let mut record = self.record.clone();
+        record["raw"]["rootProcess"] = self
+            .resources
+            .lock()
+            .map_err(|error| error.to_string())?
+            .receipt();
+        let bytes = serde_json::to_vec_pretty(&record).map_err(|e| e.to_string())?;
         let directory = if self.preflight_only {
             self.root.join("preflight")
         } else {
@@ -618,13 +707,17 @@ fn weight_inventory(settings: &crate::Settings, case: &Case) -> Result<(Value, V
             .join("snapshots")
             .join(identity.revision)
             .join(identity.relative_path);
-        check_preflight_control(case.deadline, cancel_file.as_deref())
+        case.check_control(cancel_file.as_deref())
             .map_err(|e| e.to_string())?;
         let present = path.is_file();
         let pin = if present {
             Some(
-                pin_preflight_weight(&path, case.deadline, cancel_file.as_deref(), |_| {})
-                    .map_err(|e| e.to_string())?,
+                gen_core::PinnedWeightsFile::pin_with_progress(
+                    &path,
+                    || case.check_control(cancel_file.as_deref()),
+                    |_| {},
+                )
+                .map_err(|e| e.to_string())?,
             )
         } else {
             None
@@ -896,9 +989,17 @@ async fn cancel_controller(
     stop: Arc<AtomicBool>,
     cancel_file: Option<PathBuf>,
     deadline: Instant,
+    resources: Arc<Mutex<RootProcessResources>>,
 ) -> gen_core::Result<()> {
     let result =
-        acceptance_api_cancel_controller(worker, job, ledger, stop, cancel_file, deadline).await;
+        acceptance_api_cancel_controller(worker, job, ledger, stop, cancel_file, deadline, || {
+            resources
+                .lock()
+                .map_err(|error| gen_core::Error::Msg(error.to_string()))?
+                .sample(false)
+                .map_err(gen_core::Error::Msg)
+        })
+        .await;
     if result.is_err() {
         // A controller failure/deadline is never acceptance success. Still send
         // a real API cancellation before waiting for the owned execution to join.
@@ -940,7 +1041,8 @@ async fn utility(
             Default::default(),
             stop,
             cancel_file,
-            case.deadline
+            case.deadline,
+            Arc::clone(&case.resources),
         )
     );
     result.map_err(|e| e.to_string())?;
@@ -1049,7 +1151,8 @@ async fn execute(
                 Arc::clone(&ledger),
                 stop,
                 cancel_file,
-                deadline
+                deadline,
+                Arc::clone(&case.resources),
             )
         )
     } else {
@@ -1622,7 +1725,7 @@ async fn generate(
     let cancel_file = case.cancel_file()?;
     let preload = (|| -> Result<Value> {
         let value = native::moss_generation_preload_with_check(worker, &snapshot, &mut || {
-            check_preflight_control(case.deadline, cancel_file.as_deref())
+            case.check_control(cancel_file.as_deref())
         })
         .map_err(|e| e.to_string())?;
         require(
@@ -2018,7 +2121,7 @@ async fn forecast_generation(
         let snapshot = serde_json::from_value(job.clone()).map_err(|e| e.to_string());
         let forecast = snapshot.and_then(|job| {
             native::moss_generation_preload_with_check(worker, &job, &mut || {
-                check_preflight_control(case.deadline, cancel_file.as_deref())
+                case.check_control(cancel_file.as_deref())
             })
             .map_err(|e| e.to_string())
         });
@@ -2237,6 +2340,18 @@ async fn body(
         require(if case.backend=="mlx" {claimed=="mlx" && actual.starts_with("mlx-default-gpu/stream-")}else{actual.eq_ignore_ascii_case(claimed)},"native allocator-selected CUDA context/MLX device differs from actual production worker claim")?;
         preflight_verdict(&metadata, &weights, case.backend, &case.parent,generation_forecasts.as_ref().map_err(Clone::clone)?,case.cross)
     });
+    if let Some(ceiling) = metadata["resolvedCapBytes"]
+        .as_u64()
+        .filter(|value| *value > 0)
+    {
+        let mut resources = case.resources.lock().map_err(|error| error.to_string())?;
+        require(
+            resources.ceiling.is_none_or(|previous| previous == ceiling),
+            "native root ceiling differs from device preflight",
+        )?;
+        resources.ceiling = Some(ceiling);
+        resources.sample(true)?;
+    }
     let preflight = json!({"caseId":case.id,"sourceCaseId":case.id,"backend":case.backend,"executionBackend":case.backend,"phase":if case.cross {"cross-load"} else {"capture"},"workflowSource":env("MOSS_ACCEPTANCE_WORKFLOW_SOURCE")?,"inferencePin":source_pin()?,"sourcePin":source_pin()?,"manifestSha256":SEAL,"offline":true,"weightsLoaded":false,"modelRevisions":revisions,"weights":weights,"claimedDeviceIdentity":claimed.as_ref().ok(),"deviceIdentity":metadata["deviceIdentity"],"totalCapacityBytes":metadata["totalCapacityBytes"],"resolvedCapBytes":metadata["resolvedCapBytes"],"gpuMemoryLimitFraction":case.fraction(),"resolvedCapProvenance":metadata["resolvedCapProvenance"],"headerDemandProvenance":if case.cross {"production-selected ordinary prepare_moss_preload only; actual transferred adapter rechecked before generation under this same frozen cap"} else {"native training test_memory_plan plus production-selected ordinary/DMD prepare_moss_preload; future actual adapters separately rechecked before every real generation under this same frozen cap"},"generationForecasts":generation_forecasts.as_ref().ok(),"generationForecastError":generation_forecasts.as_ref().err(),"futureAdapterIncluded":false,"adapterSpecificCheckRequiredBeforeEveryActualLoad":true,"headerDerivedDemandBytes":verdict.as_ref().ok(),"observationSchema":metadata["observationSchema"],"nativeMetadata":metadata,"verdict":if verdict.is_ok(){"admitted"}else{"refused"},"refusalReason":verdict.as_ref().err()});
     case.record["raw"]["devicePreflight"] = preflight.clone();
     case.persist()?;
@@ -2660,7 +2775,7 @@ async fn run(parent: &str, method: &str, source_backend: &str, cross: bool, pref
     // here: only the external supervisor can authenticate the final release.
     let _ = stop.send(());
     let server_result = server.await;
-    let failure = match outcome {
+    let mut failure = match outcome {
         Ok(Ok(())) => None,
         Ok(Err(error)) => Some(error),
         Err(panic) => Some(if let Some(s) = panic.downcast_ref::<String>() {
@@ -2671,6 +2786,15 @@ async fn run(parent: &str, method: &str, source_backend: &str, cross: bool, pref
             "acceptance assertion panicked".into()
         }),
     };
+    if let Err(first) = case.check_resources(true) {
+        failure = Some(match failure {
+            Some(later) if !later.contains(&first) => {
+                format!("{first}; native completion: {later}")
+            }
+            Some(later) => later,
+            None => first,
+        });
+    }
     if let Some(error) = failure.as_ref() {
         case.record["acceptanceDisposition"] = json!("failed");
         case.record["failureReason"] = json!(error);

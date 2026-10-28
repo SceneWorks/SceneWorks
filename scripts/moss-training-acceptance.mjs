@@ -8,12 +8,12 @@ import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { digest, parseTestResult } from './moss-consumer-assertions.mjs';
-import { defaultInspect, parseTestList, selectLibTestExecutable, queryWindowsProcesses, executePreparation, isPreparationCommand, PRE_MODEL_CPU_TEST } from './moss-native-api-validation.mjs';
+import { defaultInspect, parseTestList, selectLibTestExecutable, executePreparation, isPreparationCommand, PRE_MODEL_CPU_TEST } from './moss-native-api-validation.mjs';
 import { stageLatestMossArtifacts } from './moss-training-artifacts.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
 import { lockedInferenceRevision } from './select-windows-cargo-cache.mjs';
 
-export const MANIFEST_SHA256 = '6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1';
+export const MANIFEST_SHA256 = 'c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd';
 export const PREFIX = 'tests::moss_training_acceptance::';
 export const CELLS = ['base/lora', 'base/lokr', 'sft/lora', 'sft/lokr'];
 export const testsFor = (phase, executionBackend='mlx') => {
@@ -166,229 +166,65 @@ export async function validatePreflightChecked(p, backend, source, caseId, phase
   check();return cap;
 }
 
-const windowsRows=rows=>rows&&new Map([...rows].map(([pid,r])=>[pid,{...r,birth:Number.isSafeInteger(r.birthMs)?String(r.birthMs):null,executable:r.path}]));
-export const recheckWindowsRows=(pids,timeoutMs,onFailure=null,run=spawnSync)=>windowsRows(queryWindowsProcesses({pids,timeoutMs,onFailure,run}));
-
-// Mac and Windows share pid+birth+executable identity. The Windows query is reused
-// from the CPU driver; no CPU execution function or its fixed bounds are changed.
-export function processRows(platform = process.platform, onFailure = null, run = spawnSync, timeoutMs = 20_000) {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return null;
-  const bound = Math.min(20_000, timeoutMs);
-  if (platform === 'win32') {
-    const rows = queryWindowsProcesses({run,onFailure,timeoutMs:bound});
-    return windowsRows(rows);
+// The Rust API, native training and generation share this one launched process.
+// Native samples enforce its unchanged cap; the parent owns exit/stdio proof.
+// No descendant identity, metadata-helper absence or kernel peak claim is made.
+export function validateNativeRoot(record, state, capBytes) {
+  const raw=record?.raw, measured=raw?.rootProcess;
+  assert(measured?.scope==='native-api-worker-root' && measured.pid===state.rootProcess?.pid,'native root PID/scope mismatch');
+  assert(raw.serverJoined===true && Number.isSafeInteger(raw.nativeBodyReturnedAtUnixMs),'native/API joins missing');
+  assert(measured.metadataHelperAbsenceClaim===false && measured.measurement==='native-current-process-rss-sampled-maximum','unsupported native RSS/release claim');
+  assert(measured.firstFailure===null && measured.missingMeasurementCount===0,'native root RSS/cancellation failed');
+  const ceiling=capBytes??measured.resolvedCeilingBytes;
+  assert(Number.isSafeInteger(ceiling)&&ceiling>0&&measured.resolvedCeilingBytes===ceiling,'native root cap differs from admitted ceiling');
+  assert(Array.isArray(measured.samples)&&measured.samples.length>=2,'positive native root RSS observations missing');
+  let peak=0,last=-Infinity;
+  for(const sample of measured.samples){
+    const at=Date.parse(sample.at);
+    assert(Number.isFinite(at)&&at>=last&&Number.isSafeInteger(sample.bytes)&&sample.bytes>0&&sample.bytes<=ceiling,'missing/zero/over-cap native root RSS');
+    last=at;peak=Math.max(peak,sample.bytes);
   }
-  const started=performance.now();
-  const p = run('ps', ['-axo','pid=,ppid=,rss=,lstart=,comm='], { encoding:'utf8', env:{...process.env,LC_ALL:'C'}, timeout:bound, maxBuffer:16*1024*1024 });
-  if (p.error || p.status !== 0) {
-    onFailure?.({command:'ps',at:new Date().toISOString(),timeoutMs:bound,elapsedMs:performance.now()-started,
-      error:p.error?{code:p.error.code??null,message:p.error.message}:null,status:p.status??null,signal:p.signal??null,
-      stderr:typeof p.stderr==='string'?p.stderr.slice(0,512):null});
-    return null;
-  }
-  const rows = new Map();
-  for (const line of p.stdout.split('\n')) {
-    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+[\d:]+\s+\d+)\s+(.+)$/.exec(line);
-    if (m) rows.set(Number(m[1]), { pid:Number(m[1]), ppid:Number(m[2]), rssBytes:Number(m[3])*1024, birth:m[4], executable:m[5] });
-  }
-  return rows;
-}
-const identityFacts=r=>r?({pid:r.pid,ppid:r.ppid,birthMs:Number.isFinite(r.birthMs)?r.birthMs:null,
-  birth:typeof r.birth==='string'?r.birth.slice(0,128):null,executable:typeof r.executable==='string'?r.executable.slice(0,512):null,
-  rssBytes:Number.isSafeInteger(r.rssBytes)?r.rssBytes:null}):null;
-export function observeOwned(rows, known, rootPid, onIdentityFailure = null, {pending = new Map(), recheckWindows = null, onResolution = null, onRss = null} = {}) {
-  assert(rows instanceof Map, 'owned process telemetry unavailable');
-  const scope = new Map();
-  const refuse=(reason,row,parent,recheck=null)=>{
-    onIdentityFailure?.({at:new Date().toISOString(),reason,rootPid,candidate:identityFacts(row),parent:identityFacts(parent),recheck});
-    fail(reason);
-  };
-  const rememberUnresolved=row=>{
-    // Details can fail before ancestry is authenticated. Retain every visible
-    // possible descendant for cleanup, including after exit/reparenting; do not
-    // promote that uncertainty into an authenticated identity on a later census.
-    const branch=new Map([[row.pid,row]]);let changed=true;
-    while(changed){changed=false;for(const child of rows.values())if(!branch.has(child.pid)&&branch.has(child.ppid)){
-      const parent=branch.get(child.ppid);
-      if(Number.isSafeInteger(child.birthMs)&&Number.isSafeInteger(parent.birthMs)&&child.birthMs<parent.birthMs)continue;
-      branch.set(child.pid,child);changed=true;
-    }}
-    for(const [pid,candidate]of branch)if(!pending.has(pid))pending.set(pid,known.has(pid)?{...known.get(pid),absent:false}:{...candidate,unresolvedAncestry:true,absent:false});
-  };
-  // A process born during Toolhelp's snapshot/detail join has an explicit
-  // placeholder. Resolve only via one fresh selected census, including its
-  // immediate parent, so a reused PID cannot lend a stale parent edge.
-  if(!known.has(rootPid)&&!pending.has(rootPid))assert(rows.get(rootPid)?.ppid===process.pid,'initial owned root identity unavailable');
-  const possible=new Map([...known,...pending].filter(([pid,identity])=>!identity.absent&&rows.has(pid)).map(([pid])=>[pid,rows.get(pid)]));
-  if(rows.has(rootPid))possible.set(rootPid,rows.get(rootPid));
-  let expanded=true;
-  while(expanded){expanded=false;for(const row of rows.values())if(!possible.has(row.pid)&&possible.has(row.ppid)){
-    const parent=possible.get(row.ppid);
-    if(Number.isSafeInteger(row.birthMs)&&Number.isSafeInteger(parent.birthMs)&&row.birthMs<parent.birthMs)continue;
-    // A fresh owned-parent edge is independent of a previously absent PID.
-    if(pending.get(row.pid)?.absent&&!known.has(row.pid))pending.delete(row.pid);
-    possible.set(row.pid,row);expanded=true;
-  }}
-  const originalRoot=rows.get(rootPid),launcher=rows.get(process.pid);
-  if(!known.has(rootPid)&&!pending.has(rootPid)&&originalRoot?.ppid===process.pid&&Number.isSafeInteger(originalRoot.birthMs)&&Number.isSafeInteger(launcher?.birthMs)&&originalRoot.birthMs>=launcher.birthMs)pending.set(rootPid,originalRoot);
-  const incomplete=[...possible.values()].filter(row=>Object.hasOwn(row,'birthMs')&&!Number.isSafeInteger(row.birthMs));
-  let censusRssFloor=0;
-  if(incomplete.length){
-    censusRssFloor=[...possible.values()].reduce((sum,row)=>sum+(Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0?row.rssBytes:0),0);
-    const pids=[...new Set(incomplete.flatMap(row=>[row.pid,row.ppid]))].filter(pid=>pid>0);
-    let fresh=null;
-    try{fresh=recheckWindows?.(pids)??null;}catch{ /* Denial is not absence. */ }
-    const valid=fresh instanceof Map&&[...fresh].every(([pid,row])=>pids.includes(pid)&&row?.pid===pid&&Number.isSafeInteger(row.birthMs)&&row.birthMs>=0&&Number.isSafeInteger(row.ppid)&&row.ppid>=0&&Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0&&typeof row.executable==='string'&&row.birth===String(row.birthMs));
-    rows=new Map(rows);
-    for(const row of incomplete){
-      const current=valid?fresh.get(row.pid):null,parent=current?fresh.get(current.ppid):null;
-      const oldParent=rows.get(row.ppid),previous=known.get(row.pid)??pending.get(row.pid);
-      const matchedParent=parent&&parent.executable.trim()&&current.ppid===row.ppid&&current.birthMs>=parent.birthMs&&
-        (Number.isSafeInteger(oldParent?.birthMs)?parent.birthMs===oldParent.birthMs:incomplete.some(candidate=>candidate.pid===parent.pid))&&
-        (!oldParent?.executable||parent.executable===oldParent.executable);
-      const outcome=!valid?'unavailable':!current?'absent':!current.executable.trim()?'live-path-unavailable':!matchedParent?'parent-drift':'birth-resolved';
-      const witness={at:new Date().toISOString(),outcome,candidate:identityFacts(row),current:identityFacts(current)};onResolution?.(witness);
-      if(outcome==='absent'){
-        rememberUnresolved(row);rows.delete(row.pid);pending.set(row.pid,{...(previous??row),absent:true});
-        if(row.pid===rootPid&&!known.has(rootPid))refuse('initial owned root identity unavailable',row,oldParent,witness);
-      }else if(outcome==='birth-resolved'){
-        if(previous?.unresolvedAncestry&&!Number.isSafeInteger(previous.birthMs)){rememberUnresolved(row);refuse('Windows descendant ancestry unresolved',row,oldParent,witness);}
-        // The new handle may belong to a replacement PID. Its older visible
-        // offspring cannot be discarded as stale under that replacement birth.
-        rememberUnresolved(row);
-        const resolved={...current,rssBytes:Math.max(Number.isSafeInteger(row.rssBytes)?row.rssBytes:0,current.rssBytes)};
-        if(!previous)pending.set(row.pid,resolved); // Track it even if an older offspring immediately refuses.
-        rows.set(row.pid,resolved);
-      }else{rememberUnresolved(row);refuse('Windows birth telemetry missing',row,oldParent,witness);}
-    }
-  }
-  const root = rows.get(rootPid);
-  if (!known.has(rootPid) && !pending.has(rootPid)) {
-    assert(root && root.ppid === process.pid && root.birth, 'initial owned root identity unavailable');
-    if(Object.hasOwn(root,'birthMs')) {
-      const parent=rows.get(process.pid);
-      assert(Number.isFinite(root.birthMs) && Number.isFinite(parent?.birthMs) && root.birthMs>=parent.birthMs, 'initial Windows root birth not authenticated against owned parent');
-    } else assert(root.executable, 'initial owned root identity unavailable');
-    pending.set(rootPid,root);
-  }
-  // Pending includes explicitly unresolved ancestry as well as incomplete paths.
-  // Retain these observations for cleanup even after root exit or reparenting.
-  for (const [pid,identity] of [...known,...pending]) {
-    if(identity.absent)continue; // Proven absence cannot authenticate a later PID incarnation.
-    const row=rows.get(pid);
-    if(row && Object.hasOwn(row,'birthMs') && (!Number.isSafeInteger(row.birthMs)||!Number.isSafeInteger(identity.birthMs))){
-      rememberUnresolved(row);refuse('Windows birth telemetry missing',row,rows.get(row.ppid));
-    }
-    if(row && identity.unresolvedAncestry && row.birth===identity.birth)refuse('Windows descendant ancestry unresolved',row,rows.get(row.ppid));
-    if(row && row.birth===identity.birth){scope.set(pid,row);if(pending.has(pid))pending.set(pid,{...identity,absent:false});}
-    else if(pending.has(pid))pending.set(pid,{...identity,absent:true}); // Fresh census proves the old birth absent.
-  }
-  let changed = true;
-  while (changed) { changed = false; for (const row of rows.values()) if (!scope.has(row.pid) && scope.has(row.ppid)) {
-    const parent=scope.get(row.ppid);
-    if (Object.hasOwn(row,'birthMs') || Object.hasOwn(parent,'birthMs')) {
-      if (!Number.isFinite(row.birthMs) || !Number.isFinite(parent.birthMs)) {rememberUnresolved(row);refuse('Windows birth telemetry missing',row,parent);}
-      if (row.birthMs < parent.birthMs) continue;
-    }
-    if (known.has(row.pid) && known.get(row.pid).birth!==row.birth) refuse('owned descendant PID reused',row,parent);
-    scope.set(row.pid,row);pending.set(row.pid,row);changed=true;
-  } }
-  let rss=0;
-  for(const row of scope.values()){assert(Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0,'missing/negative owned RSS');rss+=row.rssBytes;}
-  // Charge the original census before any recheck can observe an exit/lower RSS.
-  rss=Math.max(rss,censusRssFloor);
-  onRss?.({rss,live:[...scope.values()]});
-  const unresolved=[...scope.values()].filter(row=>Object.hasOwn(row,'birthMs')&&!(typeof row.executable==='string'&&row.executable.trim()));
-  const gone=new Set();
-  if(unresolved.length){
-    let fresh=null;
-    try{fresh=recheckWindows?.(unresolved.map(row=>row.pid))??null;}catch{ /* Query denial is unresolved, never absence. */ }
-    const valid=fresh instanceof Map && [...fresh].every(([pid,row])=>unresolved.some(original=>original.pid===pid)&&row?.pid===pid&&Number.isSafeInteger(row.birthMs)&&row.birthMs>=0&&Number.isSafeInteger(row.ppid)&&row.ppid>=0&&Number.isSafeInteger(row.rssBytes)&&row.rssBytes>=0&&typeof row.executable==='string'&&row.birth===String(row.birthMs));
-    for(const row of unresolved){
-      const current=valid?fresh.get(row.pid):null;
-      const outcome=!valid?'unavailable':!current?'absent':current.birth!==row.birth?'pid-reused':current.ppid!==row.ppid?'parent-drift':current.executable.trim()?'resolved':'live-path-unavailable';
-      const witness={at:new Date().toISOString(),outcome,candidate:identityFacts(row),current:identityFacts(current)};
-      onResolution?.(witness);
-      if(outcome==='absent'||outcome==='pid-reused'){
-        gone.add(row.pid);pending.set(row.pid,{...row,absent:true});
-        if(row.pid===rootPid&&!known.has(rootPid))refuse('initial owned root identity unavailable',row,rows.get(row.ppid),witness);
-      }
-      else if(outcome==='resolved')scope.set(row.pid,{...current,rssBytes:Math.max(row.rssBytes,current.rssBytes)});
-      else refuse('descendant identity missing',row,scope.get(row.ppid)??known.get(row.ppid),witness);
-    }
-  }
-  let resolvedRss=0;
-  for(const row of scope.values())resolvedRss+=row.rssBytes;
-  if(resolvedRss>rss){rss=resolvedRss;onRss?.({rss,live:[...scope.values()]});}
-  const live=[];
-  for(const [pid,row] of scope){
-    if(gone.has(pid))continue;
-    const parent=scope.get(row.ppid)??known.get(row.ppid);
-    if(!(row.birth&&row.executable))refuse('descendant identity missing',row,parent);
-    const previous=known.get(pid);
-    // Windows has no POSIX exec-in-place: an empty/different image is not an exec.
-    if(previous&&Object.hasOwn(row,'birthMs')&&row.executable!==previous.executable)refuse('owned Windows executable differs',row,parent);
-    known.set(pid,row);pending.delete(pid);live.push(row);
-  }
-  return {live,rss};
+  assert(measured.sampledPeakBytes===peak,'native root sampled peak mismatch');
+  return measured;
 }
 
-// Cooperative cancellation is a native-polled owned file, NOT SIGKILL of a Metal
-// command buffer. If release cannot be proven, stop the lane, preserve logs and
-// report failure; never proceed to the next cell or signal an unrelated process.
-export async function executeSupervised(root, command, log, limitMs, state, { env = process.env, capBytes = null, cancelFile = `${log}.cancel`, query = processRows, releaseMs = BOUNDS.release, spawnChild = spawn, recheckWindows = recheckWindowsRows } = {}) {
-  const fd = openSync(log,'w');
-  const child = spawnChild(command[0],command.slice(1),{cwd:root,env:{...env,MOSS_ACCEPTANCE_CANCEL_FILE:cancelFile},stdio:['ignore','pipe','pipe'],windowsHide:true});
-  let done = false, code = null, error = null, logOpen = true;
-  const completed = new Promise(resolve => { child.on('error',e => {error=e;}); child.on('close',c => {done=true;code=c;resolve();}); });
-  for (const stream of [child.stdout,child.stderr]) stream.on('data',b => { if(logOpen) writeSync(fd,b); });
-  const known = new Map(), pending = new Map();
-  const queryOwned=until=>query(process.platform,failure=>{state.telemetryFailure??=failure;},spawnSync,Math.min(20_000,Math.max(0,until-Date.now())));
-  const deadline = Date.now() + limitMs;
-  let cancelAt = null, cancelReason = null;
-  const recordRss=observed=>{
-    if(!done&&capBytes!==null){
-      assert(state.rssFirstBytes>0||observed.rss>0,'no positive initial aggregate owned RSS');
-      if(observed.rss>0){
-        state.rssFirstBytes??=observed.rss;state.rssPeakBytes=Math.max(state.rssPeakBytes??0,observed.rss);
-        (state.rssSamples??=[]).push({at:new Date().toISOString(),aggregateBytes:observed.rss,ownedPids:observed.live.map(row=>row.pid)});
-        if(observed.rss>capBytes){state.cancelled=true;cancelReason??=`aggregate owned RSS exceeded cap (${observed.rss} > ${capBytes})`;}
-      }
-    }
-  };
-  const observe=(until=Math.min(deadline,cancelAt===null?Infinity:cancelAt+releaseMs))=>observeOwned(queryOwned(until),known,child.pid,witness=>{state.identityFailure??=witness;},{pending,onRss:recordRss,
-    recheckWindows:pids=>recheckWindows(pids,Math.min(20_000,Math.max(0,until-Date.now())),failure=>{state.telemetryFailure??=failure;}),
-    onResolution:witness=>{state.identityResolution??=witness;}});
+export async function executeSupervised(root, command, log, limitMs, state, {env=process.env,capBytes=null,cancelFile=`${log}.cancel`,releaseMs=BOUNDS.release,spawnChild=spawn,executableDigest=fileDigest}={}) {
+  const binarySha256=executableDigest(command[0]);
+  assert(/^[a-f0-9]{64}$/.test(binarySha256),'exact native executable SHA required');
+  const fd=openSync(log,'w');let child,closed=false,code=null,error=null,logOpen=true;
+  const deadline=Date.now()+limitMs;let cancelAt=null,reason=null;
   try {
-    while (true) {
-      const observed = observe();
-      if (done && !observed.live.length) { state.cleanup = { released:true, observedIdentities:[...known.values()] }; break; }
-      if (done || state.cancelled || Date.now() >= deadline) {
-        if (!cancelAt) { cancelAt = Date.now(); writeFileSync(cancelFile, JSON.stringify({cancel:true,reason:cancelReason??'owned cancellation/deadline/resource limit'})); }
-        if (Date.now() - cancelAt >= releaseMs) { state.unsafe = true; fail('owned processes did not cooperatively release; refusing forced GPU kill or next case'); }
+    child=spawnChild(command[0],command.slice(1),{cwd:root,env:{...env,MOSS_ACCEPTANCE_CANCEL_FILE:cancelFile},stdio:['ignore','pipe','pipe'],windowsHide:true});
+    const completed=new Promise(resolve=>{
+      child.on('error',e=>{error=e;});
+      child.on('close',c=>{closed=true;code=c;resolve();});
+    });
+    assert(Number.isSafeInteger(child.pid)&&child.pid>0,'owned native root PID unavailable');
+    state.rootProcess={scope:'native-api-worker-root',pid:child.pid,executable:command[0],binarySha256};
+    for(const stream of [child.stdout,child.stderr]){
+      stream.on('data',bytes=>{if(logOpen)try{writeSync(fd,bytes);}catch(e){error??=e;}});
+      stream.on('error',e=>{error??=e;});
+    }
+    while(!closed){
+      if(state.cancelled||error||Date.now()>=deadline){
+        if(cancelAt===null){cancelAt=Date.now();reason??=error?.message??'owned cancellation/deadline';writeFileSync(cancelFile,JSON.stringify({cancel:true,reason}));}
+        if(Date.now()>=cancelAt+releaseMs)fail('native root did not cooperatively close; refusing next case or forced GPU kill');
       }
-      await Promise.race([completed,pause(250)]);
-      if (done) await pause(50);
+      await Promise.race([completed,pause(25)]);
     }
-    if (cancelAt || state.cancelled || Date.now() > deadline) fail(cancelReason??'command canceled or deadline exceeded');
-    if (error) throw error;
-    return { exit:code, output:readFileSync(log,'utf8') };
-  } catch (e) {
-    if (cancelAt === null) {
-      cancelAt = Date.now();
-      writeFileSync(cancelFile,JSON.stringify({cancel:true,reason:cancelReason??e.message}));
+    state.cleanup={scope:'native-api-worker-root',released:true,stdioClosed:true,metadataHelperAbsenceClaim:false};
+    if(state.cancelled||cancelAt!==null||Date.now()>=deadline)fail(reason??'owned cancellation/deadline');
+    if(error)throw error;
+    if(code===0&&env.MOSS_ACCEPTANCE_OUTPUT){
+      const file=path.join(env.MOSS_ACCEPTANCE_OUTPUT,...(env.MOSS_ACCEPTANCE_PREFLIGHT_ONLY==='1'?['preflight']:[]),'evidence.json');
+      validateNativeRoot(json(file),state,capBytes);
     }
-    // Even telemetry failures request cooperative cancellation and prove release.
-    const until = cancelAt+releaseMs;
-    let released = false;
-    while (Date.now()<until) {
-      try { const o=observe(until); if(done && !o.live.length) {released=true;break;} } catch { /* unavailable telemetry is never release proof */ }
-      await pause(250);
-    }
-    state.cleanup={released,observedIdentities:[...known.values()],pendingIdentities:[...pending.values()].filter(row=>!row.absent).map(identityFacts)}; state.unsafe=!released;
-    if (cancelReason && !e.message.includes(cancelReason)) throw new Error(`${e.message}; ${cancelReason}`, {cause:e});
-    throw e;
-  } finally { logOpen=false; closeSync(fd); }
+    return {exit:code,output:readFileSync(log,'utf8')};
+  } finally {
+    state.cleanup??={scope:'native-api-worker-root',released:closed,stdioClosed:closed,metadataHelperAbsenceClaim:false};
+    state.unsafe=!closed;
+    logOpen=false;closeSync(fd);
+  }
 }
 
 // Decode the actual bounded native PNG payload, not a filename or header-only proof.
@@ -463,7 +299,7 @@ export async function executeCommand(root, args, log, limitMs, state, supervisio
 
 const commandComplete=(root,args,state)=>state && !state.unsafe&&!state.cancelled && (isPreparationCommand(root,args)
   ? state.completion?.scope==='root-and-stdio' && state.completion.completed===true
-  : state.cleanup?.released===true);
+  : state.cleanup?.scope==='native-api-worker-root' && state.cleanup.released===true && state.cleanup.stdioClosed===true);
 
 export async function run(options) {
   const { root,output,backend,phase,manifest,env=process.env,execute=executeCommand,inspect=defaultInspect,preflightValidator=validatePreflightChecked,sourceProvider=sourceFacts,cacheInventory=inventoryMossTrainingCache }=options;
@@ -605,8 +441,9 @@ export async function run(options) {
         const capBytes=await preflightValidator(json(preflightFile),backend,source,entry.caseId,phase,()=>{assert(!interrupted,'interrupted during native weight verification');remainingCaseMs(caseStartedAt);});
         const {result,state}=await command([executable,test,'--ignored','--exact','--nocapture','--test-threads=1'],`case-${cell.replace('/','-')}`,remainingCaseMs(caseStartedAt),{capBytes,env:{...cellEnv,MOSS_ACCEPTANCE_RESOLVED_CAP_BYTES:String(capBytes)}});
         entry.counts=parseTestResult(result.output,result.exit,test,'green');
-        assert(state.rssFirstBytes>0&&state.rssPeakBytes<=capBytes,'missing/breached aggregate RSS observation');
         assert(existsSync(path.join(caseOutput,'evidence.json')),'native case evidence missing (test counts are not learning evidence)');
+        assert(state.rootProcess?.binarySha256===receipt.executable.sha256,'launched native binary SHA mismatch');
+        validateNativeRoot(json(path.join(caseOutput,'evidence.json')),state,capBytes);
         remainingCaseMs(caseStartedAt);entry.executionPassed=true;
         if(cellIndex!==null) publishPreview(output,receipt,entry,cell);
       }

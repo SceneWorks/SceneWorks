@@ -807,3 +807,30 @@ fn preflight_cancellation_interrupts_a_cold_content_read_before_acquisition() {
         .iter()
         .any(|p| p.state == gen_core::runtime::ArtifactSealProgressState::Acquired));
 }
+
+// CI_IMPACT: injected integers only; no process query, device, tensor or model.
+#[test]
+fn native_root_rss_is_positive_bounded_and_preserves_first_failure() {
+    use super::moss_training_acceptance::RootProcessResources;
+    for bad in [None, Some(0), Some(101)] {
+        let mut resources = RootProcessResources::with_ceiling(100);
+        resources
+            .observe(Some(10), "2000-01-01T00:00:00Z".into())
+            .unwrap();
+        let first = resources
+            .observe(bad, "2000-01-01T00:00:01Z".into())
+            .unwrap_err();
+        assert_eq!(
+            resources
+                .observe(Some(20), "2000-01-01T00:00:02Z".into())
+                .unwrap_err(),
+            first
+        );
+    }
+    let mut resources = RootProcessResources::with_ceiling(100);
+    for bytes in [1, 100, 20] {
+        resources
+            .observe(Some(bytes), "2000-01-01T00:00:00Z".into())
+            .unwrap();
+    }
+}

@@ -120,3 +120,10 @@ string `captureRunId` selects the original capture artifacts and is checked agai
 unchanged evidence verifier against the inspection and artifact provenance. There is no
 separate `moss_evidence_run_id` input. These two derived values keep the combined dispatcher
 within GitHub's 25-input limit without removing either acceptance phase or any other profile.
+
+Training acceptance measures positive native current-process RSS through the protected engine's
+existing syscall, with a sampled maximum and the unchanged resolved memory ceiling. All API,
+training and generation work is joined in the launched Rust process. The parent binds its PID
+and exact binary SHA and requires child exit and stdio closure before continuing. This scope
+makes no full-process-tree, metadata-helper absence or kernel lifetime-peak claim. Cancellation,
+recovery, infeasible-cap refusal and the original one-hour cell deadline remain mandatory.

@@ -15,7 +15,7 @@
     "missing": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "unproven": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
     "failureReason": {"type": ["string", "null"]},
-    "manifestSha256": {"const": "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1"},
+    "manifestSha256": {"const": "c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd"},
     "caseId": {"enum": ["mlx/base/lora", "mlx/base/lokr", "mlx/sft/lora", "mlx/sft/lokr", "cuda/base/lora", "cuda/base/lokr", "cuda/sft/lora", "cuda/sft/lokr"]},
     "identity": {"$ref": "#/$defs/identity"},
     "datasetIdentity": {"$ref": "#/$defs/datasetIdentity"},
@@ -154,8 +154,8 @@
     },
     "crossLoadGuard": {
       "type": "object", "additionalProperties": false,
-      "required": ["device", "ownedProcesses", "aggregateRssSamples", "positiveInitialMeasurement", "telemetryComplete", "missingMeasurementCount", "allChildrenReleased", "releaseReceipt"],
-      "properties": {"device": {"$ref": "#/$defs/identity/properties/device"}, "ownedProcesses": {"$ref": "#/$defs/cleanup/properties/ownedProcesses"}, "aggregateRssSamples": {"$ref": "#/$defs/cleanup/properties/aggregateRssSamples"}, "positiveInitialMeasurement": {"const": true}, "telemetryComplete": {"const": true}, "missingMeasurementCount": {"const": 0}, "allChildrenReleased": {"const": true}, "releaseReceipt": {"$ref": "#/$defs/artifact"}}
+      "required": ["device", "rootProcess", "rootRssSamples", "positiveInitialMeasurement", "telemetryComplete", "missingMeasurementCount", "nativeRootReleased", "releaseReceipt"],
+      "properties": {"device": {"$ref": "#/$defs/identity/properties/device"}, "rootProcess": {"$ref": "#/$defs/cleanup/properties/rootProcess"}, "rootRssSamples": {"$ref": "#/$defs/cleanup/properties/rootRssSamples"}, "positiveInitialMeasurement": {"const": true}, "telemetryComplete": {"const": true}, "missingMeasurementCount": {"const": 0}, "nativeRootReleased": {"const": true}, "releaseReceipt": {"$ref": "#/$defs/artifact"}}
     },
     "checkpointStall": {
       "type": "object", "additionalProperties": false,
@@ -173,11 +173,11 @@
     },
     "cleanup": {
       "type": "object", "additionalProperties": false,
-      "required": ["ownedProcesses", "allChildrenReleased", "releaseReceipt", "aggregateRssSamples", "positiveInitialMeasurement", "telemetryComplete", "missingMeasurementCount", "resolvedCeilingBytes", "caseStartedAt", "caseEndedAt", "caseWallSeconds", "caseDeadlineSeconds", "buildPreparationWallSeconds", "buildPreparationDeadlineSeconds"],
+      "required": ["rootProcess", "nativeRootReleased", "releaseReceipt", "rootRssSamples", "positiveInitialMeasurement", "telemetryComplete", "missingMeasurementCount", "resolvedCeilingBytes", "caseStartedAt", "caseEndedAt", "caseWallSeconds", "caseDeadlineSeconds", "buildPreparationWallSeconds", "buildPreparationDeadlineSeconds"],
       "properties": {
-        "ownedProcesses": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["pid", "birthIdentity", "executable", "role", "releaseObserved"], "properties": {"pid": {"$ref": "#/$defs/positiveInteger"}, "birthIdentity": {"$ref": "#/$defs/text"}, "executable": {"$ref": "#/$defs/text"}, "role": {"enum": ["api", "worker", "api-worker", "owned-child", "watchdog"]}, "releaseObserved": {"const": true}}}},
-        "allChildrenReleased": {"const": true}, "releaseReceipt": {"$ref": "#/$defs/artifact"},
-        "aggregateRssSamples": {"type": "array", "minItems": 2, "items": {"type": "object", "additionalProperties": false, "required": ["at", "bytes", "ownedProcessCount"], "properties": {"at": {"type": "string", "format": "date-time"}, "bytes": {"$ref": "#/$defs/positiveInteger"}, "ownedProcessCount": {"$ref": "#/$defs/positiveInteger"}}}},
+        "rootProcess": {"type": "object", "additionalProperties": false, "required": ["scope", "pid", "executable", "binarySha256", "releaseObserved", "metadataHelperAbsenceClaim"], "properties": {"scope": {"const": "native-api-worker-root"}, "pid": {"$ref": "#/$defs/positiveInteger"}, "executable": {"$ref": "#/$defs/text"}, "binarySha256": {"$ref": "#/$defs/sha256"}, "releaseObserved": {"const": true}, "metadataHelperAbsenceClaim": {"const": false}}},
+        "nativeRootReleased": {"const": true}, "releaseReceipt": {"$ref": "#/$defs/artifact"},
+        "rootRssSamples": {"type": "array", "minItems": 2, "items": {"type": "object", "additionalProperties": false, "required": ["at", "bytes"], "properties": {"at": {"type": "string", "format": "date-time"}, "bytes": {"$ref": "#/$defs/positiveInteger"}}}},
         "positiveInitialMeasurement": {"const": true}, "telemetryComplete": {"const": true}, "missingMeasurementCount": {"const": 0}, "resolvedCeilingBytes": {"$ref": "#/$defs/positiveInteger"}, "caseStartedAt": {"type": "string", "format": "date-time"}, "caseEndedAt": {"type": "string", "format": "date-time"}, "caseWallSeconds": {"type": "number", "exclusiveMinimum": 0, "maximum": 3600}, "caseDeadlineSeconds": {"const": 3600}, "buildPreparationWallSeconds": {"type": "number", "minimum": 0, "maximum": 7200}, "buildPreparationDeadlineSeconds": {"const": 7200}
       }
     },
@@ -220,9 +220,9 @@
     "Verify actual adapter/library paths and hashes, final-not-intermediate selection, application report, strength 1 controls and strength 0 disable output; inspect actual decoded PNG bytes/dimensions and bind review findings to those artifact hashes.",
     "Cross-backend transfer must preserve the adapter artifact hash and exact parent/method. If the format permits loading, require successful generation; an unsupported-format refusal must name the actual incompatibility and must not be relabeled a successful load.",
     "Resolve the product fraction against actual selected-device total before weights load, preserve stricter product safety intersections and reject projected header demand above the ceiling. The low-cap refusal must use a strictly infeasible request and publish no output.",
-    "Verify aggregate RSS samples cover the active owned API/worker/descendant window without missing telemetry, stay under the resolved ceiling, and authenticate every process birth/executable before owned-child release. Missing or zero active RSS measurements fail the case.",
+    "Verify native current-process RSS samples during the API/worker case have no missing/zero measurements and stay under the resolved ceiling. Bind the native PID to the launched binary and parent-owned child exit/stdio closure; require native/API joins. No metadata-helper absence or kernel lifetime peak is claimed.",
     "Recompute training-case wall time and verify evaluation, previews, recovery, anchor re-entry and cleanup finish within 3600 seconds; build/preparation alone has a separate 7200-second bound.",
-    "Cross-load has an independent 3600-second phase budget from each import case start after separately bounded preparation, with its own positive fail-closed RSS and release evidence. Never reuse training caseStartedAt; retain original sourceCaseId and consumed artifact hashes for all eight transfers.",
+    "Cross-load has an independent 3600-second phase budget from each import case start after separately bounded preparation, with its own positive fail-closed native-root RSS and owned-root release evidence. Never reuse training caseStartedAt; retain original sourceCaseId and consumed artifact hashes for all eight transfers.",
     "The checkpoint-20 stall exists only in test support, has its own bounded timeout and retained token/state evidence, never skips/replays updates, and cannot turn a timeout or unverified child release into success.",
     "Verify real production dataset upload, submit/claim/progress/result, library registration and image execution receipts; no mocked or CPU generated-weight run counts as published-weight GPU evidence.",
     "For accepted SFT DMD executions selected mode must equal executed mode for BOTH modes and neither accelerator nor custom adapter may be dropped; Base+DMD must be refused before execution with executedMode=null.",

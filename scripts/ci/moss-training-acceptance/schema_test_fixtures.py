@@ -134,7 +134,7 @@ record = {
     "isCampaignEvidence": False,
     "acceptanceDisposition": "not-campaign-evidence",
     "missing": [], "unproven": [], "failureReason": None,
-    "manifestSha256": "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1",
+    "manifestSha256": "c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd",
     "caseId": "mlx/base/lora",
     "identity": {
         "rulebook": "sc-26584/moss-image-training-acceptance/v1",
@@ -224,10 +224,10 @@ record = {
         "phaseTiming": {"phaseStartedAt": "2000-01-02T00:00:00Z", "completedAt": "2000-01-02T00:00:02Z", "wallSeconds": 2, "wallLimitSeconds": 3600, "clockSource": "cross-load-case-start"},
         "resourceGuard": {
             "device": {"class": "nvidia-cuda", "claimedIdentity": "SCHEMA_TEST_ONLY_NOT_A_CUDA_DEVICE", "observedIdentity": "SCHEMA_TEST_ONLY_NOT_A_CUDA_DEVICE", "totalCapacityBytes": 1000, "gpuMemoryLimitFraction": 0.85, "capacityBasis": "actual-claimed-cuda-context-total-vram", "resolvedCeilingBytes": 850, "resolvedBeforeWeightsLoad": True, "projectedDemandBytes": 500, "headerDemandReceipt": artifact("cross-header.json"), "cpuReference": False},
-            "ownedProcesses": [{"pid": 1, "birthIdentity": "SCHEMA_TEST_ONLY_NOT_A_CROSS_PROCESS", "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE", "role": "api-worker", "releaseObserved": True}],
-            "aggregateRssSamples": [{"at": "2000-01-02T00:00:00Z", "bytes": 200, "ownedProcessCount": 1}, {"at": "2000-01-02T00:00:01Z", "bytes": 250, "ownedProcessCount": 1}],
+            "rootProcess": {"scope":"native-api-worker-root","pid":1,"executable":"SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE","binarySha256":"1"*64,"releaseObserved":True,"metadataHelperAbsenceClaim":False},
+            "rootRssSamples": [{"at": "2000-01-02T00:00:00Z", "bytes": 200}, {"at": "2000-01-02T00:00:01Z", "bytes": 250}],
             "positiveInitialMeasurement": True, "telemetryComplete": True, "missingMeasurementCount": 0,
-            "allChildrenReleased": True, "releaseReceipt": artifact("cross-release.json")
+            "nativeRootReleased": True, "releaseReceipt": artifact("cross-release.json")
         },
         "sourceBackend": "mlx", "importedBackend": "cuda",
         "transferredAdapter": artifact("transferred.safetensors", "2" * 64),
@@ -266,11 +266,11 @@ record = {
         "campaignCeilingRaised": False, "receipt": artifact("refusal.json"),
     },
     "cleanup": {
-        "ownedProcesses": [{"pid": 1, "birthIdentity": "SCHEMA_TEST_ONLY_NOT_A_PROCESS", "executable": "SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE", "role": "api-worker", "releaseObserved": True}],
-        "allChildrenReleased": True, "releaseReceipt": artifact("release.json"),
-        "aggregateRssSamples": [
-            {"at": "2000-01-01T00:00:00Z", "bytes": 200, "ownedProcessCount": 1},
-            {"at": "2000-01-01T00:00:01Z", "bytes": 250, "ownedProcessCount": 1},
+        "rootProcess": {"scope":"native-api-worker-root","pid":1,"executable":"SCHEMA_TEST_ONLY_NOT_AN_EXECUTABLE","binarySha256":"1"*64,"releaseObserved":True,"metadataHelperAbsenceClaim":False},
+        "nativeRootReleased": True, "releaseReceipt": artifact("release.json"),
+        "rootRssSamples": [
+            {"at": "2000-01-01T00:00:00Z", "bytes": 200},
+            {"at": "2000-01-01T00:00:01Z", "bytes": 250},
         ],
         "positiveInitialMeasurement": True, "telemetryComplete": True,
         "missingMeasurementCount": 0, "resolvedCeilingBytes": 600,

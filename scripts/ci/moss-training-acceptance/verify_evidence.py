@@ -15,6 +15,7 @@ import importlib.util
 import json
 import math
 import os
+import re
 import shutil
 import struct
 import time
@@ -22,7 +23,7 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
-MANIFEST_SHA256 = "6f0ffd5d58760fd3877e7c44915d2c968552dee865a8a19792220e7b505252a1"
+MANIFEST_SHA256 = "c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd"
 CELLS = tuple(f"{backend}/{parent}/{method}" for backend in ("mlx", "cuda")
               for parent in ("base", "sft") for method in ("lora", "lokr"))
 CHUNK_BYTES = 1024 * 1024
@@ -354,19 +355,22 @@ def verify_cross_load_clock(clock, limit):
 
 def verify_rss(guard, ceiling, started, ended):
     require(guard["positiveInitialMeasurement"] is True and guard["telemetryComplete"] is True
-            and guard["missingMeasurementCount"] == 0, "missing aggregate RSS telemetry")
-    rows = guard["aggregateRssSamples"]
-    require(len(rows) >= 2, "aggregate RSS observations missing")
+            and guard["missingMeasurementCount"] == 0, "missing native root RSS telemetry")
+    rows = guard["rootRssSamples"]
+    require(len(rows) >= 2, "native root RSS observations missing")
     previous = started
     for row in rows:
         at = timestamp(row["at"])
         require(started <= at <= ended and at >= previous, "RSS timestamp outside active phase or out of order")
         previous = at
-        require(0 < row["bytes"] <= ceiling and row["ownedProcessCount"] > 0,
-                "missing/nonpositive/over-cap aggregate RSS")
-    require(guard["allChildrenReleased"] is True and guard["ownedProcesses"], "owned-child release unproven")
-    require(all(p["releaseObserved"] is True and p["pid"] > 0 and p["birthIdentity"]
-                and p["executable"] for p in guard["ownedProcesses"]), "owned process identity/release missing")
+        require(0 < row["bytes"] <= ceiling,
+                "missing/nonpositive/over-cap native root RSS")
+    process = guard["rootProcess"]
+    require(guard["nativeRootReleased"] is True and process["releaseObserved"] is True
+            and process["scope"] == "native-api-worker-root" and process["pid"] > 0
+            and process["executable"] and re.fullmatch(r"[a-f0-9]{64}", process["binarySha256"])
+            and process["metadataHelperAbsenceClaim"] is False,
+            "native root identity/exit proof missing")
 
 
 def decoded_png(file):
@@ -602,7 +606,7 @@ def _rebase_artifacts(value, prefix, location=()):
 
 
 def controller_observations(bundle, receipt, entry, phase):
-    """Bind post-exit RSS/release facts the native process cannot self-report."""
+    """Bind native root RSS to the parent's exact launched binary/exit/stdio receipt."""
     _, parent, method = entry["caseId"].split("/")
     log = f"case-{parent}-{method}.log"
     commands = [command for command in receipt["commands"] if command["log"] == log]
@@ -611,7 +615,7 @@ def controller_observations(bundle, receipt, entry, phase):
     state = command["supervision"]
     require(command["exitCode"] == 0 and state.get("cleanup", {}).get("released") is True
             and not state.get("unsafe") and not state.get("cancelled"),
-            "external owned-child release/cancellation proof failed")
+            "parent-owned native root release/cancellation proof failed")
     require(entry["counts"] == {"passed": 1, "failed": 0, "ignored": 0, "exit_code": 0},
             "exact native test did not execute once positively")
     case_file = member_path(bundle, entry["rawEvidence"])
@@ -628,19 +632,40 @@ def controller_observations(bundle, receipt, entry, phase):
             "required model revisions, present weights or native demand provenance missing")
     for key in ("workflowSource", "inferencePin", "manifestSha256"):
         require(preflight[key] == receipt["source"][key], "preweight source binding mismatch")
-    identities = state["cleanup"]["observedIdentities"]
-    require(identities, "owned process identities missing")
-    samples = state.get("rssSamples")
-    require(samples and state.get("rssFirstBytes", 0) > 0, "positive external RSS measurement missing")
-    processes = [{"pid": row["pid"], "birthIdentity": row["birth"],
-                  "executable": row["executable"], "role": "api-worker" if index == 0 else "owned-child",
-                  "releaseObserved": True} for index, row in enumerate(identities)]
-    rows = [{"at": row["at"], "bytes": row["aggregateBytes"],
-             "ownedProcessCount": len(row["ownedPids"])} for row in samples]
+    native = read_json(case_file)
+    raw = native.get("raw", {})
+    measured = raw.get("rootProcess", {})
+    process = state.get("rootProcess", {})
+    require(process.get("scope") == "native-api-worker-root"
+            and measured.get("scope") == "native-api-worker-root"
+            and isinstance(measured.get("pid"), int) and measured["pid"] > 0
+            and measured["pid"] == process.get("pid")
+            and process.get("executable") == receipt["executable"]["path"]
+            and process.get("binarySha256") == receipt["executable"]["sha256"]
+            and raw.get("serverJoined") is True
+            and isinstance(raw.get("nativeBodyReturnedAtUnixMs"), int)
+            and state["cleanup"].get("scope") == "native-api-worker-root"
+            and state["cleanup"].get("stdioClosed") is True,
+            "native root PID/binary/joins/stdio binding missing")
+    require(measured.get("measurement") == "native-current-process-rss-sampled-maximum"
+            and measured.get("metadataHelperAbsenceClaim") is False
+            and state["cleanup"].get("metadataHelperAbsenceClaim") is False
+            and measured.get("firstFailure") is None
+            and measured.get("missingMeasurementCount") == 0
+            and measured.get("resolvedCeilingBytes") == preflight["resolvedCapBytes"],
+            "native root RSS scope/cap/completeness differs")
+    rows = measured.get("samples")
+    require(isinstance(rows, list) and len(rows) >= 2
+            and all(type(row.get("bytes")) is int and row["bytes"] > 0 for row in rows)
+            and measured.get("sampledPeakBytes") == max(row["bytes"] for row in rows),
+            "native root sampled maximum missing or differs")
+    process = {"scope":"native-api-worker-root", "pid":process["pid"],
+               "executable":process["executable"], "binarySha256":process["binarySha256"],
+               "releaseObserved":True,"metadataHelperAbsenceClaim":False}
     driver_reference = {"path": f"{phase}-{receipt['backend']}/driver.json",
                         "sha256": digest(Path(bundle) / "driver.json")}
-    cleanup = {"ownedProcesses": processes, "allChildrenReleased": True,
-               "releaseReceipt": driver_reference, "aggregateRssSamples": rows,
+    cleanup = {"rootProcess": process, "nativeRootReleased": True,
+               "releaseReceipt": driver_reference, "rootRssSamples": rows,
                "positiveInitialMeasurement": True, "telemetryComplete": True,
                "missingMeasurementCount": 0, "resolvedCeilingBytes": preflight["resolvedCapBytes"],
                "caseStartedAt": entry["caseStartedAt"], "caseEndedAt": command["finishedAt"],
@@ -911,7 +936,7 @@ def finalize(root, manifest_file, output_file, selection_file):
         require(guard["device"]["observedIdentity"] == cross_preflight["deviceIdentity"]
                 and guard["device"]["resolvedCeilingBytes"] == cross_preflight["resolvedCapBytes"],
                 "cross-load actual/preflight device or ceiling differs")
-        for key in ("ownedProcesses", "allChildrenReleased", "releaseReceipt", "aggregateRssSamples",
+        for key in ("rootProcess", "nativeRootReleased", "releaseReceipt", "rootRssSamples",
                     "positiveInitialMeasurement", "telemetryComplete", "missingMeasurementCount"):
             guard[key] = cross_cleanup[key]
         started = cross_entry["caseStartedAt"]
