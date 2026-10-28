@@ -907,6 +907,10 @@ struct JobView {
     peak_gpu_memory_pct: Option<f64>,
     backend: Option<String>,
     result: Value,
+    /// The resize mode the PERSISTED job names (sc-26691): stamped at creation or, for a job queued
+    /// before the key existed, at the claim — so it is what the job rendered (or will render) with.
+    /// `None` on a job that has not been claimed since the upgrade.
+    reference_image_resize_mode: Option<sceneworks_core::video_request::ReferenceImageResizeMode>,
 }
 
 impl JobView {
@@ -933,6 +937,15 @@ impl JobView {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             result: snapshot.get("result").cloned().unwrap_or(Value::Null),
+            reference_image_resize_mode: snapshot
+                .get("payload")
+                .and_then(|payload| payload.get("advanced"))
+                .and_then(Value::as_object)
+                .and_then(|advanced| {
+                    sceneworks_core::video_request::requested_reference_image_resize_mode(advanced)
+                        .ok()
+                        .flatten()
+                }),
         })
     }
 
@@ -2713,19 +2726,25 @@ impl Session<'_> {
     /// An empty value falls back to this shot's resolved partition, which is exactly what the
     /// first controller would have written, and the attempt row is BACKFILLED so the record
     /// self-heals on the resume that touched it rather than staying blank forever.
+    ///
+    /// `job` is the attempt's job as the API reports it now; it settles the attempt's resize mode
+    /// (sc-26691) from what the job itself records — see
+    /// [`AttemptRecord::settle_reference_image_resize_mode`].
     fn dispatched_model_for(
         &mut self,
         shot_id: &str,
         shot_index: usize,
         attempt_index: usize,
+        job: &JobView,
     ) -> String {
+        let job_mode = job.reference_image_resize_mode;
+        let job_rendered = job.status == "completed";
         let recorded = self.record.shots[shot_index].attempts[attempt_index]
             .resolved_model_id
             .clone();
         if !recorded.is_empty() {
-            // sc-26691: an adopted attempt that predates the resize mode was rendered `diffusers`.
             self.record.shots[shot_index].attempts[attempt_index]
-                .backfill_legacy_reference_image_resize_mode();
+                .settle_reference_image_resize_mode(job_mode, job_rendered);
             return recorded;
         }
         let (model, reason) = self.resolved_partition(shot_id);
@@ -2753,11 +2772,10 @@ impl Session<'_> {
             attempt.effective_steps = steps;
             attempt.turbo_scheduler_shift = shift;
         }
-        // NOT the same rule for the resize mode (sc-26691): what this shot resolves to TODAY is the
-        // engine's `match`, but a pre-story attempt was rendered under the forced short edge, so
-        // the record says `diffusers` — after the short edge above says whether it was a reference
-        // attempt at all.
-        attempt.backfill_legacy_reference_image_resize_mode();
+        // NOT the same rule for the resize mode (sc-26691): what this shot resolves to TODAY is not
+        // what a pre-story attempt rendered. The job's own record decides — after the short edge
+        // above says whether this was a reference attempt at all.
+        attempt.settle_reference_image_resize_mode(job_mode, job_rendered);
         model
     }
 
@@ -4352,7 +4370,8 @@ impl Session<'_> {
         let cancel_grace = CANCEL_GRACE.min(self.shot_budget());
         // The take names the partition that actually rendered it, not the plan's declared family
         // model (sc-23402).
-        let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
+        let dispatched_model =
+            self.dispatched_model_for(&shot.id, shot_index, attempt_index, &view);
         let take = (poll_stop == PollStop::Terminal && view.status == "completed")
             .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
             .flatten();
@@ -4548,7 +4567,8 @@ impl Session<'_> {
             };
             let view = self.client.get_job(&job_id).await?;
             let terminal = view.is_terminal() && view.is_settled();
-            let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
+            let dispatched_model =
+                self.dispatched_model_for(&shot.id, shot_index, attempt_index, &view);
             let take = (terminal && view.status == "completed")
                 .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
                 .flatten();
@@ -7267,6 +7287,7 @@ mod unit_tests {
             peak_gpu_memory_pct: pct,
             backend: None,
             result: Value::Null,
+            reference_image_resize_mode: None,
         };
         let bytes = json!({ "peakMemoryBytes": 115.2 * BYTES_PER_GB, "peakMemoryPct": 90.0 });
         let observed = memory_observation(Some(&bytes), &view(Some(10.0)), Some(128.0));
@@ -7306,6 +7327,7 @@ mod unit_tests {
             peak_gpu_memory_pct: None,
             backend: None,
             result,
+            reference_image_resize_mode: None,
         };
         assert!(!with_result(json!({ "assetWrites": [{ "type": "video" }] })).is_settled());
         assert!(

@@ -3085,6 +3085,30 @@ impl JobsStore {
             worker_gpu_id.clone()
         };
         let now = utc_now();
+        // sc-26691: the claim is the execution boundary every render crosses, so the resize mode
+        // the worker is about to render with is stamped onto the persisted job here. A MiniMax-H3
+        // job queued before the key existed then records the `match` it actually renders, and the
+        // only unstamped H3 record left is one claimed and rendered before the upgrade (replayed
+        // as the legacy `diffusers`). The stamp changes no routing fact, so the projected claim
+        // facts stay current with the new payload revision.
+        if matches!(
+            queued.job_type,
+            JobType::VideoGenerate
+                | JobType::VideoExtend
+                | JobType::VideoBridge
+                | JobType::PersonReplace
+        ) {
+            let mut payload = queued.payload.clone();
+            if crate::video_request::stamp_claimed_reference_image_resize_mode(&mut payload) {
+                transaction.execute(
+                    "update jobs
+                        set payload_json = ?1,
+                            claim_payload_revision = payload_revision + 1
+                      where id = ?2 and status = 'queued'",
+                    params![dumps(&payload)?, queued.id],
+                )?;
+            }
+        }
         transaction.execute(
             "
             update jobs

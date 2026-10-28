@@ -612,7 +612,7 @@ afterwards:
 | `resolvedModelId` | the checkpoint that rendered it, not the family the plan named |
 | `partitionReason` | why that checkpoint and not the other |
 | `referenceImageShortEdge` | the **effective** encode edge (the plan's, or 2048); absent on a base-partition attempt, which encodes no reference |
-| `referenceImageResizeMode` | the **effective** reference resize policy (`match` / `max` / `diffusers`; the plan's, or `match`), present exactly when `referenceImageShortEdge` is; a pre-sc-26691 reference attempt is backfilled `diffusers` |
+| `referenceImageResizeMode` | the **effective** reference resize policy (`match` / `max` / `diffusers`; the plan's, or `match`), present exactly when `referenceImageShortEdge` is; a pre-sc-26691 reference attempt settles from its job (its claim/creation stamp, or `diffusers` only if it completed unstamped) |
 | `loras` | the adapter ids actually sent, in payload order; empty is a recorded state, not an absence |
 | `effectiveSteps` | the count that ran: `advanced.steps`, else the recipe's, else the partition's `defaults.steps` (50) |
 | `turboSchedulerShift` | the recipe's video sigma shift; absent in the base regime |

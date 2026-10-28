@@ -952,10 +952,12 @@ is `match` (the engine default: scale the reference to the target canvas's area,
 `max` (only downsize a short edge above `referenceImageShortEdge`) or `diffusers` (force that short
 edge, upscaling included — the only behaviour before sc-26691). The short edge is read by `max` /
 `diffusers` only. The mode reaches exactly the shots the short edge reaches; a reference attempt
-records the **effective** mode (the plan's, or `match`). Replay is legacy-aware: a MiniMax-H3 job, or
-a reference attempt, recorded before the key existed carries none and was rendered under the forced
-short edge, so a retry/duplicate of such a job is stamped `diffusers` and such an attempt is
-backfilled `diffusers` — while every new video job is stamped with its resolved mode at creation.
+records the **effective** mode (the plan's, or `match`). Replay is legacy-aware: every new video job is
+stamped with its resolved mode at creation, and a MiniMax-H3 job queued before the key existed is
+stamped with the mode it renders (`match`) when a worker claims it. So only a job that finished
+without any stamp rendered under the forced short edge: its retry/duplicate is stamped `diffusers`,
+and a reference attempt recorded without a mode settles from its job — the job's stamp when it has
+one, `diffusers` only when the job completed unstamped, unset while nothing has rendered.
 
 ### Accelerators: `model.loras` and `advanced.steps` (sc-23406)
 

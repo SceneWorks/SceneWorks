@@ -920,6 +920,8 @@ async fn validate_and_canonicalize_merged_generation_payload(
     let job = store_call(state.clone(), move |store, _timeout| store.get_job(&job_id)).await?;
     let job_type = job.job_type.clone();
     let project_id = job.project_id.clone();
+    // sc-26691: only a job that actually rendered can be a legacy (pre-resize-mode) render.
+    let persisted_rendered = matches!(job.status, JobStatus::Completed);
     let mut merged = job.payload;
     // Resolved from the PERSISTED payload, BEFORE the merge below, because inline-LoRA permission is
     // a property of how the job was originally created and `payload_changes` must not be able to
@@ -1046,14 +1048,15 @@ async fn validate_and_canonicalize_merged_generation_payload(
             | JobType::VideoBridge
             | JobType::PersonReplace
     ) {
-        // sc-26691. A replay keeps the resize mode its record names (the shallow merge carried it),
-        // and a MiniMax-H3 record that names NONE predates the key — every creation boundary since
-        // stamps it — so it was rendered under the forced short edge and replays as `diffusers`
-        // rather than silently switching to today's `match` default. See
-        // `stamp_replayed_reference_image_resize_mode`.
+        // sc-26691. A replay keeps the resize mode its record names (the shallow merge carried it).
+        // Every creation boundary and every claim since stamps the key, so a MiniMax-H3 record that
+        // names NONE and COMPLETED rendered before the upgrade, under the forced short edge, and
+        // replays as `diffusers`; an unstamped record that never rendered takes today's `match`.
+        // See `stamp_replayed_reference_image_resize_mode`.
         sceneworks_core::video_request::stamp_replayed_reference_image_resize_mode(
             &mut merged,
             &persisted,
+            persisted_rendered,
             payload_changes,
         )
         .map_err(ApiError::bad_request)?;

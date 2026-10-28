@@ -243,19 +243,64 @@ pub fn stamp_reference_image_resize_mode(
     Ok(())
 }
 
+//// Stamp the resize mode a job is about to RENDER with, at the moment a worker claims it
+/// (sc-26691). Returns whether `payload` changed.
+///
+/// Creation stamps every new MiniMax-H3 job, but a job queued before sc-26691 reaches the claim
+/// without the key, and the worker that claims it now renders the engine default (`match`). The
+/// claim is the one execution-time boundary every render crosses: stamping the RESOLVED mode there
+/// makes the persisted job say what actually ran, so an unstamped H3 record can only be one that
+/// was claimed — and rendered — before the upgrade. A malformed value is left for the worker to
+/// refuse by name; another family is untouched.
+pub fn stamp_claimed_reference_image_resize_mode(payload: &mut JsonObject) -> bool {
+    if !is_minimax_h3_model(&payload_model_id(payload)) {
+        return false;
+    }
+    let advanced = payload
+        .entry("advanced")
+        .or_insert_with(|| Value::Object(JsonObject::new()));
+    let Some(advanced) = advanced.as_object_mut() else {
+        return false;
+    };
+    if advanced.contains_key(REFERENCE_IMAGE_RESIZE_MODE_KEY) {
+        return false;
+    }
+    advanced.insert(
+        REFERENCE_IMAGE_RESIZE_MODE_KEY.to_owned(),
+        Value::String(
+            effective_reference_image_resize_mode(None)
+                .as_str()
+                .to_owned(),
+        ),
+    );
+    true
+}
+
 /// The resize mode a REPLAY (retry / duplicate) stamps when the merged payload names none
 /// (sc-26691).
 ///
-/// `persisted` is the job payload as it was recorded. A MiniMax-H3 record without the key was
-/// written before sc-26691 — every later creation boundary stamps it
-/// ([`stamp_reference_image_resize_mode`]) — so it was rendered with the forced-short-edge
-/// behaviour and replays as [`REFERENCE_IMAGE_RESIZE_MODE_LEGACY`]. Anything else (a record that
-/// carried a mode the changes then dropped, or a replay that switched INTO the family from another
-/// model) is a new authored request and takes today's default.
+/// `persisted` is the job payload as it was recorded, and `persisted_rendered` whether that job
+/// actually rendered (completed). Every creation boundary and every claim since sc-26691 stamps the
+/// key ([`stamp_reference_image_resize_mode`], [`stamp_claimed_reference_image_resize_mode`]), so a
+/// MiniMax-H3 record that lacks it AND rendered was rendered before the upgrade, under the forced
+/// short edge, and replays as [`REFERENCE_IMAGE_RESIZE_MODE_LEGACY`]. An unstamped record that never
+/// rendered (failed or canceled before any claim stamped it) produced nothing to reproduce, so its
+/// replay is a new request and takes today's default — as does a record that carried a mode the
+/// changes then dropped, or a replay that switched INTO the family from another model.
 pub fn replay_reference_image_resize_mode_default(
     persisted: &JsonObject,
+    persisted_rendered: bool,
 ) -> ReferenceImageResizeMode {
-    replay_default(persisted)
+    let unstamped_h3 = is_minimax_h3_model(&payload_model_id(persisted))
+        && !persisted
+            .get("advanced")
+            .and_then(Value::as_object)
+            .is_some_and(|advanced| advanced.contains_key(REFERENCE_IMAGE_RESIZE_MODE_KEY));
+    if unstamped_h3 && persisted_rendered {
+        REFERENCE_IMAGE_RESIZE_MODE_LEGACY
+    } else {
+        REFERENCE_IMAGE_RESIZE_MODE_DEFAULT
+    }
 }
 
 /// The REPLAY (retry / duplicate) boundary for the resize mode (sc-26691): `merged` is the
@@ -265,11 +310,11 @@ pub fn replay_reference_image_resize_mode_default(
 /// without restating `advanced` drops it (another family has nothing to apply it to — the same
 /// reset the MOSS controls get) rather than being refused for a key the caller never sent. What
 /// remains is then stamped exactly as at creation, with the absent default
-/// [`replay_reference_image_resize_mode_default`] decides: `diffusers` for a pre-sc-26691 H3
-/// record, `match` otherwise.
+/// [`replay_reference_image_resize_mode_default`] decides.
 pub fn stamp_replayed_reference_image_resize_mode(
     merged: &mut JsonObject,
     persisted: &JsonObject,
+    persisted_rendered: bool,
     changes: &JsonObject,
 ) -> Result<(), String> {
     if !is_minimax_h3_model(&payload_model_id(merged)) && !changes.contains_key("advanced") {
@@ -277,23 +322,13 @@ pub fn stamp_replayed_reference_image_resize_mode(
             advanced.remove(REFERENCE_IMAGE_RESIZE_MODE_KEY);
         }
     }
-    stamp_reference_image_resize_mode(merged, replay_default(persisted))
+    stamp_reference_image_resize_mode(
+        merged,
+        replay_reference_image_resize_mode_default(persisted, persisted_rendered),
+    )
 }
 
-fn replay_default(persisted: &JsonObject) -> ReferenceImageResizeMode {
-    let legacy = is_minimax_h3_model(&payload_model_id(persisted))
-        && !persisted
-            .get("advanced")
-            .and_then(Value::as_object)
-            .is_some_and(|advanced| advanced.contains_key(REFERENCE_IMAGE_RESIZE_MODE_KEY));
-    if legacy {
-        REFERENCE_IMAGE_RESIZE_MODE_LEGACY
-    } else {
-        REFERENCE_IMAGE_RESIZE_MODE_DEFAULT
-    }
-}
-
-/// Validated seconds window for LTX-2.5's opt-in duration predictor.
+// Validated seconds window for LTX-2.5's opt-in duration predictor.
 ///
 /// This lives in core rather than gen-core so the API can reject malformed requests before a job
 /// exists without taking a provider dependency. The worker converts it to gen-core's identically
@@ -3011,17 +3046,18 @@ mod tests {
         .contains("not supported by wan_i2v"));
     }
 
-    /// sc-26691, legacy replay. A MiniMax-H3 job recorded BEFORE the key existed was rendered under
-    /// the forced short edge, so its retry/duplicate resolves to `diffusers`; a record written since
-    /// carries its own (stamped) mode, which the replay keeps; and a replay that only switched INTO
-    /// the family from another model is a new request and takes `match`.
+    /// sc-26691, legacy replay. A MiniMax-H3 job that RENDERED before the key existed was rendered
+    /// under the forced short edge, so its retry/duplicate resolves to `diffusers`; a record written
+    /// since carries its own (stamped) mode, which the replay keeps; and a replay that only switched
+    /// INTO the family from another model is a new request and takes `match`.
     #[test]
     fn legacy_h3_records_replay_as_diffusers_and_new_records_keep_their_mode() {
-        let replay = |persisted: JsonObject, changes: Value| {
+        let replay = |persisted: JsonObject, rendered: bool, changes: Value| {
             let changes = payload(changes);
             let mut merged = persisted.clone();
             merged.extend(changes.clone());
-            stamp_replayed_reference_image_resize_mode(&mut merged, &persisted, &changes).unwrap();
+            stamp_replayed_reference_image_resize_mode(&mut merged, &persisted, rendered, &changes)
+                .unwrap();
             stamped_mode(&merged).map(str::to_owned)
         };
 
@@ -3030,26 +3066,27 @@ mod tests {
             "advanced": { "referenceImageShortEdge": 1536 }
         }));
         assert_eq!(
-            replay_reference_image_resize_mode_default(&legacy),
+            replay_reference_image_resize_mode_default(&legacy, true),
             ReferenceImageResizeMode::Diffusers
         );
         assert_eq!(
-            replay(legacy.clone(), json!({})).as_deref(),
+            replay(legacy.clone(), true, json!({})).as_deref(),
             Some("diffusers")
         );
         assert_eq!(
-            replay(legacy.clone(), json!({ "seed": 7 })).as_deref(),
+            replay(legacy.clone(), true, json!({ "seed": 7 })).as_deref(),
             Some("diffusers")
         );
         // A legacy record with no `advanced` at all is still legacy.
         assert_eq!(
-            replay(payload(json!({ "model": "minimax_h3" })), json!({})).as_deref(),
+            replay(payload(json!({ "model": "minimax_h3" })), true, json!({})).as_deref(),
             Some("diffusers")
         );
         // An explicit mode in the replay's own changes wins over the legacy reading.
         assert_eq!(
             replay(
                 legacy,
+                true,
                 json!({ "advanced": { "referenceImageResizeMode": "match" } })
             )
             .as_deref(),
@@ -3060,20 +3097,20 @@ mod tests {
         let mut fresh = payload(json!({ "model": "minimax_h3_ref", "advanced": {} }));
         stamp_reference_image_resize_mode(&mut fresh, REFERENCE_IMAGE_RESIZE_MODE_DEFAULT).unwrap();
         assert_eq!(
-            replay_reference_image_resize_mode_default(&fresh),
+            replay_reference_image_resize_mode_default(&fresh, true),
             ReferenceImageResizeMode::Match
         );
-        assert_eq!(replay(fresh, json!({})).as_deref(), Some("match"));
+        assert_eq!(replay(fresh, true, json!({})).as_deref(), Some("match"));
         let max = payload(json!({
             "model": "minimax_h3_ref",
             "advanced": { "referenceImageResizeMode": "max" }
         }));
-        assert_eq!(replay(max, json!({})).as_deref(), Some("max"));
+        assert_eq!(replay(max, true, json!({})).as_deref(), Some("max"));
 
         // Switching into the family from another model is a new request, not a legacy H3 record.
         let wan = payload(json!({ "model": "wan_i2v", "advanced": {} }));
         assert_eq!(
-            replay(wan, json!({ "model": "minimax_h3_ref" })).as_deref(),
+            replay(wan, true, json!({ "model": "minimax_h3_ref" })).as_deref(),
             Some("match")
         );
 
@@ -3086,7 +3123,7 @@ mod tests {
         let changes = payload(json!({ "model": "mochi_1" }));
         let mut merged = h3.clone();
         merged.extend(changes.clone());
-        stamp_replayed_reference_image_resize_mode(&mut merged, &h3, &changes).unwrap();
+        stamp_replayed_reference_image_resize_mode(&mut merged, &h3, true, &changes).unwrap();
         assert_eq!(merged["advanced"], json!({ "steps": 8 }));
         let changes = payload(json!({
             "model": "mochi_1",
@@ -3095,9 +3132,66 @@ mod tests {
         let mut merged = h3.clone();
         merged.extend(changes.clone());
         assert!(
-            stamp_replayed_reference_image_resize_mode(&mut merged, &h3, &changes)
+            stamp_replayed_reference_image_resize_mode(&mut merged, &h3, true, &changes)
                 .unwrap_err()
                 .contains("not supported by mochi_1")
+        );
+    }
+
+    /// sc-26691, the upgrade window. A MiniMax-H3 job QUEUED before the upgrade reaches the claim
+    /// unstamped; the worker that claims it now renders `match`, so the claim stamps `match` onto
+    /// the persisted payload and the replay of that (now completed) job keeps `match` — never the
+    /// legacy `diffusers`. An unstamped job that never rendered (failed or canceled before any claim)
+    /// is not a legacy render either, and replays as `match`.
+    #[test]
+    fn a_pre_upgrade_queued_job_rendered_by_the_new_worker_replays_as_what_it_rendered() {
+        let mut queued_before_upgrade = payload(json!({
+            "model": "minimax_h3_ref",
+            "advanced": { "referenceImageShortEdge": 1536 }
+        }));
+        assert!(stamp_claimed_reference_image_resize_mode(
+            &mut queued_before_upgrade
+        ));
+        assert_eq!(stamped_mode(&queued_before_upgrade), Some("match"));
+        assert_eq!(
+            queued_before_upgrade["advanced"]["referenceImageShortEdge"],
+            json!(1536)
+        );
+        // Idempotent, and a stamped or caller-named mode is never overwritten.
+        assert!(!stamp_claimed_reference_image_resize_mode(
+            &mut queued_before_upgrade
+        ));
+        let mut named = payload(json!({
+            "model": "minimax_h3",
+            "advanced": { "referenceImageResizeMode": "max" }
+        }));
+        assert!(!stamp_claimed_reference_image_resize_mode(&mut named));
+        assert_eq!(stamped_mode(&named), Some("max"));
+        // A bare H3 payload gains an `advanced` block; another family is untouched.
+        let mut bare = payload(json!({ "model": "minimax_h3" }));
+        assert!(stamp_claimed_reference_image_resize_mode(&mut bare));
+        assert_eq!(stamped_mode(&bare), Some("match"));
+        let mut wan = payload(json!({ "model": "wan_i2v", "advanced": {} }));
+        assert!(!stamp_claimed_reference_image_resize_mode(&mut wan));
+        assert_eq!(wan["advanced"], json!({}));
+
+        // The completed, claim-stamped job replays as what it rendered.
+        let changes = JsonObject::new();
+        let mut merged = queued_before_upgrade.clone();
+        stamp_replayed_reference_image_resize_mode(
+            &mut merged,
+            &queued_before_upgrade,
+            true,
+            &changes,
+        )
+        .unwrap();
+        assert_eq!(stamped_mode(&merged), Some("match"));
+
+        // An unstamped H3 record that never rendered: nothing to reproduce, today's default.
+        let never_rendered = payload(json!({ "model": "minimax_h3_ref", "advanced": {} }));
+        assert_eq!(
+            replay_reference_image_resize_mode_default(&never_rendered, false),
+            ReferenceImageResizeMode::Match
         );
     }
 

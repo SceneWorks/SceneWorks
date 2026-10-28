@@ -4197,18 +4197,32 @@ impl AttemptRecord {
         self.take.is_some() && self.rejection.is_none()
     }
 
-    /// Backfill the resize mode of a REFERENCE attempt recorded before sc-26691 (sc-26691).
+    /// Settle the resize mode of a REFERENCE attempt that carries none (sc-26691) from its job.
     ///
-    /// Every attempt written since records its effective mode beside its short edge, so a
-    /// reference attempt (one with a short edge) that has none was dispatched to an engine that only
-    /// knew the forced short edge: it is recorded as
-    /// [`crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY`], never as today's default. A
-    /// base-partition attempt (no short edge) stays without a mode — no reference was resized.
-    pub fn backfill_legacy_reference_image_resize_mode(&mut self) {
-        if self.reference_image_short_edge.is_some() && self.reference_image_resize_mode.is_none() {
-            self.reference_image_resize_mode =
-                Some(crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY);
+    /// Every attempt dispatched since records its effective mode beside its short edge, so only an
+    /// attempt written before sc-26691 lacks one — and that alone does not say what it rendered: its
+    /// job may have been claimed (and rendered `match`) after the upgrade. The job is the authority:
+    ///
+    /// * `job_mode` — the mode the persisted job names (stamped at creation, or at the claim for a
+    ///   job queued before the key existed): what it rendered or will render. Recorded as is.
+    /// * no `job_mode` and `job_rendered` — the job finished without ever being claimed since the
+    ///   upgrade, so it rendered under the forced short edge:
+    ///   [`crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY`].
+    /// * otherwise (unclaimed, failed, canceled) — nothing rendered yet; left unset for the
+    ///   controller that observes the claim or the result.
+    ///
+    /// A base-partition attempt (no short edge) never gains a mode, and a recorded mode is final.
+    pub fn settle_reference_image_resize_mode(
+        &mut self,
+        job_mode: Option<crate::video_request::ReferenceImageResizeMode>,
+        job_rendered: bool,
+    ) {
+        if self.reference_image_short_edge.is_none() || self.reference_image_resize_mode.is_some() {
+            return;
         }
+        self.reference_image_resize_mode = job_mode.or_else(|| {
+            job_rendered.then_some(crate::video_request::REFERENCE_IMAGE_RESIZE_MODE_LEGACY)
+        });
     }
 }
 
@@ -6526,11 +6540,13 @@ mod tests {
     }
 
     /// sc-26691, legacy replay of a run record. A REFERENCE attempt written before the resize mode
-    /// existed (a short edge, no mode) reads back as `diffusers` — the forced short edge it was
-    /// rendered with — never as today's `match`; an attempt that recorded its mode keeps it; a
+    /// existed (a short edge, no mode) is settled from its JOB: a job that finished without any
+    /// post-upgrade stamp rendered under the forced short edge (`diffusers`); a job queued before
+    /// the upgrade and claimed after it carries the claim's `match` stamp, which the attempt adopts;
+    /// a job that has not rendered leaves the attempt unset. A recorded mode is final, and a
     /// base-partition attempt (no short edge) gains no mode.
     #[test]
-    fn a_pre_resize_mode_reference_attempt_backfills_as_diffusers() {
+    fn a_pre_resize_mode_reference_attempt_settles_from_what_its_job_rendered() {
         let attempt = |extra: Value| -> AttemptRecord {
             let mut record = json!({
                 "attempt": 1,
@@ -6545,9 +6561,10 @@ mod tests {
                 .extend(extra.as_object().unwrap().clone());
             serde_json::from_value(record).unwrap()
         };
+        // Finished before the upgrade: no stamp on the job, and it rendered.
         let mut legacy = attempt(json!({ "referenceImageShortEdge": 2048 }));
         assert_eq!(legacy.reference_image_resize_mode, None);
-        legacy.backfill_legacy_reference_image_resize_mode();
+        legacy.settle_reference_image_resize_mode(None, true);
         assert_eq!(
             legacy.reference_image_resize_mode,
             Some(ReferenceImageResizeMode::Diffusers)
@@ -6557,18 +6574,37 @@ mod tests {
             json!("diffusers")
         );
 
+        // Pending at the upgrade, dispatched or adopted after it: the claim stamped `match`, which
+        // is what rendered — never the legacy reading.
+        let mut adopted = attempt(json!({ "referenceImageShortEdge": 2048 }));
+        adopted.settle_reference_image_resize_mode(Some(ReferenceImageResizeMode::Match), true);
+        assert_eq!(
+            adopted.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Match)
+        );
+        let mut in_flight = attempt(json!({ "referenceImageShortEdge": 2048 }));
+        in_flight.settle_reference_image_resize_mode(Some(ReferenceImageResizeMode::Match), false);
+        assert_eq!(
+            in_flight.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Match)
+        );
+        // Not yet claimed, or ended without rendering: nothing to record yet.
+        let mut unclaimed = attempt(json!({ "referenceImageShortEdge": 2048 }));
+        unclaimed.settle_reference_image_resize_mode(None, false);
+        assert_eq!(unclaimed.reference_image_resize_mode, None);
+
         let mut recorded = attempt(json!({
             "referenceImageShortEdge": 2048,
-            "referenceImageResizeMode": "match"
+            "referenceImageResizeMode": "max"
         }));
-        recorded.backfill_legacy_reference_image_resize_mode();
+        recorded.settle_reference_image_resize_mode(None, true);
         assert_eq!(
             recorded.reference_image_resize_mode,
-            Some(ReferenceImageResizeMode::Match)
+            Some(ReferenceImageResizeMode::Max)
         );
 
         let mut base = attempt(json!({ "resolvedModelId": "minimax_h3" }));
-        base.backfill_legacy_reference_image_resize_mode();
+        base.settle_reference_image_resize_mode(Some(ReferenceImageResizeMode::Match), true);
         assert_eq!(base.reference_image_resize_mode, None);
     }
 
