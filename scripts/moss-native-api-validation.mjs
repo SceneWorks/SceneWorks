@@ -257,7 +257,7 @@ export function queryWindowsProcesses({pids = null, timeoutMs = 20_000, run = sp
   const filter=pids===null?"":` -Filter '${pids.map(pid=>`ProcessId = ${pid}`).join(" OR ")}'`;
   const script = [
     "$ErrorActionPreference = 'Stop'",
-    `$rows = @(Get-CimInstance Win32_Process${filter} | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize)`,
+    `$rows = @(Get-CimInstance Win32_Process${filter} -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize | Select-Object ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize)`,
     "$records = @($rows | ForEach-Object { @{ pid = [int]$_.ProcessId; ppid = [int]$_.ParentProcessId;",
     "  birthMs = [long](([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds()); path = [string]$_.ExecutablePath;",
     "  rssBytes = [long]$_.WorkingSetSize } })",

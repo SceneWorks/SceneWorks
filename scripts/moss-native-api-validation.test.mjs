@@ -694,6 +694,7 @@ test("selected Windows census batches exact PIDs and distinguishes empty JSON fr
   for(const stdout of [JSON.stringify([row]),"[]"]){
     const rows=queryWindowsProcesses({pids:[57240,7708],timeoutMs:1234,run:(program,args,options)=>{
       assert.equal(program,"powershell.exe");assert.match(args.at(-1),/-Filter 'ProcessId = 57240 OR ProcessId = 7708'/);
+      assert.match(args.at(-1),/-Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize/);
       assert.match(args.at(-1),/ConvertTo-Json -InputObject \$records/);assert.equal(options.timeout,1234);assert.equal(options.maxBuffer,1024*1024);
       return {status:0,stdout};
     }});
@@ -818,12 +819,13 @@ test('Windows query failures preserve bounded subtype facts without process stdo
  const timeout=Object.assign(new Error('spawnSync powershell.exe ETIMEDOUT'),{code:'ETIMEDOUT'});
  const variants=[
   [{error:timeout,status:null,signal:'SIGTERM',stdout:secret,stderr:'x'.repeat(700)},'command-error'],
+  [{error:timeout,status:0,signal:null,stdout:'[{"pid":1,"ppid":0,"birthMs":1,"path":"owned.exe","rssBytes":1}]',stderr:''},'command-error'],
   [{status:1,stdout:'[]',stderr:'CIM access denied'},'nonzero-status'],
   [{status:0,stdout:' '},'empty-stdout'],[{status:0,stdout:secret},'invalid-json'],[{status:0,stdout:'null'},'invalid-shape'],
  ];
  for(const [result,category] of variants){
   const facts=[];
-  assert.equal(queryWindowsProcesses({run:(_p,_a,options)=>{assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return result;},onFailure:fact=>facts.push(fact)}),null);
+  assert.equal(queryWindowsProcesses({run:(_p,args,options)=>{assert.match(args.at(-1),/Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate,ExecutablePath,WorkingSetSize/);assert.doesNotMatch(args.at(-1),/-Filter/);assert.equal(options.timeout,20000);assert.equal(options.maxBuffer,32*1024*1024);return result;},onFailure:fact=>facts.push(fact)}),null);
   assert.equal(facts.length,1);const fact=facts[0];assert.equal(fact.category,category);assert.equal(fact.status,result.status);assert.equal(fact.timeoutMs,20000);assert.ok(fact.elapsedMs>=0);assert.equal(fact.timedOut,category==='command-error');
   assert.ok((fact.stderr?.length??0)<=512);assert.equal(JSON.stringify(facts).includes(secret),false);
  }
