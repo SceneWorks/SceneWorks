@@ -81,6 +81,7 @@ import {
   turboRecipeSummary,
   turboVariantsForModel,
 } from "../minimaxH3Turbo.js";
+import { isMinimaxH3Entry, recipeReferenceResize } from "../minimaxH3ReferenceResize.js";
 import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -360,12 +361,16 @@ export function VideoStudio() {
     ltxVideoModelId;
   const [model, setModel] = useState(saved.model ?? defaultVideoModelId);
   const [expectedImportedModelRef, setExpectedImportedModelRef] = useState(saved.expectedImportedModelRef ?? null);
+  // sc-26691: the MiniMax-H3 reference-sizing knobs a replayed H3 recipe recorded (the studio has
+  // no control for them). Replay-only state, like the imported identity above.
+  const [replayReferenceResize, setReplayReferenceResize] = useState(null);
   // Every USER model picker must retire replay-only state. Automatic catalog/mode/recipe snaps use
   // the raw state setter below and preserve the replay while its target model becomes active.
   const setUserModel = useCallback((nextModel) => {
     setRecipeModelNotice("");
     setRecipeTierRequest(null);
     setExpectedImportedModelRef(null);
+    setReplayReferenceResize(null);
     setModel(nextModel);
   }, []);
   const textEncoderModel =
@@ -1267,11 +1272,16 @@ export function VideoStudio() {
       setRecipeTierRequest(null);
       // A non-recipe launch is a new request, not a continuation of the last replay: carrying its
       // original imported identity onto a different selection would be refused as a mismatch.
-      if (launchRequest?.view === "Video") setExpectedImportedModelRef(null);
+      if (launchRequest?.view === "Video") {
+        setExpectedImportedModelRef(null);
+        setReplayReferenceResize(null);
+      }
       return;
     }
     const recipe = launchRequest.recipe;
     setExpectedImportedModelRef(recipe.importedModelRef ?? null);
+    // How the recorded H3 clip encoded its references (`diffusers` for a pre-sc-26691 asset).
+    setReplayReferenceResize(recipeReferenceResize(recipe));
     const settings = recipe.normalizedSettings ?? {};
     const rawSettings = recipe.rawAdapterSettings ?? {};
     const { loraIds, loraWeights: recipeWeights } = recipeLoraSelection(recipe);
@@ -2044,6 +2054,9 @@ export function VideoStudio() {
           // the worker; no backend change). Emitted only when a style is applied so styleless recipes
           // stay byte-identical.
           ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
+          // sc-26691: a replayed H3 recipe's reference sizing, only while an H3 model is active
+          // (any other family refuses the key at enqueue).
+          ...(replayReferenceResize && isMinimaxH3Entry(selectedModel) ? replayReferenceResize : {}),
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
           ...(model === ltx25VideoModelId
             ? {
