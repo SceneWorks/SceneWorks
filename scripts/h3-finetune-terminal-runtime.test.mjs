@@ -8,6 +8,14 @@ import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateC
 import { assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
+// Tests must never write under a real HF cache: neither the Windows campaign root nor the HF_HOME
+// / ~/.cache/huggingface this process inherited. Every path a test materializes stays in its temp dir.
+const REAL_HF_ROOTS=[process.env.HF_HOME,process.env.HF_HUB_CACHE,'E:\\huggingface',path.join(os.homedir(),'.cache','huggingface')].filter(Boolean).map(p=>path.resolve(p).toLowerCase());
+function assertTestOwned(file,temporary){
+  const resolved=path.resolve(file),lower=resolved.toLowerCase();
+  assert.ok(lower.startsWith(path.resolve(temporary).toLowerCase()+path.sep),`${resolved} escapes the test temp dir ${temporary}`);
+  for(const real of REAL_HF_ROOTS)assert.ok(lower!==real&&!lower.startsWith(real+path.sep),`${resolved} is under the real HF cache ${real}`);
+}
 const sw='a'.repeat(40),inf='b'.repeat(40),semantic='c'.repeat(64);
 async function fixture(t,group='capability',check='image',backend='mlx') {
   const root=await mkdtemp(path.join(os.tmpdir(),'sc26691-runtime-unit-fake-'));t.after(()=>rm(root,{recursive:true,force:true}));
@@ -104,7 +112,7 @@ test('native adapter consumes actual named executed comparisons without inventin
   f.c.inputs.push({path:fixturePath,sha256:await hashFile(fixturePath),role:'numeric-fixture'},...refs);f.c.referenceRevision=caseBook.numeric.convrot.referenceRevision;
   const name=caseBook.numeric.convrot.selector;f.c.numericProof={kind:'native-pinned-fixture',package:'mlx-gen-minimax-h3',tests:[name]};
   const commands=[];const runProcess=async(argv,options)=>{commands.push(argv);let text;
-    if(argv[0]==='cargo'){const binary=path.join(options.env.CARGO_TARGET_DIR,'integration-unit-fake');await mkdir(path.dirname(binary),{recursive:true});await writeFile(binary,'unit_fake binary NOT executable');text=JSON.stringify({reason:'compiler-artifact',target:{name:'integration'},profile:{test:true},executable:binary});}
+    if(argv[0]==='cargo'){assertTestOwned(options.env.CARGO_TARGET_DIR,f.root);const binary=path.join(options.env.CARGO_TARGET_DIR,'integration-unit-fake');await mkdir(path.dirname(binary),{recursive:true});await writeFile(binary,'unit_fake binary NOT executable');text=JSON.stringify({reason:'compiler-artifact',target:{name:'integration'},profile:{test:true},executable:binary});}
     else text=argv.includes('--list')?`${name}: test\nunrelated::case: test\n`:`running 1 test\ntest ${name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n`;
     await writeFile(options.logPath,text,{flag:'wx'});
   };
@@ -142,7 +150,7 @@ test('backend readbacks bind both source identities, canonical cases and input h
 });
 test('source-bound fixture adapter records actual assertions without fictional load/peak receipts',async t=>{
   const f=await fixture(t,'lifecycle','source-drift');f.c.command=['cargo','test','--manifest-path',path.join(f.root,'Cargo.toml'),'-p','sceneworks-core','--test','minimax_h3_import','--','unit_fake_assertion'];f.c.fixtureProof={kind:'source-bound-assertions'};
-  const r=await executeFixture(f.p,f.c,f.root,f.native,f.dir,{proof_kind:'unit_fake',runProcess:async(argv,options)=>{await writeFile(options.logPath,'test unit_fake_assertion ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n');},hardware:async()=>({device:'unit_fake',driver:'unit_fake'})});
+  const r=await executeFixture(f.p,f.c,f.root,f.native,f.dir,{proof_kind:'unit_fake',runProcess:async(argv,options)=>{assertTestOwned(options.env.CARGO_TARGET_DIR,f.root);await writeFile(options.logPath,'test unit_fake_assertion ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored;\n');},hardware:async()=>({device:'unit_fake',driver:'unit_fake'})});
   assert.equal(r.proof.passed,1);assert.equal(r.evidence.proof_kind,'unit_fake');assert.ok(!r.evidence.metrics&&!r.evidence.runtimeIdentity);
 });
 test('self-contained restart campaign scenario creates baseline, restarts owned state and replays captured job',async t=>{

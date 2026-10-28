@@ -12,6 +12,14 @@ import {runStage,prepareReferenceFixtures,selectStageFiles,bindScopedAuthority,a
 import {validatePlan,verifyInputs,hashFile,runCase} from './h3-finetune-terminal.mjs';
 import {runScenario} from './h3-finetune-terminal-api.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url));
+// Tests must never write under a real HF cache: neither the Windows campaign root nor the HF_HOME
+// / ~/.cache/huggingface this process inherited. Every path a test materializes stays in its temp dir.
+const REAL_HF_ROOTS=[process.env.HF_HOME,process.env.HF_HUB_CACHE,'E:\\huggingface',path.join(os.homedir(),'.cache','huggingface')].filter(Boolean).map(p=>path.resolve(p).toLowerCase());
+function assertTestOwned(file,temporary){
+  const resolved=path.resolve(file),lower=resolved.toLowerCase();
+  assert.ok(lower.startsWith(path.resolve(temporary).toLowerCase()+path.sep),`${resolved} escapes the test temp dir ${temporary}`);
+  for(const real of REAL_HF_ROOTS)assert.ok(lower!==real&&!lower.startsWith(real+path.sep),`${resolved} is under the real HF cache ${real}`);
+}
 const digest=value=>createHash('sha256').update(value).digest('hex');
 const json=(file,value)=>writeFile(file,JSON.stringify(value,null,2)+'\n');
 function sft(tensors){const width={U8:1,I8:1,F32:4,F8_E4M3:1},header={},data=[];let offset=0;for(const [name,dtype,shape,provided]of tensors){const bytes=provided??Buffer.alloc(shape.reduce((a,b)=>a*b,1)*width[dtype],1);header[name]={dtype,shape,data_offsets:[offset,offset+bytes.length]};offset+=bytes.length;data.push(bytes);}const text=Buffer.from(JSON.stringify(header)),size=Buffer.alloc(8);size.writeBigUInt64LE(BigInt(text.length));return Buffer.concat([size,text,...data]);}
@@ -48,7 +56,9 @@ test('fresh filesystem and one scoped input reach a real source-bound prepared c
   for(const backend of ['mlx','cuda']){
   const f=await fixture(t),original=structuredClone(f.args.request.bootstrap.legalAuthority);f.args.backend=backend;if(backend==='cuda')Object.assign(f.args.request.bootstrap.operator,{gpuId:'1',requestedGpu:'1'});f.env.H3_TERMINAL_ROUTE=`h3-terminal-${backend}`;await assert.rejects(access(f.args.outputRoot),/ENOENT/);
   const result=await bootstrapTerminal(f.args);assert.equal(result.prepared,true);assert.equal(result.proof,false);assert.equal(result.cases,25);assert.equal(f.calls.stage,1);assert.equal(f.calls.inputs,1);
-  const plan=JSON.parse(await readFile(result.planPath,'utf8'));validatePlan(plan);assert.equal(plan.backend,backend);assert.equal(plan.proof_kind,'unit_fake');assert.equal(plan.preparationState,'bound');assert.equal(plan.assetStaging.receipt.sha256,await hashFile(plan.assetStaging.receipt.path));
+  const plan=JSON.parse(await readFile(result.planPath,'utf8'));validatePlan(plan);assert.equal(plan.backend,backend);
+  // The staged private root (and everything bound from it) lives in this test's temp dir only.
+  assertTestOwned(plan.assetStaging.receipt.path,f.temporary);for(const c of plan.cases)for(const input of c.inputs??[])if(!input.path.startsWith(root))assertTestOwned(input.path,f.temporary);assert.equal(plan.proof_kind,'unit_fake');assert.equal(plan.preparationState,'bound');assert.equal(plan.assetStaging.receipt.sha256,await hashFile(plan.assetStaging.receipt.path));
   for(const c of plan.cases)await verifyInputs(c);
   const c=plan.cases.find(v=>v.index===1),scenario=JSON.parse(await readFile(c.runtime.scenario,'utf8')),api=fakeAPI();
   // The API confines a local-copy import to <data>/models and a LoRA import to <data>/loras, so

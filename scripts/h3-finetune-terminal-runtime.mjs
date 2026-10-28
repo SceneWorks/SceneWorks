@@ -20,6 +20,10 @@ import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
 export function cargoTarget(c,kind,longPath,platform=process.platform){
   return platform==='win32'?`${privateRunRoot({backend:c.backend,platform,env:process.env,runId:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT})}-${kind}`:longPath;
 }
+// A unit_fake run never resolves the real Windows private root (E:\huggingface\sc26691-private):
+// unless a test names a platform explicitly, it takes the POSIX layout under its own output root.
+export const UNIT_FAKE_PLATFORM = 'linux';
+export function runPlatform(deps={}){return deps.platform??(deps.proof_kind==='unit_fake'?UNIT_FAKE_PLATFORM:process.platform);}
 const exec = promisify(execFile);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const json = async p => JSON.parse(await readFile(p, 'utf8'));
@@ -156,7 +160,7 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   assert.equal(n.package,c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3');
   if(c.backend==='cuda') base.push('--features','cuda');
   const buildCommand=[...base,'--no-run','--message-format=json'];
-  const opts={cwd:inferenceRoot,env:{...process.env,...(c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:cargoTarget(c,'native',path.join(p.output,`native-target-${p.inference}-${c.backend}`),deps.platform),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'},timeoutSeconds:c.timeoutSeconds};
+  const opts={cwd:inferenceRoot,env:{...process.env,...(c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:cargoTarget(c,'native',path.join(p.output,`native-target-${p.inference}-${c.backend}`),runPlatform(deps)),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'},timeoutSeconds:c.timeoutSeconds};
   await runner(buildCommand,{...opts,logPath:path.join(dir,'native-build.log')});
   const records=(await readFile(path.join(dir,'native-build.log'),'utf8')).split('\n').flatMap(l=>{try{return [JSON.parse(l)];}catch{return [];}});
   const artifact=records.find(v=>v.reason==='compiler-artifact' && v.target?.name==='integration' && v.profile?.test && v.executable);
@@ -195,7 +199,7 @@ export async function executeFixture(p,c,swRoot,inferenceRoot,dir,deps={}) {
   assert.equal(c.fixtureProof.kind,'source-bound-assertions');assert.equal(c.command[0],'cargo');assert.ok(c.command.includes('test')&&c.command.includes(path.join(swRoot,'Cargo.toml')));
   assert.ok(c.inputs.length);for(const input of c.inputs)assert.equal(await hashFile(input.path),input.sha256);
   const state=path.join(dir,'fixture-state');await mkdir(state);
-  const env={...privateEnvironment(state,{port:43210,gpuId:'cpu',backend:c.backend},randomUUID()),CARGO_TARGET_DIR:cargoTarget(c,'fixture',path.join(p.output,`fixture-target-${p.sceneworks}-${p.inference}-${c.backend}`),deps.platform),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'};
+  const env={...privateEnvironment(state,{port:43210,gpuId:'cpu',backend:c.backend},randomUUID()),CARGO_TARGET_DIR:cargoTarget(c,'fixture',path.join(p.output,`fixture-target-${p.sceneworks}-${p.inference}-${c.backend}`),runPlatform(deps)),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'};
   await (deps.runProcess??runProcess)(c.command,{cwd:swRoot,env,logPath:path.join(dir,'assertions.log'),timeoutSeconds:c.timeoutSeconds});
   const log=await readFile(path.join(dir,'assertions.log'),'utf8'),passed=executedTests(log);assert.ok(!/\bSKIP\b/.test(log));
   const proof={kind:'source-bound-assertions',proof_kind:fake?'unit_fake':'campaign_fixture',sceneworks:p.sceneworks,inference:p.inference,command:c.command,passed,inputs:c.inputs,meaning:'Executed source-bound synthetic contract assertions; no real-model/native load or measured peak claimed'};
@@ -289,7 +293,7 @@ export class OwnedService {
     const runner=this.deps.runProcess??runProcess;
     const command=['cargo','build','--locked','--manifest-path',path.join(this.swRoot,'Cargo.toml'),'-p','sceneworks-rust-api','--bin','sceneworks-rust-api'];
     if(this.c.backend==='cuda')command.push('--features','sceneworks-rust-api/backend-candle');
-    const platform=this.deps.platform??process.platform,buildRoot=path.join(this.p.output,`service-build-${this.p.sceneworks}-${this.p.inference}-${this.c.backend}`),receipt=path.join(buildRoot,'build.json');
+    const platform=runPlatform(this.deps),buildRoot=path.join(this.p.output,`service-build-${this.p.sceneworks}-${this.p.inference}-${this.c.backend}`),receipt=path.join(buildRoot,'build.json');
     const target=cargoTarget(this.c,'target',path.join(buildRoot,'target'),platform);
     const configuration={command,flags:Object.fromEntries(['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','RUSTUP_TOOLCHAIN'].map(k=>[k,process.env[k]??null])),proof_kind:this.fake?'unit_fake':'campaign_native'};
     let cached;

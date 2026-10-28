@@ -218,7 +218,7 @@ test('the bootstrap output root shares a volume with the staged model files', as
   // Same device, by construction, on both platforms.
   const { privateRunRoot } = await import('./h3-finetune-terminal-stage.mjs');
   const mac = privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: '/Volumes/Models/huggingface' }, runId: '7', attempt: '1' });
-  assert.equal(mac, '/Volumes/Models/huggingface/sc26691-private/7-1');
+  assert.equal(mac, path.join('/Volumes/Models/huggingface', 'sc26691-private', '7-1'));
   const win = privateRunRoot({ backend: 'cuda', platform: 'win32', env: {}, runId: '7', attempt: '1' });
   assert.equal(win, 'E:\\huggingface\\sc26691-private\\7-1');
 });
