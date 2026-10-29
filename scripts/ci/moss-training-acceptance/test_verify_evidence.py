@@ -314,8 +314,52 @@ class StaticContractTests(unittest.TestCase):
         file.write_text('{"fixtureLabel":"SCHEMA TEST ONLY - NOT CAMPAIGN EVIDENCE"}')
         value = {"identity": {"weightSources": [{"files": [{"path": "proof.json", "sha256": verifier.digest(file)}]}]}}
         self.assertEqual(len(list(verifier._artifact_references(value))), 1)
-        verifier._rebase_artifacts(value, "capture-mlx/base/lora")
-        self.assertEqual(next(verifier._artifact_references(value))["path"], "capture-mlx/base/lora/proof.json")
+        rebased = verifier._rebase_artifacts(value, "capture-mlx/base/lora")
+        self.assertEqual(next(verifier._artifact_references(rebased))["path"], "capture-mlx/base/lora/proof.json")
+        self.assertEqual(next(verifier._artifact_references(value))["path"], "proof.json")
+
+    def test_rebase_shared_upload_and_api_references_once_without_mutating_producer(self):
+        prefix = "capture-mlx/base/lora"
+        file = self.root / prefix / "dataset/upload-0.json"
+        file.parent.mkdir(parents=True)
+        file.write_text('{"fixtureLabel":"SCHEMA TEST ONLY - NOT CAMPAIGN EVIDENCE"}')
+        reference = {"path": "dataset/upload-0.json", "sha256": verifier.digest(file)}
+        upload = {"uploadReceipt": reference}
+        value = {"datasetIdentity": {"uploadedItems": [upload]},
+                 "productPath": {"datasetUpload": {"requestArtifact": reference,
+                                                   "responseArtifact": reference}}}
+        original = copy.deepcopy(value)
+        rebased = verifier._rebase_artifacts(value, prefix)
+        references = list(verifier._artifact_references(rebased))
+        self.assertEqual(len(references), 3)
+        self.assertEqual(len({id(item) for item in references}), 3)
+        for item in references:
+            self.assertEqual(item, {"path": f"{prefix}/dataset/upload-0.json", "sha256": reference["sha256"]})
+            self.assertEqual(verifier.checked_artifact(self.root, item), file)
+        self.assertEqual(value, original)
+        self.assertEqual(upload["uploadReceipt"], reference)
+        self.assertEqual(reference["path"], "dataset/upload-0.json")
+        cross = verifier._rebase_artifacts(value, "cross-load-cuda/base/lora")
+        self.assertTrue(all(item["path"] == "cross-load-cuda/base/lora/dataset/upload-0.json"
+                            for item in verifier._artifact_references(cross)))
+        self.assertEqual(value, original)
+
+    def test_rebased_artifacts_still_reject_unsafe_paths_and_changed_bytes(self):
+        prefix = "capture-mlx/base/lora"
+        for unsafe in ("../../../../escape.json", "..\\escape.json", "C:/escape.json"):
+            with self.subTest(path=unsafe), self.assertRaises(verifier.EvidenceError):
+                verifier.checked_artifact(self.root, verifier._rebase_artifacts(
+                    {"path": unsafe, "sha256": "a" * 64}, prefix))
+        context = verifier._normalizer._Context(self.root)
+        with self.assertRaises(verifier._normalizer.NormalizationError):
+            context.checked({"path": "/absolute.json", "sha256": "a" * 64})
+        file = self.root / prefix / "proof.json"
+        file.parent.mkdir(parents=True)
+        file.write_text("original")
+        rebased = verifier._rebase_artifacts({"path": "proof.json", "sha256": verifier.digest(file)}, prefix)
+        file.write_text("changed")
+        with self.assertRaisesRegex(verifier.EvidenceError, "artifact hash mismatch"):
+            verifier.checked_artifact(self.root, rebased)
 
     def test_native_descriptor_normal_form_matches_schema_without_invented_fields(self):
         from jsonschema import Draft202012Validator

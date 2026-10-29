@@ -593,16 +593,16 @@ def verify_bundle(root, phase, backend, expected_source=None):
     return bundle, receipt
 
 
-def _rebase_artifacts(value, prefix, location=()):
+def _rebase_artifacts(value, prefix):
+    # Normalization can reuse one reference in several fields. Rebuild each
+    # occurrence so aliases receive one prefix and producer observations stay local.
     if isinstance(value, dict):
         if set(value) == {"path", "sha256"}:
-            value["path"] = f"{prefix}/{value['path']}"
-        else:
-            for key, item in value.items():
-                _rebase_artifacts(item, prefix, location + (key,))
-    elif isinstance(value, list):
-        for item in value:
-            _rebase_artifacts(item, prefix, location)
+            return {"path": f"{prefix}/{value['path']}", "sha256": value["sha256"]}
+        return {key: _rebase_artifacts(item, prefix) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_rebase_artifacts(item, prefix) for item in value]
+    return value
 
 
 def controller_observations(bundle, receipt, entry, phase):
@@ -928,8 +928,8 @@ def finalize(root, manifest_file, output_file, selection_file):
         # Artifact paths are relative to the producing case directory. The peer
         # cross-load piece is rebased separately, preserving original cell identity.
         cross_piece = record.pop("crossBackendLoad")
-        _rebase_artifacts(record, capture_prefix)
-        _rebase_artifacts(cross_piece, cross_prefix)
+        record = _rebase_artifacts(record, capture_prefix)
+        cross_piece = _rebase_artifacts(cross_piece, cross_prefix)
         record["crossBackendLoad"] = cross_piece
         record["cleanup"] = external_cleanup
         guard = cross_piece["resourceGuard"]
