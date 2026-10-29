@@ -142,6 +142,43 @@ test('controlled subprocess executes, propagates failures and refuses log overwr
   await assert.rejects(runProcess([process.execPath, '-e', 'process.exit(7)'], { ...options, logPath: path.join(dir, 'failed.log') }), /failed/);
   await assert.rejects(runProcess([process.execPath, '-e', 'setTimeout(()=>{},100)'], { ...options, timeoutSeconds: 0.01, logPath: path.join(dir, 'timeout.log') }), /timeout/);
 });
+// A wedged case process (its drain never returns, its live children keep it alive) once held the
+// step open for 6.5 h (run 40797515762): the timer only logged H3_CASE_TIMEOUT. The harness now
+// terminates the process it spawned, by its own child PID, after the deadline plus a grace.
+const isAlive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
+test('a case process that ignores its deadline is terminated by its own PID within the bound', async t => {
+  const { dir } = await fixture(t);
+  // Ignores SIGTERM where signals exist (POSIX), so the SIGKILL escalation is exercised there too.
+  const script = "process.on('SIGTERM',()=>console.log('ignoring SIGTERM'));console.log('pid '+process.pid);setInterval(()=>{},1000);";
+  const started = Date.now(), logPath = path.join(dir, 'wedged.log');
+  await assert.rejects(runProcess([process.execPath, '-e', script], { cwd: dir, env: process.env, logPath, timeoutSeconds: 0.2, graceSeconds: 0.3, killGraceSeconds: 0.5 }), /terminated its own case process \d+/);
+  const elapsed = Date.now() - started, log = await readFile(logPath, 'utf8');
+  assert.ok(elapsed >= 500 && elapsed < 10000, `bounded termination took ${elapsed} ms`);
+  assert.match(log, /H3_CASE_TIMEOUT/); assert.match(log, /H3_CASE_TERMINATED: case process \d+/);
+  const pid = Number(/pid (\d+)/.exec(log)[1]); assert.equal(isAlive(pid), false, 'the case process is gone');
+  if (process.platform !== 'win32') assert.match(log, /H3_CASE_KILLED/);
+});
+test('a recorded drain bound extends the post-deadline window for the same child only, capped by the hard deadline', async t => {
+  const { dir } = await fixture(t);
+  const boundPath = path.join(dir, 'shutdown-bound.json');
+  // The child records the worker-advertised drain bound (1.5 s out) for ITS OWN pid, then wedges.
+  const script = `require('fs').writeFileSync(${JSON.stringify(boundPath)},JSON.stringify({kind:'h3-case-shutdown-bound',pid:process.pid,jobId:'j',source:'worker-advertised-stall-budget',deadlineMs:Date.now()+1500}));setInterval(()=>{},1000);`;
+  let started = Date.now();
+  await assert.rejects(runProcess([process.execPath, '-e', script], { cwd: dir, env: process.env, logPath: path.join(dir, 'bounded.log'), timeoutSeconds: 0.1, graceSeconds: 0.1, killGraceSeconds: 0.5, shutdownBoundPath: boundPath }), /terminated its own case process/);
+  assert.ok(Date.now() - started >= 1400, 'honoured the recorded drain bound');
+  assert.match(await readFile(path.join(dir, 'bounded.log'), 'utf8'), /within its recorded bound \(worker-advertised-stall-budget\)/);
+  // A bound for a foreign pid is ignored: termination follows the plain grace.
+  const foreign = `require('fs').writeFileSync(${JSON.stringify(boundPath)},JSON.stringify({kind:'h3-case-shutdown-bound',pid:1,deadlineMs:Date.now()+60000}));setInterval(()=>{},1000);`;
+  started = Date.now();
+  await assert.rejects(runProcess([process.execPath, '-e', foreign], { cwd: dir, env: process.env, logPath: path.join(dir, 'foreign.log'), timeoutSeconds: 0.1, graceSeconds: 0.2, killGraceSeconds: 0.5, shutdownBoundPath: boundPath }), /terminated/);
+  assert.ok(Date.now() - started < 10000);
+  // The hard (lane) deadline caps any recorded bound.
+  const greedy = `require('fs').writeFileSync(${JSON.stringify(boundPath)},JSON.stringify({kind:'h3-case-shutdown-bound',pid:process.pid,source:'worker-advertised-stall-budget',deadlineMs:Date.now()+3600000}));setInterval(()=>{},1000);`;
+  started = Date.now();
+  await assert.rejects(runProcess([process.execPath, '-e', greedy], { cwd: dir, env: process.env, logPath: path.join(dir, 'capped.log'), timeoutSeconds: 0.1, graceSeconds: 0.2, killGraceSeconds: 0.5, shutdownBoundPath: boundPath, hardDeadlineMs: Date.now() + 1000 }), /terminated/);
+  assert.ok(Date.now() - started < 10000, 'the lane deadline caps the recorded bound');
+  assert.match(await readFile(path.join(dir, 'capped.log'), 'utf8'), /capped by the hard deadline/);
+});
 test('missing executions cannot yield campaign acceptance; local native run is refused', async t => {
   const { p } = await fixture(t); await assert.rejects(verifyCampaign(p), /ENOENT/);
   if (process.env.GITHUB_ACTIONS !== 'true') await assert.rejects(runCase(p, p.cases[0].id, '.', '.'), /Actions-only/);

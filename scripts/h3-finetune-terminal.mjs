@@ -632,20 +632,59 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
   }
   return { evidenceSha256: await hashFile(contained(dir, c.evidence)), processLogSha256: createHash('sha256').update(log).digest('hex'), files, ...(av ? { av } : {}), ...(numeric ? { numeric } : {}), ...(runtime ? { runtime } : {}), ...(sourceCancel ? { sourceCancel } : {}) };
 }
-// No shell interpolation. The process must implement cooperative timeout/cancel (native GPU
-// execution must not be killed mid-command-buffer); Actions is the final job timeout boundary.
-export async function runProcess(argv, { cwd, env, logPath, timeoutSeconds }) {
+/** Where a case process records how long its cooperative shutdown is still entitled to (see OwnedService.drain). */
+export const CASE_SHUTDOWN_BOUND_FILE = 'shutdown-bound.json';
+/** Post-deadline window without a recorded bound: default cancel drains, the Idle wait and three bounded owned exits. */
+export const CASE_SHUTDOWN_GRACE_SECONDS = 900;
+/** After SIGTERM, how long the harness waits before SIGKILL of its own case process. */
+export const CASE_KILL_GRACE_SECONDS = 30;
+const MAX_TIMER_MS = 2 ** 31 - 1;
+// No shell interpolation. At the case deadline the process gets its cooperative window: it cancels
+// and drains its owned service within the worker's own advertised stall budget and records that
+// bound in <case dir>/shutdown-bound.json (native GPU work is never killed mid-command-buffer by
+// this harness: the owned worker/API watch the case's guardian pipe and shut down gracefully when
+// the case process goes). Past max(deadline + grace, the recorded bound), never past the hard
+// deadline, the harness terminates the process IT spawned, by its own child PID: SIGTERM, then
+// SIGKILL after a further grace, and the case fails. Nothing here waits unbounded; the Actions job
+// timeout is not the only bound (a wedged drain held the lane for 6.5 h in run 40797515762).
+export async function runProcess(argv, { cwd, env, logPath, timeoutSeconds, graceSeconds = CASE_SHUTDOWN_GRACE_SECONDS, killGraceSeconds = CASE_KILL_GRACE_SECONDS, shutdownBoundPath, hardDeadlineMs = Infinity, now = Date.now }) {
   const output = createWriteStream(logPath, { flags: 'wx' });
   await new Promise((resolve, reject) => { output.once('open', resolve); output.once('error', reject); });
   const child = spawn(argv[0], argv.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
   child.stdout.pipe(output, { end: false }); child.stderr.pipe(output, { end: false });
-  let expired = false;
-  const timer = setTimeout(() => { expired = true; output.write('H3_CASE_TIMEOUT: explicit case deadline exceeded; failure, cooperative shutdown only, never a GPU force kill.\n'); }, timeoutSeconds * 1000);
+  const exited = new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', (code, signal) => resolve({ code, signal })); });
+  const closed = new Promise(resolve => child.once('close', resolve));
+  const alive = () => child.exitCode === null && child.signalCode === null;
+  let expired = false, terminated = null, escalation, kill;
+  const recordedBound = async () => {
+    if (!shutdownBoundPath) return null;
+    try { const bound = JSON.parse(await readFile(shutdownBoundPath, 'utf8')); return bound?.kind === 'h3-case-shutdown-bound' && bound.pid === child.pid && Number.isFinite(bound.deadlineMs) ? bound : null; }
+    catch { return null; } // Absent, or mid-rename: the next check re-reads it.
+  };
+  let firstEscalationAt;
+  const escalate = async () => {
+    if (!alive()) return;
+    const bound = await recordedBound(), at = now(), target = Math.min(hardDeadlineMs, Math.max(firstEscalationAt, bound?.deadlineMs ?? -Infinity));
+    if (target > at) { escalation = setTimeout(escalate, Math.min(target - at, MAX_TIMER_MS)); return; }
+    if (!alive()) return;
+    terminated = { pid: child.pid, at: new Date(at).toISOString(), bound: bound ? { deadline: new Date(bound.deadlineMs).toISOString(), source: bound.source, jobId: bound.jobId } : null };
+    output.write(`H3_CASE_TERMINATED: case process ${child.pid} did not finish its cooperative shutdown within ${bound ? `its recorded bound (${bound.source})` : `the ${graceSeconds} s post-deadline grace`}${target === hardDeadlineMs ? ' capped by the hard deadline' : ''}; SIGTERM to the harness's own child PID, SIGKILL in ${killGraceSeconds} s.\n`);
+    child.kill('SIGTERM');
+    kill = setTimeout(() => { if (alive()) { output.write(`H3_CASE_KILLED: case process ${child.pid} survived SIGTERM for ${killGraceSeconds} s; SIGKILL.\n`); child.kill('SIGKILL'); } }, killGraceSeconds * 1000);
+  };
+  const timer = setTimeout(() => {
+    expired = true; firstEscalationAt = now() + graceSeconds * 1000;
+    output.write(`H3_CASE_TIMEOUT: explicit case deadline exceeded; failure. The case process gets its cooperative shutdown (worker-advertised drain bound, else ${graceSeconds} s) before the harness terminates its own child PID.\n`);
+    escalation = setTimeout(escalate, Math.max(0, Math.min(firstEscalationAt, hardDeadlineMs) - now()));
+  }, Math.min(timeoutSeconds * 1000, MAX_TIMER_MS));
   try {
-    const code = await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+    const { code, signal } = await exited;
+    // A grandchild that inherited the pipes must not hold the step open after the case process went.
+    await Promise.race([closed, new Promise(resolve => setTimeout(resolve, 5000).unref())]);
+    assert.ok(!terminated, `case exceeded its ${timeoutSeconds} s deadline and its cooperative shutdown bound; the harness terminated its own case process ${terminated?.pid} (${signal ?? code}); failed, never accepted on resume`);
     assert.ok(!expired, 'case exceeded timeout; failed, never accepted on resume');
     assert.equal(code, 0, 'case process failed');
-  } finally { clearTimeout(timer); await new Promise(resolve => output.end(resolve)); }
+  } finally { clearTimeout(timer); clearTimeout(escalation); clearTimeout(kill); await new Promise(resolve => output.end(resolve)); }
 }
 export async function laneBudget(p,backend,{now=Date.now(),startedAt=process.env.H3_TERMINAL_LANE_STARTED_AT}={}) {
   const filename=contained(p.output,`lane-budget-${backend}.json`),totalSeconds=86400;
@@ -782,7 +821,7 @@ export async function runCase(p, id, root, inferenceRoot) {
   await save(statePath, { ...identity, status: 'running', started });
   try {
     if (c.group === 'artifact') await save(path.join(dir, 'source-catalog.json'), await fetchFrozenCatalog(c));
-    const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(Math.max(1,Math.floor((caseDeadline-Date.now())/1000))), H3_CASE_DEADLINE_MS:String(caseDeadline) }, timeoutSeconds: Math.max(1,Math.floor((caseDeadline-Date.now())/1000)) };
+    const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(Math.max(1,Math.floor((caseDeadline-Date.now())/1000))), H3_CASE_DEADLINE_MS:String(caseDeadline) }, timeoutSeconds: Math.max(1,Math.floor((caseDeadline-Date.now())/1000)), shutdownBoundPath: path.join(dir, CASE_SHUTDOWN_BOUND_FILE), hardDeadlineMs: budget ? Date.parse(budget.deadline) : Infinity };
     if (c.group === 'numeric' && c.kind!=='actual-artifact-probe' && c.numericProof?.kind !== 'native-pinned-fixture') {
       await runProcess(c.referenceCommand, { ...options, logPath: path.join(dir, 'reference.log') });
       await save(path.join(dir, 'reference-execution.json'), { command: c.referenceCommand, revision: c.referenceRevision, outputSha256: await hashFile(contained(dir, c.referenceOutput)) });

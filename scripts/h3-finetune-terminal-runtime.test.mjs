@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat, realpath } from 'node:fs/promises';
-import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
-import { assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
+import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,advertisedStallBudget,cancelDrainBoundMs,postDrainShutdownMs,STALL_BUDGET_EVENT,WORKER_VIDEO_STALL_GRACE_SECONDS,DEFAULT_CANCEL_DRAIN_SECONDS,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
+import { CASE_SHUTDOWN_BOUND_FILE,assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
 // Tests must never write under a real HF cache: neither the Windows campaign root nor the HF_HOME
@@ -35,7 +35,7 @@ async function fixture(t,group='capability',check='image',backend='mlx') {
 async function replaceScenario(f,c,executions,parameters=f.parameters){
   Object.assign(f.c,c);f.c.declaredSourceBindings=executions;f.scenario=buildScenario(f.c,parameters,executions);await writeFile(f.c.runtime.scenario,JSON.stringify(f.scenario));f.c.inputs.find(v=>v.role==='scenario').sha256=await hashFile(f.c.runtime.scenario);return f.scenario;
 }
-function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok']}={}) {
+function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok'],signalWhileActive=false}={}) {
   let healthCalls=0;
   let pid=7000,jobNo=0,nativeLoadCount=0,serviceDir,activeWorker,heartbeat=Date.now();const children=[],calls=[],jobs=new Map(),assets=new Map();
   const preparationCancel=f.c.id.endsWith('.generation-source-prep-cancel');
@@ -47,7 +47,7 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok']}={}) {
   const spawnOwned=(argv,env,cwd,logPath)=>{
     const kind=argv[0]===process.execPath?'guardian':env.SCENEWORKS_WORKER_ONLY==='1'?'worker':'api';
     serviceDir=path.dirname(env.SCENEWORKS_CONFIG_DIR);let code=null,logs='';let resolveExit;const done=new Promise(r=>resolveExit=r);
-    const child={pid:++pid,kind,env,argv,logPath,exitCode:()=>code,log:()=>logs,append:v=>{logs+=JSON.stringify(v)+'\n';},close:()=>{if(code!==null)return;code=0;resolveExit({code:0,signal:null});},stdin:{end:()=>{calls.push(['end',kind,child.pid]);child.close();if(kind==='guardian')for(const c of children.filter(c=>c.kind==='api'&&c.env.SCENEWORKS_PARENT_PID===String(child.pid)))c.close();}},signal:s=>{assert.equal(s,'SIGTERM');assert.ok([...jobs.values()].every(j=>['completed','canceled','failed'].includes(j.status)),'no signal before cooperative completion');calls.push(['signal',kind,child.pid,s]);child.close();},exit:async()=>{const result=await done;await writeFile(logPath,logs,{flag:'wx'});return result;}};
+    const child={pid:++pid,kind,env,argv,logPath,exitCode:()=>code,log:()=>logs,append:v=>{logs+=JSON.stringify(v)+'\n';},close:()=>{if(code!==null)return;code=0;resolveExit({code:0,signal:null});},stdin:{end:()=>{calls.push(['end',kind,child.pid]);child.close();if(kind==='guardian')for(const c of children.filter(c=>c.kind==='api'&&c.env.SCENEWORKS_PARENT_PID===String(child.pid)))c.close();}},signal:s=>{assert.equal(s,'SIGTERM');assert.ok(signalWhileActive||[...jobs.values()].every(j=>['completed','canceled','failed'].includes(j.status)),'no signal before cooperative completion');calls.push(['signal',kind,child.pid,s]);child.close();},exit:async()=>{const result=await done;await writeFile(logPath,logs,{flag:'wx'});return result;}};
     children.push(child);calls.push(['spawn',kind,child.pid]);if(kind==='worker'){activeWorker=child;nativeLoadCount=0;}return child;
   };
   const deps={proof_kind:'unit_fake',platform:'darwin',sleep:pause,spawnOwned,requireFreePort:async port=>{calls.push(['free',port]);},listenerPid:async()=>wrongListener?99999:children.filter(c=>c.kind==='api'&&c.exitCode()===null).at(-1)?.pid,
@@ -209,12 +209,57 @@ test('a crashed owned API still gets its worker and guardian a graceful shutdown
   assert.equal(worker.exitCode(),0);assert.equal(guardian.exitCode(),0);
   const exits=JSON.parse(await readFile(path.join(f.dir,`exits-${service.generation}.json`),'utf8'));assert.ok(exits.drainError);
 });
-test('a live owned API that cannot drain is never bypassed by a worker signal',async t=>{
-  const f=await fixture(t),fake=fakeRuntime(f,{wrongListener:false});const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
-  service.drain=async()=>{throw new Error('cooperative cancel did not complete; do not signal native worker');};
-  await assert.rejects(service.stop(),/cooperative cancel/);
-  assert.ok(!fake.calls.some(c=>c[0]==='signal'&&c[1]==='worker'));
-  service.drain=OwnedService.prototype.drain;await service.stop();
+// A virtual clock that only advances when the harness sleeps, so hour-scale bounds run instantly.
+function virtualClock(start=1_800_000_000_000){const clock={t:start,now:()=>clock.t,sleep:async ms=>{clock.t+=ms;await new Promise(resolve=>setImmediate(resolve));}};return clock;}
+// The engine wedges mid-step and never observes the cancel (MLX run 40797515762): the job stays
+// `running` and the cancel POST only acknowledges.
+function wedgeJob(fake,id){fake.jobs.set(id,{id,status:'running',payload:{modelId:'imported_unit_fake'}});const inner=fake.deps.fetch;fake.deps.fetch=async(url,options)=>{if(url.pathname===`/api/v1/jobs/${id}/cancel`){fake.calls.push(['request',url.pathname,options.method]);return {status:200,text:async()=>JSON.stringify(fake.jobs.get(id))};}return inner(url,options);};}
+test('the drain bound is the worker-advertised stall budget for that job, not a fixed guess',()=>{
+  const event=(jobId,stallSeconds,preStepStallSeconds)=>({timestamp:'t',level:'INFO',fields:{event:STALL_BUDGET_EVENT,jobId,engine:'minimax_h3',stallSeconds,preStepStallSeconds,basis:'minimax_h3_packed_sequence'}});
+  const events=[event('other',14400,28800),{fields:{event:'unrelated',jobId:'job-1'}},event('job-1',2940,5640)];
+  assert.deepEqual(advertisedStallBudget(events,'job-1'),{stallSeconds:2940,preStepStallSeconds:5640,basis:'minimax_h3_packed_sequence'});
+  assert.equal(advertisedStallBudget(events,'absent'),null);
+  assert.equal(advertisedStallBudget([{fields:{event:STALL_BUDGET_EVENT,jobId:'job-1',stallSeconds:'n/a',preStepStallSeconds:1}}],'job-1'),null,'an unreadable budget is not a budget');
+  // The widest window the worker can still be inside, plus its own stall grace and headroom.
+  assert.equal(cancelDrainBoundMs({stallSeconds:2940,preStepStallSeconds:5640}),(5640+WORKER_VIDEO_STALL_GRACE_SECONDS+60)*1000);
+  assert.equal(cancelDrainBoundMs({stallSeconds:600,preStepStallSeconds:600}),(600+WORKER_VIDEO_STALL_GRACE_SECONDS+60)*1000);
+  assert.equal(cancelDrainBoundMs(null),DEFAULT_CANCEL_DRAIN_SECONDS*1000,'no advertisement (queued/import job) keeps the prompt default');
+  assert.equal(cancelDrainBoundMs({stallSeconds:0,preStepStallSeconds:0}),DEFAULT_CANCEL_DRAIN_SECONDS*1000,'never shorter than the default');
+});
+test('a cancelled job that turns terminal after 20 min is drained, not abandoned at 120 s',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f),clock=virtualClock();fake.deps.now=clock.now;fake.deps.sleep=clock.sleep;
+  const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  wedgeJob(fake,'slow');service.jobs.add('slow');
+  fake.children.find(c=>c.kind==='worker').append({fields:{event:STALL_BUDGET_EVENT,jobId:'slow',stallSeconds:2940,preStepStallSeconds:5640,basis:'minimax_h3_packed_sequence'}});
+  const start=clock.now();const inner=fake.deps.fetch;fake.deps.fetch=async(url,options)=>{if(clock.now()-start>=20*60000)fake.jobs.get('slow').status='canceled';return inner(url,options);};
+  await service.stop();
+  assert.equal(fake.jobs.get('slow').status,'canceled');assert.ok(clock.now()-start>=20*60000);
+  const bound=JSON.parse(await readFile(path.join(f.dir,CASE_SHUTDOWN_BOUND_FILE),'utf8'));
+  assert.equal(bound.pid,process.pid);assert.equal(bound.jobId,'slow');assert.equal(bound.source,'worker-advertised-stall-budget');
+  assert.equal(bound.deadlineMs,Date.parse(bound.cancelRequestedAt)+cancelDrainBoundMs(bound.budget)+postDrainShutdownMs());
+  assert.ok(fake.children.every(c=>c.exitCode()===0));
+});
+test('a job that ignores cancel past the advertised budget still gets the owned graceful shutdown',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f,{signalWhileActive:true}),clock=virtualClock();fake.deps.now=clock.now;fake.deps.sleep=clock.sleep;
+  const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  wedgeJob(fake,'stuck');service.jobs.add('stuck');
+  const start=clock.now();
+  // The worker advertises its budget once the engine run starts, here after the cancel was posted.
+  const inner=fake.deps.fetch;let advertised=false;fake.deps.fetch=async(url,options)=>{if(!advertised&&url.pathname.endsWith('/stuck/cancel')){advertised=true;fake.children.find(c=>c.kind==='worker').append({fields:{event:STALL_BUDGET_EVENT,jobId:'stuck',stallSeconds:600,preStepStallSeconds:2700,basis:'minimax_h3_baseline'}});}return inner(url,options);};
+  await assert.rejects(service.stop(),/did not reach a terminal state within 2820 s \(the worker's advertised stall budget: 600 s per step, 2700 s before the first step/);
+  const waited=clock.now()-start;assert.ok(waited>=2820000&&waited<2820000+60000,`drain waited ${waited} ms`);
+  assert.ok(fake.calls.some(c=>c[0]==='signal'&&c[1]==='worker'),'owned worker gets its graceful SIGTERM');
+  assert.ok(fake.calls.some(c=>c[0]==='end'&&c[1]==='guardian'),'owned guardian gets its stdin end');
+  assert.ok(fake.children.every(c=>c.exitCode()===0),'no owned child outlives the case process');
+  const exits=JSON.parse(await readFile(path.join(f.dir,`exits-${service.generation}.json`),'utf8'));assert.match(exits.drainError,/advertised stall budget/);
+  assert.ok(service.stopped);await service.stop();
+});
+test('without an advertised budget the drain keeps the prompt default bound and still shuts down',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f,{signalWhileActive:true}),clock=virtualClock();fake.deps.now=clock.now;fake.deps.sleep=clock.sleep;
+  const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  wedgeJob(fake,'import-stuck');service.jobs.add('import-stuck');const start=clock.now();
+  await assert.rejects(service.stop(),/within 120 s \(no advertised stall budget/);assert.ok(clock.now()-start<180000);
+  assert.ok(fake.calls.some(c=>c[0]==='signal'&&c[1]==='worker'));assert.equal(JSON.parse(await readFile(path.join(f.dir,CASE_SHUTDOWN_BOUND_FILE),'utf8')).source,'default-cancel-bound');
 });
 test('a real owned child that dies by signal reports as exited',{skip:process.platform==='win32'},async t=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'sc26691-signal-'));t.after(()=>rm(dir,{recursive:true,force:true}));

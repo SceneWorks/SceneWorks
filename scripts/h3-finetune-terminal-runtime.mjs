@@ -11,7 +11,7 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, open, readFile, writeFile, realpath, stat, copyFile, rename, link } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
+import { CASE_SHUTDOWN_BOUND_FILE, hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
 import { cudaDeviceEvidence, MANUAL_CUDA_PHYSICAL_GPU } from './ci/h3-import-native-proof.mjs';
@@ -117,6 +117,42 @@ export function ownedExitBoundMs(graceSeconds = SERVICE_SHUTDOWN_GRACE_SECONDS) 
   assert.ok(Number.isInteger(graceSeconds) && graceSeconds > 0);
   return (graceSeconds + API_CONNECTION_DRAIN_SECONDS + SHUTDOWN_BOUND_HEADROOM_SECONDS) * 1000;
 }
+// Cooperative cancel of a running job is observed by the worker only at its next progress boundary
+// (a denoise step for video; one MLX H3 step took ~49 min in run 40797515762). The worker advertises
+// the forward-progress budget it selected for each video job (`rust_worker_video_stall_budget_selected`
+// in crates/sceneworks-worker/src/video_jobs/wan.rs), and its own watchdog fails a job that stays
+// silent past that window plus VIDEO_STALL_GRACE. So a cancelled job is terminal within window +
+// grace whether or not the engine honours the flag, and the harness waits exactly that long: never
+// a fixed 120 s guess and never forever. Then it performs the owned graceful shutdown regardless.
+export const STALL_BUDGET_EVENT = 'rust_worker_video_stall_budget_selected';
+export const WORKER_VIDEO_STALL_GRACE_SECONDS = 60; // VIDEO_STALL_GRACE in wan.rs
+export const DRAIN_BOUND_HEADROOM_SECONDS = 60;
+/** The bound for a job with no advertised budget (queued, import, non-video): its cancel is prompt. */
+export const DEFAULT_CANCEL_DRAIN_SECONDS = 120;
+/** The owned worker's post-terminal Idle acknowledgement bound (waitIdle). */
+export const IDLE_ACK_BOUND_MS = 120000;
+const BUDGET_RECHECK_MS = 30000;
+const wholeSeconds = value => { const n = typeof value === 'number' ? value : /^\d+$/.test(String(value ?? '')) ? Number(value) : NaN; return Number.isSafeInteger(n) && n >= 0 ? n : null; };
+/** The worker's own advertised stall budget for one job, from its retained JSON trace, or null. */
+export function advertisedStallBudget(events, jobId) {
+  let found = null;
+  for (const event of events) {
+    const fields = traceFields(event);
+    if (fields.event !== STALL_BUDGET_EVENT || String(tracedJobId(event)) !== String(jobId)) continue;
+    const stallSeconds = wholeSeconds(fields.stallSeconds), preStepStallSeconds = wholeSeconds(fields.preStepStallSeconds);
+    if (stallSeconds === null || preStepStallSeconds === null) continue;
+    found = { stallSeconds, preStepStallSeconds, basis: fields.basis ?? null };
+  }
+  return found;
+}
+/** Milliseconds a cancelled job may take to turn terminal: its widest advertised stall window + the worker's grace. */
+export function cancelDrainBoundMs(budget) {
+  if (!budget) return DEFAULT_CANCEL_DRAIN_SECONDS * 1000;
+  const window = Math.max(budget.stallSeconds, budget.preStepStallSeconds);
+  return Math.max(DEFAULT_CANCEL_DRAIN_SECONDS, window + WORKER_VIDEO_STALL_GRACE_SECONDS + DRAIN_BOUND_HEADROOM_SECONDS) * 1000;
+}
+/** What the case process still needs after its last drain: the Idle wait plus three bounded owned exits. */
+export function postDrainShutdownMs() { return IDLE_ACK_BOUND_MS + 3 * ownedExitBoundMs(); }
 export const PREP_CANCELED_MARKER = 'h3-preparation-canceled';
 const receiptNameFor = jobId => `source-cancel-${encodeURIComponent(jobId)}.json`;
 const traceFields = event => event?.fields ?? event ?? {};
@@ -395,22 +431,46 @@ export class OwnedService {
     const response=await this.fetch(new URL(route,this.baseUrl),{method,headers:{'content-type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(30000)});
     const value=JSON.parse(await response.text());assert.ok(response.status>=200 && response.status<300,`${route}: ${JSON.stringify(value)}`);return value;
   }
+  now() { return (this.deps.now??Date.now)(); }
   async waitIdle() {
-    const deadline=Date.now()+120000;let seen;
+    const deadline=this.now()+IDLE_ACK_BOUND_MS;let seen;
     for(;;){
       if(this.worker.exitCode()!==null)return {epoch:this.generation,workerPid:this.worker.pid,status:'exited',exitCode:this.worker.exitCode()};
       const workers=await this.request('GET','/api/v1/workers'),worker=workers.find(v=>v.id===this.workerId);
       if(worker){if(seen!==undefined && worker.lastSeenAt!==seen && worker.status==='idle'&&!worker.currentJobId)return {epoch:this.generation,workerPid:this.worker.pid,worker,meaning:'Fresh owned-worker Idle heartbeat after terminal job acknowledgement and cleanup'};seen=worker.lastSeenAt;}
-      assert.ok(Date.now()<deadline,'owned worker has not acknowledged quiescence; never signal an active/unknown Metal buffer');await(this.deps.sleep??sleep)(250);
+      assert.ok(this.now()<deadline,'owned worker has not acknowledged quiescence after the drain');await(this.deps.sleep??sleep)(250);
     }
+  }
+  // Tell the parent harness (runProcess) how long this case process is still entitled to: the
+  // current drain deadline plus the bounded post-drain shutdown. Written atomically; the parent only
+  // honours it for its own child PID and never past its hard deadline.
+  async recordShutdownBound(jobId,cancelledAt,drainDeadline,budget) {
+    const file=path.join(this.dir,CASE_SHUTDOWN_BOUND_FILE),temporary=`${file}.${process.pid}.tmp`;
+    await writeFile(temporary,JSON.stringify({kind:'h3-case-shutdown-bound',pid:process.pid,jobId,cancelRequestedAt:new Date(cancelledAt).toISOString(),drainDeadline:new Date(drainDeadline).toISOString(),deadlineMs:drainDeadline+postDrainShutdownMs(),budget:budget??null,source:budget?'worker-advertised-stall-budget':'default-cancel-bound'},null,2)+'\n');
+    await rename(temporary,file);
   }
   async drain() {
     const records=[];
     for(const id of this.jobs) {
-      let job=await this.request('GET',`/api/v1/jobs/${encodeURIComponent(id)}`);
-      if(!terminal(job.status))await this.request('POST',`/api/v1/jobs/${encodeURIComponent(id)}/cancel`);
-      const deadline=Date.now()+120000;
-      while(!terminal(job.status)){assert.ok(Date.now()<deadline,'cooperative cancel did not complete; do not signal native worker');await (this.deps.sleep??sleep)(250);job=await this.request('GET',`/api/v1/jobs/${encodeURIComponent(id)}`);}
+      const read=()=>this.request('GET',`/api/v1/jobs/${encodeURIComponent(id)}`);
+      let job=await read();
+      if(!terminal(job.status)) {
+        await this.request('POST',`/api/v1/jobs/${encodeURIComponent(id)}/cancel`);
+        const cancelledAt=this.now();
+        let budget=advertisedStallBudget(await this.preparationTrace(),id),deadline=cancelledAt+cancelDrainBoundMs(budget),recheck=cancelledAt+BUDGET_RECHECK_MS;
+        await this.recordShutdownBound(id,cancelledAt,deadline,budget);
+        while(!terminal(job.status)) {
+          if(this.now()>=recheck||this.now()>=deadline) {
+            // The worker advertises its budget once the engine run starts, which may follow the cancel.
+            recheck=this.now()+BUDGET_RECHECK_MS;
+            const fresh=advertisedStallBudget(await this.preparationTrace(),id);
+            if(fresh&&cancelledAt+cancelDrainBoundMs(fresh)>deadline){budget=fresh;deadline=cancelledAt+cancelDrainBoundMs(fresh);await this.recordShutdownBound(id,cancelledAt,deadline,budget);}
+          }
+          if(this.now()>=deadline)throw new Error(`cooperative cancel of owned job ${id} did not reach a terminal state within ${Math.round((deadline-cancelledAt)/1000)} s (${budget?`the worker's advertised stall budget: ${budget.stallSeconds} s per step, ${budget.preStepStallSeconds} s before the first step, plus its ${WORKER_VIDEO_STALL_GRACE_SECONDS} s stall grace`:'no advertised stall budget; default cancel bound'}); the owned service still gets its graceful shutdown`);
+          // Poll briskly while a prompt cancel lands, then at a pace that suits an hour-scale step.
+          await (this.deps.sleep??sleep)(this.now()-cancelledAt<30000?250:5000);job=await read();
+        }
+      }
       records.push(job);
     }
     this.quiescence.push(await this.waitIdle());
@@ -419,18 +479,24 @@ export class OwnedService {
   }
   async stop() {
     if(this.stopped)return;await this.assertOwner();
-    // No signal until every owned submitted job is terminal. Never signal arbitrary PIDs. A dead
-    // owned API cannot drain or cancel anything: its jobs end with it, so the owned worker and
-    // guardian still get their graceful shutdown request. Without it they outlived the case and
-    // held the lane open until the job timeout.
-    let drainError;try{await this.drain();}catch(error){if(this.api.exitCode()===null)throw error;drainError=error;}
+    // Every owned submitted job is first cancelled and waited for, within the worker's own
+    // advertised stall budget (drain). Whatever the drain concludes (all terminal, a dead owned API
+    // whose jobs ended with it, or a job that outlived that bound, which the worker's own watchdog
+    // has then failed), the owned worker, guardian and API get their graceful shutdown request, by
+    // owned handle/PID only and never by name. A drain failure that skipped it left the live
+    // children holding the case process, and the lane, open for 6.5 h after the job had ended
+    // (MLX run 40797515762); a crashed API did the same until the job timeout.
+    let drainError;try{await this.drain();}catch(error){drainError=error;}
     if((this.deps.platform??process.platform)==='win32')this.worker.stdin.end();else this.worker.signal('SIGTERM');
     const bounded=async proc=>{let timer;try{return await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned graceful exit timeout; no forced kill')),ownedExitBoundMs());})]);}finally{clearTimeout(timer);}};
-    const workerExit=await bounded(this.worker);
-    this.guardian.stdin.end();await bounded(this.guardian); // Existing API parent-death watchdog -> graceful drain, on BOTH OSes.
-    const apiExit=await bounded(this.api);this.stopped=true;
+    // One child exceeding its bound still lets the next get its request; the first failure is reported.
+    const failures=[],settle=async proc=>{try{return await bounded(proc);}catch(error){failures.push(error);return {code:null,error:error.message};}};
+    const workerExit=await settle(this.worker);
+    this.guardian.stdin.end();await settle(this.guardian); // Existing API parent-death watchdog -> graceful drain, on BOTH OSes.
+    const apiExit=await settle(this.api);this.stopped=true;
     await save(path.join(this.dir,`exits-${this.generation}.json`),{workerExit,apiExit,ended:new Date().toISOString(),...(drainError?{drainError:drainError.message}:{})});
     if(drainError)throw drainError;
+    if(failures.length)throw failures[0];
     assert.equal(workerExit.code,0,'owned worker did not exit gracefully');assert.equal(apiExit.code,0,'owned API did not exit gracefully');
   }
   async checkStep(step,captures) {
