@@ -120,6 +120,9 @@ export function SimpleShell({
   const [sheet, setSheet] = useState(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [preview, setPreview] = useState(null);
+  // Ids of the collection the preview was opened from (the grid the user tapped), so the viewer
+  // can step through it. Ids, not assets: neighbours re-resolve from the live catalog.
+  const [previewScopeIds, setPreviewScopeIds] = useState(null);
   // Which audio asset the Assets viewer holds (epic 14361 / sc-14366). It lives HERE, beside
   // `preview`, so the grid and the viewer agree on which clip is loaded — the grid rings the
   // loaded tile while the viewer IS that clip's play deck. Only the ID is shell state: the
@@ -212,10 +215,14 @@ export function SimpleShell({
 
   // Opening an asset. An audio asset also becomes the loaded take, so the grid rings it and
   // the viewer opens on its deck; `play` (the tile's play button) starts it immediately.
+  // `scope` is the list the caller rendered; omit it (prev/next navigation) to keep the current one.
   const openPreview = useCallback((asset, options = {}) => {
     if (!asset) {
       setPreview(null);
       return;
+    }
+    if (options.scope) {
+      setPreviewScopeIds(options.scope.map((item) => item.id));
     }
     if (assetCanRenderAsAudio(asset)) {
       setLoadedTakeId(asset.id);
@@ -301,6 +308,26 @@ export function SimpleShell({
     () => (preview ? (assets.find((asset) => asset.id === preview.id) ?? preview) : null),
     [preview, assets],
   );
+  // Neighbours within the opened-from collection, skipping ids that have left the catalog
+  // (deleted/trashed since). Null at either end, so the viewer disables that direction.
+  const previewNavigation = useMemo(() => {
+    if (!previewAsset || !previewScopeIds) {
+      return { previous: null, next: null, position: null };
+    }
+    const byId = new Map(assets.map((asset) => [asset.id, asset]));
+    const members = previewScopeIds
+      .map((id) => byId.get(id))
+      .filter((asset) => asset && !asset.status?.trashed);
+    const index = members.findIndex((asset) => asset.id === previewAsset.id);
+    if (index < 0 || members.length < 2) {
+      return { previous: null, next: null, position: null };
+    }
+    return {
+      previous: members[index - 1] ?? null,
+      next: members[index + 1] ?? null,
+      position: { index: index + 1, total: members.length },
+    };
+  }, [previewAsset, previewScopeIds, assets]);
 
   return (
     <SimpleUiContext.Provider value={ui}>
@@ -463,7 +490,11 @@ export function SimpleShell({
             asset={previewAsset}
             audioAutoPlay={audioAutoPlay}
             breakpoint={breakpoint}
+            nextAsset={previewNavigation.next}
             onClose={() => setPreview(null)}
+            onNavigate={(asset) => openPreview(asset)}
+            position={previewNavigation.position}
+            previousAsset={previewNavigation.previous}
             onSendToVideo={
               sendAssetToVideo
                 ? (asset) => {

@@ -102,15 +102,15 @@ export function SimpleAssets() {
                 asset={asset}
                 key={asset.id}
                 loaded={asset.id === loadedTakeId}
-                onOpen={(target) => openPreview(target)}
-                onToggle={(target) => openPreview(target, { play: true })}
+                onOpen={(target) => openPreview(target, { scope: visible })}
+                onToggle={(target) => openPreview(target, { play: true, scope: visible })}
                 phone={breakpoint === "phone"}
               />
             ) : (
               <button
                 className="su-asset"
                 key={asset.id}
-                onClick={() => openPreview(asset)}
+                onClick={() => openPreview(asset, { scope: visible })}
                 title={asset.displayName ?? asset.id}
                 type="button"
               >
