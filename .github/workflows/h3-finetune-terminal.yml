@@ -233,7 +233,7 @@ jobs:
         run: |
           set -euo pipefail
           node --input-type=module <<'NODE'
-          import {execFileSync} from "node:child_process";
+          import {spawnSync} from "node:child_process";
           import {readdir, rm, statfs} from "node:fs/promises";
           import path from "node:path";
           // The stage's privateRunRoot parent: E:\\huggingface on Windows, $HF_HOME elsewhere.
@@ -244,7 +244,17 @@ jobs:
           for (const entry of entries) {
             const match = /^(\d+)-\d+(?:-bootstrap-[0-9a-f]{40}|-target|-native|-fixture)?$/.exec(entry.name);
             if (!entry.isDirectory() || !match || match[1] === current) continue;
-            const status = execFileSync("gh", ["api", `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${match[1]}`, "--jq", ".status"], {encoding: "utf8"}).trim();
+            // A directory whose name only LOOKS like a run root (a stray test leftover such as
+            // `1-1-native` or `101-1`) has no run behind it: the lookup 404s. That is a reason to
+            // keep the directory and say so, never to fail the campaign; deletion stays limited to
+            // roots of runs of THIS repository that GitHub reports as completed.
+            const lookup = spawnSync("gh", ["api", `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${match[1]}`, "--jq", "[.status, .repository.full_name] | @tsv"], {encoding: "utf8"});
+            if (lookup.status !== 0) {
+              if (/HTTP 404|Not Found/i.test(`${lookup.stderr}${lookup.stdout}`)) { console.log(`keeping ${entry.name}: no run ${match[1]} in ${process.env.GITHUB_REPOSITORY} (404)`); continue; }
+              throw new Error(`run lookup for ${entry.name} failed: ${lookup.stderr || lookup.error?.message || lookup.status}`);
+            }
+            const [status, repository] = lookup.stdout.trim().split("\t");
+            if (repository !== process.env.GITHUB_REPOSITORY) { console.log(`keeping ${entry.name}: run ${match[1]} belongs to ${repository || "no repository"}`); continue; }
             if (status !== "completed") { console.log(`keeping ${entry.name}: run ${match[1]} is ${status}`); continue; }
             await rm(path.join(parent, entry.name), {recursive: true, force: false});
             console.log(`removed ${entry.name}`);
