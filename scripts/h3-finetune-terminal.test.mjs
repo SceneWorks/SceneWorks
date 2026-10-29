@@ -6,7 +6,7 @@ import os from 'node:os';
 import { runInNewContext } from 'node:vm';
 import path from 'node:path';
 import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, normalizeLoadEvent, runProcess, runCase, verifyCampaign, reclaimCaseModelStorage, caseStorageReclaim, assertCaseFreeSpace, CASE_FREE_SPACE_HEADROOM_BYTES } from './h3-finetune-terminal.mjs';
-import { runScenario, pointer } from './h3-finetune-terminal-api.mjs';
+import { runScenario, pointer, isSettledJobSnapshot, ASSET_SETTLE_GRACE_MS } from './h3-finetune-terminal-api.mjs';
 import { awaitPeerLane, classifyPeerLane, assertPeerCanDeliver, PEER_APPEARANCE_GRACE_MS } from './lib/h3-peer-lane.mjs';
 const sw = 'a'.repeat(40), inf = 'b'.repeat(40);
 const log = 'test result: ok. 1 passed; 0 failed; 0 ignored;';
@@ -167,6 +167,34 @@ test('API failure/timeout cancels actual submitted job, not the GPU process', as
   assert.deepEqual(calls.at(-1), ['/api/v1/jobs/import-job/cancel', 'POST']);
   let time = 0;
   await assert.rejects(runScenario(s, { now: () => time, sleep: async ms => { time += ms; }, fetchImpl: async url => url.pathname.endsWith('/import') ? response({ id: 'import-job' }, 201) : response({ status: 'running' }) }), /timeout/);
+});
+// Trimmed from CUDA campaign 40874652324, cuda.reduced.real-hybrid-text: the harness captured
+// revision 82 of the completed hybrid video job (raw worker `assetWrites`, before the API persisted
+// them) and failed "completed actual result asset IDs required"; drained revision 83 carried them.
+const hybridCompletedUnpersisted = { id: 'job_dbeee8fb5a82661c1c2caee94a062c5d', type: 'video_generate', status: 'completed', projectId: 'project_c3805fe54b838fc219747e2e5ff5e7ec', payload: { model: 'imported_sc26691_hybrid_single_checkpoint' }, revision: 82,
+  result: { adapter: 'candle_minimax_h3', model: 'imported_sc26691_hybrid_single_checkpoint', expectedCount: 1, generationSetId: 'genset_322d2a47096d4f64afe6f91ecba1fc5b', generationSet: { id: 'genset_322d2a47096d4f64afe6f91ecba1fc5b', count: 1, mode: 'text_to_video' },
+    assetWrites: [{ assetId: 'asset_4a13efad5e514debb937506901b123af', type: 'video', mimeType: 'video/mp4', mediaPath: 'assets/videos/genset_322d2a47096d4f64afe6f91ecba1fc5b/2026-10-29_imported-sc26691-hybrid-single-checkpoint_a-red-cube-slides-right-across-a-white-tab.mp4' }] } };
+const hybridCompletedPersisted = { ...hybridCompletedUnpersisted, revision: 83,
+  result: { adapter: 'candle_minimax_h3', model: 'imported_sc26691_hybrid_single_checkpoint', expectedCount: 1, generationSetId: 'genset_322d2a47096d4f64afe6f91ecba1fc5b', assetIds: ['asset_4a13efad5e514debb937506901b123af'],
+    assets: [{ id: 'asset_4a13efad5e514debb937506901b123af', type: 'video', projectId: 'project_c3805fe54b838fc219747e2e5ff5e7ec', generationSetId: 'genset_322d2a47096d4f64afe6f91ecba1fc5b', file: { mimeType: 'video/mp4', width: 1088, height: 544, fps: 24, frameCount: 124, hasAudio: true, path: 'assets/videos/genset_322d2a47096d4f64afe6f91ecba1fc5b/2026-10-29_imported-sc26691-hybrid-single-checkpoint_a-red-cube-slides-right-across-a-white-tab.mp4' } }] } };
+test('a completed job is captured only after the API persisted its reported assetWrites', async () => {
+  assert.equal(isSettledJobSnapshot(hybridCompletedUnpersisted), false);
+  assert.equal(isSettledJobSnapshot(hybridCompletedPersisted), true);
+  assert.equal(isSettledJobSnapshot({ status: 'completed', result: { modelId: 'imported-model' } }), true, 'an import result has nothing to persist');
+  assert.equal(isSettledJobSnapshot({ status: 'completed', result: { assetWrites: [] } }), true);
+  assert.equal(isSettledJobSnapshot({ status: 'failed', result: { assetWrites: [{ type: 'video' }] } }), true, 'only a completed job waits on persistence');
+  const s = scenario(); s.steps = [{ id: 'generated', waitJob: 'job_dbeee8fb5a82661c1c2caee94a062c5d', assert: [{ pointer: '/status', equals: 'completed' }] }];
+  const snapshots = [{ ...hybridCompletedUnpersisted, status: 'running' }, hybridCompletedUnpersisted, hybridCompletedUnpersisted, hybridCompletedPersisted];
+  const result = await runScenario(s, { sleep: async () => {}, fetchImpl: async () => response(snapshots.shift()) });
+  assert.equal(snapshots.length, 0);
+  assert.equal(result.captures.generated.revision, 83);
+  assert.deepEqual(result.captures.generated.result.assetIds, ['asset_4a13efad5e514debb937506901b123af']);
+  // A handoff that never lands fails on its own bounded grace, naming the cause — not as a pass,
+  // and not after the whole case deadline.
+  let time = 0, cancels = 0;
+  await assert.rejects(runScenario({ ...s, timeoutSeconds: 3600 }, { now: () => time, sleep: async ms => { time += ms; }, fetchImpl: async url => { if (url.pathname.endsWith('/cancel')) { cancels++; return response({}, 200); } return response(hybridCompletedUnpersisted); } }), /assetWrites were never persisted/);
+  assert.ok(time >= ASSET_SETTLE_GRACE_MS && time < ASSET_SETTLE_GRACE_MS + 5000);
+  assert.equal(cancels, 1);
 });
 test('a timed-out status read is retried before the deadline; a timed-out submission is not', async () => {
   // The CUDA campaign's status poll outlasted 30s while a checkpoint copy saturated the jobs

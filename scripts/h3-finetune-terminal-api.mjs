@@ -34,6 +34,23 @@ export function assertRecordedAssertion({actual,expected,operator='equals'}){
     assert.ok(typeof actual==='string'&&typeof expected==='string'&&expected.length>0&&actual.includes(expected),'actual refusal did not contain the expected specific reason');
   }else{assert.equal(operator,'equals','unknown assertion operator');assert.deepEqual(actual,expected);}
 }
+/**
+ * The API commits a worker's terminal status BEFORE it persists the worker-reported
+ * `result.assetWrites` into project assets and rewrites the result as `assets` / `assetIds`
+ * (the durable two-phase handoff in `apps/rust-api/src/jobs.rs` `persist_reported_assets`). A
+ * poller can therefore read `completed` with the raw facts still in place — campaign 40874652324's
+ * hybrid case captured revision 82 (raw `assetWrites`) while revision 83, one write later, carried
+ * `assetIds`. Mirrors `JobSnapshot::is_settled` in `apps/rust-api/src/film_harness.rs`: persisted
+ * `assets`/`assetIds` are the positive signal; a completed result without non-empty `assetWrites`
+ * (an import job, for one) has nothing to persist.
+ */
+export function isSettledJobSnapshot(job) {
+  if (job?.status !== 'completed') return true;
+  const result = job.result ?? {};
+  return Array.isArray(result.assets) || Array.isArray(result.assetIds) || !Array.isArray(result.assetWrites) || result.assetWrites.length === 0;
+}
+/** Same bound the product's own film harness gives the terminal-to-persisted window. */
+export const ASSET_SETTLE_GRACE_MS = 30000;
 export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {}, deadlineMs = Infinity, uploadFile } = {}) {
   const base = new URL(s.baseUrl);
   assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname), 'task-owned loopback API required');
@@ -71,9 +88,16 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
       if (step.waitJob) {
         const jobId = expand(step.waitJob, captures); assert.ok(typeof jobId === 'string' && jobId.length > 0);
         activeJob = jobId;
+        let unsettledSince;
         for (;;) {
           result = await request('GET', `/api/v1/jobs/${encodeURIComponent(jobId)}`, undefined, 200);
-          if (['completed', 'failed', 'cancelled', 'canceled', 'interrupted'].includes(result.status)) break;
+          if (['completed', 'failed', 'cancelled', 'canceled', 'interrupted'].includes(result.status)) {
+            if (isSettledJobSnapshot(result)) break;
+            // Terminal but not yet settled: keep reading the same job until the API's asset
+            // persistence rewrites the result, bounded by its own grace (never the case deadline).
+            unsettledSince ??= now();
+            assert.ok(now() - unsettledSince < ASSET_SETTLE_GRACE_MS, `job ${jobId} completed but its reported assetWrites were never persisted into result.assets/assetIds within ${ASSET_SETTLE_GRACE_MS}ms`);
+          }
           await sleep(Math.min(1000, Math.max(0, deadline - now())));
         }
         assert.equal(result.status, step.expectedJobStatus ?? 'completed', 'job did not complete as expected');
