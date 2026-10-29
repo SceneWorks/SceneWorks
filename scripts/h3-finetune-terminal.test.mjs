@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { runInNewContext } from 'node:vm';
@@ -536,6 +536,8 @@ test('three individual source mutations are killed by executed assertions, not s
   const { dir } = await fixture(t);
   const original = await readFile(new URL('./h3-finetune-terminal.mjs', import.meta.url), 'utf8');
   for (const file of ['h3-finetune-terminal-api.mjs', 'h3-finetune-terminal-reduced.mjs', 'h3-finetune-terminal.test.mjs']) await writeFile(path.join(dir, file), await readFile(new URL(file, import.meta.url)));
+  await mkdir(path.join(dir, 'lib'), { recursive: true });
+  await writeFile(path.join(dir, 'lib', 'h3-campaign-build-profile.mjs'), await readFile(new URL('./lib/h3-campaign-build-profile.mjs', import.meta.url)));
   for (const [needle, pattern] of [
     ['assert.equal(e.inference, p.inference);', 'receipt mutation rejects wrong source revision'],
     ["assert.equal(+m[3], 0, 'ignored tests are not evidence');", 'test execution evidence rejects ignored'],

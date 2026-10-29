@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // sc-26691: explicit, source-bound terminal execution. No ordinary CI/model execution.
 import assert from 'node:assert/strict';
+import { campaignProfileArgs } from './lib/h3-campaign-build-profile.mjs';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, realpath, rename, stat, writeFile, copyFile } from 'node:fs/promises';
@@ -868,7 +869,7 @@ export async function ensureInlineNativeWitnesses(p,backend,swRoot,{run=runProce
   try{
     for(const leaf of ['hf','data','tmp'])await mkdir(path.join(dir,leaf));
     const env={...process.env,CARGO_TARGET_DIR:path.join(p.output,`native-target-${native.sha}-${backend}`),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0',...(backend==='cuda'?{RUSTC_WRAPPER:''}:{}),HF_HOME:path.join(dir,'hf'),HF_HUB_CACHE:path.join(dir,'hf','hub'),HF_HUB_OFFLINE:'1',TRANSFORMERS_OFFLINE:'1',SCENEWORKS_DATA_DIR:path.join(dir,'data'),TMPDIR:path.join(dir,'tmp')};
-    const build=['cargo','test','--locked','--manifest-path',path.join(native.root,'Cargo.toml'),'-p',backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',...(backend==='cuda'?['--features','cuda']:[]),'--test','integration','--no-run','--message-format=json'];
+    const build=['cargo','test','--locked',...campaignProfileArgs(),'--manifest-path',path.join(native.root,'Cargo.toml'),'-p',backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',...(backend==='cuda'?['--features','cuda']:[]),'--test','integration','--no-run','--message-format=json'];
     await run(build,{cwd:native.root,env,logPath:path.join(dir,'build.log'),timeoutSeconds:3600});
     const binaries=[];for(const line of(await readFile(path.join(dir,'build.log'),'utf8')).split('\n')){try{const v=JSON.parse(line);if(v.reason==='compiler-artifact'&&v.target?.name==='integration'&&v.profile?.test&&v.executable)binaries.push(v.executable);}catch{}}
     assert.equal(new Set(binaries).size,1,'one exact native integration executable required');

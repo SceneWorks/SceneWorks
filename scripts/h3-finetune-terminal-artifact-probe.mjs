@@ -1,6 +1,7 @@
 // Actual selected-checkpoint operands -> pinned CPU bridge -> ignored native consumer.
 // Dispatch-only adapter; no math oracle, model forward, download or license acknowledgment here.
 import assert from 'node:assert/strict';
+import { campaignProfileArgs } from './lib/h3-campaign-build-profile.mjs';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -220,7 +221,7 @@ export async function executeActualArtifactProbe(p,c,swRoot,inferenceRoot,dir,de
     const producer=await json(producerPath),oracleBytes=await bounded(oraclePath,256*1024*1024),oracle=JSON.parse(oracleBytes.toString('utf8'));assert.equal(producer.spec_sha256,digest(await bounded(working,8*1024*1024)));provenance(oracle.producer_provenance,expected);
     assert.equal(producer.status,'ok','producer did not succeed');provenance(producer.producer_provenance,expected);assert.equal(producer.selected_tensors_sha256,await hashFile(mini),'producer did not bind exact selected mini');
     manifest.oracle={path:oraclePath,sha256:digest(oracleBytes),producer:oracle.producer,producer_version:oracle.producer_version,artifact_sha256:oracle.artifact_sha256,producer_provenance:oracle.producer_provenance};await writeFile(working,JSON.stringify(manifest,null,2)+'\n');
-    const command=['cargo','test','--locked','--manifest-path',path.join(inferenceRoot,'Cargo.toml'),'-p',c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',...(c.backend==='cuda'?['--features','cuda']:[]),'--test','integration',ACTUAL_SELECTOR,'--','--exact','--ignored','--nocapture','--test-threads=1'];
+    const command=['cargo','test','--locked',...campaignProfileArgs(),'--manifest-path',path.join(inferenceRoot,'Cargo.toml'),'-p',c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',...(c.backend==='cuda'?['--features','cuda']:[]),'--test','integration',ACTUAL_SELECTOR,'--','--exact','--ignored','--nocapture','--test-threads=1'];
     let nativeError;try{await runner(command,{cwd:inferenceRoot,env:{...env,H3_ACTUAL_PROBE_MANIFEST:working,H3_ACTUAL_PROBE_RECEIPT_DIR:receiptDir},logPath:path.join(dir,'native.log'),timeoutSeconds:remaining()});}catch(error){nativeError=error;}
     const native=await Promise.all(manifest.cases.map(k=>json(path.join(receiptDir,`${manifest.backend}.${k.id}.json`),256*1024*1024)));
     for(const n of native){assert.equal(n.manifest_path,working);assert.equal(n.manifest_sha256,digest(await bounded(working,8*1024*1024)));}

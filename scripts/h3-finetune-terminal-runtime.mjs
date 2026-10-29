@@ -1,6 +1,7 @@
 // sc-26691 adapters for the existing harness. Production entry is explicit Actions-only.
 // No model implementation/importer/registry: own processes, existing API, native tests and receipts.
 import assert from 'node:assert/strict';
+import { campaignProfileArgs, CAMPAIGN_PROFILE_DIR } from './lib/h3-campaign-build-profile.mjs';
 import path from 'node:path';
 import net from 'node:net';
 import { randomUUID,createHash } from 'node:crypto';
@@ -169,7 +170,7 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   if((n.mechanism??c.id.split('.').at(-1))==='convrot') for(const key of ['reference_helper','reference_cuda','reference_producer'])sourceHashes.push(pinnedFixture[key].sha256);
   for(const hash of sourceHashes)assert.ok(refs.some(v=>v.sha256===hash),'missing exact independently pinned external arithmetic blob');
   const h=await (deps.hardware??hardware)(c.backend,c.runtime?.deviceId);
-  const base=['cargo','test','--locked','--manifest-path',path.join(inferenceRoot,'Cargo.toml'),'-p',n.package,'--test','integration'];
+  const base=['cargo','test','--locked',...campaignProfileArgs(),'--manifest-path',path.join(inferenceRoot,'Cargo.toml'),'-p',n.package,'--test','integration'];
   assert.equal(n.package,c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3');
   if(c.backend==='cuda') base.push('--features','cuda');
   const buildCommand=[...base,'--no-run','--message-format=json'];
@@ -304,7 +305,7 @@ export class OwnedService {
   }
   async build() {
     const runner=this.deps.runProcess??runProcess;
-    const command=['cargo','build','--locked','--manifest-path',path.join(this.swRoot,'Cargo.toml'),'-p','sceneworks-rust-api','--bin','sceneworks-rust-api'];
+    const command=['cargo','build','--locked',...campaignProfileArgs(),'--manifest-path',path.join(this.swRoot,'Cargo.toml'),'-p','sceneworks-rust-api','--bin','sceneworks-rust-api'];
     if(this.c.backend==='cuda')command.push('--features','sceneworks-rust-api/backend-candle');
     const platform=runPlatform(this.deps),buildRoot=path.join(this.p.output,`service-build-${this.p.sceneworks}-${this.p.inference}-${this.c.backend}`),receipt=path.join(buildRoot,'build.json');
     const target=cargoTarget(this.c,'target',path.join(buildRoot,'target'),platform);
@@ -316,7 +317,7 @@ export class OwnedService {
       // A failed build keeps its log in the case directory, which is what the evidence upload carries.
       try{await runner(command,{cwd:this.swRoot,env:{...process.env,...(this.c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:target,CARGO_PROFILE_DEV_DEBUG:'0'},logPath:path.join(buildRoot,'build.log'),timeoutSeconds:this.c.timeoutSeconds});}
       catch(error){await copyFile(path.join(buildRoot,'build.log'),path.join(this.dir,'service-build.log')).catch(()=>{});throw error;}
-      this.binary=path.join(target,'debug',`sceneworks-rust-api${platform==='win32'?'.exe':''}`);
+      this.binary=path.join(target,CAMPAIGN_PROFILE_DIR,`sceneworks-rust-api${platform==='win32'?'.exe':''}`);
       this.binaryHash=await hashFile(this.binary);this.buildIdentity={command,binary:this.binary,sha256:this.binaryHash,sceneworks:this.p.sceneworks,inference:this.p.inference,backend:this.c.backend,configuration};await save(receipt,this.buildIdentity);await copyFile(path.join(buildRoot,'build.log'),path.join(this.dir,'service-build.log'));
     }
     await save(path.join(this.dir,'service-build.json'),this.buildIdentity);
