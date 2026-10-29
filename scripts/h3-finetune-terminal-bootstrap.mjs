@@ -12,6 +12,8 @@ import {assertCliEnvironment,privateRunRoot,selectStageFiles,runStage,prepareRef
 import {cudaDeviceEvidence,MANUAL_CUDA_PHYSICAL_GPU} from './ci/h3-import-native-proof.mjs';
 import {prepareBootstrapInputs} from './h3-finetune-terminal-bootstrap-inputs.mjs';
 import {prepareActualProbeManifest,inspectActualArtifactHeader} from './h3-finetune-terminal-artifact-probe.mjs';
+/** `limits.maxPixels` of both builtin MiniMax-H3 partitions (config/manifests/builtin.models.jsonc), which every imported H3 entry inherits; pinned by test. */
+export const MINIMAX_H3_MAX_PIXELS=1032192;
 const execute=promisify(execFile),clone=structuredClone;
 const REQUIRED_SETS=['singularity','hybrid','pulpcut','turbo','speech'];
 const BASE_LICENSE='MiniMax-H3-Community-License-Agreement';
@@ -43,6 +45,10 @@ export function validateBootstrapRequest(request,{backend,unitFake=false}={}){
   for(const field of ['hostBudgetBytes','deviceBudgetBytes','minimumControlDelta','lokrAmplitude'])positive(op[field]);assert.ok(Number.isFinite(op.maximumBaselineDelta)&&op.maximumBaselineDelta>=0);
   for(const field of ['width','height','wideWidth','wideHeight'])assert.ok(Number.isInteger(op[field])&&op[field]>0&&op[field]%32===0,'explicit stride-aligned cohort geometry required');
   assert.equal(Math.min(op.width,op.height),544,'544-short-edge recipes require their declared geometry');assert.equal(Math.min(op.wideWidth,op.wideHeight),768,'768 recipe requires its declared geometry');
+  // sc-26691: the product FITS (never refuses) an over-cap request into the model's `limits.maxPixels`
+  // while the stored job payload keeps the requested size, so 1536x768 rendered 1408x704 and the
+  // decoded canvas could never match the queued geometry. Refuse an unrenderable cohort up front.
+  for(const [w,h] of [[op.width,op.height],[op.wideWidth,op.wideHeight]])assert.ok(w*h<=MINIMAX_H3_MAX_PIXELS,`cohort geometry ${w}x${h} exceeds MiniMax-H3 limits.maxPixels ${MINIMAX_H3_MAX_PIXELS}; the product would silently fit it to a different canvas`);
   assert.ok(op.timeoutSeconds===undefined||Number.isInteger(op.timeoutSeconds)&&op.timeoutSeconds>0&&op.timeoutSeconds<=7200);
   keys(op.pulpcutSampling,['steps','schedulerShift','audioSchedulerShift','contractSource'],'PulpCut sampling');assert.equal(op.pulpcutSampling.steps,8,'published PulpCut merge declares eight steps');for(const field of ['schedulerShift','audioSchedulerShift'])positive(op.pulpcutSampling[field]);assert.ok(typeof op.pulpcutSampling.contractSource==='string'&&op.pulpcutSampling.contractSource.length>10,'record the actual operator/source sampling authority; do not invent a trained shift');
   const selections=b.componentSelections??b.components;assert.ok(Array.isArray(selections)&&selections.length===2,'select the two existing compatible bases explicitly');assert.ok(!(b.componentSelections&&b.components),'choose one component selection field');

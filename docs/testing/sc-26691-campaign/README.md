@@ -44,7 +44,8 @@ reference is, because H3 packs every reference into the DiT sequence and per-ste
 quadratic in it:
 
 - **Generated clip:** every case renders 124 frames (5.17 s, H3's shortest legal duration) at
-  1088x544, or 1536x768 for the 768p first/last recipe. Not reducible.
+  1088x544, or 1344x768 for the 768p first/last recipe (768 short edge inside H3's
+  `maxPixels` 1,032,192; 1536x768 was silently fitted to 1408x704). Not reducible.
 - **Image references** (`imageA`/`imageB`, 576x320 plates): the request sets no
   `referenceImageShortEdge` or `referenceImageResizeMode`, so the engine defaults apply. At the
   current inference pin (`9ddabbea`, which carries the sc-26691 engine change) the default resize
@@ -78,7 +79,7 @@ reference rows + one step, capped at 8 h.
 | 2-4, 13, 14, 20 reference (1 img, 1 voice) | 36,855 | 22,467 | 37,491 | 600 s | 3,535 s |
 | 15, 16, 21, 22 text | 21,900 | 21,900 | 22,382 | 600 s | 3,300 s |
 | 17 image / 18 last-frame (1 keyframe) | 23,056 | 23,056 | 23,602 | 600 s | 3,320 s |
-| 19 first-last (2 keyframes, 1536x768) | 47,746 | 47,746 | 48,356 | 875 s | 3,650 s |
+| 19 first-last (2 keyframes, estimated at 1536x768; now 1344x768) | 47,746 | 47,746 | 48,356 | 875 s | 3,650 s |
 
 Cases 23-25 (artifact probes, source-preparation cancel) run no denoise step. The worker-envelope
 columns use the pin's image rule; with the engine change the envelope's image rows drop to the

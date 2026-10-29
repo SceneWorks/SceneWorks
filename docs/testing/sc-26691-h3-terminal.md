@@ -75,7 +75,7 @@ jq -n --arg sw "$PUBLISHED_FINAL_SHA" --argjson ack "$ACTUAL_SCOPE_ACKNOWLEDGED"
       seed:314159, requestedGpu:$gpu, gpuId:$gpu, port:43210, componentTier:"q4",
       hostBudgetBytes:$host, deviceBudgetBytes:$device,
       minimumControlDelta:0.01, maximumBaselineDelta:0.001,
-      width:1088, height:544, wideWidth:1536, wideHeight:768,
+      width:1088, height:544, wideWidth:1344, wideHeight:768,
       timeoutSeconds:7200, lokrAmplitude:0.05,
       pulpcutSampling:{steps:8,schedulerShift:$shift,audioSchedulerShift:$audioShift,
         contractSource:"Pinned publisher declares eight steps; shifts explicitly selected by the operator, not asserted as a published trained recipe"}

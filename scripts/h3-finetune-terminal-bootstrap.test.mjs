@@ -6,7 +6,8 @@ import os from 'node:os';
 import {createHash} from 'node:crypto';
 import {mkdtemp,mkdir,readFile,writeFile,rm,stat,access,link,copyFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
-import {bootstrapTerminal,validateBootstrapRequest} from './h3-finetune-terminal-bootstrap.mjs';
+import {bootstrapTerminal,validateBootstrapRequest,MINIMAX_H3_MAX_PIXELS} from './h3-finetune-terminal-bootstrap.mjs';
+import {stripJsoncComments} from './lib/jsonc.mjs';
 import {caseBook} from './h3-finetune-terminal-cases.mjs';
 import {runStage,prepareReferenceFixtures,selectStageFiles,bindScopedAuthority,assertScopedBinding} from './h3-finetune-terminal-stage.mjs';
 import {validatePlan,verifyInputs,hashFile,runCase} from './h3-finetune-terminal.mjs';
@@ -25,7 +26,7 @@ const json=(file,value)=>writeFile(file,JSON.stringify(value,null,2)+'\n');
 function sft(tensors){const width={U8:1,I8:1,F32:4,F8_E4M3:1},header={},data=[];let offset=0;for(const [name,dtype,shape,provided]of tensors){const bytes=provided??Buffer.alloc(shape.reduce((a,b)=>a*b,1)*width[dtype],1);header[name]={dtype,shape,data_offsets:[offset,offset+bytes.length]};offset+=bytes.length;data.push(bytes);}const text=Buffer.from(JSON.stringify(header)),size=Buffer.alloc(8);size.writeBigUInt64LE(BigInt(text.length));return Buffer.concat([size,text,...data]);}
 function packed(){const w='blocks.0.attn.qkv_proj',c='blocks.0.mlp.fc2',wd=Buffer.from(JSON.stringify({format:'asym_w4a8_int8',group_size:16,convrot_groupsize:256})),cd=Buffer.from(JSON.stringify({format:'int8_tensorwise',convrot:true,convrot_groupsize:256}));return sft([[w+'.weight','I8',[16,128]],[w+'.weight_codebook','F32',[16]],[w+'.weight_s_rel','F8_E4M3',[16,16]],[w+'.weight_s_channel','F32',[16]],[w+'.comfy_quant','U8',[wd.length],wd],[c+'.weight','I8',[16,256]],[c+'.weight_scale','F32',[16,1]],[c+'.comfy_quant','U8',[cd.length],cd]]);}
 function pruned(){return sft([['adaln_t_table','F32',[4,2]],['blocks.0.adaln_proj.linear.weight','F32',[36,2]],['blocks.0.adaln_proj.linear.bias','F32',[36]],['final_layer.adaln_proj.linear.weight','F32',[4,2]],['final_layer.adaln_proj.linear.bias','F32',[4]],['blocks.0.attn.qkv_proj.weight','I8',[6,2]],['padding','U8',[32768]]]);}
-function request(){return {stationary_pair_authorized:true,bootstrap:{casebook:'sc-26691-h3-cases-v1',cohort:'reduced-v1',operator:{compatibleBase:'builtin:minimax_h3',projectName:'unit_fake proof only',seed:314159,requestedGpu:'mlx',gpuId:'mlx',port:43210,componentTier:'q4',hostBudgetBytes:1024**3,deviceBudgetBytes:1024**3,minimumControlDelta:0.01,maximumBaselineDelta:0.001,width:1088,height:544,wideWidth:1536,wideHeight:768,timeoutSeconds:30,lokrAmplitude:0.05,pulpcutSampling:{steps:8,schedulerShift:12,audioSchedulerShift:3,contractSource:'unit_fake operator-selected sampling, NOT an authoritative trained-shift claim'}},componentSelections:[{modelId:'minimax_h3',tier:'q4'},{modelId:'minimax_h3_ref',tier:'q4'}],legalAuthority:{proof_kind:'unit_fake',acknowledged:true,assetSets:['singularity','hybrid','pulpcut','turbo','speech'],licenseIds:['MiniMax-H3-Community-License-Agreement','Apache-2.0','CC-BY-4.0'],inheritedLicenseIds:['MiniMax-H3-Community-License-Agreement'],includeSelectedComponents:true}}};}
+function request(){return {stationary_pair_authorized:true,bootstrap:{casebook:'sc-26691-h3-cases-v1',cohort:'reduced-v1',operator:{compatibleBase:'builtin:minimax_h3',projectName:'unit_fake proof only',seed:314159,requestedGpu:'mlx',gpuId:'mlx',port:43210,componentTier:'q4',hostBudgetBytes:1024**3,deviceBudgetBytes:1024**3,minimumControlDelta:0.01,maximumBaselineDelta:0.001,width:1088,height:544,wideWidth:1344,wideHeight:768,timeoutSeconds:30,lokrAmplitude:0.05,pulpcutSampling:{steps:8,schedulerShift:12,audioSchedulerShift:3,contractSource:'unit_fake operator-selected sampling, NOT an authoritative trained-shift claim'}},componentSelections:[{modelId:'minimax_h3',tier:'q4'},{modelId:'minimax_h3_ref',tier:'q4'}],legalAuthority:{proof_kind:'unit_fake',acknowledged:true,assetSets:['singularity','hybrid','pulpcut','turbo','speech'],licenseIds:['MiniMax-H3-Community-License-Agreement','Apache-2.0','CC-BY-4.0'],inheritedLicenseIds:['MiniMax-H3-Community-License-Agreement'],includeSelectedComponents:true}}};}
 async function fixture(t){
   const temporary=await mkdtemp(path.join(os.tmpdir(),'h3-bootstrap-unit-fake-'));t.after(()=>rm(temporary,{recursive:true,force:true}));
   const product=path.join(temporary,'inference'),evidenceNative=path.join(temporary,'inference-evidence'),evidenceRoot=path.join(temporary,'logs');for(const d of [product,evidenceNative,evidenceRoot])await mkdir(d);
@@ -88,4 +89,15 @@ test('bootstrap rejects arbitrary source/code/template fields and synthetic cons
   // CUDA runs only on physical GPU 1: GPU 0 is the owner's display/work GPU.
   for(const [gpuId,requestedGpu] of [['0','0'],['0','1'],['1','0']]){const r=request();Object.assign(r.bootstrap.operator,{gpuId,requestedGpu});assert.throws(()=>validateBootstrapRequest(r,{backend:'cuda',unitFake:true}),/physical GPU 1/);}
   const input=request().bootstrap.legalAuthority,binding=bindScopedAuthority(input,[{role:'source',sha256:'a'.repeat(64),legal:{licenseId:'MiniMax-H3-Community-License-Agreement'},origin:{kind:'casebook-asset',assetSet:'singularity'}}],{allowUnitFake:true});binding.operatorInput.acknowledged=false;assert.throws(()=>assertScopedBinding(binding,{allowUnitFake:true}));
+});
+
+test('cohort geometry stays inside the MiniMax-H3 maxPixels the product would otherwise silently fit to', async () => {
+  const manifest=JSON.parse(stripJsoncComments(await readFile(new URL('../config/manifests/builtin.models.jsonc',import.meta.url),'utf8')).replace(/,(\s*[}\]])/g,'$1'));
+  for(const id of ['minimax_h3','minimax_h3_ref'])assert.equal(manifest.models.find(entry=>entry.id===id)?.limits?.maxPixels,MINIMAX_H3_MAX_PIXELS,`${id} limits.maxPixels`);
+  validateBootstrapRequest(request(),{backend:'mlx',unitFake:true});
+  // Campaign 40874652324's dispatch asked 1536x768 for the 768p recipe; VideoRequest::from_payload
+  // fits it to 1408x704 while the stored payload still says 1536x768.
+  const wide=request();Object.assign(wide.bootstrap.operator,{wideWidth:1536,wideHeight:768});
+  assert.throws(()=>validateBootstrapRequest(wide,{backend:'mlx',unitFake:true}),/exceeds MiniMax-H3 limits.maxPixels/);
+  for(const lane of ['cuda','mlx']){const op=JSON.parse(await readFile(new URL(`../docs/testing/sc-26691-campaign/h3-terminal-${lane}.json`,import.meta.url),'utf8'));const found=[];JSON.stringify(op,(k,v)=>{if(v&&typeof v==='object'&&'wideWidth' in v)found.push(v);return v;});assert.ok(found.length>0,lane);for(const o of found)for(const [w,h] of [[o.width,o.height],[o.wideWidth,o.wideHeight]])assert.ok(w*h<=MINIMAX_H3_MAX_PIXELS,`${lane} dispatch kit ${w}x${h}`);}
 });
