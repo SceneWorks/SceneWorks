@@ -2465,6 +2465,10 @@
   display: grid;
   place-items: center;
   padding: 0 20px;
+  /* The horizontal swipe is ours (prev/next): without this the browser also pans or
+     rubber-bands the whole page under the finger. Vertical pan and pinch-zoom stay native. */
+  touch-action: pan-y pinch-zoom;
+  overscroll-behavior: contain;
 }
 
 /* Prev/next over the stage edges; a horizontal swipe on the stage does the same. */
