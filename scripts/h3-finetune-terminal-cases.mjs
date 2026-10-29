@@ -395,6 +395,9 @@ export function buildScenario(c, p, executions) {
         advanced: { ...(s.advanced ?? {}), ...(e.family === 'ltx' ? {} : { mlxQuantize: { bf16: 0, q4: 4, q8: 8 }[e.model.componentTier] }), steps: s.steps, ...(s.schedulerShift === undefined ? {} : { schedulerShift: s.schedulerShift }), ...(s.audioSchedulerShift === undefined ? {} : { audioSchedulerShift: s.audioSchedulerShift }) },
         loras: selectedAdapters, ...variant,
       };
+      // The API's classify_reference_set rule (apps/rust-api validate_video_job): a 201-expected
+      // Ref2VA submission needs a visual reference; audio alone cannot condition one (sc-26691).
+      if (body.mode === 'reference_to_video') assert.ok([body.referenceAssetIds, body.sourceClipAssetIds].some(v => Array.isArray(v) && v.length > 0), `${c.id}: reference_to_video needs at least one reference image or video clip, or the API refuses it at submit`);
       steps.push({ id, method: 'POST', path: '/api/v1/video/jobs', body, expectedStatus: 201,
         assert: [eq('/payload/model', e.model.modelId), eq('/payload/seed', p.seed), eq('/payload/mode', e.mode), eq('/payload/advanced/steps',s.steps), eq('/payload/width',s.width), eq('/payload/height',s.height), eq('/payload/fps',s.fps), eq('/payload/duration',s.duration)] });
       if (check === 'generation-source-prep-cancel') {

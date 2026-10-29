@@ -151,7 +151,10 @@ export const OPERATIONAL_CASE_DEFS = Object.freeze([
     acceptance: { ac: ['actual mixed packed/ConvRot tensor probe', 'no AV output claimed'], e: ['artifactProbeReceipt', 'artifactSha256'] },
   }),
   caseDef(25, 'lifecycle-generation-source-prep-cancel', 'source-cancel', 'lifecycle', {
-    modelKey: 'artifact.3-ref2va-pruned-v1.3-w4a8', assetSet: 'singularity', probe: 'native-source-prep-cancel',
+    // sc-26691: a ref2va generation must name a visual reference or the API refuses it at submit
+    // ("Reference to Video requires at least one reference image or video clip") before any cold
+    // source preparation could start.
+    modelKey: 'artifact.3-ref2va-pruned-v1.3-w4a8', assetSet: 'singularity', conditioning: 'reference', probe: 'native-source-prep-cancel',
     acceptance: { ac: ['actual native cold source-preparation observer', 'no AV output claimed', 'no Acquired seal / source_prepared / native load for the canceled job'], e: ['cancelReceipt', 'partialByteEvidence', 'joinedTeardownMarker'] },
   }),
 ]);

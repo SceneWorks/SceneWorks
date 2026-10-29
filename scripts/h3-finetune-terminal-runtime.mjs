@@ -529,8 +529,7 @@ export class OwnedService {
       const job=await this.request('GET',`/api/v1/jobs/${encodeURIComponent(jobId)}`);
       assert.equal(job.payload?.model,modelId,'generation must reference the actually installed imported model');
       receipt.generationJob=job; // Actual queued canonical snapshot; this is planned provenance, NOT a completed native seal.
-      const planned=job.modelProvenance?.plan??job.payload?.modelProvenance?.plan??job.payload?.expectedImportedModelRef;
-      assert.ok(planned?.checkpointId&&planned.semanticDigest,'canceled preparation must bind the actual queued planned import commitment');
+      const planned=queuedPlannedImportRef(job);
       receipt.plannedImportRef=structuredClone(planned);
       const deadline=Math.min(Date.now()+this.c.timeoutSeconds*1000,this.fake?Infinity:Number(process.env.H3_CASE_DEADLINE_MS??Infinity));
       const reading=await this.waitColdPartialReading(jobId,deadline);
@@ -762,6 +761,35 @@ export function verifyCacheCoverage(bundle,scenario,byJob,observed){
 // Re-verify a cold source-preparation cancellation from retained bytes only. The receipt is a
 // correlation index, never the proof: every event must reappear verbatim in the retained
 // worker/API epoch logs, and the terminal snapshot must reappear in the actual API transcript.
+/**
+ * The planned import commitment of a queued video job. Only `payload.expectedImportedModelRef`
+ * carries `checkpointId` (it names the worker's `h3_import_preparation` span checkpoint); the API's
+ * server-canonical `modelProvenance.plan` is `{planId, schemaVersion, semanticDigest,
+ * sourceBindingIdentity}` with NO checkpointId (campaign 40874652324's real hybrid submission), so
+ * preferring it made every cold-cancel receipt fail. When both are present they must agree.
+ */
+export function queuedPlannedImportRef(job){
+  const planned=job?.payload?.expectedImportedModelRef;
+  assert.ok(typeof planned?.checkpointId==='string'&&planned.checkpointId&&typeof planned.semanticDigest==='string'&&planned.planId,'the queued generation must carry the actual planned import commitment (payload.expectedImportedModelRef)');
+  const server=job.modelProvenance?.plan;
+  if(server!==undefined&&server!==null)for(const key of ['planId','semanticDigest','sourceBindingIdentity'])if(server[key]!==undefined||planned[key]!==undefined)assert.equal(planned[key],server[key],`queued expectedImportedModelRef.${key} differs from the server-canonical modelProvenance.plan`);
+  return planned;
+}
+/**
+ * The stored payload is the API's canonical form of the submission, not a byte copy: `requestedGpu`
+ * moves to the job's top level, `advanced` gains server defaults (`referenceImageResizeMode`), and
+ * each requested LoRA `{id, weight}` is expanded into its resolved catalog row (all observed on the
+ * real hybrid submission). Every submitted value must survive that canonicalization unchanged.
+ */
+export function assertQueuedMatchesSubmitted(request,job){
+  assert.ok(request&&job?.payload,'submitted request and queued job required');
+  for(const [key,value]of Object.entries(request)){
+    if(key==='requestedGpu'){assert.equal(String(job.requestedGpu),String(value),'queued generation differs from submitted requestedGpu');continue;}
+    if(key==='advanced'){for(const [inner,v]of Object.entries(value??{}))assert.deepEqual(job.payload.advanced?.[inner],v,`queued generation differs from submitted advanced.${inner}`);continue;}
+    if(key==='loras'){assert.ok(Array.isArray(job.payload.loras)&&job.payload.loras.length===value.length,'queued generation differs from submitted loras');value.forEach((lora,i)=>{assert.equal(job.payload.loras[i].id,lora.id,'queued generation reordered or substituted a submitted LoRA');if(lora.weight!==undefined)assert.equal(job.payload.loras[i].weight,lora.weight,'queued generation differs from submitted LoRA weight');});continue;}
+    assert.deepEqual(job.payload[key],value,`queued generation differs from submitted ${key}`);
+  }
+}
 export async function verifyGenerationSourcePrepCancel(p,c,dir,{allowUnitFake=false,receiptName,contentReadback=false}={}) {
   assert.ok(typeof receiptName==='string'&&receiptName.length>0,'actual retained source-cancel receipt is required; labels or invented receipts are not proof');
   const receipt=await json(inside(dir,receiptName));
@@ -805,8 +833,7 @@ export async function verifyGenerationSourcePrepCancel(p,c,dir,{allowUnitFake=fa
   assert.ok(typeof terminal.job.message==='string'&&terminal.job.message.includes(PREP_CANCELED_MARKER),'joined-teardown canceled root message marker required');
   assert.equal(terminal.hardAbandoned,false,'hard-abandoned cancellation cannot prove lease release');
   assert.ok(Date.parse(audit.auditedAt)>=Date.parse(terminal.acknowledgedAt),'independent audit must occur AFTER joined cancellation, not postpone POST /cancel');
-  const plannedRef=receipt.generationJob.modelProvenance?.plan??receipt.generationJob.payload?.modelProvenance?.plan??receipt.generationJob.payload?.expectedImportedModelRef;
-  assert.ok(plannedRef?.checkpointId&&plannedRef.semanticDigest,'actual queued planned source commitment required, not a fabricated completed seal');assert.deepEqual(receipt.plannedImportRef,plannedRef);assert.equal(traceSpan(observation).checkpointId,plannedRef.checkpointId,'partial trace differs from planned checkpoint');
+  const plannedRef=queuedPlannedImportRef(receipt.generationJob);assert.deepEqual(receipt.plannedImportRef,plannedRef);assert.equal(traceSpan(observation).checkpointId,plannedRef.checkpointId,'partial trace differs from planned checkpoint');
   assert.ok(Number.isInteger(terminal.elapsedMs)&&terminal.elapsedMs>=0&&terminal.elapsedMs<PREP_CANCEL_ACK_MS,`cooperative cancellation must be acknowledged under the ${PREP_CANCEL_ACK_MS}ms joined grace`);
   const requestedAt=Date.parse(receipt.cancelRequest?.requestedAt),acknowledgedAt=Date.parse(terminal.acknowledgedAt);assert.ok(Number.isFinite(requestedAt)&&Number.isFinite(acknowledgedAt));assert.equal(terminal.elapsedMs,acknowledgedAt-requestedAt,'cancel grace must derive from actual request/ack timestamps, not a free elapsed label');
   assert.equal(receipt.cancelRequest?.method,'POST');assert.equal(receipt.cancelRequest?.route,`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`,'cooperative cancel request must target the actual generation job');
@@ -836,8 +863,8 @@ export async function verifyGenerationSourcePrepCancel(p,c,dir,{allowUnitFake=fa
   const submit=transcript.transcript.find(row=>row.method==='POST'&&row.route==='/api/v1/video/jobs'&&row.result?.id===jobId);
   assert.ok(submit,'retained API transcript lacks the actual generation submission');
   assert.equal(submit.request?.model,modelId,'queued generation did not reference the planned imported model');
-  for(const [key,value]of Object.entries(submit.request))assert.deepEqual(receipt.generationJob?.payload?.[key],value,`queued generation differs from submitted ${key}`);
-  const queuedRef=submit.result?.modelProvenance?.plan??submit.result?.payload?.modelProvenance?.plan??submit.result?.payload?.expectedImportedModelRef;
+  assertQueuedMatchesSubmitted(submit.request,receipt.generationJob);
+  const queuedRef=queuedPlannedImportRef(submit.result);
   assert.deepEqual(receipt.plannedImportRef,queuedRef,'planned commitment differs from actual API submission receipt');
   return {jobId,modelId,partialBytes,sourceBytes,elapsedMs:terminal.elapsedMs,checkpointSha256:audit.sha256,removalId:modelId};
 }
@@ -970,7 +997,7 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
   }
 }
 const conditioningFields={sourceAssetId:'image',lastFrameAssetId:'image',referenceAssetIds:'image',sourceClipAssetId:'video',sourceClipAssetIds:'video',referenceClipAssetId:'video',referenceAudioAssetIds:'audio'};
-async function bindConditioningSources(service,c,jobs,requests,dir){
+export async function bindConditioningSources(service,c,jobs,requests,dir){
   const bindings=[];
   for(const job of jobs){const request=submittedPayload(requests,job),projectId=request.projectId;assert.ok(typeof projectId==='string'&&projectId);
     for(const [field,type]of Object.entries(conditioningFields))for(const id of (Array.isArray(request[field])?request[field]:request[field]?[request[field]]:[])){

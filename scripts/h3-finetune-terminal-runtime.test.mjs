@@ -73,7 +73,10 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok']}={}) {
         activeWorker.append({jobId:id,span:prepSpan(id),event:'source_file_hash_progress',path:source,acquisition:'ColdContentRead',state:'Acquired',hashed_bytes:sourceBytes,source_bytes:sourceBytes});
         activeWorker.append(sealProgress(id,{path:source,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:1,source_bytes:null}));
         activeWorker.append(sealProgress(id,{path:source,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:sourceBytes}));
-        const modelProvenance={plan:{checkpointId:'unit_fake_source',planId:'unit_fake_plan',semanticDigest:`sha256:${semantic}`}},payload={...body,expectedImportedModelRef:modelProvenance.plan,generationSetId:id};jobs.set(id,{id,status:'preparing',payload,modelProvenance,result:{modelId:body.model}});value={id,status:'queued',payload,modelProvenance};status=201;
+        // Real shapes (campaign 40874652324's hybrid POST /video/jobs): the server-canonical
+        // modelProvenance.plan carries NO checkpointId; payload.expectedImportedModelRef does. The
+        // stored payload moves requestedGpu to the job and adds advanced server defaults.
+        const sourceBindingIdentity=`sha256:${'b'.repeat(64)}`,modelProvenance={plan:{planId:'unit_fake_plan',schemaVersion:1,semanticDigest:`sha256:${semantic}`,sourceBindingIdentity}},{requestedGpu,...stored}=body,payload={...stored,advanced:{...stored.advanced,referenceImageResizeMode:'match'},expectedImportedModelRef:{baseModel:'minimax_h3_ref',checkpointId:'unit_fake_source',declaredPartition:'ref2va',family:'minimax-h3',modelId:body.model,planId:'unit_fake_plan',semanticDigest:`sha256:${semantic}`,sourceBindingIdentity},generationSetId:id};jobs.set(id,{id,status:'preparing',requestedGpu,payload,modelProvenance,result:{modelId:body.model}});value={id,status:'queued',requestedGpu,payload,modelProvenance};status=201;
       }
       else if(url.pathname==='/api/v1/video/jobs'){
         const body=JSON.parse(options.body),id=`video-${++jobNo}`,assetId=`asset-${jobNo}`,project=path.join(serviceDir,'data','projects','unit_fake.sceneworks');
