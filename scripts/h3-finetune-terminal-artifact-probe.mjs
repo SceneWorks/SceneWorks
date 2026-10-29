@@ -9,6 +9,18 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { open, readFile, writeFile, mkdir, realpath } from 'node:fs/promises';
 import { authorized, runProcess, executedTests, hashFile } from './h3-finetune-terminal.mjs';
+import { stripVerbatim } from './lib/windows-verbatim-path.mjs';
+/** This checkout's root: the repository the verify-time staging binding must stay outside of. */
+const SCENEWORKS_ROOT=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
+/**
+ * The receipt file the native probe writes per case — `receipt_file_name` in candle-gen-minimax-h3
+ * tests/support/artifact_probe_support.rs: `{backend}.{safe id}.{sha256(id)[..8]}.json`, where the
+ * safe id keeps ASCII alphanumerics and `._-` and maps everything else to `_` (sc-26691: the
+ * harness read `{backend}.{id}.json`, a name the probe never writes).
+ */
+export function nativeReceiptName(backend,caseId){return `${backend}.${[...caseId].map(ch=>/^[A-Za-z0-9._-]$/.test(ch)?ch:'_').join('')}.${createHash('sha256').update(caseId,'utf8').digest('hex').slice(0,8)}.json`;}
+/** The probe reports `manifest_path` canonicalized (`\\?\E:\...` on Windows); compare the file, not the spelling. */
+async function sameFile(a,b){const canonical=async v=>{const value=stripVerbatim(v);try{return await realpath(value);}catch{return path.resolve(value);}};return (await canonical(a))===(await canonical(b));}
 
 export const ACTUAL_SELECTOR='artifact_probe::actual_checkpoint_projections_match_pinned_cpu_oracle';
 export const FROZEN_PROVENANCE=[
@@ -120,7 +132,7 @@ export async function prepareActualProbeManifest({backend,probe,artifact,staging
       // Validate every actual projection against bound source geometry; Candle selects ALL of it.
       for(const canonical of canonicalBasis.slice(1)){const out=canonical.startsWith('norm_out.')?2*dit.hidden_size:18*dit.hidden_size;requireTensor(raw(canonical),['F16','BF16','F32'],canonical.endsWith('.weight')?[out,rank]:[out]);}
       const basis=canonicalBasis.map(raw),prefix='transformer_blocks.0.adaln_proj.linear',reduced=[raw(`${prefix}.weight`),raw(`${prefix}.bias`)];
-      cases.push({id:'pruned-timestep-interpolation',kind:'pruned_timestep_interpolation',select:{table:'adaln_t_table',grid,rank,topology:nativeBackend==='candle',aliases},input:{dtype:'F32',timesteps:[0,123.5,777.25,1000]},selected_tensors:nativeBackend==='candle'?basis:[tableName],tolerance:{max_abs:tolerances.pruned_timestep_interpolation}});
+      cases.push({id:'pruned-timestep-interpolation',kind:'pruned_timestep_interpolation',select:{table:'adaln_t_table',grid,rank,topology:nativeBackend==='candle',aliases},input:{dtype:'F32',timesteps:[0,0.1235,0.77725,1]}/*sc-26691: t is the [0,1] sigma — interpolation_position clamps it with no factor of 1000, so 123.5/777.25/1000 all collapsed onto the last row*/,selected_tensors:nativeBackend==='candle'?basis:[tableName],tolerance:{max_abs:tolerances.pruned_timestep_interpolation}});
       cases.push({id:'pruned-reduced-projection',kind:'pruned_reduced_projection',select:{prefix,weight:`${prefix}.weight`,bias_tensor:`${prefix}.bias`,rank,out_features:18*dit.hidden_size,topology:nativeBackend==='candle',aliases},input:{dtype:'F32',shape:[1,rank],values:Array.from({length:rank},(_,i)=>(i%7-3)/8)},selected_tensors:nativeBackend==='candle'?basis:reduced,tolerance:{max_abs:tolerances.pruned_reduced_projection}});
       headerFacts={grid,rank,hidden_size:dit.hidden_size,num_layers:dit.num_layers,reducedProjection:{rawWeight:reduced[0],rawBias:reduced[1],out:18*dit.hidden_size,in:rank},configBinding:ditBinding};
     }else{
@@ -194,7 +206,7 @@ async function verifyEvidenceSource(p,swRoot,inferenceRoot){
   // Product pin stays on main; evidence is allowed to be the coordinator's exact feature SHA.
   const cargo=await bounded(path.join(swRoot,'crates/sceneworks-worker/Cargo.toml'),1024*1024);assert.ok(cargo.toString('utf8').includes(`rev = "${p.inference}"`),'product inference pin drift');
 }
-const receiptFiles=(m,name)=>[...FROZEN_PRODUCERS.map((_,index)=>`frozen-producer-${index}.py`),name,'producer-spec.json','probe-manifest.json','selected-ranges.json','producer-receipt.json','cpu-oracle.json','producer.log','native.log',...m.cases.map(k=>`native-receipts/${m.backend}.${k.id}.json`)];
+const receiptFiles=(m,name)=>[...FROZEN_PRODUCERS.map((_,index)=>`frozen-producer-${index}.py`),name,'producer-spec.json','probe-manifest.json','selected-ranges.json','producer-receipt.json','cpu-oracle.json','producer.log','native.log',...m.cases.map(k=>`native-receipts/${nativeReceiptName(m.backend,k.id)}`)];
 export async function executeActualArtifactProbe(p,c,swRoot,inferenceRoot,dir,deps={}) {
   const fake=deps.proof_kind==='unit_fake',runner=deps.runProcess??runProcess,contract=c.actualArtifactProbe,receiptName=contract?.receipt??'artifact-probe-receipt.json';assert.equal(path.basename(receiptName),receiptName);
   let manifest,receipt={kind:'actual-artifact-probe',version:1,proof_kind:fake?'unit_fake':'campaign_native',caseId:c.id,backend:c.backend,sceneworks:p.sceneworks,inference:p.inference,status:'FAIL',pass:false,cases:[],productPin:p.inference,nativeEvidence:structuredClone(p.nativeEvidence),whole_file_digest_recomputed:false};
@@ -223,8 +235,8 @@ export async function executeActualArtifactProbe(p,c,swRoot,inferenceRoot,dir,de
     manifest.oracle={path:oraclePath,sha256:digest(oracleBytes),producer:oracle.producer,producer_version:oracle.producer_version,artifact_sha256:oracle.artifact_sha256,producer_provenance:oracle.producer_provenance};await writeFile(working,JSON.stringify(manifest,null,2)+'\n');
     const command=['cargo','test','--locked',...campaignProfileArgs(),'--manifest-path',path.join(inferenceRoot,'Cargo.toml'),'-p',c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',...(c.backend==='cuda'?['--features','cuda']:[]),'--test','integration',ACTUAL_SELECTOR,'--','--exact','--ignored','--nocapture','--test-threads=1'];
     let nativeError;try{await runner(command,{cwd:inferenceRoot,env:{...env,H3_ACTUAL_PROBE_MANIFEST:working,H3_ACTUAL_PROBE_RECEIPT_DIR:receiptDir},logPath:path.join(dir,'native.log'),timeoutSeconds:remaining()});}catch(error){nativeError=error;}
-    const native=await Promise.all(manifest.cases.map(k=>json(path.join(receiptDir,`${manifest.backend}.${k.id}.json`),256*1024*1024)));
-    for(const n of native){assert.equal(n.manifest_path,working);assert.equal(n.manifest_sha256,digest(await bounded(working,8*1024*1024)));}
+    const native=await Promise.all(manifest.cases.map(k=>json(path.join(receiptDir,nativeReceiptName(manifest.backend,k.id)),256*1024*1024)));
+    for(const n of native){assert.ok(await sameFile(n.manifest_path,working),'native probe read a different manifest');assert.equal(n.manifest_sha256,digest(await bounded(working,8*1024*1024)));}
     const cases=mergeProbeReceipts(manifest,producer,oracle,native,selection,expected).map(value=>campaignCase(p,value,authority));receipt={...receipt,manifest,manifestPath:working,producerCommand,nativeCommand:command,cases,status:cases.every(r=>r.pass)&&!nativeError?'PASS':'FAIL',pass:cases.every(r=>r.pass)&&!nativeError};
     const log=await readFile(path.join(dir,'native.log'),'utf8');assert.equal(executedTests(log),1,'ignored native selector must actually pass exactly once');assert.ok(!/\bSKIP\b/.test(log));if(nativeError)throw nativeError;assert.equal(receipt.pass,true,'actual probe failed or CPU fallback is not device proof');remaining();
     if(!fake)await verifyEvidenceSource(p,swRoot,inferenceRoot);
@@ -239,14 +251,14 @@ export async function verifyActualArtifactProbe(p,c,dir,{allowUnitFake=false,con
   assert.equal(e.actualArtifactProbe,c.actualArtifactProbe.receipt);const receipt=await json(path.join(dir,e.actualArtifactProbe),256*1024*1024);assert.equal(receipt.pass,true);assert.equal(receipt.status,'PASS');assert.equal(receipt.proof_kind,e.proof_kind);
   const manifest=await json(path.join(dir,'probe-manifest.json'));validateProbeManifest(manifest,c.backend);assert.deepEqual(receipt.manifest,manifest);
   const original=await boundJSON(path.join(dir,'producer-spec.json'),c.actualArtifactProbe.spec.sha256,8*1024*1024);assert.deepEqual({...manifest,oracle:original.oracle},original,'only oracle transport may change after production');
-  if(contentReadback){assert.deepEqual(await boundJSON(c.actualArtifactProbe.spec.path,c.actualArtifactProbe.spec.sha256,8*1024*1024),original);await stagingBinding(manifest,p,c,[dir,p.nativeEvidence.root]);}
+  if(contentReadback){assert.deepEqual(await boundJSON(c.actualArtifactProbe.spec.path,c.actualArtifactProbe.spec.sha256,8*1024*1024),original);await stagingBinding(manifest,p,c,[SCENEWORKS_ROOT,p.nativeEvidence.root]);}
   const producer=await json(path.join(dir,'producer-receipt.json'));assert.equal(producer.spec_sha256,digest(await bounded(path.join(dir,'producer-spec.json'),8*1024*1024)));
-  const oracle=await boundJSON(path.join(dir,'cpu-oracle.json'),manifest.oracle.sha256,256*1024*1024),selection=await json(path.join(dir,'selected-ranges.json')),native=await Promise.all(manifest.cases.map(k=>json(path.join(dir,`native-receipts/${manifest.backend}.${k.id}.json`),256*1024*1024)));
+  const oracle=await boundJSON(path.join(dir,'cpu-oracle.json'),manifest.oracle.sha256,256*1024*1024),selection=await json(path.join(dir,'selected-ranges.json')),native=await Promise.all(manifest.cases.map(k=>json(path.join(dir,'native-receipts',nativeReceiptName(manifest.backend,k.id)),256*1024*1024)));
   assert.deepEqual(receipt.nativeEvidence,p.nativeEvidence);assert.equal(receipt.productPin,p.inference);provenance(manifest.oracle.producer_provenance,FROZEN_PROVENANCE);
-  for(const n of native){assert.equal(n.manifest_path,receipt.manifestPath);assert.equal(n.manifest_sha256,digest(await bounded(path.join(dir,'probe-manifest.json'),8*1024*1024)));}
+  for(const n of native){assert.ok(await sameFile(n.manifest_path,receipt.manifestPath),'native probe read a different manifest');assert.equal(n.manifest_sha256,digest(await bounded(path.join(dir,'probe-manifest.json'),8*1024*1024)));}
   if(contentReadback)assert.deepEqual(await extractSelectedRanges(manifest,validateProbeManifest(manifest,c.backend)),selection,'selected source bytes changed since native proof');
   const authority=await readOracleAuthority(dir,{retained:true,unitFake:e.proof_kind==='unit_fake'&&allowUnitFake});
-  const merged=mergeProbeReceipts(manifest,producer,oracle,native,selection,FROZEN_PROVENANCE).map(value=>campaignCase(p,value,authority));assert.ok(merged.every(r=>r.pass),'not all native probes passed on device');assert.deepEqual(receipt.cases,merged);
+  const merged=mergeProbeReceipts(manifest,producer,oracle,native,selection,FROZEN_PROVENANCE).map(value=>campaignCase(p,value,authority));assert.ok(merged.every(r=>r.pass),'not all native probes passed on device');assert.deepEqual(receipt.cases,JSON.parse(JSON.stringify(merged)),'retained receipt differs from the recomputed merge'); // The receipt went through JSON, which writes -0 as 0; strict deepEqual would refuse a native -0.0.
   assert.deepEqual(e.files,receiptFiles(manifest,c.actualArtifactProbe.receipt),'missing or extra proof files');
   const files=[];for(const name of e.files){assert.ok(typeof name==='string'&&!path.isAbsolute(name)&&below(path.resolve(dir),path.resolve(dir,name)),'receipt file escapes case');const canonical=await realpath(path.join(dir,name));assert.ok(below(await realpath(dir),canonical),'receipt symlink escapes case');files.push({path:name,sha256:digest(await bounded(canonical,256*1024*1024))});}
   assert.equal(executedTests(await readFile(path.join(dir,'native.log'),'utf8')),1);
