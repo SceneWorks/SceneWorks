@@ -25,7 +25,7 @@ async function sameFile(a,b){const canonical=async v=>{const value=stripVerbatim
 export const ACTUAL_SELECTOR='artifact_probe::actual_checkpoint_projections_match_pinned_cpu_oracle';
 export const FROZEN_PROVENANCE=[
   {script:'scripts/ci/generate_minimax_h3_w4a8_fixture.py',sha256:'14c05c1dea46dfec0447d97b575a0c6f525e2d41bcc703ad16e1610828ea9676'},
-  {script:'scripts/h3_convrot_int8_oracle.py',sha256:'6ec5a42f680b439b1df347363c80a06ee38693adef9b441d45d3e025f2247100'},
+  {script:'scripts/h3_convrot_int8_oracle.py',sha256:'25682137344a8d94bc134585603dd51e22a2edac7a148d5363c48ce0a38dbd82'},
   {script:'scripts/h3_pruned_adaln_oracle.py',sha256:'f9de6f19c29e9ce4858f74b930f0e9a641fe106333608587d7ce4d8630b16b5b'},
 ];
 export const FROZEN_PRODUCERS=FROZEN_PROVENANCE.map(v=>v.script);

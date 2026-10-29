@@ -3,7 +3,7 @@
   "sceneworks_sha": "03cdc056c57746ac025a06552a658b47fd40eaf8",
   "inference_sha": "9ddabbea258f2faf1333a45b9186288110af4e45",
   "native_evidence_ref": "feature/sc-26679-h3-finetune-import",
-  "native_evidence_sha": "1f00423846c9fdc2b6752ee2326d56a7b1a2d99f",
+  "native_evidence_sha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
   "expected_runner": "cuda-windows",
   "adaptive_matrix": true,
   "bootstrap": {

@@ -87,8 +87,8 @@ test('claimed max_abs cannot disagree with the retained output values',async t=>
 test('pruned tolerances honor the native F32 transport without widening canonical tolerance',async t=>{const f=await fixture(t);for(const [kind,tolerance]of [['pruned_timestep_interpolation',2e-6],['pruned_reduced_projection',2e-5]]){const m=structuredClone(f.manifest);m.cases[0].kind=kind;m.cases[0].tolerance.max_abs=tolerance;const o=outputs(f,m);o.native[0].kind=kind;o.native[0].tolerance.max_abs=Math.fround(tolerance);o.native[0].comparison.tolerance=Math.fround(tolerance);o.oracle.cases[0].tolerance.max_abs=tolerance;assert.equal(mergeProbeReceipts(m,o.producer,o.oracle,o.native,o.selection,FROZEN_PROVENANCE)[0].pass,true);o.native[0].comparison.tolerance=1;assert.throws(()=>mergeProbeReceipts(m,o.producer,o.oracle,o.native,o.selection,FROZEN_PROVENANCE),/different tolerance/);}});
 
 test('native receipt names follow the probe receipt_file_name, not the bare case id', () => {
-  // Names the candle-gen-minimax-h3 probe writes at evidence 1f004238 (artifact_probe_support.rs
-  // receipt_file_name) for the three real CUDA cases of campaign 40874652324's plan.
+  // Names the candle-gen-minimax-h3 probe writes at evidence 0bada8f7 (artifact_probe_support.rs
+  // receipt_file_name, unchanged since 1f004238) for the three real CUDA cases of campaign 40874652324's plan.
   assert.equal(nativeReceiptName('candle','pruned-timestep-interpolation'),'candle.pruned-timestep-interpolation.fae77294.json');
   assert.equal(nativeReceiptName('candle','pruned-reduced-projection'),'candle.pruned-reduced-projection.44b669df.json');
   assert.equal(nativeReceiptName('candle','mixed-w4a8-convrot'),'candle.mixed-w4a8-convrot.ef18075e.json');

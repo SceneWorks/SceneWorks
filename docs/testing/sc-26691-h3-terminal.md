@@ -65,7 +65,7 @@ jq -n --arg sw "$PUBLISHED_FINAL_SHA" --argjson ack "$ACTUAL_SCOPE_ACKNOWLEDGED"
   stationary_pair_authorized: true, sceneworks_sha: $sw,
   inference_sha: "350bd900ee559ad0e5f2227b3e551d81b74b9501",
   native_evidence_ref: "feature/sc-26679-h3-finetune-import",
-  native_evidence_sha: "1f00423846c9fdc2b6752ee2326d56a7b1a2d99f",
+  native_evidence_sha: "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
   expected_runner: $runner, adaptive_matrix: true,
   bootstrap: {
     casebook: "sc-26691-h3-cases-v1", cohort: "reduced-v1",
