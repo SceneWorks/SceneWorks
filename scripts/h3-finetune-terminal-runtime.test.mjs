@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat } from 'node:fs/promises';
-import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings } from './h3-finetune-terminal-runtime.mjs';
+import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS } from './h3-finetune-terminal-runtime.mjs';
 import { assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
@@ -287,6 +287,18 @@ test('contrasts hold complete creative configuration and bind only the adapters 
 test('private environment isolates cache/config/credentials while preserving device restrictions',()=>{
   const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'unit_fake',backend:'mlx'},'task-generated-token');
   assert.equal(env.HF_HOME,path.join('/unit_fake_owned','hf'));assert.equal(env.SCENEWORKS_RUN_UTILITY_INPROCESS,'1','the API utility pool is the only worker that claims imports');assert.equal(env.SCENEWORKS_MLX_REQUIRED,'1');assert.equal(env.SCENEWORKS_CANDLE_REQUIRED,undefined);assert.ok(!Object.hasOwn(env,'HF_TOKEN'));assert.equal(env.HF_HUB_OFFLINE,'1');assert.equal(env.SCENEWORKS_ACCESS_TOKEN,'task-generated-token');
+});
+test('the owned-exit bound strictly exceeds the service shutdown grace it hands the service (sc-26691)',()=>{
+  // The API may spend its connection drain plus the whole utility-pool grace before exiting, and the
+  // GPU worker the whole grace winding a job down: a bound equal to the grace timed out on a
+  // shutdown the service was still entitled to (runs 40643143319, 40779212245).
+  const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'1',backend:'cuda'},'unit_fake_token');
+  const grace=Number(env.SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS);
+  assert.equal(grace,SERVICE_SHUTDOWN_GRACE_SECONDS,'the env grace and the bound derive from one constant');
+  assert.ok(ownedExitBoundMs()>(grace+API_CONNECTION_DRAIN_SECONDS)*1000,'bound must exceed drain + grace');
+  assert.ok(ownedExitBoundMs(10)>(10+API_CONNECTION_DRAIN_SECONDS)*1000,'derived for any grace');
+  assert.ok(ownedExitBoundMs(10)<ownedExitBoundMs(300));
+  assert.throws(()=>ownedExitBoundMs(0));
 });
 test('root-selected compiler reaches private child environments without inheriting credentials',()=>{
   const previous=process.env.RUSTUP_TOOLCHAIN;process.env.RUSTUP_TOOLCHAIN='9.8.7';

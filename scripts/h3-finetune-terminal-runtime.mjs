@@ -79,6 +79,19 @@ export const SOURCE_PREP_CHUNK_BYTES = 8 * 1024 * 1024; // native ArtifactSeal h
 export const PREP_CANCEL_ACK_MS = 30000;            // CancelJoinGuard::CANCEL_JOIN_GRACE
 export const PREP_CANCEL_ABANDON_MS = 5000;         // CancelJoinGuard::CANCEL_JOIN_ABANDON
 export const PREP_SPAN_PHASE = 'source-and-normalization';
+// The owned service's shutdown grace (SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS). The API spends up
+// to its connection drain (`API_CONNECTION_DRAIN_TIMEOUT`, 5 s) plus this grace stopping its
+// in-process utility pool, and the GPU worker up to this grace winding a job down, so the harness's
+// graceful-exit bound must be STRICTLY larger than both or it times out on a shutdown the service
+// is still entitled to (sc-26691: a 120 s bound against a 120 s grace).
+export const SERVICE_SHUTDOWN_GRACE_SECONDS = 120;
+export const API_CONNECTION_DRAIN_SECONDS = 5;
+export const SHUTDOWN_BOUND_HEADROOM_SECONDS = 60;
+/** Milliseconds the harness waits for an owned API or worker to exit after its shutdown request. */
+export function ownedExitBoundMs(graceSeconds = SERVICE_SHUTDOWN_GRACE_SECONDS) {
+  assert.ok(Number.isInteger(graceSeconds) && graceSeconds > 0);
+  return (graceSeconds + API_CONNECTION_DRAIN_SECONDS + SHUTDOWN_BOUND_HEADROOM_SECONDS) * 1000;
+}
 export const PREP_CANCELED_MARKER = 'h3-preparation-canceled';
 const receiptNameFor = jobId => `source-cancel-${encodeURIComponent(jobId)}.json`;
 const traceFields = event => event?.fields ?? event ?? {};
@@ -234,7 +247,7 @@ async function listenerPid(port) {
 export function privateEnvironment(runDir,runtime,token) {
   const env={}; // No inherited user HF settings/tokens, credentials, proxies or application roots.
   for(const key of ['PATH','RUSTUP_TOOLCHAIN','SystemRoot','WINDIR','COMSPEC','PATHEXT','TMPDIR','TEMP','TMP','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES','CUDA_DEVICE_ORDER','MLX_METAL_DEVICE_INDEX','SCENEWORKS_GPU_MEMORY_LIMIT_BYTES','SCENEWORKS_CUDA_VRAM_CAP_GB','SCENEWORKS_MLX_MEMORY_CAP_GB','LD_LIBRARY_PATH','DYLD_LIBRARY_PATH']) if(process.env[key]!==undefined)env[key]=process.env[key];
-  Object.assign(env,{SCENEWORKS_API_HOST:'127.0.0.1',SCENEWORKS_API_PORT:String(runtime.port),SCENEWORKS_API_URL:`http://127.0.0.1:${runtime.port}`,SCENEWORKS_DATA_DIR:path.join(runDir,'data'),SCENEWORKS_CONFIG_DIR:path.join(runDir,'config'),SCENEWORKS_JOBS_DB_PATH:path.join(runDir,'data','cache','jobs.db'),SCENEWORKS_ACCESS_TOKEN:token,SCENEWORKS_RUN_UTILITY_INPROCESS:'1',SCENEWORKS_UTILITY_WORKERS:'1',SCENEWORKS_WORKER_ID:`sc26691-${path.basename(runDir)}`,SCENEWORKS_GPU_ID:runtime.gpuId,SCENEWORKS_BACKEND_MLX_ENABLED:runtime.backend==='mlx'?'1':'0',SCENEWORKS_BACKEND_CANDLE_ENABLED:runtime.backend==='cuda'?'1':'0',SCENEWORKS_LOG_FORMAT:'json',SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS:'120',RUST_LOG:'info,sceneworks=debug',HF_HOME:path.join(runDir,'hf'),HF_HUB_CACHE:path.join(runDir,'hf','hub'),HUGGINGFACE_HUB_CACHE:path.join(runDir,'hf','hub'),TRANSFORMERS_CACHE:path.join(runDir,'hf','transformers'),XDG_CACHE_HOME:path.join(runDir,'cache'),HF_HUB_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'});
+  Object.assign(env,{SCENEWORKS_API_HOST:'127.0.0.1',SCENEWORKS_API_PORT:String(runtime.port),SCENEWORKS_API_URL:`http://127.0.0.1:${runtime.port}`,SCENEWORKS_DATA_DIR:path.join(runDir,'data'),SCENEWORKS_CONFIG_DIR:path.join(runDir,'config'),SCENEWORKS_JOBS_DB_PATH:path.join(runDir,'data','cache','jobs.db'),SCENEWORKS_ACCESS_TOKEN:token,SCENEWORKS_RUN_UTILITY_INPROCESS:'1',SCENEWORKS_UTILITY_WORKERS:'1',SCENEWORKS_WORKER_ID:`sc26691-${path.basename(runDir)}`,SCENEWORKS_GPU_ID:runtime.gpuId,SCENEWORKS_BACKEND_MLX_ENABLED:runtime.backend==='mlx'?'1':'0',SCENEWORKS_BACKEND_CANDLE_ENABLED:runtime.backend==='cuda'?'1':'0',SCENEWORKS_LOG_FORMAT:'json',SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS:String(SERVICE_SHUTDOWN_GRACE_SECONDS),RUST_LOG:'info,sceneworks=debug',HF_HOME:path.join(runDir,'hf'),HF_HUB_CACHE:path.join(runDir,'hf','hub'),HUGGINGFACE_HUB_CACHE:path.join(runDir,'hf','hub'),TRANSFORMERS_CACHE:path.join(runDir,'hf','transformers'),XDG_CACHE_HOME:path.join(runDir,'cache'),HF_HUB_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'});
   // Mirror the shipped desktop (apps/desktop/src/setup.rs). The API runs its in-process utility
   // pool, which is the ONLY worker that serves model_import/model_download/model_convert/lora_import
   // — with it off, nothing could ever claim an import and the first real case waited out its whole
@@ -284,7 +297,7 @@ export class OwnedService {
       if(this.worker){if((this.deps.platform??process.platform)==='win32')this.worker.stdin.end();else this.worker.signal('SIGTERM');}
       this.guardian?.stdin.end();
       const exits=[];
-      for(const proc of [this.worker,this.guardian,this.api].filter(Boolean)){let timer;try{exits.push({pid:proc.pid,...await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned startup cleanup timeout; no forced kill')),120000);})])});}catch(cleanup){exits.push({pid:proc.pid,error:cleanup.message});}finally{clearTimeout(timer);}}
+      for(const proc of [this.worker,this.guardian,this.api].filter(Boolean)){let timer;try{exits.push({pid:proc.pid,...await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned startup cleanup timeout; no forced kill')),ownedExitBoundMs());})])});}catch(cleanup){exits.push({pid:proc.pid,error:cleanup.message});}finally{clearTimeout(timer);}}
       await save(path.join(this.dir,'startup-failure.json'),{error:error.message,ownedApiPid:this.api?.pid,ownedWorkerPid:this.worker?.pid,guardianPid:this.guardian?.pid,exits,meaning:'No scenario submitted; only owned graceful shutdown requested, no force kill'});
       throw error;
     }
@@ -385,7 +398,7 @@ export class OwnedService {
     // held the lane open until the job timeout.
     let drainError;try{await this.drain();}catch(error){if(this.api.exitCode()===null)throw error;drainError=error;}
     if((this.deps.platform??process.platform)==='win32')this.worker.stdin.end();else this.worker.signal('SIGTERM');
-    const bounded=async proc=>{let timer;try{return await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned graceful exit timeout; no forced kill')),120000);})]);}finally{clearTimeout(timer);}};
+    const bounded=async proc=>{let timer;try{return await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned graceful exit timeout; no forced kill')),ownedExitBoundMs());})]);}finally{clearTimeout(timer);}};
     const workerExit=await bounded(this.worker);
     this.guardian.stdin.end();await bounded(this.guardian); // Existing API parent-death watchdog -> graceful drain, on BOTH OSes.
     const apiExit=await bounded(this.api);this.stopped=true;
