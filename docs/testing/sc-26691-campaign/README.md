@@ -27,7 +27,7 @@ BACKENDS=cuda docs/testing/sc-26691-campaign/dispatch.sh --ack <sceneworks-sha>
   always refused). It must differ from the product pin and is not stamped by `dispatch.sh`. Its frozen
   producer digests must equal `FROZEN_PROVENANCE` in `scripts/h3-finetune-terminal-artifact-probe.mjs`
   (the ConvRot oracle digest moved with main's fetched-source verification). `native_evidence_ref`
-  stays the literal label the bootstrap asserts.
+  is `main`, which the bootstrap asserts; the evidence checkout is by SHA.
 - Requires `bash`, `node`, `git` and an authenticated `gh` (on Windows: Git Bash); no standalone
   `jq`. `DRY_RUN=1` runs every read and stamps/validates both requests, printing them instead of
   dispatching.

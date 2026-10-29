@@ -87,7 +87,7 @@ export async function bootstrapTerminal({request,backend,swRoot,inferenceRoot,ev
   const {operator:op,selections,legal}=validateBootstrapRequest(request,{backend,unitFake:fake});
   if(!fake)assertCliEnvironment({env,platform:process.platform,backend});
   const sceneworks=env.H3_SCENEWORKS_SHA??env.GITHUB_SHA,inference=env.H3_INFERENCE_SHA;sha40(sceneworks);sha40(inference);assert.equal(sceneworks,env.GITHUB_SHA);
-  const nativeEvidence={ref:env.H3_NATIVE_EVIDENCE_REF,sha:env.H3_NATIVE_EVIDENCE_SHA,root:path.join(path.dirname(inferenceRoot),'inference-evidence'),productPin:inference};sha40(nativeEvidence.sha);assert.equal(nativeEvidence.ref,'feature/sc-26679-h3-finetune-import');
+  const nativeEvidence={ref:env.H3_NATIVE_EVIDENCE_REF,sha:env.H3_NATIVE_EVIDENCE_SHA,root:path.join(path.dirname(inferenceRoot),'inference-evidence'),productPin:inference};sha40(nativeEvidence.sha);assert.equal(nativeEvidence.ref,'main');
   assert.ok(path.isAbsolute(outputRoot)&&path.isAbsolute(evidenceRoot));for(const source of [swRoot,inferenceRoot,nativeEvidence.root]){const relative=path.relative(path.resolve(source),path.resolve(outputRoot));assert.ok(relative&&(relative.startsWith('..')||path.isAbsolute(relative)),'bootstrap output must be outside source checkouts');}
   const physicalOutput=path.join(await realpath(path.dirname(outputRoot)),path.basename(outputRoot));for(const source of [swRoot,inferenceRoot,nativeEvidence.root]){const relative=path.relative(await realpath(source),physicalOutput);assert.ok(relative&&(relative.startsWith('..')||path.isAbsolute(relative)),'physical bootstrap output cannot enter source checkouts');}
   await mkdir(outputRoot);await mkdir(evidenceRoot,{recursive:true});

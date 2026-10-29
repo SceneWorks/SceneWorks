@@ -8,7 +8,7 @@ The **84 cells are a regression/evidence catalog, not 84 production runs**. The 
 
 The broader seven-case matrix may move to the backend selected from actual matching first reference/hybrid inline timings. With that authorized asymmetry the physical inventory is 37 AV + 4 bounded + 2 cancellations. Both backends retain their real surface outputs and mixed audio-drop check. Passed native encoded-conditioning witnesses plus that mixed render exercise the surface; **omitted end-to-end AV contrasts remain NOT PROVEN on the other backend**, even with a peer matrix. Structural execution completeness is distinct from catalog proof completeness. No measured anchors exist in this preparation, so no backend has been selected and no GPU speed ratio is assumed.
 
-The product source pair remains the reviewed SceneWorks source and its permanent **inference-main product pin**. Native evidence-only code uses a separate `native_evidence_ref`/`native_evidence_sha` and `inference-evidence` checkout of the native feature branch. These are declared dispatch fields, never guessed revisions or a second product-pin movement. Receipts name both revisions.
+The product source pair remains the reviewed SceneWorks source and its permanent **inference-main product pin**. Native evidence-only code uses a separate `native_evidence_ref`/`native_evidence_sha` and `inference-evidence` checkout of an exact inference-main commit (`native_evidence_ref` is `main`; the checkout is by SHA, and the SHA must differ from the product pin). These are declared dispatch fields, never guessed revisions or a second product-pin movement. Receipts name both revisions.
 
 Asset verification/ensure and conditioning run **inside the existing `h3-terminal-mlx/cuda` routes**, under their unchanged device queues. There is no separate staging selector, manual workflow or required BF16 teacher/dense conversion/LTX staging phase. The whole lane has a 24-hour ceiling; individual cases retain their explicit maximum two-hour bounds and cooperative cancellation. The two approved native conditioning/adapter witnesses run once before MLX generation under their existing 8 GiB subprocess tree guard, which exits before real workers start; CUDA reuses an actual passed targeted receipt. First reference/hybrid anchors are exchanged as source-bound metadata through the existing jobs, with a bounded peer wait. No timing is guessed and no fixture cap is applied to real model workers.
 
@@ -63,8 +63,8 @@ jq -n --arg sw "$PUBLISHED_FINAL_SHA" --argjson ack "$ACTUAL_SCOPE_ACKNOWLEDGED"
   --argjson shift "$OPERATOR_PULPCUT_SHIFT" --argjson audioShift "$OPERATOR_PULPCUT_AUDIO_SHIFT" '
 {
   stationary_pair_authorized: true, sceneworks_sha: $sw,
-  inference_sha: "350bd900ee559ad0e5f2227b3e551d81b74b9501",
-  native_evidence_ref: "feature/sc-26679-h3-finetune-import",
+  inference_sha: "9ddabbea258f2faf1333a45b9186288110af4e45",
+  native_evidence_ref: "main",
   native_evidence_sha: "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
   expected_runner: $runner, adaptive_matrix: true,
   bootstrap: {
@@ -109,8 +109,8 @@ The existing entrypoint retains its ten standing dispatch keys and all old StarV
   "stationary_pair_authorized": true,
   "sceneworks_sha": "FINAL_REVIEWED_SCENEWORKS_SHA",
   "inference_sha": "FINAL_MERGED_PERMANENT_INFERENCE_SHA",
-  "native_evidence_ref": "feature/sc-26679-h3-finetune-import",
-  "native_evidence_sha": "EXACT_REVIEWED_NATIVE_EVIDENCE_FEATURE_SHA",
+  "native_evidence_ref": "main",
+  "native_evidence_sha": "EXACT_REVIEWED_NATIVE_EVIDENCE_MAIN_SHA",
   "expected_runner": "EXACT_AUTHORIZED_RUNNER_NAME",
   "plan_path": "ABSOLUTE_ALREADY_STAGED_PLAN",
   "output_path": "ABSOLUTE_PLAN_OUTPUT",

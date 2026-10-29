@@ -396,8 +396,8 @@ jobs:
           assert.ok(Date.now()<Date.parse(laneStart.startedAt)+86400000,"whole lane exhausted its original 24h budget; a dispatch does not reset it");
           await appendFile(env.GITHUB_ENV,`H3_TERMINAL_LANE_STARTED_AT=${laneStart.startedAt}\n`);
           if(originalPlan.inventory==="reduced-v1"){
-            assert.match(env.H3_NATIVE_EVIDENCE_SHA??"",/^[a-f0-9]{40}$/,"exact native FEATURE evidence SHA required independently of the product pin");
-            assert.equal(env.H3_NATIVE_EVIDENCE_REF,"feature/sc-26679-h3-finetune-import");
+            assert.match(env.H3_NATIVE_EVIDENCE_SHA??"",/^[a-f0-9]{40}$/,"exact native evidence SHA (inference main) required independently of the product pin");
+            assert.equal(env.H3_NATIVE_EVIDENCE_REF,"main");
           }
           const request = parseStageRequest(env.H3_STAGE_REQUEST ?? "{}");
           const requestedSets = request.assetSets ?? [];

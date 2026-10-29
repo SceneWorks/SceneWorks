@@ -30,7 +30,7 @@ function request(){return {stationary_pair_authorized:true,bootstrap:{casebook:'
 async function fixture(t){
   const temporary=await mkdtemp(path.join(os.tmpdir(),'h3-bootstrap-unit-fake-'));t.after(()=>rm(temporary,{recursive:true,force:true}));
   const product=path.join(temporary,'inference'),evidenceNative=path.join(temporary,'inference-evidence'),evidenceRoot=path.join(temporary,'logs');for(const d of [product,evidenceNative,evidenceRoot])await mkdir(d);
-  const env={GITHUB_ACTIONS:'true',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_SHA:'a'.repeat(40),H3_SCENEWORKS_SHA:'a'.repeat(40),H3_INFERENCE_SHA:'b'.repeat(40),H3_NATIVE_EVIDENCE_SHA:'c'.repeat(40),H3_NATIVE_EVIDENCE_REF:'feature/sc-26679-h3-finetune-import',GITHUB_RUN_ID:'101',GITHUB_RUN_ATTEMPT:'1',RUNNER_NAME:'nax-macos',HF_HOME:path.join(temporary,'hf'),HOME:temporary,H3_TERMINAL_ROUTE:'h3-terminal-mlx'};
+  const env={GITHUB_ACTIONS:'true',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_SHA:'a'.repeat(40),H3_SCENEWORKS_SHA:'a'.repeat(40),H3_INFERENCE_SHA:'b'.repeat(40),H3_NATIVE_EVIDENCE_SHA:'c'.repeat(40),H3_NATIVE_EVIDENCE_REF:'main',GITHUB_RUN_ID:'101',GITHUB_RUN_ATTEMPT:'1',RUNNER_NAME:'nax-macos',HF_HOME:path.join(temporary,'hf'),HOME:temporary,H3_TERMINAL_ROUTE:'h3-terminal-mlx'};
   const book=structuredClone(caseBook),data=new Map(),models=[sft([['padding','U8',[65536]]]),sft([['padding','U8',[60000]]]),pruned(),packed()];
   book.artifacts.forEach((v,i)=>{v.expectedBytes=models[i].length;v.expectedSha256=digest(models[i]);data.set(v.artifact,models[i]);});
   for(const [set,rows]of Object.entries(book.stagingAssets))for(const v of rows){const bytes=Buffer.from('unit_fake '+set+' '+v.file);v.expectedBytes=bytes.length;v.expectedSha256=digest(bytes);data.set(v.file,bytes);}
