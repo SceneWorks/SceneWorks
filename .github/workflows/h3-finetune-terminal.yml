@@ -143,8 +143,9 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      # sc-26691: an adaptive-matrix lane waits up to six hours, after all its staging and its first
-      # two cases, for the OTHER backend's inline anchors. When that peer was never dispatched, or
+      # sc-26691: an adaptive-matrix lane waits, after all its staging and its first two cases, for
+      # the OTHER backend's inline anchors for as long as that peer lane is alive, bounded only by
+      # this lane's own budget deadline. When that peer was never dispatched, or
       # has already ended without publishing them, the anchors can never arrive. Check the peer
       # before any staging or model work and fail within minutes (a bounded grace covers a peer
       # dispatched seconds after this one); the wait loop re-checks it while waiting.
@@ -617,7 +618,9 @@ jobs:
         if: env.H3_MATRIX_PENDING == '1'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: h3-anchors-${{ inputs.backend }}-${{ inputs.sceneworks_sha }}-${{ inputs.inference_sha }}-${{ inputs.native_evidence_sha }}
+          # One artifact per run attempt (anchorArtifactName in scripts/lib/h3-peer-lane.mjs): a fixed
+          # name made a rerun attempt's upload collide with its earlier attempt's in the same run.
+          name: h3-anchors-${{ inputs.backend }}-${{ inputs.sceneworks_sha }}-${{ inputs.inference_sha }}-${{ inputs.native_evidence_sha }}-attempt-${{ github.run_attempt }}
           path: ${{ env.H3_INLINE_ANCHORS }}
           if-no-files-found: error
           retention-days: 30
@@ -641,25 +644,24 @@ jobs:
           import {readFile,writeFile,mkdir} from "node:fs/promises";
           import {execFileSync} from "node:child_process";
           import {laneBudget,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
-          import {findPeerAnchors,observePeerLane,assertPeerCanDeliver} from "./scripts/lib/h3-peer-lane.mjs";
+          import {anchorArtifactBase,waitForPeerAnchors} from "./scripts/lib/h3-peer-lane.mjs";
           const env=process.env,p=JSON.parse(await readFile(env.PLAN,"utf8")),backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
-          const name=`h3-anchors-${peer}-${p.sceneworks}-${p.inference}-${p.nativeEvidence.sha}`;
-          const budget=await laneBudget(p,backend),deadline=Math.min(Date.parse(budget.deadline),Date.now()+6*3600000);
+          const name=anchorArtifactBase({backend:peer,sceneworks:p.sceneworks,inference:p.inference,evidence:p.nativeEvidence.sha});
+          const budget=await laneBudget(p,backend);
           const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
-          let artifact,polls=0;
-          while(!artifact){
-            assert.ok(Date.now()<deadline,"bounded peer-anchor wait expired; no backend or timing is guessed");
-            artifact=findPeerAnchors({gh,repository:env.GITHUB_REPOSITORY,name,headSha:p.sceneworks,selfRunId:env.GITHUB_RUN_ID});
-            // Every ~2 minutes, refuse at once when the peer has ended (or never existed) without
-            // publishing: those anchors can never arrive, so the remaining wait is pure waste.
-            if(!artifact&&polls++%8===0)assertPeerCanDeliver(observePeerLane({gh,repository:env.GITHUB_REPOSITORY,headSha:p.sceneworks,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer}),{peerBackend:peer,now:Date.now(),startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT),anchorsPublished:false});
-            if(!artifact)await new Promise(resolve=>setTimeout(resolve,15000));
-          }
-          const directory=path.join(p.output,`peer-inline-anchors-${peer}-${artifact.id}`);await mkdir(directory);
-          execFileSync("gh",["run","download",String(artifact.workflow_run.id),"--repo",env.GITHUB_REPOSITORY,"--name",name,"--dir",directory],{stdio:"inherit",env});
-          const decision=await receiveInlineAnchorBundle(p,backend,directory,{expectedRunId:artifact.workflow_run.id});
-          await writeFile(env.PLAN,JSON.stringify(p,null,2)+"\n");console.log(JSON.stringify({measuredMatrixDecision:decision,omittedAVStatus:"NOT proven on the displaced backend"}));
-          for(const c of executionCases(p).filter(c=>c.backend===backend&&![1,15].includes(c.index)))execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,c.id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
+          // Wait for as long as the peer lane can still deliver: it throws at once when the peer is
+          // observed ended, failed or absent without valid anchors, and is otherwise bounded only by
+          // this lane's own budget. The newest anchors that validate win; each attempt is checked
+          // against its own run id AND attempt, on a copy of the plan so a rejected one leaves no trace.
+          const {artifact,result}=await waitForPeerAnchors({gh,repository:env.GITHUB_REPOSITORY,name,headSha:p.sceneworks,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer,startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT),deadline:Date.parse(budget.deadline),log:line=>console.log(line),validate:async artifact=>{
+            const directory=path.join(p.output,`peer-inline-anchors-${peer}-${artifact.id}`);await mkdir(directory);
+            execFileSync("gh",["run","download",String(artifact.workflow_run.id),"--repo",env.GITHUB_REPOSITORY,"--name",artifact.name,"--dir",directory],{stdio:"inherit",env});
+            const plan=structuredClone(p),decision=await receiveInlineAnchorBundle(plan,backend,directory,{expectedRunId:artifact.workflow_run.id,expectedRunAttempt:artifact.runAttempt});
+            return {plan,decision};
+          }});
+          const plan=result.plan;assert.equal(plan.sceneworks,p.sceneworks);
+          await writeFile(env.PLAN,JSON.stringify(plan,null,2)+"\n");console.log(JSON.stringify({peerAnchors:{artifact:artifact.id,name:artifact.name,run:artifact.workflow_run.id,attempt:artifact.runAttempt},measuredMatrixDecision:result.decision,omittedAVStatus:"NOT proven on the displaced backend"}));
+          for(const c of executionCases(plan).filter(c=>c.backend===backend&&![1,15].includes(c.index)))execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,c.id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
           NODE
       - name: Retain terminal staging and conditioning receipts without uploading weights
         if: always()

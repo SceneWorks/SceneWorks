@@ -1,7 +1,7 @@
 // sc-26691: the adaptive matrix pairs this lane with the OTHER backend's terminal job, dispatched as
 // a separate `server-candle-linux.yml` run at the same SceneWorks SHA. A lane whose peer was never
-// dispatched, or has already ended without publishing its anchors, used to wait the full bounded
-// six hours for metadata that could not arrive. This classifies the peer from the Actions API so
+// dispatched, or has already ended without publishing its anchors, used to wait out a fixed bound
+// for metadata that could not arrive. This classifies the peer from the Actions API so
 // such a misconfigured dispatch fails within minutes, not hours.
 //
 // Shapes are the real API rows of runs 40855384972 (CUDA) and 40855343040 (MLX): the reusable
@@ -62,10 +62,61 @@ export function assertPeerCanDeliver(classification, { peerBackend, now, started
   throw new Error(`adaptive_matrix: no paired ${peerBackend} terminal run was dispatched at this SceneWorks SHA within ${Math.round(graceMs / 60000)} minutes; refusing to wait for anchors that cannot arrive. Dispatch the ${peerBackend} lane, or this lane with adaptive_matrix:false.`);
 }
 
-/** The peer's published inline-anchor artifact (earliest, unexpired, another run at this SHA), or null. */
-export function findPeerAnchors({ gh, repository, name, headSha, selfRunId }) {
-  const pages = JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repository}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=100`]));
-  return pages.flatMap(page => page.artifacts ?? []).filter(a => a.name === name && !a.expired && a.workflow_run?.head_sha === headSha && String(a.workflow_run.id) !== String(selfRunId)).sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))[0] ?? null;
+// ---------------------------------------------------------------------------
+// Inline-anchor artifacts. One per run ATTEMPT: a fixed per-SHA name made a rerun attempt's upload
+// collide (409) with its earlier attempt's artifact in the same run, and the earliest-created pick
+// paired with whichever upload happened first. The consumer takes the newest one that validates.
+export const DISPATCH_WORKFLOW_PATH = '.github/workflows/server-candle-linux.yml';
+/** How often the anchor wait polls; each poll lists the dispatch runs, their artifacts and jobs. */
+export const ANCHOR_POLL_MS = 60 * 1000;
+
+/** The pin-bound part of a lane's inline-anchor artifact name. */
+export function anchorArtifactBase({ backend, sceneworks, inference, evidence }) {
+  for (const value of [backend, sceneworks, inference, evidence]) if (typeof value !== 'string' || !value) throw new Error('anchor artifact identity requires backend and all three SHAs');
+  return `h3-anchors-${backend}-${sceneworks}-${inference}-${evidence}`;
+}
+/** The artifact name one run attempt publishes (mirrors the workflow's upload name). */
+export function anchorArtifactName(base, runAttempt) {
+  const attempt = Number(runAttempt);
+  if (!Number.isSafeInteger(attempt) || attempt < 1) throw new Error(`run attempt must be a positive integer, not ${runAttempt}`);
+  return `${base}-attempt-${attempt}`;
+}
+/** The run attempt an artifact name carries for `base`, or null when it is not one of `base`'s. */
+export function anchorArtifactAttempt(name, base) {
+  const prefix = `${base}-attempt-`;
+  if (typeof name !== 'string' || !name.startsWith(prefix)) return null;
+  const text = name.slice(prefix.length);
+  return /^[1-9]\d*$/.test(text) ? Number(text) : null;
+}
+
+/** The workflow_dispatch runs of the dispatch workflow at `headSha`. */
+export function listDispatchRuns({ gh, repository, workflowPath = DISPATCH_WORKFLOW_PATH, headSha }) {
+  const workflow = encodeURIComponent(workflowPath.split('/').pop());
+  return JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repository}/actions/workflows/${workflow}/runs?event=workflow_dispatch&head_sha=${headSha}&per_page=100`]))
+    .flatMap(page => page.workflow_runs ?? []);
+}
+
+/**
+ * Every unexpired inline-anchor artifact for `name` (the base) published by another dispatch run at
+ * this SHA, newest first (creation time, then attempt), each annotated with its `runAttempt`.
+ */
+export function peerAnchorCandidates({ gh, repository, name, headSha, selfRunId, runs }) {
+  const candidates = [];
+  for (const run of runs ?? listDispatchRuns({ gh, repository, headSha })) {
+    if (String(run.id) === String(selfRunId) || run.head_sha !== headSha) continue;
+    const artifacts = JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repository}/actions/runs/${run.id}/artifacts?per_page=100`])).flatMap(page => page.artifacts ?? []);
+    for (const artifact of artifacts) {
+      const runAttempt = anchorArtifactAttempt(artifact.name, name);
+      if (runAttempt === null || artifact.expired || artifact.workflow_run?.head_sha !== headSha || String(artifact.workflow_run?.id) !== String(run.id)) continue;
+      candidates.push({ ...artifact, runAttempt });
+    }
+  }
+  return candidates.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.runAttempt - a.runAttempt);
+}
+
+/** The newest published peer inline-anchor artifact at this SHA, or null. */
+export function findPeerAnchors(options) {
+  return peerAnchorCandidates(options)[0] ?? null;
 }
 
 /**
@@ -74,19 +125,45 @@ export function findPeerAnchors({ gh, repository, name, headSha, selfRunId }) {
  */
 export async function awaitPeerLane({ gh, repository, headSha, selfRunId, peerBackend, anchorName, startedAt, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs = 20000, graceMs = PEER_APPEARANCE_GRACE_MS }) {
   for (;;) {
-    const anchors = findPeerAnchors({ gh, repository, name: anchorName, headSha, selfRunId });
+    const runs = listDispatchRuns({ gh, repository, headSha });
+    const anchors = findPeerAnchors({ gh, repository, name: anchorName, headSha, selfRunId, runs });
     if (anchors) return { state: 'anchors', anchors };
-    const classification = assertPeerCanDeliver(observePeerLane({ gh, repository, headSha, selfRunId, peerBackend }), { peerBackend, now: now(), startedAt, graceMs, anchorsPublished: false });
+    const classification = assertPeerCanDeliver(observePeerLane({ gh, repository, headSha, selfRunId, peerBackend, runs }), { peerBackend, now: now(), startedAt, graceMs, anchorsPublished: false });
     if (classification.state === 'alive') return classification;
     await sleep(pollMs);
   }
 }
 
-/** Read the dispatch runs at `headSha` and their jobs through `gh api` (an injected executor). */
-export function observePeerLane({ gh, repository, workflowPath = '.github/workflows/server-candle-linux.yml', headSha, selfRunId, peerBackend }) {
-  const workflow = encodeURIComponent(workflowPath.split('/').pop());
-  const runs = JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repository}/actions/workflows/${workflow}/runs?event=workflow_dispatch&head_sha=${headSha}&per_page=100`]))
-    .flatMap(page => page.workflow_runs ?? []);
+/**
+ * The adaptive matrix's anchor wait. It lasts exactly as long as the peer can still deliver: it
+ * returns the newest published anchors that `validate` accepts, throws as soon as the peer lane is
+ * observed ended, failed or absent without valid anchors, and is otherwise bounded only by this
+ * lane's own budget `deadline`. (It used to stop at a fixed six hours that was never sized against
+ * a measured peer duration, discarding a live peer's work.) A candidate `validate` rejects is
+ * never retried; the next-newest one is tried instead.
+ */
+export async function waitForPeerAnchors({ gh, repository, name, headSha, selfRunId, peerBackend, startedAt, deadline, validate, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs = ANCHOR_POLL_MS, graceMs = PEER_APPEARANCE_GRACE_MS, log = () => {} }) {
+  if (!Number.isFinite(deadline)) throw new Error('the anchor wait requires this lane\'s budget deadline');
+  const rejected = new Map();
+  const rejections = () => rejected.size ? ` Rejected anchors: ${[...rejected].map(([id, reason]) => `${id}: ${reason}`).join('; ')}.` : '';
+  for (let polls = 0; ; polls++) {
+    if (now() >= deadline) throw new Error(`adaptive_matrix: this lane reached its own budget deadline ${new Date(deadline).toISOString()} while the paired ${peerBackend} lane was still able to deliver but had published no valid inline anchors; no backend or timing is guessed.${rejections()}`);
+    const runs = listDispatchRuns({ gh, repository, headSha });
+    for (const artifact of peerAnchorCandidates({ gh, repository, name, headSha, selfRunId, runs })) {
+      if (rejected.has(artifact.id)) continue;
+      try { return { state: 'anchors', artifact, result: await validate(artifact) }; }
+      catch (error) { rejected.set(artifact.id, error.message); log(`H3_PEER_ANCHORS_REJECTED: artifact ${artifact.id} (${artifact.name}, run ${artifact.workflow_run?.id}): ${error.message}`); }
+    }
+    let classification;
+    try { classification = assertPeerCanDeliver(observePeerLane({ gh, repository, headSha, selfRunId, peerBackend, runs }), { peerBackend, now: now(), startedAt, graceMs, anchorsPublished: false }); }
+    catch (error) { error.message += rejections(); throw error; }
+    if (polls % 10 === 0) log(`H3_PEER_ANCHOR_WAIT: paired ${peerBackend} lane is ${classification.state}${classification.run ? ` (run ${classification.run.id})` : ''}; waiting until ${new Date(deadline).toISOString()} at the latest`);
+    await sleep(Math.max(0, Math.min(pollMs, deadline - now())));
+  }
+}
+
+/** Read the dispatch runs at `headSha` (or the given `runs`) and their jobs through `gh api` (an injected executor). */
+export function observePeerLane({ gh, repository, workflowPath = DISPATCH_WORKFLOW_PATH, headSha, selfRunId, peerBackend, runs = listDispatchRuns({ gh, repository, workflowPath, headSha }) }) {
   const jobsByRun = new Map();
   for (const run of runs) {
     if (String(run.id) === String(selfRunId) || run.head_sha !== headSha) continue;

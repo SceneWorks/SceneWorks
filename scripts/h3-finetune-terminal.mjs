@@ -989,9 +989,11 @@ export async function writeInlineAnchorBundle(p,backend) {
   }
   const packet={version:1,backend,sceneworks:p.sceneworks,productPin:p.inference,nativeEvidenceSha:p.nativeEvidence.sha,runId:process.env.GITHUB_RUN_ID,runAttempt:process.env.GITHUB_RUN_ATTEMPT,anchors,proofs,files};await writeFile(path.join(directory,'anchors.json'),JSON.stringify(packet,null,2)+'\n',{flag:'wx'});return directory;
 }
-export async function receiveInlineAnchorBundle(p,backend,directory,{expectedRunId}={}) {
+// The peer artifact is per run attempt; its packet must carry that same run AND attempt.
+export async function receiveInlineAnchorBundle(p,backend,directory,{expectedRunId,expectedRunAttempt}={}) {
+  assert.ok(expectedRunId!==undefined&&expectedRunAttempt!==undefined,'the peer anchor artifact run id and attempt are required');
   assert.ok((await stat(contained(directory,'anchors.json'))).size<=8*1024*1024,'anchor metadata size bound exceeded');
-  const packet=await json(contained(directory,'anchors.json'));assert.equal(packet.version,1);assert.equal(packet.backend,backend==='mlx'?'cuda':'mlx');assert.ok(Array.isArray(packet.files)&&packet.files.length<=32);assert.equal(packet.anchors?.length,2);assert.equal(packet.sceneworks,p.sceneworks);assert.equal(packet.productPin,p.inference);assert.equal(packet.nativeEvidenceSha,p.nativeEvidence.sha);assert.equal(String(packet.runId),String(expectedRunId));
+  const packet=await json(contained(directory,'anchors.json'));assert.equal(packet.version,1);assert.equal(packet.backend,backend==='mlx'?'cuda':'mlx');assert.ok(Array.isArray(packet.files)&&packet.files.length<=32);assert.equal(packet.anchors?.length,2);assert.equal(packet.sceneworks,p.sceneworks);assert.equal(packet.productPin,p.inference);assert.equal(packet.nativeEvidenceSha,p.nativeEvidence.sha);assert.equal(String(packet.runId),String(expectedRunId));assert.equal(String(packet.runAttempt),String(expectedRunAttempt),'anchor packet attempt does not match its artifact');
   for(const file of packet.files){const name=contained(directory,file.path),actual=await realpath(name);contained(await realpath(directory),actual);assert.ok((await stat(actual)).size<=64*1024*1024,'anchor exchange contains metadata only');assert.equal(await hashFile(actual),file.sha256);}
   const rebase=input=>{assert.ok(packet.files.some(f=>f.path===input.path&&f.sha256===input.sha256),'anchor packet omitted a referenced receipt/log');return {...input,path:contained(directory,input.path)};};
   const peerAnchors=packet.anchors.map(anchor=>({...anchor,receiptInput:rebase(anchor.receiptInput)}));

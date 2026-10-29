@@ -7,7 +7,7 @@ import { runInNewContext } from 'node:vm';
 import path from 'node:path';
 import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, normalizeLoadEvent, runProcess, runCase, verifyCampaign, reclaimCaseModelStorage, caseStorageReclaim, assertCaseFreeSpace, CASE_FREE_SPACE_HEADROOM_BYTES } from './h3-finetune-terminal.mjs';
 import { runScenario, pointer, isSettledJobSnapshot, ASSET_SETTLE_GRACE_MS } from './h3-finetune-terminal-api.mjs';
-import { awaitPeerLane, classifyPeerLane, assertPeerCanDeliver, PEER_APPEARANCE_GRACE_MS } from './lib/h3-peer-lane.mjs';
+import { awaitPeerLane, classifyPeerLane, assertPeerCanDeliver, PEER_APPEARANCE_GRACE_MS, waitForPeerAnchors, peerAnchorCandidates, anchorArtifactBase, anchorArtifactName, anchorArtifactAttempt } from './lib/h3-peer-lane.mjs';
 const sw = 'a'.repeat(40), inf = 'b'.repeat(40);
 const log = 'test result: ok. 1 passed; 0 failed; 0 ignored;';
 function peakObservation(bytes, method, phase) {
@@ -743,9 +743,11 @@ function fakeGh({ runs, jobs, artifacts = [] }) {
   const calls = [];
   const gh = args => {
     const url = args.find(a => a.startsWith('repos/')); calls.push(url);
-    if (url.includes('/actions/artifacts')) return JSON.stringify([{ artifacts }]);
+    const runArtifacts = /runs\/(\d+)\/artifacts/.exec(url)?.[1];
+    if (runArtifacts) return JSON.stringify([{ artifacts: (typeof artifacts === 'function' ? artifacts() : artifacts).filter(a => String(a.workflow_run?.id) === runArtifacts) }]);
+    if (typeof runs === 'function') { if (url.includes('/actions/workflows/')) return JSON.stringify([{ workflow_runs: runs() }]); }
     if (url.includes('/actions/workflows/')) { assert.match(url, new RegExp(`head_sha=${PEER_SHA}`)); return JSON.stringify([{ workflow_runs: runs }]); }
-    const id = /runs\/(\d+)\/attempts\/1\/jobs/.exec(url)?.[1]; assert.ok(id, url); return JSON.stringify([{ jobs: jobs[id] ?? [] }]);
+    const id = /runs\/(\d+)\/attempts\/\d+\/jobs/.exec(url)?.[1]; assert.ok(id, url); return JSON.stringify([{ jobs: (typeof jobs === 'function' ? jobs() : jobs)[id] ?? [] }]);
   };
   return { gh, calls };
 }
@@ -763,7 +765,7 @@ test('adaptive lane fails within the grace window when the peer is absent or alr
   let clock = 0;
   const absent = fakeGh({ runs: [realRun(40855384972, 'in_progress', null)], jobs: {} });
   await assert.rejects(awaitPeerLane({ gh: absent.gh, repository: 'SceneWorks/SceneWorks', headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', anchorName: 'x', startedAt: 0, now: () => clock, sleep: async ms => { sleeps.push(ms); clock += ms; } }), /no paired mlx terminal run was dispatched at this SceneWorks SHA within 10 minutes/);
-  assert.ok(clock <= PEER_APPEARANCE_GRACE_MS + 20000, 'fails in minutes, not after the six-hour anchor wait');
+  assert.ok(clock <= PEER_APPEARANCE_GRACE_MS + 20000, 'fails in minutes, not after a long anchor wait');
   // The real cancelled MLX peer of this pair: refused once the grace has passed.
   const ended = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'completed', 'cancelled')], jobs: { 40855343040: realJobs('mlx', 'completed', 'cancelled') } });
   clock = 0;
@@ -774,11 +776,53 @@ test('adaptive lane fails within the grace window when the peer is absent or alr
   assert.throws(() => assertPeerCanDeliver(classifyPeerLane({ runs: [realRun(40855343040, 'completed', 'success')], jobsByRun: new Map([['40855343040', realJobs('mlx', 'completed', 'success')]]), selfRunId: 40855384972, headSha: PEER_SHA, peerBackend: 'mlx' }), { peerBackend: 'mlx', now: 6 * 3600000, startedAt: 0, anchorsPublished: false }), /finished successfully without publishing inline anchors/);
 });
 test('published peer anchors satisfy the preflight even when the peer has since ended', async () => {
-  const anchors = { id: 9, name: 'a', expired: false, created_at: '2026-10-29T10:40:00Z', workflow_run: { id: 40855343040, head_sha: PEER_SHA } };
-  const { gh, calls } = fakeGh({ runs: [realRun(40855343040, 'completed', 'failure')], jobs: { 40855343040: realJobs('mlx', 'completed', 'failure') }, artifacts: [anchors, { ...anchors, id: 10, workflow_run: { id: 40855384972, head_sha: PEER_SHA } }] });
+  const anchors = { id: 9, name: 'a-attempt-1', expired: false, created_at: '2026-10-29T10:40:00Z', workflow_run: { id: 40855343040, head_sha: PEER_SHA } };
+  const { gh, calls } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'completed', 'failure')], jobs: { 40855343040: realJobs('mlx', 'completed', 'failure') }, artifacts: [anchors, { ...anchors, id: 10, workflow_run: { id: 40855384972, head_sha: PEER_SHA } }] });
   const result = await awaitPeerLane({ gh, repository: 'SceneWorks/SceneWorks', headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', anchorName: 'a', startedAt: 0, now: () => 9e9, sleep: async () => assert.fail('no wait') });
-  assert.equal(result.state, 'anchors'); assert.equal(result.anchors.id, 9);
-  assert.equal(calls.length, 1, 'no liveness query once anchors exist');
+  assert.equal(result.state, 'anchors'); assert.equal(result.anchors.id, 9, 'never its own run\'s artifact');
+  assert.ok(!calls.some(url => url.includes('/jobs')), 'no liveness query once anchors exist');
+});
+// The anchor wait (sc-26691) is bounded by the peer's liveness and this lane's own budget, not a
+// fixed six hours. Hour-scale clocks are virtual.
+const HOUR = 3600000;
+const anchorBase = anchorArtifactBase({ backend: 'mlx', sceneworks: PEER_SHA, inference: 'b'.repeat(40), evidence: 'c'.repeat(40) });
+const anchorArtifact = (id, attempt, createdAt, runId = 40855343040) => ({ id, name: anchorArtifactName(anchorBase, attempt), expired: false, created_at: createdAt, workflow_run: { id: runId, head_sha: PEER_SHA } });
+const waitArgs = (gh, clock, extra) => ({ gh, repository: 'SceneWorks/SceneWorks', name: anchorBase, headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', startedAt: 0, now: () => clock.t, sleep: async ms => { clock.t += ms; }, ...extra });
+test('the anchor wait continues past six hours while the peer lane is alive', async () => {
+  const clock = { t: 0 }, published = anchorArtifact(41, 1, '2026-10-29T18:00:00Z');
+  const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'in_progress', null)], jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: () => clock.t >= 7.5 * HOUR ? [published] : [] });
+  const seen = [];
+  const result = await waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, validate: async artifact => { seen.push(artifact.id); return { decision: 'cuda' }; } }));
+  assert.equal(result.artifact.id, 41); assert.equal(result.artifact.runAttempt, 1); assert.deepEqual(result.result, { decision: 'cuda' });
+  assert.ok(clock.t >= 7.5 * HOUR, 'waited beyond the old six-hour cap for a live peer'); assert.deepEqual(seen, [41]);
+});
+test('the anchor wait stops as soon as the peer lane is observed failed', async () => {
+  const clock = { t: 0 };
+  const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'in_progress', null)], jobs: () => ({ 40855343040: clock.t >= 3 * HOUR ? realJobs('mlx', 'completed', 'failure') : realJobs('mlx', 'in_progress', null) }) });
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, validate: async () => assert.fail('nothing to validate') })), /already ended as failure without publishing inline anchors/);
+  assert.ok(clock.t >= 3 * HOUR && clock.t < 3 * HOUR + 2 * 60000, `stopped ${clock.t - 3 * HOUR} ms after the peer failed`);
+});
+test('the anchor wait is bounded by this lane\'s own budget deadline, never a fixed cap', async () => {
+  const clock = { t: 0 };
+  const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'in_progress', null)], jobs: { 40855343040: realJobs('mlx', 'in_progress', null) } });
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 19 * HOUR, validate: async () => assert.fail('nothing to validate') })), /reached its own budget deadline 1970-01-01T19:00:00.000Z while the paired mlx lane was still able to deliver/);
+  assert.equal(clock.t, 19 * HOUR, 'the budget deadline is the bound, exactly');
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, { t: 0 }, { deadline: undefined, validate: async () => {} })), /budget deadline/);
+});
+test('rerun attempts publish distinct artifacts and the newest valid one is selected', async () => {
+  assert.equal(anchorArtifactName(anchorBase, 2), `${anchorBase}-attempt-2`); assert.throws(() => anchorArtifactName(anchorBase, 0));
+  assert.equal(anchorArtifactAttempt(`${anchorBase}-attempt-3`, anchorBase), 3);
+  for (const foreign of [anchorBase, `${anchorBase}-attempt-x`, `${anchorBase}-attempt-03`, `h3-anchors-cuda-${PEER_SHA}-attempt-1`]) assert.equal(anchorArtifactAttempt(foreign, anchorBase), null, foreign);
+  // The same peer run, attempts 1 and 2 (no 409: distinct names); an expired one, and this lane's own, never count.
+  const attempt1 = anchorArtifact(51, 1, '2026-10-29T10:00:00Z'), attempt2 = anchorArtifact(52, 2, '2026-10-29T14:00:00Z');
+  const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), { ...realRun(40855343040, 'in_progress', null), run_attempt: 2 }], jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: [attempt1, attempt2, { ...anchorArtifact(53, 3, '2026-10-29T15:00:00Z'), expired: true }, anchorArtifact(54, 1, '2026-10-29T16:00:00Z', 40855384972)] });
+  assert.deepEqual(peerAnchorCandidates({ gh, repository: 'SceneWorks/SceneWorks', name: anchorBase, headSha: PEER_SHA, selfRunId: 40855384972 }).map(a => [a.id, a.runAttempt]), [[52, 2], [51, 1]]);
+  // Newest first; a candidate that fails validation falls through to the next-newest, and is not retried.
+  const clock = { t: 0 }, tried = [], logs = [];
+  const result = await waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, log: line => logs.push(line), validate: async artifact => { tried.push(artifact.id); if (artifact.runAttempt === 2) throw new Error('anchor packet attempt does not match its artifact'); return { attempt: artifact.runAttempt }; } }));
+  assert.deepEqual(tried, [52, 51]); assert.equal(result.artifact.id, 51); assert.deepEqual(result.result, { attempt: 1 });
+  assert.ok(logs.some(line => /H3_PEER_ANCHORS_REJECTED: artifact 52/.test(line)));
+  assert.equal(clock.t, 0, 'no wait when valid anchors are already published');
 });
 test('a dispatch whose jobs are not created yet is a possible peer only while active', () => {
   assert.equal(classifyPeerLane({ runs: [realRun(40855343040, 'queued', null)], jobsByRun: new Map([['40855343040', []]]), selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).state, 'alive');
