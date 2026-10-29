@@ -1161,6 +1161,101 @@ fn builtin_registry_exposes_krea_target() {
     assert_eq!(target.limits.get("requiresBackend"), None);
 }
 
+// sc-26851: the shared target seeds every Krea preset, without changing other
+// recipes that happen to share the flow-match preset builder (notably Qwen).
+#[test]
+fn krea_preview_defaults_flow_into_presets() {
+    let targets = builtin_training_targets();
+    let target = targets
+        .targets
+        .iter()
+        .find(|t| t.id == "krea_2_raw_lora")
+        .unwrap();
+    assert_eq!(target.defaults.advanced["sampleEvery"], json!(1000));
+    let presets = sceneworks_core::training::builtin_training_presets();
+    let krea: Vec<_> = presets
+        .presets
+        .iter()
+        .filter(|p| p.target_id == target.id)
+        .collect();
+    assert!(!krea.is_empty());
+    for preset in krea {
+        assert_eq!(preset.version, 2, "{}", preset.id);
+        assert_eq!(
+            preset.config.advanced["sampleEvery"],
+            json!(1000),
+            "{}",
+            preset.id
+        );
+        // Raw still uses real CFG and its supported preview recipe.
+        assert_eq!(preset.config.advanced["sampleSteps"], json!(28));
+        assert_eq!(preset.config.advanced["sampleGuidanceScale"], json!(3.5));
+        validate_training_config_for_target(target, &preset.config).unwrap();
+    }
+}
+
+#[test]
+fn krea_preview_overrides_and_stored_v1_jobs_remain_verbatim() {
+    use sceneworks_core::training::TrainingPresetProvenance;
+    let targets = builtin_training_targets();
+    let target = targets
+        .targets
+        .iter()
+        .find(|t| t.id == "krea_2_raw_lora")
+        .unwrap();
+    let presets = sceneworks_core::training::builtin_training_presets();
+    let preset = presets
+        .presets
+        .iter()
+        .find(|p| p.target_id == target.id)
+        .unwrap();
+    let dataset = dataset_fixture();
+    // Includes disabled previews, a caller cadence below the new default, and the old recipe.
+    for cadence in [0, 125, 500] {
+        let mut config = preset.config.clone();
+        config.advanced.insert("sampleEvery".into(), json!(cadence));
+        config.advanced.insert(
+            "samplePrompts".into(),
+            json!(["one", "two", "three", "four"]),
+        );
+        config.advanced.insert("sampleCount".into(), json!(4));
+        config.advanced.insert("sampleSteps".into(), json!(32));
+        config
+            .advanced
+            .insert("sampleGuidanceScale".into(), json!(4.0));
+        let snapshot = serde_json::to_value(&config).unwrap();
+        let plan = build_training_plan(BuildTrainingPlan {
+            job_id: "job_krea_preview",
+            target,
+            dataset: &dataset,
+            config: config.clone(),
+            preset: Some(TrainingPresetProvenance {
+                preset_id: preset.id.clone(),
+                preset_version: 1,
+                preset_name: preset.name.clone(),
+                preset_config_snapshot: snapshot.as_object().unwrap().clone(),
+            }),
+            lora_id: "lora_krea_preview",
+            base_model_path: "/models/krea".into(),
+            dataset_root: Path::new("/data/training/ds_abc123"),
+            output_dir: Path::new("/data/loras/lora_krea_preview"),
+            file_name: "krea.safetensors".into(),
+            created_at: "2026-10-29T00:00:00Z".into(),
+        })
+        .unwrap();
+        assert_eq!(plan.config, config);
+        assert_eq!(
+            serde_json::to_value(&plan.provenance.config_snapshot).unwrap(),
+            snapshot
+        );
+        let stored = serde_json::to_value(&plan).unwrap();
+        let restored: TrainingPlan = serde_json::from_value(stored.clone()).unwrap();
+        assert_eq!(serde_json::to_value(restored).unwrap(), stored);
+        assert_eq!(stored["provenance"]["presetVersion"], json!(1));
+        assert_eq!(stored["provenance"]["presetConfigSnapshot"], snapshot);
+    }
+}
+
 #[test]
 fn builtin_registry_exposes_sd3_targets() {
     // SD3.5 (epic 7841 T3 sc-7884) exposes TWO native MLX/Candle LoRA/LoKr training bases on the shared

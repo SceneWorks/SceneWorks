@@ -511,6 +511,30 @@ fn platform_effective_training_catalog_preserves_mlx_defaults_and_seeds_candle_l
     assert_eq!(candle_kolors.config.advanced["sampleEvery"], json!(0));
 }
 
+#[test]
+fn krea_preview_defaults_are_shared_by_cuda_and_mlx_catalogs() {
+    let shared = sceneworks_core::training::builtin_training_presets();
+    for candle in [false, true] {
+        let targets = crate::training::effective_training_targets_for_candle(candle);
+        let target = targets
+            .targets
+            .iter()
+            .find(|t| t.id == "krea_2_raw_lora")
+            .unwrap();
+        assert_eq!(target.defaults.advanced["sampleEvery"], json!(1000));
+        let effective = crate::training::effective_training_presets_for_candle(candle);
+        for preset in shared.presets.iter().filter(|p| p.target_id == target.id) {
+            let projected = effective
+                .presets
+                .iter()
+                .find(|p| p.id == preset.id)
+                .unwrap();
+            assert_eq!(projected, preset, "{} (candle {candle})", preset.id);
+            assert_eq!(projected.config.advanced["sampleEvery"], json!(1000));
+        }
+    }
+}
+
 #[tokio::test]
 async fn training_targets_route_returns_builtin_registry() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

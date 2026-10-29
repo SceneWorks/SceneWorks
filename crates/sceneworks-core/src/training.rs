@@ -2048,7 +2048,8 @@ where
         .insert("qualityPreset".to_owned(), json!(quality_preset));
     TrainingPreset {
         id: id.to_owned(),
-        version: 1,
+        // This helper also builds Qwen presets; only the Krea recipe changed.
+        version: if target.id == "krea_2_raw_lora" { 2 } else { 1 },
         target_id: target.id.clone(),
         name: name.to_owned(),
         recommended_for: recommended_for
@@ -2462,8 +2463,9 @@ fn krea_raw_lora_target() -> TrainingTarget {
                 // In-training previews render on the loaded undistilled Raw base (not the distilled
                 // CFG-free Turbo), so they use Raw's real-CFG settings — a few-step / CFG-0 preview
                 // on the non-distilled base is garbage. Heavier than Turbo previews, so a wider
-                // cadence by default (the Lens base-preview precedent).
-                "sampleEvery": 500,
+                // cadence by default. Shared by CUDA and MLX; stored job configs and caller
+                // overrides retain their chosen cadence.
+                "sampleEvery": 1000,
                 "sampleSteps": 28,
                 "sampleGuidanceScale": 3.5,
                 "qualityPreset": "balanced",

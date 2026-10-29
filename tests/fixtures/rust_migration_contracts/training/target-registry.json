@@ -700,7 +700,7 @@
             "to_v",
             "to_out.0"
           ],
-          "sampleEvery": 500,
+          "sampleEvery": 1000,
           "sampleSteps": 28,
           "sampleGuidanceScale": 3.5,
           "qualityPreset": "balanced",

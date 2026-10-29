@@ -1157,7 +1157,7 @@
     },
     {
       "id": "krea_2_raw_lora.character.adamw8bit.balanced",
-      "version": 1,
+      "version": 2,
       "targetId": "krea_2_raw_lora",
       "name": "Character balanced",
       "recommendedFor": [
@@ -1193,7 +1193,7 @@
           "outputScope": "project",
           "qualityPreset": "balanced",
           "requestedGpu": "auto",
-          "sampleEvery": 500,
+          "sampleEvery": 1000,
           "sampleGuidanceScale": 3.5,
           "sampleSteps": 28,
           "timestepBias": "high_noise",
@@ -1209,7 +1209,7 @@
     },
     {
       "id": "krea_2_raw_lora.character.adamw8bit.conservative",
-      "version": 1,
+      "version": 2,
       "targetId": "krea_2_raw_lora",
       "name": "Character conservative",
       "recommendedFor": [
@@ -1245,7 +1245,7 @@
           "outputScope": "project",
           "qualityPreset": "conservative",
           "requestedGpu": "auto",
-          "sampleEvery": 500,
+          "sampleEvery": 1000,
           "sampleGuidanceScale": 3.5,
           "sampleSteps": 28,
           "timestepBias": "high_noise",
@@ -1260,7 +1260,7 @@
     },
     {
       "id": "krea_2_raw_lora.style.adamw8bit.balanced",
-      "version": 1,
+      "version": 2,
       "targetId": "krea_2_raw_lora",
       "name": "Style balanced",
       "recommendedFor": [
@@ -1296,7 +1296,7 @@
           "outputScope": "project",
           "qualityPreset": "balanced",
           "requestedGpu": "auto",
-          "sampleEvery": 500,
+          "sampleEvery": 1000,
           "sampleGuidanceScale": 3.5,
           "sampleSteps": 28,
           "timestepBias": "high_noise",
