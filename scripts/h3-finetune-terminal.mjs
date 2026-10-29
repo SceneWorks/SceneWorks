@@ -549,7 +549,9 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
       // Imports may create native derivatives during this case; don't invent their hashes in
       // the pre-run plan. Verify their actual bytes after acquisition, confined to task state.
       const resolved = await realpath(input.path), relative = path.relative(await realpath(p.output), resolved);
-      const declared = c.inputs.some(i => path.resolve(i.path) === path.resolve(input.path) && i.sha256 === input.sha256);
+      // The product spells paths it canonicalized in verbatim form (`\\?\E:\...`), e.g. a linked
+      // checkpoint read in place below its verbatim library root (sc-26691); compare the spelling-free path.
+      const declared = c.inputs.some(i => path.resolve(stripVerbatim(i.path)) === path.resolve(stripVerbatim(input.path)) && i.sha256 === input.sha256);
       assert.ok(declared || (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative)), 'undeclared prepared source outside task state');
       assert.equal(await hashFile(input.path), input.sha256, 'prepared source content changed');
     }

@@ -543,6 +543,16 @@ test('newly prepared native derivatives are verified by bytes without invented p
   await f.save(); await f.verify();
   await writeFile(derivative, 'drifted derivative'); await assert.rejects(f.verify(), /prepared source content changed/);
 });
+test('a declared input read in place is recognized in the product verbatim spelling', { skip: process.platform !== 'win32' }, async t => {
+  // A linked checkpoint is read below its library root, which the API reports verbatim
+  // (`\\?\E:\...`, campaign 40874652324 library-roots). It is a declared input outside task state.
+  const f = await fixture(t);
+  const outside = await mkdtemp(path.join(os.tmpdir(), 'h3-linked-')); t.after(() => rm(outside, { recursive: true, force: true }));
+  const linked = path.join(outside, 'unrelated-name.safetensors'); await writeFile(linked, 'linked checkpoint bytes');
+  const sha256 = await hashFile(linked); f.c.inputs.push({ role: 'checkpoint', path: linked, sha256 });
+  f.e.loadEvent.prepared_sources = JSON.stringify([{ path: `\\\\?\\${linked}`, sha256 }]);
+  await f.save(); await f.verify();
+});
 test('replaced executable reference output cannot pass numerical fidelity', async t => {
   const f = await fixture(t, 'numeric'); await f.verify();
   await writeFile(path.join(f.dir, 'reference.json'), '[2,4,6]');
