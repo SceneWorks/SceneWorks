@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { runInNewContext } from 'node:vm';
 import path from 'node:path';
-import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, runProcess, runCase, verifyCampaign } from './h3-finetune-terminal.mjs';
+import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, normalizeLoadEvent, runProcess, runCase, verifyCampaign } from './h3-finetune-terminal.mjs';
 import { runScenario, pointer } from './h3-finetune-terminal-api.mjs';
 const sw = 'a'.repeat(40), inf = 'b'.repeat(40);
 const log = 'test result: ok. 1 passed; 0 failed; 0 ignored;';
@@ -25,10 +25,10 @@ async function fixture(t, group = 'artifact') {
   const hash = await hashFile(input);
   const p = { version: 1, sceneworks: sw, inference: inf, source: SOURCE, output: dir, responsibleTask: 'sc-26691', nextAuthorizedAction: 'Coordinator authorizes exact next Actions case; no automatic retry.', cases: requiredCases().map(c => ({ ...c, command: ['node', 'controlled-fixture.mjs'], timeoutSeconds: 10, evidence: 'evidence.json', loadHostBudgetBytes: 1000, loadDeviceBudgetBytes: 2000, minimumControlDelta: 0.1, controlStream: 'video', referenceRevision: 'c'.repeat(40), referenceCommand: ['node', 'controlled-reference.mjs'], referenceOutput: 'reference.json', tolerance: { atol: 0.001, rtol: 0.001 }, inputs: [{ path: input, sha256: hash, role: 'checkpoint', artifact: c.artifact }, { path: input, sha256: hash, role: 'reference' }] })) };
   const c = p.cases.find(c => c.group === group);
-  const e = { status: 'executed', sceneworks: sw, inference: inf, caseId: c.id, backend: c.backend, source: SOURCE, artifact: c.artifact, hardware: { device: 'synthetic CPU fixture only', driver: 'fixture' }, runtimeIdentity: { checkpointSha256: hash, planId: 'synthetic-plan', semanticDigest: hash, topology: 'fixture', quantization: 'fixture', components: [], adapters: [], operation: 'fixture', samplingPolicy: { steps: 2, schedulerShift: null }, seed: 42 }, metrics: { hostPeakBytes: 100, devicePeakBytes: 200, loadHostPeakBytes: 90, loadDevicePeakBytes: 180, observations: { host: peakObservation(100, 'sampled-process-rss', 'case'), device: peakObservation(200, 'sampled-native-allocated', 'case'), loadHost: peakObservation(90, 'sampled-process-rss', 'loading'), loadDevice: peakObservation(180, 'sampled-native-allocated', 'loading') } }, files: ['trace.json'], av: 'synthetic-av.bin', control: { intervention: 'replace conditioning', checkpointSha256: hash, seed: 42, av: 'control-av.bin' }, reference: { revision: c.referenceRevision, sha256: hash }, numeric: { candidate: 'candidate.json', reference: 'reference.json' } };
+  const e = { status: 'executed', sceneworks: sw, inference: inf, caseId: c.id, backend: c.backend, source: SOURCE, artifact: c.artifact, hardware: { device: 'synthetic CPU fixture only', driver: 'fixture' }, runtimeIdentity: { checkpointSha256: hash, planId: 'synthetic-plan', semanticDigest: `sha256:${hash}`, topology: 'fixture', quantization: 'fixture', components: [], adapters: [], operation: 'fixture', samplingPolicy: { steps: 2, schedulerShift: null }, seed: 42 }, metrics: { hostPeakBytes: 100, devicePeakBytes: 200, loadHostPeakBytes: 90, loadDevicePeakBytes: 180, observations: { host: peakObservation(100, 'sampled-process-rss', 'case'), device: peakObservation(200, 'sampled-native-allocated', 'case'), loadHost: peakObservation(90, 'sampled-process-rss', 'loading'), loadDevice: peakObservation(180, 'sampled-native-allocated', 'loading') } }, files: ['trace.json'], av: 'synthetic-av.bin', control: { intervention: 'replace conditioning', checkpointSha256: hash, seed: 42, av: 'control-av.bin' }, reference: { revision: c.referenceRevision, sha256: hash }, numeric: { candidate: 'candidate.json', reference: 'reference.json' } };
   e.testInputSha256 = hash;
   e.completedJob = { id: 'synthetic-job', status: 'completed', providerId: 'synthetic-native-provider', output: e.av };
-  e.loadEvent = { event: 'h3_import_prepared_load', jobId: e.completedJob.id, provider: e.completedJob.providerId, backend: c.backend, native_backend: c.backend, seal_validated: true, cache_state: 'Cold', identity: JSON.stringify({ checkpointId: 'synthetic-checkpoint', planId: e.runtimeIdentity.planId, semanticDigest: hash, assembly: {}, sourceFiles: [{ path: input, sha256: hash }] }), prepared_sources: JSON.stringify([{ path: input, sha256: hash }]), operation: e.runtimeIdentity.operation, seed: 42, steps: 'Some(2)', scheduler_shift: 'None' };
+  e.loadEvent = { event: 'h3_import_prepared_load', jobId: e.completedJob.id, provider: e.completedJob.providerId, backend: c.backend, native_backend: c.backend, seal_validated: true, cache_state: 'Cold', identity: JSON.stringify({ checkpointId: 'synthetic-checkpoint', planId: e.runtimeIdentity.planId, semanticDigest: `sha256:${hash}`, assembly: {}, sourceFiles: [{ path: input, sha256: hash }] }), prepared_sources: JSON.stringify([{ path: input, sha256: hash }]), operation: e.runtimeIdentity.operation, seed: 42, steps: 'Some(2)', scheduler_shift: 'None' };
   await writeFile(path.join(dir, 'source-catalog.json'), JSON.stringify({ sha: SOURCE.revision, siblings: ARTIFACTS.map(rfilename => ({ rfilename, lfs: { sha256: hash } })) }));
   await writeFile(path.join(dir, 'trace.json'), '{}');
   await writeFile(path.join(dir, e.av), 'synthetic primary AV');
@@ -83,6 +83,30 @@ for (const [name, mutate] of [
   ['missing hardware', e => e.hardware = {}],
 ]) test(`receipt mutation rejects ${name}`, async t => {
   const f = await fixture(t); await f.verify(); mutate(f.e); await f.save(); await assert.rejects(f.verify());
+});
+// sc-26691, CUDA run 40797546305 case 0: the render completed and the validator then refused the
+// product's own identity. Values below are the shapes that run's evidence.json actually carried — a
+// TYPED semantic digest, bare-hex content hashes, Option-rendered sampling fields — never guessed ones.
+test('evidence accepts the product-emitted typed semantic digest and refuses bare hex', async t => {
+  const realEvent = {
+    event: 'h3_import_prepared_load', jobId: 'job_48c3e106c8ea4437d620d838cc081ca7', provider: 'minimax_h3', backend: 'cuda:1', native_backend: 'cuda',
+    seal_validated: true, cache_state: 'Cold', operation: 'reference_to_video', seed: 314159, steps: 'Some(4)', scheduler_shift: 'Some(12.0)',
+    identity: JSON.stringify({ checkpointId: 'managed/real', planId: 'checkpoint-plan-4e923072a296085550518dce236b08f8b0840028cc65e9cb2769b4f353542fa6',
+      semanticDigest: 'sha256:f4e8b5db8d458b58abc83650c144c3fa4815ccfa7185d28f32cabcc8eef1e23b', assembly: {},
+      sourceFiles: [{ path: 'checkpoint.safetensors', sha256: 'db3ec568863db6f5ec1840210d41653afef73d4df7b0cb489c52ad458b6f8a7f' }] }),
+    prepared_sources: JSON.stringify([{ path: 'checkpoint.safetensors', sha256: 'db3ec568863db6f5ec1840210d41653afef73d4df7b0cb489c52ad458b6f8a7f' }]),
+  };
+  const closure = normalizeLoadEvent(realEvent);
+  assert.equal(closure.steps, 4); assert.equal(closure.schedulerShift, 12); assert.equal(closure.seed, 314159);
+  assert.match(closure.identity.semanticDigest, /^sha256:[a-f0-9]{64}$/);
+  const f = await fixture(t);
+  assert.match(f.e.runtimeIdentity.semanticDigest, /^sha256:[a-f0-9]{64}$/, 'the fixture carries the product form');
+  await f.verify();
+  const bare = f.e.runtimeIdentity.semanticDigest.slice('sha256:'.length);
+  f.e.runtimeIdentity.semanticDigest = bare;
+  const identity = JSON.parse(f.e.loadEvent.identity); identity.semanticDigest = bare; f.e.loadEvent.identity = JSON.stringify(identity);
+  await f.save();
+  await assert.rejects(f.verify(), /typed sha256:<64 hex> commitment/);
 });
 test('numeric case executes scale-sensitive array assertion and pinned reference revision', async t => {
   const f = await fixture(t, 'numeric'); const result = await f.verify(); assert.equal(result.numeric.elements, 3);

@@ -42,6 +42,7 @@ export function requiredCases() {
 const absolutePath = v => typeof v === 'string' && (path.posix.isAbsolute(v) || path.win32.isAbsolute(v));
 const sha40 = v => assert.match(v ?? '', /^[a-f0-9]{40}$/);
 const sha64 = v => assert.match(v ?? '', /^[a-f0-9]{64}$/);
+const typedSha256 = (v, field) => assert.match(v ?? '', /^sha256:[a-f0-9]{64}$/, `${field} must be a typed sha256:<64 hex> commitment`);
 const positive = v => assert.ok(Number.isFinite(v) && v > 0, 'positive measured value required');
 const json = async p => JSON.parse(await readFile(p, 'utf8'));
 // Final delivery links arrive after hardware execution; they are not execution inputs.
@@ -522,7 +523,9 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
     assert.ok(c.inputs.some(i => i.role === 'checkpoint' && i.sha256 === e.runtimeIdentity.checkpointSha256), 'wrong/stock checkpoint loaded');
     for (const key of ['topology', 'quantization', 'components', 'adapters', 'operation', 'samplingPolicy', 'planId']) assert.ok(e.runtimeIdentity[key] != null, `missing runtime ${key}`);
     for (const component of e.runtimeIdentity.components) assert.ok(c.inputs.some(i => i.sha256 === component.sha256), 'unverified runtime component');
-    sha64(e.runtimeIdentity.semanticDigest);
+    // The product emits the TYPED commitment `sha256:<64 hex>` (checkpoint_import_contracts.rs);
+    // bare hex here refused every real render after it completed (run 40797546305).
+    typedSha256(e.runtimeIdentity.semanticDigest, 'runtimeIdentity.semanticDigest');
     const closure = normalizeLoadEvent(e.loadEvent);
     assert.equal(closure.kind, 'prepared-native-load-closure');
     assert.equal(closure.jobId, e.completedJob?.id); assert.ok(closure.jobId);
