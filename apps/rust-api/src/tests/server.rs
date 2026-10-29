@@ -218,6 +218,55 @@ fn inprocess_worker_defaults_to_cpu_utility() {
     assert_eq!(inprocess_worker_gpu_id(Some("0".to_owned())), "0");
 }
 
+/// sc-26691: the in-process utility pool's shutdown is bounded by ONE deadline across every
+/// handle. With a per-handle timeout, three loops that never stop held the API for 3 × grace —
+/// the campaign harness's teardown bound was exactly one grace, so it timed out.
+#[tokio::test(start_paused = true)]
+async fn inprocess_utility_pool_shutdown_shares_one_deadline() {
+    let grace = std::time::Duration::from_secs(120);
+    let handles = (0..3)
+        .map(|_| {
+            tokio::spawn(async {
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        })
+        .collect();
+    let started = tokio::time::Instant::now();
+    crate::InProcessUtilityWorker { handles, grace }
+        .shutdown()
+        .await;
+    let waited = started.elapsed();
+    assert!(
+        waited >= grace,
+        "a stuck pool is still given its grace: {waited:?}"
+    );
+    assert!(
+        waited < grace + std::time::Duration::from_secs(1),
+        "three stuck loops share one deadline, not 3 x grace: {waited:?}"
+    );
+}
+
+/// sc-26691: a pool whose loops all stop promptly releases shutdown at once rather than waiting
+/// out the grace.
+#[tokio::test(start_paused = true)]
+async fn inprocess_utility_pool_shutdown_returns_when_loops_stop() {
+    let grace = std::time::Duration::from_secs(120);
+    let handles = (0..3)
+        .map(|index| {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10 * index)).await;
+                Ok(())
+            })
+        })
+        .collect();
+    let started = tokio::time::Instant::now();
+    crate::InProcessUtilityWorker { handles, grace }
+        .shutdown()
+        .await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
 #[test]
 fn inprocess_utility_worker_count_defaults_to_two() {
     // Unset / blank / unparseable → 2 so desktop downloads run two-at-a-time

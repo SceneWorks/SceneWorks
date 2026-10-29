@@ -795,9 +795,11 @@ impl InProcessUtilityWorker {
         let InProcessUtilityWorker { handles, grace } = self;
         // The loops observe the shared shutdown signal concurrently, so awaiting them
         // in sequence just collects results — each is already stopping (or stopped) by
-        // the time we reach it. The per-handle timeout bounds a stuck loop.
+        // the time we reach it. ONE deadline bounds the whole pool (sc-26691): a
+        // per-handle timeout let N stuck loops hold shutdown for N × grace.
+        let deadline = tokio::time::Instant::now() + grace;
         for handle in handles {
-            match tokio::time::timeout(grace, handle).await {
+            match tokio::time::timeout_at(deadline, handle).await {
                 Ok(Ok(Ok(()))) => {}
                 Ok(Ok(Err(error))) => tracing::error!(
                     event = "in_process_worker_exited_error",
@@ -922,6 +924,11 @@ async fn shutdown_signal(
     // therefore exit as soon as the listener closes; their lease Drop must already distinguish
     // process shutdown from an ordinary handled controller error.
     film_controller_shutdown.request();
+    // sc-26691: the in-process utility loops call `run_worker_loop` directly and only hear OS
+    // signals on their own. Whatever stopped THIS process — Ctrl-C, SIGTERM or the parent dying
+    // (the campaign harness closing the guardian's stdin) — must stop them too, or
+    // `InProcessUtilityWorker::shutdown` waits out its whole grace for loops never told to stop.
+    sceneworks_worker::request_shutdown();
     // Axum stops accepting connections when this future returns, but waits for existing
     // connections indefinitely. End app-owned long-lived streams immediately and wake the
     // server's finite drain deadline before returning control to Axum.
