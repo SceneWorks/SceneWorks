@@ -10630,7 +10630,6 @@ mod tests {
         contract.asset_facts.transformer_bytes = gib_to_bytes(FULL_LADDER_WEIGHTS_GB);
         contract.phase_facts = Some(gen_core::MemoryPhaseFacts {
             architecture: None,
-            native_quant: None,
             staged_weights: gen_core::StagedWeightSchedule::TwoStage,
             transformer_stream: Some(gen_core::StreamedWeightFacts {
                 resident_bytes: 0,
@@ -10642,6 +10641,7 @@ mod tests {
                 ]],
             }),
             decoder_workspace: None,
+            native_quant: None,
         });
         let rung4 = contract
             .strategies
@@ -12428,10 +12428,10 @@ mod tests {
         let mut sdxl = contract.clone();
         sdxl.phase_facts = Some(gen_core::MemoryPhaseFacts {
             architecture: Some(gen_core::ImagePipelineArchitecture::SdxlUnetWithDualClip),
-            native_quant: None,
             staged_weights: gen_core::StagedWeightSchedule::TwoStage,
             transformer_stream: None,
             decoder_workspace: None,
+            native_quant: None,
         });
         for windows in [None, Some(2)] {
             let longer = synthesize_estimate_ladder_with_conditioning(

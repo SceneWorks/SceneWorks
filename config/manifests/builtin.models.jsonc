@@ -17,6 +17,7 @@
       "family": "moss_image",
       "type": "image",
       "adapter": "moss_image_base",
+      "loraCompatibility": { "families": ["moss-image"], "types": ["style", "enhance", "character"] },
       "capabilities": [
         "text_to_image"
       ],
@@ -144,6 +145,7 @@
       "family": "moss_image",
       "type": "image",
       "adapter": "moss_image_sft",
+      "loraCompatibility": { "families": ["moss-image"], "types": ["style", "enhance", "character"] },
       "capabilities": [
         "text_to_image"
       ],

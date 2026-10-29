@@ -608,7 +608,7 @@ async fn apply_training_retry_resume(
             training_plan_resume_checkpoint_step(&state_for_scan, &plan_value)
         })
         .await
-        .map_err(|error| ApiError::internal(format!("resume checkpoint scan failed: {error}")))?;
+        .map_err(|error| ApiError::internal(format!("resume checkpoint scan failed: {error}")))??;
         if step.is_none() {
             return Err(ApiError::bad_request(
                 "This training job has no saved checkpoint to resume from; restart it from step 0 instead.",
@@ -634,19 +634,30 @@ async fn apply_training_retry_resume(
 /// confining that directory exactly as the worker does and matching the engine's checkpoint stem
 /// (`output.fileName`). `None` when the plan names no valid output dir or the dir holds no resume
 /// bundle of that run. Blocking filesystem work (sc-25785).
-fn training_plan_resume_checkpoint_step(state: &AppState, plan: &Value) -> Option<u32> {
-    let output_dir = plan.pointer("/output/outputDir").and_then(Value::as_str)?;
-    let file_name = plan.pointer("/output/fileName").and_then(Value::as_str)?;
+fn training_plan_resume_checkpoint_step(
+    state: &AppState,
+    plan: &Value,
+) -> Result<Option<u32>, ApiError> {
+    let Some(output_dir) = plan.pointer("/output/outputDir").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    let Some(file_name) = plan.pointer("/output/fileName").and_then(Value::as_str) else {
+        return Ok(None);
+    };
     let output_dir = sceneworks_worker::resolve_training_output_dir_under(
         &state.settings.data_dir,
         output_dir,
         "Training outputDir",
     )
-    .ok()?;
-    sceneworks_worker::latest_training_resume_step(
+    .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    if plan.pointer("/target/kernel").and_then(Value::as_str) == Some("moss_image_lora") {
+        return sceneworks_worker::latest_moss_training_resume_step(&output_dir, file_name)
+            .map_err(|error| ApiError::bad_request(error.to_string()));
+    }
+    Ok(sceneworks_worker::latest_training_resume_step(
         &output_dir,
         sceneworks_worker::training_resume_stem(file_name),
-    )
+    ))
 }
 
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {

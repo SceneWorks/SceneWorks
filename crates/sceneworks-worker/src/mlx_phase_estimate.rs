@@ -263,13 +263,13 @@ mod tests {
         };
         contract.phase_facts = Some(MemoryPhaseFacts {
             architecture: None,
-            native_quant: None,
             staged_weights: StagedWeightSchedule::ThreeStage,
             transformer_stream: Some(StreamedWeightFacts {
                 resident_bytes: 2,
                 stacks: vec![vec![2, 2]],
             }),
             decoder_workspace: None,
+            native_quant: None,
         });
         let workspace = Workspace {
             conditioning: 1,

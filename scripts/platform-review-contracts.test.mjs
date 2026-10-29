@@ -1166,7 +1166,7 @@ test("hosted-only metadata dispatch excludes every NAX runner before assignment 
       { event_name: event.event_name, repository: "SceneWorks/SceneWorks", event: {
         pull_request: { base: { ref: event.base }, head: { repo: { full_name: event.sameRepo === false ? "external/fork" : "SceneWorks/SceneWorks" } }, title: "[Mac2] metadata" },
         head_commit: { message: "[Mac2] metadata" },
-      } }, inputs, { changes: { result: gate.result, outputs: { relevant: gate.relevant } } }, () => gate.canceled,
+      } }, { verification_profile: "legacy", run_moss_native_validation: false, ...inputs }, { changes: { result: gate.result, outputs: { relevant: gate.relevant } } }, () => gate.canceled,
     );
   const validateCondition = (candidate) => {
     for (let mask = 0; mask < 16; mask++) {
@@ -1323,6 +1323,109 @@ test("macos-mlx routes an explicit Mac2 final PR and merge push without changing
   }
 });
 
+test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", async () => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const job = workflowJob(workflow, "browser-fixture-artifact");
+  const expression = workflowExpression(job);
+  const disabled = {
+    run_memory_calibration: false,
+    run_five_rung_reference: false,
+    provision_qwen_snapshot: false,
+    provision_z_image_snapshot: false,
+    run_moss_native_validation: false,
+  };
+  const validate = (candidate, candidateJob = job) => {
+    const guard = workflowStep(candidateJob, "Reject conflicting browser fixture selectors before setup");
+    assert.ok(guard, "mixed selectors must not be a skipped-green dispatch");
+    assert.ok(candidateJob.indexOf("Reject conflicting browser fixture selectors") < candidateJob.indexOf("actions/checkout"));
+    assert.ok(candidateJob.indexOf("Reject conflicting browser fixture selectors") < candidateJob.indexOf("dtolnay/rust-toolchain"));
+    assert.match(guard, /\$\{!selector\}/);
+    assert.match(guard, /echo "::error::browser-fixture-artifact cannot be combined with \$selector"\n\s+exit 1/);
+    const run = (event, inputs = {}) => Boolean(evaluateWorkflow(candidate, event, inputs));
+    for (const event of ["push", "pull_request", "merge_group"]) {
+      assert.equal(run(event, { verification_profile: "browser-fixture-artifact", ...disabled }), false, event);
+    }
+    for (const profile of [undefined, "legacy", "facts-and-projections", "consumer-assertions", "unknown"]) {
+      assert.equal(run("workflow_dispatch", { verification_profile: profile, ...disabled }), false, String(profile));
+    }
+    assert.equal(run("workflow_dispatch", { verification_profile: "browser-fixture-artifact", ...disabled }), true);
+    for (const selector of Object.keys(disabled)) {
+      assert.equal(
+        run("workflow_dispatch", { verification_profile: "browser-fixture-artifact", ...disabled, [selector]: true }),
+        true,
+        `${selector} must reach the hosted early rejection instead of skipping green`,
+      );
+    }
+  };
+  validate(expression);
+  for (const mutant of [
+    expression.replace("inputs.verification_profile == 'browser-fixture-artifact'", "inputs.verification_profile != 'legacy'"),
+    `${expression} && !inputs.run_memory_calibration`,
+  ]) {
+    assert.throws(() => validate(mutant));
+  }
+  const rejectStep = workflowStep(job, "Reject conflicting browser fixture selectors before setup");
+  assert.throws(() => validate(expression, job.replace(rejectStep, "")));
+
+  assert.match(job, /^    runs-on: macos-26$/m);
+  assert.match(job, /github\.repository == 'SceneWorks\/SceneWorks'/);
+  assert.doesNotMatch(job, /^    needs:/m);
+  assert.doesNotMatch(job, /^    continue-on-error:/m);
+  assert.match(job, /ref: \$\{\{ github\.sha \}\}/);
+  assert.match(job, /Initialize private browser fixture paths/);
+  assert.match(job, /actions\/setup-node@[0-9a-f]{40}/);
+  assert.match(job, /node-version: "20"/);
+  assert.match(job, /Validate browser fixture producer selection contracts/);
+  assert.match(job, /node --test --test-reporter=spec scripts\/platform-review-contracts\.test\.mjs scripts\/remote-macos-verification\.test\.mjs/);
+  assert.match(job, /CARGO_TARGET_DIR=\$root\/target/);
+  assert.match(job, /BROWSER_FIXTURE_OUTPUT=\$root\/output/);
+  for (const entry of [
+    'CARGO_PROFILE_DEV_DEBUG: "0"',
+    'CARGO_PROFILE_TEST_DEBUG: "0"',
+    'CARGO_PROFILE_DEV_STRIP: "false"',
+    'CARGO_PROFILE_TEST_STRIP: "false"',
+    'CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "0"',
+    'CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "0"',
+    'CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none"',
+    'CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none"',
+  ]) assert.ok(job.includes(entry), entry);
+  for (const key of [
+    "cargoProfileDevDebug",
+    "cargoProfileTestDebug",
+    "cargoProfileDevStrip",
+    "cargoProfileTestStrip",
+    "cargoProfileDevBuildOverrideDebug",
+    "cargoProfileTestBuildOverrideDebug",
+    "cargoProfileDevBuildOverrideStrip",
+    "cargoProfileTestBuildOverrideStrip",
+  ]) assert.match(job, new RegExp(`"${key}": os\\.environ`));
+  assert.match(job, /cargo test --locked -p sceneworks-rust-api --lib --no-run --message-format=json/);
+  assert.match(job, /expected one sceneworks_rust_api libtest executable/);
+  assert.match(job, /tests::browser_fixture::serve_owned_manual_browser_fixture/);
+  assert.match(job, /artifact source must be the exact clean workflow SHA/);
+  assert.match(job, /cargo-artifacts\.jsonl/);
+  assert.match(job, /producer-contract-node-version\.txt/);
+  assert.match(job, /producer-contract-tests\.txt/);
+  assert.match(job, /producerContractCommand/);
+  assert.match(job, /producerContractNodeVersion/);
+  assert.match(job, /PMETAL_METALLIB_PATH/);
+  assert.match(job, /Exact prebuilt unavailable; compiling the pinned MLX source/);
+  assert.match(job, /pmetal-mlx-sys-\*\/out\/build\/lib\/mlx\.metallib/);
+  assert.match(job, /build-companion\.json/);
+  assert.match(job, /runtimeRequirementValidated/);
+  assert.doesNotMatch(job, /metallibLaunchEnv/);
+  const upload = workflowStep(job, "Upload complete browser fixture artifact");
+  assert.match(upload, /uses: actions\/upload-artifact@[0-9a-f]{40}\b/);
+  assert.match(upload, /name: rust-api-browser-libtest-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(upload, /path: \$\{\{ env\.BROWSER_FIXTURE_OUTPUT \}\}/);
+  assert.match(upload, /if-no-files-found: error/);
+
+  assert.match(
+    workflow,
+    /options: \[legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact\]/,
+  );
+});
+
 test("imported NVFP4 model proof is explicitly manual at both reachable endpoints", async () => {
   const ordinary = await source(".github/workflows/windows-candle.yml");
   const standalone = await source(".github/workflows/imported-nvfp4-validation.yml");
@@ -1334,7 +1437,7 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
   assert.doesNotMatch(events, /pull_request|push|schedule|workflow_call/);
   const bridge = workflowJob(ordinary, "imported-nvfp4-worker-smoke");
   const validateBridge = (job) => {
-    assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && !inputs\.capability_facts_only && inputs\.run_imported_nvfp4_proof && !\(github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only\) \}\}$/m);
+    assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && !inputs\.capability_facts_only && inputs\.run_imported_nvfp4_proof && !\(github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only\) && !inputs\.run_moss_native_validation \}\}$/m);
     assert.doesNotMatch(job, /github\.event_name == 'push'|github\.event\.pull_request/);
   };
   validateBridge(bridge);
@@ -1401,7 +1504,7 @@ test("ordinary CUDA tests retain the full suite while the unchanged kernel is di
   const workflow = await source(".github/workflows/windows-candle.yml");
   const step = workflowStep(workflowJob(workflow, "candle-worker"), "Test the candle GPU worker (backend-candle)");
   assert.match(step, /cargo test -p sceneworks-worker --features backend-candle --no-run/);
-  assert.match(step, /^\s+cargo test -p sceneworks-worker --features backend-candle\s*$/m);
+  assert.match(step, /^\s+node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --features backend-candle\s*$/m);
   assert.doesNotMatch(step, /SCENEWORKS_CUDA_KERNEL_REQUIRED|windows_cuda_execution|--skip|--lib|--test /);
   const kernel = await source("crates/sceneworks-worker/tests/cuda_quant_smoke.rs");
   assert.match(kernel, /#\[test\]\n#\[ignore = "inference kernel; run the windows-candle quant_kernel_only dispatch"\]\nfn cuda_qmatmul_matches_cpu/);
@@ -1409,7 +1512,7 @@ test("ordinary CUDA tests retain the full suite while the unchanged kernel is di
   assert.ok(kernel.indexOf("required CUDA kernel validation") < kernel.indexOf("SKIP cuda_qmatmul_matches_cpu"));
   assert.doesNotMatch(kernel, /MODEL_INFERENCE_BODY_COMPLETED|MODEL_INFERENCE_DEVICE/);
   const manual = workflowJob(workflow, "quant-kernel");
-  assert.match(manual, /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only \}\}/);
+  assert.match(manual, /if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only && !inputs\.run_moss_native_validation \}\}/);
   assert.match(manual, /runs-on: \[self-hosted, Windows, X64, cuda\]/);
   assert.match(manual, /cancel-in-progress: false/);
   assert.match(manual, /cargo test --locked -p sceneworks-worker --features backend-candle --test cuda_quant_smoke --no-run/);
@@ -1482,7 +1585,7 @@ test("windows-candle runs the YuE2 terminal acceptance and profile only on dispa
   const at = workflow.indexOf("  yue2-terminal-cuda:\n");
   assert.ok(at >= 0, "windows-candle.yml must keep the YuE2 terminal job");
   const job = jobBlock(workflow, at);
-  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only && !inputs\.run_imported_nvfp4_proof && !\(github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only\) \}\}$/m);
+  assert.match(job, /^ {4}if: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_yue2_terminal_cuda && !inputs\.capability_facts_only && !inputs\.run_imported_nvfp4_proof && !\(github\.event_name == 'workflow_dispatch' && inputs\.quant_kernel_only\) && !inputs\.run_moss_native_validation \}\}$/m);
   assert.match(job, /^ {6}group: windows-candle-gpu-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}-yue2-terminal-cuda$/m);
   assert.match(job, /^ {6}cancel-in-progress: false$/m);
   assert.match(job, /^ {4}runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]$/m);
@@ -1798,7 +1901,7 @@ function jobSteps(workflow) {
       body: chunk,
       // A cargo COMMAND, line-initial, so an `echo`ed fix-it message that merely QUOTES
       // `cargo run -p sceneworks-worker` (the restamp step has one) counts as the prose it is.
-      cargo: unwrapCudaCargoCommands(chunk).split("\n").some((line) => /^\s+(run: )?cargo\s/.test(line)),
+      cargo: unwrapCudaCargoCommands(chunk).split("\n").some((line) => /^\s+(run: )?(?:node scripts\/unit-hf-sandbox\.mjs -- )?cargo\s/.test(line)),
     });
     at = next;
   }
@@ -1959,12 +2062,42 @@ test("Windows CUDA runs the Candle adapter's platform-only unit tests", async ()
   // NO `--bin` selector (sc-18808 review): it excludes the crate's LIB test target, and the crate
   // is outside `default-members`, so a plain `cargo test` never reaches it either. Under the old
   // selector the shared protocol guards in src/lib.rs executed in ZERO lanes on either platform.
-  assert.match(workflow, /^ +cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%$/m);
+  assert.match(workflow, /^ +node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%$/m);
   assert.doesNotMatch(
     workflow,
     /cargo test -p sceneworks-memory-adapter --features candle --bin/,
     "a --bin selector on the TEST step drops the lib target, where the shared protocol guards live",
   );
+});
+
+test("hosted macOS bounds the complete cold native pipeline at two hours", async (t) => {
+  const workflow = await source(".github/workflows/macos-mlx.yml");
+  const hosted = workflowJob(workflow, "macos-checks");
+  const budget = "    timeout-minutes: 120\n";
+  const validate = (candidate) => {
+    const job = workflowJob(candidate, "macos-checks");
+    assert.match(job, /^    timeout-minutes: 120$/m, "the hosted cold-build budget stays finite and sufficient");
+    assert.match(job, /^    runs-on: macos-26$/m);
+    for (const command of [
+      "cargo build -p sceneworks-worker",
+      "cargo clippy --all-targets -- -D warnings",
+      "cargo clippy -p sceneworks-memory-adapter --features mlx --all-targets -- -D warnings",
+      "node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-memory-adapter --features mlx",
+      "node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct",
+    ]) assert.ok(job.includes(`run: ${command}\n`), command);
+  };
+  validate(workflow);
+  assert.equal(hosted.split(budget).length - 1, 1);
+  for (const [name, replacement] of [
+    ["MAC-cold-budget-90", "    timeout-minutes: 90\n"],
+    ["MAC-cold-budget-missing", ""],
+    ["MAC-cold-budget-platform-maximum", "    timeout-minutes: 360\n"],
+  ]) await t.test(name, () => {
+    const mutant = workflow.replace(hosted, hosted.replace(budget, replacement));
+    assert.notEqual(mutant, workflow);
+    assert.throws(() => validate(mutant));
+    validate(workflow); // Restored source is GREEN; no workflow file is mutated by this test.
+  });
 });
 
 // The MLX twin of the pin above (sc-18250). The adapter crate sits outside the workspace
@@ -1984,7 +2117,7 @@ test("macOS MLX runs the MLX adapter's platform-only unit tests", async () => {
   // lane's platform surface.
   assert.match(
     hosted,
-    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: cargo test -p sceneworks-memory-adapter --features mlx$/m,
+    /^ {6}- name: Test the MLX memory adapter \(lib \+ memory-mlx-adapter\)\n {8}run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-memory-adapter --features mlx$/m,
   );
   assert.doesNotMatch(
     hosted,
@@ -2724,14 +2857,14 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // would re-dark macOS-conditional code in sceneworks-core / rust-api / image-quality,
   // which is precisely what sc-17026 fixed.
   const NAX_TEST = "nax_16bit_sdpa_is_correct";
-  assert.match(mlx, new RegExp(`^\\s+run: cargo test -- --skip ${NAX_TEST}$`, "m"));
+  assert.match(mlx, new RegExp(`^\\s+run: node scripts/unit-hf-sandbox\\.mjs -- cargo test -- --skip ${NAX_TEST}$`, "m"));
   // The one exemption is the targeted guard invocation below; a bare narrowing of the
   // suite to the single crate is still forbidden.
   assert.doesNotMatch(mlx, /run: cargo test -p sceneworks-worker\s*$/m);
   // ...and the skipped test must demonstrably run somewhere. Without this, deleting the
   // self-hosted half would drop the entire NAX verdict while every lane stayed green —
   // the same declared-but-unreachable trap as sc-17026, one job over.
-  const guardedNax = mlx.match(/^\s+run: [>|]-?\n\s+python3\.12 -I scripts\/ci\/metal_execution_lock\.py --wait-seconds ([0-9]+(?:\.[0-9]+)?) --\s+cargo test -p sceneworks-worker --test nax_guard$/m);
+  const guardedNax = mlx.match(/^\s+run: [>|]-?\n\s+python3\.12 -I scripts\/ci\/metal_execution_lock\.py --wait-seconds ([0-9]+(?:\.[0-9]+)?) --\s+node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard$/m);
   assert.ok(guardedNax, "self-hosted NAX execution must take the shared Metal lease before the same test argv");
   assert.ok(Number.isFinite(Number(guardedNax[1])) && Number(guardedNax[1]) > 0, "Metal lease wait must be explicit, finite and positive");
   // Running the command is only half of it — the lane must actually TRIGGER for the
@@ -2744,7 +2877,7 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // where an inherited mlx_fit_gate failure (sc-17037) meant the widened clippy never
   // executed. Lint coverage gated behind a fully green test suite is not coverage.
   const clippyAt = mlx.indexOf("run: cargo clippy --all-targets -- -D warnings");
-  const testAt = mlx.indexOf(`run: cargo test -- --skip ${NAX_TEST}`);
+  const testAt = mlx.indexOf(`run: node scripts/unit-hf-sandbox.mjs -- cargo test -- --skip ${NAX_TEST}`);
   assert.ok(clippyAt > 0, "macos-mlx.yml must lint every default member");
   assert.ok(testAt > 0, "macos-mlx.yml must run the workspace tests");
   assert.ok(clippyAt < testAt, "macos-mlx.yml must run clippy BEFORE cargo test");
@@ -3029,14 +3162,14 @@ test("Windows facts-only capture hides CUDA and compiles both runtime test suite
     if (name === "Test the candle GPU worker (backend-candle)") {
       const compile = step.indexOf(`${command} --no-run`);
       const exit = step.indexOf('if "%CAPABILITY_FACTS_ONLY%"=="true" exit /b 0');
-      const execute = step.indexOf(`\n          ${command}\n`);
+      const execute = step.indexOf(`\n          node scripts/unit-hf-sandbox.mjs -- ${command}\n`);
       assert.ok(compile >= 0 && exit > compile && execute > exit,
         "facts-only compiles, then exits before the full ordinary test execution");
       continue;
     }
     assert.ok(step.includes('set "capability_facts_test_args="'));
-    assert.ok(step.includes(`set "capability_facts_test_args="\n          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"\n          ${command} %capability_facts_test_args%`));
-    assert.deepEqual(step.split("\n").filter(line => line.trim().startsWith("cargo test ")).map(line => line.trim()), [`${command} %capability_facts_test_args%`]);
+    assert.ok(step.includes(`set "capability_facts_test_args="\n          if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"\n          node scripts/unit-hf-sandbox.mjs -- ${command} %capability_facts_test_args%`));
+    assert.deepEqual(step.split("\n").filter(line => line.trim().startsWith("node scripts/unit-hf-sandbox.mjs -- cargo test ")).map(line => line.trim()), [`node scripts/unit-hf-sandbox.mjs -- ${command} %capability_facts_test_args%`]);
   }
   assert.match(workflowStep(worker, "Check the candle sidecar builds (rust-api, backend-candle)"), /cargo check -p sceneworks-rust-api --features backend-candle/);
   assert.match(workflowStep(worker, "Clippy (candle worker)"), /cargo clippy -p sceneworks-worker --features backend-candle --all-targets -- -D warnings/);
@@ -3181,6 +3314,8 @@ test("every workspace path a self-hosted lane watches maps to a package that lan
         // and not symmetry for its own sake.
         "config/engine-capabilities/audio/capabilities.candle.json",
         "scripts/compare-engine-capability-facts.mjs", // invoked directly by the native verification step
+        "scripts/moss-native-api-validation*.mjs", // normal pre-compiler Node probe executes this test/reader family
+        "scripts/moss-training-acceptance*.mjs", // that same probe imports the native supervisor and exact-PID reader
         "Cargo.toml", // workspace graph + lints: changes what every invocation here resolves
         "Cargo.lock", // dependency pins, incl. the inference revision the whole lane compiles
         "rust-toolchain.toml", // no toolchain action on this lane; cargo auto-selects this pin
@@ -4878,7 +5013,7 @@ function mlxJobSteps(workflow, job) {
 // it changed jobs, and the `laneExits` assertion below (which counts the WHOLE FILE) is what
 // caught it: that assertion exists precisely so a guard living outside the scanned job cannot
 // ship unpinned, and the fix it asks for is to enumerate that job, which is this.
-const MLX_GUARD_JOBS = ["macos-checks", "nax-worker"];
+const MLX_GUARD_JOBS = ["macos-checks", "nax-worker", "moss-native-api-mlx", "browser-fixture-artifact"];
 
 function mlxGuardSteps(workflow) {
   return MLX_GUARD_JOBS.flatMap((job) => mlxJobSteps(workflow, job));
@@ -4891,6 +5026,20 @@ function mlxGuardSteps(workflow) {
 // string from an `else` fallthrough and from a following `-d` re-check, and the two
 // "Validate ..." steps share both the `INFERENCE_PIN` condition and its message.
 const MLX_FATAL_GUARDS = [
+  {
+    step: "Reject conflicting browser fixture selectors before setup",
+    detects: "a selected browser artifact dispatch combined with any legacy model or calibration selector",
+    branch: ['if [ "${!selector}" = "true" ]; then'],
+    diagnostic: /^echo "::error::browser-fixture-artifact cannot be combined with \$selector"$/,
+  },
+  {
+    step: "Refuse conflicting MOSS validation inputs before compiler setup",
+    detects: "a MOSS model-validation dispatch combined with another profile or provisioning selector",
+    branch: [
+      'if [ "$HOSTED_ONLY" = true ] || [ "$VERIFICATION_PROFILE" != legacy ] || [ "$RUN_MEMORY_CALIBRATION" = true ] || [ "$RUN_FIVE_RUNG_REFERENCE" = true ] || [ "$PROVISION_QWEN_SNAPSHOT" = true ] || [ "$PROVISION_Z_IMAGE_SNAPSHOT" = true ]; then',
+    ],
+    diagnostic: /^echo '::error::MOSS native validation must be dispatched alone:/,
+  },
   {
     step: "Validate hosted-only dispatch intent",
     detects: "a hosted-only artifact dispatch combined with calibration, provisioning, or an unexpected model-flag serialization",
@@ -5066,6 +5215,8 @@ const MLX_FATAL_GUARDS = [
 // backed tests fail closed, and `always()` lets the producer and its paired upload still run so
 // the fresh facts can be committed, instead of deadlocking the bootstrap.
 const MLX_GUARD_STEP_REACHABILITY = {
+  "Reject conflicting browser fixture selectors before setup": null,
+  "Refuse conflicting MOSS validation inputs before compiler setup": null,
   "Validate hosted-only dispatch intent": "if: ${{ github.event_name == 'workflow_dispatch' && inputs.hosted_only }}",
   "Verify capabilities.mlx.json content against a fresh dump": "if: ${{ always() }}",
   "Validate Qwen provisioning mode": "if: ${{ github.event_name == 'workflow_dispatch' }}",

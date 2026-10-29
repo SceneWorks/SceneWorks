@@ -107,6 +107,10 @@ on:
       # The native producer below delegates its content comparison to this script. A script-only
       # change must exercise the lane it governs.
       - "scripts/compare-engine-capability-facts.mjs"
+      # The pre-compiler owned-process probe imports these two exact controller families.
+      # CI_IMPACT: controller edits select this existing Windows lane; no new Rust inputs.
+      - "scripts/moss-native-api-validation*.mjs"
+      - "scripts/moss-training-acceptance*.mjs"
       - "Cargo.toml"
       - "Cargo.lock"
       # The toolchain and cargo-config seams (sc-17703, Michael's call — these are
@@ -258,6 +262,11 @@ on:
           - "1"
           - "0,1"
         default: "1"
+      run_moss_native_validation:
+        description: "Run the four #[ignore]d MOSS native API tests (tests::moss_training_native) once, manually, with receipts, via the CUDA/MSVC toolchain compile with CPU-synthetic fixture runtime. Exclusive with every other dispatch selector: mixed inputs fail before compiler setup"
+        required: false
+        type: boolean
+        default: false
       run_supra2_worker_smoke:
         description: "Run the Supra2-IMG Candle worker real-weight tests (sc-24214/24216/24217): install-time convert, one default 256² image_generate job, the offline cancel/recover/unload lifecycle, and the epic acceptance matrix; the three pinned snapshots must already be in E:\\huggingface\\hub"
         required: false
@@ -371,7 +380,7 @@ jobs:
     # Same-repo only — never execute untrusted fork code on the self-hosted runner. A YuE2 terminal
     # dispatch (sc-23002) runs only its own job below: every `cuda` listener is the same physical
     # box, so this lane's compile/test would share the GPU the terminal job measures with nvidia-smi.
-    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
+    if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) && !(github.event_name == 'workflow_dispatch' && inputs.run_moss_native_validation) }}
     # Actions keys retain each guarded execution request; they are not GPU mutexes.
     # Actual GPU execution takes the shared host-global UUID lease and owned Windows Job.
     # Pure file provisioning retains its existing compatibility group.
@@ -825,6 +834,12 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - name: Check Windows bounded CPU metadata before compilation
+        if: ${{ github.event_name != 'workflow_dispatch' }}
+        timeout-minutes: 3
+        shell: cmd
+        # CI_IMPACT: seconds of bounded real CPU metadata children; no compiler, model or GPU execution.
+        run: node --test --test-name-pattern="^Windows real CPU preparation" scripts/moss-native-api-validation.test.mjs
       - name: Isolate Cargo dependency checkout
         shell: powershell
         run: |
@@ -865,7 +880,7 @@ jobs:
           cargo test -p sceneworks-worker --features backend-candle --no-run
           if errorlevel 1 exit /b 1
           if "%CAPABILITY_FACTS_ONLY%"=="true" exit /b 0
-          cargo test -p sceneworks-worker --features backend-candle
+          node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-worker --features backend-candle
           if errorlevel 1 exit /b 1
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
       # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
@@ -885,7 +900,7 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          cargo check -p sceneworks-rust-api --features backend-candle
+          cargo check -p sceneworks-rust-api --features backend-candle --tests
       # PR guard for the Candle memory-calibration adapter binary (epic 15448). Like the
       # candle-gated worker code it is invisible to every other lane: `src/bin/candle.rs` is
       # `compile_error!` on macOS, macos-mlx.yml builds only `--bin memory-mlx-adapter`, and the
@@ -910,7 +925,7 @@ jobs:
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           set "capability_facts_test_args="
           if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"
-          cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%
+          node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-memory-adapter --features candle %capability_facts_test_args%
       - name: Check out the exact inference reference source
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -1491,7 +1506,7 @@ jobs:
           if-no-files-found: warn
 
   imported-nvfp4-worker-smoke:
-    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) && !inputs.run_moss_native_validation }}
     # Per-run Actions keys preserve requests; the UUID guard owns physical exclusion.
     concurrency:
       group: imported-nvfp4-proof-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1578,7 +1593,7 @@ jobs:
   # path exits non-zero and fails this job; the AT2 transcription path is now an executable case.
   # Runbook: docs/epic-22988-yue2-terminal.md.
   yue2-terminal-cuda:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) && !inputs.run_moss_native_validation }}
     concurrency:
       group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-yue2-terminal-cuda
       cancel-in-progress: false
@@ -1796,7 +1811,7 @@ jobs:
 
   iris-worker-smoke:
     needs: candle-worker
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_iris_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) && !inputs.run_moss_native_validation }}
     concurrency:
       group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-iris-worker-smoke
       cancel-in-progress: false
@@ -1901,6 +1916,108 @@ jobs:
           path: ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-*/resource-receipt.json
           if-no-files-found: warn
 
+
+  # Explicit, non-gating manual validation of the four #[ignore]d MOSS native API
+  # tests (tests::moss_training_native::*_round_trip_cpu) on the Candle backend.
+  # Real native model execution is excluded from ordinary PR/main CI by those
+  # #[ignore] attributes; this is its only Candle route (memory:
+  # real-model-execution-is-not-normal-ci).
+  #
+  # Dispatch shape: `gh workflow run windows-candle.yml --ref <ref> -f
+  # run_moss_native_validation=true` with every other input at its default.
+  # Exactly this one job runs for that shape — candle-worker, yue2-terminal-cuda
+  # and iris-worker-smoke all exclude run_moss_native_validation. Mixed inputs
+  # start this job but fail its early guard before compiler setup; unrelated
+  # jobs remain off, so an invalid dispatch is never a skipped-green proof.
+  #
+  # The self-hosted CUDA box is used for its REAL toolchain only: nvcc/MSVC
+  # compile of the candle-gated API library (vcvars64 + NVCC_CCBIN, no sccache,
+  # isolated per-listener Cargo cache). The four fixtures run CPU-synthetic —
+  # the driver hides CUDA (CUDA_VISIBLE_DEVICES=-1) AFTER compilation — so no
+  # GPU pass is claimed and no real-weights runner is occupied. Receipts, raw
+  # logs and discovery lists are uploaded even when the run fails.
+  #
+  # Bounds are the EXISTING bounded CPU validation contract, identical to the
+  # MLX lane and fixed with no dispatch knob: 180 seconds external per case and
+  # a 2 GiB AGGREGATE owned-RSS cap the driver enforces on BOTH macOS and
+  # Windows (MOSS_NATIVE_RSS_CAP_GB below) — never a Mac-only guard. The 2 GiB
+  # is an ADMITTED CAP (the native fixture's HOST_CAP_BYTES memory-budget
+  # override in the inference checkout), not a measured peak and no claim that
+  # the API resident set fits. The driver refuses any other stated value;
+  # widening follows a real recorded overrun on the remote runs and is a parent
+  # decision. Compile time is bounded separately by this job's timeout.
+  moss-native-api-candle:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.run_moss_native_validation }}
+    runs-on: [self-hosted, Windows, X64, cuda]
+    permissions:
+      contents: read
+    timeout-minutes: 180
+    env:
+      MOSS_NATIVE_RSS_CAP_GB: "2"
+      MOSS_NATIVE_WORKFLOW_FILE: .github/workflows/windows-candle.yml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Refuse conflicting MOSS validation inputs before compiler setup
+        shell: powershell
+        env:
+          CAPABILITY_FACTS_ONLY: ${{ inputs.capability_facts_only }}
+          RUN_FIVE_RUNG_REFERENCE: ${{ inputs.run_five_rung_reference }}
+          PROVISION_SNAPSHOT: ${{ inputs.provision_snapshot }}
+          RUN_LTX_EROS_ACCEPTANCE: ${{ inputs.run_ltx_eros_acceptance }}
+          RUN_EPIC_20738_TERMINAL_CUDA: ${{ inputs.run_epic_20738_terminal_cuda }}
+          RUN_YUE2_TERMINAL_CUDA: ${{ inputs.run_yue2_terminal_cuda }}
+          RUN_IRIS_WORKER_SMOKE: ${{ inputs.run_iris_worker_smoke }}
+          RUN_SUPRA2_WORKER_SMOKE: ${{ inputs.run_supra2_worker_smoke }}
+          RUN_IMPORTED_NVFP4_PROOF: ${{ inputs.run_imported_nvfp4_proof }}
+          QUANT_KERNEL_ONLY: ${{ inputs.quant_kernel_only }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:CAPABILITY_FACTS_ONLY -eq 'true' -or $env:RUN_FIVE_RUNG_REFERENCE -eq 'true' -or $env:PROVISION_SNAPSHOT -eq 'true' -or $env:RUN_LTX_EROS_ACCEPTANCE -eq 'true' -or $env:RUN_EPIC_20738_TERMINAL_CUDA -eq 'true' -or $env:RUN_YUE2_TERMINAL_CUDA -eq 'true' -or $env:RUN_IRIS_WORKER_SMOKE -eq 'true' -or $env:RUN_SUPRA2_WORKER_SMOKE -eq 'true' -or $env:RUN_IMPORTED_NVFP4_PROOF -eq 'true' -or $env:QUANT_KERNEL_ONLY -eq 'true') {
+            throw 'MOSS native validation must be dispatched alone: use only run_moss_native_validation=true; disable facts, calibration, provisioning and other model profiles.'
+          }
+      - uses: ./.github/actions/prepare-rust-runner
+      # Mirrors candle-worker: this lane's compile is heavy, and the shared runner's
+      # sccache daemon resets its connection mid-build (os error 10054). Direct rustc.
+      - name: Disable unstable sccache wrapper for the heavy Candle lane
+        shell: powershell
+        run: |
+          Add-Content -Path $env:GITHUB_ENV -Value 'RUSTC_WRAPPER='
+          Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Isolate Cargo dependency checkout
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Fetch the pinned dependencies
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      # One cmd invocation so vcvars survives: the driver compiles, discovers and
+      # runs the four cases in the same shell, and records everything before exit.
+      - name: Run the MOSS native API validation (candle)
+        shell: cmd
+        env:
+          MOSS_NATIVE_OUTPUT: ${{ runner.temp }}\moss-native-api-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node scripts/moss-native-api-validation.mjs --root . --output "%MOSS_NATIVE_OUTPUT%" --backend candle
+      - name: Upload MOSS native validation evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moss-native-api-candle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}\moss-native-api-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 14
+
   # SC-24214 (epic 24212): one real-weight Supra2-IMG `image_generate` job through the production
   # Candle worker dispatch, on the real-weights card. Dispatch only — never on PR/push — and bounded
   # (the install-time `.pt` -> bundle convert, ONE default 256², 50-step image, the sc-24216
@@ -1912,7 +2029,7 @@ jobs:
   #   gh workflow run windows-candle.yml --ref <branch> -f run_supra2_worker_smoke=true
   supra2-worker-smoke:
     needs: candle-worker
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_supra2_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_supra2_worker_smoke && !inputs.capability_facts_only && !inputs.run_imported_nvfp4_proof && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) && !inputs.run_moss_native_validation }}
     concurrency:
       group: windows-candle-gpu-${{ github.run_id }}-${{ github.run_attempt }}-supra2-worker-smoke
       cancel-in-progress: false
@@ -1989,7 +2106,7 @@ jobs:
           if-no-files-found: warn
 
   quant-kernel:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only && !inputs.run_moss_native_validation }}
     concurrency:
       group: cuda-quant-kernel-${{ github.run_id }}-${{ github.run_attempt }}
       cancel-in-progress: false

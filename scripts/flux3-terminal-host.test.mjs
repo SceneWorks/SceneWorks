@@ -80,7 +80,7 @@ test('the workflow can never upload: no artifact/upload step, no secrets, manual
     assert.match(block, /default: none/, `${input} defaults to the refused sentinel`);
   }
   assert.match(campaign, /uses: \.\/\.github\/workflows\/flux3-image-klein-terminal-host\.yml/);
-  assert.match(campaign, /if: \$\{\{ inputs\.profile == 'flux3-image-klein-terminal-host' \}\}/);
+  assert.match(campaign, /if: \$\{\{ needs\.moss-selector-preflight\.outputs\.enabled != 'true' && inputs\.profile == 'flux3-image-klein-terminal-host' \}\}/);
 });
 test('host script never echoes child output: children log to local files only', async () => {
   const text = await readFile(new URL('./flux3-terminal-host.mjs', import.meta.url), 'utf8');

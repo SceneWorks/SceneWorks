@@ -946,29 +946,40 @@ impl JobView {
     /// poller can observe `completed` with the raw facts still in place. Reading that snapshot as
     /// done would record "completed without an asset".
     ///
-    /// The persisted side is the positive signal: once `assets` / `assetIds` are present the
-    /// handoff is done, whatever else the result still carries. Waiting on the ABSENCE of
-    /// `assetWrites` alone has no escape hatch — `persist_reported_assets` returns early without
-    /// removing the key when the job row carries no `project_id`, and the recovery loop can retry a
-    /// persistently failing handoff indefinitely — which would poll a finished job until the shot
-    /// budget expired and then report it as a timeout with the take lost.
+    /// Every reported write must be covered by a persisted asset identity: an earlier running
+    /// update may have published only the first of several outputs. Raw facts may remain after a
+    /// successful handoff, so their absence is not required. A no-project or persistently failing
+    /// handoff is still bounded by the existing asset-settle grace and reported as unsettled,
+    /// rather than being retried or consuming the whole shot budget.
     fn is_settled(&self) -> bool {
-        self.status != "completed"
-            || self
-                .result
+        if self.status != "completed" {
+            return true;
+        }
+        let Some(writes) = self.result.get("assetWrites").and_then(Value::as_array) else {
+            return true;
+        };
+        writes.iter().all(|write| {
+            let Some(id) = write
+                .get("assetId")
+                .and_then(Value::as_str)
+                .filter(|id| !id.is_empty())
+            else {
+                return false;
+            };
+            self.result
                 .get("assets")
                 .and_then(Value::as_array)
-                .is_some()
-            || self
-                .result
-                .get("assetIds")
-                .and_then(Value::as_array)
-                .is_some()
-            || self
-                .result
-                .get("assetWrites")
-                .and_then(Value::as_array)
-                .is_none_or(Vec::is_empty)
+                .is_some_and(|assets| {
+                    assets
+                        .iter()
+                        .any(|asset| asset.get("id").and_then(Value::as_str) == Some(id))
+                })
+                || self
+                    .result
+                    .get("assetIds")
+                    .and_then(Value::as_array)
+                    .is_some_and(|ids| ids.iter().any(|asset_id| asset_id.as_str() == Some(id)))
+        })
     }
 
     fn failure_text(&self) -> String {
@@ -7242,10 +7253,27 @@ mod unit_tests {
         };
         assert!(!with_result(json!({ "assetWrites": [{ "type": "video" }] })).is_settled());
         assert!(
-            with_result(json!({ "assetWrites": [{ "type": "video" }], "assets": [] })).is_settled(),
-            "the persisted side is the positive signal, whatever else the result still carries"
+            !with_result(json!({ "assetWrites": [{ "type": "video" }], "assets": [] }))
+                .is_settled()
+        );
+        let writes = json!([{ "assetId": "asset_1" }, { "assetId": "asset_2" }]);
+        assert!(!with_result(json!({ "assetWrites": writes, "assets": [{"id":"asset_1"}], "assetIds":["asset_1"] })).is_settled(),
+            "an earlier published output does not settle a later pending write");
+        assert!(
+            !with_result(json!({ "assetWrites": writes, "assetIds":["asset_1", "unrelated"] }))
+                .is_settled(),
+            "matching counts cannot stand in for matching identities"
+        );
+        assert!(with_result(
+            json!({ "assetWrites": writes, "assets": [{"id":"asset_1"}, {"id":"asset_2"}] })
+        )
+        .is_settled());
+        assert!(
+            with_result(json!({ "assetWrites": writes, "assetIds":["asset_1", "asset_2"] }))
+                .is_settled()
         );
         assert!(with_result(json!({ "assetIds": ["asset_1"] })).is_settled());
+        assert!(with_result(json!({ "assetWrites": [] })).is_settled());
         assert!(with_result(json!({})).is_settled());
     }
 

@@ -89,7 +89,7 @@ fn witness_cli_binds_exact_bytes_without_weights_dataset_or_normal_app() {
     std::fs::write(base.join("config.json"), cfg.to_string()).unwrap();
     let mut config = sceneworks_core::training::flux3::target(false).defaults;
     config.rank = 4;
-    config.alpha = 4;
+    config.alpha = 4.into();
     config.steps = 4;
     config.save_every = 1;
     config.resolution = 512;

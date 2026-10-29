@@ -180,7 +180,8 @@ fn sw_config_to_engine(config: &sceneworks_core::training::TrainingConfig) -> Tr
     let network = string("networkType", "full");
     TrainingConfig {
         rank: config.rank,
-        alpha: config.alpha as f32,
+        alpha: sceneworks_core::training::training_alpha_f32(&config.alpha)
+            .expect("training target preflight validates alpha before native mapping"),
         learning_rate: config.learning_rate.as_f64().unwrap_or(1e-5) as f32,
         steps: config.steps,
         batch_size: config.batch_size,
@@ -1450,6 +1451,15 @@ mod tests {
             json!(restore_train::RECIPE_CLIP)
         );
         assert_eq!(bag["ema_decay"], json!(restore_train::RECIPE_EMA_DECAY));
+    }
+
+    /// Legacy task targets retain integral alpha semantics after the product surface moved to a
+    /// JSON number for MOSS fractions. Mutation: round or drop the checked bridge ⇒ red.
+    #[test]
+    fn task_alpha_maps_integral_contract_numbers_exactly() {
+        let mut config = sceneworks_core::training::iris::restore::iris_restore_target().defaults;
+        config.alpha = serde_json::Number::from(7);
+        assert_eq!(sw_config_to_engine(&config).alpha, 7.0);
     }
 
     /// The depth target's defaults ARE the engine's paper recipe (`apply_paper_recipe`): the global

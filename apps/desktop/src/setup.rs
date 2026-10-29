@@ -2461,11 +2461,10 @@ fn supervise_mlx_worker(app: AppHandle) {
                 command,
                 &crate::settings::load_settings().resolved_cache,
             )?;
-            // sc-7821 (epic 7819): the user's GPU memory ceiling, as fraction × total unified
-            // memory. run_worker_loop applies it to the MLX runtime process-globally (covers
-            // generations, upscales, AND LoRA training). Absent ⇒ no env ⇒ MLX default budget.
-            // Read here at spawn, so a slider change takes effect on the next worker restart.
-            if let Some(bytes) = crate::settings::gpu_memory_limit_bytes() {
+            // Preserve the macOS byte request and initialize its atomic live handoff.
+            // A metadata/write failure is not an implicit request to run uncapped.
+            crate::settings::write_gpu_memory_limit_file()?;
+            if let Some(bytes) = crate::settings::gpu_memory_limit_bytes()? {
                 command = command.env("SCENEWORKS_GPU_MEMORY_LIMIT_BYTES", bytes.to_string());
             }
             // The worker muxes generated video with ffmpeg; the desktop ships no
@@ -2558,6 +2557,9 @@ fn supervise_candle_worker(app: AppHandle) {
             terminate_linux_candle_tree(child.pid());
         },
         |sidecar, ctx| {
+            // The same global fraction is resolved per selected CUDA device by
+            // native MOSS training; never convert it using desktop maximum VRAM.
+            crate::settings::write_gpu_memory_limit_file()?;
             // Dispatches `main` to `run_worker()` with `auto`, which runs the
             // multi-GPU supervisor (`supervise_auto_workers`) and advertises the
             // candle image/video capabilities on every discovered GPU.

@@ -38,7 +38,7 @@ test("all terminal GPU tuples hold the actual GPU and API-port resource through 
 });
 test("self-hosted Metal kernel step is leased; hosted isolated macOS job remains unchanged", async () => {
   const workflow = await source("../.github/workflows/macos-mlx.yml");
-  const original = "cargo test -p sceneworks-worker --test nax_guard";
+  const original = "node scripts/unit-hf-sandbox\\.mjs -- cargo test -p sceneworks-worker --test nax_guard";
   const guard = new RegExp("python3\\.12 -I scripts/ci/metal_execution_lock\\.py --wait-seconds [0-9]+ --\\n\\s+" + original);
   assert.match(workflow, guard);
   assert.match(workflow, /workflow_dispatch' && format\('manual-\{0\}-\{1\}', github.run_id, github.run_attempt\)/);

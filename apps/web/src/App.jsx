@@ -67,7 +67,6 @@ import {
 import { buildWorkersById } from "./workers.js";
 import { createEditorScratchRegistry } from "./editorScratch.js";
 import { appConfirm, ConfirmHost } from "./appConfirm.jsx";
-import { ModelLibraryDialog } from "./components/ModelLibraryDialog.jsx";
 import { ModelLibraryRestartDialog } from "./components/ModelLibraryRestartDialog.jsx";
 import {
   adoptModelLibrary,
@@ -235,6 +234,11 @@ const SimpleShell = lazyScreen(
   () => import("./simple/SimpleShell.jsx"),
   "SimpleShell",
   "Simple UI",
+);
+const ModelLibraryDialog = lazyInteraction(
+  () => import("./components/ModelLibraryDialog.jsx"),
+  "ModelLibraryDialog",
+  "Model library recovery",
 );
 const WorkflowEmbedDecisionModal = lazyInteraction(
   () => import("./components/WorkflowEmbedNotice.jsx"),
@@ -3429,14 +3433,16 @@ export function App() {
   // disturbs the shell it renders in.
   const modelLibraryOverlays = (
     <>
-      <ModelLibraryDialog
-        autoProbePaused={modelLibraryPickerOpen}
-        canRelocate={isDesktopShell}
-        onCancel={modelLibraryGate.cancel}
-        onRelocate={chooseModelLibraryLocation}
-        onRetry={modelLibraryGate.retry}
-        state={modelLibraryState}
-      />
+      {["blocked", "retrying", "relocating"].includes(modelLibraryState?.status) ? (
+        <ModelLibraryDialog
+          autoProbePaused={modelLibraryPickerOpen}
+          canRelocate={isDesktopShell}
+          onCancel={modelLibraryGate.cancel}
+          onRelocate={chooseModelLibraryLocation}
+          onRetry={modelLibraryGate.retry}
+          state={modelLibraryState}
+        />
+      ) : null}
       <ModelLibraryRestartDialog
         canRestart={isDesktopShell}
         onLater={() => setModelLibraryRelocation(null)}

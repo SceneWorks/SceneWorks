@@ -6,6 +6,7 @@ import re
 import shutil
 import stat
 import subprocess
+import traceback
 import uuid
 from collections import Counter
 
@@ -772,6 +773,338 @@ def implementation_axis(state):
     return "implemented"
 
 
+_MOSS_FACTS_SCRIPT = """
+import { readFileSync } from "node:fs";
+import { stripJsoncComments } from "./scripts/lib/jsonc.mjs";
+import { buildMatrix } from "./scripts/generate-memory-matrix.mjs";
+const manifest = JSON.parse(
+  stripJsoncComments(readFileSync("config/manifests/builtin.models.jsonc", "utf8")),
+);
+const models = manifest.models
+  .filter((model) => model.family === "moss_image" && model.type === "image")
+  .map((model) => ({
+    id: model.id,
+    capabilities: model.capabilities,
+    loraFamilies: model.loraCompatibility?.families ?? [],
+    backends: ["mlx", "candle"].filter((backend) => model[backend] !== undefined),
+  }));
+// The pure, write-free metadata builder: the CURRENT authoritative-source expectation for the
+// MOSS lane's axes and per-(backend, rung) coverage. Nothing is read from the checked-in matrix.
+const built = await buildMatrix({ publish: false });
+const ids = new Set(models.map((model) => model.id));
+const expected = {
+  models: built.models
+    .filter((model) => ids.has(model.id))
+    .map((model) => ({ id: model.id, backends: model.backends, axes: model.axes })),
+  coverage: built.coverage
+    .filter((row) => ids.has(row.modelId))
+    .map(({ modelId, backend, rung, coordinates, states }) => ({
+      modelId, backend, rung, coordinates, states,
+    })),
+};
+console.log(JSON.stringify({ models, expected }));
+"""
+
+
+def fold_implementation_states(states):
+    folded = {"implemented": 0, "structurally-na": 0, "missing": 0}
+    for state, count in states.items():
+        folded[implementation_axis(state)] += count
+    return folded
+
+
+def moss_source_facts():
+    """The MOSS image lane as the SOURCES declare it: the builtin manifest's `moss_image` family
+    (read through the repo's own JSONC helper), the routing catalog's `ModelCaps` rows, and the
+    runtime-dumped generator capabilities. Nothing here reads the generated matrix, so the matrix
+    cannot vouch for itself."""
+    out = subprocess.run(
+        ["node", "--input-type=module", "-e", _MOSS_FACTS_SCRIPT],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    payload = json.loads(out)
+    manifest_models = payload["models"]
+    catalog = (
+        ROOT / "crates/sceneworks-core/src/jobs_store/routing/catalog.rs"
+    ).read_text(encoding="utf-8")
+    dumps = {
+        backend: json.loads(
+            (ROOT / f"config/engine-capabilities/runtime/capabilities.{backend}.json").read_text(
+                encoding="utf-8"
+            )
+        )["snapshot"]["generator_capabilities"]
+        for backend in ("mlx", "candle")
+    }
+    facts = {}
+    for entry in manifest_models:
+        row = re.search(
+            r'ModelCaps::new\(\s*"%s",\s*(true|false),\s*(true|false),\s*(true|false),'
+            r"\s*(true|false),\s*(true|false)\s*\)" % re.escape(entry["id"]),
+            catalog,
+        )
+        assert row, f"{entry['id']} has no routing-catalog ModelCaps row"
+        mlx_routed, candle_routed, _quant, candle_lora, _both = (v == "true" for v in row.groups())
+        runtime = {
+            backend: next((c for c in dumps[backend] if c["id"] == entry["id"]), None)
+            for backend in ("mlx", "candle")
+        }
+        routed = {"mlx": mlx_routed, "candle": candle_routed}
+        backends = [b for b in ("mlx", "candle") if routed[b]]
+        # The independent declarations of "this backend serves the model" must agree.
+        assert backends == entry["backends"], (entry["id"], backends, entry["backends"])
+        assert all(runtime[b] is not None for b in backends), (entry["id"], runtime)
+        # Refusal coherence: the advertised adapter bit must equal the native descriptor's bit.
+        for backend in backends:
+            assert runtime[backend]["supports_lora"] == runtime[backend]["supports_lokr"], entry["id"]
+        assert candle_lora == runtime["candle"]["supports_lora"], entry["id"]
+        # An ADVERTISED adapter family (manifest `loraCompatibility.families`) must be backed by
+        # BOTH native LoRA and LoKr on every routed backend plus the Candle routing bit. A false
+        # source bit is refused here, so it can never be paired with a matrix that dropped the
+        # overlay to hide the advertisement.
+        advertised = bool(entry["loraFamilies"])
+        if advertised:
+            assert candle_routed and candle_lora, (entry["id"], "advertised but not Candle-routed")
+            for backend in backends:
+                assert runtime[backend]["supports_lora"], (entry["id"], backend)
+                assert runtime[backend]["supports_lokr"], (entry["id"], backend)
+        facts[entry["id"]] = {
+            "advertised": advertised,
+            "modes": entry["capabilities"],
+            "backends": {b: {"lora": runtime[b]["supports_lora"]} for b in backends},
+        }
+    return {"models": facts, "expected": payload["expected"]}
+
+
+def assert_moss_census_shape(matrix, facts):
+    """Source-derived SHAPE of the MOSS image lane in the generated matrix. Pins no count: the
+    coordinate total per row is recomputed from the row's own axes, and the axes are checked
+    against the source facts."""
+    expected = facts["expected"]
+    facts = facts["models"]
+    assert facts, "no MOSS image models derived from the manifest"
+    models = {}
+    for model in matrix["models"]:
+        if model["family"] == "moss_image" or model["id"] in facts:
+            assert model["id"] not in models, f"duplicate model {model['id']}"
+            models[model["id"]] = model
+    assert models.keys() == facts.keys(), (sorted(models), sorted(facts))
+    valid_states = {state["state"] for state in matrix["conformanceStates"]}
+    rows = {}
+    for row in matrix["coverage"]:
+        if row["modelId"] in facts:
+            key = (row["modelId"], row["backend"], row["rung"])
+            assert key not in rows, f"duplicate coverage row {key}"
+            rows[key] = row
+    for model_id, fact in facts.items():
+        model = models[model_id]
+        assert sorted(model["backends"]) == sorted(fact["backends"]), model_id
+        assert model["axes"].keys() == fact["backends"].keys(), model_id
+        for backend, backend_fact in fact["backends"].items():
+            axes = model["axes"][backend]
+            assert axes["modes"] == fact["modes"], (model_id, backend)
+            expected_overlays = {"none", "lora"} if backend_fact["lora"] else {"none"}
+            if fact["advertised"]:
+                assert backend_fact["lora"], (model_id, backend, "advertised but source-false")
+                assert "lora" in axes["overlays"], (model_id, backend, "advertised lora overlay missing")
+            built_model = next(x for x in expected["models"] if x["id"] == model_id)
+            built_axes = built_model["axes"][backend]
+            assert sorted(built_model["backends"]) == sorted(fact["backends"]), model_id
+            # Compared to the CURRENT builder output, not to a pin: an invented tier, mode or
+            # overlay fails, and a legitimate source change recomputes the expectation.
+            for axis in ("tiers", "modes", "rungs"):
+                assert axes[axis] == built_axes[axis], (model_id, backend, axis)
+            assert set(axes["overlays"]) == set(built_axes["overlays"]), (model_id, backend)
+            assert len(axes["overlays"]) == len(set(axes["overlays"])), (model_id, backend)
+            assert set(axes["overlays"]) == expected_overlays, (model_id, backend, axes["overlays"])
+            assert axes["tiers"] and len(axes["tiers"]) == len(set(axes["tiers"])), (model_id, backend)
+            assert tuple(axes["rungs"]) == STRATEGY_RUNGS, (model_id, backend)
+            coordinates = len(axes["tiers"]) * len(axes["modes"]) * len(axes["overlays"])
+            for rung in STRATEGY_RUNGS:
+                where = (model_id, backend, rung)
+                row = rows.pop(where, None)
+                assert row is not None, f"missing coverage row {where}"
+                assert row["coordinates"] == coordinates, where
+                assert row["published"] + row["elided"] == coordinates, where
+                assert row["states"] and set(row["states"]) <= valid_states, where
+                assert all(
+                    isinstance(n, int) and not isinstance(n, bool) and n > 0
+                    for n in row["states"].values()
+                ), where
+                assert sum(row["states"].values()) == coordinates, where
+                tally = sum(
+                    n
+                    for state, n in row["states"].items()
+                    if implementation_axis(state) == "implemented"
+                )
+                assert row["implemented"] == tally, where
+                built_row = next(
+                    r
+                    for r in expected["coverage"]
+                    if (r["modelId"], r["backend"], r["rung"]) == where
+                )
+                assert row["coordinates"] == built_row["coordinates"], where
+                assert fold_implementation_states(row["states"]) == fold_implementation_states(
+                    built_row["states"]
+                ), where
+                if rung == "resident":
+                    # A routed backend implements the plain resident rung on every coordinate.
+                    assert tally == coordinates, where
+    assert not rows, f"coverage rows for undeclared MOSS lanes: {sorted(rows)}"
+
+
+def test_moss_image_census_shape_is_derived_from_the_sources():
+    assert_moss_census_shape(load_matrix(), moss_source_facts())
+
+
+def test_moss_image_census_shape_rejects_in_memory_mutations():
+    facts = moss_source_facts()
+    matrix = load_matrix()
+    assert_moss_census_shape(matrix, facts)  # baseline GREEN
+    model_id = sorted(facts["models"])[0]
+    backend = sorted(facts["models"][model_id]["backends"])[0]
+
+    def lane_rows(m):
+        return [r for r in m["coverage"] if r["modelId"] == model_id and r["backend"] == backend]
+
+    def model_of(m):
+        return next(x for x in m["models"] if x["id"] == model_id)
+
+    def missing_moss(m):
+        m["models"] = [x for x in m["models"] if x["family"] != "moss_image"]
+        m["coverage"] = [r for r in m["coverage"] if r["modelId"] not in facts["models"]]
+
+    def dropped_model(m):
+        m["models"] = [x for x in m["models"] if x["id"] != model_id]
+
+    def drop_overlay(m):
+        # A self-consistent overlay deletion: axes and every row shrink together.
+        model_of(m)["axes"][backend]["overlays"] = ["none"]
+        for r in lane_rows(m):
+            r["coordinates"] //= 2
+            r["elided"] = r["coordinates"] - r["published"]
+            r["states"] = {k: v // 2 for k, v in r["states"].items()}
+            r["implemented"] //= 2
+
+    def unsupported_overlay(m):
+        model_of(m)["axes"][backend]["overlays"] = ["none", "lora", "lokr"]
+
+    def missing_row(m):
+        m["coverage"].remove(lane_rows(m)[0])
+
+    def duplicate_row(m):
+        m["coverage"].append(copy.deepcopy(lane_rows(m)[0]))
+
+    def duplicate_model(m):
+        m["models"].append(copy.deepcopy(model_of(m)))
+
+    def bad_state(m):
+        lane_rows(m)[0]["states"] = {"Bogus": lane_rows(m)[0]["coordinates"]}
+
+    def bad_count(m):
+        lane_rows(m)[0]["states"] = {"Missing": 0}
+
+    def bad_sum(m):
+        lane_rows(m)[0]["coordinates"] += 1
+
+    def bad_implemented(m):
+        lane_rows(m)[0]["implemented"] += 1
+
+    def resident_not_implemented(m):
+        row = next(r for r in lane_rows(m) if r["rung"] == "resident")
+        row["states"] = {"Missing": row["coordinates"]}
+        row["implemented"] = 0
+
+    def bad_axes(m):
+        model_of(m)["axes"][backend]["rungs"] = list(STRATEGY_RUNGS[:-1])
+
+    def invented_tier(m):
+        # Self-consistent: the axis and every row of the lane grow together.
+        model_of(m)["axes"][backend]["tiers"] = ["default", "q4"]
+        for r in lane_rows(m):
+            r["coordinates"] *= 2
+            r["elided"] = r["coordinates"] - r["published"]
+            r["states"] = {k: v * 2 for k, v in r["states"].items()}
+            r["implemented"] *= 2
+
+    def fake_higher_rung_implemented(m):
+        # Self-consistent: states, implemented and the partition all agree on a rung the sources
+        # do not implement.
+        row = next(r for r in lane_rows(m) if r["rung"] == "bounded_decode")
+        row["states"] = {"Implemented": row["coordinates"]}
+        row["implemented"] = row["coordinates"]
+
+    def stray_lane(m):
+        row = copy.deepcopy(lane_rows(m)[0])
+        row["backend"] = "bogus"
+        m["coverage"].append(row)
+
+    mutations = {
+        "missing-moss": missing_moss,
+        "dropped-model": dropped_model,
+        "drop-overlay": drop_overlay,
+        "unsupported-overlay": unsupported_overlay,
+        "missing-row": missing_row,
+        "duplicate-row": duplicate_row,
+        "duplicate-model": duplicate_model,
+        "invalid-state": bad_state,
+        "invalid-count": bad_count,
+        "invalid-sum": bad_sum,
+        "invalid-implemented": bad_implemented,
+        "resident-not-implemented": resident_not_implemented,
+        "invalid-axes": bad_axes,
+        "stray-lane": stray_lane,
+        "invented-tier": invented_tier,
+        "fake-higher-rung-implemented": fake_higher_rung_implemented,
+    }
+
+    def failed_check(m, f):
+        """The source text of the assertion that rejected `m` (and that it was one)."""
+        try:
+            assert_moss_census_shape(m, f)
+        except AssertionError as error:
+            return traceback.extract_tb(error.__traceback__)[-1].line
+        raise AssertionError("mutant was accepted")
+
+    intended = {
+        "missing-moss": "models.keys() == facts.keys()",
+        "dropped-model": "models.keys() == facts.keys()",
+        "drop-overlay": "advertised lora overlay missing",
+        "unsupported-overlay": 'set(axes["overlays"]) == set(built_axes["overlays"])',
+        "missing-row": "row is not None",
+        "duplicate-row": "key not in rows",
+        "duplicate-model": 'model["id"] not in models',
+        "invalid-state": 'set(row["states"]) <= valid_states',
+        "invalid-count": "assert all(",
+        "invalid-sum": 'row["coordinates"] == coordinates',
+        "invalid-implemented": 'row["implemented"] == tally',
+        "resident-not-implemented": "fold_implementation_states(row",
+        "invalid-axes": "axes[axis] == built_axes[axis]",
+        "stray-lane": "not rows",
+        "invented-tier": "axes[axis] == built_axes[axis]",
+        "fake-higher-rung-implemented": "fold_implementation_states(row",
+    }
+    for name, mutate in mutations.items():
+        mutated = copy.deepcopy(matrix)
+        mutate(mutated)
+        line = failed_check(mutated, facts)
+        assert intended[name] in line, (name, line)
+    assert "assert facts" in failed_check(matrix, {"models": {}, "expected": facts["expected"]})
+    # A false adapter bit in the sources is refused, not absorbed into a smaller expected shape,
+    # and not hidden by a matrix that dropped the overlay to agree with it (manifest advertisement
+    # intact).
+    smaller = copy.deepcopy(facts)
+    smaller["models"][model_id]["backends"][backend]["lora"] = False
+    assert smaller["models"][model_id]["advertised"]
+    assert "advertised but source-false" in failed_check(matrix, smaller)
+    hidden = copy.deepcopy(matrix)
+    drop_overlay(hidden)
+    assert "advertised but source-false" in failed_check(hidden, smaller)
+    assert_moss_census_shape(matrix, facts)  # baseline restored GREEN
+
+
 def assert_implementation_census_shape(matrix, pinned):
     """Preserve each lane's implementation partition, independently of axis cardinality.
 
@@ -931,9 +1264,15 @@ def assert_implementation_census_shape(matrix, pinned):
     implementation. That is the shape to check when re-pinning: a lane outside qwen_image_2_1
     moving here would be a real regression, not a re-pin.
     """
+    # MOSS advertises feature-owned adapter axes; its separate source-derived
+    # census above checks every coordinate rather than pinning old refusal counts.
+    moss_ids = set(moss_source_facts()["models"])
+    assert moss_ids
+    pinned = {key: value for key, value in pinned.items() if key.split(":")[0] not in moss_ids}
     axes_by_lane = {
         (model["id"], backend): axes
         for model in matrix["models"]
+        if model["id"] not in moss_ids
         for backend, axes in model["axes"].items()
     }
     declared_keys = {
@@ -943,6 +1282,8 @@ def assert_implementation_census_shape(matrix, pinned):
     }
     census = {}
     for row in matrix["coverage"]:
+        if row["modelId"] in moss_ids:
+            continue
         tally = {"implemented": 0, "structurally-na": 0, "missing": 0}
         for state, count in row["states"].items():
             assert isinstance(count, int) and count >= 0, row

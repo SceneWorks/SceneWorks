@@ -1944,7 +1944,8 @@ pub(crate) async fn create_training_job(
     // Enforce the Rust-owned target capability before touching a dataset, allocating
     // output ids, or normalizing an image in place. The target catalog is returned
     // directly to clients, so every advertised numeric bound is a submit-time
-    // contract rather than an advisory UI hint.
+    // contract rather than an advisory UI hint. This also runs the shared MOSS field-shape
+    // validator used by worker preflight, before malformed controls can enter the queue.
     sceneworks_core::training::validate_training_config_for_target(target, &payload.config)
         .map_err(training_plan_error_to_api_error)?;
     if sceneworks_core::training::flux3::KERNELS.contains(&target.kernel.as_str())
@@ -2342,6 +2343,7 @@ pub(crate) async fn create_training_job(
             "datasetId": plan.provenance.dataset_id.clone(),
             "datasetVersion": plan.provenance.dataset_version,
             "baseModel": plan.provenance.base_model.clone(),
+            "baseModelRepo": plan.provenance.base_model_repo.clone(),
             "presetId": plan.provenance.preset_id.clone(),
             "presetVersion": plan.provenance.preset_version,
             "presetName": plan.provenance.preset_name.clone(),

@@ -566,6 +566,14 @@ pub mod voice_register;
 // so off macOS the items are otherwise unused (the parity tests still build + run).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod person_replace;
+#[cfg(all(
+    feature = "test-support",
+    any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    )
+))]
+pub mod test_support;
 mod training_jobs;
 use training_jobs::*;
 mod caption_jobs;

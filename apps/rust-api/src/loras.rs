@@ -1772,6 +1772,18 @@ pub(crate) fn validate_lora_specs_for_model(
                 declared_model_ids.join(" or ")
             )));
         }
+        // MOSS Base and SFT share a broad architecture family but have different exact
+        // checkpoints. Delegate its stricter parent/provenance rule to the shared core gate
+        // before generation so an incompatible adapter never reaches partial application.
+        if families.iter().any(|family| family == "moss-image") {
+            sceneworks_core::lora_family::validate_lora_compatibility(
+                std::slice::from_ref(lora),
+                Some(&model_own_family),
+                model_id,
+                Some(model_id),
+            )
+            .map_err(ApiError::bad_request)?;
+        }
         if families.iter().any(|family| family == "ltx-video")
             && model_id == "ltx_2_5"
             && declared_model_ids.is_empty()
@@ -2616,6 +2628,21 @@ mod base_model_gating_tests {
         ]
     }
 
+    fn moss_models() -> Vec<Value> {
+        vec![
+            json!({
+                "id": "moss_image_base",
+                "family": "moss-image",
+                "loraCompatibility": { "families": ["moss-image"] }
+            }),
+            json!({
+                "id": "moss_image_sft",
+                "family": "moss-image",
+                "loraCompatibility": { "families": ["moss-image"] }
+            }),
+        ]
+    }
+
     /// The SHIPPED `iris_3b` row (sc-25681).
     fn shipped_iris_model() -> Value {
         shipped_adapter_model("iris_3b")
@@ -3255,6 +3282,42 @@ mod base_model_gating_tests {
         let lora = json!({ "id": "legacy", "families": ["wan-video"] });
         validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
             .expect("family-only LoRA must still pass");
+    }
+
+    #[test]
+    fn moss_adapters_require_their_exact_base_or_sft_parent_before_generation() {
+        let models = moss_models();
+        let base =
+            json!({ "id": "base", "families": ["moss-image"], "baseModel": "moss_image_base" });
+        let sft = json!({ "id": "sft", "families": ["moss-image"], "baseModel": "moss_image_sft" });
+        let unknown = json!({ "id": "unknown", "families": ["moss-image"] });
+        for (model, lora) in [("moss_image_base", &base), ("moss_image_sft", &sft)] {
+            validate_lora_specs_for_model(
+                &models,
+                &[],
+                model,
+                std::slice::from_ref(lora),
+                true,
+                "LoRA",
+            )
+            .unwrap_or_else(|error| panic!("{model} exact parent must pass: {error:?}"));
+        }
+        for (model, lora) in [
+            ("moss_image_sft", &base),
+            ("moss_image_base", &sft),
+            ("moss_image_base", &unknown),
+        ] {
+            let error = validate_lora_specs_for_model(
+                &models,
+                &[],
+                model,
+                std::slice::from_ref(lora),
+                true,
+                "LoRA",
+            )
+            .expect_err("cross-checkpoint or unstamped MOSS adapter must refuse");
+            assert!(format!("{error:?}").contains("MOSS"), "{error:?}");
+        }
     }
 
     #[test]

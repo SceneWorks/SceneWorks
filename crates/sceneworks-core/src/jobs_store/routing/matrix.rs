@@ -1056,6 +1056,12 @@ pub(crate) fn expected_backend_local_trainer_id(
         target.base_model.as_str(),
         target.kernel.as_str(),
     ) {
+        ("moss_image_base_lora", "moss_image_base", "moss_image_lora") => {
+            ("moss_image_base", "moss_image_base")
+        }
+        ("moss_image_sft_lora", "moss_image_sft", "moss_image_lora") => {
+            ("moss_image_sft", "moss_image_sft")
+        }
         ("z_image_turbo_lora", "z_image_turbo", "z_image_lora") => {
             ("z_image_turbo", "z_image_turbo")
         }

@@ -1,0 +1,97 @@
+{
+  "kind": "moss-campaign-configuration-notes",
+  "manifestSha256": "6e22dbf867a0a97b711eacca9344a633461995bceabee8552d38d1cc332f9320",
+  "authority": "Coordinator configuration decision; informational notes, not acceptance evidence or an automatic control input",
+  "evidenceStatus": "Reported native fixture investigation, locally verified by its investigator, not independently executed here and not merged at the time of the relay; not real-weight evidence",
+  "firstCampaignDecision": {
+    "keepSealedManifest": true,
+    "optimizer": "adamw",
+    "learningRate": 0.001,
+    "schedule": "constant",
+    "microsteps": 60,
+    "optimizerUpdates": 60,
+    "warmupSteps": 0,
+    "basis": "LR 0.001 is the sourced native-example value. It is not demonstrably under-resolved for AdamW. Strict decrease at LR 0.001 over 60 updates is unverified and must be adjudicated by the first real-weight campaign's unchanged after < before criterion."
+  },
+  "correctedFixtureEvidence": {
+    "passingRegimeReported": {
+      "adamwAndRoseBaseLearningRate": 0.1,
+      "plainAdamLearningRate": 0.01,
+      "prodigyDimensionlessKnob": 10,
+      "microsteps": 64,
+      "optimizerUpdates": 32,
+      "schedulerMultipliers": "Applied separately; do not relabel base LR as effective LR"
+    },
+    "underResolutionFindingScope": "Candle Prodigy at original settings only. The reported 1e-12..1e-10 projected changes were below roughly 1e-7 f32 objective spacing there; this is not a universal three-update result for all optimizers or backends.",
+    "otherOriginalRunsReported": "Original Candle Base LoKR/Adam and MLX Base cases decreased; original Candle Base LoRA/AdamW moved the objective measurably by about 2.5e-6 in the wrong direction.",
+    "withdrawnClaims": [
+      "The passing fixture used AdamW effective LR 0.001 from base 0.01 times scale 0.1",
+      "AdamW LR 0.001 at the sealed campaign's 60 updates has verified strict decrease",
+      "All original optimizers/backends were universally under-resolved at three updates"
+    ]
+  },
+  "conditionalConfigurationDecisionOnly": {
+    "condition": "The first real-weight campaign honestly fails its strict learning criterion",
+    "candidate": {"optimizer": "adamw", "baseLearningRate": 0.1, "schedule": "constant", "optimizerUpdates": 60},
+    "status": "Requires a new explicit documented coordinator configuration decision, new manifest/schema seal and rerun of all eight cells because the shared optimizer configuration would change. No candidate is applied by these notes.",
+    "allowAutomaticTuning": false,
+    "allowPerCellTweak": false,
+    "allowAssertionOracleOrToleranceChange": false
+  },
+  "evaluationInvestigationStatus": "Investigator reported stale-eval and off-by-one hypotheses refuted with high confidence on fixtures. This does not replace campaign evidence.",
+  "generationAdmissionCorrection": {
+    "recordedAt": "2026-10-25",
+    "finding": "Self-caught overstatement: the claimed missing generation-admission interface and phantom generationPhaseDemands field were incorrect. Existing public native generation header estimators are available and the source consumer now uses those real routines.",
+    "productionRefactorContract": "Spec preparation and header-demand math extraction must remain a pure move: unchanged defaults, limits, guards, floor/max ordering and production cfg paths. Only the metadata bridge is test-support gated.",
+    "verificationRequired": "Identify and run existing unchanged worker tests covering the extracted paths at the first authorized build; add pure shared-helper behavior assertions if existing coverage is absent. Source formatting alone is not behavior proof.",
+    "runtimeProof": false
+  },
+  "recoveryOracleDecision": {
+    "recordedAt": "2026-10-25",
+    "oracle": "Original whole-file hash equality remains required for final adapters and complete native checkpoint inventories; the finalizer also retains its pre-existing exact tensor-payload comparisons.",
+    "rejectedChange": "A proposed payload-only substitution was reverted because the supplied MOSS source delegates serialization to shared producers/serializers not present in the reference snapshot. Map-order differences were not proven to survive serialization, so calling the whole-file constraint over-strict was speculative.",
+    "semanticState": "Complete native state, optimizer bytes, cursors, accumulated-token denominator, seed, horizon, configuration/source/dataset identities and numerical results remain exact. No tolerance, epsilon or NaN/sign normalization was introduced."
+  },
+  "baseRepositorySchemaCorrection": {
+    "recordedAt": "2026-10-25",
+    "retraction": "WITHDRAWN: the earlier note claiming all Base components live in one repository was a source-only regression. Its byte inspection did not cover the production shared-SFT component path. The Base-only availability filter was wrong and has been replaced before real execution.",
+    "productionMap": {"mlx/base/lora": ["OpenMOSS-Team/MOSS-Image-Base", "OpenMOSS-Team/MOSS-Image-SFT"], "mlx/base/lokr": ["OpenMOSS-Team/MOSS-Image-Base", "OpenMOSS-Team/MOSS-Image-SFT"], "cuda/base/lora": ["OpenMOSS-Team/MOSS-Image-Base", "OpenMOSS-Team/MOSS-Image-SFT"], "cuda/base/lokr": ["OpenMOSS-Team/MOSS-Image-Base", "OpenMOSS-Team/MOSS-Image-SFT"], "mlx/sft/lora": ["OpenMOSS-Team/MOSS-Image-SFT", "lodestones/MOSS-Image-SFT-8-steps-dmd"], "mlx/sft/lokr": ["OpenMOSS-Team/MOSS-Image-SFT", "lodestones/MOSS-Image-SFT-8-steps-dmd"], "cuda/sft/lora": ["OpenMOSS-Team/MOSS-Image-SFT", "lodestones/MOSS-Image-SFT-8-steps-dmd"], "cuda/sft/lokr": ["OpenMOSS-Team/MOSS-Image-SFT", "lodestones/MOSS-Image-SFT-8-steps-dmd"]},
+    "reason": "Production Base uses its transformer plus shared SFT text encoder/VAE components. SFT ordinary and both DMD regression modes together require the SFT and DMD repositories. The preflight now derives the complete file union by calling production selected_components, not by a repository-name heuristic.",
+    "change": "Schema requires a nonempty repository-group array; actual component coverage and count come from the production map. Every selected file retains its native trusted SHA-256 and byte-size requirement. No learning or numerical assertion changed. The repository-count schema is not used to substitute for exact file coverage.",
+    "nativeReference": "merged b939f3e883b75d3ec5e12263bde914ae5f5b2830, byte-identical to prior 160fc5de reference; gen-core/src/moss_image_assets.rs SHA256 9e122743cd6b6cddba5a74d3c906f6f5975b8aa53a151f9c9a18b288d377d121"
+  },
+  "dmdNoCfgProtocolCorrection": {
+    "recordedAt": "2026-10-25",
+    "foundBy": "First pure worker test execution: prepared_preload_requires_exact_frozen_snapshot_for_each_admissible_mode failed for SFT unmerged_bf16 because its payload incorrectly supplied guidanceScale 1.0. Two other helper refusal tests passed. No campaign had executed.",
+    "diagnosis": "Test payload defect, not helper ordering. The unchanged native DMD contract accepts omitted/zero guidance and no negative prompt; production validation correctly ran before snapshot lookup.",
+    "fix": "Omit guidanceScale for DMD-only helper test, forecast and actual generation-regression payloads. Ordinary before/after/disable previews retain the sealed guidance 1.0. Manifest, optimizer, training controls, learning oracle, production validation and guard ordering remain unchanged.",
+    "namedCfgRefusalCoverage": "sceneworks-core moss_image::tests::malformed_options_and_dmd_conflicts_fail_at_the_shared_boundary explicitly asserts DMD plus guidanceScale is refused",
+    "linkerWarning": "The first unit-test binary linked with ld __eh_frame section too large (max 16MB) for compact unwind offsets. Linking succeeded; no change made for this performance-only warning."
+  },
+  "mergedDiagnosticVerification": {
+    "verifiedAt": "2026-10-25",
+    "sourceCommit": "b939f3e883b75d3ec5e12263bde914ae5f5b2830",
+    "sourceTree": "ba0a927f0799c351cee248264276edc4cb3754ab",
+    "probeSha256": "1f0148ffa9414ef1c15c8875928d1c2b9c0ffc5888a5da22107d36f911e2d5ec",
+    "result": "All 160 supplied merged-manifest file hashes verified. All 15 previously recorded relied-on source hashes, including the probe, match the provisional 160fc5de bytes exactly; diagnostic surface unchanged. Provisional adapter status is resolved, not a runtime acceptance claim.",
+    "referenceAuthority": "Coordinator-provided read-only source snapshot; original human ratification was conveyed as yes, ratify the snapshot. No provided source bytes were modified.",
+    "runtimeAcceptanceExecuted": false
+  },
+  "terminalCampaignCorrection": {
+    "recordedAt": "2026-10-26",
+    "crossLoad": "Ordinary generation assets and header demand only; retain exact physical device identity, frozen product cap and actual transferred-adapter pre-load check. Each import has its own 3600-second compute bound after separately bounded preparation.",
+    "inspection": "Named findings and exact reviewed PNG hashes remain mandatory before acceptance. Record actual review time; human latency is outside the compute deadline.",
+    "invalidation": "Changed behavior, inputs or execution closure invalidate affected observations. Schema, verifier, notes, deadline or source-hash movement alone does not require model re-execution when preserved raw observations remain valid. Retain original product and tooling provenance. No cross-run reuse system is implemented; same-run exact-source checks remain.",
+    "hashing": "Retain full cached-file authentication. Native preflight, JS recheck and native execution each authenticate files; this costs 48 full inventory passes across 16 cells before production generator pinning. Cross-load now excludes unconsumed DMD files. Removing additional passes needs an immutable file-proof lifecycle, beyond this focused correction.",
+    "runtimeEvidence": false
+  },
+  "CI_IMPACT": "Focused pure JS/Python regressions and native metadata-only contracts add no model inference, training, workflow jobs or broad matrix to normal CI. Manual campaign retains eight training cells and eight ordinary cross-loads, all learning/recovery/precision assertions and resource guards. Per-import clocks exclude separately bounded preparation; human inspection remains required before acceptance. Full inventory hashing remains unchanged except unused cross-load DMD files are excluded.",
+  "nativeRootSupervisionRevision": {
+    "recordedAt": "2026-10-28",
+    "scope": "The owned Rust libtest process contains the API, worker, training and generation. Reuse the protected native current-process RSS syscall in existing control/check seams; retain positive fail-closed samples, unchanged product cap, first failure cancellation and original one-hour case deadline. The reported peak is a sampled maximum, not a kernel lifetime high-water measurement.",
+    "release": "The native receipt requires returned work and joined API; the parent binds PID and exact binary SHA and waits for its own child exit/stdio closure. No metadata-helper PID absence, full process tree or foreign ownership claim is made. Unclosed native writers remain unsafe and unsealed.",
+    "contract": "This explicitly replaces the earlier campaign-added all-descendant census/RSS proof. E1-E7, model/data/settings/numerics, full eight cases, recovery and real memory refusal are unchanged. The manifest seal changes; historical failed or unsafe producers are not relabeled or accepted.",
+    "CI_IMPACT": "Deletes MOSS-only process-tree/census tests and the existing Windows prefix extension; preserves generic CPU preparation/driver tests. Adds literal receipt/control regressions only. Manual native control polls reuse the existing 100ms loop without subprocesses, new threads, jobs, profiles or dependencies; actual runtime impact is unmeasured."
+  },
+  "checkpointStallInvariant": "Observe and forward the native checkpoint event only after the step-20 optimizer update and durable state land. Never wait between a loss computation and its pending update, and never skip or replay an update. Compare final reference and canceled/resumed factors exactly."
+}

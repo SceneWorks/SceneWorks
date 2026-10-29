@@ -1148,6 +1148,7 @@ dependencies = [
  "image",
  "rand 0.9.4",
  "safetensors 0.7.0",
+ "sceneworks-gen-core-testkit",
  "serde_json",
  "sha2 0.10.9",
 ]
@@ -4801,6 +4802,7 @@ dependencies = [
  "mlx-gen-flux2",
  "mlx-llm",
  "pmetal-mlx-rs",
+ "sceneworks-gen-core-testkit",
  "serde_json",
  "sha2 0.10.9",
 ]
@@ -7221,6 +7223,7 @@ dependencies = [
  "base64 0.22.1",
  "candle-gen",
  "candle-gen-ltx",
+ "candle-gen-moss-image",
  "cssparser",
  "fs2",
  "futures-util",
@@ -7228,6 +7231,7 @@ dependencies = [
  "image",
  "imageproc",
  "mlx-gen-ltx",
+ "mlx-gen-moss-image",
  "nix 0.29.0",
  "ort",
  "parquet",
