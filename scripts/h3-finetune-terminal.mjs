@@ -2,6 +2,7 @@
 // sc-26691: explicit, source-bound terminal execution. No ordinary CI/model execution.
 import assert from 'node:assert/strict';
 import { campaignProfileArgs } from './lib/h3-campaign-build-profile.mjs';
+import { stripVerbatim } from './lib/windows-verbatim-path.mjs';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, realpath, rename, stat, writeFile, copyFile } from 'node:fs/promises';
@@ -539,7 +540,12 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
     assert.ok(closure.identity.sourceFiles.some(i => i.sha256 === e.runtimeIdentity.checkpointSha256), 'missing sealed checkpoint identity');
     assert.ok(closure.prepared_sources.length > 0, 'missing native prepared closure');
     for (const input of closure.identity.sourceFiles) assert.ok(c.inputs.some(i => i.sha256 === input.sha256), 'native source closure differs from verified inputs');
+    const reclaimed = await caseStorageReclaim(p, c, dir);
     for (const input of closure.prepared_sources) {
+      // A passed case's own model copies are reclaimed (sc-26691) once its evidence is recorded; a
+      // re-validation then holds each removed file to the content hash this same validator verified
+      // before removal, bound to the passed execution record, and to the same ownership rule.
+      if (await reclaimed?.removedFile(input)) continue;
       // Imports may create native derivatives during this case; don't invent their hashes in
       // the pre-run plan. Verify their actual bytes after acquisition, confined to task state.
       const resolved = await realpath(input.path), relative = path.relative(await realpath(p.output), resolved);
@@ -653,6 +659,94 @@ export async function verifyMatrixAdmission(p) {
   const anchors=Array.isArray(p.matrixAnchors)?p.matrixAnchors:Object.values(p.matrixAnchors).flat();
   for(const anchor of anchors){sha64(anchor.receiptInput?.sha256);assert.equal(await hashFile(anchor.receiptInput.path),anchor.receiptInput.sha256);const row=await json(anchor.receiptInput.path);assert.equal(row.status,'passed');assert.equal(row.caseId,anchor.caseId);assert.equal(row.sceneworks,p.sceneworks);assert.equal(row.inference,p.inference);assert.ok(row.runId&&row.runAttempt&&row.verified?.files?.length);assert.equal(Date.parse(row.completed)-Date.parse(row.started),anchor.wallMs,'anchor must be measured from the actual inline execution, never an estimate');assert.equal(anchor.sourceSha,p.sceneworks);assert.equal(anchor.pinSha,p.inference);}
 }
+// ---------------------------------------------------------------------------
+// Per-case model storage (sc-26691). Each real case's owned service writes its own import copy, a
+// normalized bundle and an assembly companion (~65 GiB for one 31.7 GiB checkpoint), and a run
+// ran E: out of space after 5–6 cases. Once a case is recorded PASSED — evidence and receipt
+// hashes retained — exactly that case's own model copies are removed, inside this run's root.
+export const CASE_FREE_SPACE_HEADROOM_BYTES = 16 * 2 ** 30;
+const GIB = bytes => (bytes / 2 ** 30).toFixed(1);
+/** The owned service root of one case: `<output>/services/<case id>`, never anything wider. */
+function caseServiceRoot(p, c) { return contained(contained(p.output, 'services'), c.id); }
+/** The directories a passed case's reclaim may remove — all strictly below its own service root. */
+export async function caseReclaimTargets(p, c, { readdirImpl } = {}) {
+  const { readdir } = await import('node:fs/promises');
+  const root = caseServiceRoot(p, c), targets = [contained(root, 'data/models/imports'), contained(root, 'data/models/resolved')];
+  const assemblies = contained(root, 'data/cache/minimax-h3-assemblies');
+  let entries = [];
+  try { entries = await (readdirImpl ?? readdir)(assemblies, { withFileTypes: true }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  for (const entry of entries) if (entry.isDirectory()) targets.push(contained(contained(assemblies, entry.name), 'transformer_ref'));
+  return { root, targets };
+}
+/** Refuse a case before any work when the run volume cannot hold its copies (2× checkpoint + headroom). */
+export async function assertCaseFreeSpace(p, c, { statfsImpl, statImpl } = {}) {
+  const checkpoint = c.inputs?.find(i => i.role === 'checkpoint');
+  if (!checkpoint || !c.runtime?.scenario) return null;
+  const { statfs } = await import('node:fs/promises');
+  const bytes = (await (statImpl ?? stat)(checkpoint.path)).size, fs = await (statfsImpl ?? statfs)(p.output);
+  const free = Number(fs.bavail) * Number(fs.bsize), need = 2 * bytes + CASE_FREE_SPACE_HEADROOM_BYTES;
+  assert.ok(free >= need, `insufficient free space for ${c.id}: ${GIB(free)} GiB free on the run volume, need >= ${GIB(need)} GiB (2 x checkpoint ${GIB(bytes)} GiB + ${GIB(CASE_FREE_SPACE_HEADROOM_BYTES)} GiB headroom). Passed cases' own model copies are already reclaimed; free space outside this run, never by deleting staging or the shared cache.`);
+  return { free, need };
+}
+/** The retained reclaim record for a case, bound to its passed execution receipt, or null. */
+export async function caseStorageReclaim(p, c, dir) {
+  let record;
+  try { record = await json(path.join(dir, 'storage-reclaim.json')); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  assert.equal(record.kind, 'case-storage-reclaim'); assert.equal(record.caseId, c.id);
+  const execution = path.join(dir, 'execution.json');
+  assert.equal(await hashFile(execution), record.executionSha256, 'storage reclaim record is not bound to this passed execution');
+  assert.equal((await json(execution)).status, 'passed');
+  const { root } = await caseReclaimTargets(p, c);
+  const removed = new Map(record.preparedFiles.map(f => [stripVerbatim(f.path), f.sha256]));
+  return {
+    record,
+    /** True only for a recorded, confined prepared file that is actually gone; a file still on disk is re-hashed as usual. */
+    async removedFile(input) {
+      const lexical = stripVerbatim(input.path);
+      if (removed.get(lexical) !== input.sha256) return false;
+      const rel = path.relative(root, path.resolve(lexical));
+      assert.ok(rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel), 'reclaimed prepared source outside its case service root');
+      assert.ok(record.removed.some(target => { const r = path.relative(target, path.resolve(lexical)); return r !== '' && !r.startsWith('..') && !path.isAbsolute(r); }), 'prepared source was not below a reclaimed directory');
+      try { await stat(lexical); return false; } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      return true;
+    },
+  };
+}
+/** Remove a PASSED case's own model copies, recording what went and the hashes it was verified at. */
+export async function reclaimCaseModelStorage(p, c, dir, { removeImpl } = {}) {
+  const { rm, lstat } = await import('node:fs/promises');
+  // Only ever this run's own private root: on Actions the output root is `<run>-<attempt>-...`.
+  if (process.env.GITHUB_RUN_ID) assert.ok(path.basename(p.output).startsWith(`${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-`), 'storage reclaim is confined to this run\'s own private root');
+  const { root, targets } = await caseReclaimTargets(p, c);
+  try { await lstat(root); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  const execution = path.join(dir, 'execution.json'), receipt = await json(execution);
+  assert.equal(receipt.status, 'passed', 'only a recorded passed case is reclaimed');
+  const realRoot = await realpath(root), present = [];
+  for (const target of targets) {
+    let info; try { info = await lstat(target); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    assert.ok(info.isDirectory() && !info.isSymbolicLink(), `reclaim target is not a plain directory: ${target}`);
+    const rel = path.relative(realRoot, await realpath(target));
+    assert.ok(rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel), 'reclaim target escapes the case service root');
+    present.push(target);
+  }
+  // A record already retained (an interrupted reclaim, or a resumed passed case): finish removing
+  // exactly what it names, never anything it does not.
+  const prior = await caseStorageReclaim(p, c, dir);
+  if (prior) {
+    for (const target of present) assert.ok(prior.record.removed.includes(target), 'reclaim target is not named by the retained reclaim record');
+    for (const target of present) await (removeImpl ?? rm)(target, { recursive: true, force: false });
+    return prior.record;
+  }
+  const below = (base, file) => { const r = path.relative(base, path.resolve(stripVerbatim(file))); return r !== '' && !r.startsWith('..') && !path.isAbsolute(r); };
+  const e = await json(contained(dir, c.evidence)), events = [e.loadEvent];
+  try { for (const binding of (await json(path.join(dir, 'source-job-output.json'))).bindings ?? []) events.push(binding.event); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  const preparedFiles = [];
+  for (const event of events.filter(Boolean)) for (const s of normalizeLoadEvent(event).prepared_sources) if (present.some(t => below(t, s.path)) && !preparedFiles.some(f => f.path === s.path)) preparedFiles.push({ path: s.path, sha256: s.sha256 });
+  const record = { kind: 'case-storage-reclaim', caseId: c.id, executionSha256: await hashFile(execution), serviceRoot: root, removed: present, preparedFiles, reclaimedAt: new Date().toISOString(), meaning: 'This passed case\'s own import copy, normalized bundle and assembly companion were removed after its evidence and receipt hashes were recorded; re-validation holds each removed prepared file to the hash recorded here.' };
+  await writeFile(path.join(dir, 'storage-reclaim.json'), JSON.stringify(record, null, 2) + '\n', { flag: 'wx' });
+  for (const target of present) await (removeImpl ?? rm)(target, { recursive: true, force: false });
+  return record;
+}
 export async function runCase(p, id, root, inferenceRoot) {
   assert.notEqual(p.proof_kind, 'unit_fake', 'unit_fake plan is not campaign authorization');
   assert.notEqual(p.preparationState,'awaiting-inline-assets','reduced plan incomplete: inline assets and full staging receipt must bind before execution');
@@ -677,8 +771,11 @@ export async function runCase(p, id, root, inferenceRoot) {
     assert.equal(previous.status, 'passed', 'interrupted/failed case requires a new output directory, not silent overwrite');
     const verified = await validateEvidence(p, c, dir, await readFile(path.join(dir, 'process.log'), 'utf8'));
     assert.deepEqual(verified, previous.verified, 'resume evidence drift');
+    await reclaimCaseModelStorage(p, c, dir);
     return previous;
   }
+  await assertCaseFreeSpace(p, c);
+  let passed;
   const started=new Date().toISOString();
   await save(statePath, { ...identity, status: 'running', started });
   try {
@@ -698,8 +795,12 @@ export async function runCase(p, id, root, inferenceRoot) {
     await sourcePair(p, root, inferenceRoot); await verifyCaseInputs(p,c, await allowedInputRoots(p, root, inferenceRoot));
     const verified = await validateEvidence(p, c, dir, await readFile(path.join(dir, 'process.log'), 'utf8'));
     const receipt = { ...identity, started, status: 'passed', completed: new Date().toISOString(), verified };
-    await save(statePath, receipt); return receipt;
+    await save(statePath, receipt);
+    passed = receipt;
   } catch (error) { await save(statePath, { ...identity, status: 'failed', error: error.message }); throw error; }
+  // Outside the try: a reclaim failure must never rewrite a recorded PASSED case as failed.
+  await reclaimCaseModelStorage(p, c, dir);
+  return passed;
 }
 export function validateDelivery(p) {
   const d = p.delivery;

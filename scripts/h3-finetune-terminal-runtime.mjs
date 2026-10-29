@@ -2,6 +2,7 @@
 // No model implementation/importer/registry: own processes, existing API, native tests and receipts.
 import assert from 'node:assert/strict';
 import { campaignProfileArgs, CAMPAIGN_PROFILE_DIR } from './lib/h3-campaign-build-profile.mjs';
+import { stripVerbatim, canonicalWindowsPath } from './lib/windows-verbatim-path.mjs';
 import path from 'node:path';
 import net from 'node:net';
 import { randomUUID,createHash } from 'node:crypto';
@@ -66,11 +67,14 @@ export function requestedAdapterBindings(adapters, requested) {
   const ids=new Set(requested.flatMap(a=>typeof a==='string'?[a]:[a.id,a.loraId,a.name,a.path].filter(Boolean)));
   return adapters.filter(a=>[a.id,a.name,a.path].some(v=>v&&ids.has(v)));
 }
+// Product paths may arrive in Windows verbatim form; see lib/windows-verbatim-path.mjs (sc-26691).
+export { stripVerbatim, canonicalWindowsPath };
 const inside = (root, value) => {
   const p = path.resolve(root, value), rel = path.relative(root, p);
   assert.ok(rel && !rel.startsWith('..') && !path.isAbsolute(rel), 'path must remain below owned directory'); return p;
 };
 async function confined(root, value) {
+  root=await canonicalWindowsPath(root);value=await canonicalWindowsPath(value);
   const logical=path.resolve(root),r=await realpath(root),candidate=path.resolve(value);
   const within=(base,p)=>{const rel=path.relative(base,p);return rel && !rel.startsWith('..') && !path.isAbsolute(rel);};
   assert.ok(within(logical,candidate)||within(r,candidate),'path must remain below owned directory');
@@ -126,6 +130,7 @@ function coldSourceProgress(event) {
   return span.phase === PREP_SPAN_PHASE ? { fields, span } : null;
 }
 function ownedBelow(root, value) {
+  root=stripVerbatim(root);value=stripVerbatim(value);
   const paths=path.win32.isAbsolute(root)?path.win32:path.posix;
   if(typeof value!=='string'||!paths.isAbsolute(value))return undefined;
   const resolved=paths.resolve(value),relative=paths.relative(paths.resolve(root),resolved);
@@ -279,6 +284,7 @@ export function privateEnvironment(runDir,runtime,token) {
   return env;
 }
 async function confinedTaskSource(p,value,{allowRoot=false}={}) {
+  value=await canonicalWindowsPath(value);
   for(const root of [p.output,...(p.assetStaging?[await verifiedStagingRoot(p)]:[])]){const rel=path.relative(path.resolve(root),path.resolve(value));if(allowRoot&&rel==='')return realpath(root);if(rel&&!rel.startsWith('..')&&!path.isAbsolute(rel))return confined(root,value);}
   throw new Error('source outside task output or verified private staging root');
 }
@@ -647,6 +653,12 @@ export class ProcessObservations {
     return aggregate;
   }
 }
+/** Bare content digests of every file in the product's sealed component closure (`sha256:` dropped). */
+export function productComponentClosureDigests(event){
+  const closure=normalizeLoadEvent(event).identity?.assembly?.componentClosure;
+  assert.ok(Array.isArray(closure)&&closure.length,'actual immutable inherited component closure is required');
+  return closure.flatMap(component=>component.files.map(file=>{assert.match(file.sha256??'',/^sha256:[a-f0-9]{64}$/,'schema2 component digest must be an actual typed SHA256 commitment');return file.sha256.slice(7);}));
+}
 export function loadIdentity(event,job,inputs) {
   const closure=normalizeLoadEvent(event);assert.equal(closure.jobId,job.id);assert.equal(job.status,'completed');
   if(job.payload?.mode!==undefined)assert.equal(closure.operation,job.payload.mode,'observed native operation differs from actual queued job');
@@ -733,7 +745,7 @@ export async function verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{
   const request=bundle.requests.find(record=>record.route==='/api/v1/models/import'&&record.result?.id===negative.id);assert.ok(request&&request.request.sourcePath===control.differentBytes.path&&request.request.expectedSha256===spec.expectedSha256,'negative refusal must bind the actually submitted different-byte fixture');
   return {sameContentRecognized:{original:control.sourcePath,relocated:control.renamed.path,sha256:spec.expectedSha256,nativeJobId:positive.id},differentContentRefused:{jobId:negative.id,observedSha256:control.differentBytes.actualSHA,expectedSha256:spec.expectedSha256},meaning:'content identity independent of name/path/repository layout; no new training claimed'};
 }
-export const tracedJobId=event=>(event.fields??event).jobId??event.span?.jobId??event.spans?.find(span=>span.jobId)?.jobId;
+export const tracedJobId=event=>(event.fields??event).jobId??event.span?.jobId??(Array.isArray(event.spans)?[...event.spans].reverse().find(span=>span?.jobId)?.jobId:undefined);
 export function verifyCacheCoverage(bundle,scenario,byJob,observed){
   const spec=scenario.cacheCoverage;assert.ok(spec,'cache coverage requires source-bound execution contract');
   const find=name=>{const job=bundle.captures?.[name],binding=byJob.get(job?.id);assert.ok(binding,'cache phase lacks actual completed job/source/output');assert.deepEqual(binding.job,job);return binding;};
@@ -848,6 +860,7 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
   const byJob=new Map();
   for(const binding of bundle.bindings) {
     assert.ok(observed.some(event=>JSON.stringify(event)===JSON.stringify(binding.event)),'native closure must occur in retained authentic worker/API trace, not copied/fabricated binding metadata');
+    if(c.declaredSourceBindings){const preparedClosure=normalizeLoadEvent(binding.event).prepared_sources;for(const digest of productComponentClosureDigests(binding.event))assert.ok(preparedClosure.some(s=>s.sha256===digest),'product component closure file missing from actual prepared closure');}
     const identity=loadIdentity(binding.event,binding.job,c.inputs);assert.deepEqual(identity,binding.runtimeIdentity);
     const selected=c.declaredSourceBindings?.find(v=>v.model.modelId===binding.job.payload.model);
     if(c.declaredSourceBindings){
@@ -856,7 +869,17 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
       if(c.kind==='full-av')normalizedControlRequest(request,{conditioningBindings:bundle.conditioningBindings,runtimeIdentity:identity,declaredSourceBindings:c.declaredSourceBindings},{allowUnitFake});
       const requested=request?.loras??binding.job.payload.loras??[];
       const adapters=requestedAdapterBindings(selected.adapters??[],requested),prepared=normalizeLoadEvent(binding.event).prepared_sources;
-      for(const input of [...(selected.model.components??[]),...adapters])assert.ok(prepared.some(s=>s.sha256===input.sha256),'requested component/adapter missing from actual prepared closure');
+      // sc-26691: the component obligation is the PRODUCT's own sealed closure, not the harness's
+      // catalog-glob declaration. A glob such as `FL2VA/audio_vae/*` also stages loader sources
+      // (.py) the product's `members()` never reads, and a hybrid declares a resident companion
+      // (`q4/transformer_ref`) the worker only acquires for fl2va. Every file the product says it
+      // assembled must have been prepared, and everything prepared must be a declared input.
+      // (The product closure obligation is checked above, before the identity comparison.)
+      for(const input of adapters)assert.ok(prepared.some(s=>s.sha256===input.sha256),'requested adapter missing from actual prepared closure');
+      // A prepared source is a declared input, or a derivative this case's own service produced
+      // (the import's normalized assembly, e.g. `transformer_ref`) below the task output — the same
+      // rule validateEvidence applies before it re-hashes every prepared file.
+      for(const source of prepared)assert.ok(c.inputs.some(i=>i.sha256===source.sha256)||ownedBelow(p.output,source.path),'prepared source is neither a declared input nor an owned derivative');
       for(const input of identity.adapters)assert.ok(adapters.some(a=>a.sha256===input.sha256),'unrequested adapter leaked into native cache/load');
     }
     assert.equal(normalizeLoadEvent(binding.event).backend,c.backend);assert.equal(binding.media.jobId,binding.job.id);

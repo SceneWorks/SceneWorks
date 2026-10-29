@@ -3,8 +3,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat } from 'node:fs/promises';
-import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS } from './h3-finetune-terminal-runtime.mjs';
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat, realpath } from 'node:fs/promises';
+import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
 import { assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
@@ -39,7 +39,10 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok']}={}) {
   let healthCalls=0;
   let pid=7000,jobNo=0,nativeLoadCount=0,serviceDir,activeWorker,heartbeat=Date.now();const children=[],calls=[],jobs=new Map(),assets=new Map();
   const preparationCancel=f.c.id.endsWith('.generation-source-prep-cancel');
-  const prepSpan=jobId=>({jobId,checkpointId:'unit_fake_source',phase:'source-and-normalization'});
+  const prepSpan=jobId=>({name:'h3_import_preparation',jobId,checkpointId:'unit_fake_source',phase:'source-and-normalization'});
+  // The REAL worker line (CUDA run 40855384972 worker-1.log): flat fields, no top-level jobId; the
+  // job/phase/checkpoint arrive only through the span scope the product formatter emits (sc-26691).
+  const sealProgress=(jobId,fields)=>({message:'Actual native artifact-seal acquisition work',event:'artifact_seal_hash_progress',...fields,level:'info',reportedAt:new Date().toISOString(),span:prepSpan(jobId),spans:[prepSpan(jobId)]});
   const preparationSource=()=>path.join(serviceDir,'data','source-prep','model.safetensors');
   const spawnOwned=(argv,env,cwd,logPath)=>{
     const kind=argv[0]===process.execPath?'guardian':env.SCENEWORKS_WORKER_ONLY==='1'?'worker':'api';
@@ -68,8 +71,8 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok']}={}) {
         // Hash cancellation is BEFORE codec copying: no normalization copy event may be emitted.
         // The core checksum can complete before the native seal starts: these are different observers.
         activeWorker.append({jobId:id,span:prepSpan(id),event:'source_file_hash_progress',path:source,acquisition:'ColdContentRead',state:'Acquired',hashed_bytes:sourceBytes,source_bytes:sourceBytes});
-        activeWorker.append({jobId:id,span:prepSpan(id),event:'artifact_seal_hash_progress',path:source,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:1,source_bytes:null});
-        activeWorker.append({jobId:id,span:prepSpan(id),event:'artifact_seal_hash_progress',path:source,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:sourceBytes});
+        activeWorker.append(sealProgress(id,{path:source,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:1,source_bytes:null}));
+        activeWorker.append(sealProgress(id,{path:source,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:sourceBytes}));
         const modelProvenance={plan:{checkpointId:'unit_fake_source',planId:'unit_fake_plan',semanticDigest:`sha256:${semantic}`}},payload={...body,expectedImportedModelRef:modelProvenance.plan,generationSetId:id};jobs.set(id,{id,status:'preparing',payload,modelProvenance,result:{modelId:body.model}});value={id,status:'queued',payload,modelProvenance};status=201;
       }
       else if(url.pathname==='/api/v1/video/jobs'){
@@ -89,7 +92,7 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok']}={}) {
         const id=url.pathname.split('/').at(-2),job=jobs.get(id);assert.ok(job,'cancel must target a submitted job');job.cancelRequested=true;
         if(preparationCancel){
           const source=preparationSource(),sourceBytes=(await stat(source)).size;
-          activeWorker.append({jobId:id,span:prepSpan(id),event:'artifact_seal_hash_progress',path:source,acquisition:'ColdContentRead',state:'Canceled',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:sourceBytes});
+          activeWorker.append(sealProgress(id,{path:source,acquisition:'ColdContentRead',state:'Canceled',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:sourceBytes}));
           job.status='canceled';job.message='h3-preparation-canceled after joined teardown';value=job;
         } else { job.status='canceled'; value=job; }
       } else if(url.pathname.startsWith('/api/v1/jobs/')){value=jobs.get(url.pathname.split('/').at(-1));if(value?.cancelRequested&&!['completed','failed','canceled'].includes(value.status))value.status='canceled';else if(value?.status==='queued')value.status='completed';}
@@ -397,7 +400,7 @@ test('cold generation source-preparation cancellation fails loudly on every subs
     ['wrong path',async d=>{await editReceipt(d,r=>{r.observation.path=path.join(f.root,'not-owned');});},/actual observed source path|same observed owned source path/],
     ['wrong source size',async d=>{await editReceipt(d,r=>{r.observation.source_bytes+=1;});},/source audit size|stat size/],
     ['wrong planned source role',async d=>{await editReceipt(d,r=>{r.sourceAudit.sha256=semantic;});},/declared checkpoint source|verified checkpoint input/],
-    ['acquired source',async d=>{await appendRetained(d,{jobId:(await JSON.parse(await readFile(path.join(d,receiptName),'utf8'))).jobId,span:{jobId:'x',checkpointId:'c',phase:'source-and-normalization'},event:'artifact_seal_hash_progress',path:(await JSON.parse(await readFile(path.join(d,receiptName),'utf8'))).observation.path,acquisition:'ColdContentRead',state:'Acquired',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:3*SOURCE_PREP_CHUNK_BYTES+4093});},/fully Acquired/],
+    ['acquired source',async d=>{await appendRetained(d,{message:'Actual native artifact-seal acquisition work',span:{name:'h3_import_preparation',jobId:(await JSON.parse(await readFile(path.join(d,receiptName),'utf8'))).jobId,checkpointId:'c',phase:'source-and-normalization'},event:'artifact_seal_hash_progress',path:(await JSON.parse(await readFile(path.join(d,receiptName),'utf8'))).observation.path,acquisition:'ColdContentRead',state:'Acquired',hashed_bytes:SOURCE_PREP_CHUNK_BYTES,source_bytes:3*SOURCE_PREP_CHUNK_BYTES+4093});},/fully Acquired/],
     ['native load present',async d=>{const r=JSON.parse(await readFile(path.join(d,receiptName),'utf8'));await appendRetained(d,{event:'h3_import_prepared_load',jobId:r.jobId,seal_validated:true,cache_state:'Cold'});},/native load/],
     ['copy started before cancel',async d=>{const r=JSON.parse(await readFile(path.join(d,receiptName),'utf8'));await appendRetained(d,{jobId:r.jobId,span:{jobId:r.jobId,checkpointId:'unit_fake_source',phase:'source-and-normalization'},event:'h3_normalization_copy_progress',state:'Writing',copied_payload_bytes:SOURCE_PREP_CHUNK_BYTES,total_payload_bytes:3*SOURCE_PREP_CHUNK_BYTES+4093});},/hashing window was missed|normalization copy began/],
     ['missing joined marker',async d=>{await editReceipt(d,r=>{r.terminal.job.message='canceled';});},/joined-teardown/],
@@ -512,4 +515,53 @@ test('single author-declared hybrid does not require a fictional companion check
   const executions=model.supportedModes.map((mode,i)=>({licenseAuthority:{kind:'unit_fake',acknowledged:true,approvedBy:'unit fake',reference:'synthetic only',approvedAt:'2026-10-25T00:00:00Z',subjects:['source','component'].map(role=>({role,sha256:semantic}))},label:`hybrid${i}`,model,mode,sampling:{contractSource:'unit_fake',steps:50,width:576,height:320,duration:5.1667,fps:24}}));
   const scenario=buildScenario(c,{proof_kind:'unit_fake',baseUrl:'http://127.0.0.1:43210',projectId:'unit_fake',seed:1,requestedGpu:'unit_fake',timeoutSeconds:30,assets:{imageA:'red',imageB:'blue',voiceA:'speech',voiceB:'reversed'},sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.001}},executions);
   assert.ok(scenario.steps.length);assert.ok(!model.companion);
+});
+// sc-26691 audit batch: fixtures below are cut from CUDA run 40855384972 (case 0 source-job-output.json,
+// worker-1.log) and the MiniMaxAI/MiniMax-H3@939557dc FL2VA/audio_vae snapshot listing; no guessed shapes.
+const REAL_RUN_ROOT='\\\\?\\E:\\huggingface\\sc26691-private\\40855384972-1';
+const REAL_PREPARED_LORA=`\\\\?\\E:\\huggingface\\sc26691-private\\40855384972-1-bootstrap-ae69ef7b2928922370528f832c062c628f1a76b4\\services\\cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo\\data\\projects\\h3-reduced-terminal-proof.sceneworks\\loras\\imports\\sc26691_ref2v_turbo_4step_36bbcdc78d8d\\minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors`;
+test('verbatim Windows paths from the API normalize to their drive or UNC spelling',async t=>{
+  assert.equal(stripVerbatim(REAL_RUN_ROOT),'E:\\huggingface\\sc26691-private\\40855384972-1');
+  assert.equal(stripVerbatim(REAL_PREPARED_LORA).startsWith('E:\\huggingface\\sc26691-private\\40855384972-1-bootstrap-'),true);
+  assert.equal(stripVerbatim('\\\\?\\UNC\\server\\share\\x.safetensors'),'\\\\server\\share\\x.safetensors');
+  assert.equal(stripVerbatim('E:\\plain'),'E:\\plain');assert.equal(stripVerbatim(undefined),undefined);
+  const dir=await mkdtemp(path.join(os.tmpdir(),'sc26691-verbatim-'));t.after(()=>rm(dir,{recursive:true,force:true}));
+  assert.equal(await canonicalWindowsPath(dir),dir,'non-verbatim paths are untouched');
+  if(process.platform==='win32'){
+    const real=await canonicalWindowsPath(`\\\\?\\${dir}`);assert.equal(real.toLowerCase(),(await realpath(dir)).toLowerCase(),'an existing verbatim path is realpath-resolved');
+    assert.equal(await canonicalWindowsPath(`\\\\?\\${dir}\\missing\\file`),`${dir}\\missing\\file`,'a missing verbatim path is prefix-stripped');
+  }
+});
+test('the product component closure, not the catalog glob, is the declared component set',()=>{
+  // Real case-0 closure entry for FL2VA/audio_vae: the product loads four members of a directory
+  // whose catalog glob also matches nine Python modules that are never loaded.
+  const closure=[{revision:'939557dc319dd91227e30195a763f272ba7f8765',download:{componentId:'fl2va_audio_vae_config',files:['FL2VA/audio_vae/*'],subdir:'FL2VA/audio_vae'},files:[
+    {relativePath:'FL2VA/audio_vae/config.json',sha256:'sha256:d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771',sizeBytes:1973},
+    {relativePath:'FL2VA/audio_vae/config.yaml',sha256:'sha256:259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e',sizeBytes:91}]}];
+  const event={message:'Actual native load',event:'h3_import_prepared_load',jobId:'job_1',provider:'candle',backend:'cuda',native_backend:'cuda',seal_validated:true,cache_state:'Cold',identity:{checkpointId:'managed/x',planId:'p',semanticDigest:`sha256:${'a'.repeat(64)}`,assembly:{family:'minimax-h3',partition:'fl2va',components:{},componentClosure:closure},sourceFiles:[]},prepared_sources:[],operation:'reference_to_video',seed:1,steps:4,scheduler_shift:null,level:'info',reportedAt:'2026-10-28T00:00:00Z'};
+  assert.deepEqual(productComponentClosureDigests(event),['d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771','259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e']);
+  const untyped=structuredClone(event);untyped.identity.assembly.componentClosure[0].files[0].sha256='d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771';
+  assert.throws(()=>productComponentClosureDigests(untyped),/typed SHA256/);
+  const empty=structuredClone(event);empty.identity.assembly.componentClosure=[];assert.throws(()=>productComponentClosureDigests(empty),/component closure is required/);
+});
+test('declared components the product never loads are not demanded; its actual closure is',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
+  // A catalog-glob member (a .py module) and a resident companion the worker never acquires
+  // (hybrid q4/transformer_ref) are declared but absent from the prepared closure: not a defect.
+  const selected=f.c.declaredSourceBindings[0];selected.model.components=[...(selected.model.components??[]),{relativePath:'FL2VA/audio_vae/dac_utils.py',sha256:'1'.repeat(64),source:'unit_fake',revision:inf,licenseAcknowledged:true},{relativePath:'q4/transformer_ref/config.json',sha256:'2'.repeat(64),source:'unit_fake',revision:inf,licenseAcknowledged:true}];selected.licenseAuthority.subjects.push({role:'component',sha256:'1'.repeat(64)},{role:'component',sha256:'2'.repeat(64)});
+  assert.equal((await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true})).comparisons,1);
+  // A file the product's own closure names but the run never prepared is a defect.
+  const unprepare=event=>{const fields=event?.fields??event;if(fields?.event==='h3_import_prepared_load')fields.prepared_sources=fields.prepared_sources.filter(s=>s.sha256!==f.componentHash);return event;};
+  const bundleFile=path.join(f.dir,'source-job-output.json'),bundle=JSON.parse(await readFile(bundleFile,'utf8'));for(const binding of bundle.bindings)unprepare(binding.event);await writeFile(bundleFile,JSON.stringify(bundle));
+  const logFile=path.join(f.dir,'worker-1.log');await writeFile(logFile,(await readFile(logFile,'utf8')).split('\n').map(line=>{try{return JSON.stringify(unprepare(JSON.parse(line)));}catch{return line;}}).join('\n'));
+  await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true}),/product component closure file missing/);
+});
+test('seal progress is attributed only through the product span scope, never a flat line',()=>{
+  // Real flat worker-1.log line (run 40855384972): no jobId and, before sc-26691, no span.
+  const flat={message:'Actual native artifact-seal acquisition work',event:'artifact_seal_hash_progress',path:REAL_PREPARED_LORA,acquisition:'ColdContentRead',state:'Reading',hashed_bytes:8388608,source_bytes:34004507622,level:'info',reportedAt:'2026-10-28T03:12:44.101Z'};
+  assert.equal(tracedJobId(flat),undefined,'a flat seal line cannot be attributed to any job');
+  const span={name:'h3_import_preparation',jobId:'job_81cbc014f0cc7171e185068d2e5888e3',checkpointId:'managed/imported_sc26691_artifact_0_ref2va_v2_int8',phase:'source-and-normalization'};
+  const scoped={...flat,span,spans:[{name:'job',jobId:'job_outer'},span]};
+  assert.equal(tracedJobId(scoped),'job_81cbc014f0cc7171e185068d2e5888e3','the leaf span names the job');
+  assert.equal(tracedJobId({...flat,spans:[span]}),'job_81cbc014f0cc7171e185068d2e5888e3');
 });

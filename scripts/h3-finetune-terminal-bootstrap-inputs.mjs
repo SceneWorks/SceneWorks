@@ -9,6 +9,12 @@ import { cacheHub, stageOneFile, sourceUrl } from './h3-finetune-terminal-stage.
 import { FROZEN_PROVENANCE } from './h3-finetune-terminal-artifact-probe.mjs';
 
 const SMALL_FILE_LIMIT = 32 * 1024 * 1024;
+// The file extensions the product's H3 component loader admits (`members()`,
+// crates/sceneworks-core/src/minimax_h3_load.rs). A catalog glob such as `FL2VA/audio_vae/*` also
+// stages loader sources (.py) the product never reads: they stay staged inputs (the product's own
+// download set) but are not declared model components (sc-26691).
+export const PRODUCT_COMPONENT_EXTENSIONS = Object.freeze(['safetensors', 'gguf', 'json', 'yaml', 'yml', 'model', 'txt', 'tiktoken']);
+export const isProductComponentMember = file => PRODUCT_COMPONENT_EXTENSIONS.includes(path.posix.extname(String(file)).slice(1));
 const METADATA_LIMIT = 8 * 1024 * 1024;
 const REFERENCE_LIMIT = 4 * 1024 * 1024;
 const digest = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -277,7 +283,7 @@ export async function prepareBootstrapInputs({ swRoot, stageRoot, evidenceRoot, 
       inputs.push({ path: record.finalPath, sha256: record.observedSha256, role: 'component' });
       seedFiles.push({ input: record.finalPath, destination: `hf/hub/models--${entry.repo.replaceAll('/', '--')}/snapshots/${entry.revision}/${entry.file}`, mode: 'hardlink' });
     }
-    componentsByModel[modelId].push({ id: componentId, source: entry.repo, revision: entry.revision, sha256: record.observedSha256, path: record.finalPath, file: entry.file, bytes: record.actualBytes, tier, licenseAcknowledged: ack.acknowledged, explicitAcknowledgment: ack, provenance: { componentSubdir, catalogDownload: structuredClone(catalogDownload) } });
+    if (isProductComponentMember(entry.file)) componentsByModel[modelId].push({ id: componentId, source: entry.repo, revision: entry.revision, sha256: record.observedSha256, path: record.finalPath, file: entry.file, bytes: record.actualBytes, tier, licenseAcknowledged: ack.acknowledged, explicitAcknowledgment: ack, provenance: { componentSubdir, catalogDownload: structuredClone(catalogDownload) } });
   }
   // hf-hub cache lookup may require refs/<requested revision> even when the immutable
   // snapshot exists. These are private cache-index bytes, not model components or refs/main.

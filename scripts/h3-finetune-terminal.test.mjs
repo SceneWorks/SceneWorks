@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, readFile, rm, stat, symlink } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { runInNewContext } from 'node:vm';
 import path from 'node:path';
-import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, normalizeLoadEvent, runProcess, runCase, verifyCampaign } from './h3-finetune-terminal.mjs';
+import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, normalizeLoadEvent, runProcess, runCase, verifyCampaign, reclaimCaseModelStorage, caseStorageReclaim, assertCaseFreeSpace, CASE_FREE_SPACE_HEADROOM_BYTES } from './h3-finetune-terminal.mjs';
 import { runScenario, pointer } from './h3-finetune-terminal-api.mjs';
+import { awaitPeerLane, classifyPeerLane, assertPeerCanDeliver, PEER_APPEARANCE_GRACE_MS } from './lib/h3-peer-lane.mjs';
 const sw = 'a'.repeat(40), inf = 'b'.repeat(40);
 const log = 'test result: ok. 1 passed; 0 failed; 0 ignored;';
 function peakObservation(bytes, method, phase) {
@@ -562,6 +563,8 @@ test('three individual source mutations are killed by executed assertions, not s
   for (const file of ['h3-finetune-terminal-api.mjs', 'h3-finetune-terminal-reduced.mjs', 'h3-finetune-terminal.test.mjs']) await writeFile(path.join(dir, file), await readFile(new URL(file, import.meta.url)));
   await mkdir(path.join(dir, 'lib'), { recursive: true });
   await writeFile(path.join(dir, 'lib', 'h3-campaign-build-profile.mjs'), await readFile(new URL('./lib/h3-campaign-build-profile.mjs', import.meta.url)));
+  await writeFile(path.join(dir, 'lib', 'windows-verbatim-path.mjs'), await readFile(new URL('./lib/windows-verbatim-path.mjs', import.meta.url)));
+  await writeFile(path.join(dir, 'lib', 'h3-peer-lane.mjs'), await readFile(new URL('./lib/h3-peer-lane.mjs', import.meta.url)));
   for (const [needle, pattern] of [
     ['assert.equal(e.inference, p.inference);', 'receipt mutation rejects wrong source revision'],
     ["assert.equal(+m[3], 0, 'ignored tests are not evidence');", 'test execution evidence rejects ignored'],
@@ -576,4 +579,134 @@ test('three individual source mutations are killed by executed assertions, not s
     assert.equal(run.status, 1, `mutation survived: ${pattern}\n${run.stdout}\n${run.stderr}`);
     assert.match(run.stdout + run.stderr, /Missing expected (exception|rejection)/, 'must fail the discriminating assertion');
   }
+});
+// sc-26691 per-case storage reclaim. The layout mirrors CUDA run 40855384972's case-0 service root
+// (data/models/{imports,resolved}, data/cache/minimax-h3-assemblies/<id>/{transformer,transformer_ref},
+// data/projects/.../loras/imports) and its verbatim prepared_sources spelling.
+async function reclaimFixture(t, { status = 'passed' } = {}) {
+  const base = await mkdtemp(path.join(os.tmpdir(), 'sc26691-reclaim-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const output = path.join(base, '40855384972-1-bootstrap-ae69ef7b2928922370528f832c062c628f1a76b4');
+  const c = { id: 'cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo', evidence: 'evidence.json', inputs: [] };
+  const p = { output };
+  const service = path.join(output, 'services', c.id, 'data');
+  const files = {
+    imported: path.join(service, 'models', 'imports', 'imported_sc26691_artifact_0_ref2va_v2_int8', 'diffusion_pytorch_model.safetensors'),
+    resolved: path.join(service, 'models', 'resolved', 'entries', 'bundle.safetensors'),
+    ref: path.join(service, 'cache', 'minimax-h3-assemblies', '8ddcf6cab3958cccf6dc7d63c1483046', 'transformer_ref', 'diffusion_pytorch_model-00001-of-00014.safetensors'),
+    kept: path.join(service, 'cache', 'minimax-h3-assemblies', '8ddcf6cab3958cccf6dc7d63c1483046', 'transformer', 'config.json'),
+    lora: path.join(service, 'projects', 'h3-reduced-terminal-proof.sceneworks', 'loras', 'imports', 'sc26691_ref2v_turbo_4step_36bbcdc78d8d', 'minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors'),
+  };
+  for (const [name, file] of Object.entries(files)) { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, `unit fake ${name}`); }
+  const prepared = await Promise.all(Object.values(files).map(async file => ({ path: process.platform === 'win32' ? `\\\\?\\${file}` : file, sha256: await hashFile(file) })));
+  const loadEvent = { message: 'Actual native load', event: 'h3_import_prepared_load', jobId: 'job_81cbc014f0cc7171e185068d2e5888e3', provider: 'candle', backend: 'cuda', native_backend: 'cuda', seal_validated: true, cache_state: 'Cold', identity: { checkpointId: 'managed/imported_sc26691_artifact_0_ref2va_v2_int8', planId: 'p', semanticDigest: `sha256:${'a'.repeat(64)}`, assembly: { family: 'minimax-h3', partition: 'ref2va', components: {}, componentClosure: [] }, sourceFiles: [] }, prepared_sources: prepared, operation: 'reference_to_video', seed: 1, steps: 4, scheduler_shift: null, level: 'info', reportedAt: '2026-10-28T03:12:44.101Z' };
+  const dir = path.join(output, c.id);
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'evidence.json'), JSON.stringify({ loadEvent }));
+  await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ caseId: c.id, status }));
+  return { base, output, p, c, dir, files, prepared };
+}
+const exists = file => stat(file).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
+test('a passed case reclaims only its own import, resolved bundle and transformer_ref copies', async t => {
+  const prev = [process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT];
+  process.env.GITHUB_RUN_ID = '40855384972'; process.env.GITHUB_RUN_ATTEMPT = '1';
+  t.after(() => { if (prev[0] === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = prev[0]; if (prev[1] === undefined) delete process.env.GITHUB_RUN_ATTEMPT; else process.env.GITHUB_RUN_ATTEMPT = prev[1]; });
+  const f = await reclaimFixture(t);
+  const sibling = path.join(f.base, 'staging', 'model.safetensors'); await mkdir(path.dirname(sibling), { recursive: true }); await writeFile(sibling, 'shared staging');
+  const record = await reclaimCaseModelStorage(f.p, f.c, f.dir);
+  assert.equal(record.removed.length, 3);
+  for (const name of ['imported', 'resolved', 'ref']) assert.equal(await exists(f.files[name]), false, `${name} reclaimed`);
+  for (const name of ['kept', 'lora']) assert.equal(await exists(f.files[name]), true, `${name} kept`);
+  assert.equal(await exists(sibling), true, 'nothing outside the case service root is touched');
+  assert.deepEqual(record.preparedFiles.map(v => v.sha256).sort(), f.prepared.filter((_, i) => i < 3).map(v => v.sha256).sort());
+  const retained = await caseStorageReclaim(f.p, f.c, f.dir);
+  for (const [i, input] of f.prepared.entries()) assert.equal(await retained.removedFile(input), i < 3, 'only removed, recorded files are excused from re-hashing');
+  assert.equal(await retained.removedFile({ ...f.prepared[0], sha256: 'f'.repeat(64) }), false, 'a different hash is never excused');
+  // Idempotent on resume; a later change to the passed receipt unbinds the record.
+  assert.deepEqual(await reclaimCaseModelStorage(f.p, f.c, f.dir), record);
+  await writeFile(path.join(f.dir, 'execution.json'), JSON.stringify({ caseId: f.c.id, status: 'passed', changed: true }));
+  await assert.rejects(caseStorageReclaim(f.p, f.c, f.dir), /not bound to this passed execution/);
+});
+test('storage reclaim refuses non-passed cases, other runs\' roots and symlinked targets', async t => {
+  const prev = [process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT];
+  t.after(() => { if (prev[0] === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = prev[0]; if (prev[1] === undefined) delete process.env.GITHUB_RUN_ATTEMPT; else process.env.GITHUB_RUN_ATTEMPT = prev[1]; });
+  process.env.GITHUB_RUN_ID = '40855384972'; process.env.GITHUB_RUN_ATTEMPT = '1';
+  const failed = await reclaimFixture(t, { status: 'failed' });
+  await assert.rejects(reclaimCaseModelStorage(failed.p, failed.c, failed.dir), /only a recorded passed case/);
+  assert.equal(await exists(failed.files.imported), true);
+  process.env.GITHUB_RUN_ID = '40855384999';
+  const other = await reclaimFixture(t);
+  await assert.rejects(reclaimCaseModelStorage(other.p, other.c, other.dir), /confined to this run's own private root/);
+  assert.equal(await exists(other.files.imported), true);
+  process.env.GITHUB_RUN_ID = '40855384972';
+  const linked = await reclaimFixture(t), outside = path.join(linked.base, 'shared-hf-cache');
+  await mkdir(outside, { recursive: true }); await writeFile(path.join(outside, 'blob'), 'shared');
+  const resolved = path.dirname(path.dirname(linked.files.resolved)); await rm(resolved, { recursive: true });
+  await symlink(outside, resolved, 'junction');
+  await assert.rejects(reclaimCaseModelStorage(linked.p, linked.c, linked.dir), /not a plain directory|escapes the case service root/);
+  assert.equal(await exists(path.join(outside, 'blob')), true, 'a linked target never deletes what it points at');
+  assert.equal(await exists(path.join(linked.dir, 'storage-reclaim.json')), false, 'no record when the guard refuses');
+});
+test('per-case free-space preflight refuses below 2x checkpoint plus headroom', async () => {
+  const c = { id: 'cuda.reduced.artifact-4', inputs: [{ role: 'checkpoint', path: 'E:\\staging\\x.safetensors' }], runtime: { scenario: 'unit_fake' } };
+  const checkpoint = 34004507622, statImpl = async () => ({ size: checkpoint }), bsize = 4096;
+  const need = 2 * checkpoint + CASE_FREE_SPACE_HEADROOM_BYTES;
+  assert.deepEqual(await assertCaseFreeSpace({ output: 'E:\\run' }, c, { statImpl, statfsImpl: async () => ({ bsize, bavail: Math.ceil(need / bsize) }) }), { free: Math.ceil(need / bsize) * bsize, need });
+  await assert.rejects(assertCaseFreeSpace({ output: 'E:\\run' }, c, { statImpl, statfsImpl: async () => ({ bsize, bavail: Math.floor(need / bsize) - 1 }) }), /insufficient free space for cuda\.reduced\.artifact-4: .* GiB free on the run volume, need >= 79\.3 GiB/);
+  assert.equal(await assertCaseFreeSpace({ output: 'E:\\run' }, { ...c, runtime: {} }, { statImpl, statfsImpl: async () => ({ bsize, bavail: 0 }) }), null, 'cases that import nothing are not gated');
+});
+// sc-26691 adaptive peer fail-fast. Rows are the real Actions API rows of the paired dispatches
+// 40855384972 (CUDA) and 40855343040 (MLX) at ae69ef7b2 (trimmed to the fields the policy reads).
+const PEER_SHA = 'ae69ef7b2928922370528f832c062c628f1a76b4';
+const realRun = (id, status, conclusion) => ({ id, name: 'Server Candle (Linux/NVIDIA)', event: 'workflow_dispatch', status, conclusion, head_sha: PEER_SHA, run_attempt: 1, path: '.github/workflows/server-candle-linux.yml', workflow_id: 297197519 });
+const realJobs = (backend, status, conclusion) => [
+  { id: backend === 'mlx' ? 123384796089 : 123384930458, name: 'h3-terminal / terminal', status, conclusion, labels: backend === 'mlx' ? ['self-hosted', 'macOS', 'ARM64', 'real-weights'] : ['self-hosted', 'windows', 'cuda', 'real-weights', 'cuda-windows'], runner_name: backend === 'mlx' ? 'nax-macos' : 'cuda-windows' },
+  { id: 123384934525, name: 'h3-import-mlx', status: 'completed', conclusion: 'skipped', labels: ['self-hosted', 'macOS', 'ARM64', 'rw-llm'], runner_name: null },
+  { id: 123384996509, name: 'h3-import-cuda', status: 'completed', conclusion: 'skipped', labels: ['self-hosted', 'Windows', 'X64', 'cuda'], runner_name: null },
+];
+function fakeGh({ runs, jobs, artifacts = [] }) {
+  const calls = [];
+  const gh = args => {
+    const url = args.find(a => a.startsWith('repos/')); calls.push(url);
+    if (url.includes('/actions/artifacts')) return JSON.stringify([{ artifacts }]);
+    if (url.includes('/actions/workflows/')) { assert.match(url, new RegExp(`head_sha=${PEER_SHA}`)); return JSON.stringify([{ workflow_runs: runs }]); }
+    const id = /runs\/(\d+)\/attempts\/1\/jobs/.exec(url)?.[1]; assert.ok(id, url); return JSON.stringify([{ jobs: jobs[id] ?? [] }]);
+  };
+  return { gh, calls };
+}
+test('adaptive CUDA lane proceeds when the paired MLX terminal job is queued or running', async () => {
+  for (const status of ['queued', 'in_progress']) {
+    const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, status, null)], jobs: { 40855343040: realJobs('mlx', status, null) } });
+    const result = await awaitPeerLane({ gh, repository: 'SceneWorks/SceneWorks', headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', anchorName: 'x', startedAt: 0, now: () => 0, sleep: async () => assert.fail('no wait') });
+    assert.equal(result.state, 'alive'); assert.equal(result.run.id, 40855343040);
+  }
+  // Its own (CUDA) job never counts as the MLX peer.
+  assert.equal(classifyPeerLane({ runs: [realRun(40855343040, 'in_progress', null)], jobsByRun: new Map([['40855343040', realJobs('cuda', 'in_progress', null)]]), selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).state, 'absent');
+});
+test('adaptive lane fails within the grace window when the peer is absent or already ended', async () => {
+  const sleeps = [];
+  let clock = 0;
+  const absent = fakeGh({ runs: [realRun(40855384972, 'in_progress', null)], jobs: {} });
+  await assert.rejects(awaitPeerLane({ gh: absent.gh, repository: 'SceneWorks/SceneWorks', headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', anchorName: 'x', startedAt: 0, now: () => clock, sleep: async ms => { sleeps.push(ms); clock += ms; } }), /no paired mlx terminal run was dispatched at this SceneWorks SHA within 10 minutes/);
+  assert.ok(clock <= PEER_APPEARANCE_GRACE_MS + 20000, 'fails in minutes, not after the six-hour anchor wait');
+  // The real cancelled MLX peer of this pair: refused once the grace has passed.
+  const ended = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'completed', 'cancelled')], jobs: { 40855343040: realJobs('mlx', 'completed', 'cancelled') } });
+  clock = 0;
+  await assert.rejects(awaitPeerLane({ gh: ended.gh, repository: 'SceneWorks/SceneWorks', headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', anchorName: 'x', startedAt: 0, now: () => clock, sleep: async ms => { clock += ms; } }), /run 40855343040 \(job 123384796089\) already ended as cancelled without publishing inline anchors/);
+  // In the wait loop (hours after start) a failed peer is refused on the first check.
+  assert.throws(() => assertPeerCanDeliver(classifyPeerLane({ runs: [realRun(40855343040, 'completed', 'failure')], jobsByRun: new Map([['40855343040', realJobs('mlx', 'completed', 'failure')]]), selfRunId: 40855384972, headSha: PEER_SHA, peerBackend: 'mlx' }), { peerBackend: 'mlx', now: 6 * 3600000, startedAt: 0, anchorsPublished: false }), /already ended as failure/);
+  // A peer that succeeded without anchors never ran the adaptive matrix.
+  assert.throws(() => assertPeerCanDeliver(classifyPeerLane({ runs: [realRun(40855343040, 'completed', 'success')], jobsByRun: new Map([['40855343040', realJobs('mlx', 'completed', 'success')]]), selfRunId: 40855384972, headSha: PEER_SHA, peerBackend: 'mlx' }), { peerBackend: 'mlx', now: 6 * 3600000, startedAt: 0, anchorsPublished: false }), /finished successfully without publishing inline anchors/);
+});
+test('published peer anchors satisfy the preflight even when the peer has since ended', async () => {
+  const anchors = { id: 9, name: 'a', expired: false, created_at: '2026-10-29T10:40:00Z', workflow_run: { id: 40855343040, head_sha: PEER_SHA } };
+  const { gh, calls } = fakeGh({ runs: [realRun(40855343040, 'completed', 'failure')], jobs: { 40855343040: realJobs('mlx', 'completed', 'failure') }, artifacts: [anchors, { ...anchors, id: 10, workflow_run: { id: 40855384972, head_sha: PEER_SHA } }] });
+  const result = await awaitPeerLane({ gh, repository: 'SceneWorks/SceneWorks', headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', anchorName: 'a', startedAt: 0, now: () => 9e9, sleep: async () => assert.fail('no wait') });
+  assert.equal(result.state, 'anchors'); assert.equal(result.anchors.id, 9);
+  assert.equal(calls.length, 1, 'no liveness query once anchors exist');
+});
+test('a dispatch whose jobs are not created yet is a possible peer only while active', () => {
+  assert.equal(classifyPeerLane({ runs: [realRun(40855343040, 'queued', null)], jobsByRun: new Map([['40855343040', []]]), selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).state, 'alive');
+  assert.equal(classifyPeerLane({ runs: [realRun(40855343040, 'completed', 'cancelled')], jobsByRun: new Map([['40855343040', []]]), selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).state, 'absent');
+  assert.equal(classifyPeerLane({ runs: [{ ...realRun(40855343040, 'queued', null), head_sha: 'c85f515525819c8ddc87af09e53dd9b829c9d150' }], jobsByRun: new Map(), selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).state, 'absent', 'a run at another SHA is never the peer');
 });

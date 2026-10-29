@@ -143,6 +143,33 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+      # sc-26691: an adaptive-matrix lane waits up to six hours, after all its staging and its first
+      # two cases, for the OTHER backend's inline anchors. When that peer was never dispatched, or
+      # has already ended without publishing them, the anchors can never arrive. Check the peer
+      # before any staging or model work and fail within minutes (a bounded grace covers a peer
+      # dispatched seconds after this one); the wait loop re-checks it while waiting.
+      - name: Fail fast when the adaptive matrix has no live peer lane
+        if: ${{ inputs.case_id == '' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          H3_ANCHOR_INFERENCE_SHA: ${{ inputs.inference_sha }}
+          H3_ANCHOR_EVIDENCE_SHA: ${{ inputs.native_evidence_sha }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {execFileSync} from "node:child_process";
+          import {awaitPeerLane} from "./scripts/lib/h3-peer-lane.mjs";
+          const env=process.env,request=JSON.parse(env.H3_STAGE_REQUEST||"{}");
+          // Only the inline reduced-v1 bootstrap is known to be adaptive this early; an external plan
+          // is classified by the wait loop's own liveness check once the plan is read.
+          if(request.adaptive_matrix===false||request.bootstrap?.cohort!=="reduced-v1"){console.log("no adaptive peer pairing requested");process.exit(0);}
+          const backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
+          const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
+          const result=await awaitPeerLane({gh,repository:env.GITHUB_REPOSITORY,headSha:env.H3_SCENEWORKS_SHA,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer,anchorName:`h3-anchors-${peer}-${env.H3_SCENEWORKS_SHA}-${env.H3_ANCHOR_INFERENCE_SHA}-${env.H3_ANCHOR_EVIDENCE_SHA}`,startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT)});
+          console.log(JSON.stringify({peerLane:result.state,peerRun:result.run?.id??result.anchors?.workflow_run?.id??null}));
+          NODE
       # BOTH lanes SELECT the reviewed CPython 3.12 already on the runner rather than installing
       # one, through each platform's own verified selector in this repository.
       #
@@ -614,14 +641,18 @@ jobs:
           import {readFile,writeFile,mkdir} from "node:fs/promises";
           import {execFileSync} from "node:child_process";
           import {laneBudget,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
+          import {findPeerAnchors,observePeerLane,assertPeerCanDeliver} from "./scripts/lib/h3-peer-lane.mjs";
           const env=process.env,p=JSON.parse(await readFile(env.PLAN,"utf8")),backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
           const name=`h3-anchors-${peer}-${p.sceneworks}-${p.inference}-${p.nativeEvidence.sha}`;
           const budget=await laneBudget(p,backend),deadline=Math.min(Date.parse(budget.deadline),Date.now()+6*3600000);
-          let artifact;
+          const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
+          let artifact,polls=0;
           while(!artifact){
             assert.ok(Date.now()<deadline,"bounded peer-anchor wait expired; no backend or timing is guessed");
-            const pages=JSON.parse(execFileSync("gh",["api","--paginate","--slurp",`repos/${env.GITHUB_REPOSITORY}/actions/artifacts?name=${encodeURIComponent(name)}&per_page=100`],{encoding:"utf8",maxBuffer:16*1024*1024,env}));
-            artifact=pages.flatMap(page=>page.artifacts).filter(a=>a.name===name&&!a.expired&&a.workflow_run?.head_sha===p.sceneworks&&String(a.workflow_run.id)!==env.GITHUB_RUN_ID).sort((a,b)=>Date.parse(a.created_at)-Date.parse(b.created_at))[0];
+            artifact=findPeerAnchors({gh,repository:env.GITHUB_REPOSITORY,name,headSha:p.sceneworks,selfRunId:env.GITHUB_RUN_ID});
+            // Every ~2 minutes, refuse at once when the peer has ended (or never existed) without
+            // publishing: those anchors can never arrive, so the remaining wait is pure waste.
+            if(!artifact&&polls++%8===0)assertPeerCanDeliver(observePeerLane({gh,repository:env.GITHUB_REPOSITORY,headSha:p.sceneworks,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer}),{peerBackend:peer,now:Date.now(),startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT),anchorsPublished:false});
             if(!artifact)await new Promise(resolve=>setTimeout(resolve,15000));
           }
           const directory=path.join(p.output,`peer-inline-anchors-${peer}-${artifact.id}`);await mkdir(directory);

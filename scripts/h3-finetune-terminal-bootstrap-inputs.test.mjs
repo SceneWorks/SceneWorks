@@ -6,7 +6,15 @@ import { mkdtemp, mkdir, readFile, writeFile, readdir, realpath, rm, stat, symli
 import os from 'node:os';
 import path from 'node:path';
 import { stripJsoncComments } from './lib/jsonc.mjs';
-import { prepareBootstrapInputs, publishedH3Config, readPinnedHfTree, selectComponentRows, verifyPrunedReferenceDeclaration } from './h3-finetune-terminal-bootstrap-inputs.mjs';
+import { prepareBootstrapInputs, publishedH3Config, readPinnedHfTree, selectComponentRows, verifyPrunedReferenceDeclaration, isProductComponentMember } from './h3-finetune-terminal-bootstrap-inputs.mjs';
+
+// sc-26691: the real MiniMaxAI/MiniMax-H3@939557dc `FL2VA/audio_vae/` listing. Its catalog glob
+// `FL2VA/audio_vae/*` also matches nine loader `.py` modules; the product's sealed closure for that
+// component (CUDA run 40855384972 case 0) holds exactly the four members below.
+test('declared components keep only the members the product loads, not loader sources', () => {
+  const listing = ['config.json', 'config.yaml', 'dac_activations.py', 'dac_alias_free_act.py', 'dac_alias_free_filter.py', 'dac_alias_free_resample.py', 'dac_attn_proj.py', 'dac_audio_vae.py', 'dac_bigvgan.py', 'dac_utils.py', 'metadata.json', 'minimax_h3_audio_vae.py', 'model.safetensors'].map(name => `FL2VA/audio_vae/${name}`);
+  assert.deepEqual(listing.filter(isProductComponentMember), ['FL2VA/audio_vae/config.json', 'FL2VA/audio_vae/config.yaml', 'FL2VA/audio_vae/metadata.json', 'FL2VA/audio_vae/model.safetensors']);
+});
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 const blob = bytes => createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex');
