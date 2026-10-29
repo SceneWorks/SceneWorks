@@ -299,6 +299,9 @@ jobs:
           OUTPUT_INPUT: ${{ inputs.output_path }}
         run: |
           set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           node --input-type=module <<'NODE'
           import assert from "node:assert/strict";
           import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
@@ -366,6 +369,9 @@ jobs:
           OUTPUT: ${{ inputs.output_path }}
         run: |
           set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           node --input-type=module <<'NODE'
           import assert from "node:assert/strict";
           import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
@@ -469,6 +475,9 @@ jobs:
           H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
         run: |
           set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           node --input-type=module <<'NODE'
           import {execFileSync} from "node:child_process";
           import {copyFile} from "node:fs/promises";
@@ -486,6 +495,9 @@ jobs:
           H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
         run: |
           set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           node --input-type=module <<'NODE'
           import {execFileSync} from "node:child_process";
           import {copyFile} from "node:fs/promises";
@@ -593,6 +605,9 @@ jobs:
           SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '1' || '' }}
         run: |
           set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           if [ "${H3_TERMINAL_SKIP_RUN:-0}" = "1" ]; then echo "inspect-only request: no model execution"; exit 0; fi
           export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
           node --input-type=module <<'NODE'
@@ -637,6 +652,9 @@ jobs:
           SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '1' || '' }}
         run: |
           set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
           node --input-type=module <<'NODE'
           import assert from "node:assert/strict";

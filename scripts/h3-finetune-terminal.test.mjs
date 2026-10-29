@@ -257,6 +257,22 @@ test('API assertions fail on dropped selected-model propagation and external ser
   await assert.rejects(runScenario(s, { fetchImpl: async () => response({ id: 'wrong-job' }, 201) }));
   assert.throws(() => pointer({}, '/missing'), /missing/);
 });
+test('every long macOS campaign step holds a no-sleep assertion bound to its own shell', async () => {
+  // Run 40903116430: the nax-macos MacBook Pro slept mid model-import; logging and every timer
+  // froze for 5 h and the 7200 s case timeout never fired. Each long step keeps the machine awake
+  // for exactly its own lifetime: `caffeinate -w $$` exits with the step's shell, and its detached
+  // stdio holds no step pipe open, so no assertion can outlive the step (or the job).
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  const guard = 'if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi';
+  const steps = workflow.split(/\n      - name: /).slice(1).map(block => ({ name: block.split('\n')[0], block }));
+  for (const name of ['Bootstrap the reduced terminal campaign when requested', 'Ensure selected assets and conditioning in this terminal route', 'Derive explicit dense source variants from the actually staged raw snapshot', 'Extract the pinned public row as mono 32-kHz speech and retain attribution', 'Execute or reverify the reduced operational cases', 'Choose the measured matrix backend and finish this lane']) {
+    const step = steps.find(s => s.name === name); assert.ok(step, name);
+    assert.ok(step.block.includes(guard), `${name} lacks the step-bound caffeinate guard`);
+    assert.ok(step.block.indexOf(guard) < step.block.indexOf("<<'NODE'") || !step.block.includes("<<'NODE'"), `${name}: the guard must precede the long-running work`);
+  }
+  // Never an unbound assertion that could leak past the step.
+  for (const line of workflow.split('\n').filter(l => l.includes('caffeinate ') && !l.trim().startsWith('#'))) assert.equal(line.trim(), guard);
+});
 test('both terminal lanes select a reviewed CPython 3.12 instead of installing one', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
   // setup-python cannot install on either self-hosted platform here. On macOS it writes to the
