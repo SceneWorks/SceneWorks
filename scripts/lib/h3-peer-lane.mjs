@@ -65,10 +65,24 @@ export function assertPeerCanDeliver(classification, { peerBackend, now, started
 // ---------------------------------------------------------------------------
 // Inline-anchor artifacts. One per run ATTEMPT: a fixed per-SHA name made a rerun attempt's upload
 // collide (409) with its earlier attempt's artifact in the same run, and the earliest-created pick
-// paired with whichever upload happened first. The consumer takes the newest one that validates.
+// paired with whichever upload happened first.
+//
+// Pairing rule: anchors are taken ONLY from the paired peer run, which is the newest dispatch run
+// at this SHA that carries the peer backend's terminal job. While a newer dispatch at this SHA has
+// not created its jobs yet (it may be the real peer), no anchors are taken. A finished earlier pair
+// at the same SHA is never mixed with the live one. Within the paired run, the newest attempt that
+// validates wins.
 export const DISPATCH_WORKFLOW_PATH = '.github/workflows/server-candle-linux.yml';
-/** How often the anchor wait polls; each poll lists the dispatch runs, their artifacts and jobs. */
+/** The anchor wait's base poll interval; it backs off to ANCHOR_POLL_MAX_MS while nothing changes. */
 export const ANCHOR_POLL_MS = 60 * 1000;
+export const ANCHOR_POLL_MAX_MS = 5 * 60 * 1000;
+/** gh api retries (5xx, rate limit, network) with exponential backoff from GH_BACKOFF_MS. */
+export const GH_RETRIES = 4;
+export const GH_BACKOFF_MS = 5000;
+/** How long the Actions API may stay unreachable (every retry failing) before the wait gives up. */
+export const API_OUTAGE_LIMIT_MS = 30 * 60 * 1000;
+/** Download attempts per candidate per poll (a fresh directory each); a failed download is retried next poll, never rejected. */
+export const DOWNLOAD_ATTEMPTS = 3;
 
 /** The pin-bound part of a lane's inline-anchor artifact name. */
 export function anchorArtifactBase({ backend, sceneworks, inference, evidence }) {
@@ -89,85 +103,148 @@ export function anchorArtifactAttempt(name, base) {
   return /^[1-9]\d*$/.test(text) ? Number(text) : null;
 }
 
-/** The workflow_dispatch runs of the dispatch workflow at `headSha`. */
-export function listDispatchRuns({ gh, repository, workflowPath = DISPATCH_WORKFLOW_PATH, headSha }) {
-  const workflow = encodeURIComponent(workflowPath.split('/').pop());
-  return JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repository}/actions/workflows/${workflow}/runs?event=workflow_dispatch&head_sha=${headSha}&per_page=100`]))
-    .flatMap(page => page.workflow_runs ?? []);
+const defaultSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+/** `gh api` through the injected executor, retrying any failure with exponential backoff. */
+export async function ghJson(gh, args, { sleep = defaultSleep, retries = GH_RETRIES, backoffMs = GH_BACKOFF_MS, log = () => {} } = {}) {
+  for (let attempt = 1; ; attempt++) {
+    try { return JSON.parse(gh(args)); }
+    catch (error) {
+      if (attempt > retries) throw new Error(`gh ${args.join(' ')} failed ${attempt} times: ${error.message}`);
+      const wait = backoffMs * 3 ** (attempt - 1);
+      log(`H3_GH_RETRY: ${args.find(a => a.startsWith('repos/')) ?? args.join(' ')} failed (${String(error.message).split('\n')[0]}); retry ${attempt}/${retries} in ${wait / 1000} s`);
+      await sleep(wait);
+    }
+  }
+}
+
+/** The paired peer run (see the pairing rule above), or null while it cannot be told yet. */
+export function pairedPeerRun({ runs, jobsByRun, selfRunId, headSha, peerBackend }) {
+  const candidates = (runs ?? []).filter(run => String(run.id) !== String(selfRunId) && run.head_sha === headSha && run.event === 'workflow_dispatch');
+  const peers = candidates.filter(run => (jobsByRun.get(String(run.id)) ?? []).some(job => isPeerTerminalJob(job, peerBackend))).sort((a, b) => Number(b.id) - Number(a.id));
+  const newest = peers[0] ?? null;
+  const newerUnknown = candidates.some(run => !(jobsByRun.get(String(run.id)) ?? []).length && ACTIVE.has(run.status) && (!newest || Number(run.id) > Number(newest.id)));
+  return newerUnknown ? null : newest;
 }
 
 /**
- * Every unexpired inline-anchor artifact for `name` (the base) published by another dispatch run at
- * this SHA, newest first (creation time, then attempt), each annotated with its `runAttempt`.
+ * Reads the peer lane through `gh api` with retries, caching what cannot change any more: the
+ * jobs and artifacts of a completed run attempt. Artifacts are listed only for the paired peer run.
  */
-export function peerAnchorCandidates({ gh, repository, name, headSha, selfRunId, runs }) {
-  const candidates = [];
-  for (const run of runs ?? listDispatchRuns({ gh, repository, headSha })) {
-    if (String(run.id) === String(selfRunId) || run.head_sha !== headSha) continue;
-    const artifacts = JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repository}/actions/runs/${run.id}/artifacts?per_page=100`])).flatMap(page => page.artifacts ?? []);
-    for (const artifact of artifacts) {
-      const runAttempt = anchorArtifactAttempt(artifact.name, name);
-      if (runAttempt === null || artifact.expired || artifact.workflow_run?.head_sha !== headSha || String(artifact.workflow_run?.id) !== String(run.id)) continue;
-      candidates.push({ ...artifact, runAttempt });
-    }
+export class PeerLaneObserver {
+  constructor({ gh, repository, headSha, selfRunId, peerBackend, workflowPath = DISPATCH_WORKFLOW_PATH, sleep = defaultSleep, log = () => {} }) {
+    Object.assign(this, { gh, repository, headSha, selfRunId, peerBackend, workflowPath, sleep, log });
+    this.jobsCache = new Map(); this.artifactsCache = new Map();
   }
-  return candidates.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.runAttempt - a.runAttempt);
+  api(route) { return ghJson(this.gh, ['api', '--paginate', '--slurp', route], { sleep: this.sleep, log: this.log }); }
+  async runs() {
+    const workflow = encodeURIComponent(this.workflowPath.split('/').pop());
+    return (await this.api(`repos/${this.repository}/actions/workflows/${workflow}/runs?event=workflow_dispatch&head_sha=${this.headSha}&per_page=100`)).flatMap(page => page.workflow_runs ?? []);
+  }
+  async cached(cache, run, route, field) {
+    const key = `${run.id}/${run.run_attempt}`;
+    if (cache.has(key)) return cache.get(key);
+    const rows = (await this.api(route)).flatMap(page => page[field] ?? []);
+    if (run.status === 'completed') cache.set(key, rows);
+    return rows;
+  }
+  /** One observation: the dispatch runs, their jobs, the classification, the paired peer run and its anchor candidates (newest first). */
+  async observe({ name } = {}) {
+    const runs = await this.runs(), jobsByRun = new Map();
+    for (const run of runs) {
+      if (String(run.id) === String(this.selfRunId) || run.head_sha !== this.headSha) continue;
+      jobsByRun.set(String(run.id), await this.cached(this.jobsCache, run, `repos/${this.repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`, 'jobs'));
+    }
+    const context = { runs, jobsByRun, selfRunId: this.selfRunId, headSha: this.headSha, peerBackend: this.peerBackend };
+    const classification = classifyPeerLane(context), paired = pairedPeerRun(context), candidates = [];
+    if (paired && name !== undefined) {
+      for (const artifact of await this.cached(this.artifactsCache, paired, `repos/${this.repository}/actions/runs/${paired.id}/artifacts?per_page=100`, 'artifacts')) {
+        const runAttempt = anchorArtifactAttempt(artifact.name, name);
+        if (runAttempt === null || artifact.expired || artifact.workflow_run?.head_sha !== this.headSha || String(artifact.workflow_run?.id) !== String(paired.id)) continue;
+        candidates.push({ ...artifact, runAttempt });
+      }
+      candidates.sort((a, b) => b.runAttempt - a.runAttempt || Date.parse(b.created_at) - Date.parse(a.created_at));
+    }
+    const fingerprint = JSON.stringify([runs.map(run => [run.id, run.status, run.run_attempt]), [...jobsByRun].map(([id, jobs]) => [id, jobs.map(job => [job.id, job.status])]), candidates.map(a => a.id)]);
+    return { runs, jobsByRun, classification, paired, candidates, fingerprint };
+  }
 }
 
-/** The newest published peer inline-anchor artifact at this SHA, or null. */
-export function findPeerAnchors(options) {
-  return peerAnchorCandidates(options)[0] ?? null;
+/** The paired peer run's inline-anchor artifacts for `name` (the base), newest attempt first. */
+export async function peerAnchorCandidates({ gh, repository, name, headSha, selfRunId, peerBackend, sleep, log }) {
+  return (await new PeerLaneObserver({ gh, repository, headSha, selfRunId, peerBackend, sleep, log }).observe({ name })).candidates;
+}
+/** The newest published inline-anchor artifact of the paired peer run, or null. */
+export async function findPeerAnchors(options) {
+  return (await peerAnchorCandidates(options))[0] ?? null;
 }
 
 /**
  * Wait (bounded) until the peer either published its anchors or is alive; throw as soon as it is
  * known it never can. `sleep` and `now` are injected so the policy is testable without waiting.
  */
-export async function awaitPeerLane({ gh, repository, headSha, selfRunId, peerBackend, anchorName, startedAt, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs = 20000, graceMs = PEER_APPEARANCE_GRACE_MS }) {
+export async function awaitPeerLane({ gh, repository, headSha, selfRunId, peerBackend, anchorName, startedAt, now = () => Date.now(), sleep = defaultSleep, pollMs = 20000, graceMs = PEER_APPEARANCE_GRACE_MS, log }) {
+  const observer = new PeerLaneObserver({ gh, repository, headSha, selfRunId, peerBackend, sleep, log });
   for (;;) {
-    const runs = listDispatchRuns({ gh, repository, headSha });
-    const anchors = findPeerAnchors({ gh, repository, name: anchorName, headSha, selfRunId, runs });
-    if (anchors) return { state: 'anchors', anchors };
-    const classification = assertPeerCanDeliver(observePeerLane({ gh, repository, headSha, selfRunId, peerBackend, runs }), { peerBackend, now: now(), startedAt, graceMs, anchorsPublished: false });
+    const { classification, candidates } = await observer.observe({ name: anchorName });
+    if (candidates.length) return { state: 'anchors', anchors: candidates[0] };
+    assertPeerCanDeliver(classification, { peerBackend, now: now(), startedAt, graceMs, anchorsPublished: false });
     if (classification.state === 'alive') return classification;
     await sleep(pollMs);
   }
 }
 
 /**
- * The adaptive matrix's anchor wait. It lasts exactly as long as the peer can still deliver: it
- * returns the newest published anchors that `validate` accepts, throws as soon as the peer lane is
- * observed ended, failed or absent without valid anchors, and is otherwise bounded only by this
- * lane's own budget `deadline`. (It used to stop at a fixed six hours that was never sized against
- * a measured peer duration, discarding a live peer's work.) A candidate `validate` rejects is
- * never retried; the next-newest one is tried instead.
+ * The adaptive matrix's anchor wait. It lasts exactly as long as the paired peer can still deliver:
+ * it returns the newest paired-run anchors that `validate` accepts, throws as soon as the peer lane
+ * is observed ended, failed or absent without valid anchors, and is otherwise bounded only by
+ * `deadline` (this lane's work deadline minus what it still needs afterwards; it used to stop at a
+ * fixed six hours never sized against a measured peer duration). `download(artifact)` is IO: a
+ * failure is retried with backoff (the caller uses a fresh directory each try) and the candidate is
+ * kept for the next poll. Only `validate(artifact, directory)` rejects a candidate permanently. A
+ * transient Actions API failure is retried; only a continuous outage past API_OUTAGE_LIMIT_MS ends
+ * the wait. The poll interval backs off while nothing observable changes.
  */
-export async function waitForPeerAnchors({ gh, repository, name, headSha, selfRunId, peerBackend, startedAt, deadline, validate, now = () => Date.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)), pollMs = ANCHOR_POLL_MS, graceMs = PEER_APPEARANCE_GRACE_MS, log = () => {} }) {
-  if (!Number.isFinite(deadline)) throw new Error('the anchor wait requires this lane\'s budget deadline');
-  const rejected = new Map();
-  const rejections = () => rejected.size ? ` Rejected anchors: ${[...rejected].map(([id, reason]) => `${id}: ${reason}`).join('; ')}.` : '';
-  for (let polls = 0; ; polls++) {
-    if (now() >= deadline) throw new Error(`adaptive_matrix: this lane reached its own budget deadline ${new Date(deadline).toISOString()} while the paired ${peerBackend} lane was still able to deliver but had published no valid inline anchors; no backend or timing is guessed.${rejections()}`);
-    const runs = listDispatchRuns({ gh, repository, headSha });
-    for (const artifact of peerAnchorCandidates({ gh, repository, name, headSha, selfRunId, runs })) {
+export async function waitForPeerAnchors({ gh, repository, name, headSha, selfRunId, peerBackend, startedAt, deadline, download, validate, now = () => Date.now(), sleep = defaultSleep, pollMs = ANCHOR_POLL_MS, maxPollMs = ANCHOR_POLL_MAX_MS, graceMs = PEER_APPEARANCE_GRACE_MS, outageLimitMs = API_OUTAGE_LIMIT_MS, downloadAttempts = DOWNLOAD_ATTEMPTS, log = () => {} }) {
+  if (!Number.isFinite(deadline)) throw new Error('the anchor wait requires this lane\'s work deadline');
+  if (typeof download !== 'function' || typeof validate !== 'function') throw new Error('the anchor wait requires separate download (retryable) and validate (permanent) steps');
+  const observer = new PeerLaneObserver({ gh, repository, headSha, selfRunId, peerBackend, sleep, log });
+  const rejected = new Map(), lastDownloadError = new Map();
+  const notes = () => `${rejected.size ? ` Rejected anchors: ${[...rejected].map(([id, reason]) => `${id}: ${reason}`).join('; ')}.` : ''}${lastDownloadError.size ? ` Last download errors: ${[...lastDownloadError].map(([id, reason]) => `${id}: ${reason}`).join('; ')}.` : ''}`;
+  const pause = ms => sleep(Math.max(0, Math.min(ms, deadline - now())));
+  let interval = pollMs, fingerprint, outageSince = null, polls = 0;
+  for (;;) {
+    if (now() >= deadline) throw new Error(`adaptive_matrix: this lane reached its peer-anchor wait deadline ${new Date(deadline).toISOString()} (its work deadline minus the time its remaining cases need) while the paired ${peerBackend} lane was still able to deliver but had published no valid inline anchors; no backend or timing is guessed.${notes()}`);
+    let observed;
+    try { observed = await observer.observe({ name }); outageSince = null; }
+    catch (error) {
+      outageSince ??= now();
+      if (now() - outageSince >= outageLimitMs) throw new Error(`adaptive_matrix: the Actions API stayed unreachable for ${Math.round((now() - outageSince) / 60000)} minutes while waiting for the paired ${peerBackend} anchors: ${error.message}${notes()}`);
+      log(`H3_PEER_ANCHOR_WAIT: Actions API unavailable (${error.message.split('\n')[0]}); polling again`);
+      await pause(interval); continue;
+    }
+    for (const artifact of observed.candidates) {
       if (rejected.has(artifact.id)) continue;
-      try { return { state: 'anchors', artifact, result: await validate(artifact) }; }
+      let directory;
+      for (let attempt = 1; attempt <= downloadAttempts && directory === undefined; attempt++) {
+        try { directory = await download(artifact); lastDownloadError.delete(artifact.id); }
+        catch (error) { lastDownloadError.set(artifact.id, error.message); log(`H3_PEER_ANCHORS_DOWNLOAD_RETRY: artifact ${artifact.id} (${artifact.name}) attempt ${attempt}/${downloadAttempts}: ${error.message}`); if (attempt < downloadAttempts) await pause(GH_BACKOFF_MS * 3 ** (attempt - 1)); }
+      }
+      if (directory === undefined) continue; // Kept: tried again on the next poll.
+      try { return { state: 'anchors', artifact, directory, result: await validate(artifact, directory) }; }
       catch (error) { rejected.set(artifact.id, error.message); log(`H3_PEER_ANCHORS_REJECTED: artifact ${artifact.id} (${artifact.name}, run ${artifact.workflow_run?.id}): ${error.message}`); }
     }
+    const pendingDownloads = observed.candidates.some(artifact => !rejected.has(artifact.id));
     let classification;
-    try { classification = assertPeerCanDeliver(observePeerLane({ gh, repository, headSha, selfRunId, peerBackend, runs }), { peerBackend, now: now(), startedAt, graceMs, anchorsPublished: false }); }
-    catch (error) { error.message += rejections(); throw error; }
-    if (polls % 10 === 0) log(`H3_PEER_ANCHOR_WAIT: paired ${peerBackend} lane is ${classification.state}${classification.run ? ` (run ${classification.run.id})` : ''}; waiting until ${new Date(deadline).toISOString()} at the latest`);
-    await sleep(Math.max(0, Math.min(pollMs, deadline - now())));
+    try { classification = assertPeerCanDeliver(observed.classification, { peerBackend, now: now(), startedAt, graceMs, anchorsPublished: pendingDownloads }); }
+    catch (error) { error.message += notes(); throw error; }
+    interval = observed.fingerprint === fingerprint && !pendingDownloads ? Math.min(interval * 2, maxPollMs) : pollMs;
+    fingerprint = observed.fingerprint;
+    if (polls++ % 10 === 0) log(`H3_PEER_ANCHOR_WAIT: paired ${peerBackend} lane is ${classification.state}${observed.paired ? ` (paired run ${observed.paired.id})` : ''}; waiting until ${new Date(deadline).toISOString()} at the latest`);
+    await pause(interval);
   }
 }
 
-/** Read the dispatch runs at `headSha` (or the given `runs`) and their jobs through `gh api` (an injected executor). */
-export function observePeerLane({ gh, repository, workflowPath = DISPATCH_WORKFLOW_PATH, headSha, selfRunId, peerBackend, runs = listDispatchRuns({ gh, repository, workflowPath, headSha }) }) {
-  const jobsByRun = new Map();
-  for (const run of runs) {
-    if (String(run.id) === String(selfRunId) || run.head_sha !== headSha) continue;
-    jobsByRun.set(String(run.id), JSON.parse(gh(['api', '--paginate', '--slurp', `repos/${repository}/actions/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100`])).flatMap(page => page.jobs ?? []));
-  }
-  return classifyPeerLane({ runs, jobsByRun, selfRunId, headSha, peerBackend });
+/** Read the dispatch runs at `headSha` and their jobs through `gh api` (an injected executor), with retries. */
+export async function observePeerLane({ gh, repository, workflowPath = DISPATCH_WORKFLOW_PATH, headSha, selfRunId, peerBackend, sleep, log }) {
+  return (await new PeerLaneObserver({ gh, repository, workflowPath, headSha, selfRunId, peerBackend, sleep, log }).observe()).classification;
 }

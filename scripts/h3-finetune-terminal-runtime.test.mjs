@@ -254,6 +254,45 @@ test('a job that ignores cancel past the advertised budget still gets the owned 
   const exits=JSON.parse(await readFile(path.join(f.dir,`exits-${service.generation}.json`),'utf8'));assert.match(exits.drainError,/advertised stall budget/);
   assert.ok(service.stopped);await service.stop();
 });
+test('the drain is capped so the owned shutdown ends before the case hard deadline',async t=>{
+  // Windows: the parent's last-resort kill takes the owned services down with the case process,
+  // so the case process must finish its own graceful shutdown before the hard deadline.
+  const f=await fixture(t),fake=fakeRuntime(f,{signalWhileActive:true}),clock=virtualClock();fake.deps.now=clock.now;fake.deps.sleep=clock.sleep;
+  fake.deps.hardDeadlineMs=clock.now()+postDrainShutdownMs()+600000;
+  const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  wedgeJob(fake,'capped');service.jobs.add('capped');fake.children.find(c=>c.kind==='worker').append({fields:{event:STALL_BUDGET_EVENT,jobId:'capped',stallSeconds:600,preStepStallSeconds:2700,basis:'minimax_h3_baseline'}});
+  const start=clock.now();
+  await assert.rejects(service.stop(),/within 600 s \(the worker's advertised stall budget[^)]*\), capped so the owned shutdown ends before the case's hard deadline/);
+  assert.ok(clock.now()-start<=600000+5000);
+  assert.equal(JSON.parse(await readFile(path.join(f.dir,CASE_SHUTDOWN_BOUND_FILE),'utf8')).deadlineMs,fake.deps.hardDeadlineMs,'the recorded bound never exceeds the hard deadline');
+  assert.ok(fake.calls.some(c=>c[0]==='signal'&&c[1]==='worker'));assert.ok(fake.children.every(c=>c.exitCode()===0));
+});
+test('every stuck job is cancelled before any wait, under one drain deadline',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f,{signalWhileActive:true}),clock=virtualClock();fake.deps.now=clock.now;fake.deps.sleep=clock.sleep;
+  const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  wedgeJob(fake,'first');wedgeJob(fake,'second');service.jobs.add('first');service.jobs.add('second');const start=clock.now();
+  await assert.rejects(service.stop(),/cooperative cancel of owned job first, second did not reach a terminal state within 120 s/);
+  assert.ok(clock.now()-start<130000,'one shared bound, not one per job in sequence');
+  const cancels=fake.calls.filter(c=>c[0]==='request'&&c[1].endsWith('/cancel')).map(c=>c[1]);assert.deepEqual(cancels,['/api/v1/jobs/first/cancel','/api/v1/jobs/second/cancel']);
+  assert.deepEqual(JSON.parse(await readFile(path.join(f.dir,CASE_SHUTDOWN_BOUND_FILE),'utf8')).jobIds,['first','second']);
+});
+test('a shutdown-bound write failure is retried and never aborts the drain',async t=>{
+  for(const [code,failures,recorded] of [['EBUSY',2,true],['EPERM',99,false]]){
+    const f=await fixture(t),fake=fakeRuntime(f),clock=virtualClock();fake.deps.now=clock.now;fake.deps.sleep=clock.sleep;let attempts=0;
+    fake.deps.writeBound=async()=>{if(++attempts<=failures)throw Object.assign(new Error(`${code}: rename`),{code});};
+    const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+    fake.jobs.set('job',{id:'job',status:'running',payload:{}});service.jobs.add('job');
+    await service.stop();assert.equal(fake.jobs.get('job').status,'canceled');assert.equal(attempts,recorded?3:5,code);
+  }
+});
+test('an owned child that never exits is bounded; the others still get their shutdown request',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f);fake.deps.exitBoundMs=50;
+  const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();
+  const worker=fake.children.find(c=>c.kind==='worker');worker.signal=s=>{fake.calls.push(['signal','worker',worker.pid,s]);}; // A wedged Metal job ignores SIGTERM.
+  const started=Date.now();await assert.rejects(service.stop(),/owned graceful exit timeout after 50 ms/);assert.ok(Date.now()-started<5000);
+  assert.ok(fake.calls.some(c=>c[0]==='end'&&c[1]==='guardian'));assert.equal(fake.children.find(c=>c.kind==='api').exitCode(),0);
+  assert.equal(JSON.parse(await readFile(path.join(f.dir,`exits-${service.generation}.json`),'utf8')).workerExit.code,null);
+});
 test('without an advertised budget the drain keeps the prompt default bound and still shuts down',async t=>{
   const f=await fixture(t),fake=fakeRuntime(f,{signalWhileActive:true}),clock=virtualClock();fake.deps.now=clock.now;fake.deps.sleep=clock.sleep;
   const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();

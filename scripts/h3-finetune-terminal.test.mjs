@@ -158,6 +158,65 @@ test('a case process that ignores its deadline is terminated by its own PID with
   const pid = Number(/pid (\d+)/.exec(log)[1]); assert.equal(isAlive(pid), false, 'the case process is gone');
   if (process.platform !== 'win32') assert.match(log, /H3_CASE_KILLED/);
 });
+test('a case process exiting while its bound is read never arms another escalation timer', async t => {
+  const { dir } = await fixture(t), logPath = path.join(dir, 'race.log');
+  let release;
+  // The bound read is still in flight when the process exits; escalate() must notice.
+  const readBound = () => new Promise(resolve => { release = () => resolve(JSON.stringify({ kind: 'h3-case-shutdown-bound', pid: 0, deadlineMs: Date.now() + 3600000 })); });
+  const started = Date.now();
+  const run = runProcess([process.execPath, '-e', 'setTimeout(()=>{},400)'], { cwd: dir, env: process.env, logPath, timeoutSeconds: 0.05, graceSeconds: 0.05, killGraceSeconds: 0.5, shutdownBoundPath: path.join(dir, 'bound.json'), readBound });
+  await new Promise(resolve => setTimeout(resolve, 200)); assert.ok(release, 'escalation reached the bound read');
+  await assert.rejects(run, /case exceeded timeout/); release();
+  assert.ok(Date.now() - started < 5000, 'run-case is never held open by an escalation timer');
+  assert.doesNotMatch(await readFile(logPath, 'utf8'), /H3_CASE_TERMINATED/);
+});
+test('a clean exit just before the deadline is not misreported while stdio drains', async t => {
+  const { dir } = await fixture(t);
+  // A detached grandchild keeps the inherited pipes open past the deadline; the case process itself exited cleanly first.
+  const script = "require('child_process').spawn(process.execPath,['-e','setTimeout(()=>{},1500)'],{stdio:'inherit',detached:true}).unref();";
+  await runProcess([process.execPath, '-e', script], { cwd: dir, env: process.env, logPath: path.join(dir, 'clean.log'), timeoutSeconds: 0.6 });
+  assert.doesNotMatch(await readFile(path.join(dir, 'clean.log'), 'utf8'), /H3_CASE_TIMEOUT/);
+});
+test('on Windows the last-resort kill is TerminateProcess without a meaningless SIGKILL grace', async t => {
+  const { dir } = await fixture(t), logPath = path.join(dir, 'win.log');
+  await assert.rejects(runProcess([process.execPath, '-e', 'setInterval(()=>{},1000)'], { cwd: dir, env: process.env, logPath, timeoutSeconds: 0.1, graceSeconds: 0.1, killGraceSeconds: 0.2, platform: 'win32' }), /terminated its own case process/);
+  const log = await readFile(logPath, 'utf8'); assert.match(log, /TerminateProcess of the harness's own child PID/); assert.doesNotMatch(log, /SIGKILL/);
+});
+test('case and lane deadlines stay inside the Actions job timeout and leave the shutdown window', async () => {
+  const { caseDeadlines, laneWorkDeadline, peerAnchorWaitDeadline, CASE_SHUTDOWN_RESERVE_MS, ACTIONS_JOB_TIMEOUT_MS, LANE_FINALIZE_RESERVE_MS, CASE_KILL_GRACE_SECONDS } = await import('./h3-finetune-terminal.mjs');
+  const { DEFAULT_CANCEL_DRAIN_SECONDS, postDrainShutdownMs } = await import('./h3-finetune-terminal-runtime.mjs');
+  assert.ok(CASE_SHUTDOWN_RESERVE_MS >= DEFAULT_CANCEL_DRAIN_SECONDS * 1000 + postDrainShutdownMs() + CASE_KILL_GRACE_SECONDS * 1000, 'the reserve fits a default drain and the bounded owned shutdown');
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  assert.equal(Number(/\n    timeout-minutes: (\d+)\n/.exec(workflow)[1]) * 60000, ACTIONS_JOB_TIMEOUT_MS, 'ACTIONS_JOB_TIMEOUT_MS mirrors the terminal job timeout');
+  // A first dispatch: lane start == job start (+ the setup steps), so the 24 h budget ends with the job timeout.
+  const start = Date.parse('2026-10-29T00:00:00Z'), budget = { deadline: new Date(start + 86400000).toISOString() };
+  const work = laneWorkDeadline(budget, { jobStartedAt: new Date(start + 60000).toISOString() });
+  assert.equal(work, start + 86400000 - LANE_FINALIZE_RESERVE_MS); assert.ok(work < start + ACTIONS_JOB_TIMEOUT_MS - 30 * 60000, 'the always() evidence steps keep their reserve');
+  // A later dispatch of the same lane: its own job timeout is later; the persisted budget governs.
+  assert.equal(laneWorkDeadline(budget, { jobStartedAt: new Date(start + 20 * 3600000).toISOString() }), start + 86400000 - LANE_FINALIZE_RESERVE_MS);
+  // No lane budget (a single case): the job timeout alone.
+  assert.equal(laneWorkDeadline(null, { jobStartedAt: new Date(start).toISOString() }), start + ACTIONS_JOB_TIMEOUT_MS - LANE_FINALIZE_RESERVE_MS);
+  // A budget-capped case gets its whole shutdown window between soft and hard.
+  const capped = caseDeadlines({ timeoutSeconds: 7200, now: work - 30 * 60000, workDeadline: work });
+  assert.equal(capped.hard, work); assert.equal(capped.hard - capped.soft, CASE_SHUTDOWN_RESERVE_MS);
+  const roomy = caseDeadlines({ timeoutSeconds: 7200, now: start, workDeadline: work });
+  assert.equal(roomy.soft, start + 7200000); assert.equal(roomy.hard, work, 'a cancelled job may take the worker budget up to the lane work deadline');
+  // The peer-anchor wait leaves this lane's measured remaining work.
+  const p = { cases: [1, 2, 3, 15, 4].map(index => ({ index, backend: 'mlx' })).concat([{ index: 2, backend: 'cuda' }]) };
+  const wait = peerAnchorWaitDeadline(p, 'mlx', budget, { jobStartedAt: new Date(start).toISOString(), ownAnchors: [{ wallMs: 3600000 }, { wallMs: 1800000 }] });
+  assert.equal(wait.remaining, 3); assert.equal(wait.deadline, work - 3 * (3600000 + CASE_SHUTDOWN_RESERVE_MS));
+  assert.throws(() => peerAnchorWaitDeadline(p, 'mlx', budget, { ownAnchors: [] }), /measured anchors/);
+  const source = await readFile(new URL('./h3-finetune-terminal.mjs', import.meta.url), 'utf8');
+  assert.ok(source.includes('H3_CASE_HARD_DEADLINE_MS:String(caseHardDeadline)') && source.includes('hardDeadlineMs: caseHardDeadline'), 'runCase hands the same hard deadline to the case process and to runProcess');
+});
+test('the case process exits deterministically when owned handles outlive its bounded shutdown', async t => {
+  const { dir } = await fixture(t);
+  const runtime = new URL('./h3-finetune-terminal-runtime.mjs', import.meta.url).href;
+  const script = `import(${JSON.stringify(runtime)}).then(({scheduleDeterministicExit})=>{setInterval(()=>{},1000);process.exitCode=3;scheduleDeterministicExit(200);});`;
+  const started = Date.now();
+  await assert.rejects(runProcess([process.execPath, '-e', script], { cwd: dir, env: process.env, logPath: path.join(dir, 'linger.log'), timeoutSeconds: 20 }), /case process failed/);
+  assert.ok(Date.now() - started < 15000); assert.match(await readFile(path.join(dir, 'linger.log'), 'utf8'), /H3_CASE_FORCED_EXIT: owned handles outlived the bounded shutdown; exiting with 3/);
+});
 test('a recorded drain bound extends the post-deadline window for the same child only, capped by the hard deadline', async t => {
   const { dir } = await fixture(t);
   const boundPath = path.join(dir, 'shutdown-bound.json');
@@ -263,7 +322,7 @@ test('every long macOS campaign step holds a no-sleep assertion bound to its own
   // for exactly its own lifetime: `caffeinate -w $$` exits with the step's shell, and its detached
   // stdio holds no step pipe open, so no assertion can outlive the step (or the job).
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
-  const guard = 'if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi';
+  const guard = 'if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi';
   const steps = workflow.split(/\n      - name: /).slice(1).map(block => ({ name: block.split('\n')[0], block }));
   for (const name of ['Bootstrap the reduced terminal campaign when requested', 'Ensure selected assets and conditioning in this terminal route', 'Derive explicit dense source variants from the actually staged raw snapshot', 'Extract the pinned public row as mono 32-kHz speech and retain attribution', 'Execute or reverify the reduced operational cases', 'Choose the measured matrix backend and finish this lane']) {
     const step = steps.find(s => s.name === name); assert.ok(step, name);
@@ -796,34 +855,38 @@ test('published peer anchors satisfy the preflight even when the peer has since 
   const { gh, calls } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'completed', 'failure')], jobs: { 40855343040: realJobs('mlx', 'completed', 'failure') }, artifacts: [anchors, { ...anchors, id: 10, workflow_run: { id: 40855384972, head_sha: PEER_SHA } }] });
   const result = await awaitPeerLane({ gh, repository: 'SceneWorks/SceneWorks', headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', anchorName: 'a', startedAt: 0, now: () => 9e9, sleep: async () => assert.fail('no wait') });
   assert.equal(result.state, 'anchors'); assert.equal(result.anchors.id, 9, 'never its own run\'s artifact');
-  assert.ok(!calls.some(url => url.includes('/jobs')), 'no liveness query once anchors exist');
+  assert.ok(!calls.some(url => url.includes('/runs/40855384972/')), 'its own run is never queried');
 });
-// The anchor wait (sc-26691) is bounded by the peer's liveness and this lane's own budget, not a
-// fixed six hours. Hour-scale clocks are virtual.
+// The anchor wait (sc-26691) is bounded by the peer's liveness and this lane's own work deadline,
+// not a fixed six hours. Hour-scale clocks are virtual.
 const HOUR = 3600000;
 const anchorBase = anchorArtifactBase({ backend: 'mlx', sceneworks: PEER_SHA, inference: 'b'.repeat(40), evidence: 'c'.repeat(40) });
 const anchorArtifact = (id, attempt, createdAt, runId = 40855343040) => ({ id, name: anchorArtifactName(anchorBase, attempt), expired: false, created_at: createdAt, workflow_run: { id: runId, head_sha: PEER_SHA } });
-const waitArgs = (gh, clock, extra) => ({ gh, repository: 'SceneWorks/SceneWorks', name: anchorBase, headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', startedAt: 0, now: () => clock.t, sleep: async ms => { clock.t += ms; }, ...extra });
+const waitArgs = (gh, clock, extra) => ({ gh, repository: 'SceneWorks/SceneWorks', name: anchorBase, headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', startedAt: 0, now: () => clock.t, sleep: async ms => { clock.t += ms; }, download: async artifact => `dir-${artifact.id}`, ...extra });
+const livePair = () => [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'in_progress', null)];
 test('the anchor wait continues past six hours while the peer lane is alive', async () => {
   const clock = { t: 0 }, published = anchorArtifact(41, 1, '2026-10-29T18:00:00Z');
-  const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'in_progress', null)], jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: () => clock.t >= 7.5 * HOUR ? [published] : [] });
+  const { gh } = fakeGh({ runs: livePair(), jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: () => clock.t >= 7.5 * HOUR ? [published] : [] });
   const seen = [];
-  const result = await waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, validate: async artifact => { seen.push(artifact.id); return { decision: 'cuda' }; } }));
+  const result = await waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, validate: async (artifact, directory) => { seen.push([artifact.id, directory]); return { decision: 'cuda' }; } }));
   assert.equal(result.artifact.id, 41); assert.equal(result.artifact.runAttempt, 1); assert.deepEqual(result.result, { decision: 'cuda' });
-  assert.ok(clock.t >= 7.5 * HOUR, 'waited beyond the old six-hour cap for a live peer'); assert.deepEqual(seen, [41]);
+  assert.ok(clock.t >= 7.5 * HOUR, 'waited beyond the old six-hour cap for a live peer'); assert.deepEqual(seen, [[41, 'dir-41']]);
 });
 test('the anchor wait stops as soon as the peer lane is observed failed', async () => {
   const clock = { t: 0 };
-  const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'in_progress', null)], jobs: () => ({ 40855343040: clock.t >= 3 * HOUR ? realJobs('mlx', 'completed', 'failure') : realJobs('mlx', 'in_progress', null) }) });
+  const { gh } = fakeGh({ runs: () => [realRun(40855384972, 'in_progress', null), realRun(40855343040, clock.t >= 3 * HOUR ? 'completed' : 'in_progress', clock.t >= 3 * HOUR ? 'failure' : null)], jobs: () => ({ 40855343040: clock.t >= 3 * HOUR ? realJobs('mlx', 'completed', 'failure') : realJobs('mlx', 'in_progress', null) }) });
   await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, validate: async () => assert.fail('nothing to validate') })), /already ended as failure without publishing inline anchors/);
-  assert.ok(clock.t >= 3 * HOUR && clock.t < 3 * HOUR + 2 * 60000, `stopped ${clock.t - 3 * HOUR} ms after the peer failed`);
+  assert.ok(clock.t >= 3 * HOUR && clock.t <= 3 * HOUR + 5 * 60000, `stopped ${clock.t - 3 * HOUR} ms after the peer failed (within one backed-off poll)`);
 });
-test('the anchor wait is bounded by this lane\'s own budget deadline, never a fixed cap', async () => {
+test('the anchor wait is bounded by its deadline, never a fixed cap, and backs off while nothing changes', async () => {
   const clock = { t: 0 };
-  const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'in_progress', null)], jobs: { 40855343040: realJobs('mlx', 'in_progress', null) } });
-  await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 19 * HOUR, validate: async () => assert.fail('nothing to validate') })), /reached its own budget deadline 1970-01-01T19:00:00.000Z while the paired mlx lane was still able to deliver/);
-  assert.equal(clock.t, 19 * HOUR, 'the budget deadline is the bound, exactly');
-  await assert.rejects(waitForPeerAnchors(waitArgs(gh, { t: 0 }, { deadline: undefined, validate: async () => {} })), /budget deadline/);
+  const { gh, calls } = fakeGh({ runs: livePair(), jobs: { 40855343040: realJobs('mlx', 'in_progress', null) } });
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 19 * HOUR, validate: async () => assert.fail('nothing to validate') })), /reached its peer-anchor wait deadline 1970-01-01T19:00:00.000Z \(its work deadline minus the time its remaining cases need\) while the paired mlx lane was still able to deliver/);
+  assert.equal(clock.t, 19 * HOUR, 'the deadline is the bound, exactly');
+  // 19 h of an unchanged live peer: the poll backs off to 5 min, so the Actions API budget holds.
+  assert.ok(calls.length < 19 * 12 * 3 + 30, `${calls.length} gh api calls in 19 h`);
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, { t: 0 }, { deadline: undefined, validate: async () => {} })), /work deadline/);
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, { t: 0 }, { deadline: HOUR, download: undefined, validate: async () => {} })), /separate download/);
 });
 test('rerun attempts publish distinct artifacts and the newest valid one is selected', async () => {
   assert.equal(anchorArtifactName(anchorBase, 2), `${anchorBase}-attempt-2`); assert.throws(() => anchorArtifactName(anchorBase, 0));
@@ -832,13 +895,54 @@ test('rerun attempts publish distinct artifacts and the newest valid one is sele
   // The same peer run, attempts 1 and 2 (no 409: distinct names); an expired one, and this lane's own, never count.
   const attempt1 = anchorArtifact(51, 1, '2026-10-29T10:00:00Z'), attempt2 = anchorArtifact(52, 2, '2026-10-29T14:00:00Z');
   const { gh } = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), { ...realRun(40855343040, 'in_progress', null), run_attempt: 2 }], jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: [attempt1, attempt2, { ...anchorArtifact(53, 3, '2026-10-29T15:00:00Z'), expired: true }, anchorArtifact(54, 1, '2026-10-29T16:00:00Z', 40855384972)] });
-  assert.deepEqual(peerAnchorCandidates({ gh, repository: 'SceneWorks/SceneWorks', name: anchorBase, headSha: PEER_SHA, selfRunId: 40855384972 }).map(a => [a.id, a.runAttempt]), [[52, 2], [51, 1]]);
-  // Newest first; a candidate that fails validation falls through to the next-newest, and is not retried.
+  assert.deepEqual((await peerAnchorCandidates({ gh, repository: 'SceneWorks/SceneWorks', name: anchorBase, headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx' })).map(a => [a.id, a.runAttempt]), [[52, 2], [51, 1]]);
+  // Newest first; a candidate that fails VALIDATION falls through to the next-newest, and is not retried.
   const clock = { t: 0 }, tried = [], logs = [];
   const result = await waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, log: line => logs.push(line), validate: async artifact => { tried.push(artifact.id); if (artifact.runAttempt === 2) throw new Error('anchor packet attempt does not match its artifact'); return { attempt: artifact.runAttempt }; } }));
   assert.deepEqual(tried, [52, 51]); assert.equal(result.artifact.id, 51); assert.deepEqual(result.result, { attempt: 1 });
   assert.ok(logs.some(line => /H3_PEER_ANCHORS_REJECTED: artifact 52/.test(line)));
   assert.equal(clock.t, 0, 'no wait when valid anchors are already published');
+});
+test('a failed anchor download is retried with backoff, never treated as an invalid packet', async () => {
+  const clock = { t: 0 }, published = anchorArtifact(61, 1, '2026-10-29T10:00:00Z');
+  const { gh } = fakeGh({ runs: livePair(), jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: [published] });
+  const directories = [], logs = [];
+  let downloads = 0;
+  const result = await waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, log: line => logs.push(line),
+    download: async () => { const directory = `fresh-${++downloads}`; directories.push(directory); if (downloads <= 4) throw new Error('gh run download: HTTP 502'); return directory; },
+    validate: async (artifact, directory) => ({ directory }) }));
+  assert.equal(result.artifact.id, 61); assert.equal(result.directory, 'fresh-5'); assert.equal(new Set(directories).size, 5, 'a fresh directory per try');
+  assert.ok(clock.t > 0, 'backed off between tries'); assert.equal(logs.filter(line => /H3_PEER_ANCHORS_DOWNLOAD_RETRY: artifact 61/.test(line)).length, 4);
+  assert.ok(!logs.some(line => /REJECTED/.test(line)));
+});
+test('transient Actions API failures are retried; completed runs are cached; only a long outage ends the wait', async () => {
+  const clock = { t: 0 };
+  const flaky = fakeGh({ runs: livePair(), jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: () => clock.t >= HOUR ? [anchorArtifact(71, 1, '2026-10-29T10:00:00Z')] : [] });
+  let n = 0; const gh = args => { if (++n % 3 === 0) throw new Error('HTTP 502: Bad Gateway'); return flaky.gh(args); };
+  const result = await waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, validate: async () => 'ok' }));
+  assert.equal(result.artifact.id, 71, 'one 5xx no longer kills the lane');
+  // A completed peer run's jobs and artifacts are fetched once, however many polls follow.
+  const done = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), realRun(40855343040, 'completed', 'success'), realRun(40855340000, 'queued', null)], jobs: { 40855343040: realJobs('mlx', 'completed', 'success') } });
+  const { PeerLaneObserver } = await import('./lib/h3-peer-lane.mjs');
+  const observer = new PeerLaneObserver({ gh: done.gh, repository: 'SceneWorks/SceneWorks', headSha: PEER_SHA, selfRunId: 40855384972, peerBackend: 'mlx', sleep: async () => {} });
+  for (let i = 0; i < 5; i++) await observer.observe({ name: anchorBase });
+  assert.equal(done.calls.filter(url => url.includes('/runs/40855343040/')).length, 2, 'completed run: jobs and artifacts once each');
+  // Every call failing: the outage limit ends the wait with the cause, not the first error.
+  const down = { t: 0 };
+  await assert.rejects(waitForPeerAnchors(waitArgs(() => { throw new Error('HTTP 503'); }, down, { deadline: 24 * HOUR, validate: async () => {} })), /Actions API stayed unreachable for \d+ minutes/);
+  assert.ok(down.t >= 30 * 60000 && down.t < 2 * HOUR);
+});
+test('anchors come only from the paired peer run, never from a finished earlier pair at the same SHA', async () => {
+  const stale = anchorArtifact(81, 1, '2026-10-28T10:00:00Z', 40855300000), live = anchorArtifact(82, 1, '2026-10-29T12:00:00Z');
+  const clock = { t: 0 };
+  const { gh } = fakeGh({ runs: [realRun(40855300000, 'completed', 'success'), realRun(40855384972, 'in_progress', null), realRun(40855343040, 'in_progress', null)], jobs: { 40855300000: realJobs('mlx', 'completed', 'success'), 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: () => clock.t >= 2 * HOUR ? [stale, live] : [stale] });
+  const result = await waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, validate: async artifact => artifact.id }));
+  assert.equal(result.artifact.id, 82); assert.ok(clock.t >= 2 * HOUR, 'the stale pair\'s anchors were not taken');
+  // A newer dispatch whose jobs do not exist yet may be the real peer: nothing is taken meanwhile.
+  const { pairedPeerRun } = await import('./lib/h3-peer-lane.mjs');
+  const jobsByRun = new Map([['40855343040', realJobs('mlx', 'completed', 'success')], ['40855390000', []]]);
+  assert.equal(pairedPeerRun({ runs: [realRun(40855343040, 'completed', 'success'), realRun(40855390000, 'queued', null)], jobsByRun, selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }), null);
+  assert.equal(pairedPeerRun({ runs: [realRun(40855343040, 'completed', 'success'), realRun(40855390000, 'completed', 'cancelled')], jobsByRun, selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).id, 40855343040);
 });
 test('a dispatch whose jobs are not created yet is a possible peer only while active', () => {
   assert.equal(classifyPeerLane({ runs: [realRun(40855343040, 'queued', null)], jobsByRun: new Map([['40855343040', []]]), selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).state, 'alive');

@@ -144,8 +144,8 @@ jobs:
         with:
           node-version: "22"
       # sc-26691: an adaptive-matrix lane waits, after all its staging and its first two cases, for
-      # the OTHER backend's inline anchors for as long as that peer lane is alive, bounded only by
-      # this lane's own budget deadline. When that peer was never dispatched, or
+      # the OTHER backend's inline anchors for as long as that peer lane is alive, bounded by this
+      # lane's work deadline less its remaining cases. When that peer was never dispatched, or
       # has already ended without publishing them, the anchors can never arrive. Check the peer
       # before any staging or model work and fail within minutes (a bounded grace covers a peer
       # dispatched seconds after this one); the wait loop re-checks it while waiting.
@@ -301,7 +301,7 @@ jobs:
           set -euo pipefail
           # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
           # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
-          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           node --input-type=module <<'NODE'
           import assert from "node:assert/strict";
           import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
@@ -371,7 +371,7 @@ jobs:
           set -euo pipefail
           # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
           # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
-          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           node --input-type=module <<'NODE'
           import assert from "node:assert/strict";
           import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
@@ -477,7 +477,7 @@ jobs:
           set -euo pipefail
           # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
           # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
-          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           node --input-type=module <<'NODE'
           import {execFileSync} from "node:child_process";
           import {copyFile} from "node:fs/promises";
@@ -497,7 +497,7 @@ jobs:
           set -euo pipefail
           # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
           # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
-          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           node --input-type=module <<'NODE'
           import {execFileSync} from "node:child_process";
           import {copyFile} from "node:fs/promises";
@@ -607,7 +607,7 @@ jobs:
           set -euo pipefail
           # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
           # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
-          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           if [ "${H3_TERMINAL_SKIP_RUN:-0}" = "1" ]; then echo "inspect-only request: no model execution"; exit 0; fi
           export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
           node --input-type=module <<'NODE'
@@ -654,29 +654,39 @@ jobs:
           set -euo pipefail
           # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
           # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
-          if [ "$RUNNER_OS" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
           export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
           node --input-type=module <<'NODE'
           import assert from "node:assert/strict";
           import path from "node:path";
-          import {readFile,writeFile,mkdir} from "node:fs/promises";
+          import {readFile,writeFile,mkdtemp} from "node:fs/promises";
           import {execFileSync} from "node:child_process";
-          import {laneBudget,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
+          import {laneBudget,peerAnchorWaitDeadline,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
           import {anchorArtifactBase,waitForPeerAnchors} from "./scripts/lib/h3-peer-lane.mjs";
           const env=process.env,p=JSON.parse(await readFile(env.PLAN,"utf8")),backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
           const name=anchorArtifactBase({backend:peer,sceneworks:p.sceneworks,inference:p.inference,evidence:p.nativeEvidence.sha});
           const budget=await laneBudget(p,backend);
           const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
-          // Wait for as long as the peer lane can still deliver: it throws at once when the peer is
-          // observed ended, failed or absent without valid anchors, and is otherwise bounded only by
-          // this lane's own budget. The newest anchors that validate win; each attempt is checked
-          // against its own run id AND attempt, on a copy of the plan so a rejected one leaves no trace.
-          const {artifact,result}=await waitForPeerAnchors({gh,repository:env.GITHUB_REPOSITORY,name,headSha:p.sceneworks,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer,startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT),deadline:Date.parse(budget.deadline),log:line=>console.log(line),validate:async artifact=>{
-            const directory=path.join(p.output,`peer-inline-anchors-${peer}-${artifact.id}`);await mkdir(directory);
-            execFileSync("gh",["run","download",String(artifact.workflow_run.id),"--repo",env.GITHUB_REPOSITORY,"--name",artifact.name,"--dir",directory],{stdio:"inherit",env});
-            const plan=structuredClone(p),decision=await receiveInlineAnchorBundle(plan,backend,directory,{expectedRunId:artifact.workflow_run.id,expectedRunAttempt:artifact.runAttempt});
-            return {plan,decision};
-          }});
+          // The wait ends at this lane's work deadline (budget and job timeout, minus the evidence
+          // reserve) minus what its remaining cases need, sized from its own measured anchors.
+          const own=JSON.parse(await readFile(path.join(p.output,`inline-anchor-bundle-${backend}`,"anchors.json"),"utf8"));
+          const wait=peerAnchorWaitDeadline(p,backend,budget,{ownAnchors:own.anchors});
+          console.log(JSON.stringify({peerAnchorWait:{until:new Date(wait.deadline).toISOString(),reservedMs:wait.reserveMs,remainingCases:wait.remaining}}));
+          // Wait for as long as the paired peer lane can still deliver: it throws at once when the
+          // peer is observed ended, failed or absent without valid anchors. A download is IO and is
+          // retried (a fresh directory each try); only a failed packet check rejects a candidate. The
+          // newest paired-run anchors that validate win; each is checked against its own run id AND
+          // attempt, on a copy of the plan so a rejected one leaves no trace.
+          const {artifact,result}=await waitForPeerAnchors({gh,repository:env.GITHUB_REPOSITORY,name,headSha:p.sceneworks,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer,startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT),deadline:wait.deadline,log:line=>console.log(line),
+            download:async artifact=>{
+              const directory=await mkdtemp(path.join(p.output,`peer-inline-anchors-${peer}-${artifact.id}-`));
+              execFileSync("gh",["run","download",String(artifact.workflow_run.id),"--repo",env.GITHUB_REPOSITORY,"--name",artifact.name,"--dir",directory],{stdio:"inherit",env});
+              return directory;
+            },
+            validate:async (artifact,directory)=>{
+              const plan=structuredClone(p),decision=await receiveInlineAnchorBundle(plan,backend,directory,{expectedRunId:artifact.workflow_run.id,expectedRunAttempt:artifact.runAttempt});
+              return {plan,decision};
+            }});
           const plan=result.plan;assert.equal(plan.sceneworks,p.sceneworks);
           await writeFile(env.PLAN,JSON.stringify(plan,null,2)+"\n");console.log(JSON.stringify({peerAnchors:{artifact:artifact.id,name:artifact.name,run:artifact.workflow_run.id,attempt:artifact.runAttempt},measuredMatrixDecision:result.decision,omittedAVStatus:"NOT proven on the displaced backend"}));
           for(const c of executionCases(plan).filter(c=>c.backend===backend&&![1,15].includes(c.index)))execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,c.id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});

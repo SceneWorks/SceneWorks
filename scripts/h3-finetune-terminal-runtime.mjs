@@ -153,6 +153,17 @@ export function cancelDrainBoundMs(budget) {
 }
 /** What the case process still needs after its last drain: the Idle wait plus three bounded owned exits. */
 export function postDrainShutdownMs() { return IDLE_ACK_BOUND_MS + 3 * ownedExitBoundMs(); }
+/** After its work and its bounded owned shutdown, the case process gives stdio this long to flush. */
+export const FINAL_EXIT_GRACE_MS = 10000;
+/**
+ * End the case process deterministically once its work (including stop()) is done: a child handle
+ * left behind by a failed graceful exit must not keep it alive until the parent's last-resort kill.
+ * The timer is unref'd, so a clean run exits on its own first; it fires only when something lingers.
+ */
+export function scheduleDeterministicExit(ms = FINAL_EXIT_GRACE_MS, { exit = code => process.exit(code) } = {}) {
+  const timer = setTimeout(() => { console.error(`H3_CASE_FORCED_EXIT: owned handles outlived the bounded shutdown; exiting with ${process.exitCode ?? 1}`); exit(process.exitCode ?? 1); }, ms);
+  timer.unref(); return timer;
+}
 export const PREP_CANCELED_MARKER = 'h3-preparation-canceled';
 const receiptNameFor = jobId => `source-cancel-${encodeURIComponent(jobId)}.json`;
 const traceFields = event => event?.fields ?? event ?? {};
@@ -443,52 +454,73 @@ export class OwnedService {
   }
   // Tell the parent harness (runProcess) how long this case process is still entitled to: the
   // current drain deadline plus the bounded post-drain shutdown. Written atomically; the parent only
-  // honours it for its own child PID and never past its hard deadline.
-  async recordShutdownBound(jobId,cancelledAt,drainDeadline,budget) {
-    const file=path.join(this.dir,CASE_SHUTDOWN_BOUND_FILE),temporary=`${file}.${process.pid}.tmp`;
-    await writeFile(temporary,JSON.stringify({kind:'h3-case-shutdown-bound',pid:process.pid,jobId,cancelRequestedAt:new Date(cancelledAt).toISOString(),drainDeadline:new Date(drainDeadline).toISOString(),deadlineMs:drainDeadline+postDrainShutdownMs(),budget:budget??null,source:budget?'worker-advertised-stall-budget':'default-cancel-bound'},null,2)+'\n');
-    await rename(temporary,file);
+  // honours it for its own child PID and never past its hard deadline. A failed write (Windows
+  // EPERM/EBUSY on the rename while the parent reads it) is retried briefly, then logged: it never
+  // aborts the drain, it only leaves the parent on its plain grace.
+  async recordShutdownBound(jobIds,cancelledAt,drainDeadline,budgets) {
+    const file=path.join(this.dir,CASE_SHUTDOWN_BOUND_FILE),temporary=`${file}.${process.pid}.tmp`,write=this.deps.writeBound??(async text=>{await writeFile(temporary,text);await rename(temporary,file);});
+    const text=JSON.stringify({kind:'h3-case-shutdown-bound',pid:process.pid,jobId:jobIds[0],jobIds,cancelRequestedAt:new Date(cancelledAt).toISOString(),drainDeadline:new Date(drainDeadline).toISOString(),deadlineMs:drainDeadline+postDrainShutdownMs(),budget:budgets.find(Boolean)??null,budgets,source:budgets.some(Boolean)?'worker-advertised-stall-budget':'default-cancel-bound'},null,2)+'\n';
+    for(let attempt=1;;attempt++){
+      try{await write(text);return true;}
+      catch(error){if(attempt<5&&['EPERM','EBUSY','EACCES'].includes(error.code)){await (this.deps.sleep??sleep)(100);continue;}console.warn(`H3_SHUTDOWN_BOUND_UNRECORDED: ${error.message}; the parent harness keeps its plain post-deadline grace`);return false;}
+    }
   }
+  /** The case's hard deadline (H3_CASE_HARD_DEADLINE_MS from runCase): the owned shutdown must end before it. */
+  hardDeadline() { const value=this.deps.hardDeadlineMs??Number(process.env.H3_CASE_HARD_DEADLINE_MS??Infinity); return Number.isNaN(value)?Infinity:value; }
+  // Every non-terminal owned job is cancelled first, so one stuck job never delays another's
+  // cancel, and then all are awaited together under ONE drain deadline: the latest of their
+  // worker-advertised bounds (each from its own cancel), capped so the bounded post-drain shutdown
+  // (Idle wait + three owned exits) still ends before the case's hard deadline. On Windows the
+  // parent's last-resort kill takes the owned services down with the case process (job object), so
+  // this cap is what keeps the graceful shutdown inside the case's own lifetime.
   async drain() {
-    const records=[];
+    const read=id=>this.request('GET',`/api/v1/jobs/${encodeURIComponent(id)}`),records=new Map(),pending=new Map();
     for(const id of this.jobs) {
-      const read=()=>this.request('GET',`/api/v1/jobs/${encodeURIComponent(id)}`);
-      let job=await read();
-      if(!terminal(job.status)) {
-        await this.request('POST',`/api/v1/jobs/${encodeURIComponent(id)}/cancel`);
-        const cancelledAt=this.now();
-        let budget=advertisedStallBudget(await this.preparationTrace(),id),deadline=cancelledAt+cancelDrainBoundMs(budget),recheck=cancelledAt+BUDGET_RECHECK_MS;
-        await this.recordShutdownBound(id,cancelledAt,deadline,budget);
-        while(!terminal(job.status)) {
-          if(this.now()>=recheck||this.now()>=deadline) {
-            // The worker advertises its budget once the engine run starts, which may follow the cancel.
-            recheck=this.now()+BUDGET_RECHECK_MS;
-            const fresh=advertisedStallBudget(await this.preparationTrace(),id);
-            if(fresh&&cancelledAt+cancelDrainBoundMs(fresh)>deadline){budget=fresh;deadline=cancelledAt+cancelDrainBoundMs(fresh);await this.recordShutdownBound(id,cancelledAt,deadline,budget);}
-          }
-          if(this.now()>=deadline)throw new Error(`cooperative cancel of owned job ${id} did not reach a terminal state within ${Math.round((deadline-cancelledAt)/1000)} s (${budget?`the worker's advertised stall budget: ${budget.stallSeconds} s per step, ${budget.preStepStallSeconds} s before the first step, plus its ${WORKER_VIDEO_STALL_GRACE_SECONDS} s stall grace`:'no advertised stall budget; default cancel bound'}); the owned service still gets its graceful shutdown`);
-          // Poll briskly while a prompt cancel lands, then at a pace that suits an hour-scale step.
-          await (this.deps.sleep??sleep)(this.now()-cancelledAt<30000?250:5000);job=await read();
+      const job=await read(id);
+      if(terminal(job.status)){records.set(id,job);continue;}
+      await this.request('POST',`/api/v1/jobs/${encodeURIComponent(id)}/cancel`);pending.set(id,{cancelledAt:this.now(),budget:null,job});
+    }
+    if(pending.size) {
+      const cap=this.hardDeadline()-postDrainShutdownMs(),firstCancel=Math.min(...[...pending.values()].map(s=>s.cancelledAt));
+      // The worker advertises a job's budget once its engine run starts, which may follow the cancel.
+      const refresh=async()=>{const trace=await this.preparationTrace();for(const [id,state] of pending){const fresh=advertisedStallBudget(trace,id);if(fresh&&(!state.budget||cancelDrainBoundMs(fresh)>cancelDrainBoundMs(state.budget)))state.budget=fresh;}};
+      const deadlineOf=()=>Math.min(cap,Math.max(...[...pending.values()].map(s=>s.cancelledAt+cancelDrainBoundMs(s.budget))));
+      const record=deadline=>this.recordShutdownBound([...pending.keys()],firstCancel,deadline,[...pending.values()].map(s=>s.budget));
+      await refresh();let deadline=deadlineOf(),recheck=this.now()+BUDGET_RECHECK_MS;await record(deadline);
+      for(;;) {
+        for(const [id,state] of pending){state.job=await read(id);if(terminal(state.job.status)){records.set(id,state.job);pending.delete(id);}}
+        if(!pending.size)break;
+        if(this.now()>=recheck||this.now()>=deadline){recheck=this.now()+BUDGET_RECHECK_MS;await refresh();const next=deadlineOf();if(next!==deadline){deadline=next;await record(deadline);}}
+        if(this.now()>=deadline) {
+          const ids=[...pending.keys()],details=[...pending.values()].map(({budget})=>budget?`the worker's advertised stall budget: ${budget.stallSeconds} s per step, ${budget.preStepStallSeconds} s before the first step, plus its ${WORKER_VIDEO_STALL_GRACE_SECONDS} s stall grace`:'no advertised stall budget; default cancel bound').join('; ');
+          throw new Error(`cooperative cancel of owned job ${ids.join(', ')} did not reach a terminal state within ${Math.round((deadline-firstCancel)/1000)} s (${details})${deadline===cap?', capped so the owned shutdown ends before the case\'s hard deadline':''}; the owned service still gets its graceful shutdown`);
         }
+        // Poll briskly while a prompt cancel lands, then at a pace that suits an hour-scale step.
+        await (this.deps.sleep??sleep)(Math.max(0,Math.min(this.now()-firstCancel<30000?250:5000,deadline-this.now())));
       }
-      records.push(job);
     }
     this.quiescence.push(await this.waitIdle());
     const log=`drained-${this.generation}-${this.drainRecords.length}.json`;
-    await save(path.join(this.dir,log),records);this.drainRecords.push(log);this.jobs.clear();return records;
+    const drained=[...this.jobs].map(id=>records.get(id));
+    await save(path.join(this.dir,log),drained);this.drainRecords.push(log);this.jobs.clear();return drained;
   }
   async stop() {
     if(this.stopped)return;await this.assertOwner();
     // Every owned submitted job is first cancelled and waited for, within the worker's own
-    // advertised stall budget (drain). Whatever the drain concludes (all terminal, a dead owned API
-    // whose jobs ended with it, or a job that outlived that bound, which the worker's own watchdog
-    // has then failed), the owned worker, guardian and API get their graceful shutdown request, by
-    // owned handle/PID only and never by name. A drain failure that skipped it left the live
-    // children holding the case process, and the lane, open for 6.5 h after the job had ended
-    // (MLX run 40797515762); a crashed API did the same until the job timeout.
+    // advertised stall budget, capped by the case's hard deadline (drain). Whatever the drain
+    // concludes (all terminal, a dead owned API whose jobs ended with it, or a job that outlived that
+    // bound, which the worker's own watchdog has then failed), the owned worker, guardian and API get
+    // their graceful shutdown request, by owned handle/PID only and never by name. A drain failure
+    // that skipped it left the live children holding the case process, and the lane, open for 6.5 h
+    // after the job had ended (MLX run 40797515762); a crashed API did the same until the job timeout.
+    // On macOS the worker's SIGTERM may arrive while a wedged Metal job is still in flight: that is
+    // the bounded last step, not a new wait. Each exit is bounded (ownedExitBoundMs), a child that
+    // overruns is reported and the next still gets its request, and the case process itself then
+    // exits deterministically (scheduleDeterministicExit), so the total stays inside the case bound.
     let drainError;try{await this.drain();}catch(error){drainError=error;}
     if((this.deps.platform??process.platform)==='win32')this.worker.stdin.end();else this.worker.signal('SIGTERM');
-    const bounded=async proc=>{let timer;try{return await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned graceful exit timeout; no forced kill')),ownedExitBoundMs());})]);}finally{clearTimeout(timer);}};
+    const exitBound=this.deps.exitBoundMs??ownedExitBoundMs();
+    const bounded=async proc=>{let timer;try{return await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error(`owned graceful exit timeout after ${exitBound} ms (pid ${proc.pid}); no forced kill here`)),exitBound);})]);}finally{clearTimeout(timer);}};
     // One child exceeding its bound still lets the next get its request; the first failure is reported.
     const failures=[],settle=async proc=>{try{return await bounded(proc);}catch(error){failures.push(error);return {code:null,error:error.message};}};
     const workerExit=await settle(this.worker);
@@ -1136,4 +1168,5 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
     else if(mode==='fixture'){const r=await executeFixture(p,c,swRoot,inferenceRoot,dir);console.log(r.log);}
     else{assert.equal(mode,'api');const r=await executeAPICase(p,c,swRoot,inferenceRoot,dir);console.log(`H3_API_ASSERTIONS_EXECUTED=${r.result.transcript.filter(v=>v.assertion).length}`);}
   }catch(error){console.error(error.stack);process.exitCode=1;}
+  scheduleDeterministicExit();
 }

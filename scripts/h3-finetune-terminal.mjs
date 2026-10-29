@@ -636,47 +636,76 @@ export async function validateEvidence(p, c, dir, log, decode = decodeAV, delta 
 export const CASE_SHUTDOWN_BOUND_FILE = 'shutdown-bound.json';
 /** Post-deadline window without a recorded bound: default cancel drains, the Idle wait and three bounded owned exits. */
 export const CASE_SHUTDOWN_GRACE_SECONDS = 900;
-/** After SIGTERM, how long the harness waits before SIGKILL of its own case process. */
+/** After SIGTERM, how long the harness waits before SIGKILL of its own case process (POSIX only; see runProcess). */
 export const CASE_KILL_GRACE_SECONDS = 30;
+/**
+ * The window a case keeps between its soft deadline and its hard deadline for the owned-service
+ * shutdown the case process performs itself: a default cancel drain (120 s), the Idle wait (120 s)
+ * and three bounded owned exits (3 x 185 s), plus the kill grace and margin. A test pins it to the
+ * runtime's own constants.
+ */
+export const CASE_SHUTDOWN_RESERVE_MS = 20 * 60 * 1000;
+/** timeout-minutes of the terminal job in .github/workflows/h3-finetune-terminal.yml (a test pins it). */
+export const ACTIONS_JOB_TIMEOUT_MS = 1440 * 60 * 1000;
+/**
+ * Kept free at the end of the Actions job for the always() evidence/staging uploads and for the
+ * setup steps that run before the job start is recorded (H3_TERMINAL_JOB_STARTED_AT).
+ */
+export const LANE_FINALIZE_RESERVE_MS = 45 * 60 * 1000;
 const MAX_TIMER_MS = 2 ** 31 - 1;
-// No shell interpolation. At the case deadline the process gets its cooperative window: it cancels
-// and drains its owned service within the worker's own advertised stall budget and records that
-// bound in <case dir>/shutdown-bound.json (native GPU work is never killed mid-command-buffer by
-// this harness: the owned worker/API watch the case's guardian pipe and shut down gracefully when
-// the case process goes). Past max(deadline + grace, the recorded bound), never past the hard
-// deadline, the harness terminates the process IT spawned, by its own child PID: SIGTERM, then
-// SIGKILL after a further grace, and the case fails. Nothing here waits unbounded; the Actions job
-// timeout is not the only bound (a wedged drain held the lane for 6.5 h in run 40797515762).
-export async function runProcess(argv, { cwd, env, logPath, timeoutSeconds, graceSeconds = CASE_SHUTDOWN_GRACE_SECONDS, killGraceSeconds = CASE_KILL_GRACE_SECONDS, shutdownBoundPath, hardDeadlineMs = Infinity, now = Date.now }) {
+// No shell interpolation. Contract with the case process (sc-26691):
+// - The case process receives its soft deadline (H3_CASE_DEADLINE_MS) and its hard deadline
+//   (H3_CASE_HARD_DEADLINE_MS). Past the soft one it cancels and drains its owned service within
+//   the worker's own advertised stall budget, capped so that drain + the bounded owned shutdown end
+//   before the hard deadline, records that bound in <case dir>/shutdown-bound.json, and performs the
+//   graceful owned-service shutdown ITSELF. That is the only graceful path on every OS.
+// - Terminating the case process here is the last resort, after max(deadline + grace, the recorded
+//   bound) and never later than the hard deadline. It targets only the child this function spawned.
+//   POSIX: SIGTERM, then SIGKILL after a further grace; the owned worker/API are separate processes
+//   that see their guardian pipe close and shut down on their own. Windows: child.kill() is
+//   TerminateProcess, and libuv places non-detached children in a kill-on-close job object, so the
+//   owned worker/API/guardian die with it, mid-kernel and with truncated logs. Hence the case
+//   process's own pre-deadline shutdown; on Windows the kill only ever removes a wedged process.
+// Nothing here waits unbounded; the Actions job timeout is not the only bound (a wedged drain held
+// the lane for 6.5 h in run 40797515762).
+export async function runProcess(argv, { cwd, env, logPath, timeoutSeconds, graceSeconds = CASE_SHUTDOWN_GRACE_SECONDS, killGraceSeconds = CASE_KILL_GRACE_SECONDS, shutdownBoundPath, hardDeadlineMs = Infinity, now = Date.now, platform = process.platform, readBound = file => readFile(file, 'utf8') }) {
   const output = createWriteStream(logPath, { flags: 'wx' });
   await new Promise((resolve, reject) => { output.once('open', resolve); output.once('error', reject); });
   const child = spawn(argv[0], argv.slice(1), { cwd, env, stdio: ['ignore', 'pipe', 'pipe'], shell: false });
   child.stdout.pipe(output, { end: false }); child.stderr.pipe(output, { end: false });
-  const exited = new Promise((resolve, reject) => { child.once('error', reject); child.once('exit', (code, signal) => resolve({ code, signal })); });
+  let settled = false, expired = false, terminated = null, escalation, kill, timer;
+  const exited = new Promise((resolve, reject) => {
+    child.once('error', error => { settled = true; clearTimeout(timer); reject(error); });
+    // Settle at once: a clean exit just before the deadline is never misreported as a timeout, and
+    // no escalation timer can be armed for a process that is already gone.
+    child.once('exit', (code, signal) => { settled = true; clearTimeout(timer); clearTimeout(escalation); clearTimeout(kill); resolve({ code, signal }); });
+  });
   const closed = new Promise(resolve => child.once('close', resolve));
-  const alive = () => child.exitCode === null && child.signalCode === null;
-  let expired = false, terminated = null, escalation, kill;
   const recordedBound = async () => {
     if (!shutdownBoundPath) return null;
-    try { const bound = JSON.parse(await readFile(shutdownBoundPath, 'utf8')); return bound?.kind === 'h3-case-shutdown-bound' && bound.pid === child.pid && Number.isFinite(bound.deadlineMs) ? bound : null; }
+    try { const bound = JSON.parse(await readBound(shutdownBoundPath)); return bound?.kind === 'h3-case-shutdown-bound' && bound.pid === child.pid && Number.isFinite(bound.deadlineMs) ? bound : null; }
     catch { return null; } // Absent, or mid-rename: the next check re-reads it.
   };
+  const arm = (fn, ms) => { const handle = setTimeout(fn, Math.max(0, Math.min(ms, MAX_TIMER_MS))); handle.unref(); return handle; };
   let firstEscalationAt;
   const escalate = async () => {
-    if (!alive()) return;
-    const bound = await recordedBound(), at = now(), target = Math.min(hardDeadlineMs, Math.max(firstEscalationAt, bound?.deadlineMs ?? -Infinity));
-    if (target > at) { escalation = setTimeout(escalate, Math.min(target - at, MAX_TIMER_MS)); return; }
-    if (!alive()) return;
+    if (settled) return;
+    const bound = await recordedBound();
+    if (settled) return; // The process may have exited while the bound was being read.
+    const at = now(), target = Math.min(hardDeadlineMs, Math.max(firstEscalationAt, bound?.deadlineMs ?? -Infinity));
+    if (target > at) { escalation = arm(escalate, target - at); return; }
     terminated = { pid: child.pid, at: new Date(at).toISOString(), bound: bound ? { deadline: new Date(bound.deadlineMs).toISOString(), source: bound.source, jobId: bound.jobId } : null };
-    output.write(`H3_CASE_TERMINATED: case process ${child.pid} did not finish its cooperative shutdown within ${bound ? `its recorded bound (${bound.source})` : `the ${graceSeconds} s post-deadline grace`}${target === hardDeadlineMs ? ' capped by the hard deadline' : ''}; SIGTERM to the harness's own child PID, SIGKILL in ${killGraceSeconds} s.\n`);
+    const windows = platform === 'win32';
+    output.write(`H3_CASE_TERMINATED: case process ${child.pid} did not finish its cooperative shutdown within ${bound ? `its recorded bound (${bound.source})` : `the ${graceSeconds} s post-deadline grace`}${target === hardDeadlineMs ? ' capped by the hard deadline' : ''}; ${windows ? 'TerminateProcess of the harness\'s own child PID (its job object takes any owned service still running with it)' : `SIGTERM to the harness's own child PID, SIGKILL in ${killGraceSeconds} s`}.\n`);
     child.kill('SIGTERM');
-    kill = setTimeout(() => { if (alive()) { output.write(`H3_CASE_KILLED: case process ${child.pid} survived SIGTERM for ${killGraceSeconds} s; SIGKILL.\n`); child.kill('SIGKILL'); } }, killGraceSeconds * 1000);
+    if (!windows) kill = arm(() => { if (!settled) { output.write(`H3_CASE_KILLED: case process ${child.pid} survived SIGTERM for ${killGraceSeconds} s; SIGKILL.\n`); child.kill('SIGKILL'); } }, killGraceSeconds * 1000);
   };
-  const timer = setTimeout(() => {
+  timer = arm(() => {
+    if (settled) return;
     expired = true; firstEscalationAt = now() + graceSeconds * 1000;
-    output.write(`H3_CASE_TIMEOUT: explicit case deadline exceeded; failure. The case process gets its cooperative shutdown (worker-advertised drain bound, else ${graceSeconds} s) before the harness terminates its own child PID.\n`);
-    escalation = setTimeout(escalate, Math.max(0, Math.min(firstEscalationAt, hardDeadlineMs) - now()));
-  }, Math.min(timeoutSeconds * 1000, MAX_TIMER_MS));
+    output.write(`H3_CASE_TIMEOUT: explicit case deadline exceeded; failure. The case process performs its own owned-service shutdown (worker-advertised drain bound, else ${graceSeconds} s, never past the hard deadline) before the harness terminates its own child PID.\n`);
+    escalation = arm(escalate, Math.min(firstEscalationAt, hardDeadlineMs) - now());
+  }, timeoutSeconds * 1000);
   try {
     const { code, signal } = await exited;
     // A grandchild that inherited the pipes must not hold the step open after the case process went.
@@ -685,6 +714,37 @@ export async function runProcess(argv, { cwd, env, logPath, timeoutSeconds, grac
     assert.ok(!expired, 'case exceeded timeout; failed, never accepted on resume');
     assert.equal(code, 0, 'case process failed');
   } finally { clearTimeout(timer); clearTimeout(escalation); clearTimeout(kill); await new Promise(resolve => output.end(resolve)); }
+}
+/**
+ * The last moment this lane's work may run: the earlier of its persisted 24 h budget and this
+ * Actions job's own timeout (from H3_TERMINAL_JOB_STARTED_AT), minus the finalize reserve. The
+ * budget's deadline alone (lane start + 86400 s) is never before the job's 1440-minute timeout on a
+ * first dispatch, so a bound at it could never fire before Actions killed the job, and left nothing
+ * for the always() evidence steps.
+ */
+export function laneWorkDeadline(budget, { jobStartedAt = process.env.H3_TERMINAL_JOB_STARTED_AT } = {}) {
+  const job = jobStartedAt === undefined || jobStartedAt === '' ? NaN : Date.parse(jobStartedAt);
+  return Math.min(budget ? Date.parse(budget.deadline) : Infinity, Number.isFinite(job) ? job + ACTIONS_JOB_TIMEOUT_MS : Infinity) - LANE_FINALIZE_RESERVE_MS;
+}
+/** A case's soft (scenario) and hard (process) deadlines; the gap always fits at least the owned-service shutdown. */
+export function caseDeadlines({ timeoutSeconds, now = Date.now(), workDeadline = Infinity }) {
+  // The hard deadline is the lane's work deadline: within it, a cancelled job may take the worker's
+  // whole advertised stall budget to turn terminal before the case process shuts its service down.
+  const hard = workDeadline;
+  return { soft: Math.min(now + timeoutSeconds * 1000, hard - CASE_SHUTDOWN_RESERVE_MS), hard };
+}
+/**
+ * When the peer-anchor wait must give up: the lane's work deadline minus the time this lane still
+ * needs afterwards. That is sized from this lane's own measured anchors: every remaining case of
+ * this backend (the most it runs, when it is the selected matrix backend) at the longest measured
+ * anchor wall time, plus each case's shutdown reserve. Never guessed: no measured anchor, no wait.
+ */
+export function peerAnchorWaitDeadline(p, backend, budget, { jobStartedAt, ownAnchors } = {}) {
+  const walls = (ownAnchors ?? []).map(anchor => anchor.wallMs).filter(ms => Number.isFinite(ms) && ms > 0);
+  assert.ok(walls.length, 'the peer-anchor wait is sized from this lane\'s own measured anchors');
+  const remaining = p.cases.filter(c => c.backend === backend && ![1, 15].includes(c.index)).length;
+  const reserveMs = remaining * (Math.max(...walls) + CASE_SHUTDOWN_RESERVE_MS);
+  return { deadline: laneWorkDeadline(budget, { jobStartedAt }) - reserveMs, reserveMs, remaining };
 }
 export async function laneBudget(p,backend,{now=Date.now(),startedAt=process.env.H3_TERMINAL_LANE_STARTED_AT}={}) {
   const filename=contained(p.output,`lane-budget-${backend}.json`),totalSeconds=86400;
@@ -799,7 +859,9 @@ export async function runCase(p, id, root, inferenceRoot) {
   else assert.equal(process.platform, 'win32');
   await verifyMatrixAdmission(p);
   const budget=p.inventory==='reduced-v1'?await laneBudget(p,c.backend):null;
-  const caseDeadline=Math.min(Date.now()+c.timeoutSeconds*1000,budget?Date.parse(budget.deadline)-300000:Infinity);
+  // The soft deadline ends the scenario; the hard one leaves the case process room for its own
+  // owned-service shutdown and bounds runProcess. Both stay inside the lane budget AND the job timeout.
+  const {soft:caseDeadline,hard:caseHardDeadline}=caseDeadlines({timeoutSeconds:c.timeoutSeconds,workDeadline:laneWorkDeadline(budget)});
   await verifyCaseInputs(p,c, await allowedInputRoots(p, root, inferenceRoot));
   assert.ok(Date.now()<caseDeadline,'single-case timeout expired during input validation');
   const dir = contained(p.output, c.id); await mkdir(dir, { recursive: true });
@@ -821,7 +883,7 @@ export async function runCase(p, id, root, inferenceRoot) {
   await save(statePath, { ...identity, status: 'running', started });
   try {
     if (c.group === 'artifact') await save(path.join(dir, 'source-catalog.json'), await fetchFrozenCatalog(c));
-    const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(Math.max(1,Math.floor((caseDeadline-Date.now())/1000))), H3_CASE_DEADLINE_MS:String(caseDeadline) }, timeoutSeconds: Math.max(1,Math.floor((caseDeadline-Date.now())/1000)), shutdownBoundPath: path.join(dir, CASE_SHUTDOWN_BOUND_FILE), hardDeadlineMs: budget ? Date.parse(budget.deadline) : Infinity };
+    const options = { cwd: root, env: { ...process.env, H3_CASE_DIR: dir, H3_CASE_ID: id, H3_INFERENCE_ROOT: inferenceRoot, H3_TIMEOUT_SECONDS: String(Math.max(1,Math.floor((caseDeadline-Date.now())/1000))), H3_CASE_DEADLINE_MS:String(caseDeadline), H3_CASE_HARD_DEADLINE_MS:String(caseHardDeadline) }, timeoutSeconds: Math.max(1,Math.floor((caseDeadline-Date.now())/1000)), shutdownBoundPath: path.join(dir, CASE_SHUTDOWN_BOUND_FILE), hardDeadlineMs: caseHardDeadline };
     if (c.group === 'numeric' && c.kind!=='actual-artifact-probe' && c.numericProof?.kind !== 'native-pinned-fixture') {
       await runProcess(c.referenceCommand, { ...options, logPath: path.join(dir, 'reference.log') });
       await save(path.join(dir, 'reference-execution.json'), { command: c.referenceCommand, revision: c.referenceRevision, outputSha256: await hashFile(contained(dir, c.referenceOutput)) });

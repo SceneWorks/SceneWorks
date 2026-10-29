@@ -9,7 +9,7 @@ in the closeout handoff on the epic in Shortcut.
 
 ```bash
 # Both lanes, paired (each lane waits for the peer's anchor artifact while the peer lane is alive,
-# bounded only by its own 24 h lane budget; it fails at once if the peer ended or was never dispatched).
+# bounded by its work deadline (lane budget and job timeout) less its remaining cases; it fails at once if the peer ended or was never dispatched).
 docs/testing/sc-26691-campaign/dispatch.sh --ack "$(git rev-parse origin/feature/sc-26679-h3-finetune-import)"
 
 # One lane (the peer must be dispatched at the SAME SceneWorks SHA to pair).
