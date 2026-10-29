@@ -55,10 +55,10 @@ jobs:
       cancel-in-progress: false
     env:
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '1' || '' }}
+      CUDA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '0' || '' }}
       # Production registration reads NVIDIA_VISIBLE_DEVICES; keep its physical
       # claim aligned with logical cuda:0, then require the measured UUID match.
-      NVIDIA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '1' || '' }}
+      NVIDIA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '0' || '' }}
       MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
       MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
       MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source
@@ -198,10 +198,10 @@ jobs:
       cancel-in-progress: false
     env:
       CUDA_DEVICE_ORDER: PCI_BUS_ID
-      CUDA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '1' || '' }}
+      CUDA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '0' || '' }}
       # Production registration reads NVIDIA_VISIBLE_DEVICES; keep its physical
       # claim aligned with logical cuda:0, then require the measured UUID match.
-      NVIDIA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '1' || '' }}
+      NVIDIA_VISIBLE_DEVICES: ${{ matrix.backend == 'cuda' && '0' || '' }}
       MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
       MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
       MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source

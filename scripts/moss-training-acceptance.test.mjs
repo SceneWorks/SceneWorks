@@ -228,7 +228,7 @@ test('Windows actual round-trip UTC format is canonical Z in both job starts, ne
   assert.doesNotMatch(section,/UtcNow\.ToString\('o'\)/);
  }
 });
-test('both CUDA phases preserve PCI device 1, their serial group, and explicit Windows preparation workspace',()=>{
+test('both MOSS CUDA phases use authorized PCI device 0 and preserve serial preparation',()=>{
  const workflow=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
  const authoritative=readFileSync(path.join(root,'.github/workflows/windows-candle.yml'),'utf8');
  assert.match(authoritative,/group: windows-candle-gpu-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}-iris-worker-smoke\n      cancel-in-progress: false/);
@@ -237,8 +237,8 @@ test('both CUDA phases preserve PCI device 1, their serial group, and explicit W
   const section=workflow.split(`  ${job}:\n`)[1].split(/^  [a-z][a-z-]+:\n/m)[0];
   assert.match(section,/matrix\.backend == 'cuda' && 'windows-candle-gpu-real-weights' \|\| format\('moss-training-\{0\}-\{1\}-\{2\}-mlx', github\.run_id, github\.run_attempt, github\.job\)/);
   assert.match(section,/cancel-in-progress: false/);assert.match(section,/CUDA_DEVICE_ORDER: PCI_BUS_ID/);
-  assert.match(section,/CUDA_VISIBLE_DEVICES: \$\{\{ matrix\.backend == 'cuda' && '1' \|\| '' \}\}/);
-  assert.match(section,/NVIDIA_VISIBLE_DEVICES: \$\{\{ matrix\.backend == 'cuda' && '1' \|\| '' \}\}/);
+  assert.match(section,/CUDA_VISIBLE_DEVICES: \$\{\{ matrix\.backend == 'cuda' && '0' \|\| '' \}\}/);
+  assert.match(section,/NVIDIA_VISIBLE_DEVICES: \$\{\{ matrix\.backend == 'cuda' && '0' \|\| '' \}\}/);
   assert.match(section,/prepare-rust-runner\n        if: \$\{\{ matrix\.backend == 'cuda' \}\}\n        with:\n          workspace-directory: sceneworks-source/);
  }
 });
