@@ -21,6 +21,26 @@ import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
 export function cargoTarget(c,kind,longPath,platform=process.platform){
   return platform==='win32'?`${privateRunRoot({backend:c.backend,platform,env:process.env,runId:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT})}-${kind}`:longPath;
 }
+// The ONE derivation of where the owned service is built and where its binary lands (sc-26691).
+// On Windows the cargo target is the run root's short `<run>-<attempt>-target` sibling (the task
+// output root is too deep for cargo/nvcc), elsewhere it sits under the output root. The build AND
+// the readback ownership check both use this, so the check confines the binary to the directory it
+// was actually built in rather than to an output root a Windows build never writes into.
+export function serviceBuildLayout(p,c,platform){
+  const pathApi=platform==='win32'?path.win32:path;
+  const buildRoot=pathApi.join(p.output,`service-build-${p.sceneworks}-${p.inference}-${c.backend}`);
+  const target=cargoTarget(c,'target',pathApi.join(buildRoot,'target'),platform);
+  const binary=pathApi.join(target,CAMPAIGN_PROFILE_DIR,`sceneworks-rust-api${platform==='win32'?'.exe':''}`);
+  return {buildRoot,target,binary};
+}
+/** Lexical half of the owned-service-binary check: exactly the derived binary, below its derived target. */
+export function assertOwnedServiceBinary(p,c,binary,platform){
+  const pathApi=platform==='win32'?path.win32:path,layout=serviceBuildLayout(p,c,platform);
+  assert.equal(pathApi.resolve(binary),pathApi.resolve(layout.binary),'service binary is not the owned build binary');
+  const rel=pathApi.relative(layout.target,pathApi.resolve(binary));
+  assert.ok(rel&&!rel.startsWith('..')&&!pathApi.isAbsolute(rel),'path must remain below owned directory');
+  return layout;
+}
 // A unit_fake run never resolves the real Windows private root (E:\huggingface\sc26691-private):
 // unless a test names a platform explicitly, it takes the POSIX layout under its own output root.
 export const UNIT_FAKE_PLATFORM = 'linux';
@@ -179,7 +199,7 @@ export async function executeNativeComparison(p,c,swRoot,inferenceRoot,dir,deps=
   const records=(await readFile(path.join(dir,'native-build.log'),'utf8')).split('\n').flatMap(l=>{try{return [JSON.parse(l)];}catch{return [];}});
   const artifact=records.find(v=>v.reason==='compiler-artifact' && v.target?.name==='integration' && v.profile?.test && v.executable);
   assert.ok(artifact,'actual cargo test executable record required');
-  const binary=await confined(p.output,artifact.executable), binaryHash=await hashFile(binary);
+  const binary=await confined(opts.env.CARGO_TARGET_DIR,artifact.executable), binaryHash=await hashFile(binary); // the target the build used (a short sibling on Windows)
   await runner([binary,'--list'],{...opts,logPath:path.join(dir,'native-inventory.log')});
   const inventory=await readFile(path.join(dir,'native-inventory.log'),'utf8');
   const runs=[],logs=[];
@@ -307,8 +327,8 @@ export class OwnedService {
     const runner=this.deps.runProcess??runProcess;
     const command=['cargo','build','--locked',...campaignProfileArgs(),'--manifest-path',path.join(this.swRoot,'Cargo.toml'),'-p','sceneworks-rust-api','--bin','sceneworks-rust-api'];
     if(this.c.backend==='cuda')command.push('--features','sceneworks-rust-api/backend-candle');
-    const platform=runPlatform(this.deps),buildRoot=path.join(this.p.output,`service-build-${this.p.sceneworks}-${this.p.inference}-${this.c.backend}`),receipt=path.join(buildRoot,'build.json');
-    const target=cargoTarget(this.c,'target',path.join(buildRoot,'target'),platform);
+    const platform=runPlatform(this.deps),layout=serviceBuildLayout(this.p,this.c,platform),buildRoot=layout.buildRoot,receipt=path.join(buildRoot,'build.json');
+    const target=layout.target;
     const configuration={command,flags:Object.fromEntries(['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_TARGET','RUSTUP_TOOLCHAIN'].map(k=>[k,process.env[k]??null])),proof_kind:this.fake?'unit_fake':'campaign_native'};
     let cached;
     try{await mkdir(buildRoot);}catch(error){if(error.code!=='EEXIST')throw error;cached=await json(receipt);assert.deepEqual(cached.configuration,configuration,'source/build configuration drift; preserve prior candidate');assert.equal(await hashFile(cached.binary),cached.sha256);}
@@ -317,7 +337,7 @@ export class OwnedService {
       // A failed build keeps its log in the case directory, which is what the evidence upload carries.
       try{await runner(command,{cwd:this.swRoot,env:{...process.env,...(this.c.backend==='cuda'?{RUSTC_WRAPPER:''}:{}),CARGO_TARGET_DIR:target,CARGO_PROFILE_DEV_DEBUG:'0'},logPath:path.join(buildRoot,'build.log'),timeoutSeconds:this.c.timeoutSeconds});}
       catch(error){await copyFile(path.join(buildRoot,'build.log'),path.join(this.dir,'service-build.log')).catch(()=>{});throw error;}
-      this.binary=path.join(target,CAMPAIGN_PROFILE_DIR,`sceneworks-rust-api${platform==='win32'?'.exe':''}`);
+      this.binary=layout.binary;
       this.binaryHash=await hashFile(this.binary);this.buildIdentity={command,binary:this.binary,sha256:this.binaryHash,sceneworks:this.p.sceneworks,inference:this.p.inference,backend:this.c.backend,configuration};await save(receipt,this.buildIdentity);await copyFile(path.join(buildRoot,'build.log'),path.join(this.dir,'service-build.log'));
     }
     await save(path.join(this.dir,'service-build.json'),this.buildIdentity);
@@ -818,7 +838,7 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
   if(c.kind==='full-av')for(const source of bundle.conditioningBindings??[]){assert.ok(c.inputs.some(i=>i.sha256===source.sha256),'undeclared actual conditioning source');assert.equal(await hashFile(await confined(dir,inside(dir,source.file))),source.sha256,'retained conditioning bytes changed');}
   const scenarioInput=c.inputs.find(i=>i.role==='scenario'&&i.path===c.runtime.scenario);assert.ok(scenarioInput&&typeof bundle.scenarioText==='string');assert.equal(createHash('sha256').update(bundle.scenarioText).digest('hex'),scenarioInput.sha256,'actual scenario bytes differ from bound input');const scenario=JSON.parse(bundle.scenarioText);assert.equal(scenario.caseId,c.id);
   assert.equal(bundle.build.sceneworks,p.sceneworks);assert.equal(bundle.build.inference,p.inference);
-  if(!contentReadback){await confined(p.output,bundle.build.binary);assert.equal(await hashFile(bundle.build.binary),bundle.build.sha256,'owned service binary drift');}
+  if(!contentReadback){const platform=bundle.proof_kind==='unit_fake'?UNIT_FAKE_PLATFORM:process.platform,layout=assertOwnedServiceBinary(p,c,bundle.build.binary,platform);await confined(layout.target,bundle.build.binary);assert.equal(await hashFile(bundle.build.binary),bundle.build.sha256,'owned service binary drift');}
   if(/\.dense-(f16|bf16|f32)$/.test(c.id)){const expected={'dense-f16':'F16','dense-bf16':'BF16','dense-f32':'F32'}[c.id.split('.').at(-1)];assert.equal(bundle.sourceDtypeFacts?.expectedBodyDtype,expected);assert.ok(bundle.sourceDtypeFacts.bodyMatrices>0);for(const file of bundle.sourceDtypeFacts.files)assert.ok(c.inputs.some(input=>input.role==='checkpoint'&&input.path===file.path&&input.sha256===file.sha256));if(!contentReadback)assert.deepEqual(bundle.sourceDtypeFacts,await verifyDenseSourceDtypes(c,p.output));}
   const lifecycle=await json(inside(dir,'service-lifecycle.json'));for(const record of lifecycle.drains)assert.equal(await hashFile(inside(dir,record.path)),record.sha256,'owned cancellation/restart record drift');
   if(c.id.endsWith('.restart-replay'))assert.ok(bundle.epochs.length>=2 && bundle.actions.some(v=>v.kind==='restart'),'restart/replay requires actual owned restart records');

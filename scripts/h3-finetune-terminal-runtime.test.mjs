@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat } from 'node:fs/promises';
-import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS } from './h3-finetune-terminal-runtime.mjs';
+import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS } from './h3-finetune-terminal-runtime.mjs';
 import { assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
@@ -287,6 +287,31 @@ test('contrasts hold complete creative configuration and bind only the adapters 
 test('private environment isolates cache/config/credentials while preserving device restrictions',()=>{
   const env=privateEnvironment('/unit_fake_owned',{port:43210,gpuId:'unit_fake',backend:'mlx'},'task-generated-token');
   assert.equal(env.HF_HOME,path.join('/unit_fake_owned','hf'));assert.equal(env.SCENEWORKS_RUN_UTILITY_INPROCESS,'1','the API utility pool is the only worker that claims imports');assert.equal(env.SCENEWORKS_MLX_REQUIRED,'1');assert.equal(env.SCENEWORKS_CANDLE_REQUIRED,undefined);assert.ok(!Object.hasOwn(env,'HF_TOKEN'));assert.equal(env.HF_HUB_OFFLINE,'1');assert.equal(env.SCENEWORKS_ACCESS_TOKEN,'task-generated-token');
+});
+test('Windows release service binary is owned by the short run target it was built in, not the output root (sc-26691)',()=>{
+  // CUDA run 40855384972: the release build landed in the run root's short `<run>-<attempt>-target`
+  // sibling (cargoTarget), but the readback confined it to the deep output root a Windows build never
+  // writes into, so the first case to reach that check refused its own binary.
+  const previous={run:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT};
+  process.env.GITHUB_RUN_ID='40855384972';process.env.GITHUB_RUN_ATTEMPT='1';
+  try{
+    const w=path.win32,root=w.join('E:\\','huggingface','sc26691-private');
+    const p={output:w.join(root,'40855384972-1-bootstrap-ae69ef7b2928922370528f832c062c628f1a76b4'),sceneworks:sw,inference:inf},c={backend:'cuda'};
+    const layout=serviceBuildLayout(p,c,'win32');
+    assert.equal(layout.target,w.join(root,'40855384972-1-target'));
+    assert.equal(layout.binary,w.join(root,'40855384972-1-target','release','sceneworks-rust-api.exe'));
+    assert.ok(w.relative(p.output,layout.binary).startsWith('..'),'the Windows binary is NOT below the output root, so that root cannot own it');
+    assert.equal(assertOwnedServiceBinary(p,c,layout.binary,'win32').target,layout.target);
+    for(const foreign of [
+      w.join(root,'40855384972-1-target','debug','sceneworks-rust-api.exe'),
+      w.join(root,'1-1-target','release','sceneworks-rust-api.exe'),
+      `${w.join(root,'40855384972-1-target')}\\..\\elsewhere\\sceneworks-rust-api.exe`,
+      w.join(p.output,'sceneworks-rust-api.exe'),
+    ])assert.throws(()=>assertOwnedServiceBinary(p,c,foreign,'win32'),/owned build binary|below owned directory/,foreign);
+    // POSIX (MLX lane / unit_fake): the same derivation keeps the build under the output root.
+    const posix=serviceBuildLayout({...p,output:'/runs/out'},{backend:'mlx'},'darwin');
+    assert.equal(posix.binary,path.join('/runs/out',`service-build-${sw}-${inf}-mlx`,'target','release','sceneworks-rust-api'));
+  }finally{for(const [k,v] of [['GITHUB_RUN_ID',previous.run],['GITHUB_RUN_ATTEMPT',previous.attempt]]){if(v===undefined)delete process.env[k];else process.env[k]=v;}}
 });
 test('the owned-exit bound strictly exceeds the service shutdown grace it hands the service (sc-26691)',()=>{
   // The API may spend its connection drain plus the whole utility-pool grace before exiting, and the
