@@ -944,8 +944,10 @@ pub(crate) fn plan_backed_wan_video_candle_eligible(payload: &Map<String, Value>
 }
 
 /// The exact request shape MiniMax-H3's BASE partition (`transformer/`: t2va + fl2va) serves:
-/// `text_to_video` with no keyframe, `image_to_video` with a first frame, `first_last_frame` with
-/// both, and never a reference, clip, mask or bridge. One predicate for the builtin `minimax_h3`
+/// `text_to_video` with no keyframe, `image_to_video` with exactly ONE keyframe — the first frame
+/// or, last-frame-only, the last (FL2VA conditions on 0, 1 or 2 keyframes; the API admits the
+/// last-only shape through `h3_keyframes`, and the worker's `resolve_minimax_h3_conditioning`
+/// places it) — `first_last_frame` with both, and never a reference, clip, mask or bridge. One predicate for the builtin `minimax_h3`
 /// candle arm and the imported-DiT claim (sc-26680) on both lanes, so the partition an imported
 /// checkpoint is bound to cannot serve a shape the builtin partition refuses.
 pub(crate) fn minimax_h3_base_partition_shape(payload: &Map<String, Value>) -> bool {
@@ -953,7 +955,9 @@ pub(crate) fn minimax_h3_base_partition_shape(payload: &Map<String, Value>) -> b
     let has_last = has_nonempty_string(payload, "lastFrameAssetId");
     let mode_matches = match payload.get("mode").and_then(Value::as_str) {
         Some("text_to_video") => !has_source && !has_last,
-        Some("image_to_video") => has_source && !has_last,
+        // sc-26691: last-only was admitted by the API and served by the worker but claimed by no
+        // lane, so the no-lane gate refused it at submit ("no backend implements it").
+        Some("image_to_video") => has_source != has_last,
         Some("first_last_frame") => has_source && has_last,
         _ => false,
     };

@@ -254,6 +254,10 @@ fn the_imported_h3_claim_is_narrow_on_every_axis() {
         ("reference_to_video", json!({ "referenceAssetIds": ["r1"] })),
         ("text_to_video", json!({ "referenceAudioAssetIds": ["a1"] })),
         ("image_to_video", json!({})),
+        (
+            "image_to_video",
+            json!({ "sourceAssetId": "first", "lastFrameAssetId": "last" }),
+        ),
         ("first_last_frame", json!({ "sourceAssetId": "first" })),
     ] {
         let claim = payload(IMPORTED_ID, mode, extra.clone(), imported_entry());
@@ -359,6 +363,8 @@ fn explicit_ref_and_hybrid_imports_claim_only_their_declared_operations() {
         for (mode, extra) in [
             ("text_to_video", json!({})),
             ("image_to_video", json!({"sourceAssetId":"first"})),
+            // sc-26691: FL2VA's last-frame-only keyframe, which the API admits for fl2va/hybrid.
+            ("image_to_video", json!({"lastFrameAssetId":"last"})),
             (
                 "first_last_frame",
                 json!({"sourceAssetId":"first","lastFrameAssetId":"last"}),
