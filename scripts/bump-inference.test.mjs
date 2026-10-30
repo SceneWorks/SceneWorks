@@ -12,7 +12,7 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { parseCliArgs, withInferenceCheckout } from "./bump-inference.mjs";
+import { directInferenceCrates, parseCliArgs, withInferenceCheckout } from "./bump-inference.mjs";
 
 const SCRIPT = resolve(dirname(fileURLToPath(import.meta.url)), "bump-inference.mjs");
 const SHA = "a".repeat(40);
@@ -200,4 +200,29 @@ test("the flags the bump really takes still parse", () => {
   }
   // A value that looks like a flag is still a value, never an unknown argument.
   assert.deepEqual(parseCliArgs(["--repo", "--dry-run"]), { help: false });
+});
+
+// sc-26691: inference sc-27252 split gen-core into sibling crates the workspace now depends on
+// directly. The bump must refresh every one of them, so the update set is discovered from the
+// manifests rather than read from a list that rots with the next split.
+test("directInferenceCrates discovers every direct inference dependency, not the Candle patch", () => {
+  const git = '{ git = "https://github.com/SceneWorks/inference", rev = "' + SHA + '" }';
+  const worker = [
+    "[dependencies]",
+    "sceneworks-gen-core = " + git,
+    "sceneworks-gen-core-iris = " + git,
+    'serde = { version = "1.0", features = ["derive"] }',
+    'other = { git = "https://github.com/someone/else", rev = "' + SHA + '" }',
+    "",
+    "[target.'cfg(target_os = \"macos\")'.dependencies]",
+    'mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "' + SHA + '", optional = true }',
+  ].join("\n");
+  const root = ['[patch."https://github.com/huggingface/candle"]', "candle-core = " + git].join("\n");
+  const core = ["[dependencies]", "sceneworks-gen-core-checkpoint = " + git, "sceneworks-gen-core-iris = " + git].join("\n");
+  assert.deepEqual(directInferenceCrates([root, worker, core]), [
+    "mlx-gen-ltx",
+    "sceneworks-gen-core",
+    "sceneworks-gen-core-checkpoint",
+    "sceneworks-gen-core-iris",
+  ]);
 });

@@ -650,7 +650,8 @@ export function resolveRevision(repo, revision, { runGit = git } = {}) {
 /**
  * The one other spelling a crate may name its provider by (sc-24217): the backend-neutral
  * `gen_core::<family>::PROVIDER_ID` constant both backends of a family share. `mlx-gen-supra2`
- * registers `supra2_img` only as `mlx_gen::gen_core::supra2::PROVIDER_ID`, never as a literal, so
+ * registers `supra2_img` only as `gen_core_checkpoint::supra2::PROVIDER_ID` (before inference sc-27252
+ * split gen-core, `mlx_gen::gen_core::supra2::PROVIDER_ID`), never as a literal, so
  * the literal check alone would refuse a correct pointer. Still checked, not trusted: the crate's
  * own source must spell `gen_core::<family>::PROVIDER_ID`, and gen-core's `src/<family>.rs` must
  * declare that constant as exactly this provider id at the same revision.
@@ -661,23 +662,40 @@ export function providerNamedThroughGenCore({ repo, revision, provider, crateDir
   let named = "";
   try {
     named = runGit(repo, [
-      "grep", "-h", "-o", "-E", "gen_core::[a-z0-9_]+::PROVIDER_ID", revision, "--", `${crateDir}/src/`,
+      "grep", "-h", "-o", "-E", "gen_core[a-z0-9_]*::[a-z0-9_]+::PROVIDER_ID", revision, "--", `${crateDir}/src/`,
     ]);
   } catch {
     return false;
   }
   const families = new Set(
-    named.split("\n").map((line) => /gen_core::([a-z0-9_]+)::PROVIDER_ID/.exec(line)?.[1]).filter(Boolean),
+    named.split("\n").map((line) => /gen_core[a-z0-9_]*::([a-z0-9_]+)::PROVIDER_ID/.exec(line)?.[1]).filter(Boolean),
   );
   const declaration = `pub const PROVIDER_ID: &str = "${provider}";`;
+  // gen-core's family code was split into sibling neutral crates (inference sc-27316:
+  // `gen-core-checkpoint`, `gen-core-image`, ...), so the constant may live in any
+  // `crates/contracts/gen-core*/src/<family>.rs`, not only in gen-core itself.
+  let sourceDirs = [GEN_CORE_SOURCE_DIR];
+  try {
+    const contracts = runGit(repo, ["ls-tree", "--name-only", revision, "crates/contracts/"]);
+    const siblings = contracts
+      .split("\n")
+      .map((line) => line.trim().replace(/\/$/, ""))
+      .filter((line) => /^crates\/contracts\/gen-core[a-z0-9-]*$/.test(line))
+      .map((line) => `${line}/src`);
+    sourceDirs = [...new Set([GEN_CORE_SOURCE_DIR, ...siblings])];
+  } catch {
+    // Fall back to gen-core alone.
+  }
   for (const family of families) {
-    let body = "";
-    try {
-      body = runGit(repo, ["show", `${revision}:${GEN_CORE_SOURCE_DIR}/${family}.rs`]);
-    } catch {
-      continue;
+    for (const dir of sourceDirs) {
+      let body = "";
+      try {
+        body = runGit(repo, ["show", `${revision}:${dir}/${family}.rs`]);
+      } catch {
+        continue;
+      }
+      if (body.split("\n").some((line) => line.trim() === declaration)) return true;
     }
-    if (body.split("\n").some((line) => line.trim() === declaration)) return true;
   }
   return false;
 }
