@@ -737,3 +737,13 @@ test('bounded loss of the lease cooperatively cancels the authenticated child be
  await assert.rejects(executeSupervised(root,[process.execPath,'-e',code],path.join(dir,'guard-loss.log'),5000,state,{guardAlive:()=>false,onSpawn:value=>{bound=value;}}),/claim helper exited/);
  assert.deepEqual(bound,state.rootProcess);assert.equal(state.cleanup.released,true);assert.equal(state.cleanup.stdioClosed,true);assert.equal(state.unsafe,false);
 });
+
+
+test('bounded readers classify snapshot members while joining extensionless HF blobs',t=>{
+ const directory=fixture(t);
+ const weight={canonicalPath:path.join(directory,'blobs','a'.repeat(64)),relativePath:'transformer/model.safetensors',sha256:'a'.repeat(64),expectedSha256:'a'.repeat(64),trustedHashMatches:true};
+ assert.equal(boundedReaderBindings(readerLine(weight),[weight]).consumedWeights.length,1);
+ assert.throws(()=>boundedReaderBindings('',[weight]),/every selected/);
+ const config={...weight,canonicalPath:path.join(directory,'blobs','b'.repeat(64)),relativePath:'transformer/config.json'};
+ assert.equal(boundedReaderBindings(readerLine(weight),[weight,config]).consumedWeights.length,1);
+});

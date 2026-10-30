@@ -385,7 +385,9 @@ export function boundedReaderBindings(stdout, weights) {
     }
     readers.push(packet);
   }
-  const expected=[...inventory.keys()].filter(value=>value.endsWith('.safetensors'));
+  // HF snapshot symlinks resolve to extensionless blob targets. The selected
+  // source member classifies the file; canonical identity only joins the reader.
+  const expected=[...inventory.entries()].filter(([,weight])=>String(weight.relativePath??weight.path??weight.canonicalPath).toLowerCase().endsWith('.safetensors')).map(([identity])=>identity);
   assert(expected.length>0&&expected.every(value=>bound.has(value)),'not every selected safetensors file has an actual successful MOSS reader receipt');
   return {readers,otherReaders,consumedWeights:[...bound.values()]};
 }
