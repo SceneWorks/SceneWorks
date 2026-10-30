@@ -190,6 +190,19 @@ fn validate_request(request: &gen_core::TrainingRequest, cap: u64) -> gen_core::
     Ok(())
 }
 
+fn validate_library_registration(entry: &Value, submitted: &Value, job_id: &str) -> Result<()> {
+    let expected = &submitted["payload"]["manifestEntry"]["provenance"];
+    require(
+        entry["baseModel"] == "moss_image_base"
+            && entry["networkType"] == "lora"
+            && entry["source"]["provider"] == "training"
+            && expected.is_object()
+            && expected["trainingJobId"] == job_id
+            && entry["provenance"] == *expected,
+        "Library identity or exact submitted provenance/current training job differs",
+    )
+}
+
 fn validate_metrics(v: &Value) -> Result<()> {
     require(
         v["optimizer_updates"] == 4,
@@ -534,14 +547,7 @@ async fn body(
         "Library completion is not native final output",
     )?;
     resolve_training_library_adapter(&entry, &output)?;
-    require(
-        entry["baseModel"] == "moss_image_base"
-            && entry["networkType"] == "lora"
-            && entry["source"]["provider"] == "training"
-            && entry["provenance"]["configSnapshot"]
-                == submitted["payload"]["plan"]["provenance"]["configSnapshot"],
-        "Library identity or full submitted provenance differs",
-    )?;
+    validate_library_registration(&entry, &submitted, &job_id)?;
     let final_bytes = std::fs::read(&output).map_err(|e| e.to_string())?;
     case.record["raw"]["finalAdapter"] = case.retain("adapter/final.safetensors", &final_bytes)?;
     case.record["raw"]["trainingLibraryRegistration"] =
@@ -659,4 +665,54 @@ fn bounded_metric_contract_rejects_partial_or_unobserved_work() {
     let mut cold = valid;
     cold["mechanism_consumption"]["moss:frozen-caption-storage-hit"] = json!(1);
     assert!(validate_metrics(&cold).is_err());
+}
+
+// Pure JSON mutations exercise the same oracle used after actual Library registration.
+#[test]
+fn bounded_library_provenance_rejects_identity_drift() {
+    let provenance = json!({"kind":"training","trainingJobId":"job-current",
+        "targetId":"moss_image_base_lora","datasetId":"dataset-current","datasetVersion":1,
+        "baseModel":"moss_image_base","baseModelRepo":"selected/base","presetId":"preset-current",
+        "presetVersion":2,"presetName":"selected preset","presetConfigSnapshot":{"rank":2},
+        "configSnapshot":{"steps":4},"createdAt":"2026-10-29T00:00:00Z"});
+    let submitted = json!({"payload":{"manifestEntry":{"provenance":provenance}}});
+    let entry = json!({"baseModel":"moss_image_base","networkType":"lora",
+        "source":{"provider":"training"},"provenance":provenance});
+    validate_library_registration(&entry, &submitted, "job-current").unwrap();
+    // Keep configSnapshot unchanged: each other submitted provenance field must survive exactly.
+    for key in [
+        "kind",
+        "trainingJobId",
+        "targetId",
+        "datasetId",
+        "datasetVersion",
+        "baseModel",
+        "baseModelRepo",
+        "presetId",
+        "presetVersion",
+        "presetName",
+        "presetConfigSnapshot",
+        "createdAt",
+    ] {
+        let mut changed = entry.clone();
+        changed["provenance"][key] = match entry["provenance"][key].as_u64() {
+            Some(version) => json!(version + 1),
+            None => json!("different"),
+        };
+        assert!(
+            validate_library_registration(&changed, &submitted, "job-current").is_err(),
+            "changed {key}"
+        );
+        let mut missing = entry.clone();
+        missing["provenance"].as_object_mut().unwrap().remove(key);
+        assert!(
+            validate_library_registration(&missing, &submitted, "job-current").is_err(),
+            "missing {key}"
+        );
+    }
+    assert!(validate_library_registration(&entry, &submitted, "another-job").is_err());
+    let mut extra = entry.clone();
+    extra["provenance"]["unsubmitted"] = json!(true);
+    assert!(validate_library_registration(&extra, &submitted, "job-current").is_err());
+    assert!(validate_library_registration(&entry, &Value::Null, "job-current").is_err());
 }

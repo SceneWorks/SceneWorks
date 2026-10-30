@@ -365,23 +365,28 @@ export function boundedReaderBindings(stdout, weights) {
     assert(typeof weight.canonicalPath==='string' && path.isAbsolute(weight.canonicalPath) && /^[a-f0-9]{64}$/.test(weight.sha256) && weight.expectedSha256===weight.sha256 && weight.trustedHashMatches===true,'native canonical published weight path/hash missing');
     inventory.set(normalize(weight.canonicalPath),weight);
   }
-  const bound=new Map(),readers=[],otherReaders=[];
+  const tokenizerInventory=[...inventory.entries()].filter(([,weight])=>normalize(weight.relativePath)==='tokenizer/tokenizer.json');
+  assert(tokenizerInventory.length===1,'exact selected tokenizer/tokenizer.json inventory entry required');
+  const tokenizerIdentity=tokenizerInventory[0][0];
+  const bound=new Map(),tokenizers=new Map(),readers=[],otherReaders=[];
   for(const line of stdout.split(/\r?\n/)) {
     if(!line.startsWith('MODEL_INFERENCE_INPUT_USED '))continue;
     const match=line.match(/^MODEL_INFERENCE_INPUT_USED (\S+) (.+)$/);
     assert(match&&match[1]===BOUNDED_PRODUCT,'reader belongs to another selector');
     const packet=JSON.parse(match[2]);
-    if(packet.reader!=='candle-gen-moss-image::loader::load_weights_cancellable') {
+    const tokenizer=packet.reader==='candle-gen-moss-image::text_encoder::tokenizer';
+    if(!tokenizer && packet.reader!=='candle-gen-moss-image::loader::load_weights_cancellable') {
       otherReaders.push({scope:match[1],...packet,inventoryJoins:(packet.items??[]).map(item=>{const weight=inventory.get(normalize(item.absolute_lexical_path?.display));return weight?{canonicalPath:weight.canonicalPath,sha256:weight.sha256}:null;})});
       continue;
     }
-    assert(packet.schema_version===1 && packet.role==='model-weights' && packet.complete===true && Array.isArray(packet.items)&&packet.items.length>0,'incomplete source-owned MOSS weight reader');
+    assert(packet.schema_version===1 && packet.role===(tokenizer?'tokenizer':'model-weights') && packet.complete===true && Array.isArray(packet.items)&&packet.items.length>0,'incomplete source-owned MOSS reader');
     for(const item of packet.items) {
       assert(item.provenance?.kind==='successful-reader-binding'&&item.provenance.content_integrity==='not_attested','reader grade changed');
       const actual=item.absolute_lexical_path?.display;
       const weight=inventory.get(normalize(actual));
       assert(weight,`reader path absent from native prehashed inventory: ${actual}`);
-      bound.set(normalize(actual),{canonicalPath:weight.canonicalPath,sha256:weight.sha256,reader:packet.reader,readerIntegrity:'not_attested',hashProvenance:'native pre-load file SHA256, joined to actual successful source reader'});
+      if(tokenizer)assert(normalize(actual)===tokenizerIdentity,'tokenizer reader does not bind selected tokenizer/tokenizer.json');
+      (tokenizer?tokenizers:bound).set(normalize(actual),{canonicalPath:weight.canonicalPath,sha256:weight.sha256,reader:packet.reader,readerIntegrity:'not_attested',hashProvenance:'native pre-load file SHA256, joined to actual successful source reader'});
     }
     readers.push(packet);
   }
@@ -389,7 +394,8 @@ export function boundedReaderBindings(stdout, weights) {
   // source member classifies the file; canonical identity only joins the reader.
   const expected=[...inventory.entries()].filter(([,weight])=>String(weight.relativePath??weight.path??weight.canonicalPath).toLowerCase().endsWith('.safetensors')).map(([identity])=>identity);
   assert(expected.length>0&&expected.every(value=>bound.has(value)),'not every selected safetensors file has an actual successful MOSS reader receipt');
-  return {readers,otherReaders,consumedWeights:[...bound.values()]};
+  assert(tokenizers.has(tokenizerIdentity),'selected tokenizer/tokenizer.json has no actual successful MOSS tokenizer reader receipt');
+  return {readers,otherReaders,consumedWeights:[...bound.values()],consumedTokenizers:[...tokenizers.values()]};
 }
 
 export function validateBoundedSample(sample,caseOutput) {

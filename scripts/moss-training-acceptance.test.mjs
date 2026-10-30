@@ -649,6 +649,14 @@ function mockBoundedClaim() {
 function readerLine(weight, selector=BOUNDED_PRODUCT) {
  return `MODEL_INFERENCE_INPUT_USED ${selector} ${JSON.stringify({schema_version:1,reader:'candle-gen-moss-image::loader::load_weights_cancellable',role:'model-weights',complete:true,items:[{absolute_lexical_path:{display:weight.canonicalPath},provenance:{kind:'successful-reader-binding',content_integrity:'not_attested'}}]})}\n`;
 }
+function tokenizerInventory(directory) {
+ return {canonicalPath:path.join(directory,'blobs','c'.repeat(64)),relativePath:'tokenizer/tokenizer.json',sha256:'c'.repeat(64),expectedSha256:'c'.repeat(64),trustedHashMatches:true};
+}
+function tokenizerLine(tokenizer) {
+ const packet=JSON.parse(readerLine(tokenizer).trim().split(' ').slice(2).join(' '));
+ packet.reader='candle-gen-moss-image::text_encoder::tokenizer';packet.role='tokenizer';
+ return `MODEL_INFERENCE_INPUT_USED ${BOUNDED_PRODUCT} ${JSON.stringify(packet)}\n`;
+}
 function mockBoundedRun(t,{missingReader=false,wrongEvidence=false,releaseFailure=false}={}) {
  const m=mockRun(t,{backend:'cuda'}),previous=m.options.execute;let releases=0;
  m.options.phase='bounded-product';
@@ -663,9 +671,9 @@ function mockBoundedRun(t,{missingReader=false,wrongEvidence=false,releaseFailur
    const weight={canonicalPath:path.join(m.options.output,'SCHEMA_TEST_ONLY.safetensors'),sha256:'d'.repeat(64),expectedSha256:'d'.repeat(64),trustedHashMatches:true};
    const file=path.join(environment.MOSS_ACCEPTANCE_OUTPUT,'evidence.json');const evidence=JSON.parse(readFileSync(file));
    Object.assign(evidence,{recordKind:wrongEvidence?'campaign-acceptance-evidence':'bounded-product-acceptance-evidence',isCampaignEvidence:false,acceptanceDisposition:'accepted',selector:BOUNDED_PRODUCT,phase:'bounded-product',caseId:'cuda/base/lora',source:{...source,runId:'123',runAttempt:'1'}});
-   evidence.raw.rootProcess.resolvedCeilingBytes=BOUNDED_GPU_CAP_BYTES;evidence.raw.weightFiles=[weight];
+   evidence.raw.rootProcess.resolvedCeilingBytes=BOUNDED_GPU_CAP_BYTES;evidence.raw.weightFiles=[weight,tokenizerInventory(m.options.output)];
    const pixels=mockPng();writeFileSync(path.join(environment.MOSS_ACCEPTANCE_OUTPUT,'sample.png'),pixels);evidence.raw.sample={relativePath:'sample.png',sha256:digest(pixels)};
-   writeFileSync(file,JSON.stringify(evidence));if(!missingReader)result.output+=readerLine(weight);
+   writeFileSync(file,JSON.stringify(evidence));if(!missingReader)result.output+=readerLine(weight)+tokenizerLine(tokenizerInventory(m.options.output));
   }
   return result;
  };
@@ -703,13 +711,30 @@ test('bounded run refuses campaign-shaped evidence, missing actual readers and f
 });
 
 test('bounded consumption binds successful source readers to every selected safetensors hash',t=>{
- const weight={canonicalPath:path.join(fixture(t),'SCHEMA_TEST_ONLY.safetensors'),sha256:'a'.repeat(64),expectedSha256:'a'.repeat(64),trustedHashMatches:true};
- assert.equal(boundedReaderBindings(readerLine(weight),[weight]).consumedWeights[0].sha256,weight.sha256);
- assert.throws(()=>boundedReaderBindings(readerLine(weight,'wrong::scope'),[weight]),/another selector/);
- assert.throws(()=>boundedReaderBindings('',[weight]),/every selected/);
- assert.throws(()=>boundedReaderBindings(readerLine(weight),[{...weight,trustedHashMatches:false}]),/published/);
- assert.throws(()=>boundedReaderBindings(readerLine({...weight,canonicalPath:weight.canonicalPath+'.wrong'}),[weight]),/absent/);
- assert.throws(()=>boundedReaderBindings(readerLine(weight),[weight,{...weight,canonicalPath:weight.canonicalPath+'2.safetensors'}]),/every selected/);
+ const directory=fixture(t),tokenizer=tokenizerInventory(directory),receipt=tokenizerLine(tokenizer);
+ const weight={canonicalPath:path.join(directory,'SCHEMA_TEST_ONLY.safetensors'),sha256:'a'.repeat(64),expectedSha256:'a'.repeat(64),trustedHashMatches:true};
+ const bind=(stdout,weights)=>boundedReaderBindings(stdout+receipt,[...weights,tokenizer]);
+ assert.equal(bind(readerLine(weight),[weight]).consumedWeights[0].sha256,weight.sha256);
+ assert.throws(()=>bind(readerLine(weight,'wrong::scope'),[weight]),/another selector/);
+ assert.throws(()=>bind('',[weight]),/every selected/);
+ assert.throws(()=>bind(readerLine(weight),[{...weight,trustedHashMatches:false}]),/published/);
+ assert.throws(()=>bind(readerLine({...weight,canonicalPath:weight.canonicalPath+'.wrong'}),[weight]),/absent/);
+ assert.throws(()=>bind(readerLine(weight),[weight,{...weight,canonicalPath:weight.canonicalPath+'2.safetensors'}]),/every selected/);
+});
+
+test('bounded consumption requires the selected tokenizer successful reader and trusted hash',t=>{
+ const directory=fixture(t),tokenizer=tokenizerInventory(directory);
+ const weight={...tokenizer,canonicalPath:path.join(directory,'blobs','a'.repeat(64)),relativePath:'transformer/model.safetensors'};
+ const weights=[weight,tokenizer],stdout=readerLine(weight),receipt=tokenizerLine(tokenizer);
+ const consumed=boundedReaderBindings(stdout+receipt,weights).consumedTokenizers;
+ assert.equal(consumed.length,1);assert.equal(consumed[0].canonicalPath,tokenizer.canonicalPath);assert.equal(consumed[0].sha256,tokenizer.sha256);
+ assert.throws(()=>boundedReaderBindings(stdout,weights),/no actual successful MOSS tokenizer/);
+ assert.throws(()=>boundedReaderBindings(stdout+receipt,[weight]),/selected tokenizer/);
+ for(const change of [p=>p.role='model-weights',p=>p.complete=false,p=>p.schema_version=2,p=>p.items=[],p=>p.items[0].provenance.kind='planned',p=>p.items[0].provenance.content_integrity='attested',p=>p.items[0].absolute_lexical_path.display=weight.canonicalPath,p=>p.items[0].absolute_lexical_path.display+='wrong']) {
+  const packet=JSON.parse(receipt.trim().split(' ').slice(2).join(' '));change(packet);
+  assert.throws(()=>boundedReaderBindings(stdout+`MODEL_INFERENCE_INPUT_USED ${BOUNDED_PRODUCT} ${JSON.stringify(packet)}\n`,weights));
+ }
+ for(const patch of [{sha256:'f'.repeat(64)},{expectedSha256:'f'.repeat(64)},{trustedHashMatches:false}])assert.throws(()=>boundedReaderBindings(stdout+receipt,[weight,{...tokenizer,...patch}]),/published/);
 });
 
 test('bounded manual workflow uses GPU1 and isolated phase, preserving the existing GPU0 campaign',()=>{
@@ -740,10 +765,10 @@ test('bounded loss of the lease cooperatively cancels the authenticated child be
 
 
 test('bounded readers classify snapshot members while joining extensionless HF blobs',t=>{
- const directory=fixture(t);
+ const directory=fixture(t),tokenizer=tokenizerInventory(directory),receipt=tokenizerLine(tokenizer);
  const weight={canonicalPath:path.join(directory,'blobs','a'.repeat(64)),relativePath:'transformer/model.safetensors',sha256:'a'.repeat(64),expectedSha256:'a'.repeat(64),trustedHashMatches:true};
- assert.equal(boundedReaderBindings(readerLine(weight),[weight]).consumedWeights.length,1);
- assert.throws(()=>boundedReaderBindings('',[weight]),/every selected/);
+ assert.equal(boundedReaderBindings(readerLine(weight)+receipt,[weight,tokenizer]).consumedWeights.length,1);
+ assert.throws(()=>boundedReaderBindings(receipt,[weight,tokenizer]),/every selected/);
  const config={...weight,canonicalPath:path.join(directory,'blobs','b'.repeat(64)),relativePath:'transformer/config.json'};
- assert.equal(boundedReaderBindings(readerLine(weight),[weight,config]).consumedWeights.length,1);
+ assert.equal(boundedReaderBindings(readerLine(weight)+receipt,[weight,config,tokenizer]).consumedWeights.length,1);
 });
