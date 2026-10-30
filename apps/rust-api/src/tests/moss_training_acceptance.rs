@@ -27,35 +27,35 @@ const SEAL: &str = "c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82
 const PROMPT: &str = "sksmoss red circle centered on a pale background";
 const WALL: u64 = 3600;
 
-fn require(condition: bool, message: impl Into<String>) -> Result<()> {
+pub(super) fn require(condition: bool, message: impl Into<String>) -> Result<()> {
     if condition {
         Ok(())
     } else {
         Err(message.into())
     }
 }
-fn text<'a>(v: &'a Value, field: &str) -> Result<&'a str> {
+pub(super) fn text<'a>(v: &'a Value, field: &str) -> Result<&'a str> {
     v.get(field)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("missing nonempty {field}: {v}"))
 }
-fn positive(v: &Value, field: &str) -> Result<u64> {
+pub(super) fn positive(v: &Value, field: &str) -> Result<u64> {
     v.get(field)
         .and_then(Value::as_u64)
         .filter(|n| *n > 0)
         .ok_or_else(|| format!("missing positive native {field}: {v}"))
 }
-fn env(key: &str) -> Result<String> {
+pub(super) fn env(key: &str) -> Result<String> {
     std::env::var(key)
         .ok()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| format!("manual admission requires {key}"))
 }
-fn sha(bytes: &[u8]) -> String {
+pub(super) fn sha(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
-fn file_sha(path: &Path) -> Result<String> {
+pub(super) fn file_sha(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut hash = Sha256::new();
     let mut chunk = [0u8; 65536];
@@ -110,11 +110,11 @@ pub(super) fn pin_preflight_weight(
         observe,
     )
 }
-fn json_file(path: &Path) -> Result<Value> {
+pub(super) fn json_file(path: &Path) -> Result<Value> {
     serde_json::from_slice(&std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?)
         .map_err(|e| format!("{}: {e}", path.display()))
 }
-fn owned_relative(path: &str) -> Result<&Path> {
+pub(super) fn owned_relative(path: &str) -> Result<&Path> {
     let path = Path::new(path);
     require(
         !path.as_os_str().is_empty()
@@ -123,7 +123,7 @@ fn owned_relative(path: &str) -> Result<&Path> {
     )?;
     Ok(path)
 }
-fn unix_ms() -> Result<u64> {
+pub(super) fn unix_ms() -> Result<u64> {
     u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -142,7 +142,7 @@ fn observed_iso_time() -> Result<String> {
         millis % 1000
     ))
 }
-fn source_pin() -> Result<String> {
+pub(super) fn source_pin() -> Result<String> {
     let source: Value = serde_json::from_str(include_str!(
         "../../../../config/inference-third-party-source.json"
     ))
@@ -199,10 +199,7 @@ impl RootProcessResources {
             return self.result();
         }
         self.last_sample = Some(Instant::now());
-        self.observe(
-            gen_core::h3_terminal_telemetry::host_process_rss_bytes(),
-            observed_iso_time()?,
-        )
+        self.observe(native::host_process_rss_bytes(), observed_iso_time()?)
     }
     fn receipt(&self) -> Value {
         json!({"scope":"native-api-worker-root", "pid":std::process::id(),
@@ -213,21 +210,21 @@ impl RootProcessResources {
     }
 }
 
-struct Case {
-    source_backend: String,
-    backend: &'static str,
-    parent: String,
-    method: String,
-    id: String,
-    root: PathBuf,
-    dataset: PathBuf,
-    manifest: Value,
-    deadline: Instant,
-    started_at: String,
-    preflight_only: bool,
-    cross: bool,
-    record: Value,
-    resources: Arc<Mutex<RootProcessResources>>,
+pub(super) struct Case {
+    pub(super) source_backend: String,
+    pub(super) backend: &'static str,
+    pub(super) parent: String,
+    pub(super) method: String,
+    pub(super) id: String,
+    pub(super) root: PathBuf,
+    pub(super) dataset: PathBuf,
+    pub(super) manifest: Value,
+    pub(super) deadline: Instant,
+    pub(super) started_at: String,
+    pub(super) preflight_only: bool,
+    pub(super) cross: bool,
+    pub(super) record: Value,
+    pub(super) resources: Arc<Mutex<RootProcessResources>>,
 }
 impl Case {
     fn admitted(
@@ -381,7 +378,7 @@ impl Case {
             0.85
         }
     }
-    fn check_resources(&self, force: bool) -> Result<()> {
+    pub(super) fn check_resources(&self, force: bool) -> Result<()> {
         self.resources
             .lock()
             .map_err(|error| error.to_string())?
@@ -398,7 +395,7 @@ impl Case {
             "frozen case deadline exceeded",
         )
     }
-    fn cancel_file(&self) -> Result<Option<PathBuf>> {
+    pub(super) fn cancel_file(&self) -> Result<Option<PathBuf>> {
         let file = std::env::var_os("MOSS_ACCEPTANCE_CANCEL_FILE").map(PathBuf::from);
         if let Some(path) = &file {
             // The supervisor owns either a per-case control file or the EXACT
@@ -430,13 +427,16 @@ impl Case {
                     && !path
                         .components()
                         .any(|part| matches!(part, Component::ParentDir))
-                    && (path.starts_with(&self.root) || driver_owned),
+                    && (path.starts_with(&self.root)
+                        || driver_owned
+                        || (self.record["recordKind"] == "bounded-product-acceptance-evidence"
+                            && path == &backend_root.join("bounded-product.log.cancel"))),
                 "cancellation input is outside this case's owned controller scope",
             )?;
         }
         Ok(file)
     }
-    fn persist(&self) -> Result<()> {
+    pub(super) fn persist(&self) -> Result<()> {
         let mut record = self.record.clone();
         record["raw"]["rootProcess"] = self
             .resources
@@ -457,7 +457,7 @@ impl Case {
         )?;
         std::fs::write(path, bytes).map_err(|e| e.to_string())
     }
-    fn retain(&self, relative: &str, bytes: &[u8]) -> Result<Value> {
+    pub(super) fn retain(&self, relative: &str, bytes: &[u8]) -> Result<Value> {
         let relative = if self.preflight_only {
             format!("preflight/{relative}")
         } else {
@@ -477,7 +477,7 @@ impl Case {
         file.sync_all().map_err(|e| e.to_string())?;
         Ok(json!({"path":relative,"sha256":sha(bytes)}))
     }
-    fn retain_json(&self, relative: &str, value: &Value) -> Result<Value> {
+    pub(super) fn retain_json(&self, relative: &str, value: &Value) -> Result<Value> {
         self.retain(
             relative,
             &serde_json::to_vec_pretty(value).map_err(|e| e.to_string())?,
@@ -507,7 +507,7 @@ impl Case {
         )?;
         Ok(json!({"path":relative,"sha256":before}))
     }
-    async fn api(
+    pub(super) async fn api(
         &mut self,
         app: &axum::Router,
         method: &str,
@@ -530,7 +530,7 @@ impl Case {
         self.persist()?;
         Ok((status, response))
     }
-    async fn get_job(&mut self, app: &axum::Router, id: &str) -> Result<Value> {
+    pub(super) async fn get_job(&mut self, app: &axum::Router, id: &str) -> Result<Value> {
         let (status, job) = self
             .api(app, "GET", &format!("/api/v1/jobs/{id}"), Value::Null)
             .await?;
@@ -540,7 +540,7 @@ impl Case {
         )?;
         Ok(job)
     }
-    async fn claim(
+    pub(super) async fn claim(
         &mut self,
         app: &axum::Router,
         worker: &sceneworks_worker::Settings,
@@ -593,7 +593,7 @@ pub(super) fn worker_settings(
         gpu_memory_limit_bytes: 0,
     }
 }
-fn set_cap(settings: &sceneworks_worker::Settings, value: Value) -> Result<()> {
+pub(super) fn set_cap(settings: &sceneworks_worker::Settings, value: Value) -> Result<()> {
     std::fs::create_dir_all(&settings.config_dir).map_err(|e| e.to_string())?;
     std::fs::write(
         sceneworks_core::app_paths::gpu_memory_limit_file(&settings.config_dir),
@@ -685,7 +685,7 @@ pub(super) fn selected_weight_files(
 
 /// Authentication uses the linked engine's frozen acquisition manifest, NOT a
 /// directory name, cached ETag alone, fixture namespace or caller-supplied hash.
-fn weight_inventory(settings: &crate::Settings, case: &Case) -> Result<(Value, Value)> {
+pub(super) fn weight_inventory(settings: &crate::Settings, case: &Case) -> Result<(Value, Value)> {
     let mut weights = Vec::new();
     let mut revisions = BTreeMap::new();
     let selected = selected_weight_files(&case.parent, case.cross)?;
@@ -982,7 +982,7 @@ enum Execution {
     LowCap,
 }
 
-async fn cancel_controller(
+pub(super) async fn cancel_controller(
     worker: &sceneworks_worker::Settings,
     job: &str,
     ledger: AcceptanceProgressLedger,
@@ -1700,11 +1700,47 @@ async fn generate(
     adapter: Option<(&Value, f64)>,
     mode: &str,
 ) -> Result<Value> {
+    generate_with_controls(
+        case,
+        app,
+        worker,
+        project,
+        label,
+        adapter,
+        GenerationControls {
+            mode,
+            seed: 1789,
+            advanced: generation_advanced(mode)?,
+        },
+    )
+    .await
+}
+
+pub(super) struct GenerationControls<'a> {
+    pub(super) mode: &'a str,
+    pub(super) seed: u64,
+    pub(super) advanced: Value,
+}
+
+pub(super) async fn generate_with_controls(
+    case: &mut Case,
+    app: &axum::Router,
+    worker: &sceneworks_worker::Settings,
+    project: &str,
+    label: &str,
+    adapter: Option<(&Value, f64)>,
+    controls: GenerationControls<'_>,
+) -> Result<Value> {
+    let GenerationControls {
+        mode,
+        seed,
+        advanced,
+    } = controls;
     case.check_clock()?;
     let loras = adapter
         .map(|(entry, weight)| json!([{"id":entry["id"],"weight":weight}]))
         .unwrap_or_else(|| json!([]));
-    let payload = json!({"projectId":project,"model":case.base(),"prompt":PROMPT,"width":256,"height":256,"count":1,"seed":1789,"loras":loras,"advanced":generation_advanced(mode)?});
+    let payload = json!({"projectId":project,"model":case.base(),"prompt":PROMPT,"width":256,"height":256,"count":1,"seed":seed,"loras":loras,"advanced":advanced});
     let (status, job) = case.api(app, "POST", "/api/v1/image/jobs", payload).await?;
     if case.parent == "base" && mode != "off" {
         case.record["raw"]["images"][label] = json!({"httpStatus":status.as_u16(),"refusal":job});
@@ -1777,6 +1813,19 @@ async fn generate(
         serde_json::from_value(report.clone())
             .map_err(|e| format!("actual completed MOSS execution receipt invalid: {e}"))?;
     let data = typed.data();
+    if case.record["recordKind"] == "bounded-product-acceptance-evidence" {
+        require(
+            data.resolved.variant == gen_core::moss_image::MossImageVariant::Base
+                && data.resolved.steps == 2
+                && data.resolved.guidance == 1.0
+                && data.samples.len() == 1
+                && data.samples[0].seed == Some(7)
+                && data.images_per_prompt == 1
+                && data.conditioning.len() == 1
+                && data.conditioning[0].positive.sha256 == sha(PROMPT.as_bytes()),
+            "bounded native sample changed Base, steps, guidance, seed, count or caption",
+        )?;
+    }
     let execution = serde_json::to_value(data.execution_device).map_err(|e| e.to_string())?;
     require(
         execution == case.backend,
@@ -1856,7 +1905,7 @@ async fn generate(
     )?;
     let artifact = case.retain(&format!("images/{label}.png"), &bytes)?;
     let execution_receipt = case.retain_json(&format!("images/{label}-execution.json"), &report)?;
-    let result = json!({"artifact":artifact,"pixelSha256":sha(decoded.to_rgb8().as_raw()),"executionReceipt":execution_receipt,"jobReceipt":receipt,"adapterStrength":adapter.map(|(_,v)|v),"prompt":PROMPT,"seed":1789,"width":256,"height":256});
+    let result = json!({"artifact":artifact,"pixelSha256":sha(decoded.to_rgb8().as_raw()),"executionReceipt":execution_receipt,"jobReceipt":receipt,"adapterStrength":adapter.map(|(_,v)|v),"prompt":PROMPT,"seed":seed,"width":256,"height":256});
     case.record["raw"]["images"][label] = result.clone();
     case.persist()?;
     case.check_clock()?;
@@ -2223,7 +2272,7 @@ pub(super) fn preflight_verdict(
     Ok(demand)
 }
 
-fn claimed_device_identity(worker: &sceneworks_worker::Settings) -> Result<String> {
+pub(super) fn claimed_device_identity(worker: &sceneworks_worker::Settings) -> Result<String> {
     if cfg!(target_os = "macos") {
         require(
             worker.gpu_id == "mlx",
@@ -2666,7 +2715,7 @@ async fn cross_load(
     case.persist()
 }
 
-async fn observe_worker_http(
+pub(super) async fn observe_worker_http(
     directory: Arc<PathBuf>,
     sequence: Arc<AtomicU64>,
     request: axum::extract::Request,

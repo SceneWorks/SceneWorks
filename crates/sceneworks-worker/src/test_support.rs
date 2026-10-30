@@ -17,6 +17,7 @@ pub use acceptance_progress::{
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub use candle_gen_moss_image::test_support::{generation_request, Fixture};
 pub use gen_core;
+pub use gen_core_telemetry::host_process_rss_bytes;
 pub use gen_core_testkit::moss_training_probe::{EvaluationManifest, TrainingProbe};
 #[cfg(target_os = "macos")]
 pub use mlx_gen_moss_image::test_support::{generation_request, Fixture};
@@ -463,3 +464,8 @@ pub fn moss_acceptance_observation_schema() -> serde_json::Value {
         "schemaOnlyNotRunEvidence":true
     })
 }
+
+#[cfg(all(not(target_os = "macos"), feature = "model-inference-proof"))]
+mod moss_bounded;
+#[cfg(all(not(target_os = "macos"), feature = "model-inference-proof"))]
+pub use moss_bounded::*;

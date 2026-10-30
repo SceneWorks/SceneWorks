@@ -49,6 +49,8 @@ sceneworks-core = { path = "../sceneworks-core" }
 sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
 # Default-off native execution receipts for the API's CPU-only integration witness.
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278", optional = true }
+# Native RSS telemetry moved out of gen-core; acceptance keeps the same implementation.
+sceneworks-gen-core-telemetry = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278", optional = true }
 candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -77,7 +79,8 @@ sceneworks-image-quality = { path = "../sceneworks-image-quality" }
 [features]
 # Opt-in integration-test access to the existing trainer-loader seam. No runtime
 # bundle or ordinary worker build enables this feature.
-test-support = ["dep:mlx-gen-moss-image", "dep:candle-gen-moss-image", "dep:sceneworks-gen-core-testkit"]
+model-inference-proof = ["backend-candle", "test-support", "candle-gen/model-inference-proof", "candle-gen/testkit", "candle-gen-moss-image/model-inference-proof"]
+test-support = ["dep:sceneworks-gen-core-telemetry", "dep:mlx-gen-moss-image", "dep:candle-gen-moss-image", "dep:sceneworks-gen-core-testkit"]
 # Native Candle inference stays opt-in because CUDA toolchain/runtime requirements do not belong in
 # the ordinary desktop build. The bundle owns the complete provider and LLM composition.
 backend-candle = ["dep:runtime-cuda", "dep:candle-gen", "dep:candle-gen-ltx", "dep:ort"]
