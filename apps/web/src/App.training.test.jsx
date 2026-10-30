@@ -830,6 +830,63 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it.each([false, true])("renders dataset-owned similar images and persists manual deletion with the latest caption edits (retry: %s)", async (failSecondSave) => {
+    let dataset = {
+      id: "dataset-a", name: "Portrait Set", version: 3,
+      items: [
+        { id: "keep", path: "images/keep.png", displayName: "keep.png", caption: { text: "keep", source: "manual" } },
+        { id: "delete", path: "images/delete.png", displayName: "delete.png", caption: { text: "delete", source: "manual" } },
+      ],
+    };
+    const updateDataset = vi.fn(async (id, payload) => {
+      if (failSecondSave && updateDataset.mock.calls.length === 2) throw new Error("Dataset save failed");
+      dataset = {
+        ...dataset, ...payload, version: dataset.version + 1,
+        items: payload.items.map((item) => ({ ...item, path: `images/${item.id}.png` })),
+      };
+      return dataset;
+    });
+    const loadReadiness = vi.fn(async () => ({
+      gate: "needs_attention", counts: { warn: dataset.items.length, fatal: 0 }, itemCount: dataset.items.length,
+      items: dataset.items.map((item) => ({
+        itemId: item.id,
+        flags: dataset.items.length > 1
+          ? [{ check: "near_duplicate_embedding", severity: "warn", value: 0.98, peers: dataset.items.filter((peer) => peer.id !== item.id).map((peer) => peer.id) }]
+          : [],
+      })),
+    }));
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" },
+      assets: [],
+      datasets: [{ id: dataset.id, name: dataset.name, modality: "image", itemCount: 2 }],
+      loadDataset: vi.fn(async () => dataset), updateDataset, loadReadiness,
+    })));
+    await openPortraitSet();
+    const row = container.querySelector(".dataset-doctor-nearup");
+    expect(row.querySelectorAll("img")).toHaveLength(2);
+    expect([...row.querySelectorAll("img")].every((img) => img.src.includes("/training/datasets/dataset-a/images/"))).toBe(true);
+    await changeField(container.querySelector(".training-caption-card-text"), "updated caption");
+    await act(async () => row.querySelector('input[aria-label="Select delete.png"]').click());
+    await act(async () => row.querySelector("button").click());
+    await settle();
+    if (failSecondSave) {
+      expect(container.textContent).toContain("Dataset save failed");
+      expect(container.querySelectorAll(".training-caption-card-text")).toHaveLength(2);
+      expect(row.querySelector('input[aria-label="Select delete.png"]').checked).toBe(true);
+      expect(row.querySelector("button").disabled).toBe(false);
+      await act(async () => row.querySelector("button").click());
+      await settle();
+    }
+    expect(updateDataset).toHaveBeenLastCalledWith("dataset-a", expect.objectContaining({
+      items: [expect.objectContaining({ id: "keep", caption: expect.objectContaining({ text: "updated caption" }) })],
+    }));
+    expect(container.textContent).toContain("Deleted 1 image from the dataset");
+    expect(container.textContent).not.toContain("keeping the sharpest");
+    expect(container.querySelector(".dataset-doctor-nearup")).toBeNull();
+    expect(container.querySelectorAll(".training-caption-card-text")).toHaveLength(1);
+  });
+
   it("preserves ordered references when dedupe rekeys a newly uploaded target between its two saves (sc-24163)", async () => {
     const initialDataset = {
       id: "dataset-a",
