@@ -194,7 +194,7 @@
       ]
     },
     {
-      "id": "SW-import-same-parent",
+      "id": "SW-import-base-regate",
       "tests": [
         "library"
       ],
@@ -202,14 +202,13 @@
         {
           "file": "crates/sceneworks-core/src/lora_family.rs",
           "op": "replace",
-          "old": "    if base == model_id {",
-          "new": "    if model_id.starts_with(\"moss_image_\") { return false; }\n    if base == model_id {",
-          "anchor": "pub fn base_model_satisfies_gate("
+          "old": "    matches!(family, \"wan-video\" | \"ltx-video\")",
+          "new": "    matches!(family, \"wan-video\" | \"ltx-video\" | \"moss-image\")"
         }
       ]
     },
     {
-      "id": "SW-import-cross-parent",
+      "id": "SW-import-external-parent",
       "tests": [
         "library"
       ],
@@ -217,13 +216,13 @@
         {
           "file": "crates/sceneworks-core/src/lora_family.rs",
           "op": "replace",
-          "old": "if let Some(base) = base {\n                    // `base_model_satisfies_gate`",
-          "new": "if let Some(base) = base.filter(|_| !families.iter().any(|family| family == \"moss-image\")) {\n                    // `base_model_satisfies_gate`"
+          "old": "        stamp(\"ss_base_model_version\")\n            .filter(|base| matches!(base.as_str(), \"moss_image_base\" | \"moss_image_sft\"))",
+          "new": "        stamp(\"ss_base_model_version\")\n            .filter(|base| matches!(base.as_str(), \"moss_image_base_disabled\"))"
         }
       ]
     },
     {
-      "id": "SW-import-missing-parent",
+      "id": "SW-import-family-only-accept",
       "tests": [
         "library"
       ],
@@ -231,8 +230,8 @@
         {
           "file": "crates/sceneworks-core/src/lora_family.rs",
           "op": "replace",
-          "old": "family == \"moss-image\") && base.is_none()",
-          "new": "family == \"moss-image-disabled\") && base.is_none()"
+          "old": "        if !families.iter().any(|family| accepted.contains(family)) {",
+          "new": "        if families.iter().any(|family| family == \"moss-image\")\n            || !families.iter().any(|family| accepted.contains(family))\n        {"
         }
       ]
     },

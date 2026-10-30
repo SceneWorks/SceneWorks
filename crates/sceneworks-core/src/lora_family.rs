@@ -7940,5 +7940,19 @@ mod moss_training_adapter_tests {
             apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
             assert_eq!(entry["baseModel"], json!("moss_image_sft"));
         }
+        // The external (maltrainer) convention records its parent too. Asserted here as well as
+        // in the dedicated external test above because this test is the consumer-assertion
+        // harness's one exact `library` killer (scripts/moss-consumer-assertions.cases.json):
+        // every lora_family mutation in that registry must turn THIS test red.
+        let external = json!({"__metadata__":{
+            "ss_base_model_version":"moss_image_base",
+            "ss_network_module":"maltrainer.models.moss_image.lora"}});
+        assert_eq!(detect_lora_family(&external).as_deref(), Some("moss-image"));
+        let metadata = read_adapter_metadata(&external);
+        assert_eq!(metadata.moss_base_model.as_deref(), Some("moss_image_base"));
+        let mut entry = serde_json::Map::new();
+        entry.insert("family".into(), json!("moss-image"));
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
+        assert_eq!(entry["baseModel"], json!("moss_image_base"));
     }
 }
