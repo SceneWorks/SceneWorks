@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { inflateSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { createInterface } from 'node:readline';
 import { digest, parseTestResult } from './moss-consumer-assertions.mjs';
 import { defaultInspect, parseTestList, selectLibTestExecutable, executePreparation, isPreparationCommand, PRE_MODEL_CPU_TEST } from './moss-native-api-validation.mjs';
 import { stageLatestMossArtifacts } from './moss-training-artifacts.mjs';
@@ -14,6 +15,10 @@ import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs'
 import { lockedInferenceRevision } from './select-windows-cargo-cache.mjs';
 
 export const MANIFEST_SHA256 = 'c02b05e3c40e6c9666554580ff0636d5853691ffe5f5db5d586d12468c82a0fd';
+export const BOUNDED_PRODUCT = 'tests::moss_training_acceleration::moss_bounded_product_acceptance';
+export const BOUNDED_GPU_UUID = 'GPU-e4b79931-7be6-f216-460a-f5405cfafffe';
+export const BOUNDED_GPU_CAP_BYTES = 80 * 1024 ** 3;
+export const BOUNDED_GPU_RESERVE_BYTES = 2 * 1024 ** 3;
 export const PREFIX = 'tests::moss_training_acceptance::';
 export const CELLS = ['base/lora', 'base/lokr', 'sft/lora', 'sft/lokr'];
 export const testsFor = (phase, executionBackend='mlx') => {
@@ -40,12 +45,13 @@ export function parseArgs(argv) {
     o[key] = argv[i + 1];
   }
   for (const key of ['phase','root','output','backend','manifest']) assert(o[key], `--${key} is required`);
-  assert(['capture','cross-load','finalize'].includes(o.phase), 'invalid phase');
+  assert(['capture','cross-load','finalize','bounded-product'].includes(o.phase), 'invalid phase');
   assert(['mlx','cuda'].includes(o.backend), 'backend must be mlx or cuda');
   for (const key of ['root','output','manifest','peer-artifacts']) if (o[key]) o[key] = path.resolve(o[key]);
   assert(!inside(o.root, o.output), 'output must be outside source checkout');
-  if (o.phase !== 'capture') assert(o['peer-artifacts'], '--peer-artifacts required for cross-load/finalize');
+  if (['cross-load','finalize'].includes(o.phase)) assert(o['peer-artifacts'], '--peer-artifacts required for cross-load/finalize');
   if (o['capture-cell']) assert(o.phase === 'capture' && CELLS.includes(o['capture-cell']), 'capture-cell must select an exact capture cell');
+  if (o.phase === 'bounded-product') assert(o.backend === 'cuda' && !o['peer-artifacts'] && !o['capture-cell'], 'bounded product requires CUDA and no campaign selectors');
   return o;
 }
 function inside(root, file) { const r = path.relative(root, file); return r === '' || (!r.startsWith(`..${path.sep}`) && r !== '..' && !path.isAbsolute(r)); }
@@ -105,7 +111,8 @@ export function sourceFacts(root, manifest, env, inspect = defaultInspect) {
   assert(/^[a-f0-9]{40}$/.test(pin) && (!env.MOSS_INFERENCE_PIN || pin === env.MOSS_INFERENCE_PIN), 'permanent Cargo.lock inference pin must equal explicit input when supplied');
   // Terminal execution may precede feature -> main, but the selected source
   // must already be merged into the owning epic integration branch or main.
-  const mergedRefs=['refs/remotes/origin/feature/sc-26584-moss-image-training','refs/remotes/origin/main'];
+  const bounded = env.MOSS_ACCEPTANCE_PHASE === 'bounded-product';
+  const mergedRefs=[bounded ? 'refs/remotes/origin/feature/sc-26850-cuda-training-acceleration' : 'refs/remotes/origin/feature/sc-26584-moss-image-training','refs/remotes/origin/main'];
   const merged=mergedRefs.some(ref=>spawnSync('git',['merge-base','--is-ancestor',snapshot.head,ref],{cwd:root}).status===0);
   assert(merged, 'workflowSource is not proven merged into the owning epic integration branch or main');
   const inferenceRoot=env.MOSS_INFERENCE_SOURCE_ROOT;
@@ -119,7 +126,7 @@ export function sourceFacts(root, manifest, env, inspect = defaultInspect) {
     assert(!/\[patch\.[^\]]*inference[^\]]*\]/i.test(text), 'inference dependency overrides forbidden');
   }
   for (const key of Object.keys(env)) assert(!/^CARGO_(?:PATCH|SOURCE)_/.test(key), 'Cargo source/patch overrides forbidden');
-  return { workflowSource: snapshot.head, inferencePin: pin, manifestSha256: MANIFEST_SHA256, finalMergedSource:true, clean:snapshot.clean, dependencyOverridesUsed:false, cargoLockSha256: digest(lock), driverSha256: digest(readFileSync(path.join(root,'scripts/moss-training-acceptance.mjs'))), workflowSha256: digest(readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'))) };
+  return { ...(bounded ? {boundedRustSha256:fileDigest(path.join(root,'apps/rust-api/src/tests/moss_training_acceleration.rs')),deviceGuardSha256:fileDigest(path.join(root,'scripts/ci/moss-training-acceptance/bounded_product_claim.py'))} : {}), workflowSource: snapshot.head, inferencePin: pin, manifestSha256: MANIFEST_SHA256, finalMergedSource:true, clean:snapshot.clean, dependencyOverridesUsed:false, cargoLockSha256: digest(lock), driverSha256: digest(readFileSync(path.join(root,'scripts/moss-training-acceptance.mjs'))), workflowSha256: digest(readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'))) };
 }
 
 export function checkDiscovery(all, ignored, backend='mlx') {
@@ -188,7 +195,7 @@ export function validateNativeRoot(record, state, capBytes) {
   return measured;
 }
 
-export async function executeSupervised(root, command, log, limitMs, state, {env=process.env,capBytes=null,cancelFile=`${log}.cancel`,releaseMs=BOUNDS.release,spawnChild=spawn,executableDigest=fileDigest}={}) {
+export async function executeSupervised(root, command, log, limitMs, state, {env=process.env,capBytes=null,cancelFile=`${log}.cancel`,releaseMs=BOUNDS.release,spawnChild=spawn,executableDigest=fileDigest,guardAlive=()=>true,onSpawn=()=>{}}={}) {
   const binarySha256=executableDigest(command[0]);
   assert(/^[a-f0-9]{64}$/.test(binarySha256),'exact native executable SHA required');
   const fd=openSync(log,'w');let child,closed=false,code=null,error=null,logOpen=true;
@@ -201,13 +208,14 @@ export async function executeSupervised(root, command, log, limitMs, state, {env
     });
     assert(Number.isSafeInteger(child.pid)&&child.pid>0,'owned native root PID unavailable');
     state.rootProcess={scope:'native-api-worker-root',pid:child.pid,executable:command[0],binarySha256};
+    onSpawn(state.rootProcess);
     for(const stream of [child.stdout,child.stderr]){
       stream.on('data',bytes=>{if(logOpen)try{writeSync(fd,bytes);}catch(e){error??=e;}});
       stream.on('error',e=>{error??=e;});
     }
     while(!closed){
-      if(state.cancelled||error||Date.now()>=deadline){
-        if(cancelAt===null){cancelAt=Date.now();reason??=error?.message??'owned cancellation/deadline';writeFileSync(cancelFile,JSON.stringify({cancel:true,reason}));}
+      if(state.cancelled||error||!guardAlive()||Date.now()>=deadline){
+        if(cancelAt===null){cancelAt=Date.now();reason??=error?.message??(!guardAlive()?'physical-device claim helper exited':'owned cancellation/deadline');writeFileSync(cancelFile,JSON.stringify({cancel:true,reason}));}
         if(Date.now()>=cancelAt+releaseMs)fail('native root did not cooperatively close; refusing next case or forced GPU kill');
       }
       await Promise.race([completed,pause(25)]);
@@ -301,6 +309,136 @@ const commandComplete=(root,args,state)=>state && !state.unsafe&&!state.cancelle
   ? state.completion?.scope==='root-and-stdio' && state.completion.completed===true
   : state.cleanup?.scope==='native-api-worker-root' && state.cleanup.released===true && state.cleanup.stdioClosed===true);
 
+export function checkBoundedDiscovery(all, ignored) {
+  for (const [label, entries] of [['unfiltered',all],['ignored',ignored]]) {
+    const names=entries.filter(e=>e.kind==='test' && (label==='ignored'?e.name.startsWith('tests::moss_training_acceleration::'):e.name===BOUNDED_PRODUCT)).map(e=>e.name);
+    assert(JSON.stringify(names)===JSON.stringify([BOUNDED_PRODUCT]),`${label} bounded product discovery must contain exactly its ignored FQN`);
+  }
+  return [BOUNDED_PRODUCT];
+}
+
+// The helper owns only a host-global UUID lease and context-free admission. The
+// existing Node supervisor continues to own/authenticate the native child PID.
+export async function claimBoundedDevice({root,output,env,source,deadline}) {
+  mkdirSync(output,{recursive:true});
+  const claimFile=path.join(output,'physical-claim.json');
+  const helper=path.join(root,'scripts/ci/moss-training-acceptance/bounded_product_claim.py');
+  const child=spawn('python',['-I',helper,'--inference-root',env.MOSS_INFERENCE_SOURCE_ROOT,'--output',output,'--selector',BOUNDED_PRODUCT,'--deadline',deadline],{cwd:root,env,stdio:['pipe','pipe','pipe'],windowsHide:true});
+  const fd=openSync(path.join(output,'device-claim.log'),'w');
+  let closed=false,exit=null,problem=null,readyResolve,readyReject;
+  const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});
+  const complete=new Promise(resolve=>child.on('close',code=>{closed=true;exit=code;readyReject(new Error(`device claim helper exited ${code}`));closeSync(fd);resolve();}));
+  child.on('error',error=>{problem=error;readyReject(error);});
+  child.stdin.on('error',error=>{problem=error;readyReject(error);});
+  child.stderr.on('data',bytes=>writeSync(fd,bytes));
+  const lines=createInterface({input:child.stdout});
+  lines.on('line',line=>{writeSync(fd,line+'\n');try {const value=JSON.parse(line);if(value.state==='admitted')readyResolve(value);} catch(error){problem=error;readyReject(error);}});
+  let timer;
+  try {
+    const admission=await Promise.race([ready,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('device admission exceeded case deadline')),Math.max(1,Date.parse(deadline)-Date.now()));})]);
+    validateBoundedClaim(admission,source);
+    return {admission,claimFile,closed:()=>closed,alive:()=>!closed&&!problem,bindRoot(root){child.stdin.write(JSON.stringify({root})+'\n');},async release() {
+      if(!closed)child.stdin.end(JSON.stringify({release:true})+'\n');
+      await Promise.race([complete,new Promise((_,reject)=>{const timeout=setTimeout(()=>reject(new Error('device claim helper did not close')),BOUNDS.release);complete.finally(()=>clearTimeout(timeout));})]);
+      assert(exit===0&&!problem,'device claim helper release failed');
+      const final=json(claimFile);validateBoundedClaim(final,source);
+      assert(final.state==='released'&&final.postExecutionVerified===true&&final.leaseReleased===true,'physical UUID release not verified');
+      return final;
+    }};
+  } catch(error) {child.stdin.end();await Promise.race([complete,pause(BOUNDS.release)]);error.deviceClaimUnsafe=!closed;throw error;}
+  finally {clearTimeout(timer);}
+}
+
+export function validateBoundedClaim(value,source) {
+  assert(value.selector===BOUNDED_PRODUCT && value.deviceUuid===BOUNDED_GPU_UUID && value.physicalIndex===1,'bounded source selector/physical GPU claim mismatch');
+  assert(value.activityProfile==='non-isolated-correctness-headroom' && value.childGpuCapBytes===BOUNDED_GPU_CAP_BYTES && value.gpuFreeReserveBytes===BOUNDED_GPU_RESERVE_BYTES,'bounded source cap/reserve/activity policy mismatch');
+  assert(value.workflowSource===source.workflowSource && value.inferencePin===source.inferencePin,'device claim source mismatch');
+  assert(value.visibility?.CUDA_DEVICE_ORDER==='PCI_BUS_ID'&&value.visibility?.CUDA_VISIBLE_DEVICES==='1'&&value.visibility?.NVIDIA_VISIBLE_DEVICES==='1','exact child visibility required');
+  assert(value.ordinalBinding?.mapping?.length===1 && value.ordinalBinding.mapping[0].cuda_ordinal===0 && value.ordinalBinding.mapping[0].nvml_index===1 && value.ordinalBinding.mapping[0].uuid===BOUNDED_GPU_UUID,'actual CUDA ordinal-to-UUID binding mismatch');
+}
+
+export function boundedReaderBindings(stdout, weights) {
+  assert(Array.isArray(weights)&&weights.length>0,'bounded actual weight inventory missing');
+  const normalize=value=>{const normal=String(value).replaceAll(String.fromCharCode(92),'/').toLowerCase();return normal.startsWith('//?/')?normal.slice(4):normal;};
+  const inventory=new Map();
+  for(const weight of weights) {
+    assert(typeof weight.canonicalPath==='string' && path.isAbsolute(weight.canonicalPath) && /^[a-f0-9]{64}$/.test(weight.sha256) && weight.expectedSha256===weight.sha256 && weight.trustedHashMatches===true,'native canonical published weight path/hash missing');
+    inventory.set(normalize(weight.canonicalPath),weight);
+  }
+  const bound=new Map(),readers=[],otherReaders=[];
+  for(const line of stdout.split(/\r?\n/)) {
+    if(!line.startsWith('MODEL_INFERENCE_INPUT_USED '))continue;
+    const match=line.match(/^MODEL_INFERENCE_INPUT_USED (\S+) (.+)$/);
+    assert(match&&match[1]===BOUNDED_PRODUCT,'reader belongs to another selector');
+    const packet=JSON.parse(match[2]);
+    if(packet.reader!=='candle-gen-moss-image::loader::load_weights_cancellable') {
+      otherReaders.push({scope:match[1],...packet,inventoryJoins:(packet.items??[]).map(item=>{const weight=inventory.get(normalize(item.absolute_lexical_path?.display));return weight?{canonicalPath:weight.canonicalPath,sha256:weight.sha256}:null;})});
+      continue;
+    }
+    assert(packet.schema_version===1 && packet.role==='model-weights' && packet.complete===true && Array.isArray(packet.items)&&packet.items.length>0,'incomplete source-owned MOSS weight reader');
+    for(const item of packet.items) {
+      assert(item.provenance?.kind==='successful-reader-binding'&&item.provenance.content_integrity==='not_attested','reader grade changed');
+      const actual=item.absolute_lexical_path?.display;
+      const weight=inventory.get(normalize(actual));
+      assert(weight,`reader path absent from native prehashed inventory: ${actual}`);
+      bound.set(normalize(actual),{canonicalPath:weight.canonicalPath,sha256:weight.sha256,reader:packet.reader,readerIntegrity:'not_attested',hashProvenance:'native pre-load file SHA256, joined to actual successful source reader'});
+    }
+    readers.push(packet);
+  }
+  const expected=[...inventory.keys()].filter(value=>value.endsWith('.safetensors'));
+  assert(expected.length>0&&expected.every(value=>bound.has(value)),'not every selected safetensors file has an actual successful MOSS reader receipt');
+  return {readers,otherReaders,consumedWeights:[...bound.values()]};
+}
+
+export function validateBoundedSample(sample,caseOutput) {
+  assert(typeof sample?.relativePath==='string'&&!path.isAbsolute(sample.relativePath),'sole sample must name its relative native artifact');
+  const file=path.resolve(caseOutput,sample.relativePath);
+  assert(inside(caseOutput,file)&&/^[a-f0-9]{64}$/.test(sample.sha256),'sample path/hash invalid');
+  const bytes=readFileSync(file);assert(digest(bytes)===sample.sha256,'served sample bytes changed');
+  return {...sample,decoded:decodePreviewPng(bytes)};
+}
+
+async function runBoundedProduct({root,output,env,source,receipt,executable,baseEnv,command,deviceClaim=claimBoundedDevice}) {
+  assert(receipt.backend==='cuda','bounded product is CUDA only');
+  const caseStartedAt=new Date().toISOString(),caseDeadlineAt=new Date(Date.now()+BOUNDS.case).toISOString();
+  const caseOutput=path.join(output,'base','lora');mkdirSync(caseOutput,{recursive:true});
+  const entry={caseId:'cuda/base/lora',executionBackend:'cuda',test:BOUNDED_PRODUCT,caseStartedAt,caseDeadlineAt,rawEvidence:'base/lora/evidence.json'};
+  receipt.cases.push(entry);receipt.recordKind='bounded-product-execution';receipt.isCampaignEvidence=false;
+  const cellEnv={...env,...baseEnv,CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:'1',NVIDIA_VISIBLE_DEVICES:'1',MODEL_INFERENCE_CASE_FQN:BOUNDED_PRODUCT,MOSS_ACCEPTANCE_PHASE:'bounded-product',MOSS_ACCEPTANCE_CASE_ID:entry.caseId,MOSS_ACCEPTANCE_SOURCE_CASE_ID:entry.caseId,MOSS_ACCEPTANCE_EXECUTION_BACKEND:'cuda',MOSS_ACCEPTANCE_OUTPUT:caseOutput,MOSS_ACCEPTANCE_CASE_STARTED_AT:caseStartedAt,MOSS_ACCEPTANCE_CASE_DEADLINE_AT:caseDeadlineAt,MOSS_ACCEPTANCE_RESOLVED_CAP_BYTES:String(BOUNDED_GPU_CAP_BYTES),MOSS_ACCEPTANCE_CUDA_UUID:BOUNDED_GPU_UUID};
+  const lease=await deviceClaim({root,output:path.join(output,'device-claim'),env:cellEnv,source,deadline:caseDeadlineAt});
+  let nativeState;
+  try {
+    receipt.deviceClaim=lease.admission;
+    const {result,state}=await command([executable,BOUNDED_PRODUCT,'--ignored','--exact','--nocapture','--test-threads=1'],'bounded-product',remainingCaseMs(caseStartedAt),{capBytes:BOUNDED_GPU_CAP_BYTES,guardAlive:lease.alive,onSpawn:lease.bindRoot,env:{...cellEnv,MOSS_ACCEPTANCE_DEVICE_CLAIM:lease.claimFile}});
+    nativeState=state;
+    entry.counts=parseTestResult(result.output,result.exit,BOUNDED_PRODUCT,'green');
+    const evidence=json(path.join(caseOutput,'evidence.json'));
+    assert(evidence.recordKind==='bounded-product-acceptance-evidence' && evidence.isCampaignEvidence===false && evidence.acceptanceDisposition==='accepted','bounded native product evidence missing; campaign or counts cannot replace it');
+    assert(evidence.selector===BOUNDED_PRODUCT && evidence.phase==='bounded-product' && evidence.caseId===entry.caseId && evidence.source?.workflowSource===source.workflowSource && evidence.source?.inferencePin===source.inferencePin && evidence.source?.runId===receipt.workflow.runId && String(evidence.source?.runAttempt)===String(receipt.workflow.attempt),'bounded native source/run/selector mismatch');
+    assert(state.rootProcess?.binarySha256===receipt.executable.sha256,'launched bounded binary SHA mismatch');
+    validateNativeRoot(evidence,state,BOUNDED_GPU_CAP_BYTES);
+    receipt.inputConsumption=boundedReaderBindings(result.output,evidence.raw?.weightFiles);
+    store(path.join(output,'input-consumption.json'),receipt.inputConsumption);
+    receipt.sample=validateBoundedSample(evidence.raw?.sample,caseOutput);
+    remainingCaseMs(caseStartedAt);entry.executionPassed=true;
+  } finally {
+    // The command wrapper retains state even when native execution throws.
+    nativeState??=receipt.commands.at(-1)?.supervision;
+    if(nativeState?.unsafe) {
+      receipt.failures.push('native child unclosed; physical claim must not be certified released');
+      // Do not send a release command while the native writer may remain alive.
+      receipt.deviceClaimUnsafe=true;
+    } else {
+      try {
+        receipt.deviceClaim=await lease.release();
+        if(nativeState?.rootProcess) assert(receipt.deviceClaim.nativeProcessExited===true&&receipt.deviceClaim.nativeRoot?.pid===nativeState.rootProcess.pid&&receipt.deviceClaim.nativeRoot?.binarySha256===receipt.executable.sha256,'UUID release did not authenticate the owned native PID/binary');
+      } catch(error) {receipt.deviceClaimUnsafe=lease.closed?!lease.closed():false;throw error;}
+    }
+  }
+  remainingCaseMs(caseStartedAt);
+  receipt.cellComplete=true;receipt.ok=true;
+}
+
 export async function run(options) {
   const { root,output,backend,phase,manifest,env=process.env,execute=executeCommand,inspect=defaultInspect,preflightValidator=validatePreflightChecked,sourceProvider=sourceFacts,cacheInventory=inventoryMossTrainingCache }=options;
   const cellIndex=options['capture-cell'] === undefined ? null : CELLS.indexOf(options['capture-cell']);
@@ -327,20 +465,20 @@ export async function run(options) {
     assert(!interrupted,'interrupted; refusing next command');
     const state={cancelled:false}; active=state;
     const entry={command:args,log:`${name}.log`,startedAt:new Date().toISOString(),boundMs:limitMs};receipt.commands.push(entry);
-    try { const r=await execute(root,args,path.join(output,entry.log),limitMs,state,{env:{...env,...extra.env},capBytes:extra.capBytes??null});entry.exitCode=r.exit;assert(r.exit===0,`${name} exited ${r.exit}`);assert(commandComplete(root,args,state),`${name} completion/cleanup not proven`);return {result:r,state}; }
+    try { const r=await execute(root,args,path.join(output,entry.log),limitMs,state,{env:{...env,...extra.env},capBytes:extra.capBytes??null,guardAlive:extra.guardAlive,onSpawn:extra.onSpawn});entry.exitCode=r.exit;assert(r.exit===0,`${name} exited ${r.exit}`);assert(commandComplete(root,args,state),`${name} completion/cleanup not proven`);return {result:r,state}; }
     finally {entry.finishedAt=new Date().toISOString();entry.supervision=state;active=null;}
   };
   try {
-    const currentSource=sourceProvider(root,manifest,env,inspect);
+    const currentSource=sourceProvider(root,manifest,{...env,MOSS_ACCEPTANCE_PHASE:phase},inspect);
     if(continuing) assert(JSON.stringify(receipt.source)===JSON.stringify(currentSource), 'continuation source proof changed');
     receipt.source=currentSource;
     if(phase!=='finalize') {
-      receipt.cacheInventory=cacheInventory({root,phase,env});
+      receipt.cacheInventory=cacheInventory({root,phase:phase==='bounded-product'?'bounded-product':phase,env});
       assert(receipt.cacheInventory.ready,'required cached MOSS snapshots/files missing before compilation: '+receipt.cacheInventory.missing.map(x=>x.path).join(', '));
     }
     const source=receipt.source;
     let peers=options['peer-artifacts'];
-    if(phase!=='capture') {
+    if(['cross-load','finalize'].includes(phase)) {
       const selectedRoot=`${output}-selected-artifacts`;
       receipt.artifactSelection=stageLatestMossArtifacts(peers,selectedRoot,{phases:phase==='cross-load'?['capture']:['capture','cross-load'],source,runId:phase==='cross-load'?env.GITHUB_RUN_ID:env.MOSS_CAPTURE_RUN_ID});
       store(path.join(output,'selected-artifacts.json'),receipt.artifactSelection);
@@ -412,23 +550,28 @@ export async function run(options) {
       const host=rustc.result.output.match(/^host: (\S+)$/m)?.[1];
       assert(host && /^rustc \S+/m.test(rustc.result.output) && /^cargo \S+/m.test(cargo.result.output),'actual Rust/Cargo toolchain observations missing');
       receipt.toolchain={rustc:rustc.result.output.trim(),cargo:cargo.result.output.trim(),target:env.CARGO_BUILD_TARGET||host,nativeRuntime:`inference-source/${source.inferencePin}`,libtestStackBytes:NATIVE_TEST_STACK_BYTES};
-      const compile=await command(['cargo','test','--locked','-p','sceneworks-rust-api','--lib',...(backend==='cuda'?['--features','backend-candle']:[]),'--no-run','--message-format=json'],'compile',preparationRemaining());
+      const compile=await command(['cargo','test','--locked','-p','sceneworks-rust-api','--lib',...(backend==='cuda'?['--features',phase==='bounded-product'?'backend-candle,model-inference-proof':'backend-candle']:[]),'--no-run','--message-format=json'],'compile',preparationRemaining());
       executable=selectLibTestExecutable(compile.result.output,options.statExecutable);
       receipt.executable={path:executable,sha256:options.executableDigest?options.executableDigest(executable):fileDigest(executable)};
       receipt.toolchain.binarySha256=receipt.executable.sha256;
       const all=await command([executable,'--list'],'list',Math.min(BOUNDS.list,preparationRemaining()));
       const ignored=await command([executable,'--ignored','--list'],'ignored-list',Math.min(BOUNDS.list,preparationRemaining()));
       const allTests=parseTestList(all.result.output), ignoredTests=parseTestList(ignored.result.output);
-      receipt.discovery=checkDiscovery(allTests,ignoredTests,backend);
+      receipt.discovery=phase==='bounded-product'?checkBoundedDiscovery(allTests,ignoredTests):checkDiscovery(allTests,ignoredTests,backend);
+      if(phase!=='bounded-product') {
       assert(allTests.filter(e=>e.kind==='test'&&e.name===PRE_MODEL_CPU_TEST).length===1
         && !ignoredTests.some(e=>e.name===PRE_MODEL_CPU_TEST), 'required unignored CPU preparation test missing or ignored');
       // CI_IMPACT: one CPU-only library/dispatch/future-layout entry in the already-built
       // API binary, once per preparation. This is not native learning/case acceptance evidence.
       const cpu=await command([executable,PRE_MODEL_CPU_TEST,'--exact','--nocapture','--test-threads=1'],'pre-model-cpu',Math.min(BOUNDS.list,preparationRemaining()));
       receipt.preModelCpu={test:PRE_MODEL_CPU_TEST,log:'pre-model-cpu.log',counts:parseTestResult(cpu.result.output,cpu.result.exit,PRE_MODEL_CPU_TEST,'green')};
+      }
       assert(Date.now()-buildStart<=BOUNDS.build,'build preparation deadline exceeded');
       receipt.preparationFinishedAt=new Date().toISOString();
       }
+      if(phase==='bounded-product') {
+        await runBoundedProduct({root,output,env,source,receipt,executable,baseEnv,command,deviceClaim:options.deviceClaim});
+      } else {
       for(let i=cellIndex??0;i<(cellIndex===null?CELLS.length:cellIndex+1);i++) {
         const cell=CELLS[i], test=testsFor(phase,backend)[i];
         const caseStartedAt=new Date().toISOString();
@@ -449,14 +592,15 @@ export async function run(options) {
       }
       receipt.cellComplete=true;
       receipt.ok=receipt.cases.length===CELLS.length; // Capture/cross-load execution only; NEVER an acceptance attestation.
+      }
     }
-  } catch(e) {receipt.failures.push(e.message);}
+  } catch(e) {receipt.failures.push(e.message);if(e.deviceClaimUnsafe)receipt.deviceClaimUnsafe=true;}
   finally {
     process.off('SIGINT',cancel);process.off('SIGTERM',cancel);
     if(interrupted){receipt.ok=false;receipt.failures.push('signal interruption');}
     // An unclosed native writer can still mutate evidence after this function returns.
     // Retain raw diagnostics, but do not claim an immutable member seal in that state.
-    const released=receipt.commands.every(c=>isPreparationCommand(root,c.command)
+    const released=!receipt.deviceClaimUnsafe && receipt.commands.every(c=>isPreparationCommand(root,c.command)
       ? c.supervision?.completion?.scope==='root-and-stdio' && c.supervision?.completion?.completed===true && c.supervision?.completion?.stdioClosed!==false && c.supervision?.unsafe!==true
       : c.supervision?.cleanup?.released===true && c.supervision?.unsafe!==true);
     if(!released) {

@@ -12,7 +12,7 @@ import { deflateSync } from 'node:zlib';
 import { recordInspection, parseInspectionArgs } from './moss-preview-inspection.mjs';
 import { digest } from './moss-consumer-assertions.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
-import { MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, validateNativeRoot, executeSupervised, remainingCaseMs, fileDigestChecked, validatePreflightChecked, decodePreviewPng, run } from './moss-training-acceptance.mjs';
+import { BOUNDED_PRODUCT, BOUNDED_GPU_UUID, BOUNDED_GPU_CAP_BYTES, BOUNDED_GPU_RESERVE_BYTES, checkBoundedDiscovery, validateBoundedClaim, validateBoundedSample, boundedReaderBindings, MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, validateNativeRoot, executeSupervised, remainingCaseMs, fileDigestChecked, validatePreflightChecked, decodePreviewPng, run } from './moss-training-acceptance.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const fixture=t=>{const dir=mkdtempSync(path.join(os.tmpdir(),'moss-harness-unit-'));t.after(()=>{rmSync(dir,{recursive:true,force:true});rmSync(`${dir}-selected-artifacts`,{recursive:true,force:true});});return dir;};
 const source={workflowSource:'a'.repeat(40),inferencePin:'b'.repeat(40),manifestSha256:MANIFEST_SHA256,cargoLockSha256:'c'.repeat(64),driverSha256:'d'.repeat(64),workflowSha256:'e'.repeat(64)};
@@ -525,6 +525,9 @@ test('current dispatcher fits 25 inputs and derives exact source and finalize ru
  for(const options of [null,[],true,'text',{enabled:'true'},{enabled:false,runner_label:'real-weights'},{...base,unknown:true},{...base,runner_label:'unspecified'},{...base,inspection:[]},{...base,inspection:null}])assert.equal(invoke(options).status,1);
  assert.deepEqual(invoke().output,{enabled:'true',runner_label:'real-weights',phase:'capture',inspection_json:'',capture_run_id:''});
  assert.equal(invoke({...base,inspection:{}}).status,0);
+ assert.equal(invoke({...base,phase:'bounded-product'}).output.phase,'bounded-product');
+ assert.equal(invoke({...base,phase:'bounded-product',runner_label:'rw-mage'}).status,1);
+ assert.equal(invoke({...base,phase:'bounded-product',inspection:{captureRunId:'123'}}).status,1);
  const inspection={captureRunId:'123',manifestSha256:source.manifestSha256,cases:[]};
  const finalized=invoke({...base,phase:'finalize',inspection});
  assert.equal(finalized.output.capture_run_id,'123');assert.deepEqual(JSON.parse(finalized.output.inspection_json),inspection);
@@ -636,4 +639,101 @@ test('native root parent records actual child closure and exact executable SHA w
   assert.ok(state.rootProcess.pid>0);assert.equal(state.rootProcess.binarySha256,digest(readFileSync(process.execPath)));
   assert.equal(state.cleanup.released,true);assert.equal(state.cleanup.stdioClosed,true);assert.equal(state.unsafe,false);
  }
+});
+
+
+const boundedEntry={name:BOUNDED_PRODUCT,kind:'test'};
+function mockBoundedClaim() {
+ return {...source,selector:BOUNDED_PRODUCT,deviceUuid:BOUNDED_GPU_UUID,physicalIndex:1,activityProfile:'non-isolated-correctness-headroom',childGpuCapBytes:BOUNDED_GPU_CAP_BYTES,gpuFreeReserveBytes:BOUNDED_GPU_RESERVE_BYTES,visibility:{CUDA_DEVICE_ORDER:'PCI_BUS_ID',CUDA_VISIBLE_DEVICES:'1',NVIDIA_VISIBLE_DEVICES:'1'},ordinalBinding:{mapping:[{cuda_ordinal:0,nvml_index:1,uuid:BOUNDED_GPU_UUID}]}};
+}
+function readerLine(weight, selector=BOUNDED_PRODUCT) {
+ return `MODEL_INFERENCE_INPUT_USED ${selector} ${JSON.stringify({schema_version:1,reader:'candle-gen-moss-image::loader::load_weights_cancellable',role:'model-weights',complete:true,items:[{absolute_lexical_path:{display:weight.canonicalPath},provenance:{kind:'successful-reader-binding',content_integrity:'not_attested'}}]})}\n`;
+}
+function mockBoundedRun(t,{missingReader=false,wrongEvidence=false,releaseFailure=false}={}) {
+ const m=mockRun(t,{backend:'cuda'}),previous=m.options.execute;let releases=0;
+ m.options.phase='bounded-product';
+ m.options.deviceClaim=async()=>({admission:mockBoundedClaim(),claimFile:'/SCHEMA_TEST_ONLY/claim.json',alive:()=>true,release:async()=>{releases++;if(releaseFailure)throw new Error('SCHEMA_TEST_ONLY release refused');return {...mockBoundedClaim(),state:'released',postExecutionVerified:true,leaseReleased:true,nativeProcessExited:true,nativeRoot:{pid:4242,binarySha256:'f'.repeat(64)}};}});
+ m.options.execute=async(...args)=>{
+  const command=args[1];const result=await previous(...args);
+  if(command.includes('--list'))result.output=`${BOUNDED_PRODUCT}: test`;
+  if(command[1]===BOUNDED_PRODUCT) {
+   const environment=args[5].env;
+   assert.equal(environment.MODEL_INFERENCE_CASE_FQN,BOUNDED_PRODUCT);assert.equal(environment.CUDA_VISIBLE_DEVICES,'1');assert.equal(environment.NVIDIA_VISIBLE_DEVICES,'1');
+   assert.equal(environment.RUST_MIN_STACK,String(NATIVE_TEST_STACK_BYTES));assert.equal(args[5].capBytes,BOUNDED_GPU_CAP_BYTES);
+   const weight={canonicalPath:path.join(m.options.output,'SCHEMA_TEST_ONLY.safetensors'),sha256:'d'.repeat(64),expectedSha256:'d'.repeat(64),trustedHashMatches:true};
+   const file=path.join(environment.MOSS_ACCEPTANCE_OUTPUT,'evidence.json');const evidence=JSON.parse(readFileSync(file));
+   Object.assign(evidence,{recordKind:wrongEvidence?'campaign-acceptance-evidence':'bounded-product-acceptance-evidence',isCampaignEvidence:false,acceptanceDisposition:'accepted',selector:BOUNDED_PRODUCT,phase:'bounded-product',caseId:'cuda/base/lora',source:{...source,runId:'123',runAttempt:'1'}});
+   evidence.raw.rootProcess.resolvedCeilingBytes=BOUNDED_GPU_CAP_BYTES;evidence.raw.weightFiles=[weight];
+   const pixels=mockPng();writeFileSync(path.join(environment.MOSS_ACCEPTANCE_OUTPUT,'sample.png'),pixels);evidence.raw.sample={relativePath:'sample.png',sha256:digest(pixels)};
+   writeFileSync(file,JSON.stringify(evidence));if(!missingReader)result.output+=readerLine(weight);
+  }
+  return result;
+ };
+ return {...m,releases:()=>releases};
+}
+
+test('bounded product selector is exact, ignored, CUDA-only and independent of the old campaign',()=>{
+ assert.deepEqual(checkBoundedDiscovery([...entries('cuda'),boundedEntry],[...entries('cuda'),boundedEntry]),[BOUNDED_PRODUCT]);
+ for(const broken of [[],[boundedEntry,boundedEntry],[{...boundedEntry,name:BOUNDED_PRODUCT+'_extra'}]])assert.throws(()=>checkBoundedDiscovery(broken,[boundedEntry]),/discovery/);
+ assert.throws(()=>checkBoundedDiscovery([boundedEntry],[]),/ignored/);
+ const args=['--phase','bounded-product','--backend','cuda','--root','/source','--output','/output','--manifest','/manifest'];
+ assert.equal(parseArgs(args).phase,'bounded-product');
+ assert.throws(()=>parseArgs(args.map(value=>value==='cuda'?'mlx':value)),/CUDA/);
+ assert.throws(()=>parseArgs([...args,'--peer-artifacts','/old']),/campaign/);
+});
+
+test('bounded GPU claim rejects wrong physical identity, policy, mapping and source',()=>{
+ const claim=mockBoundedClaim();validateBoundedClaim(claim,source);
+ for(const patch of [{selector:PREFLIGHT},{physicalIndex:0},{deviceUuid:'GPU-other'},{activityProfile:'strict-zero-utilization'},{childGpuCapBytes:BOUNDED_GPU_CAP_BYTES+1},{gpuFreeReserveBytes:0},{workflowSource:'f'.repeat(40)},{ordinalBinding:{mapping:[{cuda_ordinal:1,nvml_index:1,uuid:BOUNDED_GPU_UUID}]}},{visibility:{...claim.visibility,NVIDIA_VISIBLE_DEVICES:'0'}}])assert.throws(()=>validateBoundedClaim({...claim,...patch},source));
+});
+
+test('bounded mock invocation compiles proof feature then runs one body and no learned CPU or campaign test',async t=>{
+ const m=mockBoundedRun(t),receipt=await run(m.options);assert.equal(receipt.ok,true,receipt.failures.join());
+ assert.equal(receipt.cases.length,1);assert.equal(receipt.cases[0].test,BOUNDED_PRODUCT);assert.equal(receipt.isCampaignEvidence,false);assert.equal(m.releases(),1);
+ assert.equal(receipt.commands.length,6);assert.deepEqual(receipt.commands[2].command.slice(0,9),['cargo','test','--locked','-p','sceneworks-rust-api','--lib','--features','backend-candle,model-inference-proof','--no-run']);
+ assert.deepEqual(receipt.commands[5].command,['/mock/api',BOUNDED_PRODUCT,'--ignored','--exact','--nocapture','--test-threads=1']);
+ assert.equal(receipt.commands.some(row=>row.command.includes(PREFLIGHT)||row.command.includes(PRE_MODEL_CPU_TEST)),false);
+ assert.equal(receipt.inputConsumption.consumedWeights.length,1);
+});
+
+test('bounded run refuses campaign-shaped evidence, missing actual readers and failed lease release',async t=>{
+ for(const options of [{wrongEvidence:true},{missingReader:true},{releaseFailure:true}]){
+  const m=mockBoundedRun(t,options),receipt=await run(m.options);assert.equal(receipt.ok,false);assert.equal(m.releases(),1);assert.equal(receipt.cases.length,1);
+ }
+});
+
+test('bounded consumption binds successful source readers to every selected safetensors hash',t=>{
+ const weight={canonicalPath:path.join(fixture(t),'SCHEMA_TEST_ONLY.safetensors'),sha256:'a'.repeat(64),expectedSha256:'a'.repeat(64),trustedHashMatches:true};
+ assert.equal(boundedReaderBindings(readerLine(weight),[weight]).consumedWeights[0].sha256,weight.sha256);
+ assert.throws(()=>boundedReaderBindings(readerLine(weight,'wrong::scope'),[weight]),/another selector/);
+ assert.throws(()=>boundedReaderBindings('',[weight]),/every selected/);
+ assert.throws(()=>boundedReaderBindings(readerLine(weight),[{...weight,trustedHashMatches:false}]),/published/);
+ assert.throws(()=>boundedReaderBindings(readerLine({...weight,canonicalPath:weight.canonicalPath+'.wrong'}),[weight]),/absent/);
+ assert.throws(()=>boundedReaderBindings(readerLine(weight),[weight,{...weight,canonicalPath:weight.canonicalPath+'2.safetensors'}]),/every selected/);
+});
+
+test('bounded manual workflow uses GPU1 and isolated phase, preserving the existing GPU0 campaign',()=>{
+ const workflow=readFileSync(path.join(root,'.github/workflows/moss-training-acceptance.yml'),'utf8');
+ const bounded=workflow.split('  bounded-product:\n')[1].split('  capture:\n')[0];
+ assert.match(bounded,/inputs\.moss_phase == 'bounded-product'/);assert.match(bounded,/CUDA_VISIBLE_DEVICES: "1"/);assert.match(bounded,/NVIDIA_VISIBLE_DEVICES: "1"/);assert.match(bounded,/--phase bounded-product/);
+ assert.doesNotMatch(bounded,/moss-capture-cell|--phase capture|--phase cross-load|--phase finalize/);
+ const guard=readFileSync(path.join(root,'scripts/ci/moss-training-acceptance/bounded_product_claim.py'),'utf8');
+ assert.match(guard,/require_stable_contexts=False/);assert.match(guard,/resources\.proof_cuda_idle/);assert.match(guard,/source_modules/);assert.doesNotMatch(guard,/bound_cuda_activity_profile|load_registry|configured_case/);
+});
+
+
+test('bounded sole served PNG must be present, authenticated, decoded and inside its output',t=>{
+ const output=fixture(t),bytes=mockPng();writeFileSync(path.join(output,'sample.png'),bytes);
+ const sample={relativePath:'sample.png',sha256:digest(bytes)};assert.equal(validateBoundedSample(sample,output).decoded.width,256);
+ assert.throws(()=>validateBoundedSample({...sample,sha256:'f'.repeat(64)},output),/changed/);
+ assert.throws(()=>validateBoundedSample({...sample,relativePath:'../sample.png'},output),/invalid/);
+ writeFileSync(path.join(output,'sample.png'),'not an image');assert.throws(()=>validateBoundedSample({...sample,sha256:digest(Buffer.from('not an image'))},output),/not PNG/);
+});
+
+
+test('bounded loss of the lease cooperatively cancels the authenticated child before accepting closure',async t=>{
+ const dir=fixture(t),state={};let bound;
+ const code="const fs=require('fs');const timer=setInterval(()=>{if(fs.existsSync(process.env.MOSS_ACCEPTANCE_CANCEL_FILE)){clearInterval(timer);process.exit(0);}},5);";
+ await assert.rejects(executeSupervised(root,[process.execPath,'-e',code],path.join(dir,'guard-loss.log'),5000,state,{guardAlive:()=>false,onSpawn:value=>{bound=value;}}),/claim helper exited/);
+ assert.deepEqual(bound,state.rootProcess);assert.equal(state.cleanup.released,true);assert.equal(state.cleanup.stdioClosed,true);assert.equal(state.unsafe,false);
 });

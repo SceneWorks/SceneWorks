@@ -36,6 +36,78 @@ defaults:
   run:
     working-directory: sceneworks-source
 jobs:
+  bounded-product:
+    name: MOSS bounded product acceptance (four updates, one image)
+    if: ${{ inputs.moss_phase == 'bounded-product' }}
+    runs-on: [self-hosted, Windows, X64, cuda, real-weights]
+    timeout-minutes: 190
+    # The host-global UUID lease is the physical exclusion. Never drop a queued run.
+    concurrency:
+      group: moss-bounded-product-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    env:
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      NVIDIA_VISIBLE_DEVICES: "1"
+      MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
+      MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
+      MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source
+      MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+      HF_HUB_CACHE: E:/huggingface/hub
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      HF_DATASETS_OFFLINE: "1"
+      RUSTC_WRAPPER: ""
+      CARGO_BUILD_JOBS: "4"
+      CARGO_INCREMENTAL: "0"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../moss-bounded-target-${{ inputs.workflowSource }}
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: none
+      CARGO_PROFILE_TEST_STRIP: none
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: none
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.workflowSource }}
+          path: sceneworks-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read-only permanent inference main ancestry and device protocol
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: SceneWorks/inference
+          ref: main
+          path: inference-source
+          fetch-depth: 0
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: ./sceneworks-source/.github/actions/prepare-rust-runner
+        with:
+          workspace-directory: sceneworks-source
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: moss-dataset
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
+      - name: Compile, discover and supervise exactly one bounded product invocation
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node scripts/moss-training-acceptance.mjs --phase bounded-product --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/bounded-product" --backend cuda --manifest scripts/ci/moss-training-acceptance/campaign.json
+      - name: Retain bounded raw product, source, device, process and sample evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: moss-bounded-product-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/bounded-product/
+          if-no-files-found: error
+          retention-days: 30
   capture:
     name: MOSS capture ${{ matrix.backend }}
     if: ${{ inputs.moss_phase == 'capture' }}
