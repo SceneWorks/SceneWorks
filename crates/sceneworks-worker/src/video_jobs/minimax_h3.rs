@@ -1698,6 +1698,7 @@ pub(super) async fn generate_candle_minimax_h3(
             prompt: &request.prompt,
             conditioning: &conditioning,
             reference_image_short_edge,
+            reference_image_resize_mode: None, // Matches the current GenerationRequest default.
         },
         gen_core::veda::workspace::Backend::Cuda,
     )

@@ -2935,6 +2935,7 @@ pub(super) async fn generate_video_using(
                         prompt: &input.prompt,
                         conditioning: &input.conditioning,
                         reference_image_short_edge: input.reference_image_short_edge,
+                        reference_image_resize_mode: None, // Matches the current GenerationRequest default.
                     })
                     .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
