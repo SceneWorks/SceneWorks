@@ -23,7 +23,7 @@
 //! `runtime_complete` — the shape every identity-carrying arm emits.
 
 use super::*;
-use mlx_gen::gen_core::supra2::{TEXT_ENCODER_COMPONENT, VAE_COMPONENT};
+use gen_core_checkpoint::supra2::{TEXT_ENCODER_COMPONENT, VAE_COMPONENT};
 use std::time::Instant;
 
 const LANE: &str = "mlx";
@@ -49,7 +49,7 @@ pub(super) fn load_spec(bundle: PathBuf, text_encoder: PathBuf, vae: PathBuf) ->
 
 /// The published request at `count` images (guidance left to the engine's default CFG 3.0).
 pub(super) fn capture_request(count: u32) -> GenerationRequest {
-    let size = mlx_gen::gen_core::supra2::IMAGE_SIZE;
+    let size = gen_core_checkpoint::supra2::IMAGE_SIZE;
     GenerationRequest {
         prompt: protocol::SUPRA2_IMG_PROMPT.to_owned(),
         width: size,
@@ -72,7 +72,7 @@ fn context(
     total_bytes: u64,
     predicted_peak_bytes: u64,
 ) -> MemoryRunContext {
-    let size = mlx_gen::gen_core::supra2::IMAGE_SIZE;
+    let size = gen_core_checkpoint::supra2::IMAGE_SIZE;
     MemoryRunContext {
         selection: *selection,
         optimization_authority: if calibration.is_some() {
@@ -503,7 +503,7 @@ mod tests {
     /// boundary, at count 1 and at the product maximum.
     #[test]
     fn the_capture_requests_resolve_through_the_engines_own_boundary() {
-        use mlx_gen::gen_core::supra2::{Supra2Resolved, DEFAULT_GUIDANCE};
+        use gen_core_checkpoint::supra2::{Supra2Resolved, DEFAULT_GUIDANCE};
         for count in [1, protocol::SUPRA2_IMG_PRODUCT_MAX_COUNT] {
             let resolved = Supra2Resolved::resolve(&capture_request(count))
                 .unwrap_or_else(|error| panic!("count {count}: {error}"));

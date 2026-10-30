@@ -26,8 +26,8 @@
 //! the one verified); the cheap check reports that recorded reason from then on, so the catalog
 //! flips the model to `needs_conversion` and the Model Manager offers "Convert again". A re-convert replaces the whole directory, which clears the marker.
 //!
-//! - `supra2_img` → [`gen_core::supra2::read_pinned_bundle`] for the bundle, and the pinned
-//!   [`gen_core::supra2::FLAN_T5_BASE`] / [`gen_core::supra2::SD_VAE`] snapshots (exact files,
+//! - `supra2_img` → [`gen_core_checkpoint::supra2::read_pinned_bundle`] for the bundle, and the pinned
+//!   [`gen_core_checkpoint::supra2::FLAN_T5_BASE`] / [`gen_core_checkpoint::supra2::SD_VAE`] snapshots (exact files,
 //!   sizes, SHA-256, and their `config.json` geometry) for the co-requisites.
 
 use std::path::{Path, PathBuf};
@@ -69,10 +69,10 @@ pub fn converted_artifact_problem(
     match converter {
         "supra2_img" => {
             let check = match check {
-                ArtifactCheck::Sizes => gen_core::supra2::BundleCheck::SizesOnly,
-                ArtifactCheck::Digests => gen_core::supra2::BundleCheck::Digests,
+                ArtifactCheck::Sizes => gen_core_checkpoint::supra2::BundleCheck::SizesOnly,
+                ArtifactCheck::Digests => gen_core_checkpoint::supra2::BundleCheck::Digests,
             };
-            gen_core::supra2::read_pinned_bundle(dir, check)
+            gen_core_checkpoint::supra2::read_pinned_bundle(dir, check)
                 .err()
                 .map(|error| error.to_string())
         }
@@ -192,15 +192,15 @@ pub fn diagnose_install(
 ) -> Option<InstallFault> {
     match converter {
         "supra2_img" => {
-            use gen_core::supra2::{FLAN_T5_BASE, SD_VAE};
+            use gen_core_checkpoint::supra2::{FLAN_T5_BASE, SD_VAE};
             let components = [
                 (
-                    gen_core::supra2::TEXT_ENCODER_COMPONENT,
+                    gen_core_checkpoint::supra2::TEXT_ENCODER_COMPONENT,
                     "Flan-T5-Base text encoder",
                     FLAN_T5_BASE,
                 ),
                 (
-                    gen_core::supra2::VAE_COMPONENT,
+                    gen_core_checkpoint::supra2::VAE_COMPONENT,
                     "SD VAE ft-MSE decoder",
                     SD_VAE,
                 ),
@@ -218,12 +218,12 @@ pub fn diagnose_install(
                     return Some(fault(None, "not installed".to_owned()));
                 };
                 let checked = pin.verify(&snapshot_dir).and_then(|()| {
-                    if component == gen_core::supra2::VAE_COMPONENT {
-                        gen_core::supra2::check_vae_config(&snapshot_dir)
+                    if component == gen_core_checkpoint::supra2::VAE_COMPONENT {
+                        gen_core_checkpoint::supra2::check_vae_config(&snapshot_dir)
                     } else {
-                        gen_core::supra2::check_t5_config(
+                        gen_core_checkpoint::supra2::check_t5_config(
                             &snapshot_dir,
-                            &gen_core::supra2::Supra2Config::published(),
+                            &gen_core_checkpoint::supra2::Supra2Config::published(),
                         )
                     }
                 });
@@ -244,7 +244,7 @@ pub fn diagnose_install(
 /// corruption that only a digest check catches. Also writes the catalog's install marker.
 #[doc(hidden)]
 pub fn write_same_size_corrupt_supra2_bundle(dir: &Path) -> std::io::Result<()> {
-    use gen_core::supra2::*;
+    use gen_core_checkpoint::supra2::*;
     std::fs::create_dir_all(dir)?;
     let file = |pin: PinnedFile| BundleFile {
         file: pin.path.to_owned(),
@@ -335,7 +335,8 @@ mod tests {
     fn a_supra2_bundle_with_a_garbage_manifest_is_refused() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
-            tmp.path().join(gen_core::supra2::BUNDLE_MANIFEST),
+            tmp.path()
+                .join(gen_core_checkpoint::supra2::BUNDLE_MANIFEST),
             b"{\"schema\":\"nope\"}",
         )
         .unwrap();

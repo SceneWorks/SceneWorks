@@ -1100,7 +1100,7 @@ fn convert_anima_prequant(
     )
 }
 
-/// The one upstream file the Supra2-IMG convert reads (`gen_core::supra2::SUPRA2_SOURCE`); the
+/// The one upstream file the Supra2-IMG convert reads (`gen_core_checkpoint::supra2::SUPRA2_SOURCE`); the
 /// manifest's `mlx.convertSourceFile` and its primary `downloads[].files` name exactly this file.
 const SUPRA2_SOURCE_FILE: &str = "model_final_ema.pt";
 
@@ -1111,7 +1111,7 @@ const SUPRA2_SOURCE_FILE: &str = "model_final_ema.pt";
 const SUPRA2_MARKER: &str = "{\n  \"_class_name\": \"Supra2ImgBundle\"\n}\n";
 
 /// Supra2-IMG convert-at-install (sc-24213, epic 24212). Everything substantive is inference-owned
-/// and backend-neutral (`gen_core::supra2`): the two co-requisite snapshots are re-verified against
+/// and backend-neutral (`gen_core_checkpoint::supra2`): the two co-requisite snapshots are re-verified against
 /// their pinned sizes + SHA-256 (`FLAN_T5_BASE` / `SD_VAE`), then `convert_pinned_checkpoint`
 /// verifies the pinned `model_final_ema.pt` SHA-256, validates the exact state dict and writes the
 /// native bundle (`denoiser.safetensors`, optional `conditioning.safetensors`, and
@@ -1126,7 +1126,7 @@ pub(crate) fn convert_supra2_bundle(
     vae_dir: &Path,
     out_dir: &Path,
 ) -> Result<(), String> {
-    use gen_core::supra2::{
+    use gen_core_checkpoint::supra2::{
         convert_pinned_checkpoint, read_pinned_bundle, BundleCheck, FLAN_T5_BASE, SD_VAE,
     };
     FLAN_T5_BASE
@@ -1500,8 +1500,8 @@ async fn resolve_convert_plan(
                     detail: format!("Expected {SUPRA2_SOURCE_FILE} in {source_repo}."),
                 }));
             }
-            let text_encoder = gen_core::supra2::FLAN_T5_BASE;
-            let vae = gen_core::supra2::SD_VAE;
+            let text_encoder = gen_core_checkpoint::supra2::FLAN_T5_BASE;
+            let vae = gen_core_checkpoint::supra2::SD_VAE;
             let text_encoder_dir = match supra2_component_snapshot(
                 settings,
                 model_id,
@@ -4002,7 +4002,7 @@ pub(crate) fn huggingface_receipt_weights_dir_at_revision(
 /// Qwen directory or an extra unreceipted sidecar is not an installation receipt.
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
 pub(crate) fn flux3_prompt_upsampler_snapshot(data_dir: &Path) -> Option<PathBuf> {
-    use gen_core::flux3::pup::{
+    use gen_core_flux3::pup::{
         SYSTEM_PROMPTS_FILE, UPSAMPLER_REPO, UPSAMPLER_REQUIRED_FILES, UPSAMPLER_REVISION,
     };
     let resolved = huggingface_receipt_weights_with_revision(
@@ -7128,7 +7128,7 @@ mod supra2_convert_tests {
         assert_eq!(mlx["requiresConversion"], true);
         assert_eq!(mlx["converter"], "supra2_img");
         assert_eq!(mlx["convertSourceFile"], SUPRA2_SOURCE_FILE);
-        let source = gen_core::supra2::SUPRA2_SOURCE;
+        let source = gen_core_checkpoint::supra2::SUPRA2_SOURCE;
         assert_eq!(mlx["convertSourceRepo"], source.repo);
         let downloads = entry["downloads"].as_array().expect("downloads");
         let primary = downloads
@@ -7145,11 +7145,11 @@ mod supra2_convert_tests {
         assert_eq!(primary["license"], source.license);
         assert_eq!(
             entry["image"]["maxPromptTokens"],
-            gen_core::supra2::MAX_PROMPT_TOKENS
+            gen_core_checkpoint::supra2::MAX_PROMPT_TOKENS
         );
         for (component, pin) in [
-            ("text_encoder", gen_core::supra2::FLAN_T5_BASE),
-            ("vae", gen_core::supra2::SD_VAE),
+            ("text_encoder", gen_core_checkpoint::supra2::FLAN_T5_BASE),
+            ("vae", gen_core_checkpoint::supra2::SD_VAE),
         ] {
             let row = downloads
                 .iter()
@@ -7158,8 +7158,8 @@ mod supra2_convert_tests {
             assert_eq!(row["license"], pin.license, "{component}");
         }
         for (component, pin) in [
-            ("text_encoder", gen_core::supra2::FLAN_T5_BASE),
-            ("vae", gen_core::supra2::SD_VAE),
+            ("text_encoder", gen_core_checkpoint::supra2::FLAN_T5_BASE),
+            ("vae", gen_core_checkpoint::supra2::SD_VAE),
         ] {
             let row = downloads
                 .iter()
@@ -7211,8 +7211,8 @@ mod supra2_convert_tests {
         let checkpoint = tmp.path().join("checkpoint");
         std::fs::create_dir_all(&checkpoint).expect("checkpoint dir");
         std::fs::write(checkpoint.join(SUPRA2_SOURCE_FILE), b"pt").expect("checkpoint");
-        let t5 = gen_core::supra2::FLAN_T5_BASE;
-        let vae = gen_core::supra2::SD_VAE;
+        let t5 = gen_core_checkpoint::supra2::FLAN_T5_BASE;
+        let vae = gen_core_checkpoint::supra2::SD_VAE;
 
         // Neither component installed.
         let error = plan(&settings, &checkpoint, SUPRA2_SOURCE_FILE)
@@ -7290,22 +7290,24 @@ mod supra2_convert_tests {
     #[ignore = "needs HF_HUB_CACHE holding the pinned Supra2-IMG, Flan-T5-Base and SD VAE snapshots"]
     fn supra2_real_weight_convert_writes_a_loadable_bundle() {
         let data_dir = tempfile::tempdir().expect("temp data dir");
-        let snapshot = |pin: gen_core::supra2::ComponentPin| {
+        let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
             huggingface_pinned_snapshot_dir(data_dir.path(), pin.repo, pin.revision)
                 .unwrap_or_else(|| panic!("{}@{} is not cached", pin.repo, pin.revision))
         };
-        let source = snapshot(gen_core::supra2::SUPRA2_SOURCE).join(SUPRA2_SOURCE_FILE);
-        let t5 = snapshot(gen_core::supra2::FLAN_T5_BASE);
-        let vae = snapshot(gen_core::supra2::SD_VAE);
+        let source = snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join(SUPRA2_SOURCE_FILE);
+        let t5 = snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE);
+        let vae = snapshot(gen_core_checkpoint::supra2::SD_VAE);
         // `SUPRA2_BUNDLE_OUT` keeps the bundle for the acceptance matrix, which a LATER process
         // loads as `SUPRA2_BUNDLE_DIR` (the real-weight lanes convert once, in this separate step).
         let out = std::env::var_os("SUPRA2_BUNDLE_OUT")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.path().join("bundle"));
         convert_supra2_bundle(&source, &t5, &vae, &out).expect("real conversion succeeds");
-        let bundle =
-            gen_core::supra2::read_pinned_bundle(&out, gen_core::supra2::BundleCheck::Digests)
-                .expect("the bundle reads back under the pin contract");
+        let bundle = gen_core_checkpoint::supra2::read_pinned_bundle(
+            &out,
+            gen_core_checkpoint::supra2::BundleCheck::Digests,
+        )
+        .expect("the bundle reads back under the pin contract");
         assert_eq!(bundle.manifest.provider_id, "supra2_img");
         assert!(
             out.join("model_index.json").is_file(),

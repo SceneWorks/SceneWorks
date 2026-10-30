@@ -24,10 +24,8 @@
 //! reads the resident model and its empty-prompt states.
 
 use super::*;
-use runtime_cuda::gen_core::iris::depth::{
-    plan_depth_input, DepthRequest, DepthResolution, IrisDepthEstimator,
-};
-use runtime_cuda::gen_core::iris::TEXT_ENCODER_COMPONENT;
+use gen_core_iris::depth::{plan_depth_input, DepthRequest, DepthResolution, IrisDepthEstimator};
+use gen_core_iris::TEXT_ENCODER_COMPONENT;
 use runtime_cuda::gen_core::{
     InputSizing, MemoryCalibrationIdentity, MemoryProviderContract, TargetSize, Transform,
     TransformRequest,
@@ -712,7 +710,7 @@ mod tests {
     #[test]
     fn the_restoration_capture_request_is_one_the_restorer_accepts() {
         let request = restoration_request(2048, 2048);
-        let options = runtime_cuda::gen_core::iris::restoration::RestorationOptions::from_request(
+        let options = gen_core_iris::restoration::RestorationOptions::from_request(
             &request,
             "iris_3b_restore",
         )

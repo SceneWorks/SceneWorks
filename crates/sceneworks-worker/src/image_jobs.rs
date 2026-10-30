@@ -2678,7 +2678,7 @@ pub(crate) fn standalone_upscale_workflow_share(
 ))]
 pub(crate) fn standalone_restore_workflow_share(
     job_payload: &JsonObject,
-    plan: &gen_core::iris::restoration::RestorationPlan,
+    plan: &gen_core_iris::restoration::RestorationPlan,
     trained_model: Option<&str>,
 ) -> Option<sceneworks_core::workflow_share::WorkflowShare> {
     let mut overlay = job_payload.clone();
@@ -2709,7 +2709,7 @@ pub(crate) fn standalone_restore_workflow_share(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn iris_upscale_overlay(
-    plan: &gen_core::iris::restoration::RestorationPlan,
+    plan: &gen_core_iris::restoration::RestorationPlan,
     trained_model: Option<&str>,
 ) -> Value {
     let mut overlay = json!({
@@ -3541,7 +3541,7 @@ fn write_upscaled_asset(
     // The applied Iris restoration plan (sc-25683) when the pass was the `iris` engine — it sizes by
     // `scale`, so `factor`/`softness` are unused and the record/name/lineage carry the plan instead —
     // with the trained restoration model it ran, if any (sc-25688).
-    iris: Option<(&gen_core::iris::restoration::RestorationPlan, Option<&str>)>,
+    iris: Option<(&gen_core_iris::restoration::RestorationPlan, Option<&str>)>,
     project_path: &Path,
 ) -> WorkerResult<JsonObject> {
     let request = &plan.request;

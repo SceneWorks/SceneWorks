@@ -1,6 +1,6 @@
 //! Multi-rank Iris-3B training on ONE host (story sc-25689, epic sc-25678).
 //!
-//! The Iris trainers are multi-PROCESS (`gen_core::iris::train::dist`: one process per rank, a
+//! The Iris trainers are multi-PROCESS (`gen_core_iris::train::dist`: one process per rank, a
 //! host TCP collective with bounded waits, typed `DistError`s). SceneWorks hosts such a run on the
 //! worker that claimed the job:
 //!
@@ -532,7 +532,7 @@ fn run_rank_process_with(
         }
         Err(error) => {
             let canceled = matches!(error, gen_core::Error::Canceled);
-            let dist = gen_core::iris::train::dist::dist_error(&error).map(|typed| WireDistError {
+            let dist = gen_core_iris::train::dist::dist_error(&error).map(|typed| WireDistError {
                 kind: crate::iris_curricula::dist_error_kind(typed).to_owned(),
                 detail: typed.to_string(),
             });
@@ -733,7 +733,7 @@ pub(crate) fn drive_rank_fleet_with(
         command
             .envs(world.env())
             .env(RANK_SPEC_ENV, &spec_path)
-            .env(gen_core::iris::train::dist::DIST_TOKEN_ENV, &token)
+            .env(gen_core_iris::train::dist::DIST_TOKEN_ENV, &token)
             // The rank resolves the plan's paths against THIS worker's settings, whatever the
             // ambient environment says (a test worker, an embedded worker with defaulted dirs).
             .env("SCENEWORKS_DATA_DIR", &settings.data_dir)
@@ -1205,7 +1205,7 @@ mod tests {
             model_options: options.clone(),
             ..Default::default()
         };
-        let plan = gen_core::iris::train::dist::parse_dist(
+        let plan = gen_core_iris::train::dist::parse_dist(
             config.model_options["iris"].get("dist"),
             false,
             true,
@@ -1283,7 +1283,7 @@ mod tests {
         let behavior = std::env::var(BEHAVIOR_ENV).unwrap_or_default();
         let record_dir = PathBuf::from(std::env::var_os(RECORD_ENV).expect("a record dir"));
         let spec = read_spec(Path::new(&std::env::var_os(RANK_SPEC_ENV).unwrap()));
-        let token = std::env::var(gen_core::iris::train::dist::DIST_TOKEN_ENV).ok();
+        let token = std::env::var(gen_core_iris::train::dist::DIST_TOKEN_ENV).ok();
         std::fs::write(
             record_dir.join(format!("rank-{}.json", world.rank)),
             serde_json::to_vec(&json!({

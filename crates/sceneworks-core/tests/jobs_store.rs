@@ -5636,7 +5636,7 @@ fn native_converters_registry_contents_are_pinned() {
 #[test]
 fn candle_native_converters_registry_contents_are_pinned() {
     use std::collections::BTreeSet;
-    // sc-24214: `supra2_img`'s converter is the backend-neutral `gen_core::supra2` one, compiled on
+    // sc-24214: `supra2_img`'s converter is the backend-neutral `gen_core_checkpoint::supra2` one, compiled on
     // every platform, and the Candle provider loads the bundle it writes.
     let expected: BTreeSet<&str> = ["flux2_klein_diffusers", "supra2_img"]
         .into_iter()

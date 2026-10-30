@@ -12,7 +12,7 @@
 //!
 //! Every geometry, rate and carrier rule is asked of the pinned engine's own symbol:
 //!
-//! * the three Wan routes go through `gen_core::wan_i2v_memory::WanI2vRoute` —
+//! * the three Wan routes go through `gen_core_memory_wan::WanI2vRoute` —
 //!   `public_geometries()` and `accepts_rate()`, the shared authority both Wan lanes seal against;
 //! * SCAIL-2 goes through `mlx_gen_scail2::memory_strategy::{PUBLIC_BUCKETS, PUBLIC_FRAMES}`.
 //!
@@ -20,7 +20,7 @@
 //! any weights are opened, instead of deep inside a multi-gigabyte load.
 
 use super::*;
-use mlx_gen::gen_core::wan_i2v_memory::WanI2vRoute;
+use gen_core_memory_wan::WanI2vRoute;
 use mlx_gen::gen_core::ReplacementMode;
 
 const SEED: u64 = 22_736;
@@ -172,7 +172,7 @@ fn production_fingerprint(arm: Arm, tier: &str) -> Result<String, String> {
             "q8" => "sc-19236-wan2-2-ti2v-5b-mlx-q8-g64-teq8-v1".to_owned(),
             other => return Err(format!("{LABEL}: unsupported TI2V-5B tier {other:?}")),
         },
-        // sc-22736's shared A14B authority (`gen_core::wan_i2v_memory`), whose dense token is
+        // sc-22736's shared A14B authority (`gen_core_memory_wan`), whose dense token is
         // `dense`. The tier is matched by name, never interpolated, so an unrecognized tier is a
         // refusal rather than a plausible-looking identity no engine publishes.
         WAN_T2V_A14B_PROVIDER | WAN_I2V_A14B_PROVIDER => {
@@ -472,7 +472,7 @@ fn numeric_quant(arm: Arm, tier: &str) -> Result<Option<Quant>, String> {
 }
 
 /// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
-/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// (`gen_core_memory_wan`), so the capture must seal a receipt before the load to read it —
 /// or by the provider's own `memory_strategy` module, which the loader publishes only for an
 /// unprepared spec, so sealing one would HIDE it (sc-22738).
 ///
@@ -496,9 +496,9 @@ fn receipt_publishes_the_identity(
         quant: numeric_quant(arm, tier)?,
         component_precision_floors: &[],
     };
-    match mlx_gen::gen_core::wan_i2v_memory::production_calibration_fingerprint(
+    match gen_core_memory_wan::production_calibration_fingerprint(
         route,
-        mlx_gen::gen_core::wan_i2v_memory::WanI2vBackend::Mlx,
+        gen_core_memory_wan::WanI2vBackend::Mlx,
         numeric_tier,
     ) {
         None => Ok(false),
@@ -619,7 +619,7 @@ const WORKER_ENCODE_PROFILE_EVIDENCE: [&str; 2] = [
 /// A MIRROR, not a read: `mlx-gen-scail2`'s `validate_context_revision_shape`
 /// (`memory_strategy.rs:570-588` at inference `3b922bac`) compares this as a bare literal and the
 /// crate publishes no `pub const` for it, unlike the Wan side's
-/// `gen_core::wan_i2v_memory::RECEIPT_VERSION`. `scripts/measure-memory-catalog.test.mjs` binds
+/// `gen_core_memory_wan::RECEIPT_VERSION`. `scripts/measure-memory-catalog.test.mjs` binds
 /// both tokens to the pinned engine source so a rename reds there rather than silently widening
 /// [`probes_admission`].
 const SCAIL2_RECEIPT_TOKEN: &str = "scail2-resident-v1";
@@ -627,7 +627,7 @@ const SCAIL2_RECEIPT_TOKEN: &str = "scail2-resident-v1";
 /// The receipt token THIS arm's engine gate requires, asked of the engine where it publishes one.
 fn engine_receipt_token(arm: Arm) -> &'static str {
     match arm.route {
-        Some(_) => mlx_gen::gen_core::wan_i2v_memory::RECEIPT_VERSION,
+        Some(_) => gen_core_memory_wan::RECEIPT_VERSION,
         None => SCAIL2_RECEIPT_TOKEN,
     }
 }
@@ -672,7 +672,7 @@ fn engine_seals_evidence(arm: Arm, identity: &str) -> bool {
 /// `mlx.rs#krea_realtime_probes_admission`, and false for a structurally similar reason.
 ///
 /// THE ENGINE SIDE. Both gates bind admission to a receipt the ENGINE seals over the artifact and
-/// the exact request bytes. `gen_core::wan_i2v_memory::validate_context`
+/// the exact request bytes. `gen_core_memory_wan::validate_context`
 /// (`crates/contracts/gen-core/src/wan_i2v_memory.rs:2897-3040` at inference `3b922bac`) refuses
 /// with `crossed Wan I2V memory context` unless `context.evidence_revision` parses as
 /// `wan-video-structural-v5:<mode>:fps<N>:<artifact_identity>:<selection_receipt>:…` (`:2944`,
@@ -1408,9 +1408,9 @@ mod tests {
     /// filesystem, so these run on any host.
     fn weights_free_a14b_contract(arm: Arm) -> mlx_gen::gen_core::MemoryProviderContract {
         let spec = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/nonexistent/wan-a14b")));
-        mlx_gen::gen_core::wan_i2v_memory::weights_free_contract(
+        gen_core_memory_wan::weights_free_contract(
             arm.provider,
-            mlx_gen::gen_core::wan_i2v_memory::WanI2vBackend::Mlx,
+            gen_core_memory_wan::WanI2vBackend::Mlx,
             &spec,
         )
         .unwrap_or_else(|error| panic!("{}: {error}", arm.provider))

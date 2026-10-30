@@ -163,7 +163,7 @@ pub(crate) enum Flux3Conversion {
     CandleGgmlQ4_1,
     /// Candle GGML Q8_0.
     CandleGgmlQ8_0,
-    /// MLX affine W`bits`A16 at `group` (`gen_core::flux3::native_convert::convert_affine`, the
+    /// MLX affine W`bits`A16 at `group` (`gen_core_flux3::native_convert::convert_affine`, the
     /// backend-neutral pack MLX's `quantized_matmul` reads; CPU-only and deterministic).
     MlxAffine { bits: u32, group: u32 },
 }
@@ -214,7 +214,7 @@ fn validate_flux3_dense_identity(
     repository: &str,
     revision: &str,
 ) -> Result<(), String> {
-    use gen_core::flux3::{
+    use gen_core_flux3::{
         BASE_WEIGHTS_REPO, BASE_WEIGHTS_REVISION, DISTILLED_WEIGHTS_REPO,
         DISTILLED_WEIGHTS_REVISION,
     };
@@ -228,7 +228,7 @@ fn validate_flux3_dense_identity(
             "FLUX3 {repository} requires revision {expected_revision}"
         ));
     }
-    let resolved = gen_core::flux3::resolve_checkpoint(root).map_err(|e| e.to_string())?;
+    let resolved = gen_core_flux3::resolve_checkpoint(root).map_err(|e| e.to_string())?;
     resolved
         .validate_route(model_id)
         .map_err(|e| e.to_string())?;
@@ -258,7 +258,7 @@ pub(crate) fn flux3_preparer(
             ));
         }
         validate_flux3_dense_identity(&spec.source, &repository, &revision)?;
-        let source = gen_core::flux3::native_convert::ConversionSource {
+        let source = gen_core_flux3::native_convert::ConversionSource {
             root: spec.source.clone(),
             repository,
             revision,
@@ -266,7 +266,7 @@ pub(crate) fn flux3_preparer(
         let cancel = gen_core::CancelFlag::new();
         let receipt = match conversion {
             Flux3Conversion::MlxAffine { bits, group } => {
-                gen_core::flux3::native_convert::convert_affine(
+                gen_core_flux3::native_convert::convert_affine(
                     &source,
                     bits,
                     group,
@@ -298,11 +298,11 @@ pub(crate) fn flux3_preparer(
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 fn convert_flux3_ggml(
     conversion: Flux3Conversion,
-    source: &gen_core::flux3::native_convert::ConversionSource,
+    source: &gen_core_flux3::native_convert::ConversionSource,
     out_dir: &Path,
     cancel: &gen_core::CancelFlag,
-) -> Result<gen_core::flux3::conversion::ConversionReceipt, String> {
-    use gen_core::flux3::artifacts::NativeDitStorage;
+) -> Result<gen_core_flux3::conversion::ConversionReceipt, String> {
+    use gen_core_flux3::artifacts::NativeDitStorage;
     let storage = match conversion {
         Flux3Conversion::CandleGgmlQ4_1 => NativeDitStorage::GgmlQ4_1,
         Flux3Conversion::CandleGgmlQ8_0 => NativeDitStorage::GgmlQ8_0,
@@ -319,10 +319,10 @@ fn convert_flux3_ggml(
 #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
 fn convert_flux3_ggml(
     conversion: Flux3Conversion,
-    _source: &gen_core::flux3::native_convert::ConversionSource,
+    _source: &gen_core_flux3::native_convert::ConversionSource,
     _out_dir: &Path,
     _cancel: &gen_core::CancelFlag,
-) -> Result<gen_core::flux3::conversion::ConversionReceipt, String> {
+) -> Result<gen_core_flux3::conversion::ConversionReceipt, String> {
     Err(format!(
         "{conversion:?} is Candle's GGML pack; this worker does not link the Candle runtime"
     ))
@@ -560,12 +560,12 @@ mod tests {
         source: &Path,
         output: &Path,
     ) -> Result<Value, String> {
-        use gen_core::flux3::conversion::{hash_source_file, open_conversion};
+        use gen_core_flux3::conversion::{hash_source_file, open_conversion};
         let conversion = Flux3Conversion::from_id(conversion_id)
             .ok_or_else(|| format!("unknown FLUX3 conversion {conversion_id}"))?;
         let expected_model = match repository {
-            gen_core::flux3::DISTILLED_WEIGHTS_REPO => "flux3_klein",
-            gen_core::flux3::BASE_WEIGHTS_REPO => "flux3_klein_base",
+            gen_core_flux3::DISTILLED_WEIGHTS_REPO => "flux3_klein",
+            gen_core_flux3::BASE_WEIGHTS_REPO => "flux3_klein_base",
             _ => return Err("unknown FLUX3 checkpoint repository".into()),
         };
         if model_id != expected_model {
@@ -614,7 +614,7 @@ mod tests {
 
     #[test]
     fn flux3_capture_refuses_distilled_config_presented_as_base_or_wrong_revision() {
-        use gen_core::flux3::{
+        use gen_core_flux3::{
             BASE_WEIGHTS_REPO, BASE_WEIGHTS_REVISION, DISTILLED_WEIGHTS_REPO,
             DISTILLED_WEIGHTS_REVISION,
         };
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn flux3_artifact_observations_bind_checkpoint_recipe_full_inventory_and_actual_bytes() {
-        use gen_core::flux3::conversion::{
+        use gen_core_flux3::conversion::{
             hash_source_file, ComponentInventory, ComponentPlacement, ComponentRole,
             ConversionReceipt,
         };
@@ -729,13 +729,13 @@ mod tests {
         for (model, repository, revision) in [
             (
                 "flux3_klein",
-                gen_core::flux3::DISTILLED_WEIGHTS_REPO,
-                gen_core::flux3::DISTILLED_WEIGHTS_REVISION,
+                gen_core_flux3::DISTILLED_WEIGHTS_REPO,
+                gen_core_flux3::DISTILLED_WEIGHTS_REVISION,
             ),
             (
                 "flux3_klein_base",
-                gen_core::flux3::BASE_WEIGHTS_REPO,
-                gen_core::flux3::BASE_WEIGHTS_REVISION,
+                gen_core_flux3::BASE_WEIGHTS_REPO,
+                gen_core_flux3::BASE_WEIGHTS_REVISION,
             ),
         ] {
             for (id, conversion) in Flux3Conversion::ALL {
@@ -1025,11 +1025,11 @@ mod tests {
                 conversion,
                 Flux3Conversion::CandleGgmlQ4_1 | Flux3Conversion::CandleGgmlQ8_0
             ) {
-                use gen_core::flux3::artifacts::NativeDitStorage;
+                use gen_core_flux3::artifacts::NativeDitStorage;
                 use runtime_cuda::providers::flux3::memory_strategy::{
                     dit_bytes, native_dit_bytes,
                 };
-                let config = gen_core::flux3::resolve_checkpoint(&dir).unwrap();
+                let config = gen_core_flux3::resolve_checkpoint(&dir).unwrap();
                 let storage = NativeDitStorage::from_package(&dir).unwrap();
                 let dense = dit_bytes(
                     "flux3_klein",

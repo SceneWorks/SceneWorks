@@ -166,11 +166,11 @@ mod native {
                 None => spec,
                 Some((text_encoder, autoencoder)) => spec
                     .with_component(
-                        gen_core::flux3::TEXT_ENCODER_COMPONENT,
+                        gen_core_flux3::TEXT_ENCODER_COMPONENT,
                         WeightsSource::Dir(text_encoder.clone()),
                     )
                     .with_component(
-                        gen_core::flux3::AUTOENCODER_COMPONENT,
+                        gen_core_flux3::AUTOENCODER_COMPONENT,
                         WeightsSource::File(autoencoder.clone()),
                     ),
             }
@@ -206,7 +206,7 @@ mod native {
         tier: Flux3Tier,
         compute_cap: Option<f32>,
     ) -> WorkerResult<()> {
-        use gen_core::flux3::quantization::{DitFormat, QuantDevice};
+        use gen_core_flux3::quantization::{DitFormat, QuantDevice};
         let format = match tier {
             Flux3Tier::Fp8Rowwise => DitFormat::Fp8Rowwise,
             Flux3Tier::Nvfp4 => DitFormat::Nvfp4,
@@ -704,11 +704,11 @@ mod tests {
             );
             assert_eq!(spec.quantize, flux3_quant(tier));
             assert_eq!(
-                spec.components.get(gen_core::flux3::TEXT_ENCODER_COMPONENT),
+                spec.components.get(gen_core_flux3::TEXT_ENCODER_COMPONENT),
                 Some(&WeightsSource::Dir(te))
             );
             assert_eq!(
-                spec.components.get(gen_core::flux3::AUTOENCODER_COMPONENT),
+                spec.components.get(gen_core_flux3::AUTOENCODER_COMPONENT),
                 Some(&WeightsSource::File(ae))
             );
             assert_eq!(

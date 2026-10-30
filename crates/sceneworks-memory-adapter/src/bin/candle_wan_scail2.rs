@@ -22,7 +22,7 @@
 
 use super::*;
 use candle_gen::gen_core::tiling::VaeTiling;
-use runtime_cuda::gen_core::wan_i2v_memory::WanI2vRoute;
+use gen_core_memory_wan::WanI2vRoute;
 use runtime_cuda::gen_core::{MemoryCalibrationIdentity, ReplacementMode};
 
 const SEED: u64 = 22_736;
@@ -467,7 +467,7 @@ fn load_spec(arm: Arm, tier: &str, load_shape: LoadShape) -> Result<Artifact, St
 }
 
 /// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
-/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// (`gen_core_memory_wan`), so the capture must seal a receipt before the load to read it —
 /// or by the provider's own `memory_strategy` module, which the loader publishes only for an
 /// unprepared spec, so sealing one would HIDE it (sc-22738). The MLX arm's helper on this lane's
 /// backend token; `production_calibration_fingerprint` returns `None` for `wan2_2_ti2v_5b` by
@@ -480,9 +480,9 @@ fn receipt_publishes_the_identity(
     let Some(route) = arm.route else {
         return Ok(false);
     };
-    match runtime_cuda::gen_core::wan_i2v_memory::production_calibration_fingerprint(
+    match gen_core_memory_wan::production_calibration_fingerprint(
         route,
-        runtime_cuda::gen_core::wan_i2v_memory::WanI2vBackend::Candle,
+        gen_core_memory_wan::WanI2vBackend::Candle,
         numeric_tier(tier)?,
     ) {
         None => Ok(false),
@@ -1051,7 +1051,7 @@ mod tests {
     }
 
     fn a14b_fixture(arm: Arm, tier: &str) -> (WanFixture, LoadSpec) {
-        use runtime_cuda::gen_core::wan_i2v_memory::{fixture_snapshot_root, WanI2vBackend};
+        use gen_core_memory_wan::{fixture_snapshot_root, WanI2vBackend};
         let temporary = WanFixture(std::env::temp_dir().join(format!(
             "sc23026-wan-{}-{}-{}", std::process::id(), arm.provider,
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()

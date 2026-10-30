@@ -2,10 +2,10 @@
 //! in both native production lanes; CPU tests exercise them without linking a CUDA/MLX bundle.
 
 use super::{parse_prompt_enhancement_fields, ImageRequest, Settings, WorkerError, WorkerResult};
-use gen_core::flux3::pup::{
+use gen_core::{LoadSpec, WeightsSource};
+use gen_core_flux3::pup::{
     UpsampleMode, MAX_EFFECTIVE_CAPTION_CHARS as PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS,
 };
-use gen_core::{LoadSpec, WeightsSource};
 use serde_json::{json, Value};
 const PROMPT_ENHANCE_MAX_REASON_CHARS: usize = 512;
 
@@ -71,7 +71,7 @@ pub(super) fn attach_prompt_upsampler(
     {
         return Ok(spec);
     }
-    use gen_core::flux3::pup::{
+    use gen_core_flux3::pup::{
         UpsamplePackage, UPSAMPLER_COMPONENT, UPSAMPLER_REPO, UPSAMPLER_REVISION,
     };
     let manifest = Value::Object(request.model_manifest_entry.clone());
@@ -157,7 +157,7 @@ pub(super) fn prompt_enhancement_fact_for_model(
             // table. Legacy FLUX.2 has no locked annotations and must preserve the prompt exactly.
             let expected = match report.locked_annotations.as_deref() {
                 Some(rows) if matches!(model, "flux3_klein" | "flux3_klein_base") => {
-                    let rows = gen_core::flux3::pup::loads(rows).map_err(|error| {
+                    let rows = gen_core_flux3::pup::loads(rows).map_err(|error| {
                         WorkerError::Engine(format!("invalid fallback locked annotations: {error}"))
                     })?;
                     if !rows.as_array().is_some_and(|rows| !rows.is_empty()) {
@@ -167,8 +167,8 @@ pub(super) fn prompt_enhancement_fact_for_model(
                     }
                     format!(
                         "{} {}",
-                        gen_core::flux3::pup::py_rstrip(&report.original_prompt),
-                        gen_core::flux3::pup::dumps(&rows)
+                        gen_core_flux3::pup::py_rstrip(&report.original_prompt),
+                        gen_core_flux3::pup::dumps(&rows)
                     )
                 }
                 _ => report.original_prompt.clone(),
@@ -216,7 +216,7 @@ pub(super) fn prompt_enhancement_fact_for_model(
     }
     if let Some(rows) = report.locked_annotations {
         if rows.chars().count() > PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS
-            || !gen_core::flux3::pup::loads(&rows).is_ok_and(|value| value.as_array().is_some())
+            || !gen_core_flux3::pup::loads(&rows).is_ok_and(|value| value.as_array().is_some())
         {
             return Err(WorkerError::Engine(
                 "prompt-enhancement locked annotations must be a bounded JSON array".to_owned(),
@@ -237,7 +237,7 @@ pub(super) fn publish_upsampling_progress(tokens: u32, max_tokens: u32) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gen_core::flux3::pup::{
+    use gen_core_flux3::pup::{
         UPSAMPLER_COMPONENT, UPSAMPLER_REPO, UPSAMPLER_REQUIRED_FILES, UPSAMPLER_REVISION,
     };
     use std::path::{Path, PathBuf};
@@ -432,7 +432,7 @@ mod tests {
                 "cache/huggingface/hub/models--black-forest-labs--flux-3-image-klein-pup/snapshots",
             )
             .join(UPSAMPLER_REVISION);
-        let system = gen_core::flux3::pup::SYSTEM_PROMPTS_FILE;
+        let system = gen_core_flux3::pup::SYSTEM_PROMPTS_FILE;
         for name in UPSAMPLER_REQUIRED_FILES.into_iter().chain([system]) {
             package_shape(&pinned);
             std::fs::write(pinned.join(system), b"receipted system prompt fixture").unwrap();
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn raw_absent_tuning_reaches_native_options_and_frozen_pup_budget() {
-        use gen_core::flux3::pup::{self, UpsampleDecision, UpsampleOptions, UpsamplerInput};
+        use gen_core_flux3::pup::{self, UpsampleDecision, UpsampleOptions, UpsamplerInput};
         let root = tempfile::Builder::new()
             .prefix(&format!("sc26238-budget-{}-", std::process::id()))
             .tempdir()
@@ -719,9 +719,9 @@ mod tests {
     }
 
     fn producer_plan(
-        locked: Option<Vec<gen_core::flux3::pup::JsonValue>>,
-    ) -> gen_core::flux3::pup::UpsamplePlan {
-        gen_core::flux3::pup::UpsamplePlan {
+        locked: Option<Vec<gen_core_flux3::pup::JsonValue>>,
+    ) -> gen_core_flux3::pup::UpsamplePlan {
+        gen_core_flux3::pup::UpsamplePlan {
             mode: if locked.is_some() {
                 UpsampleMode::TextWithBoxes
             } else {
@@ -732,12 +732,12 @@ mod tests {
             user_text: String::new(),
             locked,
             references: vec![],
-            max_new_tokens: gen_core::flux3::pup::MAX_TOKENS,
+            max_new_tokens: gen_core_flux3::pup::MAX_TOKENS,
         }
     }
 
     fn produce_then_persist(
-        plan: &gen_core::flux3::pup::UpsamplePlan,
+        plan: &gen_core_flux3::pup::UpsamplePlan,
         raw: &str,
     ) -> WorkerResult<Value> {
         let outcome = plan
@@ -764,7 +764,7 @@ mod tests {
 
     #[test]
     fn actual_pup_producer_and_persistence_share_unicode_and_complete_locked_caption_bound() {
-        use gen_core::flux3::pup::{self, JsonValue, MAX_EFFECTIVE_CAPTION_CHARS};
+        use gen_core_flux3::pup::{self, JsonValue, MAX_EFFECTIVE_CAPTION_CHARS};
         let plan = producer_plan(None);
         let edge = "界".repeat(MAX_EFFECTIVE_CAPTION_CHARS);
         assert_eq!(edge.len(), MAX_EFFECTIVE_CAPTION_CHARS * 3);
@@ -927,7 +927,7 @@ mod tests {
     async fn native_aspect_fallback_with_layout_survives_real_consumer_but_not_annotation_tampering(
     ) {
         use crate::image_jobs::*;
-        use gen_core::flux3::pup::{
+        use gen_core_flux3::pup::{
             self, UpsampleDecision, UpsampleOptions, UpsamplePackage, UpsamplerInput,
         };
         let package_dir = tempfile::tempdir().unwrap();
