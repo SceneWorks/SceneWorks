@@ -52,7 +52,6 @@ jobs:
       MOSS_WORKFLOW_SOURCE: ${{ inputs.workflowSource }}
       MOSS_INFERENCE_PIN: ${{ inputs.inference_sha }}
       MOSS_INFERENCE_SOURCE_ROOT: ${{ github.workspace }}/inference-source
-      MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
       HF_HUB_CACHE: E:/huggingface/hub
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
@@ -95,6 +94,8 @@ jobs:
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
       - name: Compile, discover and supervise exactly one bounded product invocation
         shell: cmd
+        env:
+          MOSS_ACCEPTANCE_DATASET_ROOT: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           if errorlevel 1 exit /b %errorlevel%

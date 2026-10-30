@@ -132,15 +132,14 @@ def main(args):
                         and type(root.get('pid')) is int and root['pid']>0
                         and Path(root.get('executable','')).is_absolute()
                         and len(root.get('binarySha256',''))==64, 'owned native root binding required')
-                import ctypes
-                from ctypes import wintypes
+                import ctypes.wintypes
                 kernel = ctypes.WinDLL('kernel32',use_last_error=True)
-                kernel.OpenProcess.argtypes = [wintypes.DWORD,wintypes.BOOL,wintypes.DWORD]
-                kernel.OpenProcess.restype = wintypes.HANDLE
-                kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE,wintypes.DWORD]
-                kernel.WaitForSingleObject.restype = wintypes.DWORD
-                kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-                kernel.CloseHandle.restype = wintypes.BOOL
+                kernel.OpenProcess.argtypes = [ctypes.wintypes.DWORD,ctypes.wintypes.BOOL,ctypes.wintypes.DWORD]
+                kernel.OpenProcess.restype = ctypes.wintypes.HANDLE
+                kernel.WaitForSingleObject.argtypes = [ctypes.wintypes.HANDLE,ctypes.wintypes.DWORD]
+                kernel.WaitForSingleObject.restype = ctypes.wintypes.DWORD
+                kernel.CloseHandle.argtypes = [ctypes.wintypes.HANDLE]
+                kernel.CloseHandle.restype = ctypes.wintypes.BOOL
                 process_handle = kernel.OpenProcess(0x00100000,False,root['pid']) # SYNCHRONIZE only.
                 require(bool(process_handle), 'cannot retain synchronization handle for owned native root')
                 record['nativeRoot'] = root; save()
