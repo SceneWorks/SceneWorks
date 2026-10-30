@@ -1576,7 +1576,7 @@ pub(super) async fn extract_clip_frames(
     let load = async {
         result?;
         let dir = frames_dir.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
             let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
                 .filter_map(|entry| entry.ok().map(|e| e.path()))
                 .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("png"))

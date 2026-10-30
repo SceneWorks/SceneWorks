@@ -674,7 +674,7 @@ pub(crate) async fn run_image_detail_job(
         #[cfg(target_os = "macos")]
         let blocking = {
             let spec = detail_spec(weights_dir, control_file, quant, adapters);
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
             crate::generator_cache::with_cached_generator(
                 "sdxl",
                 spec,
@@ -706,7 +706,7 @@ pub(crate) async fn run_image_detail_job(
             })
         };
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-        let blocking = tokio::task::spawn_blocking(move || {
+        let blocking = crate::load_progress::spawn_blocking(move || {
             let detail = runtime_cuda::providers::sdxl::SdxlDetail::load_admitted(
                 &candle_paths,
                 &candle_provider_spec,
@@ -770,7 +770,7 @@ pub(crate) async fn run_image_detail_job(
                     DetailEvent::Preview(frame) => {
                         // Match the shared image stream's latest-wins preview contract. Encoding stays
                         // off the async runtime; the data URL rides the next tile progress POST.
-                        let encoded = tokio::task::spawn_blocking(move || {
+                        let encoded = crate::load_progress::spawn_blocking(move || {
                             let data_url = encode_preview_data_url(&frame)?;
                             Some(PreviewSlot {
                                 index: 0,
@@ -899,7 +899,7 @@ pub(crate) async fn run_image_detail_job(
     let encode_tmp = temp_path.clone();
     let encode_final = media_path.clone();
     let written = reattach_alpha(refined, source_alpha.as_ref());
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         write_workflow_chunk(written.as_workflow_image(), &encode_tmp, share.as_ref())
             .map_err(|error| WorkerError::Io(std::io::Error::other(error)))?;
         std::fs::rename(&encode_tmp, &encode_final).inspect_err(|_| {

@@ -703,7 +703,7 @@ async fn generate_vision_json(
         CancelFlag, Constraint, Content, Message, ModelRequirements, Role, Sampling, TextLlmRequest,
     };
 
-    let image = tokio::task::spawn_blocking(move || {
+    let image = crate::load_progress::spawn_blocking(move || {
         crate::prompt_refine_jobs::load_caption_image_ref(&image_path)
     })
     .await
@@ -730,6 +730,7 @@ async fn generate_vision_json(
         "catalog vision model load failed",
         move |model| {
             let request = TextLlmRequest {
+                progress: Some(crate::load_progress::text_observer()),
                 messages: vec![Message {
                     role: Role::User,
                     content: vec![
@@ -1491,7 +1492,7 @@ pub(crate) async fn run_catalog_analysis_job(
                 CANCEL_MESSAGE,
                 "catalog structured analysis",
                 crate::no_cancel_ack(),
-                tokio::task::spawn_blocking({
+                crate::load_progress::spawn_blocking({
                 let registry = registry.clone();
                 let catalog_id = catalog_id.clone();
                 move || {
@@ -1535,7 +1536,7 @@ pub(crate) async fn run_catalog_analysis_job(
         CANCEL_MESSAGE,
         "catalog semantic reconciliation",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             reconcile_semantics_blocking(
                 &reconcile_registry,
                 &reconcile_catalog_id,
@@ -1602,7 +1603,7 @@ pub(crate) async fn run_catalog_analysis_job(
         let catalog_for_embeddings = catalog_id.clone();
         let cancel = gen_core::CancelFlag::new();
         let blocking_cancel = cancel.clone();
-        let blocking = tokio::task::spawn_blocking(move || {
+        let blocking = crate::load_progress::spawn_blocking(move || {
             run_embedding_pass_with_index_reconciliation(
                 registry_for_embeddings,
                 catalog_for_embeddings,

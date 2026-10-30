@@ -548,7 +548,7 @@ impl HeartbeatPump {
         let settings = settings.clone();
         let job_id = job_id.to_owned();
         let period = progress_report_interval(&settings);
-        let handle = tokio::spawn(async move {
+        let handle = crate::load_progress::spawn(async move {
             let mut interval = tokio::time::interval(period);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // The caller has just posted a Busy heartbeat of its own alongside the status update
@@ -651,6 +651,17 @@ pub(crate) fn shutdown_requested() -> bool {
 }
 
 pub(crate) async fn update_job(
+    api: &ApiClient,
+    job_id: &str,
+    payload: ProgressRequest,
+) -> WorkerResult<JobSnapshot> {
+    if let Some(session) = crate::load_progress::current(job_id) {
+        return session.post(api, payload).await;
+    }
+    post_job_progress(api, job_id, payload).await
+}
+
+pub(crate) async fn post_job_progress(
     api: &ApiClient,
     job_id: &str,
     mut payload: ProgressRequest,

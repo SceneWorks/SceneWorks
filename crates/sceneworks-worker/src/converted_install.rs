@@ -105,7 +105,7 @@ async fn explain_failed_load_with(
     let Some(bundle) = loaded_bundle_dir(settings, payload) else {
         return error;
     };
-    let diagnosis = tokio::task::spawn_blocking(move || {
+    let diagnosis = crate::load_progress::spawn_blocking(move || {
         // What sits at the bundle path NOW: the marker below lands only if a "Convert again"
         // has not promoted a fresh bundle over this one while it was being hashed.
         let verified = converted_artifacts::bundle_identity(&bundle);

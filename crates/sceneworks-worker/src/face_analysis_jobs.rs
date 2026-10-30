@@ -365,7 +365,7 @@ pub(crate) async fn run_dataset_face_analysis_job(
             JobStatus::LoadingModel,
             ProgressStage::LoadingModel,
             0.08,
-            "Loading face stack (SCRFD + ArcFace).",
+            crate::load_progress::PREPARING_MODEL,
             None,
             backend,
         ),
@@ -377,18 +377,19 @@ pub(crate) async fn run_dataset_face_analysis_job(
     let blocking_cancel = cancel.clone();
     let blocking_items = items;
     let job_id = job.id.clone();
-    let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<FaceAnalysisRecord>> {
-        emit_event(
-            "dataset_face_analysis_load_start",
-            json!({ "jobId": job_id, "space": FACE_EMBEDDING_SPACE }),
-        );
-        let records = analyze_faces(blocking_items, weights_dir, blocking_cancel, tx)?;
-        emit_event(
-            "dataset_face_analysis_load_complete",
-            json!({ "jobId": job_id, "space": FACE_EMBEDDING_SPACE }),
-        );
-        Ok(records)
-    });
+    let blocking =
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<FaceAnalysisRecord>> {
+            emit_event(
+                "dataset_face_analysis_load_start",
+                json!({ "jobId": job_id, "space": FACE_EMBEDDING_SPACE }),
+            );
+            let records = analyze_faces(blocking_items, weights_dir, blocking_cancel, tx)?;
+            emit_event(
+                "dataset_face_analysis_load_complete",
+                json!({ "jobId": job_id, "space": FACE_EMBEDDING_SPACE }),
+            );
+            Ok(records)
+        });
 
     // Hand the spawned blocking task to the shared scaffold (sc-8836, F-034): it owns the
     // `CancelJoinGuard`, the per-item progress select loop (with the sc-8835 cancel/heartbeat

@@ -1213,7 +1213,7 @@ mod job_tests {
             .with_state((posts.clone(), cancel_requested));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), posts)
@@ -1857,7 +1857,7 @@ mod job_tests {
             let cancel = gen_core::CancelFlag::new();
             let flag = cancel.clone();
             let adapter = data.join("loras/lora_iris/partial.safetensors");
-            let blocking = tokio::task::spawn_blocking(move || {
+            let blocking = crate::load_progress::spawn_blocking(move || {
                 let training = |step| {
                     TrainEvent::Progress(TrainingProgress::Training {
                         step,
@@ -3066,7 +3066,7 @@ mod job_tests {
             if cancel_on_training {
                 let posts = Arc::clone(&posts);
                 let user_cancel = Arc::clone(&user_cancel);
-                tokio::spawn(async move {
+                crate::load_progress::spawn(async move {
                     loop {
                         let training = posts.lock().unwrap().iter().any(|post: &Value| {
                             post["message"]

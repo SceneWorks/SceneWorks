@@ -175,7 +175,7 @@ where
         ),
     )
     .await?;
-    let source = tokio::task::spawn_blocking(move || decode_oriented_rgb8(&source_path))
+    let source = crate::load_progress::spawn_blocking(move || decode_oriented_rgb8(&source_path))
         .await
         .map_err(|error| crate::task_join_error("depth source decode", error))??;
     let resolution = engine_resolution(request.resolution);
@@ -230,7 +230,7 @@ where
     let partial_npy = outputs.partial_npy.clone();
     let partial_preview = outputs.partial_preview.clone();
     let rgb = source.image;
-    let task = tokio::task::spawn_blocking(move || -> WorkerResult<DepthMetadata> {
+    let task = crate::load_progress::spawn_blocking(move || -> WorkerResult<DepthMetadata> {
         let estimator = loader(&spec).map_err(|error| map_engine_error("load", error))?;
         let (width, height) = (rgb.width(), rgb.height());
         let request = DepthRequest {

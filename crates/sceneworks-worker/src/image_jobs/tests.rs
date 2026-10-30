@@ -10617,7 +10617,7 @@ async fn qwen_image_2_1_edit_reports_generating_progress_then_acknowledges_a_can
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(32);
     let task_generator = Arc::clone(&generator);
     let task_cancel = cancel.clone();
-    let blocking = tokio::task::spawn_blocking(move || {
+    let blocking = crate::load_progress::spawn_blocking(move || {
         drive_gen_items_scored_reported(
             tx,
             [11_i64, 12],
@@ -22843,7 +22843,6 @@ mod preview_stream_tests {
             GenEvent::Decoding { .. } => "Decoding",
             GenEvent::Loading { .. } => "Loading",
             GenEvent::Upsampling { .. } => "Upsampling",
-            GenEvent::LoadActivity { .. } => "LoadActivity",
             GenEvent::Preview { .. } => "Preview",
             GenEvent::PromptEnhancement { .. } => "PromptEnhancement",
             GenEvent::CheckpointWeightFacts { .. } => "CheckpointWeightFacts",
@@ -30169,7 +30168,7 @@ async fn a_forged_advanced_prefix_kv_cache_never_reaches_an_asset_or_the_job_res
 
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(8);
     let report = real.clone();
-    let blocking = tokio::task::spawn_blocking(move || {
+    let blocking = crate::load_progress::spawn_blocking(move || {
         let mut facts = JsonObject::new();
         facts.insert(lane_controls::PREFIX_KV_CACHE_KEY.to_owned(), report);
         let _ = tx.blocking_send(GenEvent::ImageFacts { index: 0, facts });

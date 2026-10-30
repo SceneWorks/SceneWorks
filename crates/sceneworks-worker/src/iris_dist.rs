@@ -252,10 +252,66 @@ impl WireProgress {
     }
 }
 
+/// Tensor-neutral I/O facts crossing the rank process boundary. No provider strings or
+/// pre-computed percentages are put on the wire; the coordinator uses the same formatter.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WireLoadActivity {
+    phase: String,
+    component: String,
+    file: PathBuf,
+    bytes_read: u64,
+    total_bytes: Option<u64>,
+    component_bytes_read: u64,
+    component_total_bytes: Option<u64>,
+    files_checked: usize,
+    total_files: Option<usize>,
+}
+impl WireLoadActivity {
+    fn from_activity(activity: gen_core::LoadActivity) -> Self {
+        Self {
+            phase: match activity.phase {
+                gen_core::LoadActivityPhase::Checking => "checking",
+                gen_core::LoadActivityPhase::Verifying => "verifying",
+                gen_core::LoadActivityPhase::Loading => "loading",
+            }
+            .to_owned(),
+            component: activity.component,
+            file: activity.file,
+            bytes_read: activity.bytes_read,
+            total_bytes: activity.total_bytes,
+            component_bytes_read: activity.component_bytes_read,
+            component_total_bytes: activity.component_total_bytes,
+            files_checked: activity.files_checked,
+            total_files: activity.total_files,
+        }
+    }
+    fn into_activity(self) -> Option<gen_core::LoadActivity> {
+        Some(gen_core::LoadActivity {
+            phase: match self.phase.as_str() {
+                "checking" => gen_core::LoadActivityPhase::Checking,
+                "verifying" => gen_core::LoadActivityPhase::Verifying,
+                "loading" => gen_core::LoadActivityPhase::Loading,
+                _ => return None,
+            },
+            component: self.component,
+            file: self.file,
+            bytes_read: self.bytes_read,
+            total_bytes: self.total_bytes,
+            component_bytes_read: self.component_bytes_read,
+            component_total_bytes: self.component_total_bytes,
+            files_checked: self.files_checked,
+            total_files: self.total_files,
+        })
+    }
+}
+
 /// One protocol message a rank writes.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub(crate) enum RankMessage {
+    LoadActivity {
+        activity: Option<WireLoadActivity>,
+    },
     Progress {
         progress: WireProgress,
     },
@@ -505,18 +561,30 @@ fn run_rank_process_with(
         .ok();
 
     let spec_load = inputs.load_spec(engine_id, &request.config.train_dtype);
+    let load_bridge = crate::load_progress::ProcessBridge::new(|activity| {
+        write_message(
+            &mut std::io::stdout(),
+            &RankMessage::LoadActivity {
+                activity: activity.map(WireLoadActivity::from_activity),
+            },
+        );
+    });
     let outcome = (|| {
         let mut trainer = load_trainer(engine_id, &spec_load)?;
         trainer.validate(&request)?;
         trainer.train(&request, &mut |progress| {
-            write_message(
-                out,
-                &RankMessage::Progress {
-                    progress: WireProgress::from_progress(&progress),
-                },
-            )
+            load_bridge.regular(|| {
+                write_message(
+                    out,
+                    &RankMessage::Progress {
+                        progress: WireProgress::from_progress(&progress),
+                    },
+                )
+            })
         })
     })();
+    // Flush/stop the process bridge before Done/Failed, so no rank load can arrive afterwards.
+    drop(load_bridge);
     let _ = finish(request, prepared_inputs);
     match outcome {
         Ok(output) => {
@@ -834,9 +902,16 @@ pub(crate) fn drive_rank_fleet_with(
         }
         match inbox.recv_timeout(Duration::from_millis(100)) {
             Ok(FleetEvent::Message(rank, message)) => match message {
+                RankMessage::LoadActivity { activity } => {
+                    if rank == 0 && !consumer_gone && fleet.ranks[rank].done.is_none() {
+                        gen_core::LoadActivityContext::capture()
+                            .report(activity.and_then(WireLoadActivity::into_activity));
+                    }
+                }
                 RankMessage::Progress { progress } => {
                     if rank == 0 && !consumer_gone {
                         if let Some(progress) = progress.into_progress() {
+                            crate::load_progress::training_progress(&progress);
                             if tx.blocking_send(TrainEvent::Progress(progress)).is_err() {
                                 // Nobody listens to this job any more: stop every rank.
                                 consumer_gone = true;
@@ -1128,6 +1203,33 @@ pub(crate) mod test_support {
 ))]
 mod tests {
     use super::*;
+    #[test]
+    fn load_activity_wire_round_trip_preserves_counts_and_component_totals() {
+        let activity = gen_core::LoadActivity {
+            phase: gen_core::LoadActivityPhase::Loading,
+            component: "transformer".to_owned(),
+            file: PathBuf::from("transformer/shard-2.safetensors"),
+            bytes_read: 17,
+            total_bytes: Some(40),
+            component_bytes_read: 57,
+            component_total_bytes: Some(80),
+            files_checked: 2,
+            total_files: Some(3),
+        };
+        let message = RankMessage::LoadActivity {
+            activity: Some(WireLoadActivity::from_activity(activity.clone())),
+        };
+        let mut output = Vec::new();
+        write_message(&mut output, &message);
+        let wire = parse_message(std::str::from_utf8(&output).unwrap()).unwrap();
+        let RankMessage::LoadActivity {
+            activity: Some(wire),
+        } = wire
+        else {
+            panic!("wrong rank event");
+        };
+        assert_eq!(wire.into_activity(), Some(activity));
+    }
 
     #[test]
     fn the_wire_round_trips_every_progress_event_and_ignores_noise() {

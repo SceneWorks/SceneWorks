@@ -240,7 +240,7 @@ mod imp {
         let cancel = gen_core::CancelFlag::new();
         let task_cancel = cancel.clone();
         let (tx, mut rx) = tokio::sync::mpsc::channel::<(usize, usize)>(64);
-        let blocking = tokio::task::spawn_blocking(move || {
+        let blocking = crate::load_progress::spawn_blocking(move || {
             prepare_control_dataset(&inputs, &config, &prep_dir, &task_cancel, |done, total| {
                 // A closed channel means the consumer loop returned early (POST failure / 409 stale-
                 // sweep reclaim); trip the cancel flag so the prep bails at its next per-item check
