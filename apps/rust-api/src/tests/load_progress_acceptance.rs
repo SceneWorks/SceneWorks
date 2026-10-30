@@ -464,7 +464,9 @@ async fn output_evidence(
                 "invalid PCM16 output",
             )?;
             let sum = samples
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|p| (f64::from(i16::from_le_bytes([p[0], p[1]])) / 32768.0).powi(2))
                 .sum::<f64>();
             let measured = (sum / (samples.len() / 2) as f64).sqrt();
