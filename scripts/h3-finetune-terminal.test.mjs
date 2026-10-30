@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { runInNewContext } from 'node:vm';
 import path from 'node:path';
-import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, normalizeLoadEvent, runProcess, runCase, verifyCampaign, reclaimCaseModelStorage, caseStorageReclaim, assertCaseFreeSpace, CASE_FREE_SPACE_HEADROOM_BYTES } from './h3-finetune-terminal.mjs';
+import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, normalizeLoadEvent, runProcess, runCase, verifyCampaign, reclaimCaseModelStorage, reclaimPassedCaseStorage, removeTreeNoFollow, caseStorageReclaim, assertCaseFreeSpace, CASE_FREE_SPACE_HEADROOM_BYTES } from './h3-finetune-terminal.mjs';
 import { runScenario, pointer, isSettledJobSnapshot, ASSET_SETTLE_GRACE_MS } from './h3-finetune-terminal-api.mjs';
 import { awaitPeerLane, classifyPeerLane, assertPeerCanDeliver, PEER_APPEARANCE_GRACE_MS, waitForPeerAnchors, peerAnchorCandidates, anchorArtifactBase, anchorArtifactName, anchorArtifactAttempt } from './lib/h3-peer-lane.mjs';
 const sw = 'a'.repeat(40), inf = 'b'.repeat(40);
@@ -827,10 +827,18 @@ test('a passed case reclaims only its own import, resolved bundle and transforme
   await writeFile(path.join(f.dir, 'execution.json'), JSON.stringify({ caseId: f.c.id, status: 'passed', changed: true }));
   await assert.rejects(caseStorageReclaim(f.p, f.c, f.dir), /not bound to this passed execution/);
 });
-test('storage reclaim refuses non-passed cases, other runs\' roots and symlinked targets', async t => {
+const withRunEnv = (t, id = '40855384972') => {
   const prev = [process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT];
   t.after(() => { if (prev[0] === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = prev[0]; if (prev[1] === undefined) delete process.env.GITHUB_RUN_ATTEMPT; else process.env.GITHUB_RUN_ATTEMPT = prev[1]; });
-  process.env.GITHUB_RUN_ID = '40855384972'; process.env.GITHUB_RUN_ATTEMPT = '1';
+  process.env.GITHUB_RUN_ID = id; process.env.GITHUB_RUN_ATTEMPT = '1';
+};
+// Directory links: a real symlink, or a junction where Windows withholds symlink privilege.
+async function dirLink(target, link) {
+  await mkdir(path.dirname(link), { recursive: true });
+  try { await symlink(target, link, 'dir'); } catch (error) { if (process.platform !== 'win32' || error.code !== 'EPERM') throw error; await symlink(target, link, 'junction'); }
+}
+test('storage reclaim refuses non-passed cases, other runs\' roots and linked parents', async t => {
+  withRunEnv(t);
   const failed = await reclaimFixture(t, { status: 'failed' });
   await assert.rejects(reclaimCaseModelStorage(failed.p, failed.c, failed.dir), /only a recorded passed case/);
   assert.equal(await exists(failed.files.imported), true);
@@ -839,13 +847,132 @@ test('storage reclaim refuses non-passed cases, other runs\' roots and symlinked
   await assert.rejects(reclaimCaseModelStorage(other.p, other.c, other.dir), /confined to this run's own private root/);
   assert.equal(await exists(other.files.imported), true);
   process.env.GITHUB_RUN_ID = '40855384972';
-  const linked = await reclaimFixture(t), outside = path.join(linked.base, 'shared-hf-cache');
+  // A linked PARENT (data/models -> elsewhere) would put the targets outside the case root: refused
+  // before anything is removed or recorded.
+  const parent = await reclaimFixture(t), elsewhere = path.join(parent.base, 'elsewhere-models');
+  const models = path.join(parent.output, 'services', parent.c.id, 'data', 'models');
+  await mkdir(path.join(elsewhere, 'imports'), { recursive: true }); await writeFile(path.join(elsewhere, 'imports', 'blob'), 'outside');
+  await rm(models, { recursive: true }); await dirLink(elsewhere, models);
+  await assert.rejects(reclaimCaseModelStorage(parent.p, parent.c, parent.dir), /escapes the case service root through a linked parent/);
+  assert.equal(await exists(path.join(elsewhere, 'imports', 'blob')), true, 'nothing behind a linked parent is touched');
+  assert.equal(await exists(parent.files.ref), true, 'a refusal removes nothing, not even unaffected targets');
+  assert.equal(await exists(path.join(parent.dir, 'storage-reclaim.json')), false, 'no record when the guard refuses');
+});
+test('storage reclaim unlinks a linked target without following it out of the case root', async t => {
+  withRunEnv(t);
+  const f = await reclaimFixture(t), outside = path.join(f.base, 'shared-hf-cache');
   await mkdir(outside, { recursive: true }); await writeFile(path.join(outside, 'blob'), 'shared');
-  const resolved = path.dirname(path.dirname(linked.files.resolved)); await rm(resolved, { recursive: true });
-  await symlink(outside, resolved, 'junction');
-  await assert.rejects(reclaimCaseModelStorage(linked.p, linked.c, linked.dir), /not a plain directory|escapes the case service root/);
+  const resolved = path.dirname(path.dirname(f.files.resolved)); await rm(resolved, { recursive: true });
+  await dirLink(outside, resolved);
+  const record = await reclaimCaseModelStorage(f.p, f.c, f.dir);
   assert.equal(await exists(path.join(outside, 'blob')), true, 'a linked target never deletes what it points at');
-  assert.equal(await exists(path.join(linked.dir, 'storage-reclaim.json')), false, 'no record when the guard refuses');
+  assert.equal(await exists(resolved), false, 'the link itself is removed');
+  assert.deepEqual(record.links.map(l => [l.path, l.targetInsideServiceRoot]), [[resolved, false]]);
+  assert.equal(await exists(path.join(f.dir, 'storage-reclaim.json')), true);
+});
+test('storage reclaim removes symlinked files and nested links as links, never their targets', async t => {
+  withRunEnv(t);
+  const f = await reclaimFixture(t), staging = path.join(f.base, 'staging');
+  const stagedFile = path.join(staging, 'checkpoint.safetensors'), stagedDir = path.join(staging, 'component');
+  await mkdir(stagedDir, { recursive: true }); await writeFile(stagedFile, 'staged checkpoint'); await writeFile(path.join(stagedDir, 'w.safetensors'), 'staged component');
+  // A symlinked file directly in imports, a file link to outside, a dir link to outside, a dir link
+  // to an INSIDE non-target (the case's LoRA import), and a link chain, all nested in reclaim targets.
+  const importDir = path.dirname(f.files.imported), bundle = path.dirname(f.files.resolved), loraDir = path.dirname(f.files.lora);
+  let fileLinks = true;
+  try { await symlink(stagedFile, path.join(importDir, 'linked.safetensors'), 'file'); } catch (error) { if (process.platform !== 'win32' || error.code !== 'EPERM') throw error; fileLinks = false; }
+  await dirLink(stagedDir, path.join(bundle, 'nested', 'outside-dir'));
+  await dirLink(loraDir, path.join(bundle, 'nested', 'inside-non-target'));
+  await dirLink(path.join(bundle, 'nested', 'outside-dir'), path.join(bundle, 'chain'));
+  const record = await reclaimCaseModelStorage(f.p, f.c, f.dir);
+  for (const name of ['imported', 'resolved', 'ref']) assert.equal(await exists(f.files[name]), false, `${name} reclaimed`);
+  assert.equal(await readFile(stagedFile, 'utf8'), 'staged checkpoint', 'a symlinked file\'s target is untouched');
+  assert.equal(await readFile(path.join(stagedDir, 'w.safetensors'), 'utf8'), 'staged component', 'a nested dir link\'s target is untouched');
+  assert.equal(await exists(f.files.lora), true, 'a link to an inside non-target never reclaims it');
+  const linked = record.links.map(l => path.relative(f.output, l.path)).sort();
+  assert.equal(linked.length, fileLinks ? 4 : 3);
+  assert.ok(record.links.find(l => l.path.endsWith('inside-non-target')).targetInsideServiceRoot);
+  assert.ok(!record.links.find(l => l.path.endsWith('outside-dir')).targetInsideServiceRoot);
+});
+test('storage reclaim refuses unexpected entry types before removing anything', { skip: process.platform === 'win32' && 'unix sockets in the filesystem are POSIX-only; the walk itself is covered by the fake below' }, async t => {
+  withRunEnv(t);
+  const f = await reclaimFixture(t), net = await import('node:net');
+  const socket = path.join(path.dirname(f.files.resolved), 's.sock'), server = net.createServer();
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve); });
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  await assert.rejects(reclaimCaseModelStorage(f.p, f.c, f.dir), /reclaim refuses an unexpected socket at .*s\.sock; nothing was removed/);
+  for (const name of ['imported', 'resolved', 'ref']) assert.equal(await exists(f.files[name]), true, `${name} kept on refusal`);
+  assert.equal(await exists(path.join(f.dir, 'storage-reclaim.json')), false);
+});
+test('the no-follow removal walk unlinks links, refuses devices and never recurses through a link', async () => {
+  const kinds = { '/t': 'dir', '/t/l': 'link', '/t/f': 'file', '/t/d': 'dir', '/t/d/dev': 'char' }, calls = [];
+  const info = kind => ({ isSymbolicLink: () => kind === 'link', isFile: () => kind === 'file', isDirectory: () => kind === 'dir', isSocket: () => false, isFIFO: () => false, isBlockDevice: () => false, isCharacterDevice: () => kind === 'char' });
+  const fsImpl = { lstat: async p => info(kinds[p.replaceAll('\\', '/').replace(/^[A-Za-z]:/, '')]), readdir: async p => Object.keys(kinds).filter(k => path.posix.dirname(k) === p.replaceAll('\\', '/').replace(/^[A-Za-z]:/, '') && k !== '/t').map(k => path.posix.basename(k)), unlink: async p => calls.push(['unlink', p]), rmdir: async p => calls.push(['rmdir', p]) };
+  await assert.rejects(removeTreeNoFollow(path.resolve('/t'), fsImpl), /reclaim refuses an unexpected character device/);
+  delete kinds['/t/d/dev'];
+  calls.length = 0; await removeTreeNoFollow(path.resolve('/t'), fsImpl);
+  assert.deepEqual(calls.map(([op, p]) => [op, p.replaceAll('\\', '/').replace(/^[A-Za-z]:/, '')]), [['unlink', '/t/l'], ['unlink', '/t/f'], ['rmdir', '/t/d'], ['rmdir', '/t']]);
+});
+// Regression for MLX run 41061562586: the real macOS layout. The worker stages each assembly task
+// path as ONE directory symlink — transformer_ref -> this case's own resolved bundle (Ref2VA), and
+// transformer -> the resident companion in the service's seeded HF hub (hard links into staging).
+// prepared_sources name the files through the links, exactly as the product reported them.
+test('macOS assembly symlinks (run 41061562586) reclaim the case copies and leave the hub and staging intact', async t => {
+  withRunEnv(t, '41061562586');
+  const base = await mkdtemp(path.join(os.tmpdir(), 'sc26691-reclaim-mac-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const output = path.join(base, '41061562586-1-bootstrap-78f37845b4927a10fe5d23071c6838d7cd8e2914');
+  const c = { id: 'mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo', evidence: 'evidence.json', inputs: [] }, p = { output };
+  const svc = path.join(output, 'services', c.id), data = path.join(svc, 'data');
+  const assembly = path.join(data, 'cache', 'minimax-h3-assemblies', 'fd494f8c65044d371259e5c9a34fe23c');
+  const bundle = path.join(data, 'models', 'resolved', 'entries', '71f347b6aae72dc28a42ac85582fa4b22c2c73e09dd9a0212672e4b4303bd775', 'bundle');
+  const imported = path.join(data, 'models', 'imports', 'imported_sc26691_artifact_0_ref2va_v2_int8', 'Minimax-h3_Singularity_ref2va_v2_int8.safetensors');
+  const companion = path.join(svc, 'hf', 'hub', 'models--SceneWorks--minimax-h3-mlx', 'snapshots', '137ce668c55a20bc0935fd1cf2a3de8448abb7f4', 'q4', 'transformer');
+  const vae = path.join(svc, 'hf', 'hub', 'models--MiniMaxAI--MiniMax-H3', 'snapshots', '939557dc319dd91227e30195a763f272ba7f8765', 'vae', 'config.json');
+  const lora = path.join(data, 'projects', 'h3-reduced-terminal-proof.sceneworks', 'loras', 'imports', 'sc26691_ref2v_turbo_4step_36bbcdc78d8d', 'minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors');
+  const staging = path.join(base, 'staging', 'q4-transformer-00001-of-00014.safetensors');
+  const write = async (file, text) => { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, text); };
+  const bundleFiles = ['config.json', 'diffusion_pytorch_model-00001-of-00001.safetensors', 'diffusion_pytorch_model.safetensors.index.json'];
+  const companionFiles = ['config.json', 'diffusion_pytorch_model-00001-of-00014.safetensors'];
+  for (const name of bundleFiles) await write(path.join(bundle, name), `bundle ${name}`);
+  await write(imported, 'imported checkpoint'); await write(vae, 'vae'); await write(lora, 'lora'); await write(staging, 'staged companion shard');
+  await write(path.join(companion, 'config.json'), 'companion config');
+  const { link } = await import('node:fs/promises');
+  await link(staging, path.join(companion, companionFiles[1])); // the seeded hub is hard links into staging
+  await dirLink(companion, path.join(assembly, 'transformer'));
+  await dirLink(bundle, path.join(assembly, 'transformer_ref'));
+  const prepared = [];
+  for (const name of companionFiles) prepared.push({ path: path.join(assembly, 'transformer', name), sha256: await hashFile(path.join(companion, name)) });
+  for (const name of bundleFiles) prepared.push({ path: path.join(assembly, 'transformer_ref', name), sha256: await hashFile(path.join(bundle, name)) });
+  for (const file of [lora, vae]) prepared.push({ path: file, sha256: await hashFile(file) });
+  const loadEvent = { message: 'Actual native load', event: 'h3_import_prepared_load', jobId: 'job_7a95b8bafcb31b3c44d8e420aae9562e', provider: 'mlx', backend: 'mlx', native_backend: 'mlx', seal_validated: true, cache_state: 'Cold', identity: { checkpointId: 'managed/imported_sc26691_artifact_0_ref2va_v2_int8', planId: 'p', semanticDigest: `sha256:${'a'.repeat(64)}`, assembly: { family: 'minimax-h3', partition: 'ref2va', components: {}, componentClosure: [] }, sourceFiles: [] }, prepared_sources: prepared, operation: 'reference_to_video', seed: 1, steps: 4, scheduler_shift: null, level: 'info', reportedAt: '2026-10-30T14:40:00.000Z' };
+  const dir = path.join(output, c.id); await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'evidence.json'), JSON.stringify({ loadEvent }));
+  await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ caseId: c.id, status: 'passed' }));
+  const record = await reclaimCaseModelStorage(p, c, dir);
+  assert.deepEqual(record.removed, [path.join(data, 'models', 'imports'), path.join(data, 'models', 'resolved'), path.join(assembly, 'transformer_ref')]);
+  assert.deepEqual(record.links.map(l => [l.path, l.targetInsideServiceRoot]), [[path.join(assembly, 'transformer_ref'), true]]);
+  for (const file of [imported, path.join(bundle, bundleFiles[1]), path.join(assembly, 'transformer_ref')]) assert.equal(await exists(file), false, `${file} reclaimed`);
+  assert.equal(await readFile(staging, 'utf8'), 'staged companion shard', 'staging behind the hub hard link is untouched');
+  for (const file of [path.join(companion, companionFiles[1]), vae, lora, path.join(assembly, 'transformer', 'config.json')]) assert.equal(await exists(file), true, `${file} kept`);
+  assert.deepEqual(record.preparedFiles.map(f => path.basename(f.path)).sort(), [...bundleFiles].sort(), 'exactly the files reached through transformer_ref are recorded');
+  const retained = await caseStorageReclaim(p, c, dir);
+  for (const input of prepared) assert.equal(await retained.removedFile(input), input.path.includes('transformer_ref'), `${input.path} excused only when reclaimed`);
+  assert.deepEqual(await reclaimCaseModelStorage(p, c, dir), record, 'idempotent on resume');
+});
+test('a reclaim failure after PASS is recorded and does not fail the case', async t => {
+  withRunEnv(t);
+  const errors = t.mock.method(console, 'error', () => {});
+  const f = await reclaimFixture(t);
+  const outcome = await reclaimPassedCaseStorage(f.p, f.c, f.dir, { removeImpl: async () => { const error = new Error('EBUSY: resource busy'); error.code = 'EBUSY'; throw error; } });
+  assert.match(outcome.failed.error, /EBUSY/); assert.equal(outcome.failed.recordWritten, true);
+  const failure = JSON.parse(await readFile(path.join(f.dir, 'storage-reclaim-failure.json'), 'utf8'));
+  assert.equal(failure.kind, 'case-storage-reclaim-failure'); assert.equal(failure.executionSha256, await hashFile(path.join(f.dir, 'execution.json')));
+  assert.equal(JSON.parse(await readFile(path.join(f.dir, 'execution.json'), 'utf8')).status, 'passed', 'the receipt stays passed');
+  assert.match(errors.mock.calls[0].arguments[0], /storage reclaim failed after cuda\.reduced\.artifact-0-ordered-mixed-baseline-ref-turbo PASSED.*EBUSY/);
+  // The retry (a resume) finishes exactly what the retained record names.
+  const done = await reclaimPassedCaseStorage(f.p, f.c, f.dir);
+  assert.equal(done.reclaimed.removed.length, 3);
+  for (const name of ['imported', 'resolved', 'ref']) assert.equal(await exists(f.files[name]), false, `${name} reclaimed on retry`);
 });
 test('per-case free-space preflight refuses below 2x checkpoint plus headroom', async () => {
   const c = { id: 'cuda.reduced.artifact-4', inputs: [{ role: 'checkpoint', path: 'E:\\staging\\x.safetensors' }], runtime: { scenario: 'unit_fake' } };

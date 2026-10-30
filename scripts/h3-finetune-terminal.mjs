@@ -864,29 +864,72 @@ export async function caseStorageReclaim(p, c, dir) {
     },
   };
 }
+// Assembly task paths are links, not copies: Unix stages each `minimax-h3-assemblies/<key>/{transformer,
+// transformer_ref}` as ONE directory symlink (provenance.rs `stage_h3_component_with_receipts`),
+// Windows as a real directory of per-file hard links. On macOS a Ref2VA case's transformer_ref is a
+// symlink to its own `data/models/resolved/.../bundle`; another partition points it at the resident
+// companion in the service's HF hub. The reclaim therefore never follows a link: every entry is
+// classified by lstat, a link (symlink or junction) is unlinked as itself, and whatever it points at
+// is reclaimed only when that is ITSELF a reclaim target. A hard link is a plain file name; unlinking
+// it never removes the other names of the same bytes.
+const RECLAIM_KINDS = ['file', 'dir', 'link'];
+function reclaimEntryKind(info) {
+  if (info.isSymbolicLink()) return 'link';
+  if (info.isFile()) return 'file';
+  if (info.isDirectory()) return 'dir';
+  return info.isSocket() ? 'socket' : info.isFIFO() ? 'fifo' : info.isBlockDevice() ? 'block device' : info.isCharacterDevice() ? 'character device' : 'unknown';
+}
+/** Plan a target's removal by an lstat walk: refuses any unexpected type BEFORE anything is removed. */
+async function planReclaimTree(target, root, fsImpl) {
+  const links = [];
+  const walk = async entry => {
+    const kind = reclaimEntryKind(await fsImpl.lstat(entry));
+    assert.ok(RECLAIM_KINDS.includes(kind), `reclaim refuses an unexpected ${kind} at ${entry}; nothing was removed`);
+    if (kind === 'link') {
+      const pointsAt = path.resolve(path.dirname(entry), await fsImpl.readlink(entry)), rel = path.relative(root, pointsAt);
+      links.push({ path: entry, target: pointsAt, targetInsideServiceRoot: rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel) });
+    } else if (kind === 'dir') for (const name of await fsImpl.readdir(entry)) await walk(path.join(entry, name));
+  };
+  await walk(target);
+  return links;
+}
+/** Remove a tree without ever following a link; each entry is re-classified at removal time. */
+export async function removeTreeNoFollow(target, fsImpl) {
+  const kind = reclaimEntryKind(await fsImpl.lstat(target));
+  if (kind === 'link') {
+    // A Windows directory symlink or junction may need rmdir; either way only the link goes.
+    try { await fsImpl.unlink(target); } catch (error) { if (!['EPERM', 'EISDIR'].includes(error.code)) throw error; await fsImpl.rmdir(target); }
+  } else if (kind === 'file') await fsImpl.unlink(target);
+  else if (kind === 'dir') { for (const name of await fsImpl.readdir(target)) await removeTreeNoFollow(path.join(target, name), fsImpl); await fsImpl.rmdir(target); }
+  else throw new Error(`reclaim refuses an unexpected ${kind} at ${target}`);
+}
 /** Remove a PASSED case's own model copies, recording what went and the hashes it was verified at. */
 export async function reclaimCaseModelStorage(p, c, dir, { removeImpl } = {}) {
-  const { rm, lstat } = await import('node:fs/promises');
+  const fsImpl = await import('node:fs/promises');
   // Only ever this run's own private root: on Actions the output root is `<run>-<attempt>-...`.
   if (process.env.GITHUB_RUN_ID) assert.ok(path.basename(p.output).startsWith(`${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-`), 'storage reclaim is confined to this run\'s own private root');
   const { root, targets } = await caseReclaimTargets(p, c);
-  try { await lstat(root); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  try { await fsImpl.lstat(root); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   const execution = path.join(dir, 'execution.json'), receipt = await json(execution);
   assert.equal(receipt.status, 'passed', 'only a recorded passed case is reclaimed');
-  const realRoot = await realpath(root), present = [];
+  const realRoot = await realpath(root), present = [], links = [];
   for (const target of targets) {
-    let info; try { info = await lstat(target); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
-    assert.ok(info.isDirectory() && !info.isSymbolicLink(), `reclaim target is not a plain directory: ${target}`);
-    const rel = path.relative(realRoot, await realpath(target));
-    assert.ok(rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel), 'reclaim target escapes the case service root');
+    try { await fsImpl.lstat(target); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    // The target itself may be a link (it is unlinked, never followed), but no directory between
+    // the service root and it may be: its real parent must be exactly its lexical parent.
+    const lexicalParent = path.relative(root, path.dirname(target)), realParent = path.relative(realRoot, await realpath(path.dirname(target)));
+    assert.ok(lexicalParent !== '' && !lexicalParent.startsWith('..') && !path.isAbsolute(lexicalParent), 'reclaim target escapes the case service root');
+    assert.equal(realParent, lexicalParent, `reclaim target escapes the case service root through a linked parent: ${target}`);
+    links.push(...await planReclaimTree(target, root, fsImpl));
     present.push(target);
   }
+  const remove = removeImpl ?? (target => removeTreeNoFollow(target, fsImpl));
   // A record already retained (an interrupted reclaim, or a resumed passed case): finish removing
   // exactly what it names, never anything it does not.
   const prior = await caseStorageReclaim(p, c, dir);
   if (prior) {
     for (const target of present) assert.ok(prior.record.removed.includes(target), 'reclaim target is not named by the retained reclaim record');
-    for (const target of present) await (removeImpl ?? rm)(target, { recursive: true, force: false });
+    for (const target of present) await remove(target);
     return prior.record;
   }
   const below = (base, file) => { const r = path.relative(base, path.resolve(stripVerbatim(file))); return r !== '' && !r.startsWith('..') && !path.isAbsolute(r); };
@@ -894,10 +937,29 @@ export async function reclaimCaseModelStorage(p, c, dir, { removeImpl } = {}) {
   try { for (const binding of (await json(path.join(dir, 'source-job-output.json'))).bindings ?? []) events.push(binding.event); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const preparedFiles = [];
   for (const event of events.filter(Boolean)) for (const s of normalizeLoadEvent(event).prepared_sources) if (present.some(t => below(t, s.path)) && !preparedFiles.some(f => f.path === s.path)) preparedFiles.push({ path: s.path, sha256: s.sha256 });
-  const record = { kind: 'case-storage-reclaim', caseId: c.id, executionSha256: await hashFile(execution), serviceRoot: root, removed: present, preparedFiles, reclaimedAt: new Date().toISOString(), meaning: 'This passed case\'s own import copy, normalized bundle and assembly companion were removed after its evidence and receipt hashes were recorded; re-validation holds each removed prepared file to the hash recorded here.' };
+  const record = { kind: 'case-storage-reclaim', caseId: c.id, executionSha256: await hashFile(execution), serviceRoot: root, removed: present, links, preparedFiles, reclaimedAt: new Date().toISOString(), meaning: 'This passed case\'s own import copy, normalized bundle and assembly companion were removed after its evidence and receipt hashes were recorded; re-validation holds each removed prepared file to the hash recorded here. Each link was unlinked as itself; its target was never followed or removed through the link.' };
   await writeFile(path.join(dir, 'storage-reclaim.json'), JSON.stringify(record, null, 2) + '\n', { flag: 'wx' });
-  for (const target of present) await (removeImpl ?? rm)(target, { recursive: true, force: false });
+  for (const target of present) await remove(target);
   return record;
+}
+/**
+ * Reclaim after a recorded PASS. A reclaim failure never fails the case or the lane by itself: the
+ * receipt stays PASSED, the failure is recorded in `storage-reclaim-failure.json` and annotated, and a
+ * resume retries it. The space is gated where it is actually needed: the next case's
+ * `assertCaseFreeSpace` (2x checkpoint + headroom) refuses before any work when the unreclaimed copies
+ * leave too little room, so the run volume is never exhausted silently.
+ */
+export async function reclaimPassedCaseStorage(p, c, dir, options = {}) {
+  try { return { reclaimed: await reclaimCaseModelStorage(p, c, dir, options) }; }
+  catch (error) {
+    let executionSha256 = null; try { executionSha256 = await hashFile(path.join(dir, 'execution.json')); } catch {}
+    let recordWritten = false; try { await stat(path.join(dir, 'storage-reclaim.json')); recordWritten = true; } catch {}
+    const failure = { kind: 'case-storage-reclaim-failure', caseId: c.id, executionSha256, error: error.message, recordWritten, failedAt: new Date().toISOString(), meaning: 'The case PASSED and its evidence is intact; only the per-case storage reclaim failed. Its copies stay on the run volume; the next case\'s free-space preflight refuses if that room is needed, and a resume retries the reclaim.' };
+    await writeFile(path.join(dir, 'storage-reclaim-failure.json'), JSON.stringify(failure, null, 2) + '\n');
+    const message = `storage reclaim failed after ${c.id} PASSED (the case stays passed; the next case's free-space preflight gates the room): ${error.message}`;
+    console.error(process.env.GITHUB_ACTIONS === 'true' ? `::warning title=H3 case storage reclaim failed::${message}` : `H3_STORAGE_RECLAIM_FAILED: ${message}`);
+    return { failed: failure };
+  }
 }
 export async function runCase(p, id, root, inferenceRoot) {
   assert.notEqual(p.proof_kind, 'unit_fake', 'unit_fake plan is not campaign authorization');
@@ -925,7 +987,7 @@ export async function runCase(p, id, root, inferenceRoot) {
     assert.equal(previous.status, 'passed', 'interrupted/failed case requires a new output directory, not silent overwrite');
     const verified = await validateEvidence(p, c, dir, await readFile(path.join(dir, 'process.log'), 'utf8'));
     assert.deepEqual(verified, previous.verified, 'resume evidence drift');
-    await reclaimCaseModelStorage(p, c, dir);
+    await reclaimPassedCaseStorage(p, c, dir);
     return previous;
   }
   await assertCaseFreeSpace(p, c);
@@ -952,8 +1014,9 @@ export async function runCase(p, id, root, inferenceRoot) {
     await save(statePath, receipt);
     passed = receipt;
   } catch (error) { await save(statePath, { ...identity, status: 'failed', error: error.message }); throw error; }
-  // Outside the try: a reclaim failure must never rewrite a recorded PASSED case as failed.
-  await reclaimCaseModelStorage(p, c, dir);
+  // Outside the try: a reclaim failure must never rewrite a recorded PASSED case as failed, and it
+  // is recorded rather than failing the lane (see reclaimPassedCaseStorage).
+  await reclaimPassedCaseStorage(p, c, dir);
   return passed;
 }
 export function validateDelivery(p) {
