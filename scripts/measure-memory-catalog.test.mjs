@@ -4703,7 +4703,7 @@ test("no candle plan row names a superseded version of an identity the pinned en
 // as a receipt they sealed themselves. `wan_2_2_i2v_14b:bf16:mlx` died on the FIRST probe after a
 // 383-second load before the arm mirrored that.
 //
-// The Wan half of the arm asks the engine for its token (`wan_i2v_memory::RECEIPT_VERSION` is
+// The Wan half of the arm asks the engine for its token (`gen_core_memory_wan::RECEIPT_VERSION` is
 // `pub`); the SCAIL-2 half cannot, because `mlx-gen-scail2` compares its token as a bare literal
 // inside `validate_context_revision_shape` and publishes no const for it. Both are bound to the
 // pinned engine source HERE so a rename reds rather than silently widening the arm's skip — and the
@@ -4715,14 +4715,14 @@ test("the Wan/SCAIL-2 arm's receipt tokens are the pinned engines' own, and the 
   );
 
   const wan = await readFile(
-    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core/src/wan_i2v_memory.rs"),
+    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core-memory-wan/src/receipts.rs"),
     "utf8",
   );
   const wanToken = /pub const RECEIPT_VERSION: &str = "([a-z0-9-]+)";/.exec(wan)?.[1];
-  assert.ok(wanToken, "gen-core's wan_i2v_memory still publishes RECEIPT_VERSION");
+  assert.ok(wanToken, "gen-core-memory-wan still publishes RECEIPT_VERSION");
   assert.match(
     arm,
-    /Some\(_\) => mlx_gen::gen_core::wan_i2v_memory::RECEIPT_VERSION,/,
+    /Some\(_\) => gen_core_memory_wan::RECEIPT_VERSION,/,
     "the Wan half must ASK the engine for its receipt token, never restate it",
   );
   // …and the arm's prose, which is what a record reader sees, names the same shape.

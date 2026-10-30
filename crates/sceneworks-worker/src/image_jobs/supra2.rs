@@ -157,20 +157,23 @@ mod tests {
         // generic lane forwards onto the job and the asset like any engine warning.
         assert_eq!(
             descriptor.capabilities.max_prompt_tokens,
-            Some(gen_core::supra2::MAX_PROMPT_TOKENS)
+            Some(gen_core_checkpoint::supra2::MAX_PROMPT_TOKENS)
         );
-        assert_eq!(gen_core::supra2::MAX_PROMPT_TOKENS, 128);
+        assert_eq!(gen_core_checkpoint::supra2::MAX_PROMPT_TOKENS, 128);
         assert_eq!(descriptor.capabilities.min_size, 256);
         assert_eq!(descriptor.capabilities.max_size, 256);
         let entry = shipped_supra2_entry();
         assert_eq!(entry["defaults"]["resolution"], "256x256");
-        assert_eq!(entry["defaults"]["steps"], gen_core::supra2::DEFAULT_STEPS);
+        assert_eq!(
+            entry["defaults"]["steps"],
+            gen_core_checkpoint::supra2::DEFAULT_STEPS
+        );
         assert_eq!(
             entry["defaults"]["guidanceScale"],
-            json!(gen_core::supra2::DEFAULT_GUIDANCE)
+            json!(gen_core_checkpoint::supra2::DEFAULT_GUIDANCE)
         );
         let row = crate::engines::mlx_model("supra2_img").expect("MODEL_TABLE row resolves");
-        assert_eq!(row.engine_id(), gen_core::supra2::PROVIDER_ID);
+        assert_eq!(row.engine_id(), gen_core_checkpoint::supra2::PROVIDER_ID);
         assert_eq!(row.backend(), expected_backend);
     }
 
@@ -435,7 +438,7 @@ mod tests {
             ]);
             let data = tempfile::tempdir().unwrap();
             let project = tempfile::tempdir().unwrap();
-            let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     data.path(),
                     pin.repo,
@@ -447,9 +450,9 @@ mod tests {
             let bundle = data.path().join("models/mlx/supra2_img");
             let started = std::time::Instant::now();
             crate::model_jobs::convert_supra2_bundle(
-                &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
-                &snapshot(gen_core::supra2::FLAN_T5_BASE),
-                &snapshot(gen_core::supra2::SD_VAE),
+                &snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+                &snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE),
+                &snapshot(gen_core_checkpoint::supra2::SD_VAE),
                 &bundle,
             )
             .expect("install-time conversion");
@@ -616,7 +619,7 @@ mod tests {
                 ("HF_HUB_OFFLINE", "1"),
             ]);
             let data = tempfile::tempdir().unwrap();
-            let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     data.path(),
                     pin.repo,
@@ -626,9 +629,9 @@ mod tests {
             };
             let bundle = data.path().join("models/mlx/supra2_img");
             crate::model_jobs::convert_supra2_bundle(
-                &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
-                &snapshot(gen_core::supra2::FLAN_T5_BASE),
-                &snapshot(gen_core::supra2::SD_VAE),
+                &snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+                &snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE),
+                &snapshot(gen_core_checkpoint::supra2::SD_VAE),
                 &bundle,
             )
             .expect("install-time conversion");
@@ -842,7 +845,7 @@ mod tests {
             settings.backend_candle_enabled = true;
             settings.heartbeat_seconds = 30;
 
-            let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     &settings.data_dir,
                     pin.repo,
@@ -858,9 +861,9 @@ mod tests {
             let bundle = settings.data_dir.join("models/mlx/supra2_img");
             let started = std::time::Instant::now();
             crate::model_jobs::convert_supra2_bundle(
-                &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
-                &snapshot(gen_core::supra2::FLAN_T5_BASE),
-                &snapshot(gen_core::supra2::SD_VAE),
+                &snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+                &snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE),
+                &snapshot(gen_core_checkpoint::supra2::SD_VAE),
                 &bundle,
             )
             .expect("install-time conversion");
@@ -1113,7 +1116,7 @@ mod tests {
             settings.heartbeat_seconds = 30;
             settings.huggingface_base_url = "http://127.0.0.1:9".to_owned();
 
-            let snapshot = |pin: gen_core::supra2::ComponentPin| {
+            let snapshot = |pin: gen_core_checkpoint::supra2::ComponentPin| {
                 crate::model_jobs::huggingface_pinned_snapshot_dir(
                     &settings.data_dir,
                     pin.repo,
@@ -1128,9 +1131,9 @@ mod tests {
             };
             let bundle = settings.data_dir.join("models/mlx/supra2_img");
             crate::model_jobs::convert_supra2_bundle(
-                &snapshot(gen_core::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
-                &snapshot(gen_core::supra2::FLAN_T5_BASE),
-                &snapshot(gen_core::supra2::SD_VAE),
+                &snapshot(gen_core_checkpoint::supra2::SUPRA2_SOURCE).join("model_final_ema.pt"),
+                &snapshot(gen_core_checkpoint::supra2::FLAN_T5_BASE),
+                &snapshot(gen_core_checkpoint::supra2::SD_VAE),
                 &bundle,
             )
             .expect("install-time conversion");
@@ -1627,8 +1630,8 @@ mod tests {
                         && std > crate::smoke_support::DEGENERATE_STD_FLOOR_DEFAULT
                         && asset["seed"] == json!(SEED)
                         && warnings(asset).is_empty()
-                        && raw["numInferenceSteps"] == json!(gen_core::supra2::DEFAULT_STEPS)
-                        && raw["guidanceScale"] == json!(gen_core::supra2::DEFAULT_GUIDANCE)
+                        && raw["numInferenceSteps"] == json!(gen_core_checkpoint::supra2::DEFAULT_STEPS)
+                        && raw["guidanceScale"] == json!(gen_core_checkpoint::supra2::DEFAULT_GUIDANCE)
                         && raw[sceneworks_core::supra2::UNCONDITIONAL_KEY] == "stored"
                         && raw[sceneworks_core::supra2::BACKEND_KEY] == BACKEND,
                     Some(base.latency_s),
@@ -1697,7 +1700,7 @@ mod tests {
                 let all_truncated = long.assets.iter().all(|asset| {
                     warnings(asset)
                         .iter()
-                        .any(|code| code == gen_core::supra2::PROMPT_TRUNCATED_WARNING)
+                        .any(|code| code == gen_core_checkpoint::supra2::PROMPT_TRUNCATED_WARNING)
                 });
                 let stds: Vec<f64> = long.images.iter().map(rgb_std).collect();
                 summary.check(
@@ -1869,9 +1872,9 @@ mod tests {
                     gen_core::GenerationReport::from_output(self.generate(req, on_progress)?);
                 report
                     .warnings
-                    .extend(gen_core::supra2::prompt_truncated_warning(
+                    .extend(gen_core_checkpoint::supra2::prompt_truncated_warning(
                         140,
-                        gen_core::supra2::MAX_PROMPT_TOKENS as usize,
+                        gen_core_checkpoint::supra2::MAX_PROMPT_TOKENS as usize,
                     ));
                 Ok(report)
             }
@@ -2074,7 +2077,7 @@ mod tests {
                 );
                 assert_eq!(
                     settings["generationWarnings"][0]["code"],
-                    gen_core::supra2::PROMPT_TRUNCATED_WARNING,
+                    gen_core_checkpoint::supra2::PROMPT_TRUNCATED_WARNING,
                     "{settings}"
                 );
             }
@@ -2105,7 +2108,7 @@ mod tests {
             let seen = seen.lock().unwrap().clone();
             assert_eq!(seen.len(), 1);
             assert_eq!((seen[0].seed, seen[0].count), (Some(41), 1));
-            assert_eq!(gen_core::supra2::image_seed(40, 1), 41);
+            assert_eq!(gen_core_checkpoint::supra2::image_seed(40, 1), 41);
             let mut seeds = Vec::new();
             while let Ok(event) = rx.try_recv() {
                 if let lane::GenEvent::Image { seed, .. } = event {
@@ -2265,7 +2268,7 @@ mod tests {
         /// pinned file at its pinned size.
         fn stage_component(
             data: &Path,
-            pin: gen_core::supra2::ComponentPin,
+            pin: gen_core_checkpoint::supra2::ComponentPin,
             config: &Value,
             tensor: &str,
         ) {
@@ -2283,7 +2286,7 @@ mod tests {
         /// admission depth): the manifest `convert_pinned_checkpoint` writes for the pinned
         /// checkpoint, and both converted files at their pinned sizes.
         fn stage_priceable_install(data: &Path) -> PathBuf {
-            use gen_core::supra2::{
+            use gen_core_checkpoint::supra2::{
                 BundleComponent, BundleFile, BundleManifest, BundleSource, Supra2Config,
                 FLAN_T5_BASE, PINNED_CONDITIONING, PINNED_DENOISER, SD_VAE, SUPRA2_SOURCE,
             };
@@ -2293,9 +2296,9 @@ mod tests {
                 FLAN_T5_BASE,
                 &json!({
                     "d_model": cfg.ctx_dim,
-                    "num_layers": gen_core::supra2::T5_LAYERS,
-                    "num_heads": gen_core::supra2::T5_HEADS,
-                    "d_kv": gen_core::supra2::T5_D_KV,
+                    "num_layers": gen_core_checkpoint::supra2::T5_LAYERS,
+                    "num_heads": gen_core_checkpoint::supra2::T5_HEADS,
+                    "d_kv": gen_core_checkpoint::supra2::T5_D_KV,
                     "relative_attention_num_buckets": 32,
                     "relative_attention_max_distance": 128,
                     "feed_forward_proj": "gated-gelu"
@@ -2307,29 +2310,30 @@ mod tests {
                 SD_VAE,
                 &json!({
                     "latent_channels": cfg.latent_channels,
-                    "layers_per_block": gen_core::supra2::VAE_LAYERS_PER_BLOCK,
-                    "norm_num_groups": gen_core::supra2::VAE_NORM_GROUPS,
-                    "block_out_channels": gen_core::supra2::VAE_BLOCK_OUT_CHANNELS
+                    "layers_per_block": gen_core_checkpoint::supra2::VAE_LAYERS_PER_BLOCK,
+                    "norm_num_groups": gen_core_checkpoint::supra2::VAE_NORM_GROUPS,
+                    "block_out_channels": gen_core_checkpoint::supra2::VAE_BLOCK_OUT_CHANNELS
                 }),
                 "decoder.weights",
             );
             let bundle = data.join("models/mlx/supra2_img");
-            let file = |pin: gen_core::supra2::PinnedFile| BundleFile {
+            let file = |pin: gen_core_checkpoint::supra2::PinnedFile| BundleFile {
                 file: pin.path.to_owned(),
                 bytes: pin.bytes,
                 sha256: pin.sha256.to_owned(),
             };
             let source = SUPRA2_SOURCE.files[0];
-            let component = |id: &str, pin: gen_core::supra2::ComponentPin| BundleComponent {
-                component: id.to_owned(),
-                repo: pin.repo.to_owned(),
-                revision: pin.revision.to_owned(),
-                license: pin.license.to_owned(),
-                download_bytes: pin.download_bytes(),
-            };
+            let component =
+                |id: &str, pin: gen_core_checkpoint::supra2::ComponentPin| BundleComponent {
+                    component: id.to_owned(),
+                    repo: pin.repo.to_owned(),
+                    revision: pin.revision.to_owned(),
+                    license: pin.license.to_owned(),
+                    download_bytes: pin.download_bytes(),
+                };
             let manifest = BundleManifest {
-                schema: gen_core::supra2::BUNDLE_SCHEMA.to_owned(),
-                provider_id: gen_core::supra2::PROVIDER_ID.to_owned(),
+                schema: gen_core_checkpoint::supra2::BUNDLE_SCHEMA.to_owned(),
+                provider_id: gen_core_checkpoint::supra2::PROVIDER_ID.to_owned(),
                 source: BundleSource {
                     repo: Some(SUPRA2_SOURCE.repo.to_owned()),
                     revision: Some(SUPRA2_SOURCE.revision.to_owned()),
@@ -2339,18 +2343,21 @@ mod tests {
                     weights_key: "ema".to_owned(),
                 },
                 config: cfg,
-                vae_scale: gen_core::supra2::VAE_SCALE,
+                vae_scale: gen_core_checkpoint::supra2::VAE_SCALE,
                 denoiser: file(PINNED_DENOISER),
                 denoiser_tensors: cfg.expected_tensors().len(),
                 conditioning: Some(file(PINNED_CONDITIONING)),
                 components: vec![
-                    component(gen_core::supra2::TEXT_ENCODER_COMPONENT, FLAN_T5_BASE),
-                    component(gen_core::supra2::VAE_COMPONENT, SD_VAE),
+                    component(
+                        gen_core_checkpoint::supra2::TEXT_ENCODER_COMPONENT,
+                        FLAN_T5_BASE,
+                    ),
+                    component(gen_core_checkpoint::supra2::VAE_COMPONENT, SD_VAE),
                 ],
             };
             std::fs::create_dir_all(&bundle).unwrap();
             std::fs::write(
-                bundle.join(gen_core::supra2::BUNDLE_MANIFEST),
+                bundle.join(gen_core_checkpoint::supra2::BUNDLE_MANIFEST),
                 serde_json::to_vec(&manifest).unwrap(),
             )
             .unwrap();

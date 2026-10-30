@@ -15,22 +15,22 @@
 //!   (`verify_resource`: size + sha256) before anything loads — nothing downloads at training time;
 //! * the **pre-launch views** the API serves: install availability, sidecar format/alignment checks
 //!   and a per-item dataset report under the run's invalid-example policy — all through the engine's
-//!   own readers (`gen_core::iris::train::depth`, `gen_core::iris::restoration_train`).
+//!   own readers (`gen_core_iris::train::depth`, `gen_core_iris::restoration_train`).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use gen_core::iris::downstream::{TaskExport, EMPTY_PROMPT_FILE};
-use gen_core::iris::restoration::RestorationResources;
-use gen_core::iris::restoration_train::{
+use gen_core::{TrainingConfig, TrainingItem, TrainingRequest, WeightsSource};
+use gen_core_iris::downstream::{TaskExport, EMPTY_PROMPT_FILE};
+use gen_core_iris::restoration::RestorationResources;
+use gen_core_iris::restoration_train::{
     self as restore_train, TrainingResource, TRAINING_RESOURCES,
 };
-use gen_core::iris::train::depth as depth_train;
-use gen_core::iris::{
+use gen_core_iris::train::depth as depth_train;
+use gen_core_iris::{
     IrisConfig, IrisTask, BACKBONE_CONFIG_FILE, BACKBONE_WEIGHTS_FILE, UPSTREAM_WEIGHTS_REPO,
     UPSTREAM_WEIGHTS_REVISION,
 };
-use gen_core::{TrainingConfig, TrainingItem, TrainingRequest, WeightsSource};
 use sceneworks_core::training::iris::depth::{
     depth_init, DEPTH_INIT_PARENT, ITEM_DEPTH_KEY as SW_ITEM_DEPTH_KEY,
 };
@@ -94,7 +94,7 @@ fn installed_generation_text_encoder(data_dir: &Path) -> Option<PathBuf> {
         .iter()
         .find(|download| {
             download.get("componentId").and_then(Value::as_str)
-                == Some(gen_core::iris::TEXT_ENCODER_COMPONENT)
+                == Some(gen_core_iris::TEXT_ENCODER_COMPONENT)
         })?;
     let snapshot = pinned_snapshot(
         data_dir,
@@ -505,7 +505,7 @@ pub(crate) fn task_load_inputs(
                         let encoder =
                             installed_generation_text_encoder(data_dir).expect("checked above");
                         components.insert(
-                            gen_core::iris::TEXT_ENCODER_COMPONENT.to_owned(),
+                            gen_core_iris::TEXT_ENCODER_COMPONENT.to_owned(),
                             WeightsSource::Dir(encoder),
                         );
                     }

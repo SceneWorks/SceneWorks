@@ -233,7 +233,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // backbone is the upstream `speridlabs/iris-3b` root; the Qwen3-VL text encoder is a separate
     // catalog co-requisite the descriptor declares (`required_components: ["text_encoder"]`), staged
     // as `LoadSpec::components["text_encoder"]` by the generic `attach_required_components`. Defaults are the release's own
-    // (`gen_core::iris::DEFAULT_STEPS` / `DEFAULT_CFG_SCALE`), pinned by a test below.
+    // (`gen_core_iris::DEFAULT_STEPS` / `DEFAULT_CFG_SCALE`), pinned by a test below.
     ModelRow {
         sceneworks_id: "iris_3b",
         engine_id: "iris_3b",
@@ -244,8 +244,8 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     },
     // FLUX 3 Image Klein, distilled (sc-26234, epic sc-26233) — `mlx-gen-flux3` registers
     // `flux3_klein`. The whole package (DiT + autoencoder + the bundled Qwen3-VL text encoder) is
-    // the one pinned upstream repository root, read by `gen_core::flux3::GenerationResources`; no
-    // co-requisite component. A flow map: 16 steps, no guidance (`gen_core::flux3::DEFAULT_STEPS`).
+    // the one pinned upstream repository root, read by `gen_core_flux3::GenerationResources`; no
+    // co-requisite component. A flow map: 16 steps, no guidance (`gen_core_flux3::DEFAULT_STEPS`).
     ModelRow {
         sceneworks_id: "flux3_klein",
         engine_id: "flux3_klein",
@@ -267,7 +267,7 @@ pub(crate) const MODEL_TABLE: &[ModelRow] = &[
     // is the locally converted bundle (convert-at-install, injected `modelPath`); Flan-T5-Base and
     // SD VAE ft-MSE are catalog co-requisites the descriptor declares (`text_encoder`, `vae`), staged
     // by the generic `attach_required_components`. Defaults are the release's own
-    // (`gen_core::supra2::DEFAULT_STEPS` / `DEFAULT_GUIDANCE`).
+    // (`gen_core_checkpoint::supra2::DEFAULT_STEPS` / `DEFAULT_GUIDANCE`).
     ModelRow {
         sceneworks_id: "supra2_img",
         engine_id: "supra2_img",
@@ -1999,11 +1999,11 @@ mod tests {
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
-            "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            "iris_3b" => gen_core_iris::SIZE_MULTIPLE,
             // Both frozen FLUX3 checkpoints share the pinned packed-token grid, not weights.
-            "flux3_klein" | "flux3_klein_base" => gen_core::flux3::DOWNSAMPLING_RATIO,
+            "flux3_klein" | "flux3_klein_base" => gen_core_flux3::DOWNSAMPLING_RATIO,
             // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
-            // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
+            // gen_core_checkpoint::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
             "supra2_img" => 256,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.
@@ -2053,13 +2053,13 @@ mod tests {
             "qwen_image_2_1" | "qwen_image_2_1_turbo" => 32,
             "moss_image_base" | "moss_image_sft" => 16,
             // Iris-3B (sc-25679): the backend-neutral contract publishes the patch lattice.
-            "iris_3b" => gen_core::iris::SIZE_MULTIPLE,
+            "iris_3b" => gen_core_iris::SIZE_MULTIPLE,
             // FLUX 3 Image Klein (sc-26234): 16 pixels per packed token (8× VAE × 2×2 patchify).
             // An ASSERTION-only literal on this lane: no Candle provider exists until sc-26235,
             // which replaces it with that provider's constant.
             "flux3_klein" | "flux3_klein_base" => 16,
             // Supra2-IMG (sc-24213) renders exactly one 256x256 geometry (min = max =
-            // gen_core::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
+            // gen_core_checkpoint::supra2::IMAGE_SIZE), so its only legal stride is the whole edge.
             "supra2_img" => 256,
             "z_image" | "z_image_turbo" => p::z_image::SIZE_MULTIPLE,
             // bernini_image renders on a Wan2.2-A14B snapshot; its stride is wan's, not a bernini const.

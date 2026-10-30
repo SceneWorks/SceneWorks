@@ -2858,7 +2858,7 @@ pub fn read_adapter_metadata(header: &Value) -> AdapterFileMetadata {
     }
 }
 
-// Mirrors inference gen_core::flux3::adapters semantic admission without linking an engine
+// Mirrors inference gen_core_flux3::adapters semantic admission without linking an engine
 // into rust-api. Native/PEFT alpha conventions are accepted only when mutually consistent.
 fn flux3_metadata_error(detail: impl std::fmt::Display) -> String {
     detail.to_string()

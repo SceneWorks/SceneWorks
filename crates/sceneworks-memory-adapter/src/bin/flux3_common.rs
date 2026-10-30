@@ -263,7 +263,7 @@ pub(super) fn spec(lane: &str, plan: &Plan) -> Result<LoadSpec, String> {
         spec.adapters = case.adapters.clone();
         if let Some(root) = &case.pup_root {
             spec.components.insert(
-                core::flux3::pup::UPSAMPLER_COMPONENT.into(),
+                gen_core_flux3::pup::UPSAMPLER_COMPONENT.into(),
                 WeightsSource::Dir(root.clone()),
             );
         }
@@ -376,7 +376,7 @@ pub(super) fn actual_spec_observation(plan: &Plan, spec: &LoadSpec) -> Result<Va
     {
         if spec
             .components
-            .get(core::flux3::pup::UPSAMPLER_COMPONENT)
+            .get(gen_core_flux3::pup::UPSAMPLER_COMPONENT)
             .map(source)
             != Some(json!({"kind":"Dir","path":root}))
         {
@@ -1541,7 +1541,7 @@ mod tests {
 
     #[test]
     fn flux3_both_constructed_requests_satisfy_the_real_native_parameter_contract() {
-        use super::core::flux3::{
+        use gen_core_flux3::{
             DitConfig, Flux3Config, GenerationParams, SamplerConfig, TextEncoderConfig, VaeConfig,
         };
         for lane in ["candle", "mlx"] {
@@ -1595,7 +1595,7 @@ mod tests {
                     sampler: SamplerConfig {
                         steps: checkpoint.steps,
                         guidance: checkpoint.guidance.map(f64::from),
-                        alpha: f64::from(core::flux3::DEFAULT_ALPHA),
+                        alpha: f64::from(gen_core_flux3::DEFAULT_ALPHA),
                         size: [1024, 1024],
                     },
                 };

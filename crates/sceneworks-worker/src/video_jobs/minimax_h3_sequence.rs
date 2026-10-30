@@ -13,7 +13,7 @@
 //!
 //! # Where the sequence size comes from
 //!
-//! Not re-derived here. [`gen_core::veda::workspace::h3_row_bound`] is the inference contract's
+//! Not re-derived here. [`gen_core_h3::veda::workspace::h3_row_bound`] is the inference contract's
 //! own tensor-free H3 layout envelope — the same packing rules (target lattice `17n + 5 → 5n + 2`
 //! latents at `pixels / 32` patches, reference image short edge or resize mode, the clip canvas
 //! envelope at the 768 x 1344 area, 2 fps vision sampling merged in pairs with the Qwen3-VL
@@ -105,7 +105,7 @@ pub(super) fn minimax_h3_packed_rows(
     frames: u32,
     request: MinimaxH3StallRequest<'_>,
 ) -> Option<u64> {
-    gen_core::veda::workspace::h3_row_bound(gen_core::veda::workspace::Request {
+    gen_core_h3::veda::workspace::h3_row_bound(gen_core_h3::veda::workspace::Request {
         veda: None,
         width,
         height,

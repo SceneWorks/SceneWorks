@@ -3978,8 +3978,8 @@ fn candle_certified_artifact_path(
         "iris_3b" => {
             return candle_certified_hf_artifact_path(
                 settings,
-                gen_core::iris::UPSTREAM_WEIGHTS_REPO,
-                gen_core::iris::UPSTREAM_WEIGHTS_REVISION,
+                gen_core_iris::UPSTREAM_WEIGHTS_REPO,
+                gen_core_iris::UPSTREAM_WEIGHTS_REVISION,
                 Path::new(""),
                 weights_dir,
             );

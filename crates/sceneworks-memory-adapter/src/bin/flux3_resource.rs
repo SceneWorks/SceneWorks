@@ -161,7 +161,7 @@ fn binding(root: &Path, value: &Value) -> Result<(PathBuf, Value), String> {
     {
         return Err(blocked("full lowercase SHA256 required"));
     }
-    let actual = core::flux3::conversion::hash_source_file(&path).map_err(blocked)?;
+    let actual = gen_core_flux3::conversion::hash_source_file(&path).map_err(blocked)?;
     if actual.sha256 != expected
         || value
             .get("bytes")
@@ -195,7 +195,7 @@ pub(super) fn model_inventory() -> Result<Value, String> {
                     return Err(blocked("directory links are not inventory files"));
                 }
                 let file =
-                    core::flux3::conversion::hash_source_file(&entry.path()).map_err(blocked)?;
+                    gen_core_flux3::conversion::hash_source_file(&entry.path()).map_err(blocked)?;
                 files.push(json!({"path":relative.to_string_lossy().replace('\\',"/"),"bytes":file.bytes,"sha256":file.sha256}));
             }
         }
@@ -210,8 +210,8 @@ pub(super) fn model_inventory() -> Result<Value, String> {
     // than accidentally pricing the entire source repository as the DiT package.
     if package == original {
         for name in ["config.json", "model.safetensors"] {
-            let file =
-                core::flux3::conversion::hash_source_file(&package.join(name)).map_err(blocked)?;
+            let file = gen_core_flux3::conversion::hash_source_file(&package.join(name))
+                .map_err(blocked)?;
             package_files.push(json!({"path":name,"bytes":file.bytes,"sha256":file.sha256}));
         }
     } else {
@@ -223,7 +223,7 @@ pub(super) fn model_inventory() -> Result<Value, String> {
         Path::new(""),
         &mut encoder_files,
     )?;
-    let ae = core::flux3::conversion::hash_source_file(&original.join("ae.safetensors"))
+    let ae = gen_core_flux3::conversion::hash_source_file(&original.join("ae.safetensors"))
         .map_err(blocked)?;
     Ok(json!({"package":{"root":package,"files":package_files},
         "text_encoder":{"root":original.join("text_encoder"),"files":encoder_files},
@@ -352,16 +352,16 @@ pub(super) fn bind(
         string(reference, "assetId")?;
         let (path, mut inventory) = binding(&root, reference)?;
         let conditioning =
-            core::flux3::references::decode_reference_file(&path).map_err(blocked)?;
+            gen_core_flux3::references::decode_reference_file(&path).map_err(blocked)?;
         let size = match &conditioning {
             core::Conditioning::Reference { image, .. } => (image.width, image.height),
             core::Conditioning::ReferenceRgba { image, .. } => (image.width, image.height),
             _ => return Err(blocked("decoder did not return a source-mode reference")),
         };
         if generation.get("layout").is_some() {
-            request
-                .flux3_layout_bindings
-                .push(core::flux3::layouts::ReferenceBinding::oriented(id, size));
+            request.flux3_layout_bindings.push(
+                gen_core_flux3::layouts::ReferenceBinding::oriented(id, size),
+            );
         }
         inventory["decodedCarrier"] = reference_carrier(&conditioning)
             .ok_or_else(|| blocked("missing native reference carrier"))?;
@@ -374,9 +374,9 @@ pub(super) fn bind(
     }
     if let Some(layout) = generation.get("layout") {
         request.flux3_layout =
-            Some(core::flux3::layouts::Layout::from_json(layout.clone()).map_err(blocked)?);
+            Some(gen_core_flux3::layouts::Layout::from_json(layout.clone()).map_err(blocked)?);
     }
-    core::flux3::references::normalize_request(&mut request).map_err(blocked)?;
+    gen_core_flux3::references::normalize_request(&mut request).map_err(blocked)?;
     let mut adapters = Vec::new();
     for (index, adapter) in value["adapters"]
         .as_array()
@@ -406,8 +406,8 @@ pub(super) fn bind(
             component,
             &["root", "repository", "resolvedRevision", "inventory"],
         )?;
-        if component["repository"] != core::flux3::pup::UPSAMPLER_REPO
-            || component["resolvedRevision"] != core::flux3::pup::UPSAMPLER_REVISION
+        if component["repository"] != gen_core_flux3::pup::UPSAMPLER_REPO
+            || component["resolvedRevision"] != gen_core_flux3::pup::UPSAMPLER_REVISION
         {
             return Err(blocked("PUP checkpoint identity mismatch"));
         }
@@ -426,7 +426,7 @@ pub(super) fn bind(
             inventory["role"] = json!("prompt_upsampler");
             inputs.push(inventory);
         }
-        for name in core::flux3::pup::UPSAMPLER_REQUIRED_FILES {
+        for name in gen_core_flux3::pup::UPSAMPLER_REQUIRED_FILES {
             if !names.contains(name) {
                 return Err(blocked(format!("missing PUP inventory {name}")));
             }
@@ -481,7 +481,7 @@ pub(super) fn bind(
     let mut hasher = Sha256::new();
     hasher.update(b"sceneworks-flux3-supplemental-request-v1\0");
     hasher.update(canonical_bytes(value)?);
-    let reference_resources = core::flux3::references::request_plan(&request)
+    let reference_resources = gen_core_flux3::references::request_plan(&request)
         .map_err(blocked)?
         .map(|plan| plan.memory_resources())
         .transpose()
@@ -731,7 +731,7 @@ mod tests {
         )
         .unwrap();
         let file =
-            core::flux3::conversion::hash_source_file(&fixture.0.join("adapter.safetensors"))
+            gen_core_flux3::conversion::hash_source_file(&fixture.0.join("adapter.safetensors"))
                 .unwrap();
         for provider in [PROVIDER, BASE_PROVIDER] {
             let mut value = case(provider);
@@ -788,7 +788,7 @@ mod tests {
         )
         .unwrap();
         let file =
-            core::flux3::conversion::hash_source_file(&fixture.0.join("reference.png")).unwrap();
+            gen_core_flux3::conversion::hash_source_file(&fixture.0.join("reference.png")).unwrap();
         let mut value = case(PROVIDER);
         value["references"]=json!((0..10).map(|index| json!({"instanceId":format!("instance-{index}"),"assetId":"same-asset","index":index,"path":"reference.png","sha256":file.sha256})).collect::<Vec<_>>());
         let bound = bind(

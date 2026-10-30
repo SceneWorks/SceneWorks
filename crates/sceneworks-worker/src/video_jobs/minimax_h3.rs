@@ -1829,8 +1829,8 @@ pub(super) async fn generate_candle_minimax_h3_using(
         })?;
         // Price the cold-load envelope from the same complete parsed controls used by
         // the queued gate and generation, including budgets and dense overrides.
-        let sparse_bound = gen_core::veda::workspace::for_video_request(
-            gen_core::veda::workspace::Request {
+        let sparse_bound = gen_core_h3::veda::workspace::for_video_request(
+            gen_core_h3::veda::workspace::Request {
                 veda: veda.as_ref(),
                 width: request.width,
                 height: request.height,
@@ -1841,7 +1841,7 @@ pub(super) async fn generate_candle_minimax_h3_using(
                 reference_image_short_edge,
                 reference_image_resize_mode,
             },
-            gen_core::veda::workspace::Backend::Cuda,
+            gen_core_h3::veda::workspace::Backend::Cuda,
         )
         .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
         if let Some(bound) = sparse_bound.as_ref() {

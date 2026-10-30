@@ -1,7 +1,7 @@
 //! Iris-3B generation training — the SceneWorks product surface of the native MLX (sc-25685) and
 //! Candle/CUDA (sc-25686) trainers registered under `iris_3b` (epic sc-25678).
 //!
-//! The engine contract is `gen_core::iris::train`: the shared `TrainingConfig` plus the
+//! The engine contract is `gen_core_iris::train`: the shared `TrainingConfig` plus the
 //! `model_options["iris"]` options bag, whose unknown keys the trainer REFUSES. This module owns
 //! the SceneWorks half of that contract so the Training Studio offers exactly what the trainer
 //! accepts and nothing it refuses (E3):
@@ -62,7 +62,7 @@ pub const IRIS_GENERATION_TASK: &str = "generation";
 /// `TrainingConfig.advanced` key carrying the engine's `model_options["iris"]` bag verbatim.
 pub const IRIS_OPTIONS_KEY: &str = "iris";
 /// `TrainingDatasetItem.extra` key carrying an item's named captions — passed through to the
-/// engine `TrainingItem.model_options["captions"]` (`gen_core::iris::train::ITEM_CAPTIONS_KEY`).
+/// engine `TrainingItem.model_options["captions"]` (`gen_core_iris::train::ITEM_CAPTIONS_KEY`).
 pub const ITEM_CAPTIONS_KEY: &str = "captions";
 /// Request key naming a previous Iris training job to RESUME (its newest durable checkpoint). The
 /// API resolves it to the engine's `resume_from` path; a client never sends a path.
@@ -70,7 +70,7 @@ pub const RESUME_FROM_JOB_KEY: &str = "resumeFromJobId";
 /// Request key naming a previous FULL Iris training job whose weights seed a full run
 /// (`init: load_from`). The API resolves it to the engine's `load_from` path.
 pub const LOAD_FROM_JOB_KEY: &str = "loadFromJobId";
-/// Upstream's most preview prompts per cadence (`gen_core::iris::train::PREVIEW_PROMPT_CAP`).
+/// Upstream's most preview prompts per cadence (`gen_core_iris::train::PREVIEW_PROMPT_CAP`).
 pub const IRIS_PREVIEW_PROMPT_CAP: u32 = 4;
 
 /// The micro-step fields that must be whole `gradientAccumulation` windows. `(request field, where it
@@ -83,7 +83,7 @@ pub const IRIS_MICRO_STEP_FIELDS: [(&str, bool); 4] = [
 ];
 
 /// Every engine option a client may set. The engine's full allow-list
-/// (`gen_core::iris::train::IrisTrainOptions`) minus the two PATH options the API resolves from a
+/// (`gen_core_iris::train::IrisTrainOptions`) minus the two PATH options the API resolves from a
 /// trusted job id ([`IRIS_API_OWNED_OPTION_KEYS`]).
 pub const IRIS_CLIENT_OPTION_KEYS: [&str; 33] = [
     "init",

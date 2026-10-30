@@ -90,9 +90,9 @@ pub fn flux3_runtime_bundle_check(
     package_dir: &Path,
     model_id: &str,
 ) -> std::result::Result<(), String> {
-    let resources = gen_core::flux3::GenerationResources {
+    let resources = gen_core_flux3::GenerationResources {
         package_dir: package_dir.to_path_buf(),
-        text_encoder_dir: package_dir.join(gen_core::flux3::TEXT_ENCODER_COMPONENT),
+        text_encoder_dir: package_dir.join(gen_core_flux3::TEXT_ENCODER_COMPONENT),
         autoencoder_file: package_dir.join("ae.safetensors"),
     };
     resources
@@ -151,8 +151,8 @@ pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> 
         flux3_snapshot_member(root, &package.join(name), false)?;
     }
     // Header-authoritative checkpoint boundary: flow map from the selected native header.
-    let config = gen_core::flux3::resolve_checkpoint(&package).map_err(|e| e.to_string())?;
-    let storage = gen_core::flux3::artifacts::NativeDitStorage::from_package(&package)
+    let config = gen_core_flux3::resolve_checkpoint(&package).map_err(|e| e.to_string())?;
+    let storage = gen_core_flux3::artifacts::NativeDitStorage::from_package(&package)
         .map_err(|e| e.to_string())?;
     if storage.key().map_err(|e| e.to_string())? != tier {
         return Err(format!(
@@ -166,14 +166,14 @@ pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> 
     flux3_snapshot_member(root, &ae, false)?;
     let spec = gen_core::LoadSpec::new(gen_core::WeightsSource::Dir(package))
         .with_component(
-            gen_core::flux3::TEXT_ENCODER_COMPONENT,
+            gen_core_flux3::TEXT_ENCODER_COMPONENT,
             gen_core::WeightsSource::Dir(te),
         )
         .with_component(
-            gen_core::flux3::AUTOENCODER_COMPONENT,
+            gen_core_flux3::AUTOENCODER_COMPONENT,
             gen_core::WeightsSource::File(ae),
         );
-    gen_core::flux3::GenerationResources::from_spec(&spec, &config, model)
+    gen_core_flux3::GenerationResources::from_spec(&spec, &config, model)
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -182,11 +182,11 @@ pub fn flux3_runtime_tier_bundle_check(root: &Path, tier: &str, model: &str) -> 
 /// encoder/autoencoder files by their conversion receipt, plus the encoder shard set. This is an
 /// integrity check, not a GPU load or memory measurement.
 pub fn flux3_converted_bundle_check(root: &Path, package: &Path) -> Result<(), String> {
-    use gen_core::flux3::conversion::ComponentRole;
+    use gen_core_flux3::conversion::ComponentRole;
     // Header-authoritative checkpoint boundary for the converted native package.
-    let config = gen_core::flux3::resolve_checkpoint(package).map_err(|e| e.to_string())?;
+    let config = gen_core_flux3::resolve_checkpoint(package).map_err(|e| e.to_string())?;
     let receipt =
-        gen_core::flux3::conversion::open_conversion(package).map_err(|e| e.to_string())?;
+        gen_core_flux3::conversion::open_conversion(package).map_err(|e| e.to_string())?;
     let te = root.join(&config.text_encoder.path);
     let ae = root.join(&config.vae.path);
     flux3_snapshot_member(root, &te, true)?;

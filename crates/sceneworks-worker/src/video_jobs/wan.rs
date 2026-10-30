@@ -3112,7 +3112,7 @@ pub(super) async fn generate_video_using(
                     generator.memory_strategy_contract(),
                 )?;
                 let sparse_bound = generator
-                    .veda_workspace_bound(gen_core::veda::workspace::Request {
+                    .veda_workspace_bound(gen_core_h3::veda::workspace::Request {
                         veda: input.veda.as_ref(),
                         width: input.width,
                         height: input.height,
@@ -3129,7 +3129,7 @@ pub(super) async fn generate_video_using(
                     .and_then(|contract| contract.phase_facts.as_ref())
                     .and_then(|phase| phase.native_quant.as_ref())
                     .map(|_| crate::video_admission::NativeQuantRequest {
-                        shape: gen_core::veda::workspace::Request {
+                        shape: gen_core_h3::veda::workspace::Request {
                             veda: input.veda.as_ref(),
                             width: input.width,
                             height: input.height,

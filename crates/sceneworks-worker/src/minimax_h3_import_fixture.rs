@@ -1047,7 +1047,7 @@ fn pruned_managed_import_seals_source_precision_and_whole_basis_identity() {
                 gen_core::WeightsSource::Dir(first.output.clone()),
             );
         let contract = h3::memory_strategy::contract_for(&spec).unwrap();
-        let rows = gen_core::pruned_adaln::SourcePruneSizing::conditioned_timestep_bound(
+        let rows = gen_core_h3::pruned_adaln::SourcePruneSizing::conditioned_timestep_bound(
             h3::model::MAX_STEPS as usize,
         )
         .unwrap() as u64;

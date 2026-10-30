@@ -19,9 +19,9 @@ use std::path::{Path, PathBuf};
 
 use gen_core::checkpoint_codec::{CheckpointCodecRegistry, WeightEncoding, DENSE_CODECS};
 use gen_core::convrot_int8::{ConvRotInt8, MAX_DESCRIPTOR_BYTES};
-use gen_core::pruned_adaln::{PrunedAdaLn, PruningIdentity, TABLE_KEY, TOPOLOGY_ID};
 use gen_core::w4a8_int8::W4A8Int8;
 use gen_core::weightsmeta::Dtype;
+use gen_core_h3::pruned_adaln::{PrunedAdaLn, PruningIdentity, TABLE_KEY, TOPOLOGY_ID};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -305,7 +305,7 @@ pub enum H3QkvLayout {
 /// Exact consumer binding between an H3 source's reduced centered-curve AdaLN topology and the
 /// shared native generators (sc-26684). `identity` is the full 64-hex engine content hash over
 /// every canonical operand value in contract order, at the ORIGINAL stored dtype, produced by
-/// `gen_core::pruned_adaln::PrunedAdaLn::identity_builder` over the same normalized bytes both
+/// `gen_core_h3::pruned_adaln::PrunedAdaLn::identity_builder` over the same normalized bytes both
 /// native caches consume. `sourceBytes` counts stored operand bytes at their dtype width and
 /// `computeBytes` counts the same operands once widened to F32; they are deliberately separate
 /// quantities, never interchangeable.

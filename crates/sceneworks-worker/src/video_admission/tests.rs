@@ -5501,10 +5501,10 @@ fn veda_queued_admission_uses_complete_bound_and_current_budget() {
         ..Default::default()
     };
     for backend in [
-        gen_core::veda::workspace::Backend::Mlx,
-        gen_core::veda::workspace::Backend::Cuda,
+        gen_core_h3::veda::workspace::Backend::Mlx,
+        gen_core_h3::veda::workspace::Backend::Cuda,
     ] {
-        let bound = gen_core::veda::workspace::for_request(&req, backend)
+        let bound = gen_core_h3::veda::workspace::for_request(&req, backend)
             .unwrap()
             .unwrap();
         let floor = crate::mlx_fit_gate::estimate_floor_weights_bytes(
@@ -5555,7 +5555,7 @@ fn veda_sparse_admission_selects_the_dense_strategy_with_the_bound_on_top() {
         ..Default::default()
     };
     let mut bound =
-        gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Mlx)
+        gen_core_h3::veda::workspace::for_request(&req, gen_core_h3::veda::workspace::Backend::Mlx)
             .unwrap()
             .unwrap();
     bound.total_bytes = 4 * GIB;
@@ -5635,10 +5635,12 @@ fn veda_cold_admission_adds_full_bound_and_preserves_off_baseline() {
         }),
         ..Default::default()
     };
-    let bound =
-        gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
-            .unwrap()
-            .unwrap();
+    let bound = gen_core_h3::veda::workspace::for_request(
+        &req,
+        gen_core_h3::veda::workspace::Backend::Cuda,
+    )
+    .unwrap()
+    .unwrap();
     let sparse = veda_cold_peak_gb(dense, Some(&bound));
     assert_eq!(sparse, dense + bound.total_bytes as f64 / GIB as f64);
     assert!(
@@ -5660,9 +5662,12 @@ fn veda_cuda_host_pool_is_checked_independently_and_fail_closed() {
         }),
         ..Default::default()
     };
-    let b = gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
-        .unwrap()
-        .unwrap();
+    let b = gen_core_h3::veda::workspace::for_request(
+        &req,
+        gen_core_h3::veda::workspace::Backend::Cuda,
+    )
+    .unwrap()
+    .unwrap();
     let host = veda_host_workspace_bytes(&b);
     assert!(host >= b.predictor_host_bytes + b.predictor_load_bytes);
     assert!(host <= b.total_bytes);
@@ -5780,7 +5785,7 @@ fn native_quant_contract(lane: VideoLane, activation_width: u64) -> MemoryProvid
 
 fn native_quant_request<'a>(conditioning: &'a [gen_core::Conditioning]) -> NativeQuantRequest<'a> {
     NativeQuantRequest {
-        shape: gen_core::veda::workspace::Request {
+        shape: gen_core_h3::veda::workspace::Request {
             veda: None,
             // The real selector must replace this placeholder with each admitted geometry.
             width: 32,
@@ -5805,7 +5810,7 @@ fn native_rows_at(
 ) -> gen_core::h3_memory::NativeRows {
     native
         .request_rows(
-            gen_core::veda::workspace::Request {
+            gen_core_h3::veda::workspace::Request {
                 width: geometry.width,
                 height: geometry.height,
                 frames: geometry.estimate_frames(),
@@ -6795,13 +6800,13 @@ fn native_quant_resolved_references_and_keyframes_price_real_encode_and_serial_d
             [(true, keyframes.as_slice()), (false, references.as_slice())]
         {
             let request = native_quant_request(conditioning);
-            let shape = gen_core::veda::workspace::Request {
+            let shape = gen_core_h3::veda::workspace::Request {
                 width: geometry.width,
                 height: geometry.height,
                 frames: geometry.frames,
                 ..request.shape
             };
-            let workspace = gen_core::h3_conditioning_memory::workspace(&shape, facts).unwrap();
+            let workspace = gen_core_h3::h3_conditioning_memory::workspace(&shape, facts).unwrap();
             assert!(
                 workspace.conditioning_bytes > 0,
                 "real references never classify as encodes-nothing"

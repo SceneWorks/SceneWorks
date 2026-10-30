@@ -21780,8 +21780,8 @@ impl Generator for VedaAdmissionProbe {
     }
     fn veda_workspace_bound(
         &self,
-        r: gen_core::veda::workspace::Request<'_>,
-    ) -> gen_core::Result<Option<gen_core::veda::workspace::WorkspaceBound>> {
+        r: gen_core_h3::veda::workspace::Request<'_>,
+    ) -> gen_core::Result<Option<gen_core_h3::veda::workspace::WorkspaceBound>> {
         if let Some(veda) = r.veda.filter(|v| v.enabled) {
             assert_eq!(veda.generated, gen_core::VedaBudget::KeyTiles(32));
             assert_eq!(veda.reference, gen_core::VedaBudget::SparsityPercent(0.0));

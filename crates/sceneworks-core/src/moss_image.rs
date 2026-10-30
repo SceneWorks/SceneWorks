@@ -377,7 +377,8 @@ pub fn native_request(
         }
     }
     if edit {
-        request = gen_core::moss_image_edit::edit_request(&request).map_err(|e| e.to_string())?;
+        request = gen_core_moss_image::moss_image_edit::edit_request(&request)
+            .map_err(|e| e.to_string())?;
     }
     let resolved = MossImageResolved::resolve(variant, &request).map_err(|e| e.to_string())?;
     if edit {

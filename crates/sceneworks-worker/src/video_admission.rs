@@ -32,10 +32,13 @@
 //! and the image lane remains untouched at one frame.
 
 use gen_core::tiling::VideoDecodeMemoryProfile;
+// Request/component pricing on `NativeAllocationFacts` moved into gen-core-h3 (inference sc-27316)
+// as an extension trait.
 use gen_core::{
     Conditioning, MemoryBackend, MemoryBudget, MemoryCacheState, MemoryGeometry, MemoryNumericTier,
     MemoryProviderContract, MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy,
 };
+use gen_core_h3::h3_memory::NativeAllocationFactsExt;
 use sceneworks_core::memory_calibration::{Ltx25Decoder, Ltx25TransformerVariant, StrategyRung};
 use sceneworks_core::video_memory_curves::{
     VideoCurveBackend, VideoCurveDecodePass, VideoCurveGeometry, VideoCurveLoadShape,
@@ -1526,7 +1529,7 @@ fn native_quant_phase_floor(
         // Native-main late consumer delta: packed row counts follow the SELECTED partition's own
         // patch geometry, never the stock [1, 2, 2]. A source whose selected partition disagrees
         // with this request's geometry is surfaced here rather than priced at wrong rows.
-        let workspace = gen_core::h3_conditioning_memory::workspace_with_patch(
+        let workspace = gen_core_h3::h3_conditioning_memory::workspace_with_patch(
             &shape,
             conditioning,
             native.selected_patch(shape)?,
@@ -3478,13 +3481,16 @@ fn refusal_is_a_margin_artifact(
 /// envelope before tokenization, not measured memory or an executed-tensor receipt.
 #[derive(Clone, Copy)]
 pub(crate) struct NativeQuantRequest<'a> {
-    pub(crate) shape: gen_core::veda::workspace::Request<'a>,
+    pub(crate) shape: gen_core_h3::veda::workspace::Request<'a>,
     pub(crate) evaluations: Option<u32>,
 }
 
 impl<'a> NativeQuantRequest<'a> {
-    fn shape_at(self, geometry: VideoAdmissionGeometry) -> gen_core::veda::workspace::Request<'a> {
-        gen_core::veda::workspace::Request {
+    fn shape_at(
+        self,
+        geometry: VideoAdmissionGeometry,
+    ) -> gen_core_h3::veda::workspace::Request<'a> {
+        gen_core_h3::veda::workspace::Request {
             width: geometry.width,
             height: geometry.height,
             frames: geometry.estimate_frames(),
@@ -3698,7 +3704,7 @@ const fn rung_of(strategy: MemoryStrategy) -> StrategyRung {
 pub(crate) fn admit_video_generation_with_veda(
     generator: &dyn gen_core::Generator,
     request: VideoAdmissionInputs<'_>,
-    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
     floor_headroom_bytes: u64,
 ) -> crate::WorkerResult<VideoAdmissionOutcome> {
     admit_with_veda_bound(
@@ -3713,7 +3719,7 @@ pub(crate) fn admit_video_generation_with_veda(
 fn admit_with_veda_bound(
     generator: &dyn gen_core::Generator,
     mut request: VideoAdmissionInputs<'_>,
-    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
     floor_headroom_bytes: u64,
     dense: impl FnOnce(&dyn gen_core::Generator, VideoAdmissionInputs<'_>) -> VideoAdmissionOutcome,
 ) -> crate::WorkerResult<VideoAdmissionOutcome> {
@@ -3745,7 +3751,7 @@ fn admit_with_veda_bound(
 /// problem bound, never to enlarge it.
 pub(crate) fn admit_veda_workspace(
     contract: Option<&MemoryProviderContract>,
-    bound: &gen_core::veda::workspace::WorkspaceBound,
+    bound: &gen_core_h3::veda::workspace::WorkspaceBound,
     selection: Option<&gen_core::MemorySelection>,
     runtime: Option<VideoRuntimeMemoryState>,
     headroom_bytes: u64,
@@ -3796,7 +3802,7 @@ pub(crate) fn admit_veda_workspace(
 #[cfg(any(not(target_os = "macos"), test))]
 pub(crate) fn veda_cold_peak_gb(
     dense_baseline_gb: f64,
-    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
 ) -> f64 {
     sparse.map_or(dense_baseline_gb, |bound| {
         dense_baseline_gb + bound.total_bytes as f64 / (1024. * 1024. * 1024.)
@@ -3807,7 +3813,9 @@ pub(crate) fn veda_cold_peak_gb(
 /// categories contain both host and device temporaries; retaining their complete bounds here
 /// is conservative for the host, without charging device-only QKV/output/dense-score buffers.
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
-pub(crate) fn veda_host_workspace_bytes(bound: &gen_core::veda::workspace::WorkspaceBound) -> u64 {
+pub(crate) fn veda_host_workspace_bytes(
+    bound: &gen_core_h3::veda::workspace::WorkspaceBound,
+) -> u64 {
     [
         bound.predictor_host_bytes,
         bound.predictor_load_bytes,
@@ -3824,7 +3832,7 @@ pub(crate) fn veda_host_workspace_bytes(bound: &gen_core::veda::workspace::Works
 }
 #[cfg(any(all(not(target_os = "macos"), feature = "backend-candle"), test))]
 pub(crate) fn admit_veda_host_workspace(
-    bound: &gen_core::veda::workspace::WorkspaceBound,
+    bound: &gen_core_h3::veda::workspace::WorkspaceBound,
     available: Option<u64>,
 ) -> crate::WorkerResult<()> {
     let needed = veda_host_workspace_bytes(bound);

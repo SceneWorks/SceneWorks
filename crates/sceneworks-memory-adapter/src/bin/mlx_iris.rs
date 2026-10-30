@@ -27,10 +27,8 @@
 //! a deferred materialization shape; a deferred spec fails the load.
 
 use super::*;
-use mlx_gen::gen_core::iris::depth::{
-    plan_depth_input, DepthRequest, DepthResolution, IrisDepthEstimator,
-};
-use mlx_gen::gen_core::iris::TEXT_ENCODER_COMPONENT;
+use gen_core_iris::depth::{plan_depth_input, DepthRequest, DepthResolution, IrisDepthEstimator};
+use gen_core_iris::TEXT_ENCODER_COMPONENT;
 use mlx_gen::gen_core::{InputSizing, TargetSize, Transform, TransformRequest};
 use runtime_macos::providers::iris as engine;
 
@@ -808,7 +806,7 @@ mod tests {
     #[test]
     fn the_restoration_capture_request_is_one_the_restorer_accepts() {
         let request = restoration_request(2048, 2048);
-        let options = mlx_gen::gen_core::iris::restoration::RestorationOptions::from_request(
+        let options = gen_core_iris::restoration::RestorationOptions::from_request(
             &request,
             "iris_3b_restore",
         )

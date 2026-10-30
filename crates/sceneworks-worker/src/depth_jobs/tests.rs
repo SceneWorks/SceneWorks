@@ -12,8 +12,8 @@ use axum::extract::{Path as AxumPath, State};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use gen_core::iris::depth::{DepthMap, DepthOutput};
 use gen_core::Progress;
+use gen_core_iris::depth::{DepthMap, DepthOutput};
 use image::GenericImageView;
 use sceneworks_core::depth_map::decode_npy_f32;
 use std::sync::{Arc, Mutex};
@@ -948,7 +948,7 @@ fn stored_position(orientation: u16, stored: (u32, u32), u: u32, v: u32) -> (u32
 }
 
 /// Epic AT3 (sc-25690) — depth across EXIF orientation, through the job path. The engine's
-/// estimator takes already-upright RGB8 (`gen_core::iris::depth`: an `Image` carries no EXIF) and
+/// estimator takes already-upright RGB8 (`gen_core_iris::depth`: an `Image` carries no EXIF) and
 /// is held to upstream on those pixels by the engine's own `depth_parity`; the orientation step —
 /// upstream's `ImageOps.exif_transpose` — is THIS layer's. So for every EXIF orientation (3, 6 and 8
 /// among them) the published raw map must be, bit for bit (declared tolerance 0: orientation is a
