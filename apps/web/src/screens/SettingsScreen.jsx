@@ -510,14 +510,15 @@ export function SettingsScreen({
       const fraction = percent >= 100 ? null : percent / 100;
       const updated = await invoke("set_gpu_memory_limit", { fraction });
       setSettings(updated);
-      // sc-7824: the shell writes the new ceiling to a live-handoff file the running worker re-reads
-      // between jobs, so no restart is needed — it applies within a couple of seconds.
+      // Native jobs read the atomic handoff between runs; an active job retains
+      // its admitted configuration. Other CUDA jobs do not gain a global quota.
       setStatus(
         fraction == null
-          ? "GPU memory target turned off — applies within a couple of seconds."
-          : `GPU memory target set to ${percent}% — applies within a couple of seconds.`,
+          ? "GPU memory target turned off for new jobs — no restart needed."
+          : `GPU memory target set to ${percent}% for new jobs — no restart needed.`,
       );
     } catch (error) {
+      setGpuLimitPercent(Math.round((settings?.gpuMemoryLimitFraction ?? 1) * 100));
       setStatus(String(error));
     }
   }
@@ -698,11 +699,14 @@ export function SettingsScreen({
   ];
 
   const macGpuMemory = gpu?.platform === "macos" && Boolean(gpu?.unifiedMemoryMb);
+  const cudaGpuMemory = ["windows", "linux"].includes(gpu?.platform) && Number(gpu?.gpuMemoryMb) > 0;
   const unifiedGb = macGpuMemory ? Math.round(gpu.unifiedMemoryMb / 1024) : 0;
   const gpuTargetLabel =
     gpuLimitPercent >= 100
       ? "Use all available"
-      : `~${Math.round(unifiedGb * (gpuLimitPercent / 100))} GiB of ${unifiedGb} GiB (${gpuLimitPercent}%)`;
+      : macGpuMemory
+        ? `~${Math.round(unifiedGb * (gpuLimitPercent / 100))} GiB of ${unifiedGb} GiB (${gpuLimitPercent}%)`
+        : `${gpuLimitPercent}% of each selected GPU's VRAM`;
 
   return (
     <section className="page-frame settings-screen">
@@ -1189,7 +1193,7 @@ export function SettingsScreen({
               ) : null}
             </div>
 
-            {macGpuMemory ? (
+            {macGpuMemory || cudaGpuMemory ? (
               <>
                 <div className="work-panel-divider" />
                 <div className="settings-group-title">GPU memory</div>
@@ -1205,7 +1209,7 @@ export function SettingsScreen({
                     max={100}
                     step={5}
                     value={gpuLimitPercent}
-                    aria-label="GPU memory target for SceneWorks (percent of unified memory)"
+                    aria-label={macGpuMemory ? "GPU memory target for SceneWorks (percent of unified memory)" : "MOSS training GPU memory target (percent of selected GPU VRAM)"}
                     onChange={(event) => setGpuLimitPercent(Number(event.target.value))}
                     onMouseUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
                     onKeyUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
@@ -1216,13 +1220,19 @@ export function SettingsScreen({
                     <span>Use all available</span>
                   </div>
                   <p className="settings-note settings-note--spaced">
-                    A soft target for how much unified memory SceneWorks holds, so more stays free
-                    for the rest of your system. Not a hard limit — large models can still exceed it.
-                    Applies within a couple of seconds, no restart.{" "}
-                    <code>sudo sysctl iogpu.wired_limit_mb=&lt;bytes&gt;</code> raises the system cap
-                    on 96/128 GB Macs.
+                    {macGpuMemory ? (
+                      <>An MLX soft target, not an OS memory quota. Native MOSS training also uses
+                        it for memory admission and refuses jobs that cannot fit. Changes apply
+                        to new jobs without a restart; active jobs keep their admitted cap.{" "}
+                        <code>sudo sysctl iogpu.wired_limit_mb=&lt;bytes&gt;</code> raises the system cap
+                        on 96/128 GB Macs.</>
+                    ) : (
+                      <>For native MOSS training only: limits its admission budget using the actual
+                        selected GPU&apos;s total VRAM, not host RAM or another GPU. Other CUDA jobs
+                        retain their existing memory policy. Changes apply to new jobs without a restart.</>
+                    )}
                   </p>
-                  {gpuTelemetry ? (
+                  {macGpuMemory && gpuTelemetry ? (
                     <div className="settings-inset settings-inset--spaced">
                       <div className="settings-inset-title">Live MLX memory</div>
                       <div className="settings-kv">
@@ -1253,9 +1263,8 @@ export function SettingsScreen({
 
             {gpu?.platform === "windows" || gpu?.platform === "linux" ? (
               <p className="settings-note">
-                Requires current NVIDIA drivers with CUDA support. The GPU memory target is
-                macOS-only — a discrete GPU has no per-process memory cap, so generations use
-                whatever VRAM they need.
+                Requires current NVIDIA drivers with CUDA support.{" "}
+                {!cudaGpuMemory ? "GPU memory target unavailable: NVIDIA VRAM metadata could not be read. Check the driver and retry." : "The MOSS training target is not a per-process quota for other CUDA jobs."}
               </p>
             ) : null}
 

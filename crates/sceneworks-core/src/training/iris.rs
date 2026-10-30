@@ -502,7 +502,7 @@ pub fn iris_generation_target() -> TrainingTarget {
         kernel: IRIS_TRAINING_KERNEL.to_owned(),
         defaults: TrainingConfig {
             rank: 16,
-            alpha: 16,
+            alpha: ContractNumber::from(16),
             learning_rate: ContractNumber::from_f64(0.0001).expect("0.0001 is finite"),
             // MICRO-steps (the shared unit); all four cadences are multiples of the default
             // accumulation of 1.

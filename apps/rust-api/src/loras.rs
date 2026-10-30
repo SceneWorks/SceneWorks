@@ -1796,6 +1796,10 @@ pub(crate) fn validate_lora_specs_for_model(
         // Kept alongside the declared-partition gate above rather than merged into it: this one
         // reads what an adapter RECORDS about its own training, that one reads what a catalog
         // author DECLARES. An imported Wan LoRA has the former and no catalog entry at all.
+        //
+        // `moss-image` is deliberately absent (epic 27933, 2026-10-29): MOSS Base and SFT accept
+        // each other's adapters, so a recorded base is provenance, never a gate — family matching
+        // above is the whole rule, mirroring the core `is_base_model_gated_family`.
         if families
             .iter()
             .any(|family| matches!(family.as_str(), "wan-video" | "ltx-video"))
@@ -2621,6 +2625,21 @@ mod base_model_gating_tests {
         ]
     }
 
+    fn moss_models() -> Vec<Value> {
+        vec![
+            json!({
+                "id": "moss_image_base",
+                "family": "moss-image",
+                "loraCompatibility": { "families": ["moss-image"] }
+            }),
+            json!({
+                "id": "moss_image_sft",
+                "family": "moss-image",
+                "loraCompatibility": { "families": ["moss-image"] }
+            }),
+        ]
+    }
+
     /// The SHIPPED `iris_3b` row (sc-25681).
     fn shipped_iris_model() -> Value {
         shipped_adapter_model("iris_3b")
@@ -3260,6 +3279,43 @@ mod base_model_gating_tests {
         let lora = json!({ "id": "legacy", "families": ["wan-video"] });
         validate_lora_specs_for_model(&models, &[], "wan_2_2_t2v_14b", &[lora], true, "LoRA")
             .expect("family-only LoRA must still pass");
+    }
+
+    #[test]
+    fn moss_adapters_apply_on_both_base_and_sft_checkpoints() {
+        // Base↔SFT interchange (epic 27933): either checkpoint admits any moss-image adapter —
+        // stamped with either parent, or family-only with no recorded base at all.
+        let models = moss_models();
+        let base =
+            json!({ "id": "base", "families": ["moss-image"], "baseModel": "moss_image_base" });
+        let sft = json!({ "id": "sft", "families": ["moss-image"], "baseModel": "moss_image_sft" });
+        let unknown = json!({ "id": "unknown", "families": ["moss-image"] });
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for lora in [&base, &sft, &unknown] {
+                validate_lora_specs_for_model(
+                    &models,
+                    &[],
+                    model,
+                    std::slice::from_ref(lora),
+                    true,
+                    "LoRA",
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{model} must accept any moss-image adapter: {error:?}")
+                });
+            }
+        }
+        // The family half of the gate still refuses a non-moss adapter.
+        let sdxl = json!({ "id": "sdxl", "families": ["sdxl"] });
+        validate_lora_specs_for_model(
+            &models,
+            &[],
+            "moss_image_base",
+            std::slice::from_ref(&sdxl),
+            true,
+            "LoRA",
+        )
+        .expect_err("non-moss family must still refuse");
     }
 
     #[test]

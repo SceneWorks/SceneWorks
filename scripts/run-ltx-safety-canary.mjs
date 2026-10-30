@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { withMacMetalExecutionLease, scopedMetalChildOptions } from "./lib/apple-metal-lease.mjs";
 import { execFile, spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, createReadStream } from "node:fs";
@@ -408,21 +409,38 @@ export function preserveFailureReceiptSuppression(primary, receiptError) {
 
 // Darwin answers EPERM, not ESRCH, when every member left in a group is a zombie awaiting its
 // reaper — routine once the root has exited and launchd has not yet collected an orphaned child.
-function groupHasOnlyZombies(pgid) {
-  const census = spawnSync("/bin/ps", ["-axo", "pgid=,stat="], { encoding: "utf8" });
-  if (census.status !== 0) return false;
-  return census.stdout.split("\n").map((line) => line.trim().split(/\s+/))
-    .filter(([group]) => Number(group) === pgid)
-    .every(([, state]) => state.startsWith("Z"));
+function observeOwnedGroup(pgid, censusProcess) {
+  let census;
+  try { census = censusProcess("/bin/ps", ["-axo", "pid=,ppid=,pgid=,stat="], { encoding: "utf8" }); }
+  catch (error) { return { complete: false, status: null, error: String(error.code ?? error.message).slice(0, 256), members: [] }; }
+  const rows = String(census.stdout ?? "").split("\n").map((line) => line.trim()).filter(Boolean).map((line) => line.split(/\s+/));
+  const valid = rows.every((row) => row.length === 4 && row.slice(0, 3).every((value) => /^[0-9]+$/.test(value)));
+  const members = rows.filter((row) => Number(row[2]) === pgid).map(([pid, ppid, group, state]) => ({ pid: Number(pid), ppid: Number(ppid), pgid: Number(group), state }));
+  return { complete: census.status === 0 && !census.error && census.signal === null && valid,
+    status: census.status, signal: census.signal, error: census.error ? String(census.error.code ?? census.error.message).slice(0, 256) : null,
+    malformed: !valid, members };
 }
 
-export function killProcessGroup(child, signalName) {
+export function killProcessGroup(child, signalName, {
+  sendSignal = (pid, name) => process.kill(pid, name), censusProcess = spawnSync,
+} = {}) {
   if (child.pid === undefined) return;
   try {
-    process.kill(-child.pid, signalName);
+    sendSignal(-child.pid, signalName);
   } catch (error) {
     if (error.code === "ESRCH") return;
-    if (error.code === "EPERM" && groupHasOnlyZombies(child.pid)) return;
+    if (error.code === "EPERM") {
+      const observations = [];
+      // One fresh re-observation, never another signal. A close-time census can straddle
+      // process exit/reaping; only complete absent/zombie-only proof permits completion.
+      for (let observation = 0; observation < 2; observation += 1) {
+        const current = observeOwnedGroup(child.pid, censusProcess);
+        observations.push({ ...current, memberCount: current.members.length, members: current.members.slice(0, 32) });
+        if (current.complete && current.members.every(({ state }) => state.startsWith("Z"))) return;
+      }
+      error.ownedGroupCleanup = { pgid: child.pid, signal: signalName, observations };
+      error.message += `; owned group cleanup unverified: ${JSON.stringify(error.ownedGroupCleanup)}`;
+    }
     throw error;
   }
 }
@@ -433,6 +451,9 @@ export async function runOwnedCommand(executable, args, {
   signal,
   timeout = 0,
   maxBuffer = 10 * 1024 * 1024,
+  // Internal CPU test seams; no CLI/env mode or change to production ownership/signals.
+  spawnProcess = spawn,
+  killOwnedGroup = killProcessGroup,
 } = {}) {
   signal?.throwIfAborted();
   return new Promise((resolve, reject) => {
@@ -441,14 +462,14 @@ export async function runOwnedCommand(executable, args, {
     let terminationReason = null;
     let killTimer = null;
     let timeoutTimer = null;
-    const child = spawn(executable, args, {
+    const child = spawnProcess(executable, args, {
       cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"],
     });
     const terminate = (reason) => {
       if (terminationReason !== null) return;
       terminationReason = reason;
-      killProcessGroup(child, "SIGTERM");
-      killTimer = setTimeout(() => killProcessGroup(child, "SIGKILL"), 2_000);
+      killOwnedGroup(child, "SIGTERM");
+      killTimer = setTimeout(() => killOwnedGroup(child, "SIGKILL"), 2_000);
       killTimer.unref();
     };
     const onAbort = () => terminate(signal.reason ?? new Error("command aborted"));
@@ -474,7 +495,14 @@ export async function runOwnedCommand(executable, args, {
       if (timeoutTimer !== null) clearTimeout(timeoutTimer);
       if (killTimer !== null) clearTimeout(killTimer);
       if (terminationReason !== null) {
-        killProcessGroup(child, "SIGKILL");
+        try { killOwnedGroup(child, "SIGKILL"); }
+        catch (cleanupError) {
+          // Never report verified cancellation while ownership cleanup remains unproven.
+          // Preserve the interruption, but reject cleanup failure instead of throwing from close.
+          cleanupError.cause ??= terminationReason;
+          reject(cleanupError);
+          return;
+        }
         reject(terminationReason);
         return;
       }
@@ -3624,11 +3652,12 @@ async function campaignProviderInvocation(options, input, {
       }
       // This immediate actual-GPU-owner and two-boundary pressure check is deliberately the final
       // operation before the watchdog takes ownership of the model process.
+      const status = await withMacMetalExecutionLease(MAX_RUNTIME_SECONDS, async () => {
       await assertHostPreflight(hostMemoryBytes, signal);
-      const status = await new Promise((resolve, reject) => {
-        const child = spawn("/usr/bin/python3", watchdogArgs, {
+      return await new Promise((resolve, reject) => {
+        const child = spawn("/usr/bin/python3", watchdogArgs, scopedMetalChildOptions({
           stdio: "inherit", env: environment,
-        });
+        }));
         setActiveWatchdog(child);
         const onAbort = () => child.kill(signal.reason?.signalName ?? "SIGTERM");
         if (signal) signal.addEventListener("abort", onAbort, { once: true });
@@ -3638,6 +3667,7 @@ async function campaignProviderInvocation(options, input, {
           setActiveWatchdog(null);
           resolve({ code, signal: childSignal });
         });
+      });
       });
       const eventBytes = await readFile(eventsPath, "utf8").catch(() => "");
       if (status.code !== 0 || status.signal) {
@@ -4622,11 +4652,12 @@ async function runBoundedCarrierController({
     );
     // The sole fresh actual-GPU-owner and two-boundary host check remains the final operation before
     // the watchdog owns and releases the one provider render.
+    const status = await withMacMetalExecutionLease(MAX_RUNTIME_SECONDS, async () => {
     await assertHostPreflight(hostMemoryBytes, signal);
-    const status = await new Promise((resolve, reject) => {
-      const child = spawn("/usr/bin/python3", watchdogArgs, {
+    return await new Promise((resolve, reject) => {
+      const child = spawn("/usr/bin/python3", watchdogArgs, scopedMetalChildOptions({
         stdio: "inherit", env: environment,
-      });
+      }));
       setActiveWatchdog(child);
       const onAbort = () => child.kill(signal.reason?.signalName ?? "SIGTERM");
       signal.addEventListener("abort", onAbort, { once: true });
@@ -4636,6 +4667,7 @@ async function runBoundedCarrierController({
         setActiveWatchdog(null);
         resolve({ code, signal: childSignal });
       });
+    });
     });
     const eventBytes = await readFile(eventsPath, "utf8").catch(() => "");
     if (status.code !== 0 || status.signal) {
@@ -5042,16 +5074,19 @@ async function controller(argv) {
     signal.throwIfAborted();
     // There is no sustained-quiet gate. Unrelated compilation may overlap preparation; this one
     // fresh check exclusively protects the instant at which the watchdog releases model loading.
+    const { preLaunchHost, status } = await withMacMetalExecutionLease(MAX_RUNTIME_SECONDS, async () => {
     const preLaunchHost = await assertHostPreflight(memoryBytes, signal);
     const status = await new Promise((resolve, reject) => {
-      const childProcess = spawn("/usr/bin/python3", watchdogArgs, {
+      const childProcess = spawn("/usr/bin/python3", watchdogArgs, scopedMetalChildOptions({
         stdio: "inherit",
         env: watchdogEnv,
-      });
+      }));
       activeWatchdog = childProcess;
       if (interruptedSignal !== null) childProcess.kill(interruptedSignal);
       childProcess.on("error", reject);
       childProcess.on("close", (code, signal) => resolve({ code, signal }));
+    });
+    return { preLaunchHost, status };
     });
     activeWatchdog = null;
     if (interruptedSignal !== null) throw new CanaryInterrupted(interruptedSignal);

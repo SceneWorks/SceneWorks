@@ -1,0 +1,355 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:sceneworks:moss-training-acceptance:campaign:1",
+  "title": "Frozen MOSS-Image terminal training campaign configuration",
+  "$comment": "Static source contract, not runtime evidence. Const sections freeze every field and reject per-cell tweaks. The phase definition is for dispatcher input validation, not a mutable field in the sealed manifest. Changes require a new configuration seal; rerun scope follows changed behavior, inputs and execution closure, with original evidence provenance retained.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schemaVersion", "kind", "epicId", "sourcePolicy", "axes", "dataset", "training", "recovery", "resources", "limits", "evaluation", "previews", "productAcceptance", "evidence", "changeControl"],
+  "$defs": {
+    "backend": {"type": "string", "enum": ["mlx", "cuda"]},
+    "parent": {"type": "string", "enum": ["base", "sft"]},
+    "method": {"type": "string", "enum": ["lora", "lokr"]},
+    "phase": {"type": "string", "enum": ["capture", "finalize"], "description": "Separate dispatcher phase; finalization does not change the sealed campaign configuration or extend case deadlines."},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "steps60": {"type": "integer", "minimum": 60, "maximum": 60, "const": 60},
+    "step20": {"type": "integer", "minimum": 20, "maximum": 20, "const": 20},
+    "one": {"type": "integer", "minimum": 1, "maximum": 1, "const": 1},
+    "dimension256": {"type": "integer", "minimum": 256, "maximum": 256, "const": 256},
+    "caption": {"type": "string", "const": "sksmoss red circle centered on a pale background"}
+  },
+  "properties": {
+    "$schema": {"const": "./campaign.schema.json"},
+    "schemaVersion": {"type": "integer", "const": 1},
+    "kind": {"const": "moss-image-training-acceptance-campaign"},
+    "epicId": {"type": "integer", "const": 26584},
+    "sourcePolicy": {
+      "description": "Bind terminal execution to exact final merged source and the permanent inference pin without dependency overrides or weight downloads.",
+      "type": "object",
+      "required": ["executionStage", "requireExactSceneWorksSha", "requireExactPermanentInferencePin", "allowDependencyOverrides", "allowSourceBuildWeightDownloads", "allowRuntimeWeightDownloads"],
+      "const": {
+        "executionStage": "terminal-final-merged-source",
+        "requireExactSceneWorksSha": true,
+        "requireExactPermanentInferencePin": true,
+        "allowDependencyOverrides": false,
+        "allowSourceBuildWeightDownloads": false,
+        "allowRuntimeWeightDownloads": false
+      }
+    },
+    "axes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backends", "parents", "methods", "caseIdFormat", "requiredCaseCount", "allowedPerCellDifferences"],
+      "properties": {
+        "backends": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/backend"}, "const": ["mlx", "cuda"]},
+        "parents": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/parent"}, "const": ["base", "sft"]},
+        "methods": {"type": "array", "minItems": 2, "maxItems": 2, "uniqueItems": true, "items": {"$ref": "#/$defs/method"}, "const": ["lora", "lokr"]},
+        "caseIdFormat": {"const": "backend/parent/method"},
+        "requiredCaseCount": {"type": "integer", "minimum": 8, "maximum": 8, "const": 8},
+        "allowedPerCellDifferences": {"const": ["backend", "parent", "method", "ownedPaths", "jobIds", "deviceIdentity", "observedEvidence"]}
+      }
+    },
+    "dataset": {
+      "description": "Prepare the existing deterministic three-shape recipe once and share its exact sealed image/caption bytes through the production dataset API.",
+      "type": "object",
+      "required": ["id", "kind", "recipe", "width", "height", "items", "preparation"],
+      "const": {
+        "id": "synthetic-moss-v1",
+        "kind": "deterministic-procedural-rgb-images",
+        "recipe": {
+          "repository": "https://github.com/SceneWorks/inference",
+          "revision": "e9612d817ee77907db7a5c6be42375dafa5f6805",
+          "path": "crates/media/mlx-gen/mlx-gen-moss-image/examples/adapter_acceptance.rs",
+          "sourceSha256": "32032a0200ed4d96518d29042e0e8a7604819a396eca0f0866fbcf131aac7941",
+          "sourceLines": [21, 58]
+        },
+        "width": 256,
+        "height": 256,
+        "items": [
+          {"image": "shape-0.png", "caption": "sksmoss red circle centered on a pale background", "mask": null},
+          {"image": "shape-1.png", "caption": "sksmoss blue square centered on a pale background", "mask": null},
+          {"image": "shape-2.png", "caption": "sksmoss green triangle centered on a pale background", "mask": null}
+        ],
+        "preparation": {
+          "materializeOnce": true,
+          "sealBeforeAnyWeightsLoad": true,
+          "recordEveryImageAndCaptionSha256": true,
+          "shareExactPreparedDatasetArtifactAcrossAllCells": true,
+          "uploadThroughProductionDatasetApi": true
+        }
+      }
+    },
+    "training": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["config", "networkTypeFromMethodAxis", "expectedOptimizerUpdates", "expectedCheckpointSteps", "fullModelFineTuning", "textEncoderTraining"],
+      "properties": {
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["steps", "batchSize", "gradientAccumulation", "saveEvery", "resolution", "rank", "alpha", "learningRate", "seed", "optimizer", "triggerWord", "advanced"],
+          "properties": {
+            "steps": {"$ref": "#/$defs/steps60", "description": "Original horizon is 60 microsteps for both uninterrupted and cancel/resume paths."},
+            "batchSize": {"$ref": "#/$defs/one", "description": "Frozen batch size one."},
+            "gradientAccumulation": {"$ref": "#/$defs/one", "description": "One microstep per optimizer update yields 60 updates."},
+            "saveEvery": {"$ref": "#/$defs/step20", "description": "Durable intermediate state at 20 and 40, final at 60."},
+            "resolution": {"$ref": "#/$defs/dimension256"},
+            "rank": {"type": "integer", "minimum": 4, "maximum": 4, "const": 4},
+            "alpha": {"type": "number", "exclusiveMinimum": 0, "const": 6.0},
+            "learningRate": {"type": "number", "exclusiveMinimum": 0, "const": 0.0001},
+            "seed": {"type": "integer", "minimum": 0, "const": 1789},
+            "optimizer": {"type": "string", "enum": ["adamw"]},
+            "triggerWord": {"const": "sksmoss"},
+            "advanced": {
+              "type": "object",
+              "required": ["mixedPrecision", "gradientCheckpointing", "cacheLatents", "cacheTextEmbeddings", "decomposeFactor", "loraTargetModules", "timestepType", "timestepBias", "lossType", "lrScheduler", "weightDecay", "lrWarmupSteps", "sampleEvery", "modelOptions"],
+              "const": {
+                "mixedPrecision": "bf16",
+                "gradientCheckpointing": false,
+                "cacheLatents": true,
+                "cacheTextEmbeddings": true,
+                "decomposeFactor": -1,
+                "loraTargetModules": [],
+                "timestepType": "moss_stage3_v1",
+                "timestepBias": "balanced",
+                "lossType": "mse",
+                "lrScheduler": "constant",
+                "weightDecay": 0.0,
+                "lrWarmupSteps": 0,
+                "sampleEvery": 0,
+                "modelOptions": {"vae_posterior": "posterior_mean_v1"}
+              }
+            }
+          }
+        },
+        "networkTypeFromMethodAxis": {"const": true},
+        "expectedOptimizerUpdates": {"$ref": "#/$defs/steps60"},
+        "expectedCheckpointSteps": {"const": [20, 40, 60]},
+        "fullModelFineTuning": {"const": false},
+        "textEncoderTraining": {"const": false}
+      }
+    },
+    "recovery": {
+      "description": "Each cell gets a full reference and durable-checkpoint cancel/resume; one additional fresh re-entry witness per backend is charged to Base/LoRA's deadline.",
+      "type": "object",
+      "required": ["uninterruptedReferencePerCell", "uninterruptedReferenceSteps", "cancelResumeSubrunsPerCell", "cancelAfterDurableCheckpoint", "cancelThroughProductionApi", "resumeThroughProductionApi", "resumeToOriginalSteps", "requireOriginalHorizonAndIdentity", "requireCompleteOptimizerSchedulerRngCursorAndAccumulationState", "compareActualExportedStateAndResults", "weakenExistingAssertions", "freshReentrySubrunsPerBackend", "freshReentryAnchor", "freshReentryCancelAfterDurableCheckpoint", "freshReentryUsesNewRunAndIndependentCancelToken", "freshReentryDeadlineChargedToAnchorCell"],
+      "const": {
+        "uninterruptedReferencePerCell": true,
+        "uninterruptedReferenceSteps": 60,
+        "cancelResumeSubrunsPerCell": 1,
+        "cancelAfterDurableCheckpoint": 20,
+        "cancelThroughProductionApi": true,
+        "resumeThroughProductionApi": true,
+        "resumeToOriginalSteps": 60,
+        "requireOriginalHorizonAndIdentity": true,
+        "requireCompleteOptimizerSchedulerRngCursorAndAccumulationState": true,
+        "compareActualExportedStateAndResults": true,
+        "weakenExistingAssertions": false,
+        "freshReentrySubrunsPerBackend": 1,
+        "freshReentryAnchor": {"parent": "base", "method": "lora"},
+        "freshReentryCancelAfterDurableCheckpoint": 20,
+        "freshReentryUsesNewRunAndIndependentCancelToken": true,
+        "freshReentryDeadlineChargedToAnchorCell": true
+      },
+      "properties": {
+        "uninterruptedReferenceSteps": {"$ref": "#/$defs/steps60"},
+        "cancelResumeSubrunsPerCell": {"$ref": "#/$defs/one"},
+        "cancelAfterDurableCheckpoint": {"$ref": "#/$defs/step20"},
+        "resumeToOriginalSteps": {"$ref": "#/$defs/steps60"},
+        "freshReentrySubrunsPerBackend": {"$ref": "#/$defs/one"},
+        "freshReentryCancelAfterDurableCheckpoint": {"$ref": "#/$defs/step20"}
+      }
+    },
+    "resources": {
+      "description": "Preserve product/device caps and enforce positive native API/worker-root RSS samples; the parent proves owned Rust root exit and stdio closure, not metadata-helper absence.",
+      "type": "object",
+      "required": ["capMechanism", "settingsScope", "backends", "resolveAbsoluteCeilingBeforeWeightsLoad", "preserveExistingProductRoundingAndSafetyIntersections", "requireActualClaimedDeviceIdentity", "requireRealHeaderDerivedAllPhaseDemand", "refuseProjectedDemandAboveResolvedCeiling", "allowMidCampaignCeilingIncrease", "rootRssWatchdog", "lowCapControl"],
+      "const": {
+        "capMechanism": "global-gpuMemoryLimitFraction-product-handoff",
+        "settingsScope": "owned-isolated-campaign-config-only",
+        "backends": {
+          "mlx": {"gpuMemoryLimitFraction": 0.60, "capacityBasis": "actual-detected-total-unified-memory"},
+          "cuda": {"gpuMemoryLimitFraction": 0.85, "capacityBasis": "actual-claimed-cuda-context-total-vram"}
+        },
+        "resolveAbsoluteCeilingBeforeWeightsLoad": true,
+        "preserveExistingProductRoundingAndSafetyIntersections": true,
+        "requireActualClaimedDeviceIdentity": true,
+        "requireRealHeaderDerivedAllPhaseDemand": true,
+        "refuseProjectedDemandAboveResolvedCeiling": true,
+        "allowMidCampaignCeilingIncrease": false,
+        "rootRssWatchdog": {
+          "scope": "native-api-worker-root",
+          "measurement": "native-current-process-rss-sampled-maximum",
+          "metadataHelperAbsenceClaim": false,
+          "ceilingSource": "same-resolved-absolute-product-ceiling",
+          "requirePositiveInitialMeasurement": true,
+          "requireContinuousPositiveMeasurements": true,
+          "missingMeasurement": "fail-case",
+          "onCeilingOrDeadline": "fail-and-propagate-owned-cancellation",
+          "requireOwnedRootExitAndStdioBeforeContinuation": true,
+          "allowBroadProcessKilling": false,
+          "allowForcedMlxKillMidBuffer": false
+        },
+        "lowCapControl": {
+          "perCell": true,
+          "deriveStrictlyInfeasibleRequestFromRealHeaderDemand": true,
+          "useProductionCapPath": true,
+          "requirePreLoadRefusal": true,
+          "allowCeilingIncrease": false,
+          "mainCaseRefusalIsAcceptanceFailure": true
+        }
+      },
+      "properties": {
+        "backends": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mlx", "cuda"],
+          "properties": {
+            "mlx": {"type": "object", "required": ["gpuMemoryLimitFraction", "capacityBasis"], "properties": {"gpuMemoryLimitFraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "const": 0.60}, "capacityBasis": {"const": "actual-detected-total-unified-memory"}}},
+            "cuda": {"type": "object", "required": ["gpuMemoryLimitFraction", "capacityBasis"], "properties": {"gpuMemoryLimitFraction": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "const": 0.85}, "capacityBasis": {"const": "actual-claimed-cuda-context-total-vram"}}}
+          }
+        }
+      }
+    },
+    "limits": {
+      "description": "Each unpaused compute deadline includes evaluation, generation and cleanup. Build/preparation is separately bounded; named hashbound human inspection must complete before final acceptance.",
+      "type": "object",
+      "required": ["caseWallSeconds", "crossLoadWallSeconds", "buildPreparationWallSeconds", "caseDeadlineStartsAt", "crossLoadDeadlineStartsAt", "caseDeadlineIncludes", "crossLoadDeadlineIncludes", "excludeOnlySeparateBuildPreparation", "pauseComputeDeadline"],
+      "const": {
+        "caseWallSeconds": 3600,
+        "crossLoadWallSeconds": 3600,
+        "buildPreparationWallSeconds": 7200,
+        "caseDeadlineStartsAt": "recorded-case-start",
+        "crossLoadDeadlineStartsAt": "each-import-case-after-build-preparation",
+        "caseDeadlineIncludes": ["uninterrupted-reference", "cancel-resume", "anchor-backend-fresh-reentry", "evaluation", "save-reload", "preview-generation", "ordinary-and-dmd-regression", "cleanup"],
+        "crossLoadDeadlineIncludes": ["cross-backend-load", "cross-load-generation", "cross-load-resource-guard", "cross-load-cleanup"],
+        "excludeOnlySeparateBuildPreparation": true,
+        "pauseComputeDeadline": false
+      },
+      "properties": {
+        "caseWallSeconds": {"type": "integer", "minimum": 3600, "maximum": 3600, "const": 3600},
+        "crossLoadWallSeconds": {"type": "integer", "minimum": 3600, "maximum": 3600, "const": 3600},
+        "buildPreparationWallSeconds": {"type": "integer", "minimum": 7200, "maximum": 7200, "const": 7200}
+      }
+    },
+    "evaluation": {
+      "description": "Source identity is identical across every cell/subrun; actual tensors are reused before/after within each run and need not match values across backends.",
+      "type": "object",
+      "required": ["image", "caption", "triggerWord", "mask", "width", "height", "noiseSeedHex", "sigma", "manifestAlgorithm", "manifestHashBinding", "runtimeHashNote", "withinNativeRun", "acrossNativeRuns", "learning"],
+      "const": {
+        "image": "shape-0.png",
+        "caption": "sksmoss red circle centered on a pale background",
+        "triggerWord": "sksmoss",
+        "mask": null,
+        "width": 256,
+        "height": 256,
+        "noiseSeedHex": "0x48454c444f555401",
+        "sigma": 0.375,
+        "manifestAlgorithm": "native-EvaluationManifest::new",
+        "manifestHashBinding": "compute-before-weights-load-and-require-identical-across-all-cells-and-all-subruns",
+        "runtimeHashNote": "The evaluation manifest hash is computed at run time before weights load and bound into the evidence; it is not fabricated at configuration seal time.",
+        "withinNativeRun": {
+          "reuseSameActualPreparedTensorPackageBeforeAndAfter": true,
+          "allowReencodingBetweenMeasurements": false,
+          "allowNoiseRegenerationBetweenMeasurements": false,
+          "recordBeforeAndAfterTensorShapesDtypesLayoutsAndHashes": true,
+          "requireBeforeAndAfterTensorDescriptorsAndHashesEqual": true
+        },
+        "acrossNativeRuns": {
+          "requireIdenticalSourceBytesCaptionMaskDimensionsSeedSigmaAndManifestHash": true,
+          "requireIdenticalPreparedTensorValuesAcrossBackends": false,
+          "backendSpecificPreparedValuesAreNotDefects": true,
+          "requirePerBackendPreparedTensorEvidence": true
+        },
+        "learning": {
+          "requireBothLossesPresentAndFinite": true,
+          "criterion": "after < before",
+          "allowTrainingLossSubstitution": false,
+          "allowImageDifferenceSubstitution": false,
+          "allowHashChangeSubstitution": false,
+          "allowToleranceOrOracleChanges": false
+        }
+      },
+      "properties": {
+        "caption": {"$ref": "#/$defs/caption"},
+        "width": {"$ref": "#/$defs/dimension256"},
+        "height": {"$ref": "#/$defs/dimension256"},
+        "noiseSeedHex": {"type": "string", "pattern": "^0x[0-9a-f]{16}$", "const": "0x48454c444f555401"},
+        "sigma": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1, "const": 0.375}
+      }
+    },
+    "previews": {
+      "description": "Retain actual decoded untrained/trained/disable PNG controls and named hashbound inspection findings before final acceptance, with actual review timestamps outside compute deadlines.",
+      "type": "object",
+      "required": ["prompt", "seed", "width", "height", "steps", "guidance", "count", "required", "ordinaryNoAdapterBaselineRequired", "requireActualDecodedPngs", "record", "inspection"],
+      "const": {
+        "prompt": "sksmoss red circle centered on a pale background",
+        "seed": 1789,
+        "width": 256,
+        "height": 256,
+        "steps": 8,
+        "guidance": 1.0,
+        "count": 1,
+        "required": [
+          {"role": "before-untrained", "adapterStrength": 1.0, "adapterState": "run-start-untrained-export"},
+          {"role": "after-trained", "adapterStrength": 1.0, "adapterState": "final-trained-export"},
+          {"role": "disable-control", "adapterStrength": 0.0, "adapterState": "final-trained-export"}
+        ],
+        "ordinaryNoAdapterBaselineRequired": true,
+        "requireActualDecodedPngs": true,
+        "record": ["artifactSha256", "dimensions", "prompt", "seed", "adapterHash", "adapterStrength", "executionReceipt"],
+        "inspection": {"required": true, "requireNamedReviewedArtifactsAndFindings": true, "mustCompleteBeforeFinalAcceptance": true, "missingInspection": "acceptance-incomplete"}
+      }
+    },
+    "productAcceptance": {
+      "description": "Require production API/library paths, same- and cross-backend loading, ordinary controls, both real SFT DMD modes and Base+DMD refusal.",
+      "type": "object",
+      "required": ["useProductionTrainingDatasetJobProgressCancelRetryAndLibraryApis", "requireActualLibraryRegistration", "requireFinalNotIntermediateAdapterSelection", "requireSameBackendSaveReloadGenerate", "requireCrossBackendLoadAndGenerate", "requireExactParentAndMethod", "allowCrossBaseSftCompatibilityClaim", "ordinaryRegression", "dmdRegression"],
+      "const": {
+        "useProductionTrainingDatasetJobProgressCancelRetryAndLibraryApis": true,
+        "requireActualLibraryRegistration": true,
+        "requireFinalNotIntermediateAdapterSelection": true,
+        "requireSameBackendSaveReloadGenerate": true,
+        "requireCrossBackendLoadAndGenerate": true,
+        "requireExactParentAndMethod": true,
+        "allowCrossBaseSftCompatibilityClaim": false,
+        "ordinaryRegression": {"requireNoAdapterBaselineAndPostUnloadReplay": true, "requireDisableControlMatchesBaseline": true},
+        "dmdRegression": {"sftModes": ["unmerged_bf16", "full_fp32"], "requireActualDmdWeights": true, "requireSelectedAndExecutedModes": true, "requireCustomAdapterAndAcceleratorNotDropped": true, "baseDmdMustRefuse": true}
+      }
+    },
+    "evidence": {
+      "description": "Required real observations cannot be replaced by CPU fixtures, carried results, successful compilation or missing inspection.",
+      "type": "object",
+      "required": ["schema", "requireFiniteNonzeroGradientObservations", "requireActualFactorValuesAndPositiveNumericFactorDeltas", "requireFrozenBackboneTextEncoderAndVaeObservations", "requireWeightRepositoryRevisionAndConsumedFileHashes", "retainRawObservationsBeforeAssertions", "retainFailureAndCleanupEvidence", "requireAllEightCellsAndBothBackendReentries", "allowCpuFixtureEvidenceAsRealWeights", "allowFabricatedOrCarriedEvidence", "requireInspectionBeforeAccepted"],
+      "const": {
+        "schema": "evidence.schema.json",
+        "requireFiniteNonzeroGradientObservations": true,
+        "requireActualFactorValuesAndPositiveNumericFactorDeltas": true,
+        "requireFrozenBackboneTextEncoderAndVaeObservations": true,
+        "requireWeightRepositoryRevisionAndConsumedFileHashes": true,
+        "retainRawObservationsBeforeAssertions": true,
+        "retainFailureAndCleanupEvidence": true,
+        "requireAllEightCellsAndBothBackendReentries": true,
+        "allowCpuFixtureEvidenceAsRealWeights": false,
+        "allowFabricatedOrCarriedEvidence": false,
+        "requireInspectionBeforeAccepted": true
+      }
+    },
+    "changeControl": {
+      "description": "A configuration change creates a new seal. Invalidate only observations affected by behavior, inputs or execution closure; tooling-only changes revalidate original raw evidence. Current finalizer remains same-run/exact-source only; no cross-run reuse is implemented. No case-local tuning or weaker assertions.",
+      "type": "object",
+      "required": ["oneSealedManifestForAllEightCells", "sealAlgorithm", "allowPerCellConfigurationTweaks", "behaviorInputOrClosureChange", "toolingSchemaNotesOrDeadlineOnlyChange", "preserveOriginalSourceConfigurationAndToolProvenance", "currentFinalizerReuseSupport", "allowTuningToPassLearningAssertion", "allowToleranceOracleOrAssertionLoosening"],
+      "const": {
+        "oneSealedManifestForAllEightCells": true,
+        "sealAlgorithm": "sha256-of-exact-utf8-file-bytes",
+        "allowPerCellConfigurationTweaks": false,
+        "behaviorInputOrClosureChange": "document-change-and-rerun-affected-observations",
+        "toolingSchemaNotesOrDeadlineOnlyChange": "revalidate-retained-raw-observations-with-original-provenance",
+        "preserveOriginalSourceConfigurationAndToolProvenance": true,
+        "currentFinalizerReuseSupport": "same-run-exact-source-only-no-cross-run-reuse",
+        "allowTuningToPassLearningAssertion": false,
+        "allowToleranceOracleOrAssertionLoosening": false
+      }
+    }
+  }
+}

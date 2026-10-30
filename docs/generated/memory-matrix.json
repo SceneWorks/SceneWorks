@@ -1,35 +1,35 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:3a1c3e8c634dc9d178d01852f0be0b0862891334a3ecdc378cc8dda7477519da",
+    "sceneWorksRevision": "source-tree:883762a2d1352b80c732fc6c4959cc90c1856b9eb79a747ced68d3ec1324c8e2",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
-        "sha256": "74992a6c84848e02d79c1bb0a3f3d2378377cdeee86bd1ad4acf81bbb05ac380"
+        "sha256": "87cd0a5df7820f696e528deff78dd82de236c565253d9c836f66863968d10898"
       },
       "routingCatalog": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/catalog.rs",
-        "sha256": "677abc9ca00d55da0014c2d97771e4d17248558fe6b9e5b5e7e0a1fcb01b9b27"
+        "sha256": "1c41d43947bc042d77eb00331e6641dfc7488a903cf42335e7a1e6d7ca853c7d"
       },
       "routingCandle": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/candle.rs",
-        "sha256": "7e7abe88771d7784d1637f24def17aa011f2ce4eed6b813f2bb6843f7485fa2d"
+        "sha256": "d4975c19825fae4610f234813e094f232731ab01ef1300dff67b5150b81597c8"
       },
       "routingMlx": {
         "path": "crates/sceneworks-core/src/jobs_store/routing/mlx.rs",
-        "sha256": "eaefdaec792be500c74f4530d63f06061cea7f6b11938be4b2eaad75342fe33a"
+        "sha256": "645901b8b29bcb0ede26046702a99eda5da029b35f67f808cfaf87428e69c5ec"
       },
       "engines": {
         "path": "crates/sceneworks-worker/src/engines.rs",
-        "sha256": "970c9c02164802fd0e1f4a1fab0f1d2bb1a5d0cfeb44f07e76e4089f87c5dbc2"
+        "sha256": "12e3b6c5eb180b2441e168fa880feee2fe760f4db9a347df0b1e9310f649286e"
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "6fcc6d3206bd6698350f66f610ba183f801b589add32a9ef4291b53fe1ad5f96"
+        "sha256": "8b3e6fbfffb9ddb02c36967e83fb83f8138a257880e90a8ae7ae9b5a83856306"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "624f12e74367d99017c699ce691f5dc98ced5e5caecef21f28f883b13c968f9c"
+        "sha256": "322e6f115f726b794f9a01e9a5b94f85685c44cb2e1ac335bdb6e36f88524841"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
@@ -57,7 +57,7 @@
       },
       "mlxFitGate": {
         "path": "crates/sceneworks-worker/src/mlx_fit_gate.rs",
-        "sha256": "ab3a330fceac976e34bdc2cc199e6f853124e8a0ae342ce7a38ba9fa087ec867"
+        "sha256": "51c05f08ccf53ba3da10b0e22d619ee804573f73ed2ae3a7a6d9c959150d9ad6"
       },
       "memoryRouteRegistry": {
         "path": "crates/sceneworks-worker/src/memory_route_registry.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "f1d4057e2195981c48ae694c4a8893f87cd8fa887c3e48342da9e034e72bf966"
+        "sha256": "9f800a3201110ac27edc365122e3a96924b5351e13ece467e2301896e47d770f"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
@@ -81,11 +81,11 @@
       },
       "anchorAdmission": {
         "path": "crates/sceneworks-worker/src/video_admission.rs",
-        "sha256": "9de0d961fe24dd1d1ad788f523cbd7d9637efc43aa2f80ea5751ced058758587"
+        "sha256": "5d2142258b651ebb20f3117a34f271781fc36ce0ccf7705a811c06db1e446497"
       },
       "anchorAdmissionImageVram": {
         "path": "crates/sceneworks-worker/src/vram_gate.rs",
-        "sha256": "74add18bfa99969ce8d89229d13330a8c64a17da2bc67ae23e1332b1846c23ae"
+        "sha256": "f7013ba73f1b80321dc5ff8f0430481072ec39c007157a723a8a7640ef1d0be4"
       },
       "anchorAdmissionImageCandle": {
         "path": "crates/sceneworks-worker/src/candle_memory_strategy.rs",
@@ -137,12 +137,12 @@
       "image": 61,
       "video": 11
     },
-    "cells": 11010,
+    "cells": 11030,
     "publishedCells": 3988,
-    "elidedCells": 7022,
+    "elidedCells": 7042,
     "elidedByState": {
-      "Implemented": 1598,
-      "Missing": 5424
+      "Implemented": 1602,
+      "Missing": 5440
     },
     "publicationPredicate": "A coordinate is published when it carries a claim a per-lane census cannot: a measured memory anchor covers its (model, tier, backend lane), or it is structurally exempt. A bare `Implemented` or `Missing` state is a property of the whole lane, replicated across every tier x mode x overlay, and is counted in `summary.elidedByState` and the per-(entry, backend, rung) `coverage` census instead of restated thousands of times.",
     "mlxStagedStaticCoverage": 52,
@@ -3036,6 +3036,7 @@
             "text_to_image"
           ],
           "overlays": [
+            "lora",
             "none"
           ],
           "rungs": [
@@ -3054,6 +3055,7 @@
             "text_to_image"
           ],
           "overlays": [
+            "lora",
             "none"
           ],
           "rungs": [
@@ -3099,6 +3101,7 @@
             "text_to_image"
           ],
           "overlays": [
+            "lora",
             "none"
           ],
           "rungs": [
@@ -3117,6 +3120,7 @@
             "text_to_image"
           ],
           "overlays": [
+            "lora",
             "none"
           ],
           "rungs": [
@@ -16478,240 +16482,240 @@
       "modelId": "moss_image_base",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
-      "implemented": 1,
+      "elided": 2,
+      "implemented": 2,
       "states": {
-        "Implemented": 1
+        "Implemented": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
-      "implemented": 1,
+      "elided": 2,
+      "implemented": 2,
       "states": {
-        "Implemented": 1
+        "Implemented": 2
       }
     },
     {
       "modelId": "moss_image_base",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "candle",
       "rung": "bounded_attention",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "candle",
       "rung": "bounded_decode",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "candle",
       "rung": "bounded_transformer_residency",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "candle",
       "rung": "resident",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
-      "implemented": 1,
+      "elided": 2,
+      "implemented": 2,
       "states": {
-        "Implemented": 1
+        "Implemented": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "candle",
       "rung": "staged_residency",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "mlx",
       "rung": "bounded_attention",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "mlx",
       "rung": "bounded_decode",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "mlx",
       "rung": "bounded_transformer_residency",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "mlx",
       "rung": "resident",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
-      "implemented": 1,
+      "elided": 2,
+      "implemented": 2,
       "states": {
-        "Implemented": 1
+        "Implemented": 2
       }
     },
     {
       "modelId": "moss_image_sft",
       "backend": "mlx",
       "rung": "staged_residency",
-      "coordinates": 1,
+      "coordinates": 2,
       "published": 0,
-      "elided": 1,
+      "elided": 2,
       "implemented": 0,
       "states": {
-        "Missing": 1
+        "Missing": 2
       }
     },
     {

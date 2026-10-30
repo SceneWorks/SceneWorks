@@ -104,10 +104,10 @@ const KREA_BASE_SEED: u64 = 18377;
 const KREA_RAW_PROVIDER: &str = "krea_2_raw";
 const KREA_RAW_PLAIN_EXECUTION_PATH: &str = "the MLX Krea 2 Raw base-only text-to-image path";
 const KREA_RAW_SEED: u64 = 22735;
-/// Recommended, reference-free SDXL base text-to-image. Rungs 2 and 3 are measured Missing at the
-/// pinned provider, so this apparatus intentionally exposes only Resident, Staged, and rung 4.
+/// Recommended, reference-free SDXL base text-to-image. The pinned provider exposes native VAE
+/// bounded decode; bounded attention remains Missing.
 const SDXL_PROVIDER: &str = "sdxl";
-const SDXL_CALIBRATION_FINGERPRINT: &str = "sdxl-mlx-unet-shared-ladder-v3";
+const SDXL_CALIBRATION_FINGERPRINT: &str = "sdxl-mlx-unet-shared-ladder-v5";
 const SDXL_SEED: u64 = 18379;
 // RMS is bounded by the same per-pixel envelope as maximum absolute error. This avoids inventing a
 // tighter SDXL-specific tolerance before the first physical campaign while still making the real
@@ -1757,8 +1757,8 @@ mod tests {
             let error = sdxl_spec_at(arm, root, "q8", &mismatched).unwrap_err();
             assert!(error.contains("q8"), "{}: {error}", arm.model_id);
         }
-        // A non-resident rung asks the loader to release components in phase order, exactly as the
-        // fit gate's `apply_residency_policy` would settle it.
+        // Staging is independent of scratch bounds. SDXL rung 4 requires staging; bounded decode
+        // keeps the heavy components resident before the measured request begins.
         let root = sdxl_snapshot_root(protocol::REALVISXL_REPOSITORY, REVISION, "bf16");
         let staged = MemorySelection {
             strategy: MemoryStrategy::StagedResidency,
@@ -1769,8 +1769,21 @@ mod tests {
                 component_precision_floors: &[],
             },
         };
-        let spec = sdxl_spec_at(REALVISXL_ARM, root, "bf16", &staged).unwrap();
+        let spec = sdxl_spec_at(REALVISXL_ARM, root.clone(), "bf16", &staged).unwrap();
         assert_eq!(spec.offload_policy, OffloadPolicy::Sequential);
+        let mut selection = staged;
+        for (strategy, policy) in [
+            (MemoryStrategy::BoundedDecode, OffloadPolicy::Resident),
+            (
+                MemoryStrategy::BoundedTransformerResidency,
+                OffloadPolicy::Sequential,
+            ),
+        ] {
+            selection.strategy = strategy;
+            let spec = sdxl_spec_at(REALVISXL_ARM, root.clone(), "bf16", &selection).unwrap();
+            assert_eq!(spec.offload_policy, policy);
+            assert_eq!(spec.load_shape, LoadShape::DeferredMaterialization);
+        }
     }
 
     /// sc-22729: the fixture stem names the MODEL. Reusing base SDXL's fixture on a `realvisxl`
@@ -8944,39 +8957,49 @@ fn validate_sdxl_selection_parameters(
     selection: &MemorySelection,
 ) -> Result<(), String> {
     let parameters = protocol::strategy_parameters(request)?;
-    match selection.strategy {
-        MemoryStrategy::Resident | MemoryStrategy::StagedResidency => {
-            if !parameters.is_empty() {
-                return Err(format!(
-                    "MLX SDXL {:?} calibration requires no strategy parameters, got {parameters:?}",
-                    selection.strategy
-                ));
-            }
+    let mut keys = parameters.keys().map(String::as_str).collect::<Vec<_>>();
+    keys.sort_unstable();
+    let expected: &[&str] = match selection.strategy {
+        MemoryStrategy::Resident | MemoryStrategy::StagedResidency => &[],
+        MemoryStrategy::BoundedDecode => &["decodeOverlap", "decodeTileEdge"],
+        MemoryStrategy::BoundedTransformerResidency => &[
+            "decodeOverlap",
+            "decodeTileEdge",
+            "transformerWindowComponent",
+            "transformerWindowSize",
+        ],
+        MemoryStrategy::BoundedAttention => {
+            return Err("MLX SDXL bounded attention is measured Missing at the pinned provider and is not capturable".to_owned());
         }
-        MemoryStrategy::BoundedTransformerResidency => {
-            let mut keys = parameters.keys().map(String::as_str).collect::<Vec<_>>();
-            keys.sort_unstable();
-            if keys != ["transformerWindowComponent", "transformerWindowSize"] {
-                return Err(format!(
-                    "MLX SDXL bounded transformer calibration requires exactly transformerWindowSize and transformerWindowComponent, got {keys:?}"
-                ));
-            }
-            if selection.parameters.transformer_window_size.is_none()
-                || selection.parameters.transformer_window_component
-                    != Some(TransformerComponent::Dit)
-            {
-                return Err(
-                    "MLX SDXL bounded transformer calibration requires an explicit Dit window"
-                        .to_owned(),
-                );
-            }
-        }
-        MemoryStrategy::BoundedDecode | MemoryStrategy::BoundedAttention => {
-            return Err(format!(
-                "MLX SDXL {:?} is measured Missing at the pinned provider and is not capturable",
-                selection.strategy
-            ));
-        }
+    };
+    if keys != expected {
+        return Err(format!(
+            "MLX SDXL {:?} calibration requires exactly {expected:?}, got {keys:?}",
+            selection.strategy
+        ));
+    }
+    if matches!(
+        selection.strategy,
+        MemoryStrategy::BoundedDecode | MemoryStrategy::BoundedTransformerResidency
+    ) && (!selection
+        .parameters
+        .decode_tile_edge
+        .is_some_and(|edge| mlx_gen_sdxl::memory_strategy::DECODE_TILE_EDGES.contains(&edge))
+        || !selection.parameters.decode_overlap.is_some_and(|overlap| {
+            mlx_gen_sdxl::memory_strategy::DECODE_OVERLAPS.contains(&overlap)
+        }))
+    {
+        return Err(
+            "MLX SDXL bounded decode requires a published native VAE tile and overlap".to_owned(),
+        );
+    }
+    if selection.strategy == MemoryStrategy::BoundedTransformerResidency
+        && (selection.parameters.transformer_window_size.is_none()
+            || selection.parameters.transformer_window_component != Some(TransformerComponent::Dit))
+    {
+        return Err(
+            "MLX SDXL bounded transformer calibration requires an explicit Dit window".to_owned(),
+        );
     }
     Ok(())
 }
@@ -9084,10 +9107,14 @@ fn sdxl_spec_at(
             arm.still_calibration, selection.tier.quant
         ));
     }
-    let offload = if selection.strategy == MemoryStrategy::Resident {
-        OffloadPolicy::Resident
-    } else {
+    // SDXL declares staging as a prerequisite of rung 4. Bounding decode alone only bounds
+    // scratch and must not move the component load into the measured request.
+    let offload = if selection.strategy == MemoryStrategy::StagedResidency
+        || selection.strategy == MemoryStrategy::BoundedTransformerResidency
+    {
         OffloadPolicy::Sequential
+    } else {
+        OffloadPolicy::Resident
     };
     let mut spec = LoadSpec::new(WeightsSource::Dir(root))
         .with_offload_policy(offload)
@@ -9140,7 +9167,7 @@ fn sdxl_context(
 }
 
 /// Real capture arm for the exact recommended `mlx:sdxl` base T2I identity. It deliberately does
-/// not expose SDXL edit/reference/adapter surfaces or the provider's measured-Missing rungs 2/3.
+/// not expose SDXL edit/reference/adapter surfaces or the provider's measured-Missing attention rung.
 fn run_sdxl(request: &Value) -> Result<Value, String> {
     let arm = validate_sdxl_target(request)?;
     let planned_shape = planned_load_shape(request)?;
@@ -9315,14 +9342,14 @@ fn run_sdxl(request: &Value) -> Result<Value, String> {
 
     // The pinned SDXL provider exposes synchronized request scopes and phase telemetry, but not the
     // exhaustive lifecycle hooks required for `complete`: it never reads the calibration error
-    // authorization, and its plain untiled VAE decode does not consult the request cancel flag.
+    // authorization. That missing error path alone prevents exhaustive lifecycle certification.
     // Preserve the real phase/quality/admission measurements as `runtime_complete`, keep the formal
     // lifecycle scenarios explicitly not_run, and record the internally verified mutation only as
     // diagnostics (the runtime-complete schema requires `negativeMutation: null`).
     let lifecycle_blocker = concat!(
-        "the pinned mlx-gen-sdxl provider does not implement calibration error injection and its ",
-        "plain untiled VAE decode does not consult the cancellation flag, so exhaustive warm/cancel/",
-        "error lifecycle certification cannot execute; synchronized phase telemetry, selected-versus-",
+        "the pinned mlx-gen-sdxl provider does not implement calibration error injection, so ",
+        "exhaustive warm/cancel/",
+        "error lifecycle scenarios remain not_run here; synchronized phase telemetry, selected-versus-",
         "unselected parity, and the internal negative discriminator are attested separately"
     );
     let mut fragment = json!({
@@ -26468,8 +26495,8 @@ mod sdxl_tests {
         let mut request = minimal_request(SDXL_PROVIDER);
         request["planned"]["strategy"] = json!({
             "rung": "bounded_transformer_residency",
-            "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
-            "parameters": { "transformerWindowSize": 1, "transformerWindowComponent": "dit" }
+            "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_transformer_residency"],
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "transformerWindowSize": 1, "transformerWindowComponent": "dit" }
         });
         assert_eq!(
             planned_selection(&request)
@@ -26478,6 +26505,17 @@ mod sdxl_tests {
                 .transformer_window_component,
             Some(TransformerComponent::Dit)
         );
+        validate_sdxl_selection_parameters(&request, &planned_selection(&request).unwrap())
+            .unwrap();
+        for missing in ["decodeTileEdge", "decodeOverlap"] {
+            let mut incomplete = request.clone();
+            incomplete["planned"]["strategy"]["parameters"]
+                .as_object_mut()
+                .unwrap()
+                .remove(missing);
+            let selection = planned_selection(&incomplete).unwrap();
+            assert!(validate_sdxl_selection_parameters(&incomplete, &selection).is_err());
+        }
 
         for component in ["text_encoder", "unknown"] {
             request["planned"]["strategy"]["parameters"]["transformerWindowComponent"] =
@@ -26520,6 +26558,24 @@ mod sdxl_tests {
             "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
         });
         let selection = planned_selection(&request).unwrap();
+        assert!(validate_sdxl_selection_parameters(&request, &selection).is_ok());
+        for parameters in [
+            json!({ "decodeTileEdge": 512 }),
+            json!({ "decodeOverlap": 64 }),
+            json!({ "decodeTileEdge": 127, "decodeOverlap": 64 }),
+            json!({ "decodeTileEdge": 512, "decodeOverlap": 128 }),
+            json!({ "decodeTileEdge": 512, "decodeOverlap": 64, "unknownParameter": 1 }),
+        ] {
+            request["planned"]["strategy"]["parameters"] = parameters;
+            let selection = planned_selection(&request).unwrap();
+            assert!(validate_sdxl_selection_parameters(&request, &selection).is_err());
+        }
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_attention",
+            "engagedRungs": ["resident", "bounded_attention"],
+            "parameters": {}
+        });
+        let selection = planned_selection(&request).unwrap();
         assert!(validate_sdxl_selection_parameters(&request, &selection).is_err());
     }
 
@@ -26528,15 +26584,21 @@ mod sdxl_tests {
         let mut request = minimal_request(SDXL_PROVIDER);
         request["planned"]["strategy"] = json!({
             "rung": "bounded_transformer_residency",
-            "engagedRungs": ["resident", "staged_residency", "bounded_transformer_residency"],
-            "parameters": { "transformerWindowSize": 5, "transformerWindowComponent": "dit" }
+            "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_transformer_residency"],
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64, "transformerWindowSize": 5, "transformerWindowComponent": "dit" }
         });
         assert_eq!(
             sdxl_runtime_complete_sweep(&request).unwrap(),
             json!({
-                "axes": [{ "parameter": "transformerWindowSize", "testedValues": [5] }],
+                "axes": [
+                    { "parameter": "decodeTileEdge", "testedValues": [512] },
+                    { "parameter": "decodeOverlap", "testedValues": [64] },
+                    { "parameter": "transformerWindowSize", "testedValues": [5] }
+                ],
                 "cases": [{
                     "parameters": {
+                        "decodeTileEdge": 512,
+                        "decodeOverlap": 64,
                         "transformerWindowSize": 5,
                         "transformerWindowComponent": "dit"
                     },
@@ -26555,7 +26617,7 @@ mod sdxl_tests {
     }
 
     #[test]
-    fn pinned_sdxl_contract_exposes_only_the_three_implemented_rungs() {
+    fn pinned_sdxl_contract_exposes_the_four_implemented_rungs() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -26579,6 +26641,7 @@ mod sdxl_tests {
         for strategy in [
             MemoryStrategy::Resident,
             MemoryStrategy::StagedResidency,
+            MemoryStrategy::BoundedDecode,
             MemoryStrategy::BoundedTransformerResidency,
         ] {
             assert_eq!(
@@ -26587,16 +26650,14 @@ mod sdxl_tests {
                 "{strategy:?}"
             );
         }
-        for strategy in [
-            MemoryStrategy::BoundedDecode,
-            MemoryStrategy::BoundedAttention,
-        ] {
-            assert_eq!(
-                contract.capability(strategy).unwrap().support,
-                MemoryStrategySupport::Missing,
-                "{strategy:?} must stay withheld"
-            );
-        }
+        assert_eq!(
+            contract
+                .capability(MemoryStrategy::BoundedAttention)
+                .unwrap()
+                .support,
+            MemoryStrategySupport::Missing,
+            "bounded attention must stay withheld"
+        );
         let transformer = contract
             .capability(MemoryStrategy::BoundedTransformerResidency)
             .unwrap();
@@ -26613,9 +26674,108 @@ mod sdxl_tests {
             vec![
                 MemoryStrategy::Resident,
                 MemoryStrategy::StagedResidency,
+                MemoryStrategy::BoundedDecode,
                 MemoryStrategy::BoundedTransformerResidency,
             ]
         );
+        let mut request = minimal_request(SDXL_PROVIDER);
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_decode",
+            "engagedRungs": ["resident", "bounded_decode"],
+            "parameters": { "decodeTileEdge": 512, "decodeOverlap": 64 }
+        });
+        let selection = planned_selection(&request).unwrap();
+        contract.validate_selection(&selection).unwrap();
+        let controls = contract.generation_memory(&selection).unwrap();
+        let selected_spec = sdxl_spec_at(SDXL_BASE_ARM, root.clone(), "q4", &selection).unwrap();
+        assert_eq!(
+            selected_spec.offload_policy == OffloadPolicy::Sequential,
+            controls.stage_residency
+        );
+        assert!(controls.tile_vae_decode);
+        assert_eq!(controls.decode_tile_edge, Some(512));
+        assert_eq!(controls.decode_overlap, Some(64));
+        attested_strategy(
+            &request,
+            &selection,
+            &contract.engaged_composition(selection.strategy),
+        )
+        .unwrap();
+        let calibration = contract.calibration.as_ref().unwrap();
+        let context = sdxl_context(
+            selection,
+            calibration,
+            &calibration.fingerprint,
+            768,
+            768,
+            1,
+            1,
+        );
+        assert_eq!(context.selection.parameters.decode_tile_edge, Some(512));
+        assert_eq!(context.selection.parameters.decode_overlap, Some(64));
+        assert!(!context.use_pid);
+        assert_eq!(
+            sdxl_runtime_complete_sweep(&request).unwrap()["axes"],
+            json!([
+                { "parameter": "decodeTileEdge", "testedValues": [512] },
+                { "parameter": "decodeOverlap", "testedValues": [64] }
+            ])
+        );
+        assert!(matches!(
+            &contract.formula,
+            mlx_gen::gen_core::MemoryFormulaKind::PhaseEnvelope { variables, .. }
+                if variables.contains(&mlx_gen::gen_core::MemoryFormulaVariable::DecodeTileArea)
+        ));
+        request["planned"]["strategy"] = json!({
+            "rung": "bounded_transformer_residency",
+            "engagedRungs": ["resident", "staged_residency", "bounded_decode", "bounded_transformer_residency"],
+            "parameters": {
+                "decodeTileEdge": 512, "decodeOverlap": 64,
+                "transformerWindowSize": 5, "transformerWindowComponent": "dit"
+            }
+        });
+        let selection = planned_selection(&request).unwrap();
+        validate_sdxl_selection_parameters(&request, &selection).unwrap();
+        contract.validate_selection(&selection).unwrap();
+        attested_strategy(
+            &request,
+            &selection,
+            &contract.engaged_composition(selection.strategy),
+        )
+        .unwrap();
+        let controls = contract.generation_memory(&selection).unwrap();
+        let selected_spec = sdxl_spec_at(SDXL_BASE_ARM, root.clone(), "q4", &selection).unwrap();
+        assert_eq!(
+            selected_spec.offload_policy == OffloadPolicy::Sequential,
+            controls.stage_residency
+        );
+        assert!(
+            controls.stage_residency
+                && controls.tile_vae_decode
+                && controls.stream_transformer_blocks
+        );
+        assert_eq!(controls.decode_tile_edge, Some(512));
+        assert_eq!(controls.decode_overlap, Some(64));
+        assert_eq!(controls.transformer_window_size, Some(5));
+        std::fs::copy(
+            root.join("vae/model.safetensors"),
+            root.join("vae/diffusion_pytorch_model.safetensors"),
+        )
+        .unwrap();
+        let fixed_spec = spec.with_component(
+            mlx_gen_sdxl::loader::VAE_FP16_FIX_COMPONENT,
+            WeightsSource::Dir(root.join("vae")),
+        );
+        let fixed = mlx_gen_sdxl::provider_registry()
+            .unwrap()
+            .memory_strategy_contract(SDXL_PROVIDER, &fixed_spec)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fixed.calibration.as_ref().unwrap().fingerprint,
+            mlx_gen_sdxl::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT_VAE_FP16
+        );
+        assert_ne!(fixed.calibration, contract.calibration);
         std::fs::remove_dir_all(root).ok();
     }
 }

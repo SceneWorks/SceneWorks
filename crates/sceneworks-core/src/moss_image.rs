@@ -245,7 +245,6 @@ pub fn native_request(
         "maskAssetId",
         "characterId",
         "characterLookId",
-        "loras",
     ] {
         if edit && ["sourceAssetId", "referenceAssetId", "referenceAssetIds"].contains(&key) {
             continue;
@@ -712,7 +711,6 @@ mod tests {
             ("width", json!(0)),
             ("count", json!(9)),
             ("referenceAssetId", json!("ref")),
-            ("loras", json!([{"id":"style"}])),
             ("mode", json!("edit_image")),
         ] {
             let mut p = body(json!({}));

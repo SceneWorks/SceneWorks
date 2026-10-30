@@ -69,12 +69,17 @@ fn moss_owned_weight_bytes(generator: &dyn Generator, measured_load_delta: u64) 
 }
 /// Pins every selected MOSS weight file. `on_file(done, total)` fires before each pin so a cold
 /// seal (a full SHA-256 of a multi-GB file, sc-26610) is visible as progress, not a static stage.
-fn moss_pin_spec(
+/// `adapter_pins` (sc-26587) chains the LoRA/LoKR adapter files the training lane resolved into the
+/// same load spec, so a resumed or freshly-trained adapter is identity-checked exactly like a model
+/// component instead of loading unverified.
+fn moss_pin_spec_with_adapters(
     spec: &mut LoadSpec,
     entry: &JsonObject,
     settings: &Settings,
     mode: gen_core::moss_image::MossImageAcceleration,
+    adapter_pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
     on_file: &mut dyn FnMut(usize, usize),
+    check: &mut dyn FnMut() -> gen_core::Result<()>,
 ) -> WorkerResult<()> {
     let mut targets = Vec::new();
     for download in entry
@@ -119,7 +124,7 @@ fn moss_pin_spec(
     let mut pins = Vec::with_capacity(total);
     for (done, (repo, revision, relative, path)) in targets.into_iter().enumerate() {
         on_file(done, total);
-        let pin = gen_core::PinnedWeightsFile::pin(&path).map_err(|error| crate::classify_engine_error(&format!("MOSS component {relative} missing/incomplete; install or repair the selected package"), error))?;
+        let pin = gen_core::PinnedWeightsFile::pin_with_check(&path, &mut *check).map_err(|error| crate::classify_engine_error(&format!("MOSS component {relative} missing/incomplete; install or repair the selected package"), error))?;
         if repo == gen_core::moss_image_edit::EDIT_REPOSITORY {
             let expected = if relative == "adapter_config.json" {
                 gen_core::moss_image_edit::EDIT_CONFIG_SHA256
@@ -144,13 +149,36 @@ fn moss_pin_spec(
         }
         pins.push(pin);
     }
-    crate::paths::prepare_load_spec_with_file_pins(spec, pins, "MOSS component preparation")
+    crate::paths::prepare_load_spec_with_file_pins(
+        spec,
+        pins.into_iter().chain(adapter_pins),
+        "MOSS component preparation",
+    )
+}
+#[cfg(test)]
+fn moss_pin_spec(
+    spec: &mut LoadSpec,
+    entry: &JsonObject,
+    settings: &Settings,
+    mode: gen_core::moss_image::MossImageAcceleration,
+    on_file: &mut dyn FnMut(usize, usize),
+) -> WorkerResult<()> {
+    moss_pin_spec_with_adapters(
+        spec,
+        entry,
+        settings,
+        mode,
+        Vec::new(),
+        on_file,
+        &mut || Ok(()),
+    )
 }
 /// Generation and the actual provider receipt are read while the serialized cache transaction
 /// still owns the generator. Failures/cancellation cannot publish a prior successful receipt.
 fn moss_render(
     generator: &dyn Generator,
     request: &GenerationRequest,
+    adapter_identities: &[lane_controls::AdapterIdentity],
     on_progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(Vec<(i64, Image)>, JsonObject)> {
     let output = generator
@@ -184,7 +212,15 @@ fn moss_render(
             })
         })
         .collect::<WorkerResult<Vec<_>>>()?;
-    let mut facts = JsonObject::new();
+    // The sealed MOSS receipt records the published DMD stack. Custom adapters
+    // use the same provider-report/selected-identity join as the generic image lane.
+    let mut facts = lane_controls::image_facts(
+        &[],
+        adapter_identities,
+        &generator.adapter_apply_reports(),
+        None,
+    )
+    .unwrap_or_default();
     facts.insert(
         sceneworks_core::moss_image::REPORT_KEY.into(),
         serde_json::to_value(receipt).map_err(|e| WorkerError::Engine(e.to_string()))?,
@@ -282,6 +318,7 @@ fn moss_edit_render(
     references: &[Image],
     options: sceneworks_core::moss_image::EditOptions,
     advanced: gen_core::moss_image::MossImageAdvancedInputs<'_>,
+    adapter_identities: &[lane_controls::AdapterIdentity],
     progress: &mut dyn FnMut(Progress),
 ) -> WorkerResult<(gen_core::moss_image::MossImageAdvancedOutput, JsonObject)> {
     let output = generator
@@ -371,7 +408,13 @@ fn moss_edit_render(
             "MOSS edit receipt/output count or explicit-noise seed mismatch".into(),
         ));
     }
-    let mut facts = JsonObject::new();
+    let mut facts = lane_controls::image_facts(
+        &[],
+        adapter_identities,
+        &generator.adapter_apply_reports(),
+        None,
+    )
+    .unwrap_or_default();
     facts.insert(
         sceneworks_core::moss_image::EDIT_REPORT_KEY.into(),
         serde_json::to_value(report).map_err(|e| WorkerError::Engine(e.to_string()))?,
@@ -519,12 +562,142 @@ fn emit_moss_advanced_outputs(
     }
     Ok(())
 }
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    all(test, not(feature = "test-support")),
+    expect(
+        dead_code,
+        reason = "Unit tests inspect pre-load refusals; successful fields are read only by the test-support inspector."
+    )
+)]
+struct MossPreparedPreload {
+    native: gen_core::GenerationRequest,
+    variant: gen_core::moss_image::MossImageVariant,
+    resolved: gen_core::moss_image::MossImageResolved,
+    spec: LoadSpec,
+    peak: u64,
+}
+
+// Metadata-only forecast of the production NativeMossStreamRuntime preparation
+// and header demand. No generator/model tensors/device execution is created here.
+#[cfg(test)]
+fn prepare_moss_preload(
+    settings: &Settings,
+    payload: &JsonObject,
+    request: &ImageRequest,
+    on_file: &mut dyn FnMut(usize, usize),
+) -> WorkerResult<MossPreparedPreload> {
+    prepare_moss_preload_with_check(settings, payload, request, on_file, &mut || Ok(()))
+}
+#[cfg(any(test, feature = "test-support"))]
+fn prepare_moss_preload_with_check(
+    settings: &Settings,
+    payload: &JsonObject,
+    request: &ImageRequest,
+    on_file: &mut dyn FnMut(usize, usize),
+    check: &mut dyn FnMut() -> gen_core::Result<()>,
+) -> WorkerResult<MossPreparedPreload> {
+    check().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
+    use gen_core::moss_image::{MossImageResolved, MossImageVariant};
+    let native =
+        sceneworks_core::moss_image::native_request(payload, &request.model_manifest_entry)
+            .map_err(WorkerError::InvalidPayload)?
+            .ok_or_else(|| WorkerError::InvalidPayload("missing MOSS model".into()))?;
+    let variant = MossImageVariant::from_provider_id(&request.model).expect("validated MOSS id");
+    let resolved = MossImageResolved::resolve(variant, &native)
+        .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+    let entry = sceneworks_core::moss_image::selected_components(
+        &request.model_manifest_entry,
+        native.moss_image.as_ref().expect("options"),
+    )
+    .map_err(WorkerError::InvalidPayload)?;
+    let runtime = NativeMossStreamRuntime;
+    let spec = runtime.prepare(
+        MossPreparation {
+            variant,
+            mode: resolved.acceleration,
+            edit: false,
+            entry: &entry,
+            settings,
+            request,
+            check: Some(&mut *check),
+        },
+        on_file,
+    )?;
+    let peak = runtime.cold_peak(MossColdRequest {
+        variant,
+        spec: &spec,
+        native: &native,
+        references: &[],
+        edit_options: Default::default(),
+        resolved: &resolved,
+        total_count: request.image_count(),
+        edit: false,
+        advanced: Default::default(),
+        check: Some(&mut *check),
+    })?;
+    Ok(MossPreparedPreload {
+        native,
+        variant,
+        resolved,
+        spec,
+        peak,
+    })
+}
+
+/// Read-only test-support inspection of the EXACT production-selected source
+/// pins, adapter stack and native header-demand routine. Never loads a model.
+#[cfg(feature = "test-support")]
+pub(crate) fn moss_generation_preload_for_test(
+    settings: &Settings,
+    job: &JobSnapshot,
+) -> WorkerResult<Value> {
+    moss_generation_preload_for_test_with_check(settings, job, &mut || Ok(()))
+}
+#[cfg(feature = "test-support")]
+pub(crate) fn moss_generation_preload_for_test_with_check(
+    settings: &Settings,
+    job: &JobSnapshot,
+    check: &mut dyn FnMut() -> gen_core::Result<()>,
+) -> WorkerResult<Value> {
+    let request = ImageRequest::from_payload(&job.payload);
+    let prepared =
+        prepare_moss_preload_with_check(settings, &job.payload, &request, &mut |_, _| {}, check)?;
+    let provenance = if cfg!(target_os = "macos") {
+        "production prepare_moss_preload -> mlx moss_memory::selected_asset_facts.base_bytes + overlay_bytes + request_workspace_bytes (exact selected request/adapter pins)"
+    } else {
+        "production prepare_moss_preload -> candle moss_memory::selected_preload_estimate.peak_bytes (exact selected request/adapter pins, includes owned-shard staging)"
+    };
+    let adapters = prepared.spec.adapters.iter().map(|adapter| {
+        check().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
+        let headers = gen_core::weightsmeta::safetensors_path_tensor_headers(&adapter.path)
+            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+        let tensor_bytes = headers.iter().try_fold(0_u64, |sum, header| sum.checked_add(header.data_bytes)
+            .ok_or_else(|| WorkerError::InvalidPayload("MOSS adapter header bytes overflow".into())))?;
+        let pin=gen_core::PinnedWeightsFile::pin_with_check(&adapter.path, &mut *check).map_err(|e|crate::classify_engine_error("MOSS adapter preload canceled", e))?;
+        let sha256=pin.content_sha256().iter().map(|byte|format!("{byte:02x}")).collect::<String>();
+        pin.ensure_unchanged().map_err(|e|WorkerError::InvalidPayload(e.to_string()))?;
+        Ok(json!({"path":adapter.path,"scale":adapter.scale,"tensorBytes":tensor_bytes,"sha256":sha256}))
+    }).collect::<WorkerResult<Vec<Value>>>()?;
+    Ok(json!({
+        "kind":"moss-production-generation-preload",
+        "requiredBytes":prepared.peak,"provenance":provenance,
+        "parent":prepared.variant,"selectedMode":prepared.resolved.acceleration,
+        "width":prepared.native.width,"height":prepared.native.height,
+        "steps":prepared.resolved.steps,"guidance":prepared.resolved.guidance,
+        "adapters":adapters,"weightsLoaded":false,"modelTensorsLoaded":false,
+        "deviceExecutionPerformed":false
+    }))
+}
+
 struct MossPreparation<'a> {
     variant: gen_core::moss_image::MossImageVariant,
     mode: gen_core::moss_image::MossImageAcceleration,
     edit: bool,
     entry: &'a JsonObject,
     settings: &'a Settings,
+    request: &'a ImageRequest,
+    check: Option<&'a mut dyn FnMut() -> gen_core::Result<()>>,
 }
 struct MossColdRequest<'a> {
     variant: gen_core::moss_image::MossImageVariant,
@@ -536,6 +709,7 @@ struct MossColdRequest<'a> {
     total_count: u32,
     edit: bool,
     advanced: gen_core::moss_image::MossImageAdvancedInputs<'a>,
+    check: Option<&'a mut dyn FnMut() -> gen_core::Result<()>>,
 }
 /// Private dependency boundary: production retains exact frozen seals and native admission.
 /// Injected CPU providers supply their own explicitly synthetic, pinned source contract.
@@ -564,7 +738,12 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
             edit,
             entry,
             settings,
+            request,
+            check,
         } = input;
+        let mut noop = || Ok(());
+        let check = check.unwrap_or(&mut noop);
+        check().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
         let root = huggingface_pinned_snapshot_dir(
             &settings.data_dir,
             variant.repository(),
@@ -604,7 +783,17 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
                 spec = spec.with_component(id, source);
             }
         }
-        moss_pin_spec(&mut spec, entry, settings, mode, progress)?;
+        let prepared_adapters = resolve_prepared_adapters(request, settings)?;
+        spec = spec.with_adapters(prepared_adapters.specs);
+        moss_pin_spec_with_adapters(
+            &mut spec,
+            entry,
+            settings,
+            mode,
+            prepared_adapters.pins,
+            progress,
+            check,
+        )?;
         Ok(spec)
     }
     fn cold_peak(&self, input: MossColdRequest<'_>) -> WorkerResult<u64> {
@@ -618,15 +807,31 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
             total_count,
             edit,
             advanced,
+            mut check,
         } = input;
+        let mut checked = || {
+            if native.cancel.is_cancelled() {
+                return Err(gen_core::Error::Canceled);
+            }
+            if let Some(check) = check.as_mut() {
+                check()?;
+            }
+            Ok(())
+        };
+        checked().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let _ = (resolved, total_count);
         #[cfg(target_os = "macos")]
         let peak = if edit {
             moss_edit_cold_peak(variant, spec, native, references, edit_options, advanced)?
         } else {
-            let facts = moss_memory::selected_asset_facts(variant, spec, resolved.acceleration)
-                .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+            let facts = moss_memory::selected_asset_facts_with_check(
+                variant,
+                spec,
+                resolved.acceleration,
+                &mut checked,
+            )
+            .map_err(|e| crate::classify_engine_error("MOSS preload facts failed", e))?;
             let expanded = if native.prompt_batch.is_empty() {
                 1
             } else {
@@ -664,15 +869,17 @@ impl MossStreamRuntime for NativeMossStreamRuntime {
         let peak = if edit {
             moss_edit_cold_peak(variant, spec, native, references, edit_options, advanced)?
         } else {
-            moss_memory::selected_preload_estimate(
+            moss_memory::selected_preload_estimate_with_check(
                 variant,
                 spec,
                 native,
                 gen_core::moss_image::MossImageAdvancedInputs::default(),
+                &mut checked,
             )
-            .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?
+            .map_err(|e| crate::classify_engine_error("MOSS preload facts failed", e))?
             .peak_bytes
         };
+        checked().map_err(|e| crate::classify_engine_error("MOSS preload canceled", e))?;
         Ok(peak)
     }
     fn budget(&self, settings: &Settings) -> WorkerResult<gen_core::MemoryBudget> {
@@ -811,6 +1018,8 @@ async fn generate_moss_stream_with_runtime(
             edit,
             entry: &entry,
             settings,
+            request,
+            check: None,
         },
         &mut |done, total| {
             let _ = pin_progress.send((done, total));
@@ -829,10 +1038,13 @@ async fn generate_moss_stream_with_runtime(
         total_count: request.image_count(),
         edit,
         advanced: advanced.inputs(),
+        check: None,
     })?;
     let peak = peak
         .checked_add(advanced.host_bytes as u64)
         .ok_or_else(|| WorkerError::InvalidPayload("MOSS host tensor admission overflow".into()))?;
+    let adapter_identities =
+        lane_controls::adapter_identities(api, settings, job, request, &spec.adapters).await;
     let settings_owned = settings.clone();
     let cold_settings = settings_owned.clone();
     let cold_runtime = Arc::clone(&runtime);
@@ -926,6 +1138,7 @@ async fn generate_moss_stream_with_runtime(
                     &references,
                     edit_options,
                     advanced.inputs(),
+                    &adapter_identities,
                     &mut progress,
                 )?;
                 emit_moss_advanced_outputs(
@@ -948,7 +1161,8 @@ async fn generate_moss_stream_with_runtime(
                     let seed = resolve_seed(&job_request, index);
                     native.seed = Some(seed as u64);
                     let mut progress = |p| send_gen_progress(&tx, index, p);
-                    let (images, facts) = moss_render(generator, &native, &mut progress)?;
+                    let (images, facts) =
+                        moss_render(generator, &native, &adapter_identities, &mut progress)?;
                     if images.len() != 1 {
                         return Err(WorkerError::Engine(
                             "MOSS single-image output count mismatch".into(),
@@ -970,7 +1184,8 @@ async fn generate_moss_stream_with_runtime(
                 native.seed = Some(seed as u64);
                 let mut progress = |p| send_gen_progress(&tx, 0, p);
                 native.preview = preview_sink_for(&tx, 0);
-                let (images, facts) = moss_render(generator, &native, &mut progress)?;
+                let (images, facts) =
+                    moss_render(generator, &native, &adapter_identities, &mut progress)?;
                 if images.len() != count {
                     return Err(WorkerError::Engine(
                         "MOSS batch output count mismatch".into(),
@@ -1020,6 +1235,170 @@ mod moss_consumer_tests {
     use super::*;
     use gen_core::moss_image::*;
     use std::cell::{Cell, RefCell};
+
+    // Request metadata only: no model fixture, source payload, device, tensor or
+    // native backend invocation. The tests below stop before backend header pricing.
+    fn preload_payload_for_pure_test(variant: MossImageVariant, mode: &str) -> JsonObject {
+        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
+            .iter()
+            .find(|(name, _)| *name == "builtin.models.jsonc")
+            .unwrap()
+            .1;
+        let manifest: Value =
+            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let entry = manifest["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["id"] == variant.provider_id())
+            .unwrap();
+        json!({
+            "model":variant.provider_id(), "modelManifestEntry":entry,
+            "prompt":"source-only preload request", "width":256, "height":256,
+            "count":1, "advanced":if mode == "off" {
+                json!({"steps":8,"guidanceScale":1.0,"mossImage":{"acceleration":mode}})
+            } else {
+                // DMD is natively no-CFG; this test targets snapshot availability.
+                json!({"steps":8,"mossImage":{"acceleration":mode}})
+            }
+        })
+        .as_object()
+        .unwrap()
+        .clone()
+    }
+
+    #[test]
+    fn checked_preload_refuses_cancellation_before_any_source_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings::for_test(temp.path().join("data"));
+        let payload = json!({"model":"not_a_moss_provider","prompt":"metadata only"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let request = ImageRequest::from_payload(&payload);
+        let mut checks = 0;
+        let error = prepare_moss_preload_with_check(
+            &settings,
+            &payload,
+            &request,
+            &mut |_, _| panic!("source lookup reached"),
+            &mut || {
+                checks += 1;
+                Err(gen_core::Error::Canceled)
+            },
+        )
+        .err()
+        .expect("cancellation must refuse");
+        assert!(matches!(&error, WorkerError::Canceled(_)), "{error:?}");
+        assert_eq!(checks, 1);
+    }
+
+    #[test]
+    fn prepared_preload_refuses_non_moss_before_source_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let settings = Settings::for_test(temp.path().join("data"));
+        let payload = json!({"model":"not_a_moss_provider","prompt":"metadata only"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let request = ImageRequest::from_payload(&payload);
+        let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
+            .err()
+            .expect("non-MOSS must fail before snapshot/backend preparation");
+        assert!(
+            matches!(error, WorkerError::InvalidPayload(ref message) if message == "missing MOSS model"),
+            "{error}"
+        );
+        assert!(
+            !hub.exists(),
+            "request refusal must not create a model cache"
+        );
+    }
+
+    #[test]
+    fn prepared_preload_preserves_base_dmd_refusal_before_source_lookup() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let settings = Settings::for_test(temp.path().join("data"));
+        for mode in ["unmerged_bf16", "full_fp32"] {
+            let payload = preload_payload_for_pure_test(MossImageVariant::Base, mode);
+            let request = ImageRequest::from_payload(&payload);
+            let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
+                .err()
+                .expect("Base+DMD must fail before source/backend preparation");
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(ref message) if message.contains("DMD requires the exact SFT parent")),
+                "{mode}: {error}"
+            );
+            assert!(
+                !error.to_string().contains("snapshot missing"),
+                "parent refusal must precede cache lookup: {error}"
+            );
+        }
+        assert!(
+            !hub.exists(),
+            "parent refusal must not create a model cache"
+        );
+    }
+
+    #[test]
+    fn prepared_preload_requires_exact_frozen_snapshot_for_each_admissible_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let hub = temp.path().join("hub");
+        let _env = crate::test_env::EnvVars::set(&[
+            ("HF_HUB_CACHE", hub.to_str().unwrap()),
+            ("HF_HOME", ""),
+            ("HUGGINGFACE_HUB_CACHE", ""),
+        ]);
+        let settings = Settings::for_test(temp.path().join("data"));
+        for (variant, mode) in [
+            (MossImageVariant::Base, "off"),
+            (MossImageVariant::Sft, "off"),
+            (MossImageVariant::Sft, "unmerged_bf16"),
+            (MossImageVariant::Sft, "full_fp32"),
+        ] {
+            // An unrelated empty revision must not become a fallback. No model
+            // file is created, and native/backend demand functions remain unreachable.
+            let wrong = hub
+                .join(format!(
+                    "models--{}",
+                    variant.repository().replace('/', "--")
+                ))
+                .join("snapshots")
+                .join("0000000000000000000000000000000000000000");
+            std::fs::create_dir_all(&wrong).unwrap();
+            let payload = preload_payload_for_pure_test(variant, mode);
+            let request = ImageRequest::from_payload(&payload);
+            let error = prepare_moss_preload(&settings, &payload, &request, &mut |_, _| {})
+                .err()
+                .expect("absent frozen snapshot must refuse before backend demand pricing");
+            let expected = format!(
+                "{} frozen snapshot missing; install or repair this model in Models",
+                variant.provider_id()
+            );
+            assert!(
+                matches!(error, WorkerError::InvalidPayload(ref message) if message == &expected),
+                "{variant:?}/{mode}: {error}"
+            );
+            assert_eq!(
+                std::fs::read_dir(&wrong).unwrap().count(),
+                0,
+                "no model payload may be staged by a pre-load refusal"
+            );
+        }
+    }
+
     #[test]
     fn full_prepared_consumer_config_reaches_native_shared_preparation_without_ordinary_dit() {
         let temp = tempfile::tempdir().unwrap();
@@ -1519,6 +1898,8 @@ mod moss_consumer_tests {
         cancel: Cell<bool>,
         reads: Cell<usize>,
         owned_weight_bytes: Cell<u64>,
+        adapter_reports: RefCell<Vec<gen_core::AdapterApplyReport>>,
+        adapter_report_reads: Cell<usize>,
         advanced_inputs: RefCell<Vec<AdvancedObservation>>,
     }
     impl Probe {
@@ -1544,6 +1925,8 @@ mod moss_consumer_tests {
                 cancel: Cell::new(false),
                 reads: Cell::new(0),
                 owned_weight_bytes: Cell::new(0),
+                adapter_reports: RefCell::new(vec![]),
+                adapter_report_reads: Cell::new(0),
                 advanced_inputs: RefCell::new(Vec::new()),
             }
         }
@@ -1780,6 +2163,11 @@ mod moss_consumer_tests {
         fn moss_image_owned_weight_bytes(&self) -> Option<u64> {
             Some(self.owned_weight_bytes.get())
         }
+        fn adapter_apply_reports(&self) -> Vec<gen_core::AdapterApplyReport> {
+            self.adapter_report_reads
+                .set(self.adapter_report_reads.get() + 1);
+            self.adapter_reports.borrow().clone()
+        }
         fn moss_image_execution_report(&self) -> Option<MossImageExecutionReport> {
             self.reads.set(self.reads.get() + 1);
             self.report.borrow().clone()
@@ -1841,6 +2229,7 @@ mod moss_consumer_tests {
                 noise: Some(&noise),
                 ..Default::default()
             },
+            &[],
             &mut |_| {},
         )
         .unwrap();
@@ -1962,8 +2351,16 @@ mod moss_consumer_tests {
             moss_edit_peak(&probe, &native, &refs, options, owned.inputs()).unwrap(),
             73
         );
-        let (output, facts) =
-            moss_edit_render(&probe, &native, &refs, options, owned.inputs(), &mut |_| {}).unwrap();
+        let (output, facts) = moss_edit_render(
+            &probe,
+            &native,
+            &refs,
+            options,
+            owned.inputs(),
+            &[],
+            &mut |_| {},
+        )
+        .unwrap();
         assert_eq!(probe.advanced_inputs.borrow().len(), 2);
         assert_eq!(
             probe.advanced_inputs.borrow()[0],
@@ -2239,6 +2636,7 @@ mod moss_consumer_tests {
             &references,
             options,
             Default::default(),
+            &[],
             &mut |_| {}
         )
         .is_err());
@@ -2256,6 +2654,7 @@ mod moss_consumer_tests {
             &references,
             options,
             Default::default(),
+            &[],
             &mut |_| {},
         )
         .unwrap();
@@ -2272,6 +2671,7 @@ mod moss_consumer_tests {
             &references,
             options,
             Default::default(),
+            &[],
             &mut |_| {}
         )
         .is_err());
@@ -2285,6 +2685,7 @@ mod moss_consumer_tests {
                 &references,
                 options,
                 Default::default(),
+                &[],
                 &mut |_| {}
             ),
             Err(WorkerError::Canceled(_))
@@ -2297,7 +2698,7 @@ mod moss_consumer_tests {
         })
         .unwrap();
         assert!(
-            matches!(moss_edit_render(&generator, &request, &references, options, Default::default(), &mut |_| {}).unwrap().0, MossImageAdvancedOutput::Images(ref items) if items.len() == 1)
+            matches!(moss_edit_render(&generator, &request, &references, options, Default::default(), &[], &mut |_| {}).unwrap().0, MossImageAdvancedOutput::Images(ref items) if items.len() == 1)
         );
         assert_eq!(
             loads.get(),
@@ -2309,6 +2710,18 @@ mod moss_consumer_tests {
     #[test]
     fn edit_calls_typed_native_method_with_uncropped_rgb_and_only_publishes_actual_success() {
         let probe = Probe::new();
+        let identity = lane_controls::AdapterIdentity {
+            id: Some("selected-edit-custom".into()),
+            path: PathBuf::from("edit-custom.safetensors"),
+            sha256: Some("cd".repeat(32)),
+            scale: 0.75,
+            kind: gen_core::AdapterKind::Lora,
+        };
+        *probe.adapter_reports.borrow_mut() = vec![gen_core::AdapterApplyReport {
+            adapter_path: identity.path.clone(),
+            applied: 36,
+            skipped: vec![],
+        }];
         let req = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
             width: 16,
             height: 16,
@@ -2335,6 +2748,7 @@ mod moss_consumer_tests {
             &refs,
             options,
             Default::default(),
+            std::slice::from_ref(&identity),
             &mut |_| progress += 1,
         )
         .unwrap();
@@ -2346,6 +2760,15 @@ mod moss_consumer_tests {
             173
         );
         assert_eq!(progress, 1);
+        assert_eq!(
+            facts[lane_controls::ADAPTER_APPLY_KEY][0],
+            json!({
+                "id": "selected-edit-custom", "path": "edit-custom.safetensors",
+                "sha256": "cd".repeat(32), "scale": 0.75, "kind": "lora",
+                "applied": 36, "skipped": []
+            })
+        );
+        assert_eq!(probe.adapter_report_reads.get(), 1);
         assert_eq!(
             probe.edit_inputs.borrow()[0],
             (48, 16, vec![73; 48 * 16 * 3])
@@ -2372,10 +2795,16 @@ mod moss_consumer_tests {
             &refs,
             options,
             Default::default(),
+            std::slice::from_ref(&identity),
             &mut |_| {}
         )
         .is_err());
         assert!(probe.edit_report.borrow().is_none());
+        assert_eq!(
+            probe.adapter_report_reads.get(),
+            1,
+            "failed output cannot read prior adapter reports"
+        );
         assert_eq!(probe.reads.get(), 1);
         probe.failure.set(false);
         probe.cancel.set(true);
@@ -2386,6 +2815,7 @@ mod moss_consumer_tests {
                 &refs,
                 options,
                 Default::default(),
+                std::slice::from_ref(&identity),
                 &mut |_| {}
             ),
             Err(WorkerError::Canceled(_))
@@ -2394,6 +2824,11 @@ mod moss_consumer_tests {
             probe.reads.get(),
             1,
             "canceled output must not publish a receipt"
+        );
+        assert_eq!(
+            probe.adapter_report_reads.get(),
+            1,
+            "canceled output cannot read prior adapter reports"
         );
     }
     #[test]
@@ -2406,7 +2841,7 @@ mod moss_consumer_tests {
             ..Default::default()
         };
         let mut progress = 0;
-        let (images, facts) = moss_render(&probe, &req, &mut |_| progress += 1).unwrap();
+        let (images, facts) = moss_render(&probe, &req, &[], &mut |_| progress += 1).unwrap();
         assert_eq!(
             images[0].0, 173,
             "provider's actual seed, not requested seed"
@@ -2417,10 +2852,56 @@ mod moss_consumer_tests {
         );
         assert_eq!(progress, 1);
         probe.failure.set(true);
-        assert!(moss_render(&probe, &req, &mut |_| {}).is_err());
+        assert!(moss_render(&probe, &req, &[], &mut |_| {}).is_err());
         assert_eq!(probe.reads.get(), 1);
         assert!(probe.report.borrow().is_none());
     }
+    // CI_IMPACT: literal pixels, metadata and provider reports only; no model/tensor execution.
+    #[test]
+    fn moss_custom_application_reports_join_selected_identity_into_image_facts() {
+        let probe = Probe::new();
+        let custom_path = PathBuf::from("custom.safetensors");
+        *probe.adapter_reports.borrow_mut() = vec![gen_core::AdapterApplyReport {
+            adapter_path: custom_path.clone(),
+            applied: 252,
+            skipped: vec![],
+        }];
+        let identity = lane_controls::AdapterIdentity {
+            id: Some("selected-custom".into()),
+            path: custom_path,
+            sha256: Some("ab".repeat(32)),
+            scale: 1.,
+            kind: gen_core::AdapterKind::Lokr,
+        };
+        let req = GenerationRequest {
+            width: 16,
+            height: 16,
+            ..Default::default()
+        };
+        let (_, facts) =
+            moss_render(&probe, &req, std::slice::from_ref(&identity), &mut |_| {}).unwrap();
+        let applied = &facts[lane_controls::ADAPTER_APPLY_KEY][0];
+        assert_eq!(applied["id"], "selected-custom");
+        assert_eq!(applied["path"], "custom.safetensors");
+        assert_eq!(applied["sha256"], "ab".repeat(32));
+        assert_eq!(applied["scale"], 1.);
+        assert_eq!(applied["kind"], "lokr");
+        assert_eq!(applied["applied"], 252);
+        assert_eq!(applied["skipped"], json!([]));
+        assert!(
+            facts[sceneworks_core::moss_image::REPORT_KEY]["adapter_reports"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let wrong = lane_controls::AdapterIdentity {
+            path: PathBuf::from("other.safetensors"),
+            ..identity
+        };
+        let (_, facts) = moss_render(&probe, &req, &[wrong], &mut |_| {}).unwrap();
+        assert!(facts[lane_controls::ADAPTER_APPLY_KEY][0]["applied"].is_null());
+    }
+
     #[test]
     fn cancellation_after_output_cannot_publish_a_previous_or_current_receipt() {
         let probe = Probe::new();
@@ -2431,7 +2912,7 @@ mod moss_consumer_tests {
             ..Default::default()
         };
         assert!(matches!(
-            moss_render(&probe, &req, &mut |_| {}),
+            moss_render(&probe, &req, &[], &mut |_| {}),
             Err(WorkerError::Canceled(_))
         ));
         assert_eq!(probe.reads.get(), 0);

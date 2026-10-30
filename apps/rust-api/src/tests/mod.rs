@@ -2,6 +2,7 @@
 //! (sc-11217, F-030). Shared fixtures/helpers live in `support`.
 
 mod auth;
+mod browser_fixture;
 mod catalog;
 mod checkpoint_library;
 mod compression;
@@ -24,6 +25,21 @@ mod media;
 mod model_cache;
 mod model_library;
 mod moss_image;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod moss_training_acceptance;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod moss_training_acceptance_contracts;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod moss_training_native;
 mod projects;
 mod prompt_batches;
 mod provenance;

@@ -69,9 +69,7 @@ for repo, rev, files in [
 PY
 
 # ---- 3. build (run-scoped per source SHA; unstripped, rust-lang/rust#157750) ---------------------
-# Only this lane's own trees: keep the current SHA's, drop any earlier SHA's.
-find "$HOME/sceneworks-supra2-campaign-target" -mindepth 1 -maxdepth 1 -type d ! -name "$sha" \
-  -exec rm -rf {} + 2>/dev/null || true
+# Other source revisions may still be queued or running; retain their target trees.
 mkdir -p "$target"
 export CARGO_TARGET_DIR="$target"
 export CARGO_PROFILE_RELEASE_STRIP=none
@@ -79,18 +77,37 @@ export CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_STRIP=none
 build_start=$(date +%s)
 cargo test --locked --release -p sceneworks-worker --lib --no-run
 bin="$(cargo test --locked --release -p sceneworks-worker --lib --no-run --message-format=json \
-  | python3.12 -c 'import json,sys
+  | tee "$out/native-build.jsonl" | python3.12 -c 'import json,sys
 for l in sys.stdin:
     m = json.loads(l)
     if m.get("reason") == "compiler-artifact" and m.get("executable") and m["target"]["name"] == "sceneworks_worker":
         print(m["executable"])' | tail -1)"
 test -x "$bin"
+native_binding_script="$(cd "$(dirname "$0")/.." && pwd)/memory-catalog/bind-metallib.mjs"
+PMETAL_METALLIB_PATH="$(WORK_DIR_NATIVE="$out" node "$native_binding_script" "$out/native-build.jsonl" --supra2-test --print-path)"
+export PMETAL_METALLIB_PATH
+bin="$(dirname "$PMETAL_METALLIB_PATH")/sceneworks_worker"
+test -x "$bin"
 echo "build $(( $(date +%s) - build_start ))s; binary $bin" | tee "$out/build.txt"
 
 # ---- 4. guarded runs: each invocation must run EXACTLY one passing test --------------------------
 failed=0
+SCENEWORKS_METAL_ENTRY_SCRIPT="$(cd "$(dirname "$0")/.." && pwd)/metal_execution_entry.sh"
+export SCENEWORKS_METAL_ENTRY_SCRIPT out mem_gib bin guard_py hub bundle
+# shellcheck source=scripts/ci/metal_execution_entry.sh
+source "$SCENEWORKS_METAL_ENTRY_SCRIPT"
 run_guarded() { # $1 test path, $2 cap GiB, $3 wall s
   local test=$1 cap_gib=$2 limit_s=$3 name="${1##*::}"
+  if [[ -z "${SCENEWORKS_METAL_EXECUTION_LOCK_FD+x}" ]]; then
+    export -f run_guarded
+    if ! python3.12 -I "$(dirname "$SCENEWORKS_METAL_ENTRY_SCRIPT")/metal_execution_lock.py" \
+      --wait-seconds "${SCENEWORKS_METAL_EXECUTION_WAIT_SECONDS:-$limit_s}" -- \
+      bash -c 'source "$SCENEWORKS_METAL_ENTRY_SCRIPT"; failed=0; run_guarded "$@"; exit "$failed"' _ "$@"; then
+      failed=1
+    fi
+    return
+  fi
+  metal_execution_entry "$limit_s" true
   local log="$out/$name.log" free_pct free_gib
   free_pct="$(/usr/bin/memory_pressure -Q 2>/dev/null | sed -n 's/.*free percentage: \([0-9]*\)%.*/\1/p')"
   free_gib=$(( mem_gib * ${free_pct:-0} / 100 ))

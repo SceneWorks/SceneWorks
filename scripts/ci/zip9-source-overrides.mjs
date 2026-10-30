@@ -1,0 +1,248 @@
+// Exact leaf security overrides are part of the effective producer, not hidden by a Git pin.
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import * as fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+const root = fileURLToPath(new URL('../../', import.meta.url));
+const manifestFile = new URL('../../vendor/zip9-source-overrides.json', import.meta.url);
+const sha = (data) => createHash('sha256').update(data).digest('hex');
+export const SECURITY_BACKPORT_MANIFEST_SHA256 = sha(readFileSync(manifestFile));
+export const SECURITY_BACKPORT = JSON.parse(readFileSync(manifestFile, 'utf8'));
+const names = ['candle-audio-kokoro', 'candle-core', 'mlx-gen', 'tauri-plugin-updater'];
+// Frozen main's published 2.11.0 updater port retains every production source byte from the
+// earlier audit. It omits Cargo.lock and restores the published manifests with only zip 9 changed.
+const updaterPath = 'vendor/tauri-plugin-updater-2.11.0';
+export const CURRENT_UPDATER = {
+  name: 'tauri-plugin-updater', version: '2.11.0', path: updaterPath,
+  files: [
+    ...SECURITY_BACKPORT.packages.find((pkg) => pkg.name === 'tauri-plugin-updater').files
+      .filter((file) => !['Cargo.lock', 'Cargo.toml', 'Cargo.toml.orig'].includes(path.posix.basename(file.path)))
+      .map((file) => ({ ...file, path: `${updaterPath}/${file.path.split('/').slice(2).join('/')}` })),
+    ...[
+      ['Cargo.toml', 3686, 'daf127ada64b6ecb91672ead5b501aeb1c9b8fcaebc202671e9eb8b3e4835263'],
+      ['Cargo.toml.orig', 2280, '4818cd0aef020406c8b83d6ec2b7c5f3be9b780f591e3dbbfbfbe2fa5f6dc55c'],
+      ['VENDORED.md', 2031, 'af9f8ad9c3bd8c5fba50d591b2aec63ba34592c7ab851b81037f2b397286df34'],
+    ].map(([name, bytes, sha256]) => ({ path: `${updaterPath}/${name}`, bytes, sha256 })),
+  ].sort((a, b) => a.path.localeCompare(b.path)),
+};
+
+async function verifyDirectoryClosure(repository, pkg) {
+  const declared = new Set(), directories = new Set([pkg.path]), seen = new Set();
+  for (const file of pkg.files) {
+    assert(file.path.startsWith(`${pkg.path}/`) && path.posix.normalize(file.path) === file.path);
+    assert(!declared.has(file.path), `duplicate vendor input ${file.path}`);
+    declared.add(file.path);
+    for (let parent = path.posix.dirname(file.path); parent !== pkg.path; parent = path.posix.dirname(parent)) {
+      assert(parent.startsWith(`${pkg.path}/`), 'vendor input escaped its audited root');
+      directories.add(parent);
+    }
+  }
+  async function walk(relative) {
+    const stat = await fs.lstat(path.join(repository, relative));
+    assert(stat.isDirectory() && !stat.isSymbolicLink(), `unsafe vendor directory ${relative}`);
+    for (const entry of await fs.readdir(path.join(repository, relative), { withFileTypes: true })) {
+      const name = `${relative}/${entry.name}`;
+      assert(!entry.isSymbolicLink(), `unsafe vendor link ${name}`);
+      if (entry.isDirectory()) {
+        assert(directories.has(name), `unmanifested vendor directory ${name}`);
+        await walk(name);
+      } else {
+        assert(declared.has(name), `unmanifested vendor input ${name}`);
+        assert(entry.isFile(), `unsafe vendor input ${name}`);
+        seen.add(name);
+      }
+    }
+  }
+  await walk(pkg.path);
+  assert.deepEqual([...seen].sort(), [...declared].sort(), `incomplete vendor closure ${pkg.path}`);
+}
+
+async function verifyPackageBytes(repository, pkg) {
+  // Cargo may autodiscover untracked build.rs/bin targets; known hashes alone
+  // are insufficient. Generated outputs belong outside these audited roots.
+  await verifyDirectoryClosure(repository, pkg);
+  const contents = [];
+  for (const file of pkg.files) {
+    assert(file.path.startsWith(`${pkg.path}/`) && !file.path.split('/').includes('..'));
+    const full = path.join(repository, file.path), stat = await fs.lstat(full);
+    assert(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1, `unsafe vendor file ${file.path}`);
+    const bytes = await fs.readFile(full);
+    assert.equal(bytes.length, file.bytes, file.path); assert.equal(sha(bytes), file.sha256, file.path);
+    contents.push([file.path, file.sha256]);
+  }
+  return { name: pkg.name, version: pkg.version, path: pkg.path, source_sha256: sha(JSON.stringify(contents)) };
+}
+
+export async function verifyVendorBytes(repository = root, packageNames = names) {
+  assert.equal(sha(await fs.readFile(path.join(repository, 'vendor/zip9-source-overrides.json'))), SECURITY_BACKPORT_MANIFEST_SHA256);
+  assert.deepEqual(SECURITY_BACKPORT.packages.map((p) => p.name).sort(), [...names].sort());
+  const packages = [];
+  for (const pkg of SECURITY_BACKPORT.packages) {
+    if (packageNames.includes(pkg.name)) packages.push(await verifyPackageBytes(repository, pkg));
+  }
+  assert.equal(sha(await fs.readFile(path.join(repository, 'vendor/zip9-security-backport.patch'))), SECURITY_BACKPORT.security_diff_sha256);
+  return { kind: 'exact-pinned-leaf-security-backport', engine_revision: SECURITY_BACKPORT.engine_revision,
+    manifest_sha256: SECURITY_BACKPORT_MANIFEST_SHA256, security_diff_sha256: SECURITY_BACKPORT.security_diff_sha256, packages };
+}
+
+export function validateCargoSources(metadata, repository = root, inferenceRevision = SECURITY_BACKPORT.engine_revision) {
+  assert(Array.isArray(metadata.packages));
+  assert(/^[a-f0-9]{40}$/.test(inferenceRevision), 'exact inference revision required');
+  const upstream = inferenceRevision !== SECURITY_BACKPORT.engine_revision;
+  const source = `git+https://github.com/SceneWorks/inference?rev=${inferenceRevision}#${inferenceRevision}`;
+  for (const historical of SECURITY_BACKPORT.packages) {
+    const expected = upstream && historical.name === 'tauri-plugin-updater' ? CURRENT_UPDATER : historical;
+    const matches = metadata.packages.filter((p) => p.name === expected.name);
+    assert.equal(matches.length, 1, `one effective ${expected.name} required`);
+    const pkg = matches[0];
+    if (upstream && expected.name !== 'tauri-plugin-updater') {
+      assert.equal(pkg.source, source, `${expected.name} must use the current pinned inference producer`);
+      continue;
+    }
+    assert.equal(pkg.version, expected.version);
+    assert.equal(pkg.source, null, `${expected.name} must use the audited local security port`);
+    assert.equal(path.resolve(pkg.manifest_path), path.resolve(repository, expected.path, 'Cargo.toml'));
+    assert(!metadata.workspace_members.includes(pkg.id), 'security leaves must remain dependency-only');
+    assert(!metadata.workspace_default_members.includes(pkg.id), 'security leaves must not widen default tests');
+    assert(Array.isArray(pkg.targets) && pkg.targets.length > 0, `Cargo targets required for ${expected.name}`);
+    const declared = new Set(expected.files.map((file) => path.resolve(repository, file.path)));
+    for (const target of pkg.targets) {
+      assert(path.isAbsolute(target.src_path) && declared.has(path.resolve(target.src_path)),
+        `unaudited Cargo target ${expected.name}: ${target.src_path}`);
+    }
+  }
+  for (const pkg of metadata.packages) {
+    if (pkg.source?.startsWith('git+https://github.com/SceneWorks/inference')) {
+      assert.equal(pkg.source, source, `mixed or foreign inference source: ${pkg.name}`);
+    }
+  }
+  for (const anchor of SECURITY_BACKPORT.audited_unchanged_cuda_anchors) {
+    const matches = metadata.packages.filter((p) => p.name === anchor.package);
+    assert.equal(matches.length, 1, `unambiguous CUDA anchor package ${anchor.package}`);
+    assert.equal(matches[0].source, source, `CUDA anchor source changed: ${anchor.package}`);
+  }
+  const graph = metadata.packages.map((pkg) => ({ name: pkg.name, version: pkg.version,
+    source: pkg.source ?? `path:${path.relative(repository, path.dirname(pkg.manifest_path)).split(path.sep).join('/')}`,
+    targets: (pkg.targets ?? []).map((target) => ({ name: target.name, kind: target.kind,
+      crate_types: target.crate_types, edition: target.edition, doc: target.doc, doctest: target.doctest, test: target.test,
+      required_features: target['required-features'] ?? [],
+      source: path.relative(path.dirname(pkg.manifest_path), target.src_path).split(path.sep).join('/'),
+    })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
+  })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return sha(JSON.stringify(graph));
+}
+
+async function verifyCommittedCheckout(checkout, revision) {
+  const git = (args, input) => execFileSync('git', ['-C', checkout, ...args], { encoding: 'utf8', input, maxBuffer: 16 * 1024 * 1024 });
+  assert.equal(git(['rev-parse', '--show-object-format']).trim(), 'sha1');
+  const files = [], directories = new Set(), rustDirectories = new Set(), namedFiles = new Set();
+  // Read the named tree, not the index: assume-unchanged/skip-worktree flags can conceal edits
+  // to modules and build scripts from both git status and target-root-only hashing.
+  const entries = git(['ls-tree', '-rz', '--full-tree', revision]).split('\0').filter(Boolean);
+  const attributes = git(['check-attr', `--source=${revision}`, '-z', '--stdin', 'eol'],
+    entries.map((entry) => entry.slice(entry.indexOf('\t') + 1)).join('\0') + '\0').split('\0');
+  const eol = new Map();
+  for (let i = 0; i < attributes.length - 1; i += 3) eol.set(attributes[i], attributes[i + 2]);
+  for (const entry of entries) {
+    const match = /^(100644|100755|120000) blob ([a-f0-9]{40})\t(.+)$/.exec(entry);
+    assert(match, `unsupported inference tree entry ${entry}`);
+    const [, mode, expected, relative] = match;
+    assert(path.posix.normalize(relative) === relative && !relative.includes('\\') && !relative.startsWith('../') && !path.posix.isAbsolute(relative));
+    namedFiles.add(relative);
+    if (relative.endsWith('.rs')) rustDirectories.add(path.posix.dirname(relative));
+    for (let parent = path.posix.dirname(relative); parent !== '.'; parent = path.posix.dirname(parent)) {
+      if (directories.has(parent)) break;
+      const stat = await fs.lstat(path.join(checkout, parent));
+      assert(stat.isDirectory() && !stat.isSymbolicLink(), `unsafe inference source directory ${parent}`);
+      directories.add(parent);
+    }
+    const file = path.join(checkout, relative), stat = await fs.lstat(file);
+    let bytes;
+    if (mode === '120000') {
+      assert(stat.isSymbolicLink(), `inference source mode changed: ${relative}`);
+      bytes = await fs.readlink(file, { encoding: 'buffer' });
+    } else {
+      assert(stat.isFile() && !stat.isSymbolicLink(), `inference source mode changed: ${relative}`);
+      // Windows has no POSIX executable bit. File/symlink identity and bytes are still checked.
+      if (process.platform !== 'win32') {
+        assert.equal(Boolean(stat.mode & 0o111), mode === '100755', `inference source mode changed: ${relative}`);
+      }
+      bytes = await fs.readFile(file);
+    }
+    // Git stores LF for declared CRLF checkouts. Only the named commit's EOL policy may
+    // normalize a blob comparison; the receipt still binds the exact raw bytes read below.
+    let committedBytes = bytes;
+    if (mode !== '120000' && eol.get(relative) === 'crlf') {
+      committedBytes = Buffer.from(bytes.toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
+      assert(bytes.equals(Buffer.from(committedBytes.toString('latin1').replace(/\n/g, '\r\n'), 'latin1')),
+        `inference checkout EOL differs from committed policy: ${relative}`);
+    }
+    const actual = createHash('sha1').update(`blob ${committedBytes.length}\0`).update(committedBytes).digest('hex');
+    assert.equal(actual, expected, `inference tracked bytes differ from ${revision}: ${relative}`);
+    files.push([relative, mode, sha(bytes)]);
+  }
+  assert(files.length > 0, 'inference checkout must contain committed source');
+  // Git status omits ignored files. Check only the committed Rust source/build directories:
+  // an extra module, build helper or module directory cannot join this frozen source closure.
+  for (const directory of rustDirectories) {
+    for (const entry of await fs.readdir(path.join(checkout, directory), { withFileTypes: true })) {
+      const relative = directory === '.' ? entry.name : `${directory}/${entry.name}`;
+      if (directory === '.' && ['.git', '.cargo-ok'].includes(entry.name)) continue;
+      assert(namedFiles.has(relative) || directories.has(relative), `extra inference source input: ${relative}`);
+    }
+  }
+  return { receipt: { revision, tree: git(['rev-parse', `${revision}^{tree}`]).trim(), tracked_files_sha256: sha(JSON.stringify(files)) }, files: namedFiles };
+}
+
+export async function verifySecuritySources(metadata, repository = root, inferenceRevision = SECURITY_BACKPORT.engine_revision) {
+  const cargoDigest = validateCargoSources(metadata, repository, inferenceRevision);
+  if (inferenceRevision !== SECURITY_BACKPORT.engine_revision) {
+    const updater = await verifyPackageBytes(repository, CURRENT_UPDATER);
+    const source = `git+https://github.com/SceneWorks/inference?rev=${inferenceRevision}#${inferenceRevision}`;
+    const packages = metadata.packages.filter((pkg) => pkg.source === source);
+    assert(packages.length > 0, 'current inference source closure required');
+    const checkouts = new Map(), targets = [];
+    for (const pkg of packages) {
+      const directory = path.dirname(pkg.manifest_path);
+      const git = (args) => execFileSync('git', ['-C', directory, ...args], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }).trim();
+      const checkout = await fs.realpath(git(['rev-parse', '--show-toplevel']));
+      if (!checkouts.has(checkout)) {
+        assert.equal(git(['rev-parse', 'HEAD']), inferenceRevision, 'actual dependency checkout revision');
+        // Cargo adds only its completion marker. Untracked source must not become an automatic
+        // build script or target hidden behind an unchanged committed source identity.
+        const changes = git(['status', '--porcelain', '--untracked-files=all']).split('\n')
+          .filter((line) => line && line !== '?? .cargo-ok');
+        assert.deepEqual(changes, [], 'actual inference dependency checkout must be clean');
+        checkouts.set(checkout, await verifyCommittedCheckout(checkout, inferenceRevision));
+      }
+      assert(Array.isArray(pkg.targets) && pkg.targets.length > 0, `Cargo targets required for ${pkg.name}`);
+      for (const target of pkg.targets) {
+        const relative = path.relative(checkout, await fs.realpath(target.src_path)).split(path.sep).join('/');
+        assert(!relative.startsWith('../') && !path.isAbsolute(relative));
+        assert(checkouts.get(checkout).files.has(relative), `Cargo target absent from named inference tree: ${relative}`);
+        const stat = await fs.lstat(target.src_path);
+        assert(stat.isFile() && !stat.isSymbolicLink(), `unsafe inference target ${relative}`);
+        targets.push({ package: pkg.name, path: relative, sha256: sha(await fs.readFile(target.src_path)) });
+      }
+    }
+    return { kind: 'pinned-inference-with-local-updater', engine_revision: inferenceRevision,
+      historical_backport_manifest_sha256: SECURITY_BACKPORT_MANIFEST_SHA256,
+      packages: [updater], cargo_source_graph_sha256: cargoDigest,
+      inference_checkouts: [...checkouts.values()].map((value) => value.receipt).sort((a, b) => a.tree.localeCompare(b.tree)),
+      inference_targets: targets.sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))) };
+  }
+  const result = await verifyVendorBytes(repository);
+  result.cargo_source_graph_sha256 = cargoDigest;
+  result.audited_unchanged_cuda_anchors = [];
+  for (const anchor of SECURITY_BACKPORT.audited_unchanged_cuda_anchors) {
+    const pkg = metadata.packages.find((p) => p.name === anchor.package);
+    const file = path.join(path.dirname(pkg.manifest_path), anchor.relative_path);
+    const stat = await fs.lstat(file); assert(stat.isFile() && !stat.isSymbolicLink());
+    assert.equal(sha(await fs.readFile(file)), anchor.sha256, `CUDA producer anchor changed: ${anchor.upstream_path}`);
+    result.audited_unchanged_cuda_anchors.push({ ...anchor });
+  }
+  return result;
+}

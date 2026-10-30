@@ -3033,7 +3033,6 @@ fn each_lane_keys_its_evidence_to_its_own_backend() {
 fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
     let mut streamed = fixture_contract(20, 4, &[MemoryStrategy::BoundedTransformerResidency]);
     streamed.phase_facts = Some(gen_core::MemoryPhaseFacts {
-        native_quant: None,
         architecture: None,
         staged_weights: gen_core::StagedWeightSchedule::TwoStage,
         transformer_stream: Some(gen_core::StreamedWeightFacts {
@@ -3041,6 +3040,7 @@ fn a_rung_whose_prerequisite_is_unmet_is_not_offered() {
             stacks: vec![vec![GIB; 16]],
         }),
         decoder_workspace: None,
+        native_quant: None,
     });
     let eager = with_load_shape(streamed.clone(), LoadShape::EagerMaterialization);
     // 20 GiB weights + 18 GiB headroom = a 38 GiB resident floor; rung 4 sheds the whole 16 GiB

@@ -2241,6 +2241,10 @@ pub(crate) fn training_job_is_candle_eligible(job: &JobSnapshot) -> bool {
         network_type.eq_ignore_ascii_case("lora") || network_type.eq_ignore_ascii_case("lokr");
 
     match kernel {
+        "moss_image_lora" => {
+            job.job_type == JobType::LoraTrain
+                && super::catalog::moss_training_plan_is_supported(plan)
+        }
         "flux3_klein_lora" | "flux3_klein_edit_lora" => {
             base_model == "flux3_klein_base" && network_type == "lora"
         }

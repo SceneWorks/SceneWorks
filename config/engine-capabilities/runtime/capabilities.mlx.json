@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "6f9bc0f23fe74a223e843a5c76208e8541c2a2ff",
+    "inferenceRevision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities"
   },
   "modelMappings": {
@@ -396,7 +396,9 @@
     "wan_i2v_14b_lora": "wan2_2_i2v_14b",
     "wan_lora": "wan2_2_ti2v_5b",
     "wan_t2v_14b_lora": "wan2_2_t2v_14b",
-    "z_image_turbo_lora": "z_image_turbo"
+    "z_image_turbo_lora": "z_image_turbo",
+    "moss_image_base_lora": "moss_image_base",
+    "moss_image_sft_lora": "moss_image_sft"
   },
   "workerCapabilities": [
     "audio_generate",
@@ -1382,7 +1384,10 @@
         "conditioning": [],
         "supports_lora": true,
         "supports_lokr": true,
-        "supported_quants": [],
+        "supported_quants": [
+          "q8",
+          "q4"
+        ],
         "supports_preview": true,
         "supports_prompt_enhancement": false,
         "samplers": [

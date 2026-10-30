@@ -9208,7 +9208,7 @@ mod sdxl_family_tests {
                 .as_str()
                 .expect("calibrationFingerprint is a string");
             let expected = match backend {
-                "mlx" => "sdxl-mlx-unet-shared-ladder-v3".to_owned(),
+                "mlx" => "sdxl-mlx-unet-shared-ladder-v5".to_owned(),
                 _ => sdxl_candle_route_fingerprint(model_id),
             };
             assert_eq!(fingerprint, expected, "{key}");

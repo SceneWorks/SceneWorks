@@ -1264,6 +1264,9 @@ pub(crate) fn training_job_is_mlx_eligible(job: &JobSnapshot) -> bool {
     if !MLX_ROUTED_TRAINING_KERNELS.contains(&kernel) {
         return false;
     }
+    if kernel == "moss_image_lora" {
+        return super::catalog::moss_training_plan_is_supported(plan);
+    }
     if crate::training::flux3::KERNELS.contains(&kernel) {
         return plan
             .get("target")
@@ -1433,6 +1436,16 @@ mod tests {
                     super::image_request_mlx_eligible(model, &payload),
                     "{payload:?}"
                 );
+                let mut custom = payload.clone();
+                custom.insert("loras".into(), json!([{"id":"custom"}]));
+                assert_eq!(
+                    json!(crate::moss_image::edit_reference_ids(&custom).unwrap()),
+                    references
+                );
+                assert!(
+                    super::image_request_mlx_eligible(model, &custom),
+                    "{custom:?}"
+                );
                 for patch in [
                     json!({"referenceAssetIds":[],"sourceAssetId":null,"referenceAssetId":null}),
                     json!({"referenceAssetIds":null,"sourceAssetId":null,"referenceAssetId":null}),
@@ -1445,7 +1458,6 @@ mod tests {
                     json!({"sourceAssetId":"conflict","referenceAssetIds":["ref"],"referenceAssetId":null}),
                     json!({"referenceAssetId":"conflict","referenceAssetIds":["ref"],"sourceAssetId":null}),
                     json!({"maskAssetId":"mask"}),
-                    json!({"loras":[{"id":"custom"}]}),
                     json!({"advanced":{"mossImage":{"acceleration":"unmerged_bf16"}}}),
                     json!({"advanced":{"mossImage":{"acceleration":"full_fp32"}}}),
                     json!({"advanced":{"mossImageEdit":{"unknown":true}}}),

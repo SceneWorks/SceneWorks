@@ -15711,6 +15711,19 @@ mod variant_delete_tests {
     use crate::tests::support::isolate_hf_cache;
     use std::os::unix::fs::symlink;
 
+    /// Bind cache resolution to this fixture's literal data directory before any seed or delete.
+    fn fixture_cache_root(
+        data_dir: &FsPath,
+    ) -> sceneworks_core::hf_home::test_support::CacheRootGuard {
+        let hub = data_dir.join("cache/huggingface/hub");
+        let guard = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+            data_dir.to_path_buf(),
+            hub.clone(),
+        );
+        assert_eq!(huggingface_hub_cache_dir(data_dir), hub);
+        guard
+    }
+
     fn fixture_repo_cache_path(data_dir: &FsPath, repo: &str) -> PathBuf {
         let path = huggingface_repo_cache_path(data_dir, repo).unwrap();
         assert!(
@@ -16245,12 +16258,11 @@ mod variant_delete_tests {
         let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
-            data_dir.to_owned(),
-            data_dir.join("cache/huggingface/hub"),
-        );
+        let _cache_root = fixture_cache_root(data_dir);
+        let hub = data_dir.join("cache/huggingface/hub");
         let repo_name = "SceneWorks/minimax-h3-mlx";
-        let repo = fixture_repo_cache_path(data_dir, repo_name);
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        assert_eq!(repo, hub.join("models--SceneWorks--minimax-h3-mlx"));
         seed_minimax_tier(&repo, "q4", "q4dit", "q4refdit", 18780);
         seed_minimax_tier(&repo, "bf16", "bf16dit", "bf16refdit", 66280);
 
@@ -16341,11 +16353,10 @@ mod variant_delete_tests {
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();
-            let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
-                data_dir.to_owned(),
-                data_dir.join("cache/huggingface/hub"),
-            );
-            let repo = fixture_repo_cache_path(data_dir, "speridlabs/iris-3b");
+            let hub = data_dir.join("cache/huggingface/hub");
+            let _cache_root = fixture_cache_root(data_dir);
+            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            assert_eq!(repo, hub.join("models--speridlabs--iris-3b"));
             for (index, rel) in [
                 "config.yaml",
                 "model.safetensors",
@@ -16420,11 +16431,10 @@ mod variant_delete_tests {
         ] {
             let tmp = tempfile::tempdir().unwrap();
             let data_dir = tmp.path();
-            let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
-                data_dir.to_owned(),
-                data_dir.join("cache/huggingface/hub"),
-            );
-            let repo = fixture_repo_cache_path(data_dir, "speridlabs/iris-3b");
+            let hub = data_dir.join("cache/huggingface/hub");
+            let _cache_root = fixture_cache_root(data_dir);
+            let repo = huggingface_repo_cache_path(data_dir, "speridlabs/iris-3b").unwrap();
+            assert_eq!(repo, hub.join("models--speridlabs--iris-3b"));
             for (index, rel) in generation
                 .iter()
                 .chain(depth)
@@ -16489,11 +16499,14 @@ mod variant_delete_tests {
         let entry = |id: &str| catalog.iter().find(|m| m["id"] == id).unwrap().clone();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
-            data_dir.to_owned(),
-            data_dir.join("cache/huggingface/hub"),
+        let _cache_root = fixture_cache_root(data_dir);
+        let hub = data_dir.join("cache/huggingface/hub");
+        let repo =
+            huggingface_repo_cache_path(data_dir, "ostris/zimage_turbo_training_adapter").unwrap();
+        assert_eq!(
+            repo,
+            hub.join("models--ostris--zimage_turbo_training_adapter")
         );
-        let repo = fixture_repo_cache_path(data_dir, "ostris/zimage_turbo_training_adapter");
         seed(
             &repo,
             "zimage_turbo_training_adapter_v1.safetensors",
@@ -16541,12 +16554,11 @@ mod variant_delete_tests {
         let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
-            data_dir.to_owned(),
-            data_dir.join("cache/huggingface/hub"),
-        );
+        let _cache_root = fixture_cache_root(data_dir);
+        let hub = data_dir.join("cache/huggingface/hub");
         let repo_name = "Org/solo-model";
-        let repo = fixture_repo_cache_path(data_dir, repo_name);
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        assert_eq!(repo, hub.join("models--Org--solo-model"));
         seed(&repo, "q4/transformer/model.safetensors", "q4dit", 100);
         // A file NO declared scope names — only a blanket removal reaches it.
         seed(&repo, "README.md", "readme", 10);
@@ -16588,12 +16600,11 @@ mod variant_delete_tests {
         let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
-            data_dir.to_owned(),
-            data_dir.join("cache/huggingface/hub"),
-        );
+        let _cache_root = fixture_cache_root(data_dir);
+        let hub = data_dir.join("cache/huggingface/hub");
         let repo_name = "SceneWorks/whole-repo-pair";
-        let repo = fixture_repo_cache_path(data_dir, repo_name);
+        let repo = huggingface_repo_cache_path(data_dir, repo_name).unwrap();
+        assert_eq!(repo, hub.join("models--SceneWorks--whole-repo-pair"));
         seed(&repo, "model.safetensors", "dit", 100);
 
         let entry = |id: &str| {

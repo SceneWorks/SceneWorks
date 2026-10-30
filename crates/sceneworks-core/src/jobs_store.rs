@@ -4379,8 +4379,16 @@ fn persist_claim_routing_facts(
 /// fact sets — grown per finished image, streamed on the per-image / terminal
 /// posts, and deliberately omitted from every per-step tick
 /// (`image_jobs::slim_step_result`) so the step cadence stays O(1).
-const PROGRESS_RESULT_ACCUMULATION_KEYS: [&str; 3] =
-    ["assetWrites", "generationSet", "prefixKvCache"];
+/// API-materialized `assets`/`assetIds` must survive too: a terminal full/raw post
+/// commits before fallible side effects. Never erase already published assets
+/// while that durable handoff is pending; successful augmentation replaces them.
+const PROGRESS_RESULT_ACCUMULATION_KEYS: [&str; 5] = [
+    "assetWrites",
+    "generationSet",
+    "prefixKvCache",
+    "assets",
+    "assetIds",
+];
 
 /// Merge the image lane's accumulated fact keys into an incoming progress
 /// result, mirroring [`merge_training_sample_history`]: a worker result that

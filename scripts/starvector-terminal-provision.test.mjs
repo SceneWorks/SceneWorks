@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
+import { existsSync, writeFileSync } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -1373,6 +1374,29 @@ test("upstream pip watchdog closes its owned child on repeated or decreasing tra
       assert.throws(() => process.kill(pid, 0), /ESRCH/);
       assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE/);
     }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("upstream pip spawn watchdog remains active before any recognized download", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "starvector-pip-startup-stall-"));
+  const pidPath = path.join(root, "child.pid"), events = [];
+  let clock = 0;
+  const script = `require('node:fs').writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+    console.log('Unrecognized startup FIXTURE_PRIVATE'); setInterval(() => {}, 20);`;
+  try {
+    await assert.rejects(() => runUpstreamPip(process.execPath, ["-e", script], { timeout: 5000, maxBuffer: 4096 }, {
+      now: () => clock,
+      emit: line => {
+        const event = JSON.parse(line); events.push(event);
+        // The filesystem handshake is not pip progress: advancing this invocation's clock past
+        // its spawn deadline must still stop the child WITHOUT a recognized download event.
+        if (event.event === "waiting" && existsSync(pidPath)) clock = 101;
+      },
+      heartbeatMs: 10, noProgressMs: 100,
+    }), /no_observable_download_progress/);
+    const pid = Number(await readFile(pidPath, "utf8"));
+    assert.throws(() => process.kill(pid, 0), /ESRCH/);
+    assert.doesNotMatch(JSON.stringify(events), /FIXTURE_PRIVATE/);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

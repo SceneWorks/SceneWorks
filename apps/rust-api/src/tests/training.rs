@@ -1,6 +1,66 @@
 //! rust-api training tests (split from tests.rs, sc-11217 F-030).
 use super::support::*;
 
+/// Shape errors precede even dataset lookup, for both checkpoints/methods and dry/real submits.
+/// No worker is dispatched and no model fixture is installed by this test.
+#[tokio::test]
+async fn moss_field_shapes_refuse_submission_before_queueing() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let app = create_app(test_settings(&temp_dir)).unwrap();
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({"name":"MOSS shape checks"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let project_id = project["id"].as_str().unwrap();
+    let targets = sceneworks_core::training::builtin_training_targets();
+    for target in targets
+        .targets
+        .iter()
+        .filter(|t| t.kernel == "moss_image_lora")
+    {
+        for network in ["lora", "lokr"] {
+            for dry_run in [false, true] {
+                for (field, invalid, remedy) in [
+                    ("cacheLatents", json!("false"), "true or false"),
+                    ("cacheTextEmbeddings", json!(0), "true or false"),
+                    ("loraTargetModules", json!([7]), "only strings"),
+                    (
+                        "modelOptions",
+                        json!({"vae_posterior":"sample"}),
+                        "posterior_mean_v1",
+                    ),
+                    ("decomposeFactor", json!(0), "-1 or a positive i32"),
+                ] {
+                    let mut config = serde_json::to_value(&target.defaults).unwrap();
+                    config["advanced"]["networkType"] = json!(network);
+                    config["advanced"][field] = invalid;
+                    let (status, error) = request(
+                        app.clone(),
+                        "POST",
+                        &format!("/api/v1/projects/{project_id}/training/jobs"),
+                        json!({
+                            "targetId":target.id, "datasetId":"ds_missing", "config":config,
+                            "outputName":"Rejected before allocation", "dryRun":dry_run
+                        }),
+                    )
+                    .await;
+                    assert_eq!(status, StatusCode::BAD_REQUEST, "{field}: {error}");
+                    assert_eq!(error["code"], "training_field_error", "{error}");
+                    assert_eq!(error["context"]["field"], field, "{error}");
+                    assert!(error.to_string().contains(remedy), "{error}");
+                }
+            }
+        }
+    }
+    let (status, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{jobs}");
+    assert!(jobs.as_array().unwrap().is_empty(), "{jobs}");
+}
+
 fn ltx_prepared_bundle_bytes(schema: &str) -> Vec<u8> {
     let mut header = serde_json::to_vec(&json!({
         "__metadata__": {
@@ -143,8 +203,8 @@ fn platform_effective_training_catalog_advertises_adapter_noise_support() {
 }
 
 /// sc-24830: the targets endpoint advertises depth-anchoring support identically on both
-/// platforms — every LoRA target except the Krea ControlNet branch (its trainer cannot decode
-/// x0) — since every other trainer declares it on MLX and Candle alike. Mutation:
+/// platforms — excluding Krea ControlNet, Iris and MOSS, whose trainers do not advertise
+/// this technique. Mutation:
 /// re-introduce a Candle-only removal of the flag (or drop it from one target) ⇒ red.
 #[test]
 fn platform_effective_training_catalog_projects_depth_anchoring_support() {
@@ -169,14 +229,117 @@ fn platform_effective_training_catalog_projects_depth_anchoring_support() {
         .iter()
         .map(|target| target.id.clone())
         .filter(|id| {
-            id != "krea_2_control" && !id.starts_with("iris_3b") && !id.starts_with("flux3_klein")
+            id != "krea_2_control"
+                && !id.starts_with("iris_3b")
+                && !matches!(id.as_str(), "moss_image_base_lora" | "moss_image_sft_lora")
+                && !id.starts_with("flux3_klein")
         })
         .collect();
     assert_eq!(mlx, all);
+    for candle in [false, true] {
+        let registry = crate::training::effective_training_targets_for_candle(candle);
+        for id in ["moss_image_base_lora", "moss_image_sft_lora"] {
+            let target = registry
+                .targets
+                .iter()
+                .find(|target| target.id == id)
+                .unwrap();
+            assert_ne!(
+                target.limits.get("supportsDepthAnchoring"),
+                Some(&json!(true))
+            );
+            assert!(
+                !sceneworks_core::training::depth_anchoring::target_supports_depth_anchoring(
+                    target
+                )
+            );
+        }
+    }
     assert!(mlx.iter().any(|id| id == "z_image_turbo_lora"));
     assert!(mlx
         .iter()
         .any(|id| id == "mage_flow_base_lora" || id.starts_with("mage")));
+}
+
+/// MOSS must not advertise or accept depth anchoring through the HTTP training surface.
+#[tokio::test]
+async fn moss_training_catalog_and_submit_refuse_depth_anchoring() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    let hub = settings.data_dir.join("cache/huggingface/hub");
+    let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.clone(),
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir),
+        hub
+    );
+    let app = create_app(settings.clone()).expect("app creates");
+    let (status, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "MOSS depth refusal" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{project}");
+    let path = format!(
+        "/api/v1/projects/{}/training/jobs",
+        project["id"].as_str().unwrap()
+    );
+    let (status, registry) =
+        request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{registry}");
+    for id in ["moss_image_base_lora", "moss_image_sft_lora"] {
+        let target = registry["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|target| target["id"] == id)
+            .expect("MOSS target advertised");
+        assert_ne!(
+            target["limits"]["supportsDepthAnchoring"],
+            json!(true),
+            "{id}"
+        );
+        for enabled in [false, true] {
+            let mut config = target["defaults"].clone();
+            if enabled {
+                config["advanced"]["depthAnchoringWeight"] = json!(0.01);
+            }
+            let (status, error) = request(
+                app.clone(),
+                "POST",
+                &path,
+                json!({"targetId": id, "datasetId": "ds_missing", "config": config,
+                    "outputName": "MOSS depth refusal", "dryRun": true}),
+            )
+            .await;
+            if enabled {
+                assert_eq!(status, StatusCode::BAD_REQUEST, "{id}: {error}");
+                assert_eq!(error["code"], "training_field_error", "{id}: {error}");
+                assert_eq!(
+                    error["context"]["field"], "depthAnchoringWeight",
+                    "{id}: {error}"
+                );
+                assert!(
+                    error["detail"]
+                        .as_str()
+                        .unwrap()
+                        .contains("does not support depth anchoring"),
+                    "{id}: {error}"
+                );
+            } else {
+                // The same config without depth passes validation and reaches dataset lookup.
+                assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {error}");
+                assert_eq!(
+                    error["detail"], "Training dataset not found",
+                    "{id}: {error}"
+                );
+            }
+        }
+    }
 }
 
 /// sc-24832: the targets endpoint advertises each body loss identically on both platforms, on
@@ -3513,6 +3676,137 @@ async fn completed_training_job_registers_lora_with_provenance() {
             && item["provenance"]["trainingJobId"] == json!(job_id)));
 }
 
+/// A completed MOSS run enters the existing adapter library with the exact checkpoint, method and
+/// serialized product controls intact. Mutation: drop MOSS provenance, register a generic family, or
+/// lose fractional alpha/module selection ⇒ red.
+#[tokio::test]
+async fn completed_moss_lokr_registers_exact_provenance_for_library_selection() {
+    let _env = isolate_hf_cache();
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let settings = test_settings(&temp_dir);
+    seed_installed_training_base(&settings.data_dir, "moss_image_base");
+    let app = create_app(settings.clone()).expect("app creates");
+    let (_, project) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/projects",
+        json!({ "name": "MOSS Library" }),
+    )
+    .await;
+    let project_id = project["id"].as_str().expect("project id").to_owned();
+    let (_, asset) = request_multipart_upload(
+        app.clone(),
+        &format!("/api/v1/projects/{project_id}/assets"),
+        "moss.png",
+        "image/png",
+        b"png-bytes",
+    )
+    .await;
+    let (_, dataset) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/datasets"),
+        json!({
+            "name": "MOSS set",
+            "items": [{ "assetId": asset["id"], "caption": { "text": "mossStyle portrait" } }]
+        }),
+    )
+    .await;
+    let (_, targets) = request(app.clone(), "GET", "/api/v1/training/targets", Value::Null).await;
+    let target = targets["targets"]
+        .as_array()
+        .expect("targets")
+        .iter()
+        .find(|target| target["id"] == "moss_image_base_lora")
+        .expect("MOSS Base target");
+    let mut config = target["defaults"].clone();
+    config["alpha"] = json!(0.5);
+    config["triggerWord"] = json!("mossStyle");
+    config["advanced"]["networkType"] = json!("lokr");
+    config["advanced"]["decomposeFactor"] = json!(4);
+    config["advanced"]["loraTargetModules"] = json!(["q", "layers.0.proj.ffn_up_gate"]);
+    let (status, job) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/projects/{project_id}/training/jobs"),
+        json!({
+            "targetId": "moss_image_base_lora",
+            "datasetId": dataset["id"],
+            "config": config,
+            "outputName": "MOSS Base LoKr",
+            "dryRun": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{job}");
+    let job_id = job["id"].as_str().expect("job id").to_owned();
+    let output_dir = std::path::PathBuf::from(
+        job["payload"]["plan"]["output"]["outputDir"]
+            .as_str()
+            .expect("output dir"),
+    );
+    let adapter_path = output_dir.join(
+        job["payload"]["plan"]["output"]["fileName"]
+            .as_str()
+            .expect("output file"),
+    );
+    claim_training_job_as_mlx_worker(&app, &job_id).await;
+    std::fs::create_dir_all(&output_dir).expect("output dir creates");
+    write_test_safetensors(&adapter_path);
+    let (status, completed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{job_id}/progress"),
+        json!({
+            "status": "completed", "stage": "completed", "progress": 1,
+            "message": "MOSS LoKr saved.", "workerId": TEST_TRAINING_WORKER_ID,
+            "result": { "outputPath": adapter_path.display().to_string() }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{completed}");
+    assert_eq!(completed["result"]["loraRegistered"], true);
+    let (_, loras) = request(
+        app,
+        "GET",
+        &format!("/api/v1/loras?projectId={project_id}"),
+        Value::Null,
+    )
+    .await;
+    let entry = loras
+        .as_array()
+        .expect("library")
+        .iter()
+        .find(|entry| entry["name"] == "MOSS Base LoKr")
+        .expect("completed MOSS adapter appears in the library");
+    // Exercise the campaign's actual library resolver on this real API result.
+    // Windows canonical output paths carry a verbatim prefix while the API's
+    // installed directory can retain its ordinary path and mixed separators.
+    #[cfg(any(
+        target_os = "macos",
+        all(not(target_os = "macos"), feature = "backend-candle")
+    ))]
+    assert_eq!(
+        super::moss_training_acceptance::resolve_training_library_adapter(entry, &adapter_path)
+            .unwrap(),
+        std::fs::canonicalize(&adapter_path).unwrap()
+    );
+    assert_eq!(entry["family"], "moss-image");
+    assert_eq!(entry["baseModel"], "moss_image_base");
+    assert_eq!(entry["networkType"], "lokr");
+    assert_eq!(
+        entry["provenance"]["baseModelRepo"],
+        "OpenMOSS-Team/MOSS-Image-Base"
+    );
+    assert_eq!(entry["source"]["provider"], "training");
+    assert_eq!(entry["provenance"]["trainingJobId"], job_id);
+    assert_eq!(entry["provenance"]["configSnapshot"]["alpha"], 0.5);
+    assert_eq!(
+        entry["provenance"]["configSnapshot"]["advanced"]["loraTargetModules"],
+        json!(["q", "layers.0.proj.ffn_up_gate"])
+    );
+}
+
 fn seed_installed_wan_i2v_a14b_training_base(data_dir: &std::path::Path) {
     #[cfg(target_os = "macos")]
     {
@@ -4777,7 +5071,17 @@ async fn crafted_training_job_cannot_register_outside_canonical_manifest() {
 async fn real_training_job_rejected_when_base_model_missing() {
     let _env = isolate_hf_cache();
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
-    let app = create_app(test_settings(&temp_dir)).expect("app creates");
+    let settings = test_settings(&temp_dir);
+    let hub = settings.data_dir.join("cache/huggingface/hub");
+    let _cache_root = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        hub.clone(),
+    );
+    assert_eq!(
+        sceneworks_core::hf_home::huggingface_hub_cache_dir(&settings.data_dir),
+        hub
+    );
+    let app = create_app(settings.clone()).expect("app creates");
     let (_, project) = request(
         app.clone(),
         "POST",
@@ -7044,7 +7348,7 @@ async fn flux3_training_surface_preserves_both_targets_and_adapter_identity() {
         let target = sceneworks_core::training::flux3::target(edit);
         let mut config = target.defaults.clone();
         config.rank = 8;
-        config.alpha = 12;
+        config.alpha = 12.into();
         config
             .advanced
             .get_mut("flux3")

@@ -381,7 +381,7 @@ pub fn iris_depth_target() -> TrainingTarget {
         defaults: TrainingConfig {
             // No adapter: rank/alpha are not read by a full fine-tune (the Studio hides them).
             rank: 1,
-            alpha: 1,
+            alpha: ContractNumber::from(1),
             learning_rate: ContractNumber::from_f64(3e-5).expect("3e-5 is finite"),
             // MICRO-steps: the paper's 10K optimizer steps × 32 accumulation.
             steps: PAPER_OPTIMIZER_STEPS * accumulation,

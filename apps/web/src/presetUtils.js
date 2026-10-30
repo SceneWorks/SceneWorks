@@ -301,11 +301,16 @@ export function loraMatchesModel(lora, model) {
   if (declaredModelIds.length && model?.id && !declaredModelIds.includes(model.id)) {
     return false;
   }
+  // MOSS Base and SFT share the `moss-image` family AND accept each other's adapters
+  // (epic 27933, 2026-10-29): the two checkpoints are one transformer architecture, so a
+  // recorded base is provenance, never a picker gate. Any moss-image adapter — either parent,
+  // or a family-assigned row with no base at all — is offered on both models, mirroring the API
+  // gate, which no longer base-gates `moss-image`. The family test above is the whole rule.
+  const trainedBase = lora?.baseModel ?? lora?.base_model;
   // LTX-2.3 and LTX-2.5 deliberately keep one architecture family for routing, but their adapter
   // contracts are not interchangeable. Training/import outputs record `baseModel`; mirror the API
   // gate so a 2.3 output is never offered in the 2.5 picker (or vice versa), and fail closed for an
   // unstamped family-only adapter on 2.5. Eros is the same 2.3 backbone.
-  const trainedBase = lora?.baseModel ?? lora?.base_model;
   if (
     families.includes("ltx-video") &&
     model?.id === "ltx_2_5" &&

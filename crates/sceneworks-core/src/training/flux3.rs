@@ -37,7 +37,7 @@ pub fn target(edit: bool) -> TrainingTarget {
         kernel: id.to_owned(),
         defaults: TrainingConfig {
             rank: 4,
-            alpha: 4,
+            alpha: 4.into(),
             learning_rate: ContractNumber::from_f64(0.0001).expect("finite"),
             steps: 1000,
             batch_size: 1,
