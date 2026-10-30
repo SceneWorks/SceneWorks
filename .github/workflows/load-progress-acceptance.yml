@@ -37,10 +37,10 @@ on:
         required: true
         type: string
       case:
-        description: One bounded real product job; dispatch each required case once
+        description: One bounded job, or cuda_all for the three sequential CUDA jobs sharing one build
         required: true
         type: choice
-        options: [image_mlx, image_cuda, audio, training]
+        options: [image_mlx, image_cuda, audio, training, cuda_all]
       backend:
         description: MLX uses the explicitly approved primary dev Mac; CUDA preserves physical GPU0
         required: true
@@ -67,8 +67,8 @@ jobs:
     runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
     timeout-minutes: 180
     concurrency:
-      # Existing CUDA real-weight exclusion; Mac also takes the existing cooperative Metal lease.
-      group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || format('load-progress-mlx-{0}-{1}', github.run_id, github.run_attempt) }}
+      # Distinct pending requests must remain queued; preserve the existing physical GPU0 binding.
+      group: ${{ format('load-progress-{0}-{1}-{2}', inputs.backend, github.run_id, github.run_attempt) }}
       cancel-in-progress: false
     env:
       LOAD_PROGRESS_SOURCE_SHA: ${{ inputs.source_sha }}
@@ -137,7 +137,7 @@ jobs:
           else
             node scripts/load-progress-acceptance.mjs
           fi
-      - name: Compile then execute the one selected CUDA case
+      - name: Compile then execute the selected bounded CUDA jobs
         if: ${{ inputs.backend == 'cuda' }}
         shell: cmd
         run: |
@@ -150,6 +150,11 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: load-progress-${{ inputs.backend }}-${{ inputs.case }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+          # Aggregate child evidence is retained without uploading case state or build targets.
+          path: |
+            ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+            ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/image_cuda/evidence/
+            ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/audio/evidence/
+            ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/training/evidence/
           if-no-files-found: error
           retention-days: 30

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// sc27984: one explicitly selected real product job, separate from ordinary CI.
+// sc27984: explicit bounded product acceptance, separate from ordinary CI.
 import assert from 'node:assert/strict';
 import { spawn, execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -12,7 +12,9 @@ import { assertPins } from './qwen-image-2-1-app-lifecycle.mjs';
 import { enterMacMetalExecution, metalChildOptions } from './lib/apple-metal-execution-lock.mjs';
 const execFile = promisify(execFileCb);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const CASES = ['image_mlx', 'image_cuda', 'audio', 'training'];
+export const NATIVE_CASES = ['image_mlx', 'image_cuda', 'audio', 'training'];
+export const CUDA_CASES = ['image_cuda', 'audio', 'training'];
+export const CASES = [...NATIVE_CASES, 'cuda_all'];
 export const ORT_FILTER = 'model_io::tests::external_initializer_session_creation_acceptance';
 export function ortSmokeRequired(selectedCase, platform) { return selectedCase === 'image_cuda' && platform === 'win32'; }
 export function validateOrtReceipt(value) {
@@ -30,7 +32,7 @@ export function admission(env, platform = process.platform, { execute = true } =
   assert(env.LOAD_PROGRESS_OUTPUT && (platform==='win32'?path.win32:path.posix).isAbsolute(env.LOAD_PROGRESS_OUTPUT), 'absolute unique output directory required');
   if (platform === 'darwin') {
     if (execute) assert.equal(env.LOAD_PROGRESS_MAC_GO, 'true', "Michael's explicit dev Mac GPU go required");
-    assert.notEqual(env.LOAD_PROGRESS_CASE, 'image_cuda', 'CUDA case needs Windows');
+    assert(!['image_cuda','cuda_all'].includes(env.LOAD_PROGRESS_CASE), 'CUDA case needs Windows');
   } else {
     assert.notEqual(env.LOAD_PROGRESS_CASE, 'image_mlx', 'MLX case needs Mac');
     // Reuse the established real-weights workflow physical GPU0 restriction.
@@ -82,9 +84,8 @@ export function childEnvironment(env, state, evidence) {
   Object.assign(child, { HF_HUB_OFFLINE:'1', TRANSFORMERS_OFFLINE:'1', HF_DATASETS_OFFLINE:'1', LOAD_PROGRESS_STATE_ROOT:state, LOAD_PROGRESS_OUTPUT:evidence, CARGO_BUILD_JOBS:'2', CARGO_INCREMENTAL:'0', RUST_TEST_THREADS:'1' });
   return child;
 }
-export async function run(env = process.env, { checkOnly = false, buildOnly = false } = {}) {
-  const filter = admission(env, process.platform, { execute: !checkOnly && !buildOnly });
-  const output = path.resolve(env.LOAD_PROGRESS_OUTPUT);
+async function freshOutput(requested) {
+  const output = path.resolve(requested);
   const relative = path.relative(root, output);
   assert(relative.startsWith(`..${path.sep}`), 'output must be outside checkout');
   await mkdir(path.dirname(output), { recursive:true });
@@ -93,6 +94,35 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
   assert(path.relative(root,parent).startsWith(`..${path.sep}`), 'output parent must physically be outside checkout');
   await mkdir(output); // EEXIST is a fail-closed fresh-attempt requirement.
   const evidence = path.join(output,'evidence'); await mkdir(evidence);
+  return {output,evidence};
+}
+// One CUDA build target, three existing bounded jobs; no matrix or additional model settings.
+export async function runCudaAll(env, options = {}, runCase = run) {
+  const {output,evidence}=await freshOutput(env.LOAD_PROGRESS_OUTPUT);
+  const target=path.resolve(env.LOAD_PROGRESS_TARGET_DIR ?? path.join(path.dirname(output),`sc27980-target-${env.LOAD_PROGRESS_SOURCE_SHA}-win32`));
+  const receipt={schemaVersion:1,case:'cuda_all',status:'running',sourceSha:env.LOAD_PROGRESS_SOURCE_SHA,inferenceSha:env.LOAD_PROGRESS_INFERENCE_SHA,startedAt:new Date().toISOString(),requiredCases:CUDA_CASES,target,cases:[]};
+  const persist=()=>writeFile(path.join(evidence,'controller.json'),JSON.stringify(receipt,null,2)+'\n');
+  await persist();
+  try {
+    const expected=options.checkOnly?'checked-no-model-execution':options.buildOnly?'compiled-no-model-execution':'passed';
+    const selected=options.checkOnly||options.buildOnly?['image_cuda']:CUDA_CASES;
+    for(const selectedCase of selected) {
+      const caseOutput=path.join(output,selectedCase);
+      const child=await runCase({...env,LOAD_PROGRESS_CASE:selectedCase,LOAD_PROGRESS_OUTPUT:caseOutput,LOAD_PROGRESS_TARGET_DIR:target},options);
+      assert.equal(child.case,selectedCase); assert.equal(child.status,expected);
+      assert.equal(child.sourceSha,env.LOAD_PROGRESS_SOURCE_SHA); assert.equal(child.inferenceSha,env.LOAD_PROGRESS_INFERENCE_SHA);
+      receipt.cases.push({case:selectedCase,status:child.status,receipt:path.relative(output,path.join(caseOutput,'evidence/controller.json'))});
+      await persist();
+    }
+    if (expected==='passed') assert.deepEqual(receipt.cases.map(item=>item.case),CUDA_CASES,'all three real jobs must pass');
+    receipt.status=expected; return receipt;
+  } catch(error) { receipt.status='failed'; receipt.error=error.message; throw error; }
+  finally { receipt.finishedAt=new Date().toISOString(); await persist(); }
+}
+export async function run(env = process.env, { checkOnly = false, buildOnly = false } = {}) {
+  const filter = admission(env, process.platform, { execute: !checkOnly && !buildOnly });
+  if (env.LOAD_PROGRESS_CASE==='cuda_all') return runCudaAll(env,{checkOnly,buildOnly});
+  const {output,evidence}=await freshOutput(env.LOAD_PROGRESS_OUTPUT);
   const receipt = { schemaVersion:1, case:env.LOAD_PROGRESS_CASE, status:'preflight', sourceSha:env.LOAD_PROGRESS_SOURCE_SHA, inferenceSha:env.LOAD_PROGRESS_INFERENCE_SHA, startedAt:new Date().toISOString(), platform:process.platform, runner:env.RUNNER_NAME ?? null, test:filter };
   const persist = () => writeFile(path.join(evidence,'controller.json'), JSON.stringify(receipt,null,2)+'\n');
   const childEnv = childEnvironment(env,path.join(output,'state'),path.join(evidence,'case'));
@@ -173,7 +203,7 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
-    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. Mac requires LOAD_PROGRESS_MAC_GO=true; Windows uses established physical GPU0 visibility. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. Run each case once at the final clean pin pair.\n');
+    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. Mac requires LOAD_PROGRESS_MAC_GO=true; Windows uses established physical GPU0 visibility. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
   } else {
     try {
       const checkOnly=process.argv.includes('--check-only'), buildOnly=process.argv.includes('--build-only');

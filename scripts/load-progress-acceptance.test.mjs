@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { admission, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ORT_FILTER, CASES } from './load-progress-acceptance.mjs';
+import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { admission, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
 const env = {LOAD_PROGRESS_CASE:'image_mlx',LOAD_PROGRESS_SOURCE_SHA:'a'.repeat(40),LOAD_PROGRESS_INFERENCE_SHA:'b'.repeat(40),LOAD_PROGRESS_OUTPUT:'/tmp/load-progress-case',LOAD_PROGRESS_MAC_GO:'true'};
 test('manual selector freezes one exact ignored test and rejects platform mismatch',()=>{
   assert.equal(admission(env,'darwin'),'tests::load_progress_acceptance::image_mlx');
@@ -29,7 +31,7 @@ test('child setup keeps frozen cache and device but removes credentials and muta
 });
 test('all four real cases are ignored and the existing eight-cell campaign remains separate',async()=>{
   const source=await readFile(new URL('../apps/rust-api/src/tests/load_progress_acceptance.rs',import.meta.url),'utf8');
-  for(const selected of CASES) assert.match(source,new RegExp('#\\[ignore = "sc27984[^\\n]+\\nasync fn '+selected+'\\('));
+  for(const selected of NATIVE_CASES) assert.match(source,new RegExp('#\\[ignore = "sc27984[^\\n]+\\nasync fn '+selected+'\\('));
   const controller=await readFile(new URL('./load-progress-acceptance.mjs',import.meta.url),'utf8');
   assert.match(controller,/--no-run/);assert.match(controller,/--ignored/);assert.match(controller,/--exact/);
   assert.doesNotMatch(controller,/moss-training-acceptance\.mjs|memory-catalog-campaign/);
@@ -72,4 +74,70 @@ test('ORT receipt binds actual session result to bounded byte ranges and refusal
   const receipt={kind:'sc27980-ort-session-acceptance',passed:true,outputs:4,externalFileBytes:16777216,selectedExternalBytes:40,nestedExternalData:true,omittedLength:true,aliasesAndOverlaps:true,decimalOffsetPadding:true,sourceModelUnchanged:true,missingTruncatedOverflowRefusals:true};
   assert.doesNotThrow(()=>validateOrtReceipt(receipt));
   for(const [key,value] of [['selectedExternalBytes',16777216],['outputs',0],['sourceModelUnchanged',false],['missingTruncatedOverflowRefusals',false]]) assert.throws(()=>validateOrtReceipt({...receipt,[key]:value}));
+});
+
+test('CUDA aggregate selector is explicit and rejected on MLX',()=>{
+  const base={profile:'load-progress-acceptance',ref:'a'.repeat(40),inference_sha:'b'.repeat(40),backend:'candle',moss_options_json:JSON.stringify({case:'cuda_all',hf_hub_cache:'E:/huggingface/hub',build_only:false})};
+  assert.equal(dispatchOptions(base,base.ref).case,'cuda_all');
+  assert.throws(()=>dispatchOptions({...base,backend:'mlx',moss_options_json:JSON.stringify({case:'cuda_all',hf_hub_cache:'/frozen/hub',mac_go:true})},base.ref),/Windows/);
+});
+
+test('CUDA aggregate runs the existing cases sequentially with one target and independent fresh outputs',async()=>{
+  const temp=await mkdtemp(path.join(os.tmpdir(),'sc27980-aggregate-test-'));
+  try {
+    const selected={...env,LOAD_PROGRESS_CASE:'cuda_all',LOAD_PROGRESS_OUTPUT:path.join(temp,'attempt')};
+    const calls=[];
+    const result=await runCudaAll(selected,{},async (child,options)=>{
+      calls.push(child);
+      assert.deepEqual(options,{});
+      return {case:child.LOAD_PROGRESS_CASE,status:'passed',sourceSha:child.LOAD_PROGRESS_SOURCE_SHA,inferenceSha:child.LOAD_PROGRESS_INFERENCE_SHA};
+    });
+    assert.equal(result.status,'passed');
+    assert.deepEqual(calls.map(child=>child.LOAD_PROGRESS_CASE),CUDA_CASES);
+    assert.equal(new Set(calls.map(child=>child.LOAD_PROGRESS_TARGET_DIR)).size,1);
+    assert.equal(new Set(calls.map(child=>child.LOAD_PROGRESS_OUTPUT)).size,3);
+    assert.deepEqual(calls.filter(child=>ortSmokeRequired(child.LOAD_PROGRESS_CASE,'win32')).map(child=>child.LOAD_PROGRESS_CASE),['image_cuda']);
+    const saved=JSON.parse(await readFile(path.join(selected.LOAD_PROGRESS_OUTPUT,'evidence/controller.json'),'utf8'));
+    assert.deepEqual(saved.cases.map(item=>item.case),CUDA_CASES);
+    assert.equal(saved.status,'passed');
+  } finally { await rm(temp,{recursive:true,force:true}); }
+});
+
+for(const options of [{buildOnly:true},{checkOnly:true}]) {
+  test(`CUDA aggregate ${options.buildOnly?'build-only':'check-only'} prepares once and cannot claim acceptance`,async()=>{
+    const temp=await mkdtemp(path.join(os.tmpdir(),'sc27980-aggregate-mode-test-'));
+    try {
+      const calls=[];
+      const expected=options.buildOnly?'compiled-no-model-execution':'checked-no-model-execution';
+      const result=await runCudaAll({...env,LOAD_PROGRESS_CASE:'cuda_all',LOAD_PROGRESS_OUTPUT:path.join(temp,'attempt')},options,async (child,mode)=>{
+        calls.push(child.LOAD_PROGRESS_CASE); assert.deepEqual(mode,options);
+        return {case:child.LOAD_PROGRESS_CASE,status:expected,sourceSha:child.LOAD_PROGRESS_SOURCE_SHA,inferenceSha:child.LOAD_PROGRESS_INFERENCE_SHA};
+      });
+      assert.deepEqual(calls,['image_cuda']); assert.equal(result.status,expected);assert.notEqual(result.status,'passed');
+    } finally { await rm(temp,{recursive:true,force:true}); }
+  });
+}
+
+test('CUDA aggregate fails closed without running later cases or losing prior receipts',async()=>{
+  const temp=await mkdtemp(path.join(os.tmpdir(),'sc27980-aggregate-fail-test-'));
+  try {
+    const calls=[],output=path.join(temp,'attempt');
+    await assert.rejects(runCudaAll({...env,LOAD_PROGRESS_CASE:'cuda_all',LOAD_PROGRESS_OUTPUT:output},{},async child=>{
+      calls.push(child.LOAD_PROGRESS_CASE);
+      if(child.LOAD_PROGRESS_CASE==='audio') throw new Error('owned audio failed');
+      return {case:child.LOAD_PROGRESS_CASE,status:'passed',sourceSha:child.LOAD_PROGRESS_SOURCE_SHA,inferenceSha:child.LOAD_PROGRESS_INFERENCE_SHA};
+    }),/owned audio failed/);
+    assert.deepEqual(calls,['image_cuda','audio']);
+    const saved=JSON.parse(await readFile(path.join(output,'evidence/controller.json'),'utf8'));
+    assert.equal(saved.status,'failed'); assert.deepEqual(saved.cases.map(item=>item.case),['image_cuda']);
+    assert.deepEqual(saved.requiredCases,CUDA_CASES);
+  } finally { await rm(temp,{recursive:true,force:true}); }
+});
+
+test('acceptance concurrency preserves distinct pending dispatches on both backends',async()=>{
+  const workflow=await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
+  assert.match(workflow,/group: \$\{\{ format\('load-progress-\{0\}-\{1\}-\{2\}', inputs.backend, github.run_id, github.run_attempt\) \}\}/);
+  assert.doesNotMatch(workflow,/windows-candle-gpu-real-weights/);
+  assert.match(workflow,/cancel-in-progress: false/);
+  for(const selected of CUDA_CASES) assert(workflow.includes('/'+selected+'/evidence/'),'aggregate child evidence must be uploaded');
 });
