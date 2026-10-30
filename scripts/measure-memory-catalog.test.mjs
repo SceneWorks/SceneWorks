@@ -4599,7 +4599,18 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
   );
   const gate = /pub\(crate\) fn safety_check\(([\s\S]*?)\n\}\n/.exec(engine);
   assert.ok(gate, "the pinned crate still declares a registered safety_check");
-  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(gate[1]);
+  // Since inference 56dd728f the registered gate delegates its request checks to ONE private helper
+  // (shared with the loaded-provider gate). Follow exactly that delegation — the helper must be the
+  // gate's tail call and be defined in the same file — rather than accept a match anywhere.
+  let routing = gate[1];
+  if (!/context\.mode\.as_key\(\)/.test(routing)) {
+    const delegate = /\{\s*(\w+)\(\s*spec\s*,\s*contract\s*,\s*context\s*,[\s\S]*?\)\s*$/.exec(routing.trimEnd());
+    assert.ok(delegate, "safety_check neither routes on the request mode nor delegates to one helper");
+    const helper = new RegExp(`\\nfn ${delegate[1]}\\(([\\s\\S]*?)\\n\\}\\n`).exec(engine);
+    assert.ok(helper, `safety_check delegates to ${delegate[1]}, which the pinned crate does not define`);
+    routing = helper[1];
+  }
+  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(routing);
   assert.ok(routed, "safety_check no longer routes on the request mode; re-read this derivation");
   const engineRoutes = [...routed[1].matchAll(/^\s*"([a-z_]+)" =>/gm)].map((match) => match[1]).sort();
   assert.ok(engineRoutes.length > 0, "the engine's route arm list parsed empty");

@@ -30,7 +30,10 @@ import {
   anchorLoaderDigests,
   anchorMeasurementRevision,
   assertEngineIdMatchesPlan,
+  assertFormerEntryPoints,
   assertModelIsNamedByEntryPoints,
+  declarationsFromConfig,
+  entryPointsAtRevision,
   narrowEntryPointsAtRevision,
   buildAnchorLoaderConfig,
   calibrationPlanAnchors,
@@ -369,9 +372,12 @@ test("an edit to a shared crate the loader does not reach leaves the key unchang
   const { digest, files } = keyAt(PIN);
   for (const shared of [
     // A file inside a shared crate the loader DOES link and DOES partly reach — but this file is
-    // not on any path from the loader's entry points.
-    "crates/contracts/gen-core/src/sdxl_ldm.rs",
-    "crates/contracts/gen-core/src/wan_i2v_memory.rs",
+    // not on any path from the loader's entry points. (Inference sc-27252 moved the files this
+    // list used to name, sdxl_ldm.rs and wan_i2v_memory.rs, out of gen-core; these two stayed.)
+    "crates/contracts/gen-core/src/audio_dsp.rs",
+    "crates/contracts/gen-core/src/tier_integrity.rs",
+    // Where sdxl_ldm.rs went: a sibling neutral crate this loader does not link.
+    "crates/contracts/gen-core-family/src/sdxl_ldm.rs",
     // A shared crate on the other lane entirely.
     "crates/llm/candle-llm/src/lib.rs",
   ]) {
@@ -485,13 +491,15 @@ test("a leading `super` RUN is consumed whole, not just its first hop", { skip }
   // spells exactly this at `unified.rs:255` (inside `#[cfg(test)]`, so it is stripped before the
   // hash — the shape is live, its current site is not shipped).
   const unified = "crates/contracts/gen-core/src/sampling/unified.rs";
-  const target = "crates/contracts/gen-core/src/sdxl_ldm.rs";
+  // A crate-root module the loader never reaches (sdxl_ldm.rs, the original target, left gen-core
+  // in inference sc-27252).
+  const target = "crates/contracts/gen-core/src/face.rs";
   const current = keyAt(PIN);
   assert.ok(current.files.includes(unified), `${unified} must be in the closure`);
   assert.ok(!current.files.includes(target), `${target} must start OUTSIDE the closure`);
 
   const closure = filesFor(
-    { [unified]: edited(base, unified, "pub type Probe = super::super::sdxl_ldm::SdxlLdm;") },
+    { [unified]: edited(base, unified, "pub type Probe = super::super::face::DetectedFace;") },
     config.models[MODEL].entryPoints,
   );
   assert.ok(
@@ -551,12 +559,7 @@ function packagedStore() {
   // was asked for "z_image_edit" — a string the inference tree never spells at any revision — and
   // the stamp threw on data the shipped CLI stamps cleanly. A helper that does not reproduce the
   // declaration faithfully tests a configuration nothing runs.
-  const declared = Object.fromEntries(
-    Object.entries(config.models).map(([model, entry]) => [
-      model,
-      { ...(entry.engineId ? { engineId: entry.engineId } : {}), entryPoints: entry.entryPoints },
-    ]),
-  );
+  const declared = declarationsFromConfig(config);
   const attestations = indexCurrencyAttestations(
     JSON.parse(readFileSync(path.join(root, ANCHOR_CURRENCY_ATTESTATIONS_PATH), "utf8")),
   );
@@ -728,9 +731,15 @@ test("an entry point absent at a historical revision narrows the unit, it does n
     const anchor = stampable.find((candidate) => candidate.id === id);
     return `${anchor.modelId}:${anchor.backend}`;
   };
+  // sc-26691: an entry point the historical tree carries at a RECORDED former path (a file move,
+  // `formerEntryPoints`) is the same source and is keyed there, so it is not absent; only a path
+  // the tree carries under neither name narrows.
   const absentAt = (row) => {
     const historical = gitTree(repo, row.revision);
-    return (config.models[laneOf(row.id)]?.entryPoints ?? []).filter((file) => !historical.has(file)).sort();
+    const lane = declared[laneOf(row.id)];
+    return entryPointsAtRevision({ entryPoints: lane?.entryPoints ?? [], formerEntryPoints: lane?.formerEntryPoints, tree: historical })
+      .filter((file) => !historical.has(file))
+      .sort();
   };
   const historicalRows = report.filter((row) => absentAt(row).length > 0);
   assert.ok(
@@ -952,4 +961,52 @@ test("a declared entry point that is not shipped source is refused", { skip }, (
       }),
     /not shipped source/,
   );
+});
+
+// sc-26691: inference sc-27252 moved family modules out of gen-core (gen-core/src/iris.rs ->
+// gen-core-iris/src/lib.rs). A recorded former path lets a revision that predates the move key the
+// same entry point by where it then lived, so a pre-move anchor still derives the key it recorded.
+test("a former entry-point path keys a pre-move revision by where the source then lived", () => {
+  const tree = (files) => ({ has: (file) => files.includes(file) });
+  const entryPoints = ["crates/contracts/gen-core-iris/src/lib.rs", "crates/media/x/src/model.rs"];
+  const formerEntryPoints = { "crates/contracts/gen-core-iris/src/lib.rs": ["crates/contracts/gen-core/src/iris.rs"] };
+  // The pin carries the declared path: nothing changes there.
+  assert.deepEqual(
+    entryPointsAtRevision({ entryPoints, formerEntryPoints, tree: tree([...entryPoints, "crates/contracts/gen-core/src/iris.rs"]) }),
+    entryPoints,
+  );
+  // A pre-move revision carries the former path instead.
+  assert.deepEqual(
+    entryPointsAtRevision({ entryPoints, formerEntryPoints, tree: tree(["crates/contracts/gen-core/src/iris.rs", "crates/media/x/src/model.rs"]) }),
+    ["crates/contracts/gen-core/src/iris.rs", "crates/media/x/src/model.rs"],
+  );
+  // Neither present: left for the narrowing to drop, never invented.
+  assert.deepEqual(
+    entryPointsAtRevision({ entryPoints, formerEntryPoints, tree: tree(["crates/media/x/src/model.rs"]) }),
+    entryPoints,
+  );
+});
+
+test("former entry-point history is layout history only, never a second loader", () => {
+  const entryPoints = ["crates/contracts/gen-core-iris/src/lib.rs", "crates/media/x/src/model.rs"];
+  assert.doesNotThrow(() => assertFormerEntryPoints("iris_3b:mlx", { entryPoints }));
+  assert.throws(
+    () => assertFormerEntryPoints("iris_3b:mlx", { entryPoints, formerEntryPoints: { "crates/other/src/lib.rs": ["crates/a/src/b.rs"] } }),
+    /does not declare/,
+  );
+  assert.throws(
+    () => assertFormerEntryPoints("iris_3b:mlx", { entryPoints, formerEntryPoints: { [entryPoints[0]]: [] } }),
+    /no former path/,
+  );
+  assert.throws(
+    () => assertFormerEntryPoints("iris_3b:mlx", { entryPoints, formerEntryPoints: { [entryPoints[0]]: [entryPoints[1]] } }),
+    /invalid former path/,
+  );
+  // The checked-in declaration is well-formed and every recorded former path predates the pin.
+  const declared = declarationsFromConfig(config);
+  for (const [model, entry] of Object.entries(declared)) {
+    for (const current of Object.keys(entry.formerEntryPoints ?? {})) {
+      assert.ok(entry.entryPoints.includes(current), `${model}: ${current}`);
+    }
+  }
 });
