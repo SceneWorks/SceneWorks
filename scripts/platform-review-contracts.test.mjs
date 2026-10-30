@@ -11,7 +11,7 @@ import { writeFileSync } from "node:fs";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { historyRequirements } from "./prepare-inference-history.mjs";
-import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision, prepareFlashAttnBuildDir } from "./select-windows-cargo-cache.mjs";
+import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision, flashAttentionBuildDirectory } from "./select-windows-cargo-cache.mjs";
 import { bindQwenPersistentCache } from "./ci/memory-catalog/bind-qwen-persistent-cache.mjs";
 
 // sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
@@ -624,6 +624,25 @@ test("Windows Cargo cache preserves only the matching service cache and remains 
   assert.equal(caches.size, 4);
 });
 
+test("Windows FlashAttention objects persist in the listener cache, outside the deleted checkout target", () => {
+  // sc-28031: without this the vendored flash-attn kernels rebuilt from scratch in every job.
+  const directories = new Set();
+  for (let i = 1; i <= 4; i++) {
+    const runnerName = `cuda-windows${i === 1 ? "" : `-${i}`}`;
+    const selected = selectWindowsCargoCache({ runnerName, cargoHome: `D:\\cargo-home-${i}`, runnerToolCache: "C:\\tools" });
+    const directory = flashAttentionBuildDirectory(selected.cache);
+    assert.equal(directory, `${selected.cache}\\candle-flash-attn`);
+    assert.doesNotMatch(directory, /\\_work\\|\\target(\\|$)/i);
+    directories.add(directory);
+  }
+  assert.equal(directories.size, 4);
+  const fallback = selectWindowsCargoCache({ runnerName: "cuda-windows-2", runnerToolCache: "C:\\tools" });
+  assert.equal(flashAttentionBuildDirectory(fallback.cache), "C:\\tools\\SceneWorks\\cargo\\cuda-windows-2\\candle-flash-attn");
+  for (const cache of [undefined, "", "relative", "C:\\tools\\..\\shared", "\\\\server\\share"]) {
+    assert.throws(() => flashAttentionBuildDirectory(cache), /safe listener/);
+  }
+});
+
 test("Windows Cargo cache rejects another listener's cache and shared or missing homes", () => {
   for (const cargoHome of [undefined, "", "C:\\Users\\runner\\.cargo", "D:\\cargo-home-1", "relative", "\\\\server\\share", "D:\\cargo-home-2\nINJECT=value"]) {
     const selected = selectWindowsCargoCache({ runnerName: "cuda-windows-2", cargoHome, runnerToolCache: "C:\\tools" });
@@ -669,33 +688,12 @@ test("Windows Cargo cache directory guard preserves content and rejects linked o
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-// Inference 354b41cc put candle-flash-attn (a ~20 min nvcc build) into every backend-candle graph;
-// job targets are disposable, so run 41043982039 rebuilt it in each of four graphs and hit the
-// 60 min job limit. The kernels get a persistent per-listener, per-revision object cache.
-test("Windows candle lanes keep FlashAttention kernels in a bounded per-listener, per-revision cache", async () => {
-  const root = await mkdtemp(path.join(await realpath(tmpdir()), "flash-attn-cache-"));
-  try {
-    const cache = path.join(root, "cargo-home-2"), parent = path.join(cache, "candle-flash-attn");
-    const [current, previous, older, oldest] = ["a", "b", "c", "d"].map(c => c.repeat(40));
-    for (const [rev, day] of [[previous, 3], [older, 2], [oldest, 1]]) {
-      const dir = path.join(parent, rev); await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, "flash_api-1.o"), rev);
-      const when = new Date(Date.UTC(2026, 9, day)); await utimes(dir, when, when);
-    }
-    await mkdir(path.join(parent, "not-a-revision"));
-    const result = await prepareFlashAttnBuildDir(cache, current, { now: new Date(Date.UTC(2026, 9, 30)) });
-    assert.equal(result.directory, path.join(parent, current));
-    assert.deepEqual(result.removed.sort(), [older, oldest].sort(), "only revisions beyond the newest other one are removed");
-    assert.deepEqual((await readdir(parent)).sort(), [current, previous, "not-a-revision"].sort());
-    assert.equal(await readFile(path.join(parent, previous, "flash_api-1.o"), "utf8"), previous, "the previous pin stays warm");
-    // Re-selecting an existing revision preserves its objects and refreshes its use marker.
-    await writeFile(path.join(parent, current, "flash_api-2.o"), "kept");
-    await prepareFlashAttnBuildDir(cache, current, { now: new Date(Date.UTC(2026, 9, 31)) });
-    assert.equal(await readFile(path.join(parent, current, "flash_api-2.o"), "utf8"), "kept");
-    assert.equal((await stat(path.join(parent, current))).mtime.toISOString(), "2026-10-31T00:00:00.000Z");
-    for (const bad of ["", "main", "A".repeat(40), "../" + "a".repeat(37)]) await assert.rejects(() => prepareFlashAttnBuildDir(cache, bad), /physical persistent/);
-  } finally { await rm(root, { recursive: true, force: true }); }
+// Inference 354b41cc put candle-flash-attn (a ~20 min nvcc build) into every backend-candle graph.
+// The selector (single mechanism, sc-28031) exports the persistent per-listener object cache; every
+// heavy compile step must run after it, and the cold-time-sized 90 min ordinary budget is pinned below.
+test("Windows candle lanes select the FlashAttention object cache before every heavy compile step", async () => {
   const select = await source("scripts/select-windows-cargo-cache.mjs");
-  assert.match(select, /CANDLE_FLASH_ATTN_BUILD_DIR=\$\{flashAttn\.directory\}/, "the selection step exports the cache to every later compile step");
+  assert.match(select, /CANDLE_FLASH_ATTN_BUILD_DIR=\$\{flashAttention\}/, "the selection step exports the cache to every later compile step");
   const job = workflowJob(await source(".github/workflows/windows-candle.yml"), "candle-worker");
   const selectStep = workflowStep(job, "Isolate Cargo dependency checkout");
   for (const heavy of ["Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)"]) {

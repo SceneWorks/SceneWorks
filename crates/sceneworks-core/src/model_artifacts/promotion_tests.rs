@@ -215,6 +215,79 @@ fn sibling_tiers_of_one_repository_stay_distinct_members() {
     );
 }
 
+/// sc-27985: MOSS-Image SFT splits one snapshot across a primary row and a co-requisite row that
+/// both list LICENSE. One member per row wrote that path twice, so every promotion declined with
+/// "duplicate artifact output file" and the model always loaded from the slow external library.
+/// Same-snapshot rows now promote as one member and the bundle still serves the original rows.
+#[test]
+fn rows_sharing_one_snapshot_and_a_file_promote_as_one_member() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    let library = temp.path().join("library");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    for (file, body) in [
+        ("LICENSE", b"license".as_slice()),
+        ("transformer/model.safetensors", b"transformer"),
+        ("text_encoder/model.safetensors", b"encoder"),
+    ] {
+        install_snapshot_file(&library, "owner/model", PRIMARY_REVISION, file, body);
+    }
+    let requirements = [
+        requirement(
+            "owner/model",
+            Some(PRIMARY_REVISION),
+            "default",
+            &["LICENSE", "transformer/model.safetensors"],
+            true,
+        ),
+        requirement(
+            "owner/model",
+            Some(PRIMARY_REVISION),
+            "default",
+            &["LICENSE", "text_encoder/model.safetensors"],
+            false,
+        ),
+    ];
+
+    let candidate = promotion_candidate_for_requirements(&resolver_for(&library), &requirements)
+        .expect("rows sharing a snapshot file promote");
+
+    let members = &candidate.artifact.closure.members;
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].role, ArtifactMemberRole::Primary);
+    assert_eq!(members[0].component_id, None);
+    assert_eq!(
+        members[0]
+            .files
+            .iter()
+            .map(|file| file.relative_path.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "LICENSE",
+            "text_encoder/model.safetensors",
+            "transformer/model.safetensors"
+        ]
+    );
+
+    let store = ResolvedCacheStore::open(&data_dir).unwrap();
+    let outcome = ResolvedCacheMaterializer::new(store)
+        .materialize(
+            &candidate,
+            &library,
+            "owner/model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap();
+    let MaterializationOutcome::Published(metadata) = outcome else {
+        panic!("expected a published bundle, got {outcome:?}");
+    };
+    assert!(
+        local_artifact_for_requirements(std::slice::from_ref(&metadata.artifact), &requirements)
+            .is_some(),
+        "the merged bundle must cover both original rows"
+    );
+}
+
 /// A legacy receipt that never recorded its snapshot revision adopts the only installed snapshot
 /// that holds its exact recorded file set.
 #[test]

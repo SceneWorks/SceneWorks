@@ -2146,8 +2146,14 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // with the live dataset, then maps them to selection keys and drops them. Non-destructive: the
   // originals stay in the library/uploads and can be re-added.
   async function removeDuplicates(removeIds) {
+    return removeDatasetImages(removeIds, true);
+  }
+
+  // Manual Doctor selections use the same persistence path, without claiming that the chosen
+  // images are exact copies or that the sharpest was automatically kept.
+  async function removeDatasetImages(removeIds, automaticDuplicates = false) {
     if (!removeIds?.length || savingDataset) {
-      return;
+      return false;
     }
     setSavingDataset(true);
     setDatasetError("");
@@ -2155,8 +2161,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
     try {
       const saved = await persistDataset();
       if (!saved?.id) {
-        setDatasetError("Save the dataset before removing duplicates.");
-        return;
+        setDatasetError("Save the dataset before deleting images.");
+        return false;
       }
       const { nextSelection, removedCount } = selectionAfterDuplicateRemoval({
         dataset: saved,
@@ -2164,17 +2170,21 @@ export function TrainingStudio({ mode = "training" } = {}) {
         removeIds,
       });
       if (!removedCount) {
-        setDatasetError("Those duplicates are no longer in the dataset.");
-        return;
+        setDatasetError("Those images are no longer in the dataset.");
+        return false;
       }
       const updated = await persistDataset(nextSelection, saved);
       if (updated) {
         setDatasetMessage(
-          `Removed ${removedCount} duplicate${removedCount === 1 ? "" : "s"}, keeping the sharpest of each. The originals stay in your library.`,
+          automaticDuplicates
+            ? `Removed ${removedCount} duplicate${removedCount === 1 ? "" : "s"}, keeping the sharpest of each. The originals stay in your library.`
+            : `Deleted ${removedCount} image${removedCount === 1 ? "" : "s"} from the dataset. Library originals are kept.`,
         );
       }
+      return Boolean(updated);
     } catch (err) {
       setDatasetError(err.message);
+      return false;
     } finally {
       setSavingDataset(false);
     }
@@ -2424,6 +2434,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const doctorHandlersRef = useRef({});
   doctorHandlersRef.current = {
     onRemoveDuplicates: removeDuplicates,
+    onDeleteSelected: removeDatasetImages,
     onUpscaleLowRes: upscaleLowRes,
     onSmartCrop: smartCropItems,
     onStripExif: stripExifItems,
@@ -2435,6 +2446,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
       report: readiness,
       loading: readinessLoading,
       onRemoveDuplicates: (...args) => doctorHandlersRef.current.onRemoveDuplicates(...args),
+      onDeleteSelected: (...args) => doctorHandlersRef.current.onDeleteSelected(...args),
       onUpscaleLowRes: (...args) => doctorHandlersRef.current.onUpscaleLowRes(...args),
       onSmartCrop: (...args) => doctorHandlersRef.current.onSmartCrop(...args),
       onStripExif: (...args) => doctorHandlersRef.current.onStripExif(...args),

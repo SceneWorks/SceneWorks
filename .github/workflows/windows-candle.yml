@@ -435,7 +435,7 @@ jobs:
     # compile graphs (worker test, sidecar check, memory adapter, clippy). Its FlashAttention-2
     # nvcc build is ~20 min, and job targets are disposable, so every graph rebuilt it and run
     # 41043982039 (both attempts) hit 60 min inside the memory adapter: worker test 30 min, sidecar
-    # 23 min. "Isolate Cargo dependency checkout" now gives the kernels a persistent per-listener
+    # 23 min. The Cargo cache selector (scripts/select-windows-cargo-cache.mjs) now gives the kernels a persistent per-listener
     # CANDLE_FLASH_ATTN_BUILD_DIR, written per object as nvcc finishes (so a cancelled job keeps
     # what it compiled). Cold on a listener after a kernel/pin change: setup+fetch ~2, worker test
     # ~30 (measured), sidecar ~5, memory adapter <=20 and clippy ~6 (warm-history maxima 9/19/6),
@@ -840,6 +840,8 @@ jobs:
           Remove-Item Env:RUSTC_WRAPPER -ErrorAction SilentlyContinue
       # Preserve listener isolation without repeating the entire Git/registry transfer
       # into RUNNER_TEMP every job. Never fall back to shared %USERPROFILE%\.cargo.
+      # The selector also exports a listener-owned CANDLE_FLASH_ATTN_BUILD_DIR, so the
+      # FlashAttention nvcc objects survive the post-job target cleanup (sc-28031).
       - name: Set up Node for Cargo cache selection
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

@@ -14252,10 +14252,17 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .dataset-doctor-nearup-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
   margin-bottom: 0.4rem;
+}
+
+.dataset-doctor-nearup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .dataset-doctor-nearup-label {
@@ -14271,6 +14278,7 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 .dataset-doctor-nearup-thumb {
+  position: relative;
   display: block;
   width: 48px;
   height: 48px;
@@ -14278,13 +14286,53 @@ details[open] > summary.lora-scope-group-heading::before,
   overflow: hidden;
   flex: 0 0 auto;
   background: color-mix(in oklch, var(--text-muted) 15%, transparent);
+  cursor: pointer;
 }
 
-.dataset-doctor-nearup-thumb > * {
+.dataset-doctor-nearup-thumb.selected,
+.dataset-doctor-nearup-thumb:focus-within,
+.dataset-doctor-nearup-thumb:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.dataset-doctor-nearup-thumb > :not(input),
+.dataset-doctor-nearup-preview > * {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.dataset-doctor-nearup-thumb > input {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.dataset-doctor-nearup-preview {
+  position: fixed;
+  z-index: 1600;
+  pointer-events: none;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-2);
+  box-shadow: 0 0 0 2px var(--accent), 0 8px 24px #0008;
+}
+
+.dataset-doctor-nearup-preview > * {
+  object-fit: contain;
+}
+
+.dataset-doctor-nearup-thumb-missing {
+  font-size: 9px;
+  text-align: center;
+  align-content: center;
 }
 
 /* Kind-aware recommendations (sc-6540) — the manual next-steps (acquire/replace), distinct from the
