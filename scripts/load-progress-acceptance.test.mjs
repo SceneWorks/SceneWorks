@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { admission, childEnvironment, dispatchOptions, cacheInventory, CASES } from './load-progress-acceptance.mjs';
+import { admission, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ORT_FILTER, CASES } from './load-progress-acceptance.mjs';
 const env = {LOAD_PROGRESS_CASE:'image_mlx',LOAD_PROGRESS_SOURCE_SHA:'a'.repeat(40),LOAD_PROGRESS_INFERENCE_SHA:'b'.repeat(40),LOAD_PROGRESS_OUTPUT:'/tmp/load-progress-case',LOAD_PROGRESS_MAC_GO:'true'};
 test('manual selector freezes one exact ignored test and rejects platform mismatch',()=>{
   assert.equal(admission(env,'darwin'),'tests::load_progress_acceptance::image_mlx');
@@ -59,4 +59,17 @@ test('cache preflight stats only exact frozen files and retains all missing comp
   const result=await cacheInventory('/nonexistent-sc27980-hub','audio',manifest);
   assert.equal(result.requiredFiles,2);assert.equal(result.presentFiles,0);assert.equal(result.missing.length,2);assert.equal(result.missing[1].component,'codec');
   assert.equal(result.totalPresentBytes,0);
+});
+
+test('ORT session construction is selected once before CUDA image only, never ordinary CI',()=>{
+  assert.equal(ORT_FILTER,'model_io::tests::external_initializer_session_creation_acceptance');
+  assert.equal(ortSmokeRequired('image_cuda','win32'),true);
+  for(const selected of ['image_mlx','audio','training']) assert.equal(ortSmokeRequired(selected,'win32'),false);
+  for(const selected of CASES) assert.equal(ortSmokeRequired(selected,'darwin'),false);
+});
+
+test('ORT receipt binds actual session result to bounded byte ranges and refusal coverage',()=>{
+  const receipt={kind:'sc27980-ort-session-acceptance',passed:true,outputs:4,externalFileBytes:16777216,selectedExternalBytes:40,nestedExternalData:true,omittedLength:true,aliasesAndOverlaps:true,decimalOffsetPadding:true,sourceModelUnchanged:true,missingTruncatedOverflowRefusals:true};
+  assert.doesNotThrow(()=>validateOrtReceipt(receipt));
+  for(const [key,value] of [['selectedExternalBytes',16777216],['outputs',0],['sourceModelUnchanged',false],['missingTruncatedOverflowRefusals',false]]) assert.throws(()=>validateOrtReceipt({...receipt,[key]:value}));
 });

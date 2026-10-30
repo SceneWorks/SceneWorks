@@ -13,6 +13,15 @@ import { enterMacMetalExecution, metalChildOptions } from './lib/apple-metal-exe
 const execFile = promisify(execFileCb);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const CASES = ['image_mlx', 'image_cuda', 'audio', 'training'];
+export const ORT_FILTER = 'model_io::tests::external_initializer_session_creation_acceptance';
+export function ortSmokeRequired(selectedCase, platform) { return selectedCase === 'image_cuda' && platform === 'win32'; }
+export function validateOrtReceipt(value) {
+  assert.equal(value.kind,'sc27980-ort-session-acceptance');
+  assert.equal(value.passed,true); assert.equal(value.outputs,4);
+  assert.equal(value.externalFileBytes,16 * 1024 * 1024); assert.equal(value.selectedExternalBytes,40);
+  for(const field of ['nestedExternalData','omittedLength','aliasesAndOverlaps','decimalOffsetPadding','sourceModelUnchanged','missingTruncatedOverflowRefusals']) assert.equal(value[field],true,`ORT acceptance missing ${field}`);
+}
+
 export function admission(env, platform = process.platform, { execute = true } = {}) {
   assert(CASES.includes(env.LOAD_PROGRESS_CASE), 'select exactly one known LOAD_PROGRESS_CASE');
   assert(['darwin', 'win32'].includes(platform), 'native macOS or Windows runner required');
@@ -121,16 +130,38 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
         assert.equal(result.code,0,`${name} failed (${JSON.stringify(result)}); inspect retained log`);
       } finally { await log.close(); }
     };
-    const args = ['test','--locked','-p','sceneworks-rust-api','--bin','sceneworks-rust-api','--no-run','--message-format=json-render-diagnostics','-j','2'];
-    if (process.platform === 'win32') args.push('--features','backend-candle');
-    receipt.status='building'; await persist(); await execute('cargo',args,'build');
-    const messages = (await readFile(path.join(evidence,'build.log'),'utf8')).split(/\r?\n/).flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});
-    const artifacts = messages.filter(v=>v.reason==='compiler-artifact' && v.target?.name==='sceneworks-rust-api' && v.profile?.test && v.executable);
-    assert.equal(artifacts.length,1,'exact compiled test executable required');
-    const executable = artifacts[0].executable; const metadata = await stat(executable);
-    assert(metadata.isFile());
-    receipt.binary = {path:executable,sha256:createHash('sha256').update(await readFile(executable)).digest('hex')};
+    const compileTest = async (packageName, targetArgs, targetName, logName) => {
+      const args = ['test','--locked','-p',packageName,...targetArgs,'--no-run','--message-format=json-render-diagnostics','-j','2'];
+      if (process.platform === 'win32') args.push('--features','backend-candle');
+      await execute('cargo',args,logName);
+      const messages=(await readFile(path.join(evidence,`${logName}.log`),'utf8')).split(/\r?\n/).flatMap(line=>{try{return [JSON.parse(line)];}catch{return [];}});
+      const artifacts=messages.filter(v=>v.reason==='compiler-artifact' && v.target?.name===targetName && v.profile?.test && v.executable);
+      assert.equal(artifacts.length,1,'exact compiled test executable required');
+      const executable=artifacts[0].executable; assert((await stat(executable)).isFile());
+      return {path:executable,sha256:createHash('sha256').update(await readFile(executable)).digest('hex')};
+    };
+    const ortRequired=ortSmokeRequired(env.LOAD_PROGRESS_CASE,process.platform);
+    if (ortRequired && !buildOnly) {
+      const runtime=env.ORT_DYLIB_PATH ?? (env.APPDATA ? path.join(env.APPDATA,'SceneWorks','gpu-runtime','onnxruntime','onnxruntime.dll') : null);
+      assert(runtime && path.isAbsolute(runtime),'existing ORT_DYLIB_PATH or provisioned app runtime required; no runtime is downloaded');
+      const metadata=await stat(runtime); assert(metadata.isFile(),'existing ONNX Runtime DLL required');
+      childEnv.ORT_DYLIB_PATH=runtime;
+      childEnv.PATH=path.dirname(runtime)+path.delimiter+(childEnv.PATH??'');
+      childEnv.SCENEWORKS_LOAD_PROGRESS_ORT_EVIDENCE=path.join(evidence,'ort-session.json');
+      receipt.ortRuntime={path:runtime,bytes:metadata.size};
+    }
+    receipt.status='building'; await persist();
+    receipt.binary=await compileTest('sceneworks-rust-api',['--bin','sceneworks-rust-api'],'sceneworks-rust-api','build');
+    if (ortRequired) receipt.ortBinary=await compileTest('sceneworks-worker',['--lib'],'sceneworks_worker','ort-build');
     if (buildOnly) { receipt.status='compiled-no-model-execution'; return receipt; }
+    if (ortRequired) {
+      receipt.status='ort-session-smoke'; await persist();
+      await execute(receipt.ortBinary.path,[ORT_FILTER,'--ignored','--exact','--nocapture','--test-threads=1'],'ort-native');
+      receipt.ortSmoke=JSON.parse(await readFile(path.join(evidence,'ort-session.json'),'utf8'));
+      // The ignored smoke asserts actual ORT session construction and byte ranges internally.
+      validateOrtReceipt(receipt.ortSmoke);
+    }
+    const executable=receipt.binary.path;
     receipt.status='running'; await persist();
     // One fresh libtest process, one exact ignored test; no cargo test zero-match success.
     await execute(executable,[filter,'--ignored','--exact','--nocapture','--test-threads=1'],'native');
