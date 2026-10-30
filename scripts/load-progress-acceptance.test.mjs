@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { admission, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
+import { admission, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
 const env = {LOAD_PROGRESS_CASE:'image_mlx',LOAD_PROGRESS_SOURCE_SHA:'a'.repeat(40),LOAD_PROGRESS_INFERENCE_SHA:'b'.repeat(40),LOAD_PROGRESS_OUTPUT:'/tmp/load-progress-case',LOAD_PROGRESS_MAC_GO:'true'};
 test('manual selector freezes one exact ignored test and rejects platform mismatch',()=>{
   assert.equal(admission(env,'darwin'),'tests::load_progress_acceptance::image_mlx');
@@ -140,4 +140,23 @@ test('acceptance concurrency preserves distinct pending dispatches on both backe
   assert.doesNotMatch(workflow,/windows-candle-gpu-real-weights/);
   assert.match(workflow,/cancel-in-progress: false/);
   for(const selected of CUDA_CASES) assert(workflow.includes('/'+selected+'/evidence/'),'aggregate child evidence must be uploaded');
+});
+
+test('API test target owns the actual registered acceptance module rather than the CLI binary',async()=>{
+  const manifest=await readFile(new URL('../apps/rust-api/Cargo.toml',import.meta.url),'utf8');
+  const packageName=/^name = "([^"]+)"/m.exec(manifest)[1];
+  assert.deepEqual(API_TEST_TARGET.args,['--lib']);
+  assert.equal(API_TEST_TARGET.name,packageName.replaceAll('-','_'));
+  const library=await readFile(new URL('../'+API_TEST_TARGET.source,import.meta.url),'utf8');
+  assert.match(library,/#\[cfg\(test\)\]\s*mod tests;/);
+  const modules=await readFile(new URL('../apps/rust-api/src/tests/mod.rs',import.meta.url),'utf8');
+  assert.match(modules,/mod load_progress_acceptance;/);
+  const cases=await readFile(new URL('../apps/rust-api/src/tests/load_progress_acceptance.rs',import.meta.url),'utf8');
+  for(const selected of NATIVE_CASES) assert(cases.includes(`async fn ${selected}()`));
+});
+
+test('zero-match and unrelated libtest listings cannot reach acceptance execution',()=>{
+  const selected='tests::load_progress_acceptance::image_cuda';
+  assert.deepEqual(ignoredTestRegistration(`${selected}: test\r\n\r\n1 test, 0 benchmarks\r\n`,selected),{filter:selected,registered:true});
+  for(const listing of ['0 tests, 0 benchmarks\n','tests::other: test\n1 test, 0 benchmarks\n',`${selected}: test\ntests::other: test\n2 tests, 0 benchmarks\n`]) assert.throws(()=>ignoredTestRegistration(listing,selected),/exact ignored test is not registered/);
 });

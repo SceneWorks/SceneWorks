@@ -15,8 +15,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const NATIVE_CASES = ['image_mlx', 'image_cuda', 'audio', 'training'];
 export const CUDA_CASES = ['image_cuda', 'audio', 'training'];
 export const CASES = [...NATIVE_CASES, 'cuda_all'];
+export const API_TEST_TARGET = {args:['--lib'],name:'sceneworks_rust_api',source:'apps/rust-api/src/lib.rs'};
 export const ORT_FILTER = 'model_io::tests::external_initializer_session_creation_acceptance';
 export function ortSmokeRequired(selectedCase, platform) { return selectedCase === 'image_cuda' && platform === 'win32'; }
+export function ignoredTestRegistration(stdout, filter) {
+  const tests=stdout.split(/\r?\n/).map(line=>line.trim()).filter(line=>line.endsWith(': test'));
+  assert.deepEqual(tests,[`${filter}: test`],`exact ignored test is not registered: ${filter}`);
+  return {filter,registered:true};
+}
 export function validateOrtReceipt(value) {
   assert.equal(value.kind,'sc27980-ort-session-acceptance');
   assert.equal(value.passed,true); assert.equal(value.outputs,4);
@@ -181,8 +187,16 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
       receipt.ortRuntime={path:runtime,bytes:metadata.size};
     }
     receipt.status='building'; await persist();
-    receipt.binary=await compileTest('sceneworks-rust-api',['--bin','sceneworks-rust-api'],'sceneworks-rust-api','build');
+    receipt.binary=await compileTest('sceneworks-rust-api',API_TEST_TARGET.args,API_TEST_TARGET.name,'build');
     if (ortRequired) receipt.ortBinary=await compileTest('sceneworks-worker',['--lib'],'sceneworks_worker','ort-build');
+    const listIgnored=async (binary,testName,logName)=>{
+      // The same compiler-artifact executable/hash is listed and subsequently executed.
+      // Libtest listing invokes no test body, model or ORT session.
+      await execute(binary.path,[testName,'--list','--ignored','--exact'],logName);
+      return ignoredTestRegistration(await readFile(path.join(evidence,`${logName}.log`),'utf8'),testName);
+    };
+    receipt.testRegistration=await listIgnored(receipt.binary,filter,'tests-list');
+    if (ortRequired) receipt.ortTestRegistration=await listIgnored(receipt.ortBinary,ORT_FILTER,'ort-tests-list');
     if (buildOnly) { receipt.status='compiled-no-model-execution'; return receipt; }
     if (ortRequired) {
       receipt.status='ort-session-smoke'; await persist();
