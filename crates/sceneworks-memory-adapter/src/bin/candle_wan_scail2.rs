@@ -467,7 +467,7 @@ fn load_spec(arm: Arm, tier: &str, load_shape: LoadShape) -> Result<Artifact, St
 }
 
 /// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
-/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// (`gen_core_memory_wan`), so the capture must seal a receipt before the load to read it —
 /// or by the provider's own `memory_strategy` module, which the loader publishes only for an
 /// unprepared spec, so sealing one would HIDE it (sc-22738). The MLX arm's helper on this lane's
 /// backend token; `production_calibration_fingerprint` returns `None` for `wan2_2_ti2v_5b` by

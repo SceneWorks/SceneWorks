@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const INFERENCE_PIN: &str = "0b80ec518c4b514f04b8a39703aa56cf395da278";
+pub const INFERENCE_PIN: &str = "7e0a34e4e774750cc2a2eee098a5d7ae2347bebb";
 pub const QWEN_REPOSITORY: &str = "SceneWorks/qwen-image-mlx";
 /// The Qwen-Image-Edit-2511 tiered rehost (sc-22728). Serves BOTH shipped edit catalog ids —
 /// `qwen_image_edit_2511` and `qwen_image_edit_2511_lightning` — on both lanes, because they are one

@@ -1387,7 +1387,8 @@ test("an InstantID cell whose staged identity stack is missing a file is weights
   await stageSdxlTierMainTensors(hub, "SceneWorks/realvisxl-mlx", REVISION, "q4");
   const weights = await mkdtemp(path.join(tmpdir(), "instantid-weights-"));
   const controlnet = await mkdtemp(path.join(tmpdir(), "instantid-controlnet-"));
-  const previous = { ...process.env };
+  const instantIdEnvKeys = ["SCENEWORKS_INSTANTID_WEIGHTS", "SCENEWORKS_INSTANTID_CONTROLNET"];
+  const previous = Object.fromEntries(instantIdEnvKeys.map(key => [key, process.env[key]]));
   process.env.SCENEWORKS_INSTANTID_WEIGHTS = weights;
   process.env.SCENEWORKS_INSTANTID_CONTROLNET = controlnet;
   try {
@@ -1408,7 +1409,11 @@ test("an InstantID cell whose staged identity stack is missing a file is weights
     assert.equal(row.env.SCENEWORKS_INSTANTID_WEIGHTS, weights);
     assert.equal(row.env.SCENEWORKS_INSTANTID_CONTROLNET, controlnet);
   } finally {
-    process.env = previous;
+    // Preserve Windows environment-key semantics; restore only this fixture's overrides.
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -4598,7 +4603,12 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
   );
   const gate = /pub\(crate\) fn safety_check\(([\s\S]*?)\n\}\n/.exec(engine);
   assert.ok(gate, "the pinned crate still declares a registered safety_check");
-  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(gate[1]);
+  // Since inference 354b41cc the registered `safety_check` is a thin wrapper and the mode
+  // routing lives in its `checked_safety` delegate; read the match out of whichever carries it.
+  const checked = /fn checked_safety\(([\s\S]*?)\n\}\n/.exec(engine);
+  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(
+    checked?.[1] ?? gate[1],
+  );
   assert.ok(routed, "safety_check no longer routes on the request mode; re-read this derivation");
   const engineRoutes = [...routed[1].matchAll(/^\s*"([a-z_]+)" =>/gm)].map((match) => match[1]).sort();
   assert.ok(engineRoutes.length > 0, "the engine's route arm list parsed empty");
@@ -4713,15 +4723,17 @@ test("the Wan/SCAIL-2 arm's receipt tokens are the pinned engines' own, and the 
     "utf8",
   );
 
+  // Inference sc-27316 moved the Wan receipt contract from gen-core's `wan_i2v_memory` module
+  // into the sibling `gen-core-memory-wan` crate, and the arm's import moved with it.
   const wan = await readFile(
-    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core/src/wan_i2v_memory.rs"),
+    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core-memory-wan/src/receipts.rs"),
     "utf8",
   );
   const wanToken = /pub const RECEIPT_VERSION: &str = "([a-z0-9-]+)";/.exec(wan)?.[1];
-  assert.ok(wanToken, "gen-core's wan_i2v_memory still publishes RECEIPT_VERSION");
+  assert.ok(wanToken, "gen-core-memory-wan still publishes RECEIPT_VERSION");
   assert.match(
     arm,
-    /Some\(_\) => mlx_gen::gen_core::wan_i2v_memory::RECEIPT_VERSION,/,
+    /Some\(_\) => gen_core_memory_wan::RECEIPT_VERSION,/,
     "the Wan half must ASK the engine for its receipt token, never restate it",
   );
   // …and the arm's prose, which is what a record reader sees, names the same shape.
@@ -7861,7 +7873,7 @@ async function fakeGpuHost({ pmon, apps, pmonAfterReap, appsAfterReap }) {
 }
 
 async function runGpuPreflight(host) {
-  const env = { ...process.env, PATH: `${host.bin}:${process.env.PATH}`, CUDA_VISIBLE_DEVICES: "1" };
+  const env = { ...process.env, PATH: `${host.bin}${path.delimiter}${process.env.PATH}`, CUDA_VISIBLE_DEVICES: "1" };
   try {
     const { stdout } = await execFileAsync("bash", ["scripts/ci/memory-catalog/gpu-preflight.sh"], { cwd: ROOT, env });
     return { code: 0, stdout };
@@ -8006,7 +8018,8 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
   await writeFile(summary, "");
   const env = {
     ...process.env,
-    PATH: `${bin}:${process.env.PATH}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+    CATALOG_TEST_BIN: bin,
     CAMPAIGN: "sc-22738",
     BACKEND: "candle",
     BASE_REF: "feature/sc-22723-memory-anchor-measurability",
@@ -8029,7 +8042,10 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
   let stdout = "";
   let stderr = "";
   try {
-    const result = await execFileAsync("bash", ["scripts/ci/memory-catalog/pr.sh"], { cwd: ROOT, env });
+    // Git Bash's launcher prepends its own Git directory. Reassert the mocks inside
+    // the shell so these tests can never fall through to real git/gh on Windows.
+    const fixtureShell = 'fixture_bin="$CATALOG_TEST_BIN"; if command -v cygpath >/dev/null 2>&1; then fixture_bin="$(cygpath -u "$fixture_bin")"; fi; export PATH="$fixture_bin:$PATH"; [[ "$(command -v git)" == "$fixture_bin/git" && "$(command -v gh)" == "$fixture_bin/gh" ]] || exit 98; source "$0"';
+    const result = await execFileAsync("bash", ["-c", fixtureShell, "scripts/ci/memory-catalog/pr.sh"], { cwd: ROOT, env });
     ({ stdout, stderr } = result);
   } catch (error) {
     code = error.code ?? 1;

@@ -172,7 +172,7 @@ fn production_fingerprint(arm: Arm, tier: &str) -> Result<String, String> {
             "q8" => "sc-19236-wan2-2-ti2v-5b-mlx-q8-g64-teq8-v1".to_owned(),
             other => return Err(format!("{LABEL}: unsupported TI2V-5B tier {other:?}")),
         },
-        // sc-22736's shared A14B authority (`gen_core::wan_i2v_memory`), whose dense token is
+        // sc-22736's shared A14B authority (`gen_core_memory_wan`), whose dense token is
         // `dense`. The tier is matched by name, never interpolated, so an unrecognized tier is a
         // refusal rather than a plausible-looking identity no engine publishes.
         WAN_T2V_A14B_PROVIDER | WAN_I2V_A14B_PROVIDER => {
@@ -472,7 +472,7 @@ fn numeric_quant(arm: Arm, tier: &str) -> Result<Option<Quant>, String> {
 }
 
 /// Whether this cell's production identity is minted by the SEALED-RECEIPT authority
-/// (`gen_core::wan_i2v_memory`), so the capture must seal a receipt before the load to read it —
+/// (`gen_core_memory_wan`), so the capture must seal a receipt before the load to read it —
 /// or by the provider's own `memory_strategy` module, which the loader publishes only for an
 /// unprepared spec, so sealing one would HIDE it (sc-22738).
 ///

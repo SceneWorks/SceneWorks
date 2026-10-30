@@ -775,13 +775,15 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                 assert_eq!(selected["payload"]["loras"][0]["id"], entry["id"]);
                 assert_eq!(selected["payload"]["loras"][0]["weight"], 1.0);
                 let other_parent = if base == "moss_image_base" { "moss_image_sft" } else { "moss_image_base" };
-                let (status, refused) = request(app.clone(), "POST", "/api/v1/image/jobs", json!({
-                    "projectId":project_id,"model":other_parent,"prompt":"wrong checkpoint",
+                // Base↔SFT interchange (epic 27933): the trained adapter records its exact
+                // parent but submits on the other checkpoint too.
+                let (status, crossed) = request(app.clone(), "POST", "/api/v1/image/jobs", json!({
+                    "projectId":project_id,"model":other_parent,"prompt":"interchangeable checkpoint",
                     "loras":[{"id":entry["id"],"weight":1.0}],
                     "advanced":{"mossImage":{"acceleration":"off"}}
                 })).await;
-                assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
-                assert!(refused.to_string().contains("not interchangeable"), "{refused}");
+                assert_eq!(status, StatusCode::CREATED, "{crossed}");
+                assert_eq!(crossed["payload"]["loras"][0]["id"], entry["id"]);
                 for acceleration in ["unmerged_bf16", "full_fp32"] {
                     // Namespace-only staging tests API selection/replay, NOT execution of
                     // published DMD weights. Actual DMD+custom acceptance belongs to S5.

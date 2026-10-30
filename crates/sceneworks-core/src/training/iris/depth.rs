@@ -2,7 +2,7 @@
 //! `iris_3b_depth` trainers (`mlx-gen-iris` / `candle-gen-iris`): the paper's supervised
 //! direct-regression fine-tune (arXiv 2610.09450v1 §5.2) that produces a `depth/` export.
 //!
-//! The engine contract is `gen_core::iris::train::depth`: the shared `TrainingConfig` (a FULL
+//! The engine contract is `gen_core_iris::train::depth`: the shared `TrainingConfig` (a FULL
 //! fine-tune, `loss_type = "l1"`) plus the `model_options["iris"]` bag whose unknown keys the trainer
 //! refuses (`DEPTH_OPTION_KEYS`), and per-item `model_options["depth"] = {path, mask_path?, scale?,
 //! min_depth?, max_depth?}`. This module owns the SceneWorks half so the Training Studio offers

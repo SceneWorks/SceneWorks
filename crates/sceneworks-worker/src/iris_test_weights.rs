@@ -1,6 +1,6 @@
 //! Shared Iris task-export weight fixture for this crate's tests.
 //!
-//! `gen_core::iris` export resolution (`TaskExport::from_dir`, `RestorationResources::from_dir`)
+//! `gen_core_iris` export resolution (`TaskExport::from_dir`, `RestorationResources::from_dir`)
 //! reads the `model.safetensors` header for the trained-export `irisTask` stamp and refuses a
 //! header it cannot parse, so a staged install's weights must be a real safetensors file. The stub
 //! loaders the tests inject never read tensors, so a header-only file is enough.

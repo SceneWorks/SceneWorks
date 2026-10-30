@@ -954,6 +954,12 @@ pub fn detect_lora_family(header: &Value) -> Option<String> {
 /// Exact kohya network module emitted by the MiniMax-H3 trainer.
 pub const MINIMAX_H3_TRAINER_NETWORK_MODULE: &str = "networks.lora_minimax_h3";
 
+/// The maltrainer MOSS-Image LoRA trainer module (epic 27933). Like
+/// [`MINIMAX_H3_TRAINER_NETWORK_MODULE`], `ss_network_module` is a code namespace rather than a
+/// free-form label, so only this exact module is architecture evidence — a lookalike must stay
+/// unclassified rather than resolve confidently.
+pub const MOSS_IMAGE_TRAINER_NETWORK_MODULE: &str = "maltrainer.models.moss_image.lora";
+
 /// Metadata flag that makes the trainer's intentional trunk-only export explicit.
 pub const MINIMAX_H3_TOKEN_REFINER_METADATA_KEY: &str = "ss_h3_lora_token_refiner";
 
@@ -2301,6 +2307,13 @@ fn detect_metadata_family(header: &Value) -> Option<MetadataFamily> {
     {
         return Some(MetadataFamily::exact("minimax-h3".to_owned()));
     }
+    if metadata
+        .get("ss_network_module")
+        .and_then(Value::as_str)
+        .is_some_and(|module| module.trim() == MOSS_IMAGE_TRAINER_NETWORK_MODULE)
+    {
+        return Some(MetadataFamily::exact("moss-image".to_owned()));
+    }
     for key in [
         "baseModel",
         "base_model",
@@ -2527,6 +2540,20 @@ fn metadata_value_to_family(value: &str) -> Option<String> {
     if normalized.contains("zimage") || normalized.contains("z-image") {
         return Some("z-image".to_owned());
     }
+    // MOSS-Image (epic 27933): training-base ids `moss_image_base` / `moss_image_sft`, repos
+    // `OpenMOSS-Team/MOSS-Image-*`, and the maltrainer module path all carry a `moss[-_]image`
+    // token. Never match bare "moss": the MOSS **TTS** checkpoints share the prefix
+    // (`moss_ttsd_v05`, `moss_tts_realtime`, `OpenMOSS-Team/MOSS-TTSD`), and claiming one here
+    // would hard-route an audio adapter onto an image model. The needles require the `image`
+    // half, and the leading token boundary ([`contains_token`], as in the Mage arm) keeps a
+    // mid-token tail like `openmossimage` from matching while `openmoss-team/moss-image-base`
+    // still resolves across its `/` separator.
+    if contains_token(&normalized, "moss-image")
+        || contains_token(&normalized, "moss_image")
+        || contains_token(&normalized, "mossimage")
+    {
+        return Some("moss-image".to_owned());
+    }
     // Qwen-Image 2.1 (sc-24156, epic 24107) BEFORE the generic qwen+image arm below, which would
     // otherwise swallow `qwen_image_2_1` / `Qwen-Image-2.1` into the 2512 `qwen-image` family. The
     // two are different DiTs (2.1 is ~7.1B over a Qwen3 tower, 2512 ~20B over Qwen2.5-VL), so an
@@ -2591,7 +2618,9 @@ pub struct AdapterFileMetadata {
     /// The base model id an Iris adapter's `baseModel` stamp names. Read ONLY alongside an
     /// `irisTask` stamp, so no other family's import is described differently than before.
     pub iris_base_model: Option<String>,
-    /// Exact Base/SFT parent from a native MOSS adapter, never inferred across checkpoints.
+    /// Exact Base/SFT parent, from a native MOSS adapter's stamp or an external trainer's
+    /// `ss_base_model_version` (epic 27933). Recorded provenance only, never inferred — and no
+    /// longer a gate: both MOSS checkpoints accept either parent's adapters.
     pub moss_base_model: Option<String>,
     /// Header-declared training repository (raw `base_model`), never guessed from source.repo.
     pub base_model: Option<String>,
@@ -2818,7 +2847,14 @@ pub fn read_adapter_metadata(header: &Value) -> AdapterFileMetadata {
     let moss_base_model = (stamp("sceneworks_adapter_format").as_deref()
         == Some("moss_transformer_adapter_v1"))
     .then(|| stamp("baseModel"))
-    .flatten();
+    .flatten()
+    .or_else(|| {
+        // External MOSS trainers (maltrainer, kohya convention) carry no SceneWorks stamp but
+        // name the trained checkpoint in `ss_base_model_version` (epic 27933). Only the two real
+        // checkpoint ids are recorded; any other value stays absent rather than inventing a base.
+        stamp("ss_base_model_version")
+            .filter(|base| matches!(base.as_str(), "moss_image_base" | "moss_image_sft"))
+    });
     // Localize the new identity projection to the two frozen FLUX3 checkpoints. Other families
     // historically use baseModel for application model ids, so do not rewrite their imports.
     let base_model = stamp("base_model").filter(|repo| {
@@ -2868,7 +2904,7 @@ pub fn read_adapter_metadata(header: &Value) -> AdapterFileMetadata {
     }
 }
 
-// Mirrors inference gen_core::flux3::adapters semantic admission without linking an engine
+// Mirrors inference gen_core_flux3::adapters semantic admission without linking an engine
 // into rust-api. Native/PEFT alpha conventions are accepted only when mutually consistent.
 fn flux3_metadata_error(detail: impl std::fmt::Display) -> String {
     detail.to_string()
@@ -3446,8 +3482,12 @@ fn lora_declared_model_ids(lora: &Value) -> Vec<&str> {
 /// are both `wan-video` but cross-applying a LoRA garbles output. LTX-2.3 and LTX-2.5 share the
 /// `ltx-video` family while their adapter contracts differ (2.5 has no FF bias targets and uses a
 /// strict rank/alpha metadata contract), so a trained output must stay on its recorded generation.
+///
+/// `moss-image` is deliberately NOT here (epic 27933, 2026-10-29): MOSS Base and SFT share one
+/// transformer architecture and accept each other's adapters, so a recorded base is provenance,
+/// never a gate — family matching alone decides.
 fn is_base_model_gated_family(family: &str) -> bool {
-    matches!(family, "wan-video" | "ltx-video" | "moss-image")
+    matches!(family, "wan-video" | "ltx-video")
 }
 
 fn same_ltx_generation(model_id: &str, base: &str) -> bool {
@@ -3616,9 +3656,6 @@ pub fn validate_lora_compatibility(
                          LTX-2.5 as the base model."
                     ));
                 }
-                if families.iter().any(|family| family == "moss-image") && base.is_none() {
-                    return Err(format!("LoRA {lora_id} must record its exact MOSS Base/SFT parent; re-import the native adapter."));
-                }
                 if let Some(base) = base {
                     // `base_model_satisfies_gate` keeps the 5B-vs-14B split while letting a
                     // Wan-14B LoRA through on a model that accepts `wan-video` via the registry
@@ -3627,8 +3664,6 @@ pub fn validate_lora_compatibility(
                     {
                         let detail = if families.iter().any(|family| family == "ltx-video") {
                             "LTX-2.3 and LTX-2.5 LoRAs are not interchangeable."
-                        } else if families.iter().any(|family| family == "moss-image") {
-                            "MOSS Base and SFT adapters are not interchangeable."
                         } else {
                             "Wan 5B and 14B LoRAs are not interchangeable."
                         };
@@ -7799,44 +7834,125 @@ mod tests {
 #[cfg(test)]
 mod moss_training_adapter_tests {
     use super::*;
+
     #[test]
-    fn native_moss_import_keeps_exact_base_and_refuses_cross_checkpoint_use() {
-        for (base, other) in [
-            ("moss_image_base", "moss_image_sft"),
-            ("moss_image_sft", "moss_image_base"),
+    fn external_moss_metadata_detects_family_and_records_base() {
+        // The maltrainer stamp set from the motivating external file (epic 27933): kohya keys
+        // only, no SceneWorks adapter-format stamp.
+        let header = json!({"__metadata__":{
+            "ss_base_model_version":"moss_image_base",
+            "ss_network_module":"maltrainer.models.moss_image.lora",
+            "ss_network_dim":"8","ss_network_alpha":"8"}});
+        assert_eq!(detect_lora_family(&header).as_deref(), Some("moss-image"));
+        let metadata = read_adapter_metadata(&header);
+        assert_eq!(metadata.moss_base_model.as_deref(), Some("moss_image_base"));
+        assert_eq!(metadata.network_type.as_deref(), Some("lora"));
+        assert_eq!(metadata.rank, Some(8));
+        let mut entry = serde_json::Map::new();
+        entry.insert("family".into(), json!("moss-image"));
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
+        assert_eq!(entry["baseModel"], json!("moss_image_base"));
+
+        // The exact trainer module classifies on its own; a lookalike module is a code
+        // namespace mismatch and must stay unclassified.
+        let module_only =
+            json!({"__metadata__":{"ss_network_module":"maltrainer.models.moss_image.lora"}});
+        assert_eq!(
+            detect_lora_family(&module_only).as_deref(),
+            Some("moss-image")
+        );
+        let lookalike = json!({"__metadata__":{
+            "ss_network_module":"othertrainer.models.moss_image_fork.lora"}});
+        assert_eq!(detect_lora_family(&lookalike), None);
+        // An unrecognized `ss_base_model_version` never invents a recorded base.
+        let foreign_base = json!({"__metadata__":{
+            "ss_base_model_version":"moss_image_base_v2_custom_merge",
+            "ss_network_module":"maltrainer.models.moss_image.lora"}});
+        assert_eq!(read_adapter_metadata(&foreign_base).moss_base_model, None);
+    }
+
+    #[test]
+    fn moss_image_tokens_map_to_family_but_bare_moss_does_not() {
+        for value in [
+            "moss_image_base",
+            "moss_image_sft",
+            "moss-image",
+            "OpenMOSS-Team/MOSS-Image-Base",
+            "loras/moss_image_style_v1.safetensors",
         ] {
-            for method in ["lora", "lokr"] {
-                let header = json!({"__metadata__":{"family":"moss-image","baseModel":base,"sceneworks_adapter_format":"moss_transformer_adapter_v1","networkType":method,"rank":"8","alpha":"12"}});
-                assert_eq!(detect_lora_family(&header).as_deref(), Some("moss-image"));
-                let metadata = read_adapter_metadata(&header);
-                assert_eq!(metadata.moss_base_model.as_deref(), Some(base));
-                let mut entry = serde_json::Map::new();
-                entry.insert("family".into(), json!("moss-image"));
-                apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
-                assert_eq!(entry["baseModel"], json!(base));
-                let adapter = Value::Object(entry);
-                assert!(validate_lora_compatibility(
-                    std::slice::from_ref(&adapter),
-                    Some("moss_image"),
-                    base,
-                    Some(base)
-                )
-                .is_ok());
-                assert!(validate_lora_compatibility(
-                    std::slice::from_ref(&adapter),
-                    Some("moss_image"),
-                    other,
-                    Some(other)
-                )
-                .is_err());
-                assert!(validate_lora_compatibility(
-                    &[json!({"family":"moss-image"})],
-                    Some("moss_image"),
-                    base,
-                    Some(base)
-                )
-                .is_err());
+            assert_eq!(
+                metadata_value_to_family(value).as_deref(),
+                Some("moss-image"),
+                "{value}"
+            );
+        }
+        // The MOSS **TTS** checkpoints share the "moss" prefix; none of them may classify as
+        // the image family, and a mid-token tail must not match either.
+        for value in [
+            "moss",
+            "moss_ttsd_v05",
+            "moss_tts_realtime",
+            "OpenMOSS-Team/MOSS-TTSD",
+            "openmossimage",
+        ] {
+            assert_eq!(metadata_value_to_family(value), None, "{value}");
+        }
+    }
+
+    #[test]
+    fn moss_adapters_apply_on_both_base_and_sft() {
+        // Base↔SFT interchange (epic 27933): any moss-image adapter — stamped with either
+        // parent or family-only — passes the compatibility gate on both checkpoints.
+        let base_stamped = json!({"id":"base","family":"moss-image","baseModel":"moss_image_base"});
+        let sft_stamped = json!({"id":"sft","family":"moss-image","baseModel":"moss_image_sft"});
+        let family_only = json!({"id":"family_only","family":"moss-image"});
+        for model in ["moss_image_base", "moss_image_sft"] {
+            for adapter in [&base_stamped, &sft_stamped, &family_only] {
+                assert!(
+                    validate_lora_compatibility(
+                        std::slice::from_ref(adapter),
+                        Some("moss_image"),
+                        model,
+                        Some(model)
+                    )
+                    .is_ok(),
+                    "{model} must accept {adapter}"
+                );
             }
         }
+        // A non-moss family is still refused by the family half of the gate.
+        assert!(validate_lora_compatibility(
+            &[json!({"id":"sdxl","family":"sdxl"})],
+            Some("moss_image"),
+            "moss_image_base",
+            Some("moss_image_base")
+        )
+        .is_err());
+        // Native stamps still record the exact parent at import; interchange is purely a
+        // gate decision, so provenance stays intact.
+        for method in ["lora", "lokr"] {
+            let header = json!({"__metadata__":{"family":"moss-image","baseModel":"moss_image_sft","sceneworks_adapter_format":"moss_transformer_adapter_v1","networkType":method,"rank":"8","alpha":"12"}});
+            assert_eq!(detect_lora_family(&header).as_deref(), Some("moss-image"));
+            let metadata = read_adapter_metadata(&header);
+            assert_eq!(metadata.moss_base_model.as_deref(), Some("moss_image_sft"));
+            let mut entry = serde_json::Map::new();
+            entry.insert("family".into(), json!("moss-image"));
+            apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
+            assert_eq!(entry["baseModel"], json!("moss_image_sft"));
+        }
+        // The external (maltrainer) convention records its parent too. Asserted here as well as
+        // in the dedicated external test above because this test is the consumer-assertion
+        // harness's one exact `library` killer (scripts/moss-consumer-assertions.cases.json):
+        // every lora_family mutation in that registry must turn THIS test red.
+        let external = json!({"__metadata__":{
+            "ss_base_model_version":"moss_image_base",
+            "ss_network_module":"maltrainer.models.moss_image.lora"}});
+        assert_eq!(detect_lora_family(&external).as_deref(), Some("moss-image"));
+        let metadata = read_adapter_metadata(&external);
+        assert_eq!(metadata.moss_base_model.as_deref(), Some("moss_image_base"));
+        let mut entry = serde_json::Map::new();
+        entry.insert("family".into(), json!("moss-image"));
+        apply_adapter_metadata_to_manifest_entry(&mut entry, &metadata);
+        assert_eq!(entry["baseModel"], json!("moss_image_base"));
     }
 }

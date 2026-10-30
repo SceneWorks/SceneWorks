@@ -4057,7 +4057,7 @@ pub fn edit_pair_kernel_shape_error(
 }
 
 /// The dataset-shape floor for a target (sc-24161), mirroring the engine's
-/// `gen_core::train::validate_edit_request` so the API answers before a job is queued:
+/// `gen_core_train::validate_edit_request` so the API answers before a job is queued:
 ///
 /// - a target that cannot train edits refuses any item carrying references (never a text-to-image
 ///   adapter silently trained on the edit targets);

@@ -650,30 +650,37 @@ export function resolveRevision(repo, revision, { runGit = git } = {}) {
 /**
  * The one other spelling a crate may name its provider by (sc-24217): the backend-neutral
  * `gen_core::<family>::PROVIDER_ID` constant both backends of a family share. `mlx-gen-supra2`
- * registers `supra2_img` only as `mlx_gen::gen_core::supra2::PROVIDER_ID`, never as a literal, so
- * the literal check alone would refuse a correct pointer. Still checked, not trusted: the crate's
- * own source must spell `gen_core::<family>::PROVIDER_ID`, and gen-core's `src/<family>.rs` must
+ * registers `supra2_img` only through that constant, never as a literal, so the literal check
+ * alone would refuse a correct pointer. Inference sc-27316 split gen-core's family code into
+ * sibling neutral crates (`gen-core-checkpoint`, `gen-core-image`, …), so the constant may now be
+ * spelled `gen_core_<suffix>::<family>::PROVIDER_ID` and live in
+ * `crates/contracts/gen-core-<suffix>/src/<family>.rs`. Still checked, not trusted: the crate's
+ * own source must spell the constant path, and the named contracts crate's `src/<family>.rs` must
  * declare that constant as exactly this provider id at the same revision.
  */
-export const GEN_CORE_SOURCE_DIR = "crates/contracts/gen-core/src";
-
 export function providerNamedThroughGenCore({ repo, revision, provider, crateDir, runGit = git }) {
   let named = "";
   try {
     named = runGit(repo, [
-      "grep", "-h", "-o", "-E", "gen_core::[a-z0-9_]+::PROVIDER_ID", revision, "--", `${crateDir}/src/`,
+      "grep", "-h", "-o", "-E", "gen_core(_[a-z0-9_]+)?::[a-z0-9_]+::PROVIDER_ID", revision, "--", `${crateDir}/src/`,
     ]);
   } catch {
     return false;
   }
-  const families = new Set(
-    named.split("\n").map((line) => /gen_core::([a-z0-9_]+)::PROVIDER_ID/.exec(line)?.[1]).filter(Boolean),
+  const references = new Set(
+    named
+      .split("\n")
+      .map((line) => /gen_core((?:_[a-z0-9_]+)?)::([a-z0-9_]+)::PROVIDER_ID/.exec(line))
+      .filter(Boolean)
+      .map((match) => `${match[1]}:${match[2]}`),
   );
   const declaration = `pub const PROVIDER_ID: &str = "${provider}";`;
-  for (const family of families) {
+  for (const reference of references) {
+    const [suffix, family] = reference.split(":");
+    const contractsDir = `crates/contracts/gen-core${suffix.replaceAll("_", "-")}/src`;
     let body = "";
     try {
-      body = runGit(repo, ["show", `${revision}:${GEN_CORE_SOURCE_DIR}/${family}.rs`]);
+      body = runGit(repo, ["show", `${revision}:${contractsDir}/${family}.rs`]);
     } catch {
       continue;
     }

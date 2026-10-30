@@ -4,9 +4,9 @@
 
 use std::path::Path;
 
-use gen_core::flux3::references::ReferenceOutputSize;
 use gen_core::{Conditioning, MemoryReferenceResourceFacts};
-use gen_core_flux3::{layouts::LayoutCompile, references::ReferencePlan};
+use gen_core_flux3::layouts::LayoutCompile;
+use gen_core_flux3::references::{ReferenceOutputSize, ReferencePlan};
 use sceneworks_core::image_request::ImageRequest;
 use sceneworks_core::project_store::ProjectStore;
 use sha2::{Digest, Sha256};

@@ -1987,6 +1987,7 @@ mod moss_consumer_tests {
             progress: &mut dyn FnMut(Progress),
         ) -> gen_core::Result<MossImageAdvancedOutput> {
             use gen_core::moss_image_edit::*;
+            use gen_core_moss_image::moss_image_edit::edit_request;
             *self.report.borrow_mut() = None;
             *self.edit_report.borrow_mut() = None;
             let dimensions = inputs.validate()?;
@@ -2005,7 +2006,7 @@ mod moss_consumer_tests {
             if self.cancel.get() {
                 req.cancel.cancel();
             }
-            let native = gen_core_moss_image::moss_image_edit::edit_request(req)?;
+            let native = edit_request(req)?;
             let mut base = completed_receipt_for(
                 &native,
                 MossImageVariant::from_provider_id(self.descriptor.id)

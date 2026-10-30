@@ -1698,7 +1698,9 @@ pub(super) async fn generate_candle_minimax_h3(
             prompt: &request.prompt,
             conditioning: &conditioning,
             reference_image_short_edge,
-            reference_image_resize_mode: None, // Matches the current GenerationRequest default.
+            // H3 advanced controls carry no resize-mode knob; `None` keeps the workspace
+            // bound exactly as before the field existed upstream.
+            reference_image_resize_mode: None,
         },
         gen_core::veda::workspace::Backend::Cuda,
     )

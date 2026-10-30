@@ -109,9 +109,7 @@ impl gen_core::Trainer for Observed {
             }
         }
         r["boundedObserverCompleted"] = serde_json::json!(proof.is_ok());
-        if result.is_err() {
-            return result;
-        }
+        let output = result?;
         if proof.is_err() {
             return Err(gen_core::Error::Msg(
                 "native training returned but bounded observer did not complete".into(),
@@ -120,6 +118,6 @@ impl gen_core::Trainer for Observed {
         if let Some(error) = observation_error {
             return Err(gen_core::Error::Msg(error));
         }
-        result
+        Ok(output)
     }
 }

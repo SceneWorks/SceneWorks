@@ -63,7 +63,7 @@ fn stage_task_export(data_dir: &std::path::Path, subdir: &str, config: &str) {
     }
 }
 
-/// The engine's pinned training resources (`gen_core::iris::restoration_train::TRAINING_RESOURCES`):
+/// The engine's pinned training resources (`gen_core_iris::restoration_train::TRAINING_RESOURCES`):
 /// `(component, repo, revision, file)`.
 const TRAINING_RESOURCES: [(&str, &str, &str, &str); 3] = [
     (

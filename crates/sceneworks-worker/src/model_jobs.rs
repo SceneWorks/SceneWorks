@@ -1111,7 +1111,7 @@ const SUPRA2_SOURCE_FILE: &str = "model_final_ema.pt";
 const SUPRA2_MARKER: &str = "{\n  \"_class_name\": \"Supra2ImgBundle\"\n}\n";
 
 /// Supra2-IMG convert-at-install (sc-24213, epic 24212). Everything substantive is inference-owned
-/// and backend-neutral (`gen_core::supra2`): the two co-requisite snapshots are re-verified against
+/// and backend-neutral (`gen_core_checkpoint::supra2`): the two co-requisite snapshots are re-verified against
 /// their pinned sizes + SHA-256 (`FLAN_T5_BASE` / `SD_VAE`), then `convert_pinned_checkpoint`
 /// verifies the pinned `model_final_ema.pt` SHA-256, validates the exact state dict and writes the
 /// native bundle (`denoiser.safetensors`, optional `conditioning.safetensors`, and

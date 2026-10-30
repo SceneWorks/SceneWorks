@@ -529,12 +529,15 @@ test("a declaration pointing at a crate that never names the provider is refused
 });
 
 // sc-24217: `mlx-gen-supra2` names its provider only through gen-core's family constant. That
-// spelling is accepted ONLY when gen-core's `src/<family>.rs` declares the constant as exactly this
-// provider id; any other family, value or absent file still refuses the pointer.
+// spelling is accepted ONLY when the named contracts crate's `src/<family>.rs` declares the
+// constant as exactly this provider id; any other family, value or absent file still refuses the
+// pointer. Since inference sc-27316 the constant may live in a sibling neutral crate
+// (`gen_core_checkpoint::<family>::PROVIDER_ID` -> `crates/contracts/gen-core-checkpoint`).
 test("a provider named through gen_core::<family>::PROVIDER_ID is still checked, not trusted", () => {
   const sources = {
     "crates/m/src/lib.rs": "provider_id: mlx_gen::gen_core::fam::PROVIDER_ID,",
     "crates/contracts/gen-core/src/fam.rs": 'pub const PROVIDER_ID: &str = "fam_img";\n',
+    "crates/contracts/gen-core-checkpoint/src/fam2.rs": 'pub const PROVIDER_ID: &str = "fam2_img";\n',
   };
   const runGit = (_repo, args) => {
     if (args[0] === "grep" && args.includes("-F")) {
@@ -546,7 +549,7 @@ test("a provider named through gen_core::<family>::PROVIDER_ID is still checked,
       const dir = args.at(-1);
       return Object.entries(sources)
         .filter(([file]) => file.startsWith(dir))
-        .flatMap(([, body]) => body.match(/gen_core::[a-z0-9_]+::PROVIDER_ID/g) ?? [])
+        .flatMap(([, body]) => body.match(/gen_core(?:_[a-z0-9_]+)?::[a-z0-9_]+::PROVIDER_ID/g) ?? [])
         .join("\n");
     }
     if (args[0] === "show") {
@@ -560,6 +563,13 @@ test("a provider named through gen_core::<family>::PROVIDER_ID is still checked,
     assertProviderIsDeclaredInCrate({ repo: "/fake", revision: "r1", provider, crateDir: crateDir.replace(/\/$/, ""), runGit });
   assert.doesNotThrow(() => assertFor("fam_img"));
   assert.throws(() => assertFor("other_img"), /never names it/);
+  // Sibling-crate spelling resolves against its own contracts crate, and only that one.
+  sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core_checkpoint::fam2::PROVIDER_ID,";
+  assert.doesNotThrow(() => assertFor("fam2_img"));
+  assert.throws(() => assertFor("fam_img"), /never names it/);
+  // A sibling reference to a family the sibling crate does not declare still refuses.
+  sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core_checkpoint::fam::PROVIDER_ID,";
+  assert.throws(() => assertFor("fam_img"), /never names it/);
   sources["crates/m/src/lib.rs"] = "provider_id: mlx_gen::gen_core::absent::PROVIDER_ID,";
   assert.throws(() => assertFor("fam_img"), /never names it/);
 });

@@ -732,7 +732,7 @@ mod tests {
             user_text: String::new(),
             locked,
             references: vec![],
-            max_new_tokens: gen_core::flux3::pup::MAX_TOKENS,
+            max_new_tokens: gen_core_flux3::pup::MAX_TOKENS,
         }
     }
 

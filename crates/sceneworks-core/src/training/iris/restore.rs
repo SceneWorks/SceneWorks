@@ -3,7 +3,7 @@
 //! adversarial recipe (arXiv 2610.09450v1 §5.3, Eq. 6 — `‖x̂ − y‖² + 5·LPIPS + 0.5·L_adv` with a frozen
 //! OpenCLIP ConvNeXt-XXL critic trunk), fine-tuning the `upscaler/` export.
 //!
-//! The engine contract is `gen_core::iris::restoration_train`: the shared `TrainingConfig` plus the
+//! The engine contract is `gen_core_iris::restoration_train`: the shared `TrainingConfig` plus the
 //! `model_options["iris_restore"]` bag (`RestoreOptions`, unknown keys refused) and, per item, an
 //! optional `model_options["degraded_image"]` (an aligned degraded input; absent on every item =
 //! seeded synthetic second-order degradation of clean images).
@@ -42,7 +42,7 @@ pub const IRIS_RESTORE_TARGET_ID: &str = "iris_3b_restore";
 pub const IRIS_RESTORE_BASE_MODEL: &str = "iris_3b_restore";
 /// The task a restoration artifact belongs to (the engine's `irisTask` stamp).
 pub const IRIS_RESTORATION_TASK: &str = "restoration";
-/// The engine options bag key (`gen_core::iris::restoration_train::OPTIONS_KEY`).
+/// The engine options bag key (`gen_core_iris::restoration_train::OPTIONS_KEY`).
 pub const RESTORE_OPTIONS_KEY: &str = "iris_restore";
 /// `TrainingDatasetItem.extra` key naming an item's aligned degraded input (a dataset-relative path).
 /// The worker resolves it into the engine's `model_options["degraded_image"]`.

@@ -10,7 +10,7 @@
 //! This module is the one parse of those three fields, shared by the API (submit-time validation
 //! and the pre-submission plan preview) and the worker (the request it hands the engine), so the
 //! two can never disagree about what a payload means. It carries no engine math: the planner
-//! (`gen_core::iris::restoration::plan`) lives behind the worker crate.
+//! (`gen_core_iris::restoration::plan`) lives behind the worker crate.
 
 use serde_json::{Map, Value};
 

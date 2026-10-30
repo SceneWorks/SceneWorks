@@ -50,7 +50,7 @@ const IRIS_RESTORE_ID: &str = "iris_3b_restore";
 mod candle_supra2;
 
 /// Supra2-IMG (sc-24217, epic 24212), served by `candle_supra2`: `candle-gen-supra2`'s registry id
-/// (`gen_core::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
+/// (`gen_core_checkpoint::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
 /// for the reason the Iris ids above are: `adapterCapturableProviders` reads the pre-gate off this
 /// file.
 const SUPRA2_ID: &str = "supra2_img";
@@ -8699,7 +8699,9 @@ fn retain_sdxl_endpoint_output(request: &Value, output: &Image) -> Result<Value,
     }
     if !output
         .pixels
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .any(|pixel| pixel != &output.pixels[..3])
     {
         return Err("SDXL endpoint output is spatially flat".into());

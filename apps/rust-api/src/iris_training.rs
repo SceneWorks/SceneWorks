@@ -3,7 +3,7 @@
 //! native-training path every family shares.
 //!
 //! * the pre-launch **data walk** endpoint — the trainer's own unused-tail condition
-//!   (`gen_core::iris::train::DataWalk`, via the worker crate), so the Studio can warn before Start;
+//!   (`gen_core_iris::train::DataWalk`, via the worker crate), so the Studio can warn before Start;
 //! * **resume / new phase / load-from** — a client names a previous Iris training JOB, never a
 //!   path; the run's checkpoint root or export is recomputed from that job's trusted ids exactly as
 //!   the registrars recompute an output dir, and stamped into the engine options bag;
@@ -32,7 +32,7 @@ pub(crate) const CHECKPOINT_MODEL_ID_KEY: &str = "checkpointModelId";
 const BACKBONE_CONFIG_FILE: &str = "config.yaml";
 const BACKBONE_WEIGHTS_FILE: &str = "model.safetensors";
 const CHECKPOINT_STATE_FILE: &str = "state.json";
-/// The third file of a depth / restoration task export (`gen_core::iris::downstream`).
+/// The third file of a depth / restoration task export (`gen_core_iris::downstream`).
 const EMPTY_PROMPT_FILE: &str = "empty_prompt.safetensors";
 
 /// The objective of a plan (`None` for a non-Iris plan).

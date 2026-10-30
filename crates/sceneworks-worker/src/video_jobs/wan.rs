@@ -2935,7 +2935,9 @@ pub(super) async fn generate_video_using(
                         prompt: &input.prompt,
                         conditioning: &input.conditioning,
                         reference_image_short_edge: input.reference_image_short_edge,
-                        reference_image_resize_mode: None, // Matches the current GenerationRequest default.
+                        // Wan inputs carry no resize-mode control; `None` keeps the workspace
+                        // bound exactly as before the field existed upstream.
+                        reference_image_resize_mode: None,
                     })
                     .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {

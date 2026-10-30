@@ -3058,7 +3058,7 @@
         "sha256": "9d7fe5acff9a375df4ea1fa42df99e6f965aae0642bacc4c597cf715f8c5c72d",
         "recordId": "imc-8a22fa05fc612e4ab577",
         "calibrationFingerprint": "iris-3b-candle-derived-2026-10-12-v1",
-        "loaderClosureDigest": "fc3867ae1fae57e37a1a7cf5bce9071f8c5c98f898f7470cd42824af5e2d8ae1"
+        "loaderClosureDigest": "7d053cb4b3967609c5aae6af8b3335467047dc7109b78899417ac67ff3be47a3"
       },
       "geometry": {
         "width": 1024,
@@ -3103,7 +3103,7 @@
         "sha256": "5b028eebb0f7d5dc6f0362f68b6a55ff038bf4fa888e77080c43889c713d7fd7",
         "recordId": "imc-39c0f13c4788fcf08eb0",
         "calibrationFingerprint": "iris-3b-mlx-derived-2026-10-12-v1",
-        "loaderClosureDigest": "86aff20381a0ea4b4000b80fc75c91d14815a538bc7af5a81c427785f9a3e1d8"
+        "loaderClosureDigest": "dc5ae5090010d3afcefacdbfdd64370f1319ab80c58feb485adb28c0fa01e663"
       },
       "geometry": {
         "width": 1024,
@@ -11012,7 +11012,7 @@
         "sha256": "4e5dbb30ad68ed201e6c84cfd0b8348df7ba819dc97d8f6623729fd76b0f95a3",
         "recordId": "imc-130e60e9f989be2191bc",
         "calibrationFingerprint": "supra2-img-mlx-resident-v1",
-        "loaderClosureDigest": "79805375a0434636b88b7768723f1b015e8deba4e9b2226a25dba82cd34eb10b"
+        "loaderClosureDigest": "0c2903abebfc8451c94b1d4a72f011ac7e14941117582f2886328220bb096952"
       },
       "geometry": {
         "width": 256,

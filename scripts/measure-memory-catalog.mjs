@@ -417,14 +417,30 @@ export function parseWanMlxSealedProviders(source, sourcePath = WAN_MLX_LOADER_P
  * The sealing routes at `inferenceRepo`, or `null` when no inference checkout is reachable. `null`
  * is NOT a refusal — see `WAN_MLX_SEAL_UNCHECKED`.
  */
+// Since inference 354b41cc the 5B and A14B loader bodies live in `model/{ti2v,a14b}.rs`
+// (`use super::*` keeps the provider-id consts in model.rs), so the seal scan reads whichever
+// of the three files the checkout has and parses them as one text. A pre-split checkout still
+// parses model.rs alone, and the parser's fail-closed guarantees are unchanged: a seal whose
+// const no file declares, or a checkout sealing nothing anywhere, still THROWS.
+export const WAN_MLX_LOADER_PATHS = [
+  WAN_MLX_LOADER_PATH,
+  "crates/media/mlx-gen/mlx-gen-wan/src/model/ti2v.rs",
+  "crates/media/mlx-gen/mlx-gen-wan/src/model/a14b.rs",
+];
+
 export async function readWanMlxSealedProviders(inferenceRepo = process.env.INFERENCE_REPO) {
   if (!inferenceRepo) return null;
-  try {
-    return parseWanMlxSealedProviders(await readFile(path.join(inferenceRepo, WAN_MLX_LOADER_PATH), "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-    throw error;
+  const sources = [];
+  for (const file of WAN_MLX_LOADER_PATHS) {
+    try {
+      sources.push(await readFile(path.join(inferenceRepo, file), "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+      throw error;
+    }
   }
+  if (sources.length === 0) return null;
+  return parseWanMlxSealedProviders(sources.join("\n"));
 }
 
 /** Why the MLX lane cannot capture `provider` at this pin, or `null` when it can. */
