@@ -1,0 +1,130 @@
+name: Model load progress terminal acceptance
+# sc27984: never on push/PR; ordinary CI only compiles the ignored Rust tests.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact clean final SceneWorks SHA (40 hex, same revision as dispatch ref)
+        required: true
+        type: string
+      inference_sha:
+        description: Exact inference SHA permanently pinned by the selected source
+        required: true
+        type: string
+      case:
+        description: One bounded real product job; dispatch each required case once
+        required: true
+        type: choice
+        options: [image_mlx, image_cuda, audio, training]
+      backend:
+        description: MLX uses the explicitly approved primary dev Mac; CUDA preserves physical GPU0
+        required: true
+        type: choice
+        options: [cuda, mlx]
+      hf_hub_cache:
+        description: Absolute existing provisioned HF hub directory on selected host (no downloads)
+        required: true
+        type: string
+      build_only:
+        description: Compile ignored acceptance tests without executing models
+        required: true
+        type: boolean
+        default: true
+      mac_go:
+        description: Michael explicitly approved this dev Mac GPU run (needed only for MLX execution)
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  accept:
+    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    timeout-minutes: 180
+    concurrency:
+      # Existing CUDA real-weight exclusion; Mac also takes the existing cooperative Metal lease.
+      group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || format('load-progress-mlx-{0}-{1}', github.run_id, github.run_attempt) }}
+      cancel-in-progress: false
+    env:
+      LOAD_PROGRESS_SOURCE_SHA: ${{ inputs.source_sha }}
+      LOAD_PROGRESS_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      LOAD_PROGRESS_CASE: ${{ inputs.case }}
+      LOAD_PROGRESS_MAC_GO: ${{ inputs.mac_go }}
+      LOAD_PROGRESS_OUTPUT: ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}
+      LOAD_PROGRESS_TARGET_DIR: ${{ github.workspace }}/../load-progress-target-${{ inputs.source_sha }}-${{ inputs.backend }}
+      HF_HUB_CACHE: ${{ inputs.hf_hub_cache }}
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '0' || 'mlx' }}
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
+      NVIDIA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
+      RUSTC_WRAPPER: ""
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: none
+      CARGO_PROFILE_TEST_STRIP: none
+      BUILD_ONLY: ${{ inputs.build_only }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - name: Require selected dispatch ref and case before native setup
+        shell: bash
+        env:
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          node --input-type=module -e 'import assert from "node:assert/strict"; import {admission} from "./scripts/load-progress-acceptance.mjs"; assert.equal(process.env.DISPATCH_SHA,process.env.LOAD_PROGRESS_SOURCE_SHA); admission(process.env,process.platform,{execute:process.env.BUILD_ONLY!=="true"});'
+      - uses: ./.github/actions/prepare-rust-runner
+        if: ${{ inputs.backend == 'cuda' }}
+        with:
+          workspace-directory: .
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        if: ${{ inputs.backend == 'mlx' }}
+        with:
+          toolchain: "1.98.0"
+      - name: Prepare Debug MLX library without model execution
+        if: ${{ inputs.backend == 'mlx' }}
+        shell: bash
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --build-type Debug --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "PMETAL_MLX_PREBUILT_DIR=" >> "$GITHUB_ENV"
+            echo "PMETAL_METALLIB_PATH=" >> "$GITHUB_ENV"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Compile then execute the one selected MLX case
+        if: ${{ inputs.backend == 'mlx' }}
+        shell: bash
+        run: |
+          if [ "$BUILD_ONLY" = true ]; then
+            node scripts/load-progress-acceptance.mjs --build-only
+          else
+            node scripts/load-progress-acceptance.mjs
+          fi
+      - name: Compile then execute the one selected CUDA case
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          if "%BUILD_ONLY%"=="true" (node scripts/load-progress-acceptance.mjs --build-only) else (node scripts/load-progress-acceptance.mjs)
+      - name: Retain progress POSTs, output identities and failure evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: load-progress-${{ inputs.backend }}-${{ inputs.case }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
+          if-no-files-found: error
+          retention-days: 30
