@@ -1333,10 +1333,10 @@ pub(crate) async fn restore_with_progress(
             let dir = crate::iris_task_training::trained_task_export_dir(
                 &settings.data_dir,
                 model,
-                gen_core::iris::IrisTask::Restoration,
+                gen_core_iris::IrisTask::Restoration,
             )
             .map_err(|detail| WorkerError::InvalidPayload(format!("Iris restoration: {detail}")))?;
-            let resources = gen_core::iris::restoration::RestorationResources::from_dir(
+            let resources = gen_core_iris::restoration::RestorationResources::from_dir(
                 &dir,
                 sceneworks_core::image_restoration::IRIS_RESTORE_MODEL_ID,
             )

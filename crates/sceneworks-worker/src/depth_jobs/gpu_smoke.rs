@@ -210,7 +210,7 @@ async fn iris_worker_gpu_smoke_depth() {
     assert_eq!((preview.width(), preview.height()), (768, 1024));
 
     // The subject (face, upright centre) is nearer than the backdrop (top corners).
-    let control = gen_core::iris::depth::near_bright_unit(&gen_core::iris::depth::DepthMap {
+    let control = gen_core_iris::depth::near_bright_unit(&gen_core_iris::depth::DepthMap {
         width: map.width,
         height: map.height,
         values: map.values.clone(),

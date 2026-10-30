@@ -1,5 +1,5 @@
 //! Worker-side seams of Iris-3B curricula, REPA, holdout validation and fp16 (story sc-25689, epic
-//! sc-25678). Everything here reads the ENGINE's own contract (`gen_core::iris::train` at the
+//! sc-25678). Everything here reads the ENGINE's own contract (`gen_core_iris::train` at the
 //! pinned inference revision), so SceneWorks never re-derives what the trainer decides:
 //!
 //! * [`iris_stage_presets`] — the four official stages (`stage1_256 → stage2_512 → stage3_1024 →
@@ -211,8 +211,8 @@ impl ResolvedIrisPlan {
 }
 
 /// The kind name of a typed distributed failure.
-pub fn dist_error_kind(error: &gen_core::iris::train::dist::DistError) -> &'static str {
-    use gen_core::iris::train::dist::DistError;
+pub fn dist_error_kind(error: &gen_core_iris::train::dist::DistError) -> &'static str {
+    use gen_core_iris::train::dist::DistError;
     match error {
         DistError::InvalidMesh(_) => "invalid_mesh",
         DistError::GlobalBatchMismatch { .. } => "global_batch_mismatch",
@@ -299,9 +299,9 @@ fn resolve_iris_request(
     backbone_dir: &Path,
     request: &gen_core::TrainingRequest,
 ) -> Result<ResolvedIrisPlan, IrisPlanRefusal> {
-    use gen_core::iris::train::{IrisTrainPlan, TrainFlowDefaults};
+    use gen_core_iris::train::{IrisTrainPlan, TrainFlowDefaults};
     let refuse = |error: gen_core::Error| {
-        let kind = gen_core::iris::train::dist::dist_error(&error)
+        let kind = gen_core_iris::train::dist::dist_error(&error)
             .map(dist_error_kind)
             .unwrap_or("invalid");
         IrisPlanRefusal {
@@ -309,11 +309,11 @@ fn resolve_iris_request(
             message: format!("Iris 3B training refused this configuration: {error}"),
         }
     };
-    let config = gen_core::iris::IrisConfig::from_dir(backbone_dir).map_err(refuse)?;
+    let config = gen_core_iris::IrisConfig::from_dir(backbone_dir).map_err(refuse)?;
     let flow = TrainFlowDefaults::from_dir(backbone_dir).map_err(refuse)?;
     let resolved = IrisTrainPlan::resolve(request, &config, &flow, &[]).map_err(refuse)?;
     let (train, holdout) =
-        gen_core::iris::train::holdout::split_items(&request.items).map_err(refuse)?;
+        gen_core_iris::train::holdout::split_items(&request.items).map_err(refuse)?;
     let global_batch = resolved.batch_size * resolved.dist.world.world_size * resolved.grad_accum;
     let mut dist = resolved.dist.identity();
     if let Some(object) = dist.as_object_mut() {
@@ -511,7 +511,7 @@ fn normalize_preset_options(
 /// from the engine's vendored upstream YAML. The config is the Iris target's defaults overlaid with
 /// the translated stage (a full fine-tune, as upstream trains).
 pub fn iris_stage_presets() -> Result<Vec<Value>, String> {
-    use gen_core::iris::train::upstream::{stage_preset_config, STAGE_PRESETS};
+    use gen_core_iris::train::upstream::{stage_preset_config, STAGE_PRESETS};
     let target = sceneworks_core::training::iris::iris_generation_target();
     STAGE_PRESETS
         .iter()
@@ -594,7 +594,7 @@ mod tests {
     /// The SceneWorks mirror of the engine's closed sets is the engine's, value for value.
     #[test]
     fn the_core_mirror_matches_the_engine_contract() {
-        use gen_core::iris::train::{ac, holdout, repa, shapes};
+        use gen_core_iris::train::{ac, holdout, repa, shapes};
         assert_eq!(core::BUCKET_TABLES, shapes::BUCKET_TABLES);
         let mut policies = core::AC_POLICIES.to_vec();
         let mut engine = ac::POLICIES.to_vec();
@@ -611,9 +611,9 @@ mod tests {
         assert_eq!(core::IRIS_REPA_TEACHER_ENTRYPOINT, repa::DEFAULT_TEACHER);
         assert_eq!(
             core::DEFAULT_DIST_TIMEOUT_SECS,
-            gen_core::iris::train::dist::DEFAULT_TIMEOUT_SECS
+            gen_core_iris::train::dist::DEFAULT_TIMEOUT_SECS
         );
-        let stages: Vec<(&str, Option<&str>)> = gen_core::iris::train::upstream::STAGE_PRESETS
+        let stages: Vec<(&str, Option<&str>)> = gen_core_iris::train::upstream::STAGE_PRESETS
             .iter()
             .map(|preset| (preset.id, preset.parent))
             .collect();
@@ -640,7 +640,7 @@ mod tests {
             config
                 .model_options
                 .insert(IRIS_OPTIONS_KEY.to_owned(), Value::Object(bag));
-            gen_core::iris::train::IrisTrainOptions::from_config(&config)
+            gen_core_iris::train::IrisTrainOptions::from_config(&config)
                 .unwrap_or_else(|error| panic!("{key} is not an engine option: {error}"));
         }
         let mut bag = Map::new();
@@ -648,7 +648,7 @@ mod tests {
         config
             .model_options
             .insert(IRIS_OPTIONS_KEY.to_owned(), Value::Object(bag));
-        assert!(gen_core::iris::train::IrisTrainOptions::from_config(&config).is_err());
+        assert!(gen_core_iris::train::IrisTrainOptions::from_config(&config).is_err());
     }
 
     #[test]

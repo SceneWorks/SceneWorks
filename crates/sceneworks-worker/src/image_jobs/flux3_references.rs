@@ -4,8 +4,9 @@
 
 use std::path::Path;
 
-use gen_core::flux3::references::{ReferenceOutputSize, ReferencePlan};
 use gen_core::{Conditioning, MemoryReferenceResourceFacts};
+use gen_core_flux3::layouts::LayoutCompile;
+use gen_core_flux3::references::{ReferenceOutputSize, ReferencePlan};
 use sceneworks_core::image_request::ImageRequest;
 use sceneworks_core::project_store::ProjectStore;
 use sha2::{Digest, Sha256};
@@ -214,7 +215,7 @@ pub(crate) fn resolve_owned_layout(
         })
         .unwrap_or_default();
     let output = references.map(|refs| refs.plan.output.clone()).unwrap_or(
-        gen_core::flux3::references::OutputGeometry {
+        gen_core_flux3::references::OutputGeometry {
             canvas: (request.width, request.height),
             crop: None,
         },
@@ -225,7 +226,7 @@ pub(crate) fn resolve_owned_layout(
     compiled.caption(&request.prompt).map_err(invalid)?;
     let fact = serde_json::json!({
         "schemaVersion":1,
-        "upstreamRevision":gen_core::flux3::UPSTREAM_CODE_REVISION,
+        "upstreamRevision":gen_core_flux3::UPSTREAM_CODE_REVISION,
         "semantics":"caption_only_soft_spatial_guidance",
         "coordinateConvention":"yxyx",
         "authoring":layout.to_json(),
@@ -293,7 +294,7 @@ pub(crate) fn resolve_owned_references(
         }
         // Reuse the frozen EXIF/source-mode decoder. AE's RGB fork and PUP's independent white
         // composite remain native responsibilities; never flatten alpha or resize at this seam.
-        let image = gen_core::flux3::references::decode_reference_file(&path)
+        let image = gen_core_flux3::references::decode_reference_file(&path)
             .map_err(|error| invalid(error.to_string()))?;
         let (kind, width, height, pixels) = match &image {
             Conditioning::Reference {
@@ -328,7 +329,7 @@ pub(crate) fn resolve_owned_references(
         width: authored.width,
         height: authored.height,
     };
-    let plan = gen_core::flux3::references::plan(&dimensions, output_size)
+    let plan = gen_core_flux3::references::plan(&dimensions, output_size)
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     let resources = plan
         .memory_resources()
@@ -413,8 +414,8 @@ mod tests {
                 req: &gen_core::GenerationRequest,
                 _: &mut dyn FnMut(gen_core::Progress),
             ) -> gen_core::Result<gen_core::GenerationOutput> {
-                let input = gen_core::flux3::references::upsampler_input(req)?;
-                let outcome = gen_core::flux3::pup::upsample(
+                let input = gen_core_flux3::references::upsampler_input(req)?;
+                let outcome = gen_core_flux3::pup::upsample(
                     None,
                     &input,
                     &Default::default(),
@@ -498,12 +499,12 @@ mod tests {
             ..Default::default()
         };
         layout.apply(&mut native);
-        let input = gen_core::flux3::references::upsampler_input(&native).unwrap();
+        let input = gen_core_flux3::references::upsampler_input(&native).unwrap();
         assert_eq!(
             input.boxes.as_ref().unwrap()[0].from.as_deref(),
             Some("ref_image_1")
         );
-        let outcome = gen_core::flux3::pup::upsample(
+        let outcome = gen_core_flux3::pup::upsample(
             None,
             &input,
             &Default::default(),

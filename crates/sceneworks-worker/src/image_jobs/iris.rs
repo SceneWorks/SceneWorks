@@ -18,7 +18,7 @@
 /// The Iris text-encoder directory a resolved spec carries, for diagnostics/tests.
 #[cfg(test)]
 pub(crate) fn staged_text_encoder_dir(spec: &gen_core::LoadSpec) -> Option<&std::path::Path> {
-    match spec.components.get(gen_core::iris::TEXT_ENCODER_COMPONENT) {
+    match spec.components.get(gen_core_iris::TEXT_ENCODER_COMPONENT) {
         Some(gen_core::WeightsSource::Dir(dir)) => Some(dir.as_path()),
         _ => None,
     }
@@ -29,8 +29,8 @@ mod tests {
     use super::*;
     use crate::error::WorkerResult;
     use crate::settings::Settings;
-    use gen_core::iris::{IrisTask, TEXT_ENCODER_COMPONENT};
     use gen_core::{LoadSpec, WeightsSource};
+    use gen_core_iris::{IrisTask, TEXT_ENCODER_COMPONENT};
     use sceneworks_core::contracts::JsonObject;
     use serde_json::json;
     use serde_json::Value;
@@ -278,8 +278,8 @@ mod tests {
         assert_eq!(model.engine_id(), "iris_3b");
         assert!(model.supports_guidance() && model.supports_negative_prompt());
         let caps = &model.descriptor.capabilities;
-        assert_eq!(model.default_steps(), gen_core::iris::DEFAULT_STEPS);
-        assert_eq!(model.default_guidance(), gen_core::iris::DEFAULT_CFG_SCALE);
+        assert_eq!(model.default_steps(), gen_core_iris::DEFAULT_STEPS);
+        assert_eq!(model.default_guidance(), gen_core_iris::DEFAULT_CFG_SCALE);
 
         let entry = shipped_iris_entry();
         let limits = entry.get("limits").and_then(Value::as_object).unwrap();
@@ -290,10 +290,10 @@ mod tests {
             .filter_map(Value::as_str)
             .collect();
         assert_eq!(samplers, caps.samplers, "the menu IS the engine's");
-        assert_eq!(samplers, gen_core::iris::SAMPLERS);
+        assert_eq!(samplers, gen_core_iris::SAMPLERS);
         assert_eq!(
             entry["defaults"]["sampler"].as_str(),
-            Some(gen_core::iris::SOLVER_ORDER_2_SAMPLER)
+            Some(gen_core_iris::SOLVER_ORDER_2_SAMPLER)
         );
         assert!(caps.schedulers.is_empty());
         for absent in ["schedulers", "guidanceMethods"] {
@@ -363,7 +363,7 @@ mod tests {
         }
         assert_eq!(
             limits["requiresDimensionsMultipleOf"].as_u64(),
-            Some(u64::from(gen_core::iris::SIZE_MULTIPLE))
+            Some(u64::from(gen_core_iris::SIZE_MULTIPLE))
         );
         assert_eq!(
             limits["maxDimension"].as_u64(),
@@ -375,16 +375,16 @@ mod tests {
         );
         assert_eq!(
             entry["defaults"]["steps"].as_u64(),
-            Some(u64::from(gen_core::iris::DEFAULT_STEPS))
+            Some(u64::from(gen_core_iris::DEFAULT_STEPS))
         );
         assert_eq!(
             entry["defaults"]["resolution"].as_str(),
-            Some(format!("{0}x{0}", gen_core::iris::DEFAULT_SIZE).as_str()),
+            Some(format!("{0}x{0}", gen_core_iris::DEFAULT_SIZE).as_str()),
             "the default stays 1024-class"
         );
         assert_eq!(
             entry["image"]["patchGridVisibleBelow"].as_u64(),
-            Some(u64::from(gen_core::iris::DEFAULT_SIZE))
+            Some(u64::from(gen_core_iris::DEFAULT_SIZE))
         );
     }
 
@@ -393,8 +393,8 @@ mod tests {
     #[test]
     fn the_steps_ceiling_admits_the_models_own_default() {
         assert_eq!(
-            super::super::max_requested_steps(gen_core::iris::DEFAULT_STEPS),
-            gen_core::iris::DEFAULT_STEPS
+            super::super::max_requested_steps(gen_core_iris::DEFAULT_STEPS),
+            gen_core_iris::DEFAULT_STEPS
         );
         assert_eq!(super::super::max_requested_steps(40), 80);
     }
@@ -1203,8 +1203,8 @@ mod tests {
             width: 64,
             height: 64,
             seed,
-            steps: Some(gen_core::iris::DEFAULT_STEPS),
-            guidance: Some(gen_core::iris::DEFAULT_CFG_SCALE),
+            steps: Some(gen_core_iris::DEFAULT_STEPS),
+            guidance: Some(gen_core_iris::DEFAULT_CFG_SCALE),
             sampler: None,
             scheduler: None,
             scheduler_shift: None,
@@ -1739,7 +1739,7 @@ mod tests {
         );
         assert_eq!(
             switch.generator_after_generation,
-            Some(vec![gen_core::iris::TEXT_ENCODER_COMPONENT.to_owned()]),
+            Some(vec![gen_core_iris::TEXT_ENCODER_COMPONENT.to_owned()]),
             "the generator is resident with its text encoder: {switch:?}"
         );
         assert_eq!(
@@ -1898,7 +1898,7 @@ mod tests {
         let eager = gen_core::LoadShape::EagerMaterialization;
         let ids = [
             "iris_3b",
-            gen_core::iris::DEPTH_MODEL_ID,
+            gen_core_iris::DEPTH_MODEL_ID,
             crate::iris_restore::IRIS_RESTORE_MODEL_ID,
         ];
         for witness in deferred_route_witnesses() {
@@ -1975,7 +1975,7 @@ mod tests {
         let mut generation_rungs = Vec::new();
         for id in [
             "iris_3b",
-            gen_core::iris::DEPTH_MODEL_ID,
+            gen_core_iris::DEPTH_MODEL_ID,
             crate::iris_restore::IRIS_RESTORE_MODEL_ID,
         ] {
             let fixture = registry

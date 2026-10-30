@@ -7148,7 +7148,7 @@ mod download_receipt_tests {
 
     /// sc-26234 (epic sc-26233): FLUX 3 Image Klein is ONE package — the DiT, the autoencoder AND
     /// the Qwen3-VL text encoder all live under the one pinned `black-forest-labs/flux-3-image-klein`
-    /// root (`gen_core::flux3::GenerationResources` reads them from there), so the entry has exactly
+    /// root (`gen_core_flux3::GenerationResources` reads them from there), so the entry has exactly
     /// one download and NO co-requisite component (the inverse of Iris-3B, whose encoder is a
     /// separate `text_encoder` component). Install state therefore gates on the bundled
     /// `text_encoder/` files of the SAME snapshot: the DiT + autoencoder alone is a repairable

@@ -21,16 +21,16 @@
 
 use std::path::{Path, PathBuf};
 
-use gen_core::iris::depth::{
+use gen_core::{CancelFlag, LoadSpec, WeightsSource};
+use gen_core_iris::depth::{
     colorize_inferno, plan_depth_input, DepthInputPlan, DepthMetadata, DepthRequest,
     DepthResolution, IrisDepthEstimator, VALUE_CONVENTION, VALUE_CONVENTION_DESCRIPTION,
 };
-use gen_core::iris::downstream::{TaskExport, EMPTY_PROMPT_FILE};
-use gen_core::iris::{
+use gen_core_iris::downstream::{TaskExport, EMPTY_PROMPT_FILE};
+use gen_core_iris::{
     IrisTask, BACKBONE_CONFIG_FILE, BACKBONE_WEIGHTS_FILE, UPSTREAM_WEIGHTS_REPO,
     UPSTREAM_WEIGHTS_REVISION,
 };
-use gen_core::{CancelFlag, LoadSpec, WeightsSource};
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageReader};
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};

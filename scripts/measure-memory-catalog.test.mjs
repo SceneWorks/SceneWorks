@@ -4598,7 +4598,12 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
   );
   const gate = /pub\(crate\) fn safety_check\(([\s\S]*?)\n\}\n/.exec(engine);
   assert.ok(gate, "the pinned crate still declares a registered safety_check");
-  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(gate[1]);
+  // Since inference 354b41cc the registered `safety_check` is a thin wrapper and the mode
+  // routing lives in its `checked_safety` delegate; read the match out of whichever carries it.
+  const checked = /fn checked_safety\(([\s\S]*?)\n\}\n/.exec(engine);
+  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(
+    checked?.[1] ?? gate[1],
+  );
   assert.ok(routed, "safety_check no longer routes on the request mode; re-read this derivation");
   const engineRoutes = [...routed[1].matchAll(/^\s*"([a-z_]+)" =>/gm)].map((match) => match[1]).sort();
   assert.ok(engineRoutes.length > 0, "the engine's route arm list parsed empty");
@@ -4713,15 +4718,17 @@ test("the Wan/SCAIL-2 arm's receipt tokens are the pinned engines' own, and the 
     "utf8",
   );
 
+  // Inference sc-27316 moved the Wan receipt contract from gen-core's `wan_i2v_memory` module
+  // into the sibling `gen-core-memory-wan` crate, and the arm's import moved with it.
   const wan = await readFile(
-    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core/src/wan_i2v_memory.rs"),
+    path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core-memory-wan/src/receipts.rs"),
     "utf8",
   );
   const wanToken = /pub const RECEIPT_VERSION: &str = "([a-z0-9-]+)";/.exec(wan)?.[1];
-  assert.ok(wanToken, "gen-core's wan_i2v_memory still publishes RECEIPT_VERSION");
+  assert.ok(wanToken, "gen-core-memory-wan still publishes RECEIPT_VERSION");
   assert.match(
     arm,
-    /Some\(_\) => mlx_gen::gen_core::wan_i2v_memory::RECEIPT_VERSION,/,
+    /Some\(_\) => gen_core_memory_wan::RECEIPT_VERSION,/,
     "the Wan half must ASK the engine for its receipt token, never restate it",
   );
   // …and the arm's prose, which is what a record reader sees, names the same shape.

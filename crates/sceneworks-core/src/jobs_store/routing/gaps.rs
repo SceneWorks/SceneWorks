@@ -1341,7 +1341,7 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
     "sd3_5_medium_quant",
     "anima_quant",
     // sc-24213: Supra2-IMG `.pt` checkpoint -> native bundle through inference's backend-neutral
-    // `gen_core::supra2::convert_pinned_checkpoint`.
+    // `gen_core_checkpoint::supra2::convert_pinned_checkpoint`.
     "supra2_img",
 ];
 
@@ -1354,7 +1354,7 @@ pub const NATIVE_CONVERTERS: &[&str] = &[
 ///   sc-7459) performs the same single-file → diffusers key remap as the macOS converter so
 ///   `flux2_klein_9b_true_v2` installs + converts off-Mac;
 /// - `supra2_img` (sc-24214), which needs no twin at all: its converter is inference's
-///   backend-neutral `gen_core::supra2::convert_pinned_checkpoint` (no MLX or Candle code), compiled
+///   backend-neutral `gen_core_checkpoint::supra2::convert_pinned_checkpoint` (no MLX or Candle code), compiled
 ///   on every platform, and `candle-gen-supra2` loads the very bundle it writes. Off-Mac Supra2 has
 ///   no raw-source fallback (the upstream `.pt` pickle is not loadable), so the converted bundle is
 ///   required here exactly as on macOS.

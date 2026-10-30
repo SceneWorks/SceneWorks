@@ -51,7 +51,7 @@ const FLUX3_BASE_PROVIDER: &str = "flux3_klein_base";
 mod mlx_iris;
 
 /// The three Iris-3B task routes (sc-25690), served by `mlx_iris`. Registry ids of `mlx-gen-iris`
-/// (`gen_core::iris::GENERATION_MODEL_ID` / `DEPTH_MODEL_ID` / `restoration::MODEL_ID`), which are
+/// (`gen_core_iris::GENERATION_MODEL_ID` / `DEPTH_MODEL_ID` / `restoration::MODEL_ID`), which are
 /// also the catalog model ids. Spelled here, as consts, because
 /// `scripts/stale-lane-report.mjs::adapterCapturableProviders` reads the dispatch arms off this file.
 const IRIS_PROVIDER: &str = "iris_3b";
@@ -62,7 +62,7 @@ const IRIS_RESTORE_PROVIDER: &str = "iris_3b_restore";
 mod mlx_supra2;
 
 /// Supra2-IMG (sc-24217, epic 24212), served by `mlx_supra2`: `mlx-gen-supra2`'s registry id
-/// (`gen_core::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
+/// (`gen_core_checkpoint::supra2::PROVIDER_ID`), which is also the catalog model id. Spelled here, as a const,
 /// because `scripts/stale-lane-report.mjs::adapterCapturableProviders` reads the dispatch arms off
 /// this file; `mlx_supra2`'s tests bind it to the engine constant through `protocol`.
 const SUPRA2_PROVIDER: &str = "supra2_img";

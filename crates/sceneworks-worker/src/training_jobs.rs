@@ -104,16 +104,16 @@ pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, Strin
         }
         // Pre-download PLANNING witness: config-only metadata (no header/tensor reads), bound to
         // the catalog base model. Checkpoint identity is the post-download header resolution.
-        let cfg = gen_core::flux3::Flux3MetadataConfig::from_dir(base)
+        let cfg = gen_core_flux3::Flux3MetadataConfig::from_dir(base)
             .and_then(|metadata| metadata.for_model(BASE_ID))
             .map_err(|_| "witness config JSON refused".to_owned())?;
         cfg.validate_supported()
             .map_err(|_| "witness release format refused".to_owned())?;
-        gen_core::flux3::training::identity::validate_release_config(&cfg)
+        gen_core_flux3::training::identity::validate_release_config(&cfg)
             .map_err(|_| "witness requires canonical undistilled graph".to_owned())?;
         let mut normalized = engine_training_config(plan);
         normalized.resume = false;
-        // Byte-identical to gen_core::flux3::training::identity::build; not a JS approximation.
+        // Byte-identical to gen_core_flux3::training::identity::build; not a JS approximation.
         let config_sha256 = format!(
             "{:x}",
             Sha256::digest(
@@ -125,7 +125,7 @@ pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, Strin
             )
         );
         let targets =
-            gen_core::flux3::training::lora_targets(&cfg.dit, &normalized.lora_target_modules)
+            gen_core_flux3::training::lora_targets(&cfg.dit, &normalized.lora_target_modules)
                 .map_err(|_| "witness factor selection refused".to_owned())?;
         let mut factors = BTreeMap::new();
         for target in targets {
@@ -162,7 +162,7 @@ pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, Strin
             trigger_words: plan.output.trigger_words.clone(),
             cancel: CancelFlag::new(),
         };
-        let options = gen_core::flux3::training::options::TrainingOptions::parse(&request)
+        let options = gen_core_flux3::training::options::TrainingOptions::parse(&request)
             .map_err(|_| "witness source options refused".to_owned())?;
         let backend = if cfg!(target_os = "macos") {
             "mlx"
@@ -185,7 +185,7 @@ pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, Strin
             "scheduler": format!("{:?};warmup={};cycles={};power={}", options.scheduler, normalized.lr_warmup_steps, options.cycles, options.power),
             "accumulation": normalized.gradient_accumulation.to_string(),
             "accumulation_scaling": "loss/configured_N_before_backward; epoch-tail flush",
-            "rng": gen_core::flux3::training::rng::RNG_ALGORITHM,
+            "rng": gen_core_flux3::training::rng::RNG_ALGORITHM,
             "config_sha256": config_sha256
         });
         Ok(json!({
@@ -194,8 +194,8 @@ pub fn flux3_training_config_witness(plan: &TrainingPlan) -> Result<Value, Strin
             "configuration": configuration,
             "factors": factors,
             "activeFactorKeys": active_factor_keys,
-            "trainingReference": gen_core::flux3::training::TRAINING_REFERENCE_REVISION,
-            "rngAlgorithm": gen_core::flux3::training::rng::RNG_ALGORITHM,
+            "trainingReference": gen_core_flux3::training::TRAINING_REFERENCE_REVISION,
+            "rngAlgorithm": gen_core_flux3::training::rng::RNG_ALGORITHM,
             "baseRepository": BASE_REPO,
             "baseRevision": BASE_REVISION,
             "rank": normalized.rank,
@@ -1485,24 +1485,24 @@ fn validate_weights_free_training_request(
         ))
     })?;
     if engine_id == "flux3_klein_base" {
-        gen_core::flux3::training::options::TrainingOptions::parse(request)
+        gen_core_flux3::training::options::TrainingOptions::parse(request)
             .map_err(|error| WorkerError::InvalidPayload(error.to_string()))?;
     }
-    gen_core::train::validate_control_request(&descriptor, request).map_err(|error| {
+    gen_core_train::validate_control_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
-    gen_core::train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
+    gen_core_train::validate_full_finetune_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
     // Epic 2123: the engine's own technique floor over the fully mapped request (weight / gradient
     // noise, schedule shape, declared support, aux model directories present), so the worker
     // refuses exactly what the trainer would — before any model load.
-    gen_core::train::validate_training_techniques(&descriptor, request).map_err(|error| {
+    gen_core_train::validate_training_techniques(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
     // Instruction-edit pairs (sc-24161): a trainer that cannot take references refuses an edit
     // dataset typed, and an edit trainer refuses mixed/over-cap/control+edit items — before load.
-    gen_core::train::validate_edit_request(&descriptor, request).map_err(|error| {
+    gen_core_train::validate_edit_request(&descriptor, request).map_err(|error| {
         WorkerError::InvalidPayload(format!("{engine_id} trainer rejected the plan: {error}"))
     })?;
 
@@ -2464,15 +2464,15 @@ pub(crate) fn engine_trainer_id_for(kernel: &str, base_model: &str) -> Option<&'
             _ => None,
         },
         // Iris-3B generation (sc-25685 MLX / sc-25686 Candle): both backends register ONE trainer
-        // under the generation install's id (`gen_core::iris::train::TRAINER_ID`), serving LoRA, LoKr
+        // under the generation install's id (`gen_core_iris::train::TRAINER_ID`), serving LoRA, LoKr
         // and the full (weights- or random-init) run; the network type travels in the config. The
         // depth/restoration exports are different task installs and are never a training base here.
         // The depth (S9 sc-25687) and restoration (S10 sc-25688) task trainers ride the same kernel,
         // keyed on the task install they fine-tune.
         "iris_train" => match base_model {
-            "iris_3b" => Some(gen_core::iris::train::TRAINER_ID),
-            "iris_3b_depth" => Some(gen_core::iris::train::depth::DEPTH_TRAINER_ID),
-            "iris_3b_restore" => Some(gen_core::iris::restoration_train::TRAINER_ID),
+            "iris_3b" => Some(gen_core_iris::train::TRAINER_ID),
+            "iris_3b_depth" => Some(gen_core_iris::train::depth::DEPTH_TRAINER_ID),
+            "iris_3b_restore" => Some(gen_core_iris::restoration_train::TRAINER_ID),
             _ => None,
         },
         // Both FLUX.3 workflows share the native trainer, but never the distilled generation base.
@@ -3200,7 +3200,7 @@ impl TrainerLoadInputs {
         // re-verified (size + sha256) before every run and never downloaded here.
         if let Some(teacher) = crate::iris_curricula::repa_teacher_component(settings, plan)? {
             components.insert(
-                gen_core::iris::train::repa::TEACHER_COMPONENT.to_owned(),
+                gen_core_iris::train::repa::TEACHER_COMPONENT.to_owned(),
                 teacher,
             );
         }
@@ -5466,7 +5466,7 @@ mod tests {
         // is read by request_fingerprint; no weights, preprocessing, tensors or device.
         let bytes_file = temp.path().join("declared-fingerprint-fixture.bin");
         std::fs::write(&bytes_file, b"DECLARED_SYNTHETIC_DATASET_BYTES").unwrap();
-        let cfg = gen_core::flux3::Flux3MetadataConfig::from_dir(&base)
+        let cfg = gen_core_flux3::Flux3MetadataConfig::from_dir(&base)
             .and_then(|metadata| metadata.for_model(BASE_ID))
             .unwrap();
         for rank in [4, 8] {
@@ -5488,8 +5488,8 @@ mod tests {
                 cancel: CancelFlag::new(),
             };
             let options =
-                gen_core::flux3::training::options::TrainingOptions::parse(&request).unwrap();
-            let targets = gen_core::flux3::training::lora_targets(
+                gen_core_flux3::training::options::TrainingOptions::parse(&request).unwrap();
+            let targets = gen_core_flux3::training::lora_targets(
                 &cfg.dit,
                 &request.config.lora_target_modules,
             )
@@ -5499,7 +5499,7 @@ mod tests {
             } else {
                 "candle-cuda"
             };
-            let mut native = gen_core::flux3::training::identity::build(
+            let mut native = gen_core_flux3::training::identity::build(
                 &request,
                 &cfg,
                 &options,
@@ -9286,7 +9286,7 @@ mod tests {
                 let mut stripped = prepared.request.clone();
                 stripped.items[0].reference_image_paths.clear();
                 assert!(
-                    gen_core::train::validate_edit_request(trainer.descriptor(), &stripped).is_ok(),
+                    gen_core_train::validate_edit_request(trainer.descriptor(), &stripped).is_ok(),
                     "a plain request is a T2I request to the engine — the KERNEL floor refuses it"
                 );
                 let mut over = prepared.request.clone();
@@ -9669,18 +9669,16 @@ mod tests {
     ))]
     #[test]
     fn flux3_native_request_keeps_options_paths_resume_and_exact_base() {
-        use gen_core::flux3::training::{
+        use gen_core_flux3::training::{
             checkpoint::{publish_bytes, ResumePolicy, TrainingCursor},
             controller, identity, rng,
         };
-        use gen_core::flux3::{
-            DitConfig, Flux3Config, SamplerConfig, TextEncoderConfig, VaeConfig,
-        };
+        use gen_core_flux3::{DitConfig, Flux3Config, SamplerConfig, TextEncoderConfig, VaeConfig};
         use sha2::Digest;
         // A metadata/admission fixture, NOT loaded weights or a native optimizer execution.
         fn observed_identity(
             request: &TrainingRequest,
-        ) -> gen_core::flux3::training::ResumeIdentity {
+        ) -> gen_core_flux3::training::ResumeIdentity {
             let config = Flux3Config {
                 format_version: 1,
                 model: "declared synthetic identity fixture".into(),
@@ -9723,8 +9721,8 @@ mod tests {
             };
             identity::validate_release_config(&config).unwrap();
             let options =
-                gen_core::flux3::training::options::TrainingOptions::parse(request).unwrap();
-            let targets = gen_core::flux3::training::lora_targets(
+                gen_core_flux3::training::options::TrainingOptions::parse(request).unwrap();
+            let targets = gen_core_flux3::training::lora_targets(
                 &config.dit,
                 &request.config.lora_target_modules,
             )
@@ -9818,15 +9816,15 @@ mod tests {
                 let name = choice.as_str().unwrap();
                 assert_eq!(choice_request.config.timestep_type, name);
                 let expected = match name {
-                    "uniform" | "linear" => gen_core::flux3::training::Weighting::None,
-                    "sigmoid" | "logit_normal" => gen_core::flux3::training::Weighting::LogitNormal,
-                    "mode" => gen_core::flux3::training::Weighting::Mode,
-                    "cosmap" => gen_core::flux3::training::Weighting::Cosmap,
-                    "sigma_sqrt" => gen_core::flux3::training::Weighting::SigmaSqrt,
+                    "uniform" | "linear" => gen_core_flux3::training::Weighting::None,
+                    "sigmoid" | "logit_normal" => gen_core_flux3::training::Weighting::LogitNormal,
+                    "mode" => gen_core_flux3::training::Weighting::Mode,
+                    "cosmap" => gen_core_flux3::training::Weighting::Cosmap,
+                    "sigma_sqrt" => gen_core_flux3::training::Weighting::SigmaSqrt,
                     _ => panic!("unimplemented advertised timestep {name}"),
                 };
                 assert_eq!(
-                    gen_core::flux3::training::options::TrainingOptions::parse(&choice_request)
+                    gen_core_flux3::training::options::TrainingOptions::parse(&choice_request)
                         .unwrap()
                         .weighting,
                     expected
@@ -9857,7 +9855,7 @@ mod tests {
                 std::fs::canonicalize(&plan.output.output_dir).unwrap()
             );
             assert_eq!(request.file_name, plan.output.file_name);
-            gen_core::flux3::training::options::TrainingOptions::parse(&request).unwrap();
+            gen_core_flux3::training::options::TrainingOptions::parse(&request).unwrap();
             assert_eq!(
                 request
                     .config
@@ -9916,7 +9914,7 @@ mod tests {
                 &request.cancel,
             )
             .unwrap();
-            let admit = |identity: &gen_core::flux3::training::ResumeIdentity| {
+            let admit = |identity: &gen_core_flux3::training::ResumeIdentity| {
                 controller::find_resume(
                     &request.output_dir,
                     stem,

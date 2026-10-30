@@ -9,13 +9,13 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The catalog id of the Iris-3B depth task export (`gen_core::iris::DEPTH_MODEL_ID`).
+/// The catalog id of the Iris-3B depth task export (`gen_core_iris::DEPTH_MODEL_ID`).
 pub const DEPTH_MODEL_ID: &str = "iris_3b_depth";
 /// The asset `type` of a depth map.
 pub const DEPTH_ASSET_TYPE: &str = "depth";
 /// The `file.mimeType` recorded for the raw map.
 pub const NPY_MIME_TYPE: &str = "application/x-npy";
-/// Upstream's default `max_side` (`gen_core::iris::depth::DEFAULT_DEPTH_MAX_SIDE`).
+/// Upstream's default `max_side` (`gen_core_iris::depth::DEFAULT_DEPTH_MAX_SIDE`).
 pub const DEFAULT_DEPTH_MAX_SIDE: u32 = 1024;
 /// The smallest user-selectable cap: below this the 16-pixel patch grid leaves the model almost
 /// nothing to look at.

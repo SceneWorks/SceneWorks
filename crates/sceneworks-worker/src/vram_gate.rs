@@ -7164,10 +7164,12 @@ mod tests {
             }),
             ..Default::default()
         };
-        let bound =
-            gen_core::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
-                .unwrap()
-                .unwrap();
+        let bound = gen_core_h3::veda::workspace::for_request(
+            &req,
+            gen_core::veda::workspace::Backend::Cuda,
+        )
+        .unwrap()
+        .unwrap();
         let budget = Some(VramBudget {
             free_gb: 42.068,
             total_gb: 96.,
