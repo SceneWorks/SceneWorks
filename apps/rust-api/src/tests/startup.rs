@@ -399,7 +399,9 @@ async fn old_durable_model_uploads_survive_both_restart_sweeps_until_ownership_i
             #[cfg(windows)]
             {
                 use std::os::windows::fs::OpenOptionsExt;
-                options.custom_flags(0x02000000);
+                // FILE_FLAG_BACKUP_SEMANTICS opens the directory; setting its mtime needs
+                // FILE_WRITE_ATTRIBUTES, which a read-only handle lacks (os error 5).
+                options.custom_flags(0x02000000).access_mode(0x0100);
             }
             options
                 .open(&dir)
