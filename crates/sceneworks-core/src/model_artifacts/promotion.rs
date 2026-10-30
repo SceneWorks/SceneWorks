@@ -79,7 +79,13 @@ pub fn promotion_candidate_for_requirements(
         ));
     }
     let library = resolver.source_library();
-    let mut members = Vec::with_capacity(requirements.len());
+    // Rows of one repository, revision and variant share one snapshot destination, so they become
+    // one member carrying the union of their files (sc-27985). A manifest may split a snapshot
+    // across rows that each list the same shared file (MOSS-Image SFT's primary and
+    // `moss-shared-snapshot` rows both carry LICENSE); one member per row would write that path
+    // twice and the bundle could never be promoted. The availability resolver already unions files
+    // per (repository, revision, variant), so the merged bundle covers every original row.
+    let mut members: Vec<ResolvedBundleMember> = Vec::with_capacity(requirements.len());
     let mut primary_identity = None;
     for requirement in requirements {
         let revision = resolve_requirement_revision(library, requirement)?;
@@ -90,6 +96,27 @@ pub fn promotion_candidate_for_requirements(
         )?;
         if requirement.is_primary {
             primary_identity = Some(source.clone());
+        }
+        let files = requirement
+            .files
+            .iter()
+            .map(ArtifactFile::new)
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(member) = members.iter_mut().find(|member| member.source == source) {
+            if requirement.is_primary {
+                member.role = ArtifactMemberRole::Primary;
+                member.component_id = None;
+            }
+            for file in files {
+                if !member
+                    .files
+                    .iter()
+                    .any(|existing| existing.relative_path == file.relative_path)
+                {
+                    member.files.push(file);
+                }
+            }
+            continue;
         }
         members.push(ResolvedBundleMember {
             role: if requirement.is_primary {
@@ -112,11 +139,7 @@ pub fn promotion_candidate_for_requirements(
                 &revision,
                 Path::new(""),
             )?,
-            files: requirement
-                .files
-                .iter()
-                .map(ArtifactFile::new)
-                .collect::<Result<Vec<_>, _>>()?,
+            files,
             source,
         });
     }
