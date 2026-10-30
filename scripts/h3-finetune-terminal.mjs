@@ -906,8 +906,9 @@ export async function removeTreeNoFollow(target, fsImpl) {
   else throw new Error(`reclaim refuses an unexpected ${kind} at ${target}`);
 }
 /** Remove a PASSED case's own model copies, recording what went and the hashes it was verified at. */
-export async function reclaimCaseModelStorage(p, c, dir, { removeImpl } = {}) {
-  const fsImpl = await import('node:fs/promises');
+export async function reclaimCaseModelStorage(p, c, dir, { removeImpl, fsOverrides } = {}) {
+  // fsOverrides is a unit seam for entry types a host filesystem cannot create (a Windows socket).
+  const fsImpl = { ...(await import('node:fs/promises')), ...fsOverrides };
   // Only ever this run's own private root: on Actions the output root is `<run>-<attempt>-...`.
   if (process.env.GITHUB_RUN_ID) assert.ok(path.basename(p.output).startsWith(`${process.env.GITHUB_RUN_ID}-${process.env.GITHUB_RUN_ATTEMPT}-`), 'storage reclaim is confined to this run\'s own private root');
   const { root, targets } = await caseReclaimTargets(p, c);

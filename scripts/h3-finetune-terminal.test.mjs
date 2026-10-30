@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile, readFile, rm, stat, symlink } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, rename, writeFile, readFile, rm, stat, symlink } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import os from 'node:os';
 import { runInNewContext } from 'node:vm';
@@ -924,11 +924,29 @@ test('storage reclaim removes symlinked files and nested links as links, never t
 test('storage reclaim refuses unexpected entry types before removing anything', { skip: process.platform === 'win32' && 'unix sockets in the filesystem are POSIX-only; the walk itself is covered by the fake below' }, async t => {
   withRunEnv(t);
   const f = await reclaimFixture(t), net = await import('node:net');
-  const socket = path.join(path.dirname(f.files.resolved), 's.sock'), server = net.createServer();
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve); });
-  t.after(() => new Promise(resolve => server.close(resolve)));
+  // Bind at a SHORT path, then move the socket into the reclaim target. The target path is far past
+  // sun_path (108 bytes on Linux, 104 on macOS) and libuv silently truncates a long bind name, which
+  // created the socket as a truncated sibling under services/ (outside every target) so the reclaim
+  // never saw it. rename() keeps the entry a socket; the listener is not needed for lstat to see it.
+  const bound = path.join(f.base, 's.sock'), socket = path.join(path.dirname(f.files.resolved), 's.sock'), server = net.createServer();
+  assert.ok(Buffer.byteLength(bound) < 104, `socket bind path must fit sun_path: ${bound}`);
+  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(bound, resolve); });
+  await rename(bound, socket);
+  await new Promise(resolve => server.close(resolve));
+  assert.ok((await lstat(socket)).isSocket(), 'the socket is inside a reclaim target');
   await assert.rejects(reclaimCaseModelStorage(f.p, f.c, f.dir), /reclaim refuses an unexpected socket at .*s\.sock; nothing was removed/);
   for (const name of ['imported', 'resolved', 'ref']) assert.equal(await exists(f.files[name]), true, `${name} kept on refusal`);
+  assert.equal(await exists(path.join(f.dir, 'storage-reclaim.json')), false);
+});
+test('storage reclaim refuses an unexpected entry type found by the pre-walk on every platform', async t => {
+  withRunEnv(t);
+  const f = await reclaimFixture(t), odd = path.join(path.dirname(f.files.resolved), 's.sock');
+  await writeFile(odd, 'stands in for a socket');
+  const asSocket = info => ({ ...info, isSymbolicLink: () => false, isFile: () => false, isDirectory: () => false, isSocket: () => true, isFIFO: () => false, isBlockDevice: () => false, isCharacterDevice: () => false });
+  const fsOverrides = { lstat: async entry => { const info = await lstat(entry); return path.resolve(entry) === path.resolve(odd) ? asSocket(info) : info; } };
+  await assert.rejects(reclaimCaseModelStorage(f.p, f.c, f.dir, { fsOverrides }), /reclaim refuses an unexpected socket at .*s.sock; nothing was removed/);
+  for (const name of ['imported', 'resolved', 'ref']) assert.equal(await exists(f.files[name]), true, `${name} kept on refusal`);
+  assert.equal(await exists(odd), true);
   assert.equal(await exists(path.join(f.dir, 'storage-reclaim.json')), false);
 });
 test('the no-follow removal walk unlinks links, refuses devices and never recurses through a link', async () => {
