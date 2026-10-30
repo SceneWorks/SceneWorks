@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { admission, childEnvironment, CASES } from './load-progress-acceptance.mjs';
+import { admission, childEnvironment, dispatchOptions, cacheInventory, CASES } from './load-progress-acceptance.mjs';
 const env = {LOAD_PROGRESS_CASE:'image_mlx',LOAD_PROGRESS_SOURCE_SHA:'a'.repeat(40),LOAD_PROGRESS_INFERENCE_SHA:'b'.repeat(40),LOAD_PROGRESS_OUTPUT:'/tmp/load-progress-case',LOAD_PROGRESS_MAC_GO:'true'};
 test('manual selector freezes one exact ignored test and rejects platform mismatch',()=>{
   assert.equal(admission(env,'darwin'),'tests::load_progress_acceptance::image_mlx');
@@ -33,4 +33,30 @@ test('all four real cases are ignored and the existing eight-cell campaign remai
   const controller=await readFile(new URL('./load-progress-acceptance.mjs',import.meta.url),'utf8');
   assert.match(controller,/--no-run/);assert.match(controller,/--ignored/);assert.match(controller,/--exact/);
   assert.doesNotMatch(controller,/moss-training-acceptance\.mjs|memory-catalog-campaign/);
+});
+
+test('registered dispatcher selects only bounded profile cases and rejects wrong source/options before native setup',()=>{
+  const base={profile:'load-progress-acceptance',ref:'a'.repeat(40),inference_sha:'b'.repeat(40),backend:'candle',moss_options_json:JSON.stringify({case:'image_cuda',hf_hub_cache:'E:/huggingface/hub'})};
+  assert.deepEqual(dispatchOptions(base,base.ref),{case:'image_cuda',backend:'cuda',hf_hub_cache:'E:/huggingface/hub',build_only:true,mac_go:false});
+  assert.throws(()=>dispatchOptions({...base,profile:'catalog'},base.ref));
+  assert.throws(()=>dispatchOptions(base,'c'.repeat(40)),/exact dispatched/);
+  for(const options of [{case:'all',hf_hub_cache:'E:/hub'},{case:'image_mlx',hf_hub_cache:'E:/hub'},{case:'image_cuda',hf_hub_cache:'relative'},{case:'image_cuda',hf_hub_cache:'E:/hub',unknown:true},{case:'image_cuda',hf_hub_cache:'E:/hub',build_only:'false'}]) assert.throws(()=>dispatchOptions({...base,moss_options_json:JSON.stringify(options)},base.ref));
+  const mlx={...base,backend:'mlx',moss_options_json:JSON.stringify({case:'image_mlx',hf_hub_cache:'/frozen/hub',build_only:false})};
+  assert.throws(()=>dispatchOptions(mlx,mlx.ref),/explicit.*go/);
+  assert.equal(dispatchOptions({...mlx,moss_options_json:JSON.stringify({case:'image_mlx',hf_hub_cache:'/frozen/hub',build_only:false,mac_go:true})},mlx.ref).build_only,false);
+});
+test('manual profile calls only dedicated acceptance and keeps catalog and MOSS campaign conditions separate',async()=>{
+  const dispatcher=await readFile(new URL('../.github/workflows/memory-catalog-campaign.yml',import.meta.url),'utf8');
+  assert.match(dispatcher,/if \(i.profile === 'load-progress-acceptance'\) \{ emit\('enabled','false'\)/);
+  assert.match(dispatcher,/uses: \.\/\.github\/workflows\/load-progress-acceptance.yml/);
+  assert.match(dispatcher,/inputs.profile == '' \|\| inputs.profile == 'catalog'/);
+  const workflow=await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
+  assert.match(workflow,/workflow_dispatch:/);assert.match(workflow,/workflow_call:/);assert.doesNotMatch(workflow,/^  (push|pull_request|schedule):/m);
+});
+
+test('cache preflight stats only exact frozen files and retains all missing component names',async()=>{
+  const manifest=[{id:'chatterbox_tts',downloads:[{repo:'Example/Audio',revision:'a'.repeat(40),files:['model.safetensors']},{repo:'Example/Codec',revision:'b'.repeat(40),componentId:'codec',files:['weights.safetensors']}]}];
+  const result=await cacheInventory('/nonexistent-sc27980-hub','audio',manifest);
+  assert.equal(result.requiredFiles,2);assert.equal(result.presentFiles,0);assert.equal(result.missing.length,2);assert.equal(result.missing[1].component,'codec');
+  assert.equal(result.totalPresentBytes,0);
 });

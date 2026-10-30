@@ -1,6 +1,31 @@
 name: Model load progress terminal acceptance
 # sc27984: never on push/PR; ordinary CI only compiles the ignored Rust tests.
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      inference_sha:
+        required: true
+        type: string
+      case:
+        required: true
+        type: string
+      backend:
+        required: true
+        type: string
+      hf_hub_cache:
+        required: true
+        type: string
+      build_only:
+        required: false
+        type: boolean
+        default: true
+      mac_go:
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       source_sha:

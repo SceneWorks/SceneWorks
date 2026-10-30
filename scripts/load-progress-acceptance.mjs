@@ -7,6 +7,7 @@ import { createHash } from 'node:crypto';
 import { readFile, writeFile, mkdir, open, stat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { stripJsoncComments } from './lib/jsonc.mjs';
 import { assertPins } from './qwen-image-2-1-app-lifecycle.mjs';
 import { enterMacMetalExecution, metalChildOptions } from './lib/apple-metal-execution-lock.mjs';
 const execFile = promisify(execFileCb);
@@ -17,7 +18,7 @@ export function admission(env, platform = process.platform, { execute = true } =
   assert(['darwin', 'win32'].includes(platform), 'native macOS or Windows runner required');
   assert(/^[a-f0-9]{40}$/.test(env.LOAD_PROGRESS_SOURCE_SHA ?? ''), 'exact source SHA required');
   assert(/^[a-f0-9]{40}$/.test(env.LOAD_PROGRESS_INFERENCE_SHA ?? ''), 'exact inference SHA required');
-  assert(env.LOAD_PROGRESS_OUTPUT && path.isAbsolute(env.LOAD_PROGRESS_OUTPUT), 'absolute unique output directory required');
+  assert(env.LOAD_PROGRESS_OUTPUT && (platform==='win32'?path.win32:path.posix).isAbsolute(env.LOAD_PROGRESS_OUTPUT), 'absolute unique output directory required');
   if (platform === 'darwin') {
     if (execute) assert.equal(env.LOAD_PROGRESS_MAC_GO, 'true', "Michael's explicit dev Mac GPU go required");
     assert.notEqual(env.LOAD_PROGRESS_CASE, 'image_cuda', 'CUDA case needs Windows');
@@ -28,6 +29,43 @@ export function admission(env, platform = process.platform, { execute = true } =
     assert.equal(env.CUDA_DEVICE_ORDER, 'PCI_BUS_ID');
   }
   return `tests::load_progress_acceptance::${env.LOAD_PROGRESS_CASE}`;
+}
+// Pure registered-dispatcher selector. It cannot start or load anything.
+export function dispatchOptions(inputs, dispatchedSha) {
+  assert.equal(inputs.profile, 'load-progress-acceptance');
+  assert.equal(inputs.ref, dispatchedSha, 'ref must equal exact dispatched source SHA');
+  assert(['mlx','candle'].includes(inputs.backend), 'backend must be mlx or candle');
+  const options=JSON.parse(inputs.moss_options_json || '{}' );
+  assert(options && typeof options==='object' && !Array.isArray(options), 'load progress options must be an object');
+  assert(Object.keys(options).every(key=>['case','hf_hub_cache','build_only','mac_go'].includes(key)), 'unknown load progress option');
+  for(const key of ['build_only','mac_go']) assert(options[key]===undefined || typeof options[key]==='boolean', `${key} must be boolean`);
+  const backend=inputs.backend==='mlx'?'mlx':'cuda', platform=backend==='mlx'?'darwin':'win32';
+  assert(typeof options.hf_hub_cache==='string' && (platform==='win32'?path.win32:path.posix).isAbsolute(options.hf_hub_cache), 'absolute existing HF hub cache required');
+  assert(!/[\r\n]/.test(options.hf_hub_cache), 'invalid cache path');
+  const selected={case:options.case,backend,hf_hub_cache:options.hf_hub_cache,build_only:options.build_only??true,mac_go:options.mac_go??false};
+  admission({LOAD_PROGRESS_CASE:selected.case,LOAD_PROGRESS_SOURCE_SHA:inputs.ref,LOAD_PROGRESS_INFERENCE_SHA:inputs.inference_sha,LOAD_PROGRESS_OUTPUT:platform==='win32'?'C:/load-progress':'/tmp/load-progress',LOAD_PROGRESS_MAC_GO:String(selected.mac_go),SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'},platform,{execute:!selected.build_only});
+  return selected;
+}
+// Exact manifest filenames only: metadata/stat, no recursive scans, hashes or model reads.
+export async function cacheInventory(hub, selectedCase, manifest = null) {
+  assert(hub && path.isAbsolute(hub), 'explicit absolute HF_HUB_CACHE required');
+  const models=manifest ?? JSON.parse(stripJsoncComments(await readFile(path.join(root,'config/manifests/builtin.models.jsonc'),'utf8'))).models;
+  const model=selectedCase==='audio'?'chatterbox_tts':'moss_image_sft';
+  const entry=models.find(m=>m.id===model); assert(entry, 'shipped selected model missing');
+  const rows=new Map();
+  for(const source of entry.downloads) {
+    assert(/^[a-f0-9]{40}$/.test(source.revision), 'immutable snapshot required');
+    for(const file of source.files) {
+      assert(typeof file==='string' && !file.includes('*') && !file.includes('..') && !path.isAbsolute(file),'exact manifest file required');
+      const target=path.join(hub,`models--${source.repo.replaceAll('/','--')}`,'snapshots',source.revision,file);
+      const row={repo:source.repo,revision:source.revision,file,path:target,component:source.componentId??null};
+      try { const metadata=await stat(target); assert(metadata.isFile()&&metadata.size>0,'empty/non-file artifact'); Object.assign(row,{present:true,bytes:metadata.size}); }
+      catch(error) { Object.assign(row,{present:false,error:error.code??error.message}); }
+      rows.set(`${source.repo}@${source.revision}/${file}`,row);
+    }
+  }
+  const files=[...rows.values()];
+  return {model,hub,requiredFiles:files.length,presentFiles:files.filter(f=>f.present).length,totalPresentBytes:files.reduce((sum,f)=>sum+(f.bytes??0),0),missing:files.filter(f=>!f.present),files};
 }
 export function childEnvironment(env, state, evidence) {
   const child = { ...env };
@@ -71,6 +109,10 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
     }
     await persist();
     if (checkOnly) { receipt.status='checked-no-model-execution'; return receipt; }
+    if (!buildOnly) {
+      receipt.cache=await cacheInventory(env.HF_HUB_CACHE,env.LOAD_PROGRESS_CASE); await persist();
+      assert.equal(receipt.cache.missing.length,0,'provision missing frozen model files before acceptance; see controller.json');
+    }
     const execute = async (command,args,name) => {
       const log = await open(path.join(evidence,`${name}.log`),'wx');
       try {
