@@ -21,6 +21,17 @@ export function selectWindowsCargoCache({ runnerName, cargoHome, runnerToolCache
   return { runner: runnerName, mode: "listener-cache", cache: path.win32.join(runnerToolCache, "SceneWorks", "cargo", runnerName.toLowerCase()) };
 }
 
+// The vendored candle-flash-attn build script compiles ~37 FlashAttention-2 kernels for four
+// -gencode targets (~17 min). Without CANDLE_FLASH_ATTN_BUILD_DIR its objects live in OUT_DIR under
+// the checkout target, which cleanup-runner-storage deletes after every job, so every run paid the
+// full nvcc build again (sc-28031). The build keys each object on kernel source, every header,
+// nvcc flags and arch, so one listener-owned directory is safe across pins and branches (inference
+// CI does the same per runner). An nvcc toolkit upgrade is not in that key: clear the directory.
+export function flashAttentionBuildDirectory(cache) {
+  if (!absoluteWindows(cache)) fail();
+  return path.win32.join(cache, "candle-flash-attn");
+}
+
 export async function ensurePhysicalCargoCache(directory) {
   if (!path.isAbsolute(directory)) fail();
   const segments = [];
@@ -74,8 +85,10 @@ async function main() {
   const revision = lockedInferenceRevision(await readFile("Cargo.lock", "utf8"));
   const present = await cachedInferenceRevision(selected.cache, revision);
   if (!process.env.GITHUB_ENV) throw new Error("GitHub environment output is required");
-  await appendFile(process.env.GITHUB_ENV, `CARGO_HOME=${selected.cache}\n`);
-  console.log(JSON.stringify({ kind: "windows-cargo-cache", ...selected, inference_revision: revision, inference_commit_present: present }));
+  const flashAttention = flashAttentionBuildDirectory(selected.cache);
+  await ensurePhysicalCargoCache(flashAttention);
+  await appendFile(process.env.GITHUB_ENV, `CARGO_HOME=${selected.cache}\nCANDLE_FLASH_ATTN_BUILD_DIR=${flashAttention}\n`);
+  console.log(JSON.stringify({ kind: "windows-cargo-cache", ...selected, flash_attention_build: flashAttention, inference_revision: revision, inference_commit_present: present }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
