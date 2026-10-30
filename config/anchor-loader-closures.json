@@ -1,7 +1,7 @@
 {
   "_comment": "Per-model loader-closure digests: the memory anchor currency key (sc-22511). An anchor is CURRENT while the digest it recorded still equals the digest here for its (model, backend lane). The unit is the source files the model's loader reaches, and nothing else — not the pin, not sibling models, not shared crates the loader never reaches. Regenerate when the pinned inference revision changes: node scripts/anchor-loader-closure.mjs --repo <inference> --write. A regeneration that leaves the digests unchanged is the expected case. A catalog alias (a model id the inference tree never names, such as z_image_edit) declares the engine id it resolves to as engineId; the alias is part of its hashed closure text.",
   "digestVersion": "anchor-loader-closure v2",
-  "inferenceRevision": "56dd728f54d1cf018b75b2dd2f85e47438aff84c",
+  "inferenceRevision": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
   "models": {
     "bernini:candle": {
       "entryPoints": [
@@ -14121,11 +14121,6 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/model.rs"
       ],
-      "formerEntryPoints": {
-        "crates/contracts/gen-core-iris/src/lib.rs": [
-          "crates/contracts/gen-core/src/iris.rs"
-        ]
-      },
       "digest": "d0f3e7dd7f895efaa01060390cb7084dfb459bcea54804d474ee1952fa071665",
       "closureFileCount": 416,
       "closureFiles": [
@@ -14553,11 +14548,6 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/model.rs"
       ],
-      "formerEntryPoints": {
-        "crates/contracts/gen-core-iris/src/lib.rs": [
-          "crates/contracts/gen-core/src/iris.rs"
-        ]
-      },
       "digest": "02c650cca9173d66aec2095918dae05d45dcf4cc335f78bf98f70220d5d9888f",
       "closureFileCount": 302,
       "closureFiles": [
@@ -14871,11 +14861,6 @@
         "crates/media/candle-gen/candle-gen-iris/src/depth.rs",
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs"
       ],
-      "formerEntryPoints": {
-        "crates/contracts/gen-core-iris/src/lib.rs": [
-          "crates/contracts/gen-core/src/iris.rs"
-        ]
-      },
       "digest": "b20f4e73d2ca9a3d813981417d73552a5306d304d7b6913bb1ee86fd4c352992",
       "closureFileCount": 416,
       "closureFiles": [
@@ -15303,11 +15288,6 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/depth.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs"
       ],
-      "formerEntryPoints": {
-        "crates/contracts/gen-core-iris/src/lib.rs": [
-          "crates/contracts/gen-core/src/iris.rs"
-        ]
-      },
       "digest": "0c5f250f2dd1e61cb21e0c952ce66f90454f51ca1f745ff15f290c3a81aef271",
       "closureFileCount": 302,
       "closureFiles": [
@@ -15621,11 +15601,6 @@
         "crates/media/candle-gen/candle-gen-iris/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-iris/src/restoration.rs"
       ],
-      "formerEntryPoints": {
-        "crates/contracts/gen-core-iris/src/restoration.rs": [
-          "crates/contracts/gen-core/src/iris/restoration.rs"
-        ]
-      },
       "digest": "54c2272a7ab1757b99565fa2987ea1f5e5bfc593a4bdd3a26e07582784d4caf6",
       "closureFileCount": 413,
       "closureFiles": [
@@ -16050,11 +16025,6 @@
         "crates/media/mlx-gen/mlx-gen-iris/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-iris/src/restoration.rs"
       ],
-      "formerEntryPoints": {
-        "crates/contracts/gen-core-iris/src/restoration.rs": [
-          "crates/contracts/gen-core/src/iris/restoration.rs"
-        ]
-      },
       "digest": "dc646924851c820e9c1a2519fb2c3477b747844e6d9d31a0e0b8a9e46e9f9754",
       "closureFileCount": 299,
       "closureFiles": [
@@ -46741,11 +46711,6 @@
         "crates/media/candle-gen/candle-gen-supra2/src/memory_strategy.rs",
         "crates/media/candle-gen/candle-gen-supra2/src/model.rs"
       ],
-      "formerEntryPoints": {
-        "crates/contracts/gen-core-checkpoint/src/supra2.rs": [
-          "crates/contracts/gen-core/src/supra2.rs"
-        ]
-      },
       "digest": "95eb5c1614bed8264631b8290854551600670e78b83b80c67e2720d4525ff6a1",
       "closureFileCount": 372,
       "closureFiles": [
@@ -47129,11 +47094,6 @@
         "crates/media/mlx-gen/mlx-gen-supra2/src/memory_strategy.rs",
         "crates/media/mlx-gen/mlx-gen-supra2/src/model.rs"
       ],
-      "formerEntryPoints": {
-        "crates/contracts/gen-core-checkpoint/src/supra2.rs": [
-          "crates/contracts/gen-core/src/supra2.rs"
-        ]
-      },
       "digest": "8b723af246d08fd1488aa803e513d04cd09371335ece258df8f830ad858ff90a",
       "closureFileCount": 506,
       "closureFiles": [

@@ -4,7 +4,6 @@
 
 use std::path::Path;
 
-// `Layout::compile` lives in gen-core-flux3 as an extension trait (inference sc-27316).
 use gen_core::{Conditioning, MemoryReferenceResourceFacts};
 use gen_core_flux3::layouts::LayoutCompile;
 use gen_core_flux3::references::{ReferenceOutputSize, ReferencePlan};

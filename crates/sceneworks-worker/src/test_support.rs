@@ -17,9 +17,7 @@ pub use acceptance_progress::{
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub use candle_gen_moss_image::test_support::{generation_request, Fixture};
 pub use gen_core;
-// MOSS-Image recovery/training helpers moved out of gen-core (inference sc-27252).
 pub use gen_core_moss_image;
-// Host RSS sampling for the acceptance probes (gen-core-telemetry, inference sc-27252).
 pub use gen_core_telemetry;
 pub use gen_core_testkit::moss_training_probe::{EvaluationManifest, TrainingProbe};
 #[cfg(target_os = "macos")]

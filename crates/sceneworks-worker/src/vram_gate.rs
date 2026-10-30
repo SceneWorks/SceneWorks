@@ -7166,7 +7166,7 @@ mod tests {
         };
         let bound = gen_core_h3::veda::workspace::for_request(
             &req,
-            gen_core_h3::veda::workspace::Backend::Cuda,
+            gen_core::veda::workspace::Backend::Cuda,
         )
         .unwrap()
         .unwrap();

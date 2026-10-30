@@ -1,7 +1,7 @@
 {
   "stationary_pair_authorized": true,
   "sceneworks_sha": "03cdc056c57746ac025a06552a658b47fd40eaf8",
-  "inference_sha": "56dd728f54d1cf018b75b2dd2f85e47438aff84c",
+  "inference_sha": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
   "native_evidence_ref": "main",
   "native_evidence_sha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
   "expected_runner": "cuda-windows",

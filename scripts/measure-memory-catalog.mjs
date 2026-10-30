@@ -362,11 +362,6 @@ export const SDXL_ROUTES_UNCHECKED =
   + "engine's route revision was not compared with the shipped one; classified as if the engine agrees";
 
 export const WAN_MLX_LOADER_PATH = "crates/media/mlx-gen/mlx-gen-wan/src/model.rs";
-// inference sc-27342 split the loader module: `model.rs` keeps the provider-id consts and the
-// per-route loaders moved into its `model/` submodule files (a14b.rs, ti2v.rs, ...). The module is
-// one unit — model.rs plus every file directly under model/ — read together, so a route's seal and
-// its const resolve wherever inside the module they live, before and after the split.
-export const WAN_MLX_LOADER_SUBMODULE_DIR = "crates/media/mlx-gen/mlx-gen-wan/src/model";
 
 export const WAN_MLX_SEAL_UNCHECKED =
   `no inference checkout (--inference-repo / $INFERENCE_REPO) supplies ${WAN_MLX_LOADER_PATH}, so `
@@ -422,29 +417,30 @@ export function parseWanMlxSealedProviders(source, sourcePath = WAN_MLX_LOADER_P
  * The sealing routes at `inferenceRepo`, or `null` when no inference checkout is reachable. `null`
  * is NOT a refusal — see `WAN_MLX_SEAL_UNCHECKED`.
  */
-export async function readWanMlxLoaderModule(inferenceRepo) {
-  const parts = [await readFile(path.join(inferenceRepo, WAN_MLX_LOADER_PATH), "utf8")];
-  let entries = [];
-  try {
-    entries = await readdir(path.join(inferenceRepo, WAN_MLX_LOADER_SUBMODULE_DIR), { withFileTypes: true });
-  } catch (error) {
-    // A pre-split pin has no model/ directory: the whole loader is model.rs.
-    if (error.code !== "ENOENT" && error.code !== "ENOTDIR") throw error;
-  }
-  for (const name of entries.filter((entry) => entry.isFile() && entry.name.endsWith(".rs")).map((entry) => entry.name).sort()) {
-    parts.push(await readFile(path.join(inferenceRepo, WAN_MLX_LOADER_SUBMODULE_DIR, name), "utf8"));
-  }
-  return parts.join("\n");
-}
+// Since inference 354b41cc the 5B and A14B loader bodies live in `model/{ti2v,a14b}.rs`
+// (`use super::*` keeps the provider-id consts in model.rs), so the seal scan reads whichever
+// of the three files the checkout has and parses them as one text. A pre-split checkout still
+// parses model.rs alone, and the parser's fail-closed guarantees are unchanged: a seal whose
+// const no file declares, or a checkout sealing nothing anywhere, still THROWS.
+export const WAN_MLX_LOADER_PATHS = [
+  WAN_MLX_LOADER_PATH,
+  "crates/media/mlx-gen/mlx-gen-wan/src/model/ti2v.rs",
+  "crates/media/mlx-gen/mlx-gen-wan/src/model/a14b.rs",
+];
 
 export async function readWanMlxSealedProviders(inferenceRepo = process.env.INFERENCE_REPO) {
   if (!inferenceRepo) return null;
-  try {
-    return parseWanMlxSealedProviders(await readWanMlxLoaderModule(inferenceRepo));
-  } catch (error) {
-    if (error.code === "ENOENT" || error.code === "ENOTDIR") return null;
-    throw error;
+  const sources = [];
+  for (const file of WAN_MLX_LOADER_PATHS) {
+    try {
+      sources.push(await readFile(path.join(inferenceRepo, file), "utf8"));
+    } catch (error) {
+      if (error.code === "ENOENT" || error.code === "ENOTDIR") continue;
+      throw error;
+    }
   }
+  if (sources.length === 0) return null;
+  return parseWanMlxSealedProviders(sources.join("\n"));
 }
 
 /** Why the MLX lane cannot capture `provider` at this pin, or `null` when it can. */

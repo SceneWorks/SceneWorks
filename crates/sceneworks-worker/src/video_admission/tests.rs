@@ -5555,7 +5555,7 @@ fn veda_sparse_admission_selects_the_dense_strategy_with_the_bound_on_top() {
         ..Default::default()
     };
     let mut bound =
-        gen_core_h3::veda::workspace::for_request(&req, gen_core_h3::veda::workspace::Backend::Mlx)
+        gen_core_h3::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Mlx)
             .unwrap()
             .unwrap();
     bound.total_bytes = 4 * GIB;
@@ -5635,12 +5635,10 @@ fn veda_cold_admission_adds_full_bound_and_preserves_off_baseline() {
         }),
         ..Default::default()
     };
-    let bound = gen_core_h3::veda::workspace::for_request(
-        &req,
-        gen_core_h3::veda::workspace::Backend::Cuda,
-    )
-    .unwrap()
-    .unwrap();
+    let bound =
+        gen_core_h3::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
+            .unwrap()
+            .unwrap();
     let sparse = veda_cold_peak_gb(dense, Some(&bound));
     assert_eq!(sparse, dense + bound.total_bytes as f64 / GIB as f64);
     assert!(
@@ -5662,12 +5660,10 @@ fn veda_cuda_host_pool_is_checked_independently_and_fail_closed() {
         }),
         ..Default::default()
     };
-    let b = gen_core_h3::veda::workspace::for_request(
-        &req,
-        gen_core_h3::veda::workspace::Backend::Cuda,
-    )
-    .unwrap()
-    .unwrap();
+    let b =
+        gen_core_h3::veda::workspace::for_request(&req, gen_core::veda::workspace::Backend::Cuda)
+            .unwrap()
+            .unwrap();
     let host = veda_host_workspace_bytes(&b);
     assert!(host >= b.predictor_host_bytes + b.predictor_load_bytes);
     assert!(host <= b.total_bytes);

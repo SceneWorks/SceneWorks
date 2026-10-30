@@ -650,52 +650,41 @@ export function resolveRevision(repo, revision, { runGit = git } = {}) {
 /**
  * The one other spelling a crate may name its provider by (sc-24217): the backend-neutral
  * `gen_core::<family>::PROVIDER_ID` constant both backends of a family share. `mlx-gen-supra2`
- * registers `supra2_img` only as `gen_core_checkpoint::supra2::PROVIDER_ID` (before inference sc-27252
- * split gen-core, `mlx_gen::gen_core::supra2::PROVIDER_ID`), never as a literal, so
- * the literal check alone would refuse a correct pointer. Still checked, not trusted: the crate's
- * own source must spell `gen_core::<family>::PROVIDER_ID`, and gen-core's `src/<family>.rs` must
+ * registers `supra2_img` only through that constant, never as a literal, so the literal check
+ * alone would refuse a correct pointer. Inference sc-27316 split gen-core's family code into
+ * sibling neutral crates (`gen-core-checkpoint`, `gen-core-image`, …), so the constant may now be
+ * spelled `gen_core_<suffix>::<family>::PROVIDER_ID` and live in
+ * `crates/contracts/gen-core-<suffix>/src/<family>.rs`. Still checked, not trusted: the crate's
+ * own source must spell the constant path, and the named contracts crate's `src/<family>.rs` must
  * declare that constant as exactly this provider id at the same revision.
  */
-export const GEN_CORE_SOURCE_DIR = "crates/contracts/gen-core/src";
-
 export function providerNamedThroughGenCore({ repo, revision, provider, crateDir, runGit = git }) {
   let named = "";
   try {
     named = runGit(repo, [
-      "grep", "-h", "-o", "-E", "gen_core[a-z0-9_]*::[a-z0-9_]+::PROVIDER_ID", revision, "--", `${crateDir}/src/`,
+      "grep", "-h", "-o", "-E", "gen_core(_[a-z0-9_]+)?::[a-z0-9_]+::PROVIDER_ID", revision, "--", `${crateDir}/src/`,
     ]);
   } catch {
     return false;
   }
-  const families = new Set(
-    named.split("\n").map((line) => /gen_core[a-z0-9_]*::([a-z0-9_]+)::PROVIDER_ID/.exec(line)?.[1]).filter(Boolean),
+  const references = new Set(
+    named
+      .split("\n")
+      .map((line) => /gen_core((?:_[a-z0-9_]+)?)::([a-z0-9_]+)::PROVIDER_ID/.exec(line))
+      .filter(Boolean)
+      .map((match) => `${match[1]}:${match[2]}`),
   );
   const declaration = `pub const PROVIDER_ID: &str = "${provider}";`;
-  // gen-core's family code was split into sibling neutral crates (inference sc-27316:
-  // `gen-core-checkpoint`, `gen-core-image`, ...), so the constant may live in any
-  // `crates/contracts/gen-core*/src/<family>.rs`, not only in gen-core itself.
-  let sourceDirs = [GEN_CORE_SOURCE_DIR];
-  try {
-    const contracts = runGit(repo, ["ls-tree", "--name-only", revision, "crates/contracts/"]);
-    const siblings = contracts
-      .split("\n")
-      .map((line) => line.trim().replace(/\/$/, ""))
-      .filter((line) => /^crates\/contracts\/gen-core[a-z0-9-]*$/.test(line))
-      .map((line) => `${line}/src`);
-    sourceDirs = [...new Set([GEN_CORE_SOURCE_DIR, ...siblings])];
-  } catch {
-    // Fall back to gen-core alone.
-  }
-  for (const family of families) {
-    for (const dir of sourceDirs) {
-      let body = "";
-      try {
-        body = runGit(repo, ["show", `${revision}:${dir}/${family}.rs`]);
-      } catch {
-        continue;
-      }
-      if (body.split("\n").some((line) => line.trim() === declaration)) return true;
+  for (const reference of references) {
+    const [suffix, family] = reference.split(":");
+    const contractsDir = `crates/contracts/gen-core${suffix.replaceAll("_", "-")}/src`;
+    let body = "";
+    try {
+      body = runGit(repo, ["show", `${revision}:${contractsDir}/${family}.rs`]);
+    } catch {
+      continue;
     }
+    if (body.split("\n").some((line) => line.trim() === declaration)) return true;
   }
   return false;
 }

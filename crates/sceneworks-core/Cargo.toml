@@ -10,13 +10,11 @@ publish = false
 test-support = []
 
 [dependencies]
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "56dd728f54d1cf018b75b2dd2f85e47438aff84c" }
-# sc-26691: inference sc-27252 split these families out of gen-core into sibling crates
-# (same source and rev as gen-core; bump-inference.mjs keeps them in lockstep).
-sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "56dd728f54d1cf018b75b2dd2f85e47438aff84c" }
-sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "56dd728f54d1cf018b75b2dd2f85e47438aff84c" }
-sceneworks-gen-core-iris = { git = "https://github.com/SceneWorks/inference", rev = "56dd728f54d1cf018b75b2dd2f85e47438aff84c" }
-sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "56dd728f54d1cf018b75b2dd2f85e47438aff84c" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "354b41ccaccdc14afccff0d0fb1ae1b0be04836e" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "354b41ccaccdc14afccff0d0fb1ae1b0be04836e" }
+sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "354b41ccaccdc14afccff0d0fb1ae1b0be04836e" }
+# The H3 finetune-import codec (minimax_h3_codec) reads the pruned-AdaLN table contract.
+sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "354b41ccaccdc14afccff0d0fb1ae1b0be04836e" }
 directories = "5"
 fs2 = "0.4"
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's

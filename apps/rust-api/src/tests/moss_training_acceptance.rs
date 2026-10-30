@@ -8,8 +8,8 @@ use super::support::*;
 use futures_util::FutureExt;
 use sceneworks_worker::test_support::{
     self as native, acceptance_api_cancel_controller, acceptance_progress_snapshot, gen_core,
-    gen_core_moss_image, gen_core_telemetry, observe_acceptance_trainer, AcceptanceProgressLedger,
-    EvaluationManifest, TrainingProbe,
+    gen_core_moss_image, observe_acceptance_trainer, AcceptanceProgressLedger, EvaluationManifest,
+    TrainingProbe,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -201,7 +201,7 @@ impl RootProcessResources {
         }
         self.last_sample = Some(Instant::now());
         self.observe(
-            gen_core_telemetry::host_process_rss_bytes(),
+            native::gen_core_telemetry::host_process_rss_bytes(),
             observed_iso_time()?,
         )
     }

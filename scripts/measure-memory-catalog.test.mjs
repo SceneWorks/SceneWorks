@@ -4599,18 +4599,12 @@ test("the Krea Realtime arm's admitted routes are the pinned engine's own", { sk
   );
   const gate = /pub\(crate\) fn safety_check\(([\s\S]*?)\n\}\n/.exec(engine);
   assert.ok(gate, "the pinned crate still declares a registered safety_check");
-  // Since inference 56dd728f the registered gate delegates its request checks to ONE private helper
-  // (shared with the loaded-provider gate). Follow exactly that delegation — the helper must be the
-  // gate's tail call and be defined in the same file — rather than accept a match anywhere.
-  let routing = gate[1];
-  if (!/context\.mode\.as_key\(\)/.test(routing)) {
-    const delegate = /\{\s*(\w+)\(\s*spec\s*,\s*contract\s*,\s*context\s*,[\s\S]*?\)\s*$/.exec(routing.trimEnd());
-    assert.ok(delegate, "safety_check neither routes on the request mode nor delegates to one helper");
-    const helper = new RegExp(`\\nfn ${delegate[1]}\\(([\\s\\S]*?)\\n\\}\\n`).exec(engine);
-    assert.ok(helper, `safety_check delegates to ${delegate[1]}, which the pinned crate does not define`);
-    routing = helper[1];
-  }
-  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(routing);
+  // Since inference 354b41cc the registered `safety_check` is a thin wrapper and the mode
+  // routing lives in its `checked_safety` delegate; read the match out of whichever carries it.
+  const checked = /fn checked_safety\(([\s\S]*?)\n\}\n/.exec(engine);
+  const routed = /match context\.mode\.as_key\(\) \{([\s\S]*?)\n {4}\};/.exec(
+    checked?.[1] ?? gate[1],
+  );
   assert.ok(routed, "safety_check no longer routes on the request mode; re-read this derivation");
   const engineRoutes = [...routed[1].matchAll(/^\s*"([a-z_]+)" =>/gm)].map((match) => match[1]).sort();
   assert.ok(engineRoutes.length > 0, "the engine's route arm list parsed empty");
@@ -4725,6 +4719,8 @@ test("the Wan/SCAIL-2 arm's receipt tokens are the pinned engines' own, and the 
     "utf8",
   );
 
+  // Inference sc-27316 moved the Wan receipt contract from gen-core's `wan_i2v_memory` module
+  // into the sibling `gen-core-memory-wan` crate, and the arm's import moved with it.
   const wan = await readFile(
     path.join(process.env.INFERENCE_REPO, "crates/contracts/gen-core-memory-wan/src/receipts.rs"),
     "utf8",

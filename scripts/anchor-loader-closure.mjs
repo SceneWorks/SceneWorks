@@ -697,70 +697,6 @@ export function assertModelIsNamedByEntryPoints({ model, engineId, entryPoints, 
  * narrowed only when NO survivor names the id, and an unchanged rule leaves every current digest
  * exactly where it was.
  */
-/**
- * The declaration in derivable form, exactly as every caller must pass it: `engineId` and
- * `formerEntryPoints` travel with the entry points.
- */
-export function declarationsFromConfig(config) {
-  return Object.fromEntries(
-    Object.entries(config.models).map(([model, entry]) => {
-      assertFormerEntryPoints(model, entry);
-      return [
-        model,
-        {
-          ...(entry.engineId ? { engineId: entry.engineId } : {}),
-          entryPoints: entry.entryPoints,
-          ...(entry.formerEntryPoints ? { formerEntryPoints: entry.formerEntryPoints } : {}),
-        },
-      ];
-    }),
-  );
-}
-
-/**
- * `formerEntryPoints` maps a declared entry point to the path(s) the SAME source lived at before a
- * file move (newest first). It is layout history, never a second loader: a key may only name
- * a currently declared entry point, a former path may not also be a declared one, and every value
- * must be a non-empty list of distinct shipped-source paths.
- */
-export function assertFormerEntryPoints(model, { entryPoints, formerEntryPoints }) {
-  if (formerEntryPoints === undefined) return;
-  if (!formerEntryPoints || typeof formerEntryPoints !== "object" || Array.isArray(formerEntryPoints)) {
-    throw new Error(`anchor loader declaration "${model}" carries a malformed formerEntryPoints`);
-  }
-  const seen = new Set();
-  for (const [current, former] of Object.entries(formerEntryPoints)) {
-    if (!entryPoints.includes(current)) {
-      throw new Error(`anchor loader declaration "${model}" records former paths for ${current}, which it does not declare`);
-    }
-    if (!Array.isArray(former) || former.length === 0) {
-      throw new Error(`anchor loader declaration "${model}" records no former path for ${current}`);
-    }
-    for (const file of former) {
-      if (typeof file !== "string" || !isShippedSource(file) || entryPoints.includes(file) || seen.has(file)) {
-        throw new Error(`anchor loader declaration "${model}" records an invalid former path ${JSON.stringify(file)} for ${current}`);
-      }
-      seen.add(file);
-    }
-  }
-}
-
-/**
- * The declared entry points as a HISTORICAL tree laid them out (sc-26691). Inference sc-27252 moved
- * family modules out of gen-core into sibling crates (`gen-core/src/iris.rs` ->
- * `gen-core-iris/src/lib.rs`), so a revision that predates the move carries the same entry point
- * at its former path. An entry point absent from `tree` is replaced by its first former path the
- * tree does carry, so an anchor measured before the move still derives the key it recorded. The pin
- * always carries the declared path itself, so this changes nothing there; a path with no recorded
- * history, or none present, is left for `narrowEntryPointsAtRevision` to drop.
- */
-export function entryPointsAtRevision({ entryPoints, formerEntryPoints, tree }) {
-  return entryPoints.map((file) => {
-    if (tree.has(file)) return file;
-    return (formerEntryPoints?.[file] ?? []).find((former) => tree.has(former)) ?? file;
-  });
-}
-
 export function narrowEntryPointsAtRevision({ model, engineId, entryPoints, tree }) {
   const id = engineId ?? model.split(":")[0];
   const present = entryPoints.filter((file) => tree.has(file));
@@ -848,7 +784,6 @@ export function buildAnchorLoaderConfig({ repo, revision, declared }) {
     models[model] = {
       ...(entry.engineId ? { engineId: entry.engineId } : {}),
       entryPoints: [...entry.entryPoints].sort(),
-      ...(declared[model].formerEntryPoints ? { formerEntryPoints: declared[model].formerEntryPoints } : {}),
       digest: entry.digest,
       closureFileCount: entry.files.length,
       closureFiles: entry.files,
@@ -1057,12 +992,7 @@ export function stampAnchorStore({ repo, store, declared, corpora, attestations 
     // over less than the declaration says never has to be guessed at.
     const historical = {};
     for (const model of models) {
-      const { engineId, formerEntryPoints } = declared[model];
-      const entryPoints = entryPointsAtRevision({
-        entryPoints: declared[model].entryPoints,
-        formerEntryPoints,
-        tree,
-      });
+      const { engineId, entryPoints } = declared[model];
       const narrowing = narrowEntryPointsAtRevision({ model, engineId, entryPoints, tree });
       narrowedAt.set(`${revision}|${model}`, narrowing.narrowed);
       historical[model] = {
@@ -1186,7 +1116,15 @@ export async function main(argv = process.argv.slice(2)) {
 
   const configPath = path.join(root, ANCHOR_LOADER_CONFIG_PATH);
   const existing = JSON.parse(await readFile(configPath, "utf8"));
-  const declared = declarationsFromConfig(existing);
+  const declared = Object.fromEntries(
+    Object.entries(existing.models).map(([model, entry]) => [
+      model,
+      {
+        ...(entry.engineId ? { engineId: entry.engineId } : {}),
+        entryPoints: entry.entryPoints,
+      },
+    ]),
+  );
   const pinned = inferencePinFromCargo(await readFile(path.join(root, "Cargo.toml"), "utf8"));
   const revision = resolveRevision(path.resolve(repo), value("--revision") ?? pinned);
 
