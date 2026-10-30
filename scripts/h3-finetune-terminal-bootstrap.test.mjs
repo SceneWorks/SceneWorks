@@ -58,6 +58,16 @@ test('fresh filesystem and one scoped input reach a real source-bound prepared c
   const f=await fixture(t),original=structuredClone(f.args.request.bootstrap.legalAuthority);f.args.backend=backend;if(backend==='cuda')Object.assign(f.args.request.bootstrap.operator,{gpuId:'1',requestedGpu:'1'});f.env.H3_TERMINAL_ROUTE=`h3-terminal-${backend}`;await assert.rejects(access(f.args.outputRoot),/ENOENT/);
   const result=await bootstrapTerminal(f.args);assert.equal(result.prepared,true);assert.equal(result.proof,false);assert.equal(result.cases,25);assert.equal(f.calls.stage,1);assert.equal(f.calls.inputs,1);
   const plan=JSON.parse(await readFile(result.planPath,'utf8'));validatePlan(plan);assert.equal(plan.backend,backend);
+  // sc-26691 user-approved scope decision (2026-10-30): the compatible-base cases (2, 4 with its
+  // identity negative, 20, 25) are planned at MLX 8 / CUDA 50 with a recorded step policy; every
+  // other case keeps its recipe's steps on both backends, and no shift is invented for them.
+  const expectedSteps={2:{mlx:8,cuda:50},4:{mlx:8,cuda:50},20:{mlx:8,cuda:50},25:{mlx:8,cuda:50},17:8,18:8,21:8};
+  for(const v of plan.cases.filter(v=>v.declaredSourceBindings))for(const e of v.declaredSourceBindings){
+    const want=expectedSteps[v.index],steps=typeof want==='object'?want[backend]:want??4;assert.equal(e.sampling.steps,steps,`${v.id} ${e.label}`);
+    if(typeof want==='object'){assert.deepEqual(v.backendSteps,{cuda:50,mlx:8});assert.equal(e.sampling.stepPolicy.backend,backend);assert.equal(e.sampling.stepPolicy.steps,steps);assert.equal(e.sampling.stepPolicy.decision.approvedAt,'2026-10-30');assert.equal(e.sampling.stepPolicy.decision.measuredRun,'41061562586');assert.equal(e.sampling.schedulerShift,undefined,'no shift is invented for the compatible-base recipe');assert.match(e.sampling.contractSource,new RegExp(`at ${steps} steps on ${backend}`));}
+    else assert.equal(e.sampling.stepPolicy,undefined,v.id);
+  }
+  {const tampered=structuredClone(plan),c2=tampered.cases.find(v=>v.index===2);c2.declaredSourceBindings[0].sampling.steps=backend==='mlx'?50:8;assert.throws(()=>validatePlan(tampered),/its declared (mlx|cuda) recipe is/);}
   // sc-26691: no well-known port; every case service binds an OS-assigned port at start.
   for(const v of plan.cases.filter(v=>v.runtime?.scenario))assert.equal(v.runtime.port,0,v.id);
   // The staged private root (and everything bound from it) lives in this test's temp dir only.

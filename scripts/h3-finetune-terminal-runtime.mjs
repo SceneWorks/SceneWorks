@@ -1025,6 +1025,10 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
     if(c.declaredSourceBindings){
       assert.ok(selected,'completed job selected an undeclared/stock model');assert.equal(identity.checkpointSha256,selected.model.sha256);assert.equal(normalizeLoadEvent(binding.event).identity.assembly.partition,selected.model.partition,'actual native partition differs from declared import');if(selected.model.topology==='pruned')assert.ok(normalizeLoadEvent(binding.event).identity.assembly.adalnPruning,'pruned declaration requires actual pruned assembly');
       const request=bundle.requests?.find(r=>r.result.id===binding.job.id&&r.route==='/api/v1/video/jobs')?.request;
+      // A job this case submitted queues (and, via loadIdentity, natively runs) exactly its declared
+      // per-backend NFE: MLX 8 / CUDA 50 for the compatible-base cases (sc-26691 scope decision,
+      // 2026-10-30), never a silent override. Duplicates/replays carry their original's payload.
+      if(request&&selected.sampling?.steps!==undefined)for(const queued of [request.advanced?.steps,binding.job.payload?.advanced?.steps])assert.equal(Number(queued),selected.sampling.steps,`queued NFE differs from the declared ${c.backend} recipe`);
       if(c.kind==='full-av')normalizedControlRequest(request,{conditioningBindings:bundle.conditioningBindings,runtimeIdentity:identity,declaredSourceBindings:c.declaredSourceBindings},{allowUnitFake});
       const requested=request?.loras??binding.job.payload.loras??[];
       const adapters=requestedAdapterBindings(selected.adapters??[],requested),prepared=normalizeLoadEvent(binding.event).prepared_sources;

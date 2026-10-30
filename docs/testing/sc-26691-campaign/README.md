@@ -89,6 +89,16 @@ reference rows + one step, capped at 8 h.
 | 17 image / 18 last-frame (1 keyframe) | 23,056 | 23,056 | 23,602 | 600 s | 3,320 s |
 | 19 first-last (2 keyframes, estimated at 1536x768; now 1344x768) | 47,746 | 47,746 | 48,356 | 875 s | 3,650 s |
 
+**Step counts per backend (user-approved scope decision, 2026-10-30).** The compatible-base cases
+(2, 4, 20, and the cancel case 25) run 50 denoise steps on CUDA and 8 on MLX. Nothing else differs:
+same inputs, geometry, adapters, seed and shift. At the tiled MLX kernel one H3 step measured about
+5.4–6.6 min (run 41061562586). A 50-step MLX case (about 5 h) cannot fit the 7200 s case bound or the
+24 h lane, while 8 steps (about 50 min) can. The count is declared per backend in the case manifest
+(`backendSteps`) and recorded in the plan's `sampling.stepPolicy`. Validators check the requested
+steps per backend, and no MLX/CUDA output of these cases is compared across backends. See *Backend-specific
+step count* in `docs/testing/sc-26691-h3-terminal.md`. The turbo cases keep their recipe's 4 or 8
+steps on both backends.
+
 Cases 23-25 (artifact probes, source-preparation cancel) run no denoise step. The worker-envelope
 columns use the pin's image rule; with the engine change the envelope's image rows drop to the
 `match` size too (that function moves with the pin). `timeoutSeconds` (7200 s) is the whole-case

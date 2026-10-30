@@ -5,7 +5,7 @@ import {
   BACKENDS, BOTH_BACKEND_CAUSAL_CASE, BROAD_MATRIX_CASES, CATALOG_CELLS, CATALOG_SUFFIXES,
   MAX_OPERATIONAL_EXECUTIONS, OPERATIONAL_CASE_DEFS, REAL_CELL_MAP, buildCatalogCoverage,
   catalogCoverageCounts, chooseMatrixBackend, defaultCatalog, operationalCases, summarizeUniqueExecutions,
-  validateClosure, validateOperationalCaseInventory,
+  validateClosure, validateOperationalCaseInventory, COMPATIBLE_BASE_STEPS, declaredBackendSteps,
 } from './h3-finetune-terminal-reduced.mjs';
 import { requiredCases } from './h3-finetune-terminal.mjs';
 
@@ -208,4 +208,20 @@ test('all-25-on-both-backends closure proves the 44 AV + 4 probe + 2 cancel maxi
   assert.equal(closure.matrixDecision, null);
   assertEveryCellCategorizedOnce(closure.coverage);
   assert.ok(closure.coverage.every(entry => entry.category !== 'unproven'));
+});
+
+// sc-26691 user-approved scope decision (2026-10-30): MLX runs the compatible-base 50-step cases at
+// 8 steps (run 41061562586: ~5.4-6.6 min per MLX step), CUDA keeps 50.
+test('backend-specific steps are declared only on the compatible-base cases and never on compared cases', () => {
+  assert.deepEqual(OPERATIONAL_CASE_DEFS.filter(def => def.backendSteps).map(def => def.slug),
+    ['artifact-1-reference', 'artifact-3-opaque-renamed-linked-source', 'real-hybrid-reference', 'lifecycle-generation-source-prep-cancel']);
+  for (const c of operationalCases()) {
+    if (c.backendSteps) { assert.deepEqual(c.backendSteps, { cuda: 50, mlx: 8 }); assert.equal(declaredBackendSteps(c), COMPATIBLE_BASE_STEPS[c.backend]); }
+    else assert.equal(declaredBackendSteps(c), null);
+  }
+  validateOperationalCaseInventory();
+  const mutate = (slug, change) => { const cases = operationalCases(); for (const c of cases.filter(v => v.slug === slug)) change(c); return cases; };
+  assert.throws(() => validateOperationalCaseInventory(mutate('artifact-1-reference', c => { c.backendSteps = { cuda: 50, mlx: 50 }; })), /declared compatible-base pair/);
+  for (const slug of ['artifact-0-ordered-mixed-baseline-ref-turbo', 'real-hybrid-text', 'real-mixed-repeat', 'real-drop-audio', 'real-drop-images'])
+    assert.throws(() => validateOperationalCaseInventory(mutate(slug, c => { c.backendSteps = { cuda: 50, mlx: 8 }; })), /cannot be an anchor, baseline, repeat or matrix case/, slug);
 });

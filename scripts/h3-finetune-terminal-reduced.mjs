@@ -49,6 +49,49 @@ export const BOTH_BACKEND_CAUSAL_CASE = 'real-drop-audio';
 
 const caseDef = (index, slug, kind, group, details = {}) => ({ index, slug, kind, group, ...details });
 
+// sc-26691 user-approved scope decision, 2026-10-30. The cases with no trained accelerator run the
+// compatible-base unaccelerated recipe: 50 denoise steps on CUDA, but 8 on MLX. At the tiled MLX
+// kernel one H3 step measured ~5.4-6.6 min (run 41061562586), so a 50-step MLX render (~5 h) fits
+// neither the 7200 s case bound nor the 24 h lane, while 8 steps (~50 min) does. Only the step
+// count differs: inputs, geometry, adapters, seed and scheduler shift are identical on both
+// backends. The per-backend count is DECLARED on the case (`backendSteps`), bound into the plan's
+// sampling and checked by every validator; it is never a silent runtime override. Because the two
+// backends then render different recipes, no validation may treat an MLX and a CUDA output of these
+// cases as equivalent: they are neither matrix anchors, baselines/repeats nor broad-matrix cases,
+// and comparisons stay within one backend.
+export const COMPATIBLE_BASE_STEPS = Object.freeze({ cuda: 50, mlx: 8 });
+export const BACKEND_STEP_DECISION = Object.freeze({
+  story: 'sc-26691', approvedBy: 'user', approvedAt: '2026-10-30', measuredRun: '41061562586',
+  measurement: 'MLX H3 denoise at the tiled kernel ~5.4-6.6 min/step; 50 steps ~5 h exceeds the 7200 s case bound and the 24 h lane, 8 steps ~50 min fits',
+  scope: 'MLX runs the compatible-base 50-step cases at 8 steps; CUDA keeps 50; every other input and parameter identical',
+});
+const backendSteps = () => ({ backendSteps: { ...COMPATIBLE_BASE_STEPS } });
+/** The case's declared per-backend denoise step count, or null when its recipe fixes the steps. */
+export function declaredBackendSteps(c, backend = c?.backend) {
+  const steps = c?.backendSteps?.[backend];
+  return steps === undefined ? null : steps;
+}
+/** The plan's step-policy record for a backend-specific case (bound beside its sampling). */
+export function backendStepPolicy(c, backend = c?.backend) {
+  const steps = declaredBackendSteps(c, backend);
+  assert.ok(Number.isInteger(steps) && steps >= 2, `${c?.id ?? c?.slug} declares no ${backend} step count`);
+  return { kind: 'backend-specific-steps', backend, steps, byBackend: { ...c.backendSteps }, decision: { ...BACKEND_STEP_DECISION } };
+}
+/**
+ * A planned sampling must request exactly the case's declared step count on ITS backend, and carry
+ * the matching step-policy record; a case without backend-specific steps may not carry one (no
+ * undeclared per-backend override).
+ */
+export function assertDeclaredBackendSteps(c, sampling, backend = c?.backend) {
+  const steps = declaredBackendSteps(c, backend);
+  if (steps === null) { assert.equal(sampling?.stepPolicy, undefined, `${c?.id ?? c?.slug} declares no backend-specific steps; an undeclared per-backend step override is refused`); return; }
+  assert.equal(sampling?.steps, steps, `${c.id ?? c.slug} requests ${sampling?.steps} steps; its declared ${backend} recipe is ${steps}`);
+  assert.deepEqual(sampling.stepPolicy, backendStepPolicy(c, backend), `${c.id ?? c.slug} step policy differs from the declared ${backend} decision`);
+}
+// The inline anchors whose timings choose the matrix backend; compared across backends, so their
+// recipe (steps included) must be identical on both.
+export const MATRIX_ANCHOR_ROLES = Object.freeze({ reference: 'artifact-0-ordered-mixed-baseline-ref-turbo', prompt: 'real-hybrid-text' });
+
 // 25 operational cases per backend. max = 22 full-av + 2 actual-artifact probes + 1 source-cancel.
 export const OPERATIONAL_CASE_DEFS = Object.freeze([
   caseDef(1, 'artifact-0-ordered-mixed-baseline-ref-turbo', 'full-av', 'artifact', {
@@ -59,7 +102,7 @@ export const OPERATIONAL_CASE_DEFS = Object.freeze([
     },
   }),
   caseDef(2, 'artifact-1-reference', 'full-av', 'artifact', {
-    modelKey: 'artifact.1-ref2va-v1.3-int8', assetSet: 'singularity', conditioning: 'reference', adapterRecipe: 'none',
+    modelKey: 'artifact.1-ref2va-v1.3-int8', assetSet: 'singularity', conditioning: 'reference', adapterRecipe: 'none', ...backendSteps(),
     acceptance: { ac: ['job.status=completed', 'job.payload.model=artifact.1-ref2va-v1.3-int8', 'reference_to_video operation', 'decoded AV matches resolved lattice'], e: ['jobSnapshot', 'nativeLoadClosure', 'outputAV'] },
   }),
   caseDef(3, 'artifact-2-lokr-ref-turbo-baseline', 'full-av', 'artifact', {
@@ -67,7 +110,7 @@ export const OPERATIONAL_CASE_DEFS = Object.freeze([
     acceptance: { ac: ['job.status=completed', 'LoKr adapter + ref-turbo recipe bound', 'partition pruned', 'decoded AV matches resolved lattice'], e: ['jobSnapshot', 'nativeLoadClosure', 'outputAV', 'adapterClosure', 'samplingRecipe'] },
   }),
   caseDef(4, 'artifact-3-opaque-renamed-linked-source', 'full-av', 'artifact', {
-    modelKey: 'artifact.3-ref2va-pruned-v1.3-w4a8', assetSet: 'singularity', conditioning: 'reference', adapterRecipe: 'none', sourceVariant: 'opaque-renamed-linked',
+    modelKey: 'artifact.3-ref2va-pruned-v1.3-w4a8', assetSet: 'singularity', conditioning: 'reference', adapterRecipe: 'none', sourceVariant: 'opaque-renamed-linked', ...backendSteps(),
     acceptance: { ac: ['job.status=completed', 'opaque renamed linked source resolves to a declared import', 'native-single source format preserved', 'decoded AV matches resolved lattice'], e: ['jobSnapshot', 'nativeLoadClosure', 'outputAV', 'sourceResolution'] },
   }),
   caseDef(5, 'real-mixed-repeat', 'full-av', 'real', {
@@ -131,7 +174,7 @@ export const OPERATIONAL_CASE_DEFS = Object.freeze([
     acceptance: { ac: ['job.status=completed', 'first_last_frame operation with both endpoints', 'fl-turbo-4v1.0_768 recipe bound'], e: ['jobSnapshot', 'outputAV', 'samplingRecipe'] },
   }),
   caseDef(20, 'real-hybrid-reference', 'full-av', 'real', {
-    modelKey: 'hybrid-single-checkpoint', assetSet: 'hybrid', conditioning: 'reference', adapterRecipe: 'compatible-declared-sampling',
+    modelKey: 'hybrid-single-checkpoint', assetSet: 'hybrid', conditioning: 'reference', adapterRecipe: 'compatible-declared-sampling', ...backendSteps(),
     acceptance: { ac: ['job.status=completed', 'hybrid reference_to_video operation', 'compatible declared source and sampling only'], e: ['jobSnapshot', 'outputAV', 'samplingRecipe', 'sourceResolution'] },
   }),
   caseDef(21, 'real-independent-fl2va', 'full-av', 'real', {
@@ -154,7 +197,7 @@ export const OPERATIONAL_CASE_DEFS = Object.freeze([
     // sc-26691: a ref2va generation must name a visual reference or the API refuses it at submit
     // ("Reference to Video requires at least one reference image or video clip") before any cold
     // source preparation could start.
-    modelKey: 'artifact.3-ref2va-pruned-v1.3-w4a8', assetSet: 'singularity', conditioning: 'reference', probe: 'native-source-prep-cancel',
+    modelKey: 'artifact.3-ref2va-pruned-v1.3-w4a8', assetSet: 'singularity', conditioning: 'reference', probe: 'native-source-prep-cancel', ...backendSteps(),
     acceptance: { ac: ['actual native cold source-preparation observer', 'no AV output claimed', 'no Acquired seal / source_prepared / native load for the canceled job'], e: ['cancelReceipt', 'partialByteEvidence', 'joinedTeardownMarker'] },
   }),
 ]);
@@ -257,6 +300,13 @@ export function validateOperationalCaseInventory(plan = {}) {
       if (item.repeatsOf) assert.ok(byId.has(item.repeatsOf), `${item.id} repeatsOf target missing`);
     }
     for (const slug of [...BROAD_MATRIX_CASES, BOTH_BACKEND_CAUSAL_CASE]) assert.ok(defBySlug.has(slug), `matrix case ${slug} missing from the inventory`);
+    // Backend-specific step counts (sc-26691, 2026-10-30) are the declared compatible-base pair,
+    // and a case carrying them is never compared across backends or against a repeat.
+    const comparedSlugs = new Set([...Object.values(MATRIX_ANCHOR_ROLES), ...BROAD_MATRIX_CASES, BOTH_BACKEND_CAUSAL_CASE, ...selected.flatMap(value => value.baselineSlug ? [value.slug, value.baselineSlug] : [])]);
+    for (const item of selected) if (item.backendSteps !== undefined) {
+      assert.deepEqual(item.backendSteps, { ...COMPATIBLE_BASE_STEPS }, `${item.id} backend step counts must be the declared compatible-base pair`);
+      assert.ok(!comparedSlugs.has(item.slug), `${item.id} has backend-specific steps and cannot be an anchor, baseline, repeat or matrix case`);
+    }
   }
   for (const suffix of Object.keys(REAL_CELL_MAP)) assert.ok(CATALOG_SUFFIXES.includes(suffix), `real mapping references unknown catalog cell ${suffix}`);
   for (const slug of Object.values(REAL_CELL_MAP).flat()) assert.ok(defBySlug.has(slug), `real cell map references unknown operational case ${slug}`);
@@ -444,7 +494,7 @@ export function chooseMatrixBackend(anchorsOrOptions = {}) {
   assert.ok(Number.isFinite(weights.prompt) && weights.prompt > 0, 'prompt weight must be positive');
   const rows = Array.isArray(anchors) ? anchors : BACKENDS.flatMap(backend => Array.isArray(anchors?.[backend]) ? anchors[backend].map(row => ({ ...row, backend: row.backend ?? backend })) : []);
   assert.ok(rows.length > 0, 'inline anchor timings required');
-  const roles = { reference: 'artifact-0-ordered-mixed-baseline-ref-turbo', prompt: 'real-hybrid-text' };
+  const roles = MATRIX_ANCHOR_ROLES;
   // A missing or not-yet-measured (pending) anchor means UNSELECTED: no credit and no skip.
   const pending = [];
   for (const [role, slug] of Object.entries(roles)) for (const backend of BACKENDS) {

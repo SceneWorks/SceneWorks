@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { operationalCases } from './h3-finetune-terminal-reduced.mjs';
+import { operationalCases, backendStepPolicy, COMPATIBLE_BASE_STEPS } from './h3-finetune-terminal-reduced.mjs';
 import { requiredCases, ARTIFACTS, SOURCE, hashFile, sensitivityDecision, compareControlMedia } from './h3-finetune-terminal.mjs';
 import { caseBook, concretePlan, buildScenario, nativeCommands, referenceCommand, prepareCases, finalizeCampaignPlan, prepareControlledLoKr, fixtureBindings } from './h3-finetune-terminal-cases.mjs';
 import { runScenario } from './h3-finetune-terminal-api.mjs';
@@ -305,6 +305,7 @@ function reducedExecution(c) {
   e.mode=({'text':'text_to_video','image':'image_to_video','last-frame-only':'image_to_video','first-last-frame':'first_last_frame','reference':'reference_to_video','ordered-mixed':'reference_to_video'})[c.conditioning]??'reference_to_video';
   const recipeId=({'fl-turbo-4v01':'minimax_h3_turbo_4step_v01','fl-turbo-8':'minimax_h3_turbo_8step','fl-turbo-4v1.0-768':'minimax_h3_turbo_4step_768p'})[c.adapterRecipe]??([1,3,5,6,7,8,9,10,11,12,13,14].includes(c.index)?'minimax_h3_ref2v_turbo_4step':null);
   if(recipeId){const r=caseBook.sampling.turbo.find(v=>v.id===recipeId);Object.assign(e.sampling,{steps:r.steps,schedulerShift:r.schedulerShift,audioSchedulerShift:r.audioSchedulerShift,width:r.trainingShortEdge*2,height:r.trainingShortEdge});if(c.index!==12)e.adapters=[{id:r.id,kind:'lora',role:'accelerator',sha256:hash,source:'unit_fake source',revision,compatibilitySource:'unit_fake compatibility',topology:e.model.topology,partition:e.model.partition,licenseAcknowledged:true}];}
+  if(c.backendSteps)Object.assign(e.sampling,{steps:c.backendSteps[c.backend],stepPolicy:backendStepPolicy(c)});
   if([3,13].includes(c.index))e.adapters.push({id:'unit_fake_lokr',kind:'lokr',sha256:hash,source:'unit_fake generated fixture',revision,compatibilitySource:'unit_fake compatibility',topology:e.model.topology,partition:e.model.partition,licenseAcknowledged:true});
   if(c.index===4){Object.assign(e.model,{sourceFormat:'native-single',sourcePath:'/synthetic-only/opaque.bin',originalPath:'/synthetic-only/original.safetensors',originalSha256:e.model.sha256});Object.assign(e,{ownershipMode:'linked',linkedRootId:'unit_fake_root',linkedRelativePath:'opaque.bin'});}
   grant(e);if(c.index!==4)return [e];
@@ -318,6 +319,29 @@ test('default operational plan contains 22 single AV submissions, two probes and
     if(c.index===4){assert.equal(scenario.steps.filter(s=>s.path==='/api/v1/models/import').length,2);assert.ok(scenario.identificationControl);}
     if(c.kind==='source-cancel')assert.ok(!scenario.steps.some(s=>s.id==='synthetic_av0_done'));
   }
+});
+// sc-26691 user-approved scope decision (2026-10-30): the compatible-base cases request 8 steps on
+// MLX and 50 on CUDA; every other request field is identical and every other case is unchanged.
+test('compatible-base cases request their declared per-backend steps and nothing else differs',()=>{
+  const p=params(),changed=[2,4,20,25];p.identificationControlReceipt='/synthetic-only/identity-controls.json';assert.deepEqual(COMPATIBLE_BASE_STEPS,{cuda:50,mlx:8});
+  const request=(backend,index)=>{const c=operationalCases(backend).find(v=>v.index===index);return {c,scenario:buildScenario(c,p,reducedExecution(c))};};
+  for(const def of operationalCases('mlx').filter(c=>c.kind!=='actual-artifact-probe')){
+    const mlx=request('mlx',def.index),cuda=request('cuda',def.index),[a]=submissions(mlx.scenario),[b]=submissions(cuda.scenario);
+    assert.deepEqual(Boolean(def.backendSteps),changed.includes(def.index),`${def.slug} backend-specific declaration`);
+    if(changed.includes(def.index)){
+      assert.equal(a.body.advanced.steps,8,def.slug);assert.equal(b.body.advanced.steps,50,def.slug);
+      assert.ok(a.assert.some(x=>x.pointer==='/payload/advanced/steps'&&x.equals===8),'the queued MLX job is asserted at 8 steps');
+      assert.ok(b.assert.some(x=>x.pointer==='/payload/advanced/steps'&&x.equals===50),'the queued CUDA job is asserted at 50 steps');
+    } else assert.equal(a.body.advanced.steps,b.body.advanced.steps,`${def.slug} steps are backend-independent`);
+    const strip=body=>{const {advanced,...rest}=structuredClone(body);const {steps,...other}=advanced;return {...rest,advanced:other};};
+    assert.deepEqual(strip(a.body),strip(b.body),`${def.slug}: only the step count may differ across backends`);
+  }
+  // A mismatched or undeclared per-backend count is refused, not silently accepted.
+  const mlx=operationalCases('mlx').find(v=>v.index===2),wrong=reducedExecution(mlx);wrong[0].sampling.steps=50;wrong[0].sampling.stepPolicy={...wrong[0].sampling.stepPolicy,steps:50};
+  assert.throws(()=>buildScenario(mlx,p,wrong),/requests 50 steps; its declared mlx recipe is 8/);
+  const forged=reducedExecution(mlx);forged[0].sampling.stepPolicy.byBackend.mlx=50;assert.throws(()=>buildScenario(mlx,p,forged),/step policy differs/);
+  const renamed=operationalCases('cuda').find(v=>v.index===4),negative=reducedExecution(renamed);negative[1].sampling.steps=8;assert.throws(()=>buildScenario(renamed,p,negative),/declared cuda recipe is 50/);
+  const turbo=operationalCases('mlx').find(v=>v.index===15),override=reducedExecution(turbo);override[0].sampling.stepPolicy=backendStepPolicy(mlx);assert.throws(()=>buildScenario(turbo,p,override),/undeclared per-backend step override/);
 });
 test('reduced recipes alter only intended conditioning and reject wrong frozen sources or absent accelerators',()=>{
   const cases=operationalCases('mlx'),p=params(),get=index=>cases.find(c=>c.index===index),body=index=>submissions(buildScenario(get(index),p,reducedExecution(get(index))))[0].body;

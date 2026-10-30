@@ -5,7 +5,7 @@ import path from 'node:path';
 import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { requiredCases, SOURCE, ARTIFACTS, hashFile, validatePlan, verifiedStagingRoot } from './h3-finetune-terminal.mjs';
 import {assertScopedBinding} from './h3-finetune-terminal-stage.mjs';
-import { operationalCases, operationalCaseById, chooseMatrixBackend } from './h3-finetune-terminal-reduced.mjs';
+import { operationalCases, operationalCaseById, chooseMatrixBackend, assertDeclaredBackendSteps } from './h3-finetune-terminal-reduced.mjs';
 const caseCheck=c=>c.kind==='source-cancel'?'generation-source-prep-cancel':c.sourceVariant==='opaque-renamed-linked'?'renamed':c.sourceVariant==='independent-finetune-pulpcut-merge'?'independent-finetune':c.id.split('.').slice(2).join('.');
 export const caseBook = JSON.parse(await readFile(new URL('../docs/testing/sc-26691-h3-cases.json', import.meta.url), 'utf8'));
 const clone = structuredClone;
@@ -276,6 +276,7 @@ function assertReducedBindings(c,p,executions,book=caseBook) {
   assert.equal(executions.length,renamed?2:1,'one AV submission per reduced case; only renamed identity adds an import-only negative');
   if(renamed)assertCoverage({...c,id:`${c.backend}.generalization.renamed`},executions);
   for(const e of executions){
+    assertDeclaredBackendSteps(c,e.sampling);
     if(e.identityControl?.kind==='different-bytes-negative')continue;
     const artifact=/^artifact\.(\d)-/.exec(c.modelKey);if(artifact)assert.equal(e.model.sha256,book.artifacts[Number(artifact[1])].expectedSha256,'reduced binding must use its frozen content identity');
     const expectedMode=({'text':'text_to_video','image':'image_to_video','last-frame-only':'image_to_video','first-last-frame':'first_last_frame','reference':'reference_to_video','ordered-mixed':'reference_to_video'})[c.conditioning];
@@ -297,7 +298,7 @@ export function buildScenario(c, p, executions) {
   const book=p.unitCasebook??caseBook;
   const reduced=operationalCaseById(c.id);
   assert.ok(reduced || requiredCases().some(expected => expected.id === c.id));
-  if(reduced){for(const key of ['kind','index','slug','modelKey','conditioning','adapterRecipe'])assert.deepEqual(c[key],reduced[key],`reduced case reclassification: ${key}`);assertReducedBindings(c,p,executions,book);}
+  if(reduced){for (const key of ['kind','index','slug','modelKey','conditioning','adapterRecipe','backendSteps'])assert.deepEqual(c[key],reduced[key],`reduced case reclassification: ${key}`);assertReducedBindings(c,p,executions,book);}
   assert.ok(executions?.length > 0, 'actual staged execution binding required');
   assert.ok(p.projectId && Number.isSafeInteger(p.seed) && p.seed>=0 && typeof p.requestedGpu === 'string' && p.requestedGpu.length > 0);
   assert.ok(p.timeoutSeconds > 0 && p.timeoutSeconds <= 7200);

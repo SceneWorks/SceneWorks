@@ -16,6 +16,20 @@ Probe 23 consumes actual pruned table/reduced operands. Probe 24 consumes actual
 
 The detailed catalog scenarios below remain available for regression/reference. They do not reinstate mandatory production fan-out. Actual coverage reports retain format/family/lifecycle omissions and backend-specific AV omissions instead of calling them waived or passed.
 
+## Backend-specific step count for the compatible-base cases (user-approved scope decision, 2026-10-30)
+
+The cases with no trained accelerator run the compatible-base unaccelerated recipe: `artifact-1-reference` (2), `artifact-3-opaque-renamed-linked-source` (4, both its renamed source and its import-only different-bytes negative), `real-hybrid-reference` (20) and `lifecycle-generation-source-prep-cancel` (25). **CUDA renders them at 50 denoise steps; MLX renders them at 8.** Inputs, geometry, adapters (none), seed and scheduler shift (the engine default; none is invented) are identical on both backends. Only the step count differs.
+
+Why: at the tiled MLX kernel one H3 step measured about 5.4–6.6 min (run 41061562586). A 50-step MLX render would take about 5 h, which fits neither the 7200 s case bound nor the 24 h lane. At 8 steps the render takes about 50 min and fits. The user approved this scope change on 2026-10-30.
+
+How it is enforced (no silent override):
+
+- `scripts/h3-finetune-terminal-reduced.mjs` declares the pair on each of those four cases as `backendSteps: { cuda: 50, mlx: 8 }` (`COMPATIBLE_BASE_STEPS`, `BACKEND_STEP_DECISION`). It is part of every plan case and is checked by `validatePlan` like any other manifest field.
+- The bootstrap plans those cases' sampling at the lane's own count. It records `sampling.stepPolicy`: the backend, the steps, the pair, and the decision with its date and run id. The contract source names the decision. Cases 17, 18, 21 (8 steps) and the 4-step turbo cases keep their recipe's steps on both backends.
+- `assertDeclaredBackendSteps` runs when the scenario is built and again in `validatePlan`. It refuses a sampling that requests a different count on that backend, a step policy that differs from the declaration, and a step policy on a case without one. The scenario asserts the queued `/payload/advanced/steps`. The readback asserts that every job the case submitted was queued at the declared count. `loadIdentity` already binds the observed native NFE to the queued job.
+- Cross-backend comparisons: none of these four cases is a matrix anchor (cases 1 and 15 stay at identical turbo recipes on both backends, so `chooseMatrixBackend` still compares like with like). None is a baseline, repeat or broad-matrix case, and the inventory validator refuses backend-specific steps on any such case. Repeat and control comparisons run within one backend, so a 50-step CUDA render is never asserted equivalent to an 8-step MLX render.
+- The peer-anchor wait charges each remaining case its OWN lane's declared steps (`estimateCaseMs` reads the case's bound sampling). An MLX lane therefore reserves 8 steps for these cases and a CUDA lane reserves 50.
+
 ## Finalization ownership and review order
 
 The current `sceneworks-epic` terminal workflow supersedes older helper-PR and repeated-review procedures. The coordinator is the sole publisher. These private preparation commits are inputs to the coordinator's owned isolated checkout of the **existing feature branch**, not a request for a new S12/helper/sync/pin PR into feature.

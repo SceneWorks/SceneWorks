@@ -7,7 +7,7 @@ import {promisify} from 'node:util';
 import {mkdir,readFile,writeFile,realpath,stat} from 'node:fs/promises';
 import {caseBook,prepareCases,finalizeCampaignPlan,prepareControlledLoKr} from './h3-finetune-terminal-cases.mjs';
 import {SOURCE,hashFile,sourcePair,validatePlan} from './h3-finetune-terminal.mjs';
-import {operationalCases} from './h3-finetune-terminal-reduced.mjs';
+import {operationalCases,declaredBackendSteps,backendStepPolicy} from './h3-finetune-terminal-reduced.mjs';
 import {assertCliEnvironment,privateRunRoot,selectStageFiles,runStage,prepareReferenceFixtures,bindScopedAuthority} from './h3-finetune-terminal-stage.mjs';
 import {cudaDeviceEvidence,MANUAL_CUDA_PHYSICAL_GPU} from './ci/h3-import-native-proof.mjs';
 import {prepareBootstrapInputs} from './h3-finetune-terminal-bootstrap-inputs.mjs';
@@ -77,9 +77,15 @@ async function prepareSpeech({stageRoot,stagePath,swRoot,env}){
   const receipt=JSON.parse(await readFile(path.join(directory,'speech-receipt.json'),'utf8'));assert.equal(receipt.status,'completed');assert.equal(receipt.proof_kind,'campaign_native');
   return {...receipt,directory};
 }
-function sampling(op,recipe,book){
-  const geometry=recipe?.trainingShortEdge===768?{width:op.wideWidth,height:op.wideHeight}:{width:op.width,height:op.height};
-  return {...geometry,fps:24,duration:124/24,steps:recipe?.steps??50,...(recipe?{schedulerShift:recipe.schedulerShift,audioSchedulerShift:recipe.audioSchedulerShift}:{}),contractSource:recipe?`Frozen recipe ${recipe.id}; ${book.turboArtifacts.repo}@${book.turboArtifacts.revision}`:'Explicit compatible-base unaccelerated 50-step cohort recipe; no teacher is staged'};
+// A trained accelerator fixes its own steps. Without one the case runs the compatible-base
+// unaccelerated recipe at its DECLARED per-backend count (CUDA 50, MLX 8: the user-approved sc-26691
+// scope decision of 2026-10-30), recorded as `stepPolicy` so every validator checks the requested
+// steps per backend; geometry, shifts and every other field are backend-independent.
+function sampling(op,recipe,book,c){
+  const geometry=recipe?.trainingShortEdge===768?{width:op.wideWidth,height:op.wideHeight}:{width:op.width,height:op.height},base={...geometry,fps:24,duration:124/24};
+  if(recipe)return {...base,steps:recipe.steps,schedulerShift:recipe.schedulerShift,audioSchedulerShift:recipe.audioSchedulerShift,contractSource:`Frozen recipe ${recipe.id}; ${book.turboArtifacts.repo}@${book.turboArtifacts.revision}`};
+  const steps=declaredBackendSteps(c);if(steps===null)return base;const stepPolicy=backendStepPolicy(c);
+  return {...base,steps,stepPolicy,contractSource:`Explicit compatible-base unaccelerated cohort recipe at ${steps} steps on ${c.backend} (CUDA ${stepPolicy.byBackend.cuda} / MLX ${stepPolicy.byBackend.mlx}: user-approved sc-26691 scope decision ${stepPolicy.decision.approvedAt}, MLX timing run ${stepPolicy.decision.measuredRun}); no teacher is staged`};
 }
 function recipeFor(c,book){const index=({'fl-turbo-4v1.0-768':0,'fl-turbo-8':1,'fl-turbo-4v01':2})[c.adapterRecipe];return index!==undefined?book.sampling.turbo[index]:[1,3,5,6,7,8,9,10,11,12,13,14].includes(c.index)?book.sampling.turbo[3]:null;}
 function primaryFor(c,book){const match=/^artifact\.(\d)-/.exec(c.modelKey);return match?book.artifacts[Number(match[1])]:book.stagingAssets[c.assetSet==='independent'?'pulpcut':'hybrid'][0];}
@@ -147,7 +153,7 @@ export async function bootstrapTerminal({request,backend,swRoot,inferenceRoot,ev
       if(partition==='hybrid')model.hybridBinding={kind:'single-checkpoint',declarationSource:`${source.repo}@${source.revision}/${source.file}: author-declared hybrid selection merge; same imported bytes permitted by the declared contract`};if(c.index===21)model.lineage={source:source.repo,revision:source.revision,kind:'trained-turbo-delta-merge-requant-not-independent-full-training'};
       const recipe=recipeFor(c,book),adapters=[];if(recipe&&c.index!==12){const index=book.sampling.turbo.findIndex(v=>v.id===recipe.id),file=book.turboArtifacts.files[index],staged=stage.files.find(v=>v.observedSha256===file.sha256);assert.ok(staged);adapters.push({id:`sc26691_${recipe.id.replace('minimax_h3_','')}_${canonicalSha(modelId).slice(0,12)}`,recipeId:recipe.id,kind:'lora',role:'accelerator',sha256:staged.observedSha256,source:book.turboArtifacts.repo,revision:book.turboArtifacts.revision,compatibilitySource:`Frozen ${recipe.id}; explicit ${partition}/${topology} import`,topology,partition,licenseAcknowledged:legal.acknowledged,importPath:staged.finalPath});caseInputs[c.id].push({path:staged.finalPath,sha256:staged.observedSha256,role:'adapter'});}
       if([3,13].includes(c.index))adapters.push({id:`sc26691_lokr_${modelId}`,kind:'lokr',sha256:lokr.provenance.sha256,source:'controlled-generated-body-only-not-trained',revision:sceneworks,compatibilitySource:`Actual bound source ${pruned.observedSha256} Q projection`,topology,partition,licenseAcknowledged:legal.acknowledged,importPath:lokr.file});
-      const e={label:'source',licenseAuthority:clone(authority),model,mode:requestedMode(c),sampling:sampling(op,recipe,book),adapters};if(c.index===21)e.sampling={...sampling(op,null,book),...clone(op.pulpcutSampling)};
+      const e={label:'source',licenseAuthority:clone(authority),model,mode:requestedMode(c),sampling:sampling(op,recipe,book,c),adapters};if(c.index===21)e.sampling={...sampling(op,null,book,c),...clone(op.pulpcutSampling)};assert.ok(Number.isInteger(e.sampling.steps),`${c.id} has no declared step count`);
       if(c.index===4){model.originalPath=identity.sourcePath;model.originalSha256=identity.sourceActualSHA;model.sourcePath=identity.renamed.path;Object.assign(e,{ownershipMode:'linked',linkedRootId:capture('library/rootId'),linkedRelativePath:path.relative(stageRoot,identity.renamed.path).split(path.sep).join('/')});const negative=clone(e);negative.label='different_bytes';negative.model.modelId='imported_sc26691_identity_negative';negative.model.sourcePath=identity.differentBytes.path;negative.model.sha256=identity.differentBytes.actualSHA;negative.identityControl={kind:'different-bytes-negative',expectedSourceSha256:identity.sourceActualSHA};delete negative.ownershipMode;delete negative.linkedRootId;delete negative.linkedRelativePath;bindings[c.id]=[e,negative];caseInputs[c.id].push({path:identity.renamed.path,sha256:identity.renamed.actualSHA,role:'checkpoint'},{path:identity.differentBytes.path,sha256:identity.differentBytes.actualSHA,role:'checkpoint'});}
       else bindings[c.id]=[e];
     }

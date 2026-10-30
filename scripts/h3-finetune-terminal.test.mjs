@@ -207,7 +207,7 @@ test('case and lane deadlines stay inside the Actions job timeout and leave the 
 // Real CUDA attempt 1, run 40903166111: lane budget from 15:35:56, job start 15:35:51, own anchors
 // published 16:58:40. Reference anchor (case 1) 2687313 ms with steps 53558/53581/53799/54018 ms;
 // prompt anchor (case 15) 857867 ms with 17871/17968/18236/18747 ms. Remaining step counts are the
-// plan's declared samplings (50-step: cases 2, 4, 20, 25; 8-step: 17, 18, 21; the rest 4).
+// plan's declared CUDA samplings (50-step: cases 2, 4, 20, 25 — 8 on MLX since 2026-10-30; 8-step: 17, 18, 21; the rest 4).
 test('the peer-anchor wait is sized from real measured per-case work and lets CUDA wait for a ~3 h MLX anchor', async () => {
   const { peerAnchorWaitDeadline, anchorTimingFromLogs, estimateCaseMs, remainingLaneCases, CASE_SHUTDOWN_RESERVE_MS, LANE_FINALIZE_RESERVE_MS } = await import('./h3-finetune-terminal.mjs');
   const { OPERATIONAL_CASE_DEFS } = await import('./h3-finetune-terminal-reduced.mjs');
@@ -241,6 +241,34 @@ test('the peer-anchor wait is sized from real measured per-case work and lets CU
   const flat = anchorTimingFromLogs({ wallMs: 4 * 600000, steps: 4 });
   assert.equal(flat.stepMs, 600000); assert.equal(flat.fixedMs, 0); assert.match(flat.basis, /no per-step timing/);
   assert.throws(() => peerAnchorWaitDeadline(p, 'cuda', budget, {}), /measured anchor timings/);
+});
+// sc-26691 user-approved scope decision (2026-10-30): the compatible-base cases run 8 steps on MLX
+// (one MLX step measured ~5.4-6.6 min in run 41061562586), 50 on CUDA. Each lane's peer-wait
+// reserve charges ITS OWN declared steps; the anchors (turbo recipes) stay identical across backends.
+test('the peer-anchor wait charges each lane its own per-backend declared steps', async () => {
+  const { peerAnchorWaitDeadline, anchorTimingFromLogs, estimateCaseMs } = await import('./h3-finetune-terminal.mjs');
+  const { operationalCases, declaredBackendSteps, MATRIX_ANCHOR_ROLES } = await import('./h3-finetune-terminal-reduced.mjs');
+  const recipeSteps = { 17: 8, 18: 8, 21: 8 };
+  const p = { cases: operationalCases().map(c => ({ ...c, ...(c.kind === 'actual-artifact-probe' ? {} : { declaredSourceBindings: [{ sampling: { steps: declaredBackendSteps(c) ?? recipeSteps[c.index] ?? 4 } }] }) })) };
+  for (const slug of Object.values(MATRIX_ANCHOR_ROLES)) for (const c of p.cases.filter(v => v.slug === slug)) assert.equal(c.backendSteps, undefined, 'a matrix anchor is compared across backends, so its steps are backend-independent');
+  const stepLog = n => Array.from({ length: n }, (_, i) => JSON.stringify({ message: 'minimax-h3: denoise step done', step: i + 1, total: n, elapsed_ms: 360000 })).join(String.fromCharCode(10));
+  // MLX: ~6 min/step measured split; fixed part 20 min (reference) / 10 min (prompt).
+  const mlx = { reference: anchorTimingFromLogs({ wallMs: 1200000 + 4 * 360000, steps: 4, logText: stepLog(4) }), prompt: anchorTimingFromLogs({ wallMs: 600000 + 4 * 360000, steps: 4, logText: stepLog(4) }) };
+  const cuda = { reference: anchorTimingFromLogs({ wallMs: 2687313, steps: 4, logText: stepLog(4).replaceAll('360000', '54000') }), prompt: anchorTimingFromLogs({ wallMs: 857867, steps: 4, logText: stepLog(4).replaceAll('360000', '18000') }) };
+  const at = (backend, index) => p.cases.find(c => c.backend === backend && c.index === index);
+  for (const index of [2, 4, 20]) {
+    const timings = index === 20 ? mlx.prompt : mlx.reference;
+    assert.equal(estimateCaseMs(at('mlx', index), mlx), timings.fixedMs + 8 * 360000, `mlx case ${index} is charged 8 steps`);
+    const cudaTimings = index === 20 ? cuda.prompt : cuda.reference;
+    assert.equal(estimateCaseMs(at('cuda', index), cuda), cudaTimings.fixedMs + 50 * 54000 * (index === 20 ? 18000 / 54000 : 1), `cuda case ${index} is charged 50 steps`);
+  }
+  // An 8-step MLX compatible-base case fits the 7200 s case bound; 50 steps would not.
+  assert.ok(estimateCaseMs(at('mlx', 2), mlx) < 7200000);
+  assert.ok(mlx.reference.fixedMs + 50 * 360000 > 7200000);
+  const wait = peerAnchorWaitDeadline(p, 'mlx', { deadline: '2026-10-31T12:00:00.000Z' }, { jobStartedAt: '2026-10-30T12:00:00Z', timings: mlx });
+  for (const index of [2, 4, 20]) assert.equal(wait.perCase.find(row => row.caseId === at('mlx', index).id).ms, Math.round(estimateCaseMs(at('mlx', index), mlx)));
+  const fiftyStep = peerAnchorWaitDeadline({ cases: p.cases.map(c => c.backendSteps ? { ...c, declaredSourceBindings: [{ sampling: { steps: 50 } }] } : c) }, 'mlx', { deadline: '2026-10-31T12:00:00.000Z' }, { jobStartedAt: '2026-10-30T12:00:00Z', timings: mlx });
+  assert.equal(fiftyStep.remainingMs - wait.remainingMs, 3 * 42 * 360000, 'three denoising compatible-base cases x 42 fewer steps on MLX (case 25 cancels before any step)');
 });
 test('own anchor timings come from the retained anchor case receipts and worker logs', async t => {
   const { ownAnchorTimings } = await import('./h3-finetune-terminal.mjs');

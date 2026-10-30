@@ -13,7 +13,7 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {assertRecordedAssertion} from './h3-finetune-terminal-api.mjs';
-import { operationalCases, operationalCaseById, BROAD_MATRIX_CASES, OPERATIONAL_CASE_DEFS, validateMatrixDecision, buildCatalogCoverage, catalogCoverageCounts, summarizeUniqueExecutions, chooseMatrixBackend, validateNativeWitnessMarkers, CONDITIONING_WITNESS_SELECTOR, ADAPTER_WITNESS_SELECTOR } from './h3-finetune-terminal-reduced.mjs';
+import { operationalCases, operationalCaseById, BROAD_MATRIX_CASES, OPERATIONAL_CASE_DEFS, validateMatrixDecision, buildCatalogCoverage, catalogCoverageCounts, summarizeUniqueExecutions, chooseMatrixBackend, assertDeclaredBackendSteps, validateNativeWitnessMarkers, CONDITIONING_WITNESS_SELECTOR, ADAPTER_WITNESS_SELECTOR } from './h3-finetune-terminal-reduced.mjs';
 export function plannedCases(p) {return p.inventory==='reduced-v1'?operationalCases(p.backend):requiredCases();}
 export function executionCases(p) {
   if(p.matrixDecision){validateMatrixDecision(p.matrixDecision);if(p.matrixDecision.status==='selected'){assert.ok(p.matrixAnchors,'measured inline anchors required before asymmetry');assert.deepEqual(p.matrixDecision,chooseMatrixBackend({anchors:p.matrixAnchors}),'matrix choice must derive from measured anchors');}}
@@ -72,6 +72,8 @@ export function validatePlan(p) {
     const c = p.cases.find(c => c.id === expected.id);
     for (const [k, v] of Object.entries(expected)) assert.deepEqual(c?.[k], v, `missing/mismatched ${expected.id}.${k}`);
     if(p.inventory==='reduced-v1'&&c.group==='artifact')assert.equal(c.artifact,ARTIFACTS[c.index-1],'frozen source cannot be relabeled');
+    // sc-26691 (2026-10-30): every bound sampling requests its case's declared per-backend steps.
+    if(p.inventory==='reduced-v1')for(const e of c.declaredSourceBindings??[])if(e.family!=='ltx')assertDeclaredBackendSteps(c,e.sampling);
     assert.ok(Number.isInteger(c.timeoutSeconds) && c.timeoutSeconds > 0 && c.timeoutSeconds <= 7200);
     assert.ok(Array.isArray(c.command) && c.command.length > 0 && c.command.every(s => typeof s === 'string'));
     assert.ok(Array.isArray(c.inputs) && c.inputs.length > 0);

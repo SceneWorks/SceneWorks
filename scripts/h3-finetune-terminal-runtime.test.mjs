@@ -147,6 +147,13 @@ test('owned API pipeline binds real-shaped jobs/assets/load events, compares med
   assert.equal((await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true})).comparisons,1);
   await assert.rejects(validateEvidence(f.p,f.c,f.dir,'H3_API_ASSERTIONS_EXECUTED=1'),/unit_fake/);
 });
+// sc-26691 (2026-10-30): the readback binds the queued NFE to the case's declared per-backend
+// recipe (MLX 8 / CUDA 50 for the compatible-base cases), so a render at another step count fails.
+test('readback refuses a job queued at other than its declared per-backend steps',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
+  const declared=f.c.declaredSourceBindings[0].sampling.steps;f.c.declaredSourceBindings[0].sampling.steps=declared===8?50:8;
+  await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true}),new RegExp(`queued NFE differs from the declared ${f.c.backend} recipe`));
+});
 test('portable case evidence redecodes all retained outputs without publishing or rereading model/cache bytes',async t=>{
   const f=await fixture(t),fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
   await assert.rejects(access(path.join(f.dir,'service')));const bundle=JSON.parse(await readFile(path.join(f.dir,'source-job-output.json'),'utf8'));
