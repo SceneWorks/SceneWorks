@@ -19,7 +19,7 @@ export const MUTABLE_FILES = [
 ];
 export const TESTS = {
   target: ["sceneworks-core", "training::moss_training_s1_tests::moss_targets_keep_explicit_checkpoint_and_method_choices"],
-  library: ["sceneworks-core", "lora_family::moss_training_adapter_tests::native_moss_import_keeps_exact_base_and_refuses_cross_checkpoint_use"],
+  library: ["sceneworks-core", "lora_family::moss_training_adapter_tests::moss_adapters_apply_on_both_base_and_sft"],
   scheduler: ["sceneworks-core", "jobs_store::routing::catalog::moss_native_training_routing_tests::moss_exact_checkpoint_adapters_route_to_both_native_lanes_not_generic"],
   catalog: ["sceneworks-core", "jobs_store::routing::catalog::tests::routed_model_lists_match_snapshot"],
   matrix: ["sceneworks-core", "jobs_store::routing::matrix::tests::checked_in_matrix_matches_all_authoritative_sources"],

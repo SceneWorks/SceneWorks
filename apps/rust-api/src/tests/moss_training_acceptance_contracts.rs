@@ -618,27 +618,21 @@ async fn pre_model_library_and_dispatch_cpu_contract() {
             let (status, submitted) = request(app.clone(), "POST", "/api/v1/image/jobs",
                 json!({"projectId":project["id"],"model":model,"prompt":"CPU catalog admission only",
                     "width":256,"height":256,"loras":[{"id":adapter["id"],"weight":1.0}]})).await;
-            if matches_parent {
-                assert_eq!(status, StatusCode::CREATED, "{submitted}");
-                assert_eq!(submitted["status"], "queued", "{submitted}");
-                assert_eq!(submitted["payload"]["modelManifestEntry"]["id"], model);
-                let id = submitted["id"].as_str().unwrap();
-                let (status, canceled) = request(
-                    app.clone(),
-                    "POST",
-                    &format!("/api/v1/jobs/{id}/cancel"),
-                    Value::Null,
-                )
-                .await;
-                assert_eq!(status, StatusCode::OK, "{canceled}");
-                assert_eq!(canceled["status"], "canceled", "{canceled}");
-            } else {
-                assert_eq!(status, StatusCode::BAD_REQUEST, "{submitted}");
-                assert!(
-                    submitted["detail"].as_str().unwrap().contains("MOSS"),
-                    "{submitted}"
-                );
-            }
+            // Base↔SFT interchange (epic 27933): either checkpoint admits any moss-image
+            // adapter, so the cross-parent submission is as admissible as the exact one.
+            assert_eq!(status, StatusCode::CREATED, "{submitted}");
+            assert_eq!(submitted["status"], "queued", "{submitted}");
+            assert_eq!(submitted["payload"]["modelManifestEntry"]["id"], model);
+            let id = submitted["id"].as_str().unwrap();
+            let (status, canceled) = request(
+                app.clone(),
+                "POST",
+                &format!("/api/v1/jobs/{id}/cancel"),
+                Value::Null,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{canceled}");
+            assert_eq!(canceled["status"], "canceled", "{canceled}");
         }
     }
     // Header validation must still refuse a literal local adapter with truncated data.

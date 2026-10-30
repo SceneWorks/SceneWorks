@@ -240,17 +240,22 @@ describe("loraMatchesModel", () => {
     ).toBe(false);
   });
 
-  it("requires exact canonical Base or SFT provenance for MOSS adapters", () => {
+  it("offers any moss-image adapter on both MOSS Base and SFT", () => {
+    // Base↔SFT interchange (epic 27933): either parent stamp — or no recorded base at all,
+    // the family-assigned external import case — lists on both checkpoints.
     const base = { id: "moss_image_base", family: "moss-image", loraCompatibility: { families: ["moss-image"] } };
     const sft = { id: "moss_image_sft", family: "moss-image", loraCompatibility: { families: ["moss-image"] } };
     const baseAdapter = { id: "base", family: "moss-image", baseModel: "moss_image_base" };
     const sftAdapter = { id: "sft", family: "moss-image", base_model: "moss_image_sft" };
+    const unstamped = { id: "unstamped", family: "moss-image" };
 
-    expect(loraMatchesModel(baseAdapter, base)).toBe(true);
-    expect(loraMatchesModel(sftAdapter, sft)).toBe(true);
-    expect(loraMatchesModel(baseAdapter, sft)).toBe(false);
-    expect(loraMatchesModel(sftAdapter, base)).toBe(false);
-    expect(loraMatchesModel({ id: "unstamped", family: "moss-image" }, base)).toBe(false);
+    for (const model of [base, sft]) {
+      for (const adapter of [baseAdapter, sftAdapter, unstamped]) {
+        expect(loraMatchesModel(adapter, model)).toBe(true);
+      }
+    }
+    // Family routing still applies: a non-moss adapter stays out of the MOSS pickers.
+    expect(loraMatchesModel({ id: "other", family: "sdxl" }, base)).toBe(false);
   });
 
   it("offers no LoRA for SenseNova when its schema-valid catalog rows omit the advertisement", () => {
