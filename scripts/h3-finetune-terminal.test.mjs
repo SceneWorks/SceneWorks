@@ -183,7 +183,7 @@ test('on Windows the last-resort kill is TerminateProcess without a meaningless 
   const log = await readFile(logPath, 'utf8'); assert.match(log, /TerminateProcess of the harness's own child PID/); assert.doesNotMatch(log, /SIGKILL/);
 });
 test('case and lane deadlines stay inside the Actions job timeout and leave the shutdown window', async () => {
-  const { caseDeadlines, laneWorkDeadline, peerAnchorWaitDeadline, CASE_SHUTDOWN_RESERVE_MS, ACTIONS_JOB_TIMEOUT_MS, LANE_FINALIZE_RESERVE_MS, CASE_KILL_GRACE_SECONDS } = await import('./h3-finetune-terminal.mjs');
+  const { caseDeadlines, laneWorkDeadline, CASE_SHUTDOWN_RESERVE_MS, ACTIONS_JOB_TIMEOUT_MS, LANE_FINALIZE_RESERVE_MS, CASE_KILL_GRACE_SECONDS } = await import('./h3-finetune-terminal.mjs');
   const { DEFAULT_CANCEL_DRAIN_SECONDS, postDrainShutdownMs } = await import('./h3-finetune-terminal-runtime.mjs');
   assert.ok(CASE_SHUTDOWN_RESERVE_MS >= DEFAULT_CANCEL_DRAIN_SECONDS * 1000 + postDrainShutdownMs() + CASE_KILL_GRACE_SECONDS * 1000, 'the reserve fits a default drain and the bounded owned shutdown');
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
@@ -201,13 +201,62 @@ test('case and lane deadlines stay inside the Actions job timeout and leave the 
   assert.equal(capped.hard, work); assert.equal(capped.hard - capped.soft, CASE_SHUTDOWN_RESERVE_MS);
   const roomy = caseDeadlines({ timeoutSeconds: 7200, now: start, workDeadline: work });
   assert.equal(roomy.soft, start + 7200000); assert.equal(roomy.hard, work, 'a cancelled job may take the worker budget up to the lane work deadline');
-  // The peer-anchor wait leaves this lane's measured remaining work.
-  const p = { cases: [1, 2, 3, 15, 4].map(index => ({ index, backend: 'mlx' })).concat([{ index: 2, backend: 'cuda' }]) };
-  const wait = peerAnchorWaitDeadline(p, 'mlx', budget, { jobStartedAt: new Date(start).toISOString(), ownAnchors: [{ wallMs: 3600000 }, { wallMs: 1800000 }] });
-  assert.equal(wait.remaining, 3); assert.equal(wait.deadline, work - 3 * (3600000 + CASE_SHUTDOWN_RESERVE_MS));
-  assert.throws(() => peerAnchorWaitDeadline(p, 'mlx', budget, { ownAnchors: [] }), /measured anchors/);
   const source = await readFile(new URL('./h3-finetune-terminal.mjs', import.meta.url), 'utf8');
   assert.ok(source.includes('H3_CASE_HARD_DEADLINE_MS:String(caseHardDeadline)') && source.includes('hardDeadlineMs: caseHardDeadline'), 'runCase hands the same hard deadline to the case process and to runProcess');
+});
+// Real CUDA attempt 1, run 40903166111: lane budget from 15:35:56, job start 15:35:51, own anchors
+// published 16:58:40. Reference anchor (case 1) 2687313 ms with steps 53558/53581/53799/54018 ms;
+// prompt anchor (case 15) 857867 ms with 17871/17968/18236/18747 ms. Remaining step counts are the
+// plan's declared samplings (50-step: cases 2, 4, 20, 25; 8-step: 17, 18, 21; the rest 4).
+test('the peer-anchor wait is sized from real measured per-case work and lets CUDA wait for a ~3 h MLX anchor', async () => {
+  const { peerAnchorWaitDeadline, anchorTimingFromLogs, estimateCaseMs, remainingLaneCases, CASE_SHUTDOWN_RESERVE_MS, LANE_FINALIZE_RESERVE_MS } = await import('./h3-finetune-terminal.mjs');
+  const { OPERATIONAL_CASE_DEFS } = await import('./h3-finetune-terminal-reduced.mjs');
+  const stepLog = ms => ms.map((elapsed, i) => JSON.stringify({ message: 'minimax-h3: denoise step done', step: i + 1, total: ms.length, elapsed_ms: elapsed })).join('\n');
+  const timings = {
+    reference: anchorTimingFromLogs({ wallMs: 2687313, steps: 4, logText: stepLog([53558, 53581, 53799, 54018]) }),
+    prompt: anchorTimingFromLogs({ wallMs: 857867, steps: 4, logText: stepLog([17871, 17968, 18236, 18747]) }),
+  };
+  assert.equal(timings.reference.basis, 'measured-step-split'); assert.equal(timings.reference.fixedMs, 2687313 - 214956);
+  const steps = { 2: 50, 4: 50, 17: 8, 18: 8, 20: 50, 21: 8, 25: 50 };
+  const p = { cases: OPERATIONAL_CASE_DEFS.flatMap(def => ['cuda', 'mlx'].map(backend => ({ ...def, backend, id: `${backend}.reduced.${def.slug}`, ...(def.kind === 'actual-artifact-probe' ? {} : { declaredSourceBindings: [{ sampling: { steps: steps[def.index] ?? 4 } }] }) }))) };
+  assert.equal(remainingLaneCases(p, 'cuda').length, 23, 'selected backend: every remaining case');
+  assert.equal(remainingLaneCases(p, 'cuda', { displaced: true }).length, 16, 'displaced backend omits the seven broad-matrix cases');
+  // Per-case, not the longest anchor applied blindly: a 4-step hybrid case costs its own anchor, a
+  // 50-step reference case its fixed part plus 50 measured steps.
+  const byIndex = index => estimateCaseMs(p.cases.find(c => c.backend === 'cuda' && c.index === index), timings);
+  assert.equal(Math.round(byIndex(16)), 857867); assert.equal(Math.round(byIndex(5)), 2687313);
+  assert.equal(Math.round(byIndex(2)), Math.round(timings.reference.fixedMs + 50 * timings.reference.stepMs));
+  const budget = { deadline: '2026-10-30T15:35:56.000Z' }, published = Date.parse('2026-10-29T16:58:40Z');
+  const wait = peerAnchorWaitDeadline(p, 'cuda', budget, { jobStartedAt: '2026-10-29T15:35:51Z', timings });
+  assert.equal(wait.workDeadline, Date.parse('2026-10-30T15:35:51Z') - LANE_FINALIZE_RESERVE_MS);
+  assert.equal(wait.deadline, wait.workDeadline - wait.remainingMs - CASE_SHUTDOWN_RESERVE_MS);
+  assert.ok(Math.abs(wait.remainingMs / 3600000 - 15.10) < 0.01, `remaining CUDA work ${(wait.remainingMs / 3600000).toFixed(2)} h`);
+  assert.equal(new Date(wait.deadline).toISOString().slice(0, 16), '2026-10-29T23:24');
+  const waitHours = (wait.deadline - published) / 3600000;
+  assert.ok(waitHours > 6 && waitHours < 7, `CUDA may wait ${waitHours.toFixed(2)} h for the MLX anchors`);
+  assert.ok(wait.deadline - published > 3 * 3600000, 'a ~3 h MLX anchor publication fits');
+  // The formula this replaces (remaining x (longest anchor + 20 min)) would have refused at once.
+  assert.ok(published > wait.workDeadline - 23 * (2687313 + CASE_SHUTDOWN_RESERVE_MS));
+  // An engine without per-step timing is charged pessimistically (whole wall per step), labelled.
+  const flat = anchorTimingFromLogs({ wallMs: 4 * 600000, steps: 4 });
+  assert.equal(flat.stepMs, 600000); assert.equal(flat.fixedMs, 0); assert.match(flat.basis, /no per-step timing/);
+  assert.throws(() => peerAnchorWaitDeadline(p, 'cuda', budget, {}), /measured anchor timings/);
+});
+test('own anchor timings come from the retained anchor case receipts and worker logs', async t => {
+  const { ownAnchorTimings } = await import('./h3-finetune-terminal.mjs');
+  const output = await mkdtemp(path.join(os.tmpdir(), 'sc26691-anchor-timing-')); t.after(() => rm(output, { recursive: true, force: true }));
+  const cases = [[1, 'artifact-0-ordered-mixed-baseline-ref-turbo', '2026-10-29T15:57:52.037Z', '2026-10-29T16:42:39.350Z', [53558, 53581, 53799, 54018]], [15, 'real-hybrid-text', '2026-10-29T16:44:20.489Z', '2026-10-29T16:58:38.356Z', [17871, 17968, 18236, 18747]]];
+  const p = { output, cases: cases.map(([index, slug]) => ({ index, slug, backend: 'cuda', kind: 'full-av', id: `cuda.reduced.${slug}`, declaredSourceBindings: [{ sampling: { steps: 4 } }] })) };
+  for (const [index, slug, started, completed, steps] of cases) {
+    const dir = path.join(output, `cuda.reduced.${slug}`); await mkdir(dir);
+    await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ status: 'passed', started, completed }));
+    // The real worker line shape, interleaved with unrelated events.
+    await writeFile(path.join(dir, 'worker-1.log'), [JSON.stringify({ event: 'artifact_seal_hash_progress' }), ...steps.map((elapsed_ms, i) => JSON.stringify({ message: 'minimax-h3: denoise step done', step: i + 1, total: 4, elapsed_ms, span: { name: 'h3_import_execution' } }))].join('\n') + '\n');
+    void index;
+  }
+  const timings = await ownAnchorTimings(p, 'cuda');
+  assert.equal(timings.reference.wallMs, 2687313); assert.equal(timings.reference.stepMs, 53739); assert.equal(timings.prompt.wallMs, 857867);
+  assert.equal(timings.prompt.basis, 'measured-step-split');
 });
 test('the case process exits deterministically when owned handles outlive its bounded shutdown', async t => {
   const { dir } = await fixture(t);

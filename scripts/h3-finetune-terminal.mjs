@@ -12,7 +12,7 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {assertRecordedAssertion} from './h3-finetune-terminal-api.mjs';
-import { operationalCases, operationalCaseById, BROAD_MATRIX_CASES, validateMatrixDecision, buildCatalogCoverage, catalogCoverageCounts, summarizeUniqueExecutions, chooseMatrixBackend, validateNativeWitnessMarkers, CONDITIONING_WITNESS_SELECTOR, ADAPTER_WITNESS_SELECTOR } from './h3-finetune-terminal-reduced.mjs';
+import { operationalCases, operationalCaseById, BROAD_MATRIX_CASES, OPERATIONAL_CASE_DEFS, validateMatrixDecision, buildCatalogCoverage, catalogCoverageCounts, summarizeUniqueExecutions, chooseMatrixBackend, validateNativeWitnessMarkers, CONDITIONING_WITNESS_SELECTOR, ADAPTER_WITNESS_SELECTOR } from './h3-finetune-terminal-reduced.mjs';
 export function plannedCases(p) {return p.inventory==='reduced-v1'?operationalCases(p.backend):requiredCases();}
 export function executionCases(p) {
   if(p.matrixDecision){validateMatrixDecision(p.matrixDecision);if(p.matrixDecision.status==='selected'){assert.ok(p.matrixAnchors,'measured inline anchors required before asymmetry');assert.deepEqual(p.matrixDecision,chooseMatrixBackend({anchors:p.matrixAnchors}),'matrix choice must derive from measured anchors');}}
@@ -734,17 +734,67 @@ export function caseDeadlines({ timeoutSeconds, now = Date.now(), workDeadline =
   return { soft: Math.min(now + timeoutSeconds * 1000, hard - CASE_SHUTDOWN_RESERVE_MS), hard };
 }
 /**
- * When the peer-anchor wait must give up: the lane's work deadline minus the time this lane still
- * needs afterwards. That is sized from this lane's own measured anchors: every remaining case of
- * this backend (the most it runs, when it is the selected matrix backend) at the longest measured
- * anchor wall time, plus each case's shutdown reserve. Never guessed: no measured anchor, no wait.
+ * The measured cost model of one inline anchor: its wall time split into the per-case fixed part
+ * (import, normalization, encoders, DiT load, decode) and its per-denoise-step time, from the
+ * anchor case's own worker logs ("minimax-h3: denoise step done" with elapsed_ms). Real CUDA run
+ * 40903166111: the reference anchor was 2687 s with 4 x ~54 s steps, the prompt anchor 858 s with
+ * 4 x ~18 s, so the fixed part dominates and a step count must not scale the whole wall. When an
+ * engine logs no per-step timing (the MLX engine), the whole wall is attributed to its steps: a
+ * pessimistic, labelled basis, never a guess in the optimistic direction.
  */
-export function peerAnchorWaitDeadline(p, backend, budget, { jobStartedAt, ownAnchors } = {}) {
-  const walls = (ownAnchors ?? []).map(anchor => anchor.wallMs).filter(ms => Number.isFinite(ms) && ms > 0);
-  assert.ok(walls.length, 'the peer-anchor wait is sized from this lane\'s own measured anchors');
-  const remaining = p.cases.filter(c => c.backend === backend && ![1, 15].includes(c.index)).length;
-  const reserveMs = remaining * (Math.max(...walls) + CASE_SHUTDOWN_RESERVE_MS);
-  return { deadline: laneWorkDeadline(budget, { jobStartedAt }) - reserveMs, reserveMs, remaining };
+export function anchorTimingFromLogs({ wallMs, steps, logText = '' }) {
+  assert.ok(Number.isFinite(wallMs) && wallMs > 0 && Number.isInteger(steps) && steps > 0, 'measured anchor wall and its declared step count required');
+  const stepMs = [];
+  for (const line of logText.split('\n')) { try { const event = JSON.parse(line); if (event.message === 'minimax-h3: denoise step done' && Number.isFinite(Number(event.elapsed_ms))) stepMs.push(Number(event.elapsed_ms)); } catch {} }
+  if (stepMs.length >= steps) { const perStep = stepMs.slice(-steps).reduce((a, b) => a + b, 0) / steps; return { wallMs, steps, stepMs: perStep, fixedMs: Math.max(0, wallMs - steps * perStep), basis: 'measured-step-split' }; }
+  return { wallMs, steps, stepMs: wallMs / steps, fixedMs: 0, basis: 'whole-wall-per-step (no per-step timing logged)' };
+}
+/** This lane's own anchor timings, read from its retained anchor case directories. */
+export async function ownAnchorTimings(p, backend) {
+  const { readdir } = await import('node:fs/promises');
+  const timings = {};
+  for (const [role, index] of [['reference', 1], ['prompt', 15]]) {
+    const c = p.cases.find(v => v.backend === backend && v.index === index); assert.ok(c, `${backend} anchor case ${index} missing`);
+    const dir = contained(p.output, c.id), row = await json(path.join(dir, 'execution.json')); assert.equal(row.status, 'passed', `${c.id} anchor has not passed`);
+    let logText = '';
+    for (const name of (await readdir(dir)).filter(name => /^worker-\d+\.log$/.test(name)).sort()) logText += await readFile(path.join(dir, name), 'utf8') + '\n';
+    timings[role] = anchorTimingFromLogs({ wallMs: Date.parse(row.completed) - Date.parse(row.started), steps: c.declaredSourceBindings?.[0]?.sampling?.steps, logText });
+  }
+  return timings;
+}
+/**
+ * The measured estimate of one remaining case on this lane: the fixed part of the anchor it shares
+ * its model/conditioning family with (the singularity reference family, or the hybrid/independent
+ * prompt family) plus its OWN declared step count at that anchor's per-step time. The numeric
+ * probes and the cold source-preparation cancel run no denoise; they are charged the reference
+ * anchor's fixed part (an import-scale preparation).
+ */
+export function estimateCaseMs(c, timings) {
+  const def = OPERATIONAL_CASE_DEFS.find(v => v.slug === c.slug);
+  if (c.kind !== 'full-av') return timings.reference.fixedMs || timings.reference.wallMs;
+  const anchor = def?.assetSet === 'singularity' ? timings.reference : timings.prompt;
+  const steps = c.declaredSourceBindings?.[0]?.sampling?.steps ?? anchor.steps;
+  return anchor.fixedMs + steps * anchor.stepMs;
+}
+/**
+ * The cases this lane still runs after its anchors. Before the peer's anchors arrive the matrix
+ * decision is unknown, so the bound is the larger allocation: the SELECTED backend runs every
+ * remaining case; the displaced one omits BROAD_MATRIX_CASES (executionCases).
+ */
+export function remainingLaneCases(p, backend, { displaced = false } = {}) {
+  return p.cases.filter(c => c.backend === backend && ![1, 15].includes(c.index) && !(displaced && BROAD_MATRIX_CASES.includes(c.slug)));
+}
+/**
+ * When the peer-anchor wait must give up: the lane's work deadline minus the measured estimate of
+ * every case it may still run (the selected-backend allocation) and one case shutdown reserve. A
+ * lane whose remaining work alone exceeds its budget cannot finish either way and refuses at once.
+ */
+export function peerAnchorWaitDeadline(p, backend, budget, { jobStartedAt, timings } = {}) {
+  assert.ok(timings?.reference && timings?.prompt, 'the peer-anchor wait is sized from this lane\'s own measured anchor timings');
+  const cases = remainingLaneCases(p, backend), perCase = cases.map(c => ({ caseId: c.id, ms: Math.round(estimateCaseMs(c, timings)) }));
+  const remainingMs = perCase.reduce((sum, row) => sum + row.ms, 0), displacedMs = remainingLaneCases(p, backend, { displaced: true }).reduce((sum, c) => sum + estimateCaseMs(c, timings), 0);
+  const work = laneWorkDeadline(budget, { jobStartedAt });
+  return { deadline: work - remainingMs - CASE_SHUTDOWN_RESERVE_MS, workDeadline: work, remainingMs, displacedMs: Math.round(displacedMs), reserveMs: remainingMs + CASE_SHUTDOWN_RESERVE_MS, remaining: cases.length, perCase, basis: { reference: timings.reference.basis, prompt: timings.prompt.basis } };
 }
 export async function laneBudget(p,backend,{now=Date.now(),startedAt=process.env.H3_TERMINAL_LANE_STARTED_AT}={}) {
   const filename=contained(p.output,`lane-budget-${backend}.json`),totalSeconds=86400;

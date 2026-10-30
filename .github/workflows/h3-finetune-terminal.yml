@@ -661,17 +661,17 @@ jobs:
           import path from "node:path";
           import {readFile,writeFile,mkdtemp} from "node:fs/promises";
           import {execFileSync} from "node:child_process";
-          import {laneBudget,peerAnchorWaitDeadline,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
+          import {laneBudget,ownAnchorTimings,peerAnchorWaitDeadline,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
           import {anchorArtifactBase,waitForPeerAnchors} from "./scripts/lib/h3-peer-lane.mjs";
           const env=process.env,p=JSON.parse(await readFile(env.PLAN,"utf8")),backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
           const name=anchorArtifactBase({backend:peer,sceneworks:p.sceneworks,inference:p.inference,evidence:p.nativeEvidence.sha});
           const budget=await laneBudget(p,backend);
           const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
           // The wait ends at this lane's work deadline (budget and job timeout, minus the evidence
-          // reserve) minus what its remaining cases need, sized from its own measured anchors.
-          const own=JSON.parse(await readFile(path.join(p.output,`inline-anchor-bundle-${backend}`,"anchors.json"),"utf8"));
-          const wait=peerAnchorWaitDeadline(p,backend,budget,{ownAnchors:own.anchors});
-          console.log(JSON.stringify({peerAnchorWait:{until:new Date(wait.deadline).toISOString(),reservedMs:wait.reserveMs,remainingCases:wait.remaining}}));
+          // reserve) minus the measured estimate of every case it may still run (each case: its
+          // anchor family's fixed part plus its own step count at the measured per-step time).
+          const wait=peerAnchorWaitDeadline(p,backend,budget,{timings:await ownAnchorTimings(p,backend)});
+          console.log(JSON.stringify({peerAnchorWait:{until:new Date(wait.deadline).toISOString(),workDeadline:new Date(wait.workDeadline).toISOString(),remainingMs:wait.remainingMs,displacedMs:wait.displacedMs,remainingCases:wait.remaining,basis:wait.basis,perCase:wait.perCase}}));
           // Wait for as long as the paired peer lane can still deliver: it throws at once when the
           // peer is observed ended, failed or absent without valid anchors. A download is IO and is
           // retried (a fresh directory each try); only a failed packet check rejects a candidate. The
