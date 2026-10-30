@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "generatedFrom": {
-    "inferenceRevision": "0b80ec518c4b514f04b8a39703aa56cf395da278",
+    "inferenceRevision": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
     "dumper": "cargo run -p sceneworks-worker --bin dump-engine-capabilities --no-default-features --features backend-candle"
   },
   "modelMappings": {
@@ -365,6 +365,8 @@
     "ltx_2_5_video_lora": "ltx_2_5_distilled",
     "ltx_video_lora": "ltx_2_3",
     "mage_flow_base_lora": "mage_flow_base",
+    "moss_image_base_lora": "moss_image_base",
+    "moss_image_sft_lora": "moss_image_sft",
     "qwen_image_2_1_edit_lora": "qwen_image_2_1",
     "qwen_image_2_1_lora": "qwen_image_2_1",
     "sd3_5_large_lora": "sd3_5_large",
@@ -373,9 +375,7 @@
     "wan_i2v_14b_lora": "wan2_2_i2v_14b",
     "wan_lora": "wan2_2_ti2v_5b",
     "wan_t2v_14b_lora": "wan2_2_t2v_14b",
-    "z_image_turbo_lora": "z_image_turbo",
-    "moss_image_base_lora": "moss_image_base",
-    "moss_image_sft_lora": "moss_image_sft"
+    "z_image_turbo_lora": "z_image_turbo"
   },
   "workerCapabilities": [
     "audio_generate",
@@ -2247,11 +2247,13 @@
         "samplers": [
           "uni_pc",
           "euler",
+          "dpmpp_2m",
           "euler_ancestral",
           "heun",
           "dpmpp_sde",
           "ddim",
-          "unipc"
+          "unipc",
+          "dpmpp2m"
         ],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2273,7 +2275,9 @@
         "samplers": [
           "uni_pc",
           "euler",
-          "unipc"
+          "dpmpp_2m",
+          "unipc",
+          "dpmpp2m"
         ],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2297,7 +2301,9 @@
         "samplers": [
           "uni_pc",
           "euler",
-          "unipc"
+          "dpmpp_2m",
+          "unipc",
+          "dpmpp2m"
         ],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2319,7 +2325,9 @@
         "samplers": [
           "uni_pc",
           "euler",
-          "unipc"
+          "dpmpp_2m",
+          "unipc",
+          "dpmpp2m"
         ],
         "schedulers": [],
         "supported_guidance_methods": []
@@ -2341,7 +2349,9 @@
         "samplers": [
           "uni_pc",
           "euler",
-          "unipc"
+          "dpmpp_2m",
+          "unipc",
+          "dpmpp2m"
         ],
         "schedulers": [],
         "supported_guidance_methods": []
