@@ -357,18 +357,18 @@ pub fn iris_weights_root_at(
 // Supra2-IMG (sc-24217, epic 24212): the shared half of the `mlx_supra2` / `candle_supra2` arms.
 // ---------------------------------------------------------------------------------------------
 
-/// The pinned upstream repository the install converts (`gen_core::supra2::SUPRA2_SOURCE.repo`).
+/// The pinned upstream repository the install converts (`gen_core_checkpoint::supra2::SUPRA2_SOURCE.repo`).
 pub const SUPRA2_IMG_REPOSITORY: &str = "SupraLabs/Supra2-IMG";
 /// The registry id both engines register, which is also the catalog model id.
-pub const SUPRA2_IMG_PROVIDER: &str = gen_core::supra2::PROVIDER_ID;
+pub const SUPRA2_IMG_PROVIDER: &str = gen_core_checkpoint::supra2::PROVIDER_ID;
 /// The one tier both loaders accept: `LoadSpec::precision` `Bf16` (the f32 checkpoint's default
 /// precision; every override and every quantization is refused), which is what the worker's
 /// `plan_tier_key` and both engines' contract surfaces call `bf16`.
 pub const SUPRA2_IMG_TIER: &str = "bf16";
 /// The published request every capture renders: seed 0, 50 Euler steps, the default CFG 3.0 (the
 /// request leaves guidance unset so the engine's own default applies), at the native 256x256.
-pub const SUPRA2_IMG_SEED: u64 = gen_core::supra2::DEFAULT_SEED;
-pub const SUPRA2_IMG_STEPS: u32 = gen_core::supra2::DEFAULT_STEPS;
+pub const SUPRA2_IMG_SEED: u64 = gen_core_checkpoint::supra2::DEFAULT_SEED;
+pub const SUPRA2_IMG_STEPS: u32 = gen_core_checkpoint::supra2::DEFAULT_STEPS;
 /// The largest image count a SceneWorks Supra2 job renders in one call (`image_request::MAX_COUNT`;
 /// `sceneworks_core::supra2::validate_request` refuses more). The anchor is measured at count 1, the
 /// plan's single-image cell; this product maximum is rendered once more after it on the same loaded
@@ -399,7 +399,7 @@ pub struct Supra2Envs {
 pub fn supra2_fixture(lane: &str) -> String {
     format!(
         "supra2-img-{lane}-{SUPRA2_IMG_TIER}-{}-seed{SUPRA2_IMG_SEED}-step{SUPRA2_IMG_STEPS}",
-        gen_core::supra2::IMAGE_SIZE
+        gen_core_checkpoint::supra2::IMAGE_SIZE
     )
 }
 
@@ -463,7 +463,7 @@ pub fn validate_supra2_plan(request: &Value, lane: &str) -> Result<(u32, u32), S
         }
     }
     let (width, height) = target_geometry(request)?;
-    let native = gen_core::supra2::IMAGE_SIZE;
+    let native = gen_core_checkpoint::supra2::IMAGE_SIZE;
     if (width, height) != (native, native) {
         return Err(format!(
             "{SUPRA2_IMG_PROVIDER} renders its native {native}x{native} only, not {width}x{height}"
@@ -504,7 +504,7 @@ impl Supra2Inputs {
     /// The one upstream file the convert reads.
     pub fn source_file(&self) -> PathBuf {
         self.source_root
-            .join(gen_core::supra2::SUPRA2_SOURCE.files[0].path)
+            .join(gen_core_checkpoint::supra2::SUPRA2_SOURCE.files[0].path)
     }
 
     /// The record's artifact block: the upstream snapshot the bundle was converted from.
@@ -542,7 +542,7 @@ pub fn supra2_inputs_at(
     text_encoder: PathBuf,
     vae: PathBuf,
 ) -> Result<Supra2Inputs, String> {
-    use gen_core::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
+    use gen_core_checkpoint::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
     validate_artifact_identity(&repository, &revision, SUPRA2_IMG_REPOSITORY)?;
     if revision != SUPRA2_SOURCE.revision {
         return Err(format!(
@@ -608,7 +608,11 @@ pub fn supra2_bundle_dir(inputs: &Supra2Inputs) -> PathBuf {
 /// A bundle the measured process may load: present, and passing the provider's own pin contract
 /// with every digest re-verified.
 fn supra2_bundle_is_pinned(dir: &Path) -> bool {
-    gen_core::supra2::read_pinned_bundle(dir, gen_core::supra2::BundleCheck::Digests).is_ok()
+    gen_core_checkpoint::supra2::read_pinned_bundle(
+        dir,
+        gen_core_checkpoint::supra2::BundleCheck::Digests,
+    )
+    .is_ok()
 }
 
 /// How the bundle a capture loads came to exist — recorded in the record's diagnostics.
@@ -687,7 +691,7 @@ pub fn ensure_supra2_bundle(inputs: &Supra2Inputs) -> Result<Supra2Bundle, Strin
 /// verifies the source digest and writes the manifest last), hold the result to the provider's pin
 /// contract, then move it into place — the worker's install-time convert, step for step.
 pub fn supra2_convert(request: &Value) -> Result<Value, String> {
-    use gen_core::supra2::{convert_pinned_checkpoint, FLAN_T5_BASE, SD_VAE};
+    use gen_core_checkpoint::supra2::{convert_pinned_checkpoint, FLAN_T5_BASE, SD_VAE};
     let path = |key: &str| {
         request
             .get(key)
@@ -723,9 +727,12 @@ pub fn supra2_convert(request: &Value) -> Result<Value, String> {
     let converted = convert_pinned_checkpoint(&source, &partial)
         .map_err(|error| format!("Supra2-IMG checkpoint conversion failed: {error}"))
         .and_then(|_| {
-            gen_core::supra2::read_pinned_bundle(&partial, gen_core::supra2::BundleCheck::Digests)
-                .map(|_| ())
-                .map_err(|error| format!("Supra2-IMG bundle failed its pin contract: {error}"))
+            gen_core_checkpoint::supra2::read_pinned_bundle(
+                &partial,
+                gen_core_checkpoint::supra2::BundleCheck::Digests,
+            )
+            .map(|_| ())
+            .map_err(|error| format!("Supra2-IMG bundle failed its pin contract: {error}"))
         });
     if let Err(error) = converted {
         let _ = std::fs::remove_dir_all(&partial);
@@ -770,7 +777,7 @@ mod supra2_tests {
         assert_eq!((SUPRA2_IMG_SEED, SUPRA2_IMG_STEPS), (0, 50));
         assert_eq!(
             SUPRA2_IMG_REPOSITORY,
-            gen_core::supra2::SUPRA2_SOURCE.repo,
+            gen_core_checkpoint::supra2::SUPRA2_SOURCE.repo,
             "the record names the repository the converter pins"
         );
         assert_eq!(
@@ -781,7 +788,7 @@ mod supra2_tests {
             supra2_calibration_fingerprint("candle"),
             "supra2-img-candle-resident-v1"
         );
-        const { assert!(SUPRA2_IMG_PRODUCT_MAX_COUNT <= gen_core::supra2::MAX_IMAGES) };
+        const { assert!(SUPRA2_IMG_PRODUCT_MAX_COUNT <= gen_core_checkpoint::supra2::MAX_IMAGES) };
     }
 
     /// Every row outside the one measurable cell is refused before an env var or a weight is read.
@@ -863,7 +870,7 @@ mod supra2_tests {
     /// the other component's pin.
     #[test]
     fn the_inputs_bind_only_the_pinned_snapshots() {
-        use gen_core::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
+        use gen_core_checkpoint::supra2::{FLAN_T5_BASE, SD_VAE, SUPRA2_SOURCE};
         let scratch =
             std::env::temp_dir().join(format!("sceneworks-supra2-inputs-{}", std::process::id()));
         let source = snapshot(&scratch, SUPRA2_SOURCE.repo, SUPRA2_SOURCE.revision);

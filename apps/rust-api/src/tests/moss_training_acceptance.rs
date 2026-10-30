@@ -8,7 +8,8 @@ use super::support::*;
 use futures_util::FutureExt;
 use sceneworks_worker::test_support::{
     self as native, acceptance_api_cancel_controller, acceptance_progress_snapshot, gen_core,
-    observe_acceptance_trainer, AcceptanceProgressLedger, EvaluationManifest, TrainingProbe,
+    gen_core_moss_image, observe_acceptance_trainer, AcceptanceProgressLedger, EvaluationManifest,
+    TrainingProbe,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -1286,13 +1287,13 @@ fn capture_native_bundle(
         .as_u64()
         .ok_or("native checkpoint step missing")?;
     let step = u32::try_from(step).map_err(|e| e.to_string())?;
-    let bundle = gen_core::moss_image_training::recovery::resume_bundle_path(
+    let bundle = gen_core_moss_image::moss_image_training::recovery::resume_bundle_path(
         &request.output_dir,
         &request.file_name,
         step,
     )
     .map_err(|e| e.to_string())?;
-    let state = gen_core::moss_image_training::recovery::bundle::read(&bundle)
+    let state = gen_core_moss_image::moss_image_training::recovery::bundle::read(&bundle)
         .map_err(|e| e.to_string())?;
     let mut members = BTreeMap::new();
     for entry in std::fs::read_dir(&bundle).map_err(|e| e.to_string())? {
@@ -2038,13 +2039,13 @@ pub(super) fn exact_safetensors_equal(left: &Path, right: &Path) -> Result<()> {
 }
 
 fn compare_recovery(case: &mut Case, reference: &Run, resumed: &Run, canceled: &Run) -> Result<()> {
-    let reference_bundle = gen_core::moss_image_training::recovery::resume_bundle_path(
+    let reference_bundle = gen_core_moss_image::moss_image_training::recovery::resume_bundle_path(
         &reference.request.output_dir,
         &reference.request.file_name,
         60,
     )
     .map_err(|e| e.to_string())?;
-    let resumed_bundle = gen_core::moss_image_training::recovery::resume_bundle_path(
+    let resumed_bundle = gen_core_moss_image::moss_image_training::recovery::resume_bundle_path(
         &resumed.request.output_dir,
         &resumed.request.file_name,
         60,
@@ -2064,7 +2065,8 @@ fn compare_recovery(case: &mut Case, reference: &Run, resumed: &Run, canceled: &
     // Reauthenticate EACH native manifest against its original raw bytes; the
     // manifest hashes remain raw identities, not cross-run state comparisons.
     for bundle in [&reference_bundle, &resumed_bundle] {
-        gen_core::moss_image_training::recovery::bundle::read(bundle).map_err(|e| e.to_string())?;
+        gen_core_moss_image::moss_image_training::recovery::bundle::read(bundle)
+            .map_err(|e| e.to_string())?;
     }
     // Retain every original raw hash, including the two distinct manifests.
     let inventory = |root: &Path| -> Result<BTreeMap<String, String>> {

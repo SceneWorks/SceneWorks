@@ -8,7 +8,7 @@
 // Not every target/feature combination compiles every caller.
 #![allow(dead_code)]
 
-use gen_core::iris::{IrisTask, ADAPTER_TASK_KEY};
+use gen_core_iris::{IrisTask, ADAPTER_TASK_KEY};
 
 /// A valid, tensor-free `model.safetensors` stamped `irisTask=<task>` in its `__metadata__` (the
 /// stamp a trained export of that task carries; a matching stamp resolves, as an unstamped release

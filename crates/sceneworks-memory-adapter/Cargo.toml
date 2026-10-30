@@ -22,6 +22,10 @@ sceneworks-core = { path = "../sceneworks-core" }
 # and its pin contract are gen-core's own backend-neutral `supra2` module (the same code the
 # worker's install-time converter calls), so both lanes share one call path in `lib.rs`.
 sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
+sceneworks-gen-core-iris = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278", optional = true }
+sceneworks-gen-core-flux3 = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278", optional = true }
+sceneworks-gen-core-memory-wan = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # Keep every first-party adapter crate on the exact pinned inference revision.
@@ -63,8 +67,8 @@ sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference",
 
 [features]
 default = []
-mlx = ["dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-instantid", "dep:mlx-gen-krea", "dep:mlx-gen-krea-realtime", "dep:mlx-gen-ltx", "dep:mlx-gen-mage", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]
-candle = ["dep:candle-gen", "dep:candle-gen-scail2", "dep:candle-gen-sdxl", "dep:candle-gen-wan", "dep:runtime-cuda", "dep:image"]
+mlx = ["dep:sceneworks-gen-core-memory-wan", "dep:sceneworks-gen-core-flux3", "dep:sceneworks-gen-core-iris", "dep:mlx-gen", "dep:mlx-gen-flux2", "dep:mlx-gen-instantid", "dep:mlx-gen-krea", "dep:mlx-gen-krea-realtime", "dep:mlx-gen-ltx", "dep:mlx-gen-mage", "dep:mlx-gen-minimax-h3", "dep:mlx-gen-scail2", "dep:mlx-gen-sdxl", "dep:mlx-gen-wan", "dep:mlx-rs", "dep:runtime-macos"]
+candle = ["dep:sceneworks-gen-core-memory-wan", "dep:sceneworks-gen-core-flux3", "dep:sceneworks-gen-core-iris", "dep:candle-gen", "dep:candle-gen-scail2", "dep:candle-gen-sdxl", "dep:candle-gen-wan", "dep:runtime-cuda", "dep:image"]
 
 [[bin]]
 name = "memory-mlx-adapter"

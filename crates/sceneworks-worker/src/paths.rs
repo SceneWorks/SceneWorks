@@ -635,13 +635,15 @@ pub fn latest_moss_training_resume_step(
     output_dir: &Path,
     file_name: &str,
 ) -> WorkerResult<Option<u32>> {
-    gen_core::moss_image_training::recovery::resume_state_if_present(output_dir, file_name)
-        .map(|state| state.map(|state| state.step))
-        .map_err(|error| {
-            WorkerError::InvalidPayload(format!(
-                "MOSS resume checkpoint verification failed: {error}"
-            ))
-        })
+    gen_core_moss_image::moss_image_training::recovery::resume_state_if_present(
+        output_dir, file_name,
+    )
+    .map(|state| state.map(|state| state.step))
+    .map_err(|error| {
+        WorkerError::InvalidPayload(format!(
+            "MOSS resume checkpoint verification failed: {error}"
+        ))
+    })
 }
 
 /// Prepare only the job-owned MOSS recovery bundles. Native verification and bounded
@@ -663,13 +665,12 @@ pub(crate) fn prepare_moss_training_resume_dir(
             )
         });
     }
-    gen_core::moss_image_training::recovery::clear_resume_states(output_dir, file_name).map_err(
-        |error| {
+    gen_core_moss_image::moss_image_training::recovery::clear_resume_states(output_dir, file_name)
+        .map_err(|error| {
             WorkerError::InvalidPayload(format!(
                 "Could not clear job-owned MOSS resume checkpoints: {error}"
             ))
-        },
-    )?;
+        })?;
     Ok(None)
 }
 

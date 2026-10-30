@@ -381,7 +381,7 @@ pub(crate) fn stage_restore_install(data_dir: &Path, config: &str, files: &[&str
         let bytes = if *file == "config.yaml" {
             config.as_bytes().to_vec()
         } else {
-            crate::iris_test_weights::task_weights(gen_core::iris::IrisTask::Restoration)
+            crate::iris_test_weights::task_weights(gen_core_iris::IrisTask::Restoration)
         };
         std::fs::write(dir.join(file), bytes).unwrap();
     }
@@ -483,7 +483,7 @@ fn a_trained_model_previews_with_its_own_tile_geometry() {
         UPSCALER_CONFIG.replace("  tile: 1024", "  tile: 512"),
     )
     .unwrap();
-    let weights = crate::iris_test_weights::task_weights(gen_core::iris::IrisTask::Restoration);
+    let weights = crate::iris_test_weights::task_weights(gen_core_iris::IrisTask::Restoration);
     for file in ["model.safetensors", "empty_prompt.safetensors"] {
         std::fs::write(dir.join(file), &weights).unwrap();
     }
@@ -552,7 +552,7 @@ mod job_tests {
             .join("restored");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("config.yaml"), UPSCALER_CONFIG).unwrap();
-        let weights = crate::iris_test_weights::task_weights(gen_core::iris::IrisTask::Restoration);
+        let weights = crate::iris_test_weights::task_weights(gen_core_iris::IrisTask::Restoration);
         for file in ["model.safetensors", "empty_prompt.safetensors"] {
             std::fs::write(dir.join(file), &weights).unwrap();
         }

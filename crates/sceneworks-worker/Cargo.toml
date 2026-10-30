@@ -47,6 +47,12 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 sceneworks-core = { path = "../sceneworks-core" }
 # Backend-neutral inference contracts; pinned with both platform bundles to one canonical commit.
 sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
+sceneworks-gen-core-iris = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
+sceneworks-gen-core-flux3 = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
+sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
+sceneworks-gen-core-train = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
+sceneworks-gen-core-h3 = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278" }
 # Default-off native execution receipts for the API's CPU-only integration witness.
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "0b80ec518c4b514f04b8a39703aa56cf395da278", optional = true }
 # Native RSS telemetry moved out of gen-core; acceptance keeps the same implementation.

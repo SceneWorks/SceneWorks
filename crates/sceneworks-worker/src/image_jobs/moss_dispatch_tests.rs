@@ -198,7 +198,7 @@ mod dispatch_transaction_tests {
                     .advanced
                     .validate(input.native, input.resolved)
                     .unwrap();
-                let request = gen_core::moss_image_edit::edit_request(input.native).unwrap();
+                let request = gen_core_moss_image::moss_image_edit::edit_request(input.native).unwrap();
                 assert_eq!(
                     request.moss_image.unwrap().acceleration,
                     MossImageAcceleration::Off

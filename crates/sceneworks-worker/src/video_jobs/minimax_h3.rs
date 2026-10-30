@@ -1688,7 +1688,7 @@ pub(super) async fn generate_candle_minimax_h3(
             })?;
     // Price the cold-load envelope from the same complete parsed controls used by
     // the queued gate and generation, including budgets and dense overrides.
-    let sparse_bound = gen_core::veda::workspace::for_video_request(
+    let sparse_bound = gen_core_h3::veda::workspace::for_video_request(
         gen_core::veda::workspace::Request {
             veda: veda.as_ref(),
             width: request.width,

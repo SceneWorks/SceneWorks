@@ -8,7 +8,7 @@
 //! * the **unused-tail** report — upstream's single-device ranged sampler walks only the first
 //!   `640 · ⌊n / 640⌋` items of an `n > 640` dataset that is not a multiple of 640 (641–1279 items
 //!   train on 640). The trainer prints that on stderr only, so SceneWorks computes it from the SAME
-//!   `gen_core::iris::train::DataWalk` the trainer walks and surfaces it before launch (the API's
+//!   `gen_core_iris::train::DataWalk` the trainer walks and surfaces it before launch (the API's
 //!   data-walk endpoint) and in the job (progress message, structured log event and result);
 //! * the **memory floor** gate — a routed Iris training lane is never admitted unbounded: a host
 //!   under its floor row (`sceneworks_core::training::iris::floors`, GiB against a capacity in GiB)
@@ -17,25 +17,25 @@
 
 use std::path::{Path, PathBuf};
 
-use gen_core::iris::train::{DataWalk, CANONICAL_CHUNKS};
+use gen_core_iris::train::{DataWalk, CANONICAL_CHUNKS};
 use serde::Serialize;
 
 /// An Iris training run's checkpoint root, `<output_dir>/<stem>.checkpoints` — the engine's own
-/// `gen_core::iris::train::checkpoint_root`, so resume / load-from / metrics read exactly where the
+/// `gen_core_iris::train::checkpoint_root`, so resume / load-from / metrics read exactly where the
 /// trainers write.
 pub fn iris_checkpoint_root(output_dir: &Path, file_name: &str) -> PathBuf {
-    gen_core::iris::train::checkpoint_root(output_dir, file_name)
+    gen_core_iris::train::checkpoint_root(output_dir, file_name)
 }
 
 /// Every checkpoint directory an Iris training run leaves beside its export (sc-25690): the
 /// checkpoint root and the single sibling `<root>.prior` the trainers retire foreign or abandoned
-/// checkpoints into (`gen_core::iris::train::lineage::prior_checkpoint_root`). Both are part of the
+/// checkpoints into (`gen_core_iris::train::lineage::prior_checkpoint_root`). Both are part of the
 /// run's on-disk footprint, so whatever deletes a run's files deletes these too — taken from the
 /// engine contract, never re-derived here.
 pub fn iris_run_checkpoint_dirs(output_dir: &Path, file_name: &str) -> [PathBuf; 2] {
     [
         iris_checkpoint_root(output_dir, file_name),
-        gen_core::iris::train::lineage::prior_checkpoint_root(output_dir, file_name),
+        gen_core_iris::train::lineage::prior_checkpoint_root(output_dir, file_name),
     ]
 }
 
@@ -1018,7 +1018,7 @@ mod job_tests {
         /// `Ok` — the trainer's contract for a cancel after the first optimizer step.
         CancelAfterFirstStep,
         /// Train a step, publish a checkpoint, then fail at the export the way the engine does (its
-        /// publication is atomic — `gen_core::iris::train::lineage` — so no export is left at the
+        /// publication is atomic — `gen_core_iris::train::lineage` — so no export is left at the
         /// final path): the typed error, the checkpoint kept, nothing exported.
         FailsExport,
         /// Run the ENGINE's own depth dataset pass (`depth_dataset_pass`, the first thing both depth
@@ -1081,8 +1081,8 @@ mod job_tests {
             self.seen.lock().unwrap().request = Some(req.clone());
             on_progress(TrainingProgress::Preparing);
             if self.behavior == Behavior::DepthDatasetPass {
-                use gen_core::iris::train::depth as depth_train;
-                let model = gen_core::iris::IrisConfig::parse(DEPTH_CONFIG)?;
+                use gen_core_iris::train::depth as depth_train;
+                let model = gen_core_iris::IrisConfig::parse(DEPTH_CONFIG)?;
                 let plan = depth_train::DepthTrainPlan::resolve(req, &model)?;
                 depth_train::depth_dataset_pass(req, &plan, |_| {})?;
             }
@@ -2587,11 +2587,11 @@ mod job_tests {
         repo: &'static str,
         file: &'static str,
         bytes: &[u8],
-    ) -> gen_core::iris::restoration_train::TrainingResource {
+    ) -> gen_core_iris::restoration_train::TrainingResource {
         use sha2::Digest;
         let revision = "0123456789abcdef0123456789abcdef01234567";
         stage_bytes(data, repo, revision, file, bytes);
-        gen_core::iris::restoration_train::TrainingResource {
+        gen_core_iris::restoration_train::TrainingResource {
             component,
             name: component,
             url: "https://example.invalid/fixture",
@@ -2671,7 +2671,7 @@ mod job_tests {
         assert_eq!(run.seen.weights.as_deref(), Some(export.as_path()));
         let mut components = run.seen.components.clone();
         components.sort();
-        let resource_path = |resource: &gen_core::iris::restoration_train::TrainingResource| {
+        let resource_path = |resource: &gen_core_iris::restoration_train::TrainingResource| {
             crate::model_jobs::huggingface_pinned_snapshot_dir(
                 &data,
                 resource.repo,
@@ -2725,7 +2725,7 @@ mod job_tests {
         let data_holder = tempfile::tempdir().unwrap();
         let data = data_holder.path().canonicalize().unwrap();
         stage_task_export(&data, "upscaler");
-        for resource in gen_core::iris::restoration_train::TRAINING_RESOURCES {
+        for resource in gen_core_iris::restoration_train::TRAINING_RESOURCES {
             stage(&data, resource.repo, resource.revision, resource.file);
         }
         let plan = task_plan(
@@ -2753,7 +2753,7 @@ mod job_tests {
         // A missing resource is named before anything is hashed.
         let missing = sceneworks_core::hf_home::huggingface_repo_cache_path(
             &data,
-            gen_core::iris::restoration_train::CRITIC_TRUNK_RESOURCE.repo,
+            gen_core_iris::restoration_train::CRITIC_TRUNK_RESOURCE.repo,
         )
         .unwrap();
         std::fs::remove_dir_all(missing).unwrap();

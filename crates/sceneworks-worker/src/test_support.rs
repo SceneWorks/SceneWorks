@@ -17,6 +17,7 @@ pub use acceptance_progress::{
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub use candle_gen_moss_image::test_support::{generation_request, Fixture};
 pub use gen_core;
+pub use gen_core_moss_image;
 pub use gen_core_telemetry::host_process_rss_bytes;
 pub use gen_core_testkit::moss_training_probe::{EvaluationManifest, TrainingProbe};
 #[cfg(target_os = "macos")]
@@ -278,7 +279,7 @@ fn moss_acceptance_device(
             "MLX acceptance requires its original default GPU stream".into(),
         ));
     }
-    let total = gen_core::moss_image_training::recovery::host::total_bytes()
+    let total = gen_core_moss_image::moss_image_training::recovery::host::total_bytes()
         .map_err(|error| unsupported(&error))?;
     let ceiling = gen_core::train::effective_memory_budget_with_fraction(
         total,

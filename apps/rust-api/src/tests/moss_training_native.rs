@@ -9,10 +9,9 @@ use super::support::*;
 use futures_util::FutureExt;
 use sceneworks_worker::test_support::{
     gen_core::{
-        self, moss_image::MossImageVariant, AdapterKind, CancelFlag, GenerationOutput,
-        WeightsSource,
+        moss_image::MossImageVariant, AdapterKind, CancelFlag, GenerationOutput, WeightsSource,
     },
-    generation_request, Fixture, TrainingProbe,
+    gen_core_moss_image, generation_request, Fixture, TrainingProbe,
 };
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -512,7 +511,7 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                 if let Some(id) = cancel_id {
                     let (_, checkpoint_job) = request(cancel_app.clone(), "GET", &format!("/api/v1/jobs/{id}"), Value::Null).await;
                     let output = &checkpoint_job["payload"]["plan"]["output"];
-                    let state = gen_core::moss_image_training::recovery::resume_state(
+                    let state = gen_core_moss_image::moss_image_training::recovery::resume_state(
                         Path::new(output["outputDir"].as_str().unwrap()),
                         output["fileName"].as_str().unwrap(),
                     ).unwrap();
@@ -669,12 +668,12 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                     assert!(checkpoint > 0 && checkpoint < total_steps);
                     assert_ne!(canceled["result"]["trainedArtifactExported"], true);
                     let output = &job["payload"]["plan"]["output"];
-                    let sealed = gen_core::moss_image_training::recovery::resume_state(
+                    let sealed = gen_core_moss_image::moss_image_training::recovery::resume_state(
                         Path::new(output["outputDir"].as_str().unwrap()), output["fileName"].as_str().unwrap(),
                     ).unwrap();
                     assert_eq!(sealed.resolved_seed, literal_seed);
                     assert_eq!(job["payload"]["plan"]["config"]["seed"], literal_seed);
-                    let bundle = gen_core::moss_image_training::recovery::resume_bundle_path(
+                    let bundle = gen_core_moss_image::moss_image_training::recovery::resume_bundle_path(
                         Path::new(output["outputDir"].as_str().unwrap()),
                         output["fileName"].as_str().unwrap(),
                         u32::try_from(checkpoint).unwrap(),
@@ -732,10 +731,10 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                 let output = &completed["payload"]["plan"]["output"];
                 // Step 3 is a retained partial-accumulation checkpoint, independent
                 // of how far the producer advanced while the 64-event channel filled.
-                let third_bundle = gen_core::moss_image_training::recovery::resume_bundle_path(
+                let third_bundle = gen_core_moss_image::moss_image_training::recovery::resume_bundle_path(
                     Path::new(output["outputDir"].as_str().unwrap()), output["fileName"].as_str().unwrap(), 3,
                 ).unwrap();
-                let third = gen_core::moss_image_training::recovery::bundle::read(&third_bundle);
+                let third = gen_core_moss_image::moss_image_training::recovery::bundle::read(&third_bundle);
                 diagnostic["phase"] = json!("sealed_step3_read");
                 diagnostic["sealedStep3"] = match &third {
                     Ok(state) => json!({"step":state.step,"update":state.update,"resolvedSeed":state.resolved_seed,"geometry":state.geometry,"accumulatedTokens":state.accumulated_tokens}),
@@ -751,7 +750,7 @@ async fn run_moss_case(base: &str, variant: MossImageVariant, method: &str) {
                 // This denominator comes from actual encoded [N,128,H/16,W/16]
                 // tensors, not planned area: a 32×32 fallback produces 4, not 8.
                 assert_eq!(third.accumulated_tokens, 8);
-                let sealed = gen_core::moss_image_training::recovery::resume_state(
+                let sealed = gen_core_moss_image::moss_image_training::recovery::resume_state(
                     Path::new(output["outputDir"].as_str().unwrap()), output["fileName"].as_str().unwrap(),
                 ).unwrap();
                 assert_eq!(sealed.resolved_seed, literal_seed);

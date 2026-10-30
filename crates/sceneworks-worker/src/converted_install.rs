@@ -286,7 +286,10 @@ mod tests {
 
     /// Stage `files` at their exact pinned sizes (zeros) in `pin`'s snapshot: present and
     /// size-correct, wrong content — a same-size corruption only the digests see.
-    fn stage_same_size_component(data_dir: &std::path::Path, pin: gen_core::supra2::ComponentPin) {
+    fn stage_same_size_component(
+        data_dir: &std::path::Path,
+        pin: gen_core_checkpoint::supra2::ComponentPin,
+    ) {
         let snapshot = sceneworks_core::hf_home::huggingface_repo_cache_path(data_dir, pin.repo)
             .unwrap()
             .join("snapshots")
@@ -360,8 +363,8 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let bundle = data.path().join("models/mlx/supra2_img");
         converted_artifacts::write_same_size_corrupt_supra2_bundle(&bundle).unwrap();
-        stage_same_size_component(data.path(), gen_core::supra2::FLAN_T5_BASE);
-        stage_same_size_component(data.path(), gen_core::supra2::SD_VAE);
+        stage_same_size_component(data.path(), gen_core_checkpoint::supra2::FLAN_T5_BASE);
+        stage_same_size_component(data.path(), gen_core_checkpoint::supra2::SD_VAE);
         let error = explain_failed_load(
             &settings_at(data.path()),
             &payload(&bundle),

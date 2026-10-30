@@ -4,15 +4,15 @@
 //!
 //! The published interface is text-to-image at 256x256 with prompt, seed, guidance, steps and image
 //! count. The backend-neutral rules (native size, `steps >= 1`, finite guidance, at most
-//! [`gen_core::supra2::MAX_IMAGES`] images, no negative prompt / prompt batch / conditioning) are
+//! [`gen_core_checkpoint::supra2::MAX_IMAGES`] images, no negative prompt / prompt batch / conditioning) are
 //! inference's own `Supra2Resolved::resolve`, run here on the request the worker would build.
 //! SceneWorks adds only what the engine never sees because the generic lane would drop or rewrite
 //! it first: an edit/reference mode, a reference/mask/control carrier, LoRAs, a quantization tier, a
 //! hires-fix pass, a sampler/scheduler/guidance-method choice and every other lane knob the engine
 //! has no input for, plus the lane's step ceiling (the worker clamps above it rather than refusing).
 use crate::contracts::JsonObject;
-use gen_core::supra2::{self as s2, Supra2Resolved};
 use gen_core::GenerationRequest;
+use gen_core_checkpoint::supra2::{self as s2, Supra2Resolved};
 use serde_json::Value;
 
 /// Is `model` the Supra2-IMG catalog id?
@@ -183,7 +183,7 @@ pub const BACKEND_KEY: &str = "backend";
 
 /// Which unconditional context a render at `guidance` (the resolved value; `None` ⇒ the release
 /// default) steers against, derived deterministically the way the engine decides it: CFG runs iff
-/// `guidance > 1` (`gen_core::supra2::cfg_enabled`), and then uses the bundle's stored conditioning
+/// `guidance > 1` (`gen_core_checkpoint::supra2::cfg_enabled`), and then uses the bundle's stored conditioning
 /// when its manifest records one, else the empty-prompt fallback. The engine's own
 /// `used_stored_unconditional` flag stays inside the provider (the `Generator` report does not carry
 /// it), so the worker reads the same fact off the manifest of `bundle` — the confined directory the

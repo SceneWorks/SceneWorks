@@ -11,7 +11,7 @@
 //! This module owns the Iris-specific pieces those surfaces share:
 //!
 //! * **the plan** ([`preview_restore_plan`]) — the engine's own pure planner
-//!   (`gen_core::iris::restoration::plan`) run with no weights, so the UI can show the real
+//!   (`gen_core_iris::restoration::plan`) run with no weights, so the UI can show the real
 //!   processing and output dimensions BEFORE submission, labelled honestly when the input budget
 //!   downscaled the source ([`plan_summary`]); the job records the same plan on its result;
 //! * **the install** ([`resolve_restore_export_dir`]) — cache-only resolution of the task's own
@@ -25,10 +25,10 @@
 
 use std::path::{Path, PathBuf};
 
-use gen_core::iris::restoration::{
+use gen_core::{CancelFlag, InputSizing, TargetSize, TransformRequest};
+use gen_core_iris::restoration::{
     self, Dims, RestorationOptions, RestorationPlan, RestorationResources, TileGeometry,
 };
-use gen_core::{CancelFlag, InputSizing, TargetSize, TransformRequest};
 use sceneworks_core::image_restoration::{IrisRestoreParams, RestoreInputSizing};
 use serde::Serialize;
 
@@ -37,16 +37,16 @@ use crate::{Settings, WorkerError, WorkerResult};
 /// The registered transform id (and catalog entry id) — one name for both, asserted in the tests.
 pub const IRIS_RESTORE_MODEL_ID: &str = restoration::MODEL_ID;
 /// The upstream weights repo and the exact revision the `iris_3b_restore` catalog entry installs.
-pub(crate) const IRIS_RESTORE_REPO: &str = gen_core::iris::UPSTREAM_WEIGHTS_REPO;
-pub(crate) const IRIS_RESTORE_REVISION: &str = gen_core::iris::UPSTREAM_WEIGHTS_REVISION;
+pub(crate) const IRIS_RESTORE_REPO: &str = gen_core_iris::UPSTREAM_WEIGHTS_REPO;
+pub(crate) const IRIS_RESTORE_REVISION: &str = gen_core_iris::UPSTREAM_WEIGHTS_REVISION;
 /// The restoration task's export folder inside the repo.
 pub(crate) fn restore_subdir() -> &'static str {
-    gen_core::iris::IrisTask::Restoration.backbone_subdir()
+    gen_core_iris::IrisTask::Restoration.backbone_subdir()
 }
 /// The three files of the export — the task's whole resource closure.
 pub(crate) const RESTORE_EXPORT_FILES: [&str; 3] = [
-    gen_core::iris::BACKBONE_CONFIG_FILE,
-    gen_core::iris::BACKBONE_WEIGHTS_FILE,
+    gen_core_iris::BACKBONE_CONFIG_FILE,
+    gen_core_iris::BACKBONE_WEIGHTS_FILE,
     restoration::EMPTY_PROMPT_FILE,
 ];
 
@@ -320,7 +320,7 @@ pub fn restore_plan_geometry(
     let dir = crate::iris_task_training::trained_task_export_dir(
         data_dir,
         model,
-        gen_core::iris::IrisTask::Restoration,
+        gen_core_iris::IrisTask::Restoration,
     )
     .map_err(|detail| format!("Iris restoration: {detail}"))?;
     let resources = RestorationResources::from_dir(&dir, IRIS_RESTORE_MODEL_ID)

@@ -1938,7 +1938,7 @@ mod moss_consumer_tests {
             inputs: gen_core::moss_image_edit::MossImageEditInputs<'_>,
         ) -> gen_core::Result<u64> {
             inputs.validate()?;
-            let native = gen_core::moss_image_edit::edit_request(request)?;
+            let native = gen_core_moss_image::moss_image_edit::edit_request(request)?;
             let resolved = MossImageResolved::resolve(MossImageVariant::Sft, &native)?;
             inputs.advanced.validate(&native, &resolved)?;
             self.advanced_inputs.borrow_mut().push((
@@ -2005,7 +2005,7 @@ mod moss_consumer_tests {
             if self.cancel.get() {
                 req.cancel.cancel();
             }
-            let native = edit_request(req)?;
+            let native = gen_core_moss_image::moss_image_edit::edit_request(req)?;
             let mut base = completed_receipt_for(
                 &native,
                 MossImageVariant::from_provider_id(self.descriptor.id)
@@ -2205,7 +2205,7 @@ mod moss_consumer_tests {
             "mlx_moss_image_sft",
             Some(Arc::new(payload)),
         );
-        let native = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+        let native = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
             prompt: "edit".into(),
             width: 16,
             height: 16,
@@ -2510,7 +2510,7 @@ mod moss_consumer_tests {
     fn cold_edit_uses_native_typed_validation_before_provider_loading() {
         let temp = tempfile::tempdir().unwrap();
         let spec = LoadSpec::new(WeightsSource::Dir(temp.path().to_path_buf()));
-        let mut request = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+        let mut request = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
             width: 16,
             height: 16,
             ..Default::default()
@@ -2579,7 +2579,7 @@ mod moss_consumer_tests {
         );
         let generator = moss_load_admitted(60, budget, load).unwrap();
         assert_eq!(loads.get(), 1);
-        let request = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+        let request = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
             width: 16,
             height: 16,
             ..Default::default()
@@ -2690,7 +2690,7 @@ mod moss_consumer_tests {
             Err(WorkerError::Canceled(_))
         ));
         generator.cancel.set(false);
-        let request = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+        let request = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
             width: 16,
             height: 16,
             ..Default::default()
@@ -2721,7 +2721,7 @@ mod moss_consumer_tests {
             applied: 36,
             skipped: vec![],
         }];
-        let req = gen_core::moss_image_edit::edit_request(&GenerationRequest {
+        let req = gen_core_moss_image::moss_image_edit::edit_request(&GenerationRequest {
             width: 16,
             height: 16,
             ..Default::default()
