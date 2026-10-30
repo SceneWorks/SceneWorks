@@ -249,6 +249,12 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
             ordered,
             format!("required {case} MOSS sequence differs; inspect recorded POSTs: {messages:?}"),
         )?;
+        require(
+            !lowered[transformer + 1..]
+                .iter()
+                .any(|message| message.contains("encoding prompt")),
+            "prompt encoding label returned after transformer loading began",
+        )?;
     }
     let compute = lowered
         .iter()
@@ -715,6 +721,29 @@ fn progress_sequence_requires_bytes_and_current_phase() {
         stale.push(obsolete);
         assert!(validate_progress(&stale, "image_mlx").is_err());
     }
+    let mut stale_prompt_cases = Vec::new();
+    for (case, valid) in [("image_mlx", &mlx), ("image_cuda", &cuda)] {
+        let transformer = valid
+            .iter()
+            .position(|message| message.contains("Loading transformer"))
+            .unwrap();
+        // The encoder can still read a new weight range while encoding. Repeated positive /
+        // negative encoding reports before renderer construction remain legitimate.
+        let mut encoding_read = valid.clone();
+        encoding_read.insert(transformer, "Loading text encoder — 1.5 / 2.0 GB".into());
+        validate_progress(&encoding_read, case).unwrap();
+        // Regression: an IO scope ending during lazy renderer construction restored the old
+        // EncodingPrompt label, after all prompt encoding had already completed.
+        let mut stale_prompt = valid.clone();
+        stale_prompt.insert(transformer + 1, "Image 1/1 — Encoding prompt.".into());
+        if validate_progress(&stale_prompt, case).is_ok() {
+            stale_prompt_cases.push(case);
+        }
+    }
+    assert!(
+        stale_prompt_cases.is_empty(),
+        "stale prompt replay accepted for {stale_prompt_cases:?}"
+    );
     let mut wrong_order = mlx;
     wrong_order.swap(3, 5);
     assert!(validate_progress(&wrong_order, "image_mlx").is_err());
