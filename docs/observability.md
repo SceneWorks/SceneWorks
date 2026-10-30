@@ -150,6 +150,15 @@ shared code) when it drops its resident generator after the idle timeout: `engin
 level. It correlates with the worker releasing cached GPU allocations (Metal/MLX or
 CUDA) before the next generation cold-loads weights again.
 
+### Generator cache miss — `generator_cache_miss` (Rust worker, sc-27985)
+
+Emitted at info level each time a request cold-loads instead of reusing the resident
+generator: `engine`, and `reason` — `empty` (nothing resident: first job, or after an
+idle eviction) or `identity_changed`, with `residentEngine` and `changed`, the
+comma-separated cache-identity fields that differ (for example `adapters` when a LoRA
+was added or removed, `resolved_route` for a different acceleration mode). A warm hit
+emits nothing.
+
 ### Warm execution-policy decision — `generator_cache_warm_policy_decision` (Rust worker, sc-18317)
 
 Emitted once per request evaluation on a warm cache hit whose request asks for an
