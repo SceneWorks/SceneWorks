@@ -197,7 +197,9 @@ fn has_bytes(message: &str) -> bool {
             .iter()
             .any(|u| message.contains(u))
 }
-fn validate_progress(messages: &[String], image: bool, training: bool) -> Result<()> {
+fn validate_progress(messages: &[String], case: &str) -> Result<()> {
+    let image = case.starts_with("image_");
+    let training = case == "training";
     let lowered: Vec<_> = messages.iter().map(|m| m.to_lowercase()).collect();
     let load = lowered
         .iter()
@@ -228,13 +230,24 @@ fn validate_progress(messages: &[String], image: bool, training: bool) -> Result
             .iter()
             .position(|m| m.contains("step "))
             .ok_or("missing real denoise steps")?;
-        require(
+        // MLX materializes encoder+VAE in load; Candle defers VAE weights until decode.
+        // Both encode conditioning before constructing the first lazy transformer renderer.
+        let ordered = if case == "image_cuda" {
+            checking < text
+                && text < prompt
+                && prompt < transformer
+                && transformer < step
+                && step < vae
+        } else {
             checking < text
                 && text < vae
-                && vae < transformer
-                && transformer < prompt
-                && prompt < step,
-            format!("required MOSS sequence differs; inspect recorded POSTs: {messages:?}"),
+                && vae < prompt
+                && prompt < transformer
+                && transformer < step
+        };
+        require(
+            ordered,
+            format!("required {case} MOSS sequence differs; inspect recorded POSTs: {messages:?}"),
         )?;
     }
     let compute = lowered
@@ -254,18 +267,31 @@ fn validate_progress(messages: &[String], image: bool, training: bool) -> Result
         })
         .ok_or("missing compute progress after loading")?;
     require(load < compute, "compute precedes byte-bearing load")?;
-    // A later genuine lazy read can occur; an unchanged earlier IO label must never reappear
-    // after compute. Do not demand that every brief/coalesced intermediate report is posted.
-    let old_io: Vec<_> = lowered[..compute]
-        .iter()
-        .filter(|m| {
-            m.contains("loading ") || m.contains("verifying ") || m.contains("checking model files")
-        })
-        .collect();
-    require(
-        !lowered[compute..].iter().any(|m| old_io.contains(&m)),
-        "earlier IO label reappeared after compute",
-    )
+    // Invalidate IO labels at EVERY compute transition, including denoising after a lazy
+    // transformer read. Distinct later lazy reads (Candle VAE decode) remain truthful.
+    let mut seen_io = std::collections::BTreeSet::<&str>::new();
+    let mut obsolete_io = std::collections::BTreeSet::<&str>::new();
+    for message in &lowered {
+        if message.contains("loading ")
+            || message.contains("verifying ")
+            || message.contains("checking model files")
+        {
+            require(
+                !obsolete_io.contains(message.as_str()),
+                "earlier IO label reappeared after compute",
+            )?;
+            seen_io.insert(message.as_str());
+        }
+        if message.contains("encoding prompt")
+            || message.contains("step ")
+            || message.contains("generating audio (")
+            || message.contains("decoding")
+            || message.contains("synthes")
+        {
+            obsolete_io.extend(seen_io.iter().copied());
+        }
+    }
+    Ok(())
 }
 
 fn reference_wav() -> Vec<u8> {
@@ -598,7 +624,7 @@ async fn run(case: &str) {
         let rows = ledger.rows.lock().unwrap().clone();
         let messages = progress_messages(&rows, id);
         receipt["messages"] = json!(messages);
-        validate_progress(&messages, case.starts_with("image_"), case == "training")?;
+        validate_progress(&messages, case)?;
         Ok::<_, String>(())
     })
     .catch_unwind()
@@ -655,28 +681,44 @@ async fn training() {
 
 #[test]
 fn progress_sequence_requires_bytes_and_current_phase() {
-    let sequence: Vec<String> = [
+    let mlx: Vec<String> = [
         "Checking model files (1/1).",
         "Loading text encoder — 1.0 / 2.0 GB",
         "Loading vae — 1.0 / 2.0 GB",
-        "Loading transformer — 1.0 / 2.0 GB",
         "Image 1/1 — Encoding prompt.",
+        "Image 1/1 — Encoding prompt.",
+        "Loading transformer — 1.0 / 2.0 GB",
         "Image 1/1 — step 1 of 2",
     ]
     .into_iter()
     .map(str::to_owned)
     .collect();
-    validate_progress(&sequence, true, false).unwrap();
-    let mut stale = sequence.clone();
-    stale.push(sequence[3].clone());
-    assert!(validate_progress(&stale, true, false).is_err());
-    let mut wrong_order = sequence;
-    wrong_order.swap(2, 3);
-    assert!(validate_progress(&wrong_order, true, false).is_err());
+    validate_progress(&mlx, "image_mlx").unwrap();
+    let cuda = vec![
+        mlx[0].clone(),
+        mlx[1].clone(),
+        mlx[3].clone(),
+        mlx[4].clone(),
+        mlx[5].clone(),
+        mlx[6].clone(),
+        mlx[2].clone(),
+    ];
+    validate_progress(&cuda, "image_cuda").unwrap();
+    assert!(validate_progress(&mlx, "image_cuda").is_err());
+    assert!(validate_progress(&cuda, "image_mlx").is_err());
+    // A stale transformer label after denoising must fail, even though it first appeared
+    // after prompt encoding. Likewise the completed encoder label cannot return.
+    for obsolete in [mlx[1].clone(), mlx[5].clone()] {
+        let mut stale = mlx.clone();
+        stale.push(obsolete);
+        assert!(validate_progress(&stale, "image_mlx").is_err());
+    }
+    let mut wrong_order = mlx;
+    wrong_order.swap(3, 5);
+    assert!(validate_progress(&wrong_order, "image_mlx").is_err());
     assert!(validate_progress(
         &["Loading weights".into(), "Training step 1 of 1".into()],
-        false,
-        true
+        "training"
     )
     .is_err());
 }
