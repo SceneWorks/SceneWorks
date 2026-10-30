@@ -100,7 +100,10 @@ fn external_buffers(path: &Path, model: &mut Vec<u8>) -> WorkerResult<Vec<(Strin
             .or_default()
             .push(reference);
     }
-    let directory = path.parent().unwrap_or_else(|| Path::new("."));
+    let directory = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
     let mut buffers = Vec::new();
     let mut embedded = BTreeMap::new();
     for (name, references) in files {
@@ -627,6 +630,40 @@ mod tests {
             "source model stays immutable"
         );
     }
+    #[test]
+    fn bare_relative_model_filename_resolves_sibling_external_weights() {
+        // Unique siblings exercise an empty Path::parent without mutating process-wide cwd.
+        let mut model_file = tempfile::NamedTempFile::new_in(".").unwrap();
+        let mut weights_file = tempfile::NamedTempFile::new_in(".").unwrap();
+        let model_name = std::path::PathBuf::from(model_file.path().file_name().unwrap());
+        let weights_name = weights_file
+            .path()
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(model_name.parent().unwrap().as_os_str().is_empty());
+        weights_file
+            .write_all(&[0, 0, 0, 0, 17, 18, 19, 20])
+            .unwrap();
+        let tensor = [
+            integer(1, 1),
+            integer(2, 1),
+            field(8, b"x"),
+            integer(14, 1),
+            entry("location", &weights_name),
+            entry("offset", "4"),
+            entry("length", "4"),
+        ]
+        .concat();
+        let mut bytes = model(&[tensor]);
+        model_file.write_all(&bytes).unwrap();
+        let buffers = external_buffers(&model_name, &mut bytes).unwrap();
+        assert_eq!(buffers, vec![(weights_name, vec![17, 18, 19, 20])]);
+        assert_eq!(refs(&bytes)[0].offset, 0);
+    }
+
     #[test]
     fn optimized_ort_buffers_bypass_the_onnx_metadata_walker_unchanged() {
         let mut bytes = b"\x08\x00\x00\x00ORTMopaque-flatbuffer".to_vec();
