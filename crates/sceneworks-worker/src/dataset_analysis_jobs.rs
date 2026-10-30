@@ -113,7 +113,7 @@ pub(crate) async fn run_dataset_analysis_job(
             JobStatus::LoadingModel,
             ProgressStage::LoadingModel,
             0.08,
-            "Loading CLIP image embedder.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             backend,
         ),

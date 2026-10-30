@@ -1765,9 +1765,9 @@ pub(crate) async fn run_dataset_upscale_job(
         &job.id,
         progress_payload(
             JobStatus::LoadingModel,
-            ProgressStage::Downloading,
+            ProgressStage::LoadingModel,
             0.1,
-            "Loading upscaler.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             None,
             None,
