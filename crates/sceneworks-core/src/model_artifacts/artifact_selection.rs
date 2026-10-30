@@ -949,18 +949,21 @@ pub fn selected_requirements_for_closure(
     let mut requirements = receipt_requirements_for_model(selected, data_dir);
     let receipt_backed = !requirements.is_empty();
     for declared in declared_exact_requirements_for_model(selected) {
-        // Covered only when an existing requirement of the same row identity already holds every
-        // declared file. Several rows can share a repository and variant with different files
-        // (MOSS's `moss-dmd-lora` / `-time` / `-dataspace` rows), and matching on identity alone
-        // kept only the first (sc-27985).
+        // A co-requisite row is covered only when an existing requirement of the same identity
+        // already holds every declared file: several co-requisite rows can share a repository and
+        // variant with different files (MOSS's `moss-dmd-lora` / `-time` / `-dataspace`), and
+        // matching on identity alone kept only the first (sc-27985). A primary receipt stays
+        // authoritative even when the current manifest lists different files, so a still-usable
+        // install never gains a second primary.
         if !requirements.iter().any(|requirement| {
             requirement.repository == declared.repository
                 && requirement.variant == declared.variant
                 && requirement.is_primary == declared.is_primary
-                && declared
-                    .files
-                    .iter()
-                    .all(|file| requirement.files.contains(file))
+                && (declared.is_primary
+                    || declared
+                        .files
+                        .iter()
+                        .all(|file| requirement.files.contains(file)))
         }) {
             requirements.push(declared);
         }
@@ -1166,6 +1169,37 @@ mod tests {
             serde_json::to_vec(&json!({ "receipts": receipts })).unwrap(),
         )
         .unwrap();
+    }
+
+    /// sc-27985: a primary receipt stays authoritative when the current manifest's exact primary
+    /// file list moved on, so a still-usable install keeps exactly one (receipt-backed) primary.
+    #[test]
+    fn a_stale_primary_receipt_is_not_joined_by_the_changed_declared_primary() {
+        let temp = tempfile::tempdir().unwrap();
+        write_receipts(
+            temp.path(),
+            "owner/model",
+            json!([{"repo":"owner/model", "modelId":"model", "variant":"default",
+                    "resolvedFiles":["model-v1.safetensors"], "snapshotRevision": REV_A}]),
+        );
+        let model = json!({
+            "id": "model",
+            "downloads": [
+                {"provider":"huggingface", "repo":"owner/model", "revision": REV_A,
+                 "default":true, "files":["model-v2.safetensors"]}
+            ]
+        });
+
+        let selected =
+            selected_requirements_for_model(&model, std::env::consts::OS, None, temp.path());
+
+        assert!(selected.receipt_backed);
+        assert_eq!(selected.requirements.len(), 1);
+        assert!(selected.requirements[0].is_primary);
+        assert_eq!(
+            selected.requirements[0].files,
+            vec![PathBuf::from("model-v1.safetensors")]
+        );
     }
 
     #[test]
