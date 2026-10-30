@@ -173,12 +173,12 @@ export function DatasetEditorPanel({
   }
   // sc-8564: resolve a near-dup cluster's item ids (server dataset-item ids — the readiness report's
   // `itemId` / flag `peers`) back to member assets, so the cluster view can render each sibling's
-  // thumbnail. `activeDataset.items` carry both the server `id` and the `assetId` (the member-asset key).
+  // thumbnail. Use the editor's selection key for both library and dataset-owned images.
   const assetByItemId = React.useMemo(() => {
     const byAssetId = new Map((memberAssets ?? []).map((asset) => [asset.id, asset]));
     const map = new Map();
-    for (const item of activeDataset?.items ?? []) {
-      const asset = item.assetId ? byAssetId.get(item.assetId) : null;
+    for (const [index, item] of (activeDataset?.items ?? []).entries()) {
+      const asset = byAssetId.get(datasetItemSelectionKey(activeDataset, item, index));
       if (asset) {
         map.set(item.id, asset);
       }
@@ -190,7 +190,7 @@ export function DatasetEditorPanel({
     return asset ? (
       <AssetThumbnail asset={asset} />
     ) : (
-      <span className="dataset-doctor-nearup-thumb-missing" title={itemId} aria-hidden />
+      <span className="dataset-doctor-nearup-thumb-missing" role="img" aria-label="Image unavailable">Unavailable</span>
     );
   };
 
@@ -476,9 +476,13 @@ export function DatasetEditorPanel({
                 onRecaptionFlagged={(itemIds) => setCaptionDialog({ type: "flagged", itemIds })}
               />
               <NearDuplicateClusters
+                key={activeDataset?.id ?? "draft"}
                 report={readiness}
                 renderThumbnail={renderClusterThumbnail}
+                itemLabel={(itemId) => assetByItemId.has(itemId) ? imageAssetName(assetByItemId.get(itemId)) : itemId}
                 onRemoveDuplicates={datasetDoctor?.onRemoveDuplicates}
+                onDeleteSelected={datasetDoctor?.onDeleteSelected}
+                busy={savingDataset || deletingDataset}
               />
               {readiness?.distributions ? (
                 <details className="dataset-doctor-advanced">
