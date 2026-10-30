@@ -1,5 +1,5 @@
 import path from "node:path";
-import { appendFile, lstat, mkdir, readFile, readdir, realpath } from "node:fs/promises";
+import { appendFile, lstat, mkdir, readFile, readdir, realpath, rm, utimes } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
@@ -42,6 +42,35 @@ export async function ensurePhysicalCargoCache(directory) {
   if (normalized(physical) !== normalized(directory)) fail();
 }
 
+// candle-flash-attn's build script compiles 37 FlashAttention-2 CUDA/CUTLASS kernels (~20 min) and
+// honours CANDLE_FLASH_ATTN_BUILD_DIR as a persistent object cache: cudaforge keys every object on
+// its nvcc args and the full kernels/ tree content, so a stale object is never reused. Job targets
+// on these runners are disposable, so without it every compile graph of every job rebuilt the
+// kernels. The directory is per listener (a listener runs one job at a time; two listeners never
+// write the same objects) and per locked inference revision: object names hash the kernel path,
+// which lives under the revision's Cargo checkout, so a revision's objects only serve that
+// revision. The current revision plus the most recently used other one are retained (a PR on the
+// previous pin stays warm); older revision directories are removed so the cache cannot grow
+// without bound. Objects are written as nvcc finishes each one, so a cancelled job keeps them.
+export const FLASH_ATTN_RETAINED_REVISIONS = 2;
+export async function prepareFlashAttnBuildDir(cache, revision, { now = new Date() } = {}) {
+  if (!/^[a-f0-9]{40}$/.test(revision ?? "")) fail();
+  const parent = path.join(cache, "candle-flash-attn"), directory = path.join(parent, revision);
+  await ensurePhysicalCargoCache(directory);
+  await utimes(directory, now, now); // Most-recently-used marker for retention.
+  const others = [];
+  for (const entry of await readdir(parent, { withFileTypes: true })) {
+    if (entry.name === revision || !/^[a-f0-9]{40}$/.test(entry.name)) continue;
+    const full = path.join(parent, entry.name), info = await lstat(full);
+    if (!info.isDirectory() || info.isSymbolicLink()) continue; // Never follow or remove a link.
+    others.push({ full, used: info.mtimeMs });
+  }
+  others.sort((a, b) => b.used - a.used);
+  const removed = [];
+  for (const stale of others.slice(FLASH_ATTN_RETAINED_REVISIONS - 1)) { await rm(stale.full, { recursive: true, force: true }); removed.push(path.basename(stale.full)); }
+  return { directory, removed };
+}
+
 export function lockedInferenceRevision(lock) {
   const lines = lock.split(/\r?\n/).filter(line => line.startsWith('source = "git+https://github.com/SceneWorks/inference'));
   const sources = lines.map(line => /^source = "git\+https:\/\/github\.com\/SceneWorks\/inference\?rev=([a-f0-9]{40})#([a-f0-9]{40})"$/.exec(line));
@@ -74,8 +103,9 @@ async function main() {
   const revision = lockedInferenceRevision(await readFile("Cargo.lock", "utf8"));
   const present = await cachedInferenceRevision(selected.cache, revision);
   if (!process.env.GITHUB_ENV) throw new Error("GitHub environment output is required");
-  await appendFile(process.env.GITHUB_ENV, `CARGO_HOME=${selected.cache}\n`);
-  console.log(JSON.stringify({ kind: "windows-cargo-cache", ...selected, inference_revision: revision, inference_commit_present: present }));
+  const flashAttn = await prepareFlashAttnBuildDir(selected.cache, revision);
+  await appendFile(process.env.GITHUB_ENV, `CARGO_HOME=${selected.cache}\nCANDLE_FLASH_ATTN_BUILD_DIR=${flashAttn.directory}\n`);
+  console.log(JSON.stringify({ kind: "windows-cargo-cache", ...selected, inference_revision: revision, inference_commit_present: present, candle_flash_attn_build_dir: flashAttn.directory, candle_flash_attn_removed: flashAttn.removed }));
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile, utimes, stat } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
@@ -11,7 +11,7 @@ import { writeFileSync } from "node:fs";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { historyRequirements } from "./prepare-inference-history.mjs";
-import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
+import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision, prepareFlashAttnBuildDir } from "./select-windows-cargo-cache.mjs";
 import { bindQwenPersistentCache } from "./ci/memory-catalog/bind-qwen-persistent-cache.mjs";
 
 // sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
@@ -669,6 +669,40 @@ test("Windows Cargo cache directory guard preserves content and rejects linked o
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+// Inference 354b41cc put candle-flash-attn (a ~20 min nvcc build) into every backend-candle graph;
+// job targets are disposable, so run 41043982039 rebuilt it in each of four graphs and hit the
+// 60 min job limit. The kernels get a persistent per-listener, per-revision object cache.
+test("Windows candle lanes keep FlashAttention kernels in a bounded per-listener, per-revision cache", async () => {
+  const root = await mkdtemp(path.join(await realpath(tmpdir()), "flash-attn-cache-"));
+  try {
+    const cache = path.join(root, "cargo-home-2"), parent = path.join(cache, "candle-flash-attn");
+    const [current, previous, older, oldest] = ["a", "b", "c", "d"].map(c => c.repeat(40));
+    for (const [rev, day] of [[previous, 3], [older, 2], [oldest, 1]]) {
+      const dir = path.join(parent, rev); await mkdir(dir, { recursive: true }); await writeFile(path.join(dir, "flash_api-1.o"), rev);
+      const when = new Date(Date.UTC(2026, 9, day)); await utimes(dir, when, when);
+    }
+    await mkdir(path.join(parent, "not-a-revision"));
+    const result = await prepareFlashAttnBuildDir(cache, current, { now: new Date(Date.UTC(2026, 9, 30)) });
+    assert.equal(result.directory, path.join(parent, current));
+    assert.deepEqual(result.removed.sort(), [older, oldest].sort(), "only revisions beyond the newest other one are removed");
+    assert.deepEqual((await readdir(parent)).sort(), [current, previous, "not-a-revision"].sort());
+    assert.equal(await readFile(path.join(parent, previous, "flash_api-1.o"), "utf8"), previous, "the previous pin stays warm");
+    // Re-selecting an existing revision preserves its objects and refreshes its use marker.
+    await writeFile(path.join(parent, current, "flash_api-2.o"), "kept");
+    await prepareFlashAttnBuildDir(cache, current, { now: new Date(Date.UTC(2026, 9, 31)) });
+    assert.equal(await readFile(path.join(parent, current, "flash_api-2.o"), "utf8"), "kept");
+    assert.equal((await stat(path.join(parent, current))).mtime.toISOString(), "2026-10-31T00:00:00.000Z");
+    for (const bad of ["", "main", "A".repeat(40), "../" + "a".repeat(37)]) await assert.rejects(() => prepareFlashAttnBuildDir(cache, bad), /physical persistent/);
+  } finally { await rm(root, { recursive: true, force: true }); }
+  const select = await source("scripts/select-windows-cargo-cache.mjs");
+  assert.match(select, /CANDLE_FLASH_ATTN_BUILD_DIR=\$\{flashAttn\.directory\}/, "the selection step exports the cache to every later compile step");
+  const job = workflowJob(await source(".github/workflows/windows-candle.yml"), "candle-worker");
+  const selectStep = workflowStep(job, "Isolate Cargo dependency checkout");
+  for (const heavy of ["Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)"]) {
+    assert.ok(job.indexOf(selectStep) < job.indexOf(workflowStep(job, heavy)), `${heavy} runs after the cache is selected`);
+  }
+});
+
 test("Windows Cargo cache diagnostic distinguishes an actual locked Git commit from empty or unrelated caches", async () => {
   const root = await mkdtemp(path.join(await realpath(tmpdir()), "cargo-listener-git-"));
   const git = promisify(execFile);
@@ -965,7 +999,7 @@ test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung t
   const workflow = await source(".github/workflows/windows-candle.yml");
   const runbook = await source("docs/epic-20738-terminal-cuda.md");
   const timeoutContract =
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 60 \}\}/;
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 90 \}\}/;
   const validateTimeout = (candidate) => {
     assert.match(candidate, timeoutContract);
     const job = workflowJob(candidate, "candle-worker");
@@ -982,11 +1016,12 @@ test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung t
 
   const terminalArm =
     "github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720";
-  const ordinaryArm = "inputs.run_five_rung_reference && 120 || 60";
+  const ordinaryArm = "inputs.run_five_rung_reference && 120 || 90";
   for (const [name, mutated] of [
     ["terminal timeout regressed to 360", workflow.replace(terminalArm, terminalArm.replace("720", "360"))],
     ["terminal timeout arm removed", workflow.replace(` || ${terminalArm}`, "")],
-    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("60", "45"))],
+    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("90", "45"))],
+    ["ordinary timeout regressed to the pre-flash-attn 60", workflow.replace(ordinaryArm, ordinaryArm.replace("90", "60"))],
   ]) {
     assert.notEqual(mutated, workflow, `${name} mutation must modify the workflow fixture`);
     assert.throws(
