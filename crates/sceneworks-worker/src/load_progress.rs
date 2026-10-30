@@ -256,7 +256,7 @@ pub(crate) fn generator_progress(progress: &gen_core::Progress) {
     );
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) fn training_progress(progress: &gen_core::TrainingProgress) {
     let (message, stage) = match progress {
         gen_core::TrainingProgress::Preparing => {
@@ -285,11 +285,7 @@ pub(crate) fn training_progress(progress: &gen_core::TrainingProgress) {
 
 /// Attach one request-local callback when a universal text request is built. The captured
 /// context also covers decoder threads; it never consults another job's current observer.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+// Backend-neutral request builders (including StarVector) also compile without a native backend.
 pub(crate) fn text_observer() -> gen_core::core_llm::GenerationProgressObserver {
     let context = Context::capture();
     gen_core::core_llm::GenerationProgressObserver::new(move |phase| {
@@ -306,11 +302,7 @@ pub(crate) fn text_observer() -> gen_core::core_llm::GenerationProgressObserver 
 
 /// Universal text execution starts with preparation; the request's phase observer supplies actual
 /// tokenization/prefill/decode boundaries. Token counts use the same current-state slot.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
-#[cfg_attr(
-    not(any(target_os = "macos", feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) fn generate_text(
     model: &dyn gen_core::core_llm::TextLlm,
     request: &gen_core::core_llm::TextLlmRequest,
