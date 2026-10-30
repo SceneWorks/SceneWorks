@@ -10,9 +10,9 @@ publish = false
 test-support = []
 
 [dependencies]
-sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "7e0a34e4e774750cc2a2eee098a5d7ae2347bebb" }
-sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "7e0a34e4e774750cc2a2eee098a5d7ae2347bebb" }
-sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "7e0a34e4e774750cc2a2eee098a5d7ae2347bebb" }
+sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "54ad274dd4fd28b02faece88f268aa2a2ddaf86b" }
+sceneworks-gen-core-checkpoint = { git = "https://github.com/SceneWorks/inference", rev = "54ad274dd4fd28b02faece88f268aa2a2ddaf86b" }
+sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "54ad274dd4fd28b02faece88f268aa2a2ddaf86b" }
 directories = "5"
 fs2 = "0.4"
 # sc-19708: exact-file requirement selection matches receipt files against the manifest's

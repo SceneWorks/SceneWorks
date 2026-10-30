@@ -429,11 +429,12 @@ jobs:
     # component set is 144.051 GB (210.332 GB once transformer_ref joins in sc-17149) against
     # Krea q4's ~14 GB, so it is the branch that most
     # needs the long budget. Krea's two dispatch shapes keep their exact previous values --
-    # five-rung + provision 240, five-rung alone 120, everything else 60.
+    # five-rung + provision 240, five-rung alone 120. Ordinary cold builds also allow 120.
     # The LTX Eros acceptance capture (sc-18902, from main) keeps its own six-hour ceiling.
     # The strictly serial 19-cell epic-20738 terminal campaign gets a job-level twelve-hour
     # ceiling; no individual step receives a timeout above GitHub's 360-minute step limit.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
+    # Cold inference pins build both the worker and sidecar; a healthy compile exceeded 60m.
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || 120 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Register before builds so post cleanup also covers failed/cancelled jobs.
