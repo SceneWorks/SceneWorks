@@ -98,7 +98,13 @@ def main(args):
                     msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1); claimed=True
                 except OSError:
                     time.sleep(min(.5,max(0,deadline-time.monotonic())))
-            devices, processes = guard.inventory(output,'bounded-claimed-device',deadline)
+            # Shared-headroom correctness requires fresh exact-card counters, not
+            # a host-wide process census. Preserve the original case deadline
+            # even when the sampling helper supplies its own five-second window.
+            def selected_inventory(out=None, label='snapshot', probe_deadline=None):
+                bounded_deadline = deadline if probe_deadline is None else min(deadline, probe_deadline)
+                return guard.inventory(out,label,bounded_deadline,selected_uuid=UUID)
+            devices, processes = selected_inventory(output,'bounded-claimed-device',deadline)
             selected = [d for d in devices if d['uuid']==UUID and d['index']==1]
             require(len(selected)==1, 'physical1 UUID changed; no fallback')
             policy = SimpleNamespace(child_gpu_cap_bytes=CAP,gpu_free_reserve_bytes=RESERVE)
@@ -106,8 +112,8 @@ def main(args):
             record['admissionDiagnostic'] = resources.cuda_claim_diagnostic(UUID,devices,processes,policy,activity_profile=PROFILE)
             require(idle_check(selected[0],processes), 'selected GPU lacks cap plus reserve headroom')
             identity_key = lambda uuid, rows: resources.proof_cuda_contexts(uuid,rows,activity_profile=PROFILE)
-            device, baseline = guard.sample_baseline(selected[0],output,'bounded-admission',idle_check=idle_check,identity_key=identity_key,permit_bounded_growth=True,require_stable_contexts=False)
-            binding = primitives.resolve_binding(guard,output,deadline,dict(os.environ),cuda_ordinals='0')
+            device, baseline = guard.sample_baseline(selected[0],output,'bounded-admission',idle_check=idle_check,identity_key=identity_key,permit_bounded_growth=True,require_stable_contexts=False,inventory_reader=selected_inventory)
+            binding = primitives.resolve_binding(SimpleNamespace(inventory=selected_inventory),output,deadline,dict(os.environ),cuda_ordinals='0')
             require(binding.get('mapping') == [{'cuda_ordinal':0,'uuid':UUID,'nvml_index':1}], 'actual CUDA ordinal0 does not resolve to physical1 leased UUID')
             record.update(state='admitted', ordinalBinding=binding, admissionBaseline=baseline)
             save(); print(json.dumps(record),flush=True)
@@ -144,7 +150,7 @@ def main(args):
                 record['nativeProcessExited']=True
             else:
                 record['nativeProcessStarted']=False
-            guard.verify_idle(device,output,'bounded-release',baseline,idle_check=idle_check,identity_key=identity_key,permit_bounded_growth=True,require_stable_contexts=False)
+            guard.verify_idle(device,output,'bounded-release',baseline,idle_check=idle_check,identity_key=identity_key,permit_bounded_growth=True,require_stable_contexts=False,inventory_reader=selected_inventory)
             record.update(state='released',postExecutionVerified=True)
         except BaseException as error:
             record.update(state='failed',error=str(error)); raise
