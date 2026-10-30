@@ -16,6 +16,8 @@ import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
 import { cudaDeviceEvidence, MANUAL_CUDA_PHYSICAL_GPU } from './ci/h3-import-native-proof.mjs';
 import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
+import { OS_ASSIGNED_PORT, isServicePort, boundApiPort, portHolder, formatPortHolder, isBindFailure, liveOwnedProcesses, campaignRunRoots, formatLeftovers } from './lib/h3-owned-processes.mjs';
+export { OS_ASSIGNED_PORT, boundApiPort };
 // Windows: the bootstrap output root is ~95 characters deep and cargo/nvcc nest candle's kernel
 // build ~50 more below CARGO_TARGET_DIR, so a target under the output root overruns MAX_PATH.
 // There the target is a short sibling of this run's private root (`<run>-<attempt>-<kind>`).
@@ -285,7 +287,7 @@ export async function executeFixture(p,c,swRoot,inferenceRoot,dir,deps={}) {
   assert.equal(c.fixtureProof.kind,'source-bound-assertions');assert.equal(c.command[0],'cargo');assert.ok(c.command.includes('test')&&c.command.includes(path.join(swRoot,'Cargo.toml')));
   assert.ok(c.inputs.length);for(const input of c.inputs)assert.equal(await hashFile(input.path),input.sha256);
   const state=path.join(dir,'fixture-state');await mkdir(state);
-  const env={...privateEnvironment(state,{port:43210,gpuId:'cpu',backend:c.backend},randomUUID()),CARGO_TARGET_DIR:cargoTarget(c,'fixture',path.join(p.output,`fixture-target-${p.sceneworks}-${p.inference}-${c.backend}`),runPlatform(deps)),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'};
+  const env={...privateEnvironment(state,{port:OS_ASSIGNED_PORT,gpuId:'cpu',backend:c.backend},randomUUID()),CARGO_TARGET_DIR:cargoTarget(c,'fixture',path.join(p.output,`fixture-target-${p.sceneworks}-${p.inference}-${c.backend}`),runPlatform(deps)),CARGO_PROFILE_TEST_DEBUG:'0',CARGO_PROFILE_DEV_DEBUG:'0'};
   await (deps.runProcess??runProcess)(c.command,{cwd:swRoot,env,logPath:path.join(dir,'assertions.log'),timeoutSeconds:c.timeoutSeconds});
   const log=await readFile(path.join(dir,'assertions.log'),'utf8'),passed=executedTests(log);assert.ok(!/\bSKIP\b/.test(log));
   const proof={kind:'source-bound-assertions',proof_kind:fake?'unit_fake':'campaign_fixture',sceneworks:p.sceneworks,inference:p.inference,command:c.command,passed,inputs:c.inputs,meaning:'Executed source-bound synthetic contract assertions; no real-model/native load or measured peak claimed'};
@@ -325,6 +327,10 @@ export function privateEnvironment(runDir,runtime,token) {
   // pool, which is the ONLY worker that serves model_import/model_download/model_convert/lora_import
   // — with it off, nothing could ever claim an import and the first real case waited out its whole
   // deadline in `queued`. macOS requires MLX; off-Mac requires Candle and enforces unsupported shapes.
+  // Port 0: the API binds an OS-assigned port and derives its own self-call URL from the bound
+  // listener; an explicit SCENEWORKS_API_URL would pin it to ":0". The worker, launched after the
+  // API reports its bound port, gets the real URL (OwnedService.start).
+  if(runtime.port===OS_ASSIGNED_PORT)delete env.SCENEWORKS_API_URL;
   if(runtime.backend==='mlx')env.SCENEWORKS_MLX_REQUIRED='1';
   else Object.assign(env,{SCENEWORKS_CANDLE_REQUIRED:'1',SCENEWORKS_CANDLE_UNSUPPORTED_MODE:'enforce'});
   if(runtime.memoryCap){assert.equal(runtime.memoryCap.kind,runtime.backend==='cuda'?'cuda-vram-gb':'mlx-memory-gb');assert.ok(Number.isFinite(runtime.memoryCap.value)&&runtime.memoryCap.value>0);env[runtime.backend==='cuda'?'SCENEWORKS_CUDA_VRAM_CAP_GB':'SCENEWORKS_MLX_MEMORY_CAP_GB']=String(runtime.memoryCap.value);}
@@ -346,11 +352,12 @@ export class OwnedService {
     this.sourceDtypeFacts=await verifyDenseSourceDtypes(this.c,this.p.output);
     const r=this.c.runtime;
     assert.ok(this.c.inputs.some(i=>i.path===r?.scenario && i.role==='scenario'),'bind the actual request/action scenario as an input');
-    assert.ok(r && Number.isInteger(r.port) && r.port>1024 && r.port<=65535 && r.gpuId);
+    assert.ok(r && isServicePort(r.port) && r.gpuId,'owned service port (0 = OS-assigned) and device required');
     if(!this.fake && this.c.backend==='cuda') {
       assert.equal(String(r.gpuId),MANUAL_CUDA_PHYSICAL_GPU,'manual campaign runs on physical GPU 1 (GPU 0 is the owner display GPU)');
       await hardware('cuda',r.deviceId); // Confirm UUID/PCI mapping before any build, listener or model load.
     }
+    await this.refuseLeftoverOwnedProcesses();
     const services=path.join(this.p.output,'services');await mkdir(services,{recursive:true});
     this.runDir=path.join(services,this.c.id);await mkdir(this.runDir);this.owner=randomUUID();
     for(const d of ['config','data','data/cache','hf','hf/hub','cache']) await mkdir(path.join(this.runDir,d),{recursive:true});
@@ -372,7 +379,7 @@ export class OwnedService {
       this.guardian?.stdin.end();
       const exits=[];
       for(const proc of [this.worker,this.guardian,this.api].filter(Boolean)){let timer;try{exits.push({pid:proc.pid,...await Promise.race([proc.exit(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('owned startup cleanup timeout; no forced kill')),ownedExitBoundMs());})])});}catch(cleanup){exits.push({pid:proc.pid,error:cleanup.message});}finally{clearTimeout(timer);}}
-      await save(path.join(this.dir,'startup-failure.json'),{error:error.message,ownedApiPid:this.api?.pid,ownedWorkerPid:this.worker?.pid,guardianPid:this.guardian?.pid,exits,meaning:'No scenario submitted; only owned graceful shutdown requested, no force kill'});
+      await save(path.join(this.dir,'startup-failure.json'),{error:error.message,requestedPort:this.c.runtime.port,...(this.port!==undefined?{boundPort:this.port}:{}),...(error.portHolder?{portHolder:error.portHolder}:{}),ownedApiPid:this.api?.pid,ownedWorkerPid:this.worker?.pid,guardianPid:this.guardian?.pid,exits,meaning:'No scenario submitted; only owned graceful shutdown requested, no force kill'});
       throw error;
     }
   }
@@ -395,27 +402,52 @@ export class OwnedService {
     }
     await save(path.join(this.dir,'service-build.json'),this.buildIdentity);
   }
+  // A live API/worker/guardian recorded by an earlier run (or an earlier case of this run) still
+  // holds its port and possibly Metal/CUDA memory. Refuse before building or binding anything and
+  // name it; never signal it - terminating a foreign process is the operator's decision.
+  async refuseLeftoverOwnedProcesses() {
+    const platform=this.deps.platform??process.platform;
+    const info=this.deps.processInfo??(this.fake?async()=>null:undefined); // unit_fake never inspects host processes
+    const found=await (this.deps.liveOwnedProcesses??liveOwnedProcesses)({roots:await campaignRunRoots(this.p.output),exclude:[this.dir],platform,...(info?{info}:{})});
+    if(!found.length)return;
+    await save(path.join(this.dir,'leftover-processes.json'),{caseId:this.c.id,found,meaning:'Owned processes recorded by an earlier campaign run/case are still alive as themselves (PID, command and start time match). No case process was started and nothing was signalled; stop them, then re-dispatch.'});
+    throw new Error(`H3_LEFTOVER_OWNED_PROCESSES: refusing ${this.c.id}; ${found.length} owned process(es) from earlier campaign runs are still alive and were left untouched: ${formatLeftovers(found)}`);
+  }
+  // Name the actual listener on a bind conflict (lsof on macOS, netstat -ano on Windows).
+  async withPortHolder(error,port) {
+    const platform=this.deps.platform??process.platform;
+    let diagnosis;
+    try{diagnosis=await (this.deps.portHolder??(this.fake?async p=>({port:p,tool:'unit_fake',exitCode:0,output:'',holders:[]}):portHolder))(port,{platform});}
+    catch(failure){diagnosis={port,tool:'unavailable',toolError:failure.message,holders:[]};}
+    error.portHolder=diagnosis;error.message=`${error.message} (${formatPortHolder(diagnosis)})`;return error;
+  }
   async assertOwner() {const record=await json(this.ownerPath);assert.equal(record.token,this.owner);assert.equal(record.pid,process.pid);assert.equal(await hashFile(this.binary),this.binaryHash);}
   async start() {
     await this.assertOwner();assert.ok(!this.api || this.stopped,'refuse second live service');
-    await (this.deps.requireFreePort??requireFreePort)(this.c.runtime.port); // No HTTP probe of a pre-existing/user API.
-    const launch=this.deps.spawnOwned??spawnOwned, epoch=++this.generation;
+    // Each epoch's API binds an OS-assigned port (runtime.port 0) and reports it; nothing depends
+    // on a well-known port another process may hold. A legacy fixed port is still checked first.
+    const requested=this.c.runtime.port;this.port=undefined;
+    if(requested!==OS_ASSIGNED_PORT){try{await (this.deps.requireFreePort??requireFreePort)(requested);}catch(error){throw isBindFailure(error)?await this.withPortHolder(error,requested):error;}} // No HTTP probe of a pre-existing/user API.
+    const launch=this.deps.spawnOwned??spawnOwned, epoch=++this.generation, processes=[];
+    const spawnRecorded=(role,argv,childEnv,log)=>{const spawnedFrom=new Date().toISOString(),child=launch(argv,childEnv,this.swRoot,log);processes.push({role,pid:child.pid,executable:argv[0],spawnedFrom,spawnedTo:new Date().toISOString()});return child;};
     const env=privateEnvironment(this.runDir,{...this.c.runtime,memoryCap:this.memoryCap??this.c.runtime.memoryCap,backend:this.c.backend},this.token);
-    this.guardian=launch([process.execPath,'-e',"process.stdin.resume();process.stdin.on('end',()=>process.exit(0));"],env,this.swRoot,path.join(this.dir,`guardian-${epoch}.log`));
+    this.guardian=spawnRecorded('guardian',[process.execPath,'-e',"process.stdin.resume();process.stdin.on('end',()=>process.exit(0));"],env,path.join(this.dir,`guardian-${epoch}.log`));
     assert.ok(this.guardian.pid>1);env.SCENEWORKS_PARENT_PID=String(this.guardian.pid);
     // The API's in-process utility worker registers under the API's SCENEWORKS_WORKER_ID unchanged.
     // Sharing the GPU worker's id let the GPU worker's registration replace it, so nothing advertised
     // model_import and every import stayed queued. The desktop likewise gives them distinct ids.
-    this.api=launch([this.binary],{...env,SCENEWORKS_WORKER_ID:`${env.SCENEWORKS_WORKER_ID}-utility`},this.swRoot,path.join(this.dir,`api-${epoch}.log`));assert.ok(this.api.pid>1);
+    this.api=spawnRecorded('api',[this.binary],{...env,SCENEWORKS_WORKER_ID:`${env.SCENEWORKS_WORKER_ID}-utility`},path.join(this.dir,`api-${epoch}.log`));assert.ok(this.api.pid>1);
     this.startTime=new Date().toISOString();this.stopped=false;
     const deadline=Date.now()+60000;
     for(;;) {
-      assert.equal(this.api.exitCode(),null,'new API exited before ownership/readiness');
-      let pid;try{pid=await (this.deps.listenerPid??listenerPid)(this.c.runtime.port);}catch{}
-      if(pid!==undefined){assert.equal(pid,this.api.pid,'refuse contacting a listener not owned by this child');break;}
+      if(this.api.exitCode()!==null){const error=new Error('new API exited before ownership/readiness');throw requested!==OS_ASSIGNED_PORT&&isBindFailure({message:this.api.log()})?await this.withPortHolder(error,requested):error;}
+      // The API logs `api_listening` with its bound address; the listener must then be this child.
+      const candidate=requested===OS_ASSIGNED_PORT?boundApiPort(this.api.log()):requested;
+      let pid;if(candidate!==undefined)try{pid=await (this.deps.listenerPid??listenerPid)(candidate);}catch{}
+      if(pid!==undefined){if(pid!==this.api.pid)throw await this.withPortHolder(new Error(`refuse contacting a listener not owned by this child (port ${candidate}: pid ${pid}, owned API pid ${this.api.pid})`),candidate);this.port=candidate;break;}
       assert.ok(Date.now()<deadline,'owned API listener timeout');await (this.deps.sleep??sleep)(100);
     }
-    this.baseUrl=`http://127.0.0.1:${this.c.runtime.port}`;
+    this.baseUrl=`http://127.0.0.1:${this.port}`;
     // The API binds a bootstrap health surface first and reports `starting` until its
     // readiness-critical startup completes, then the ready app answers `ok`. Wait for readiness
     // within the same deadline; only `starting` is an acceptable in-between state, and the owned
@@ -431,11 +463,13 @@ export class OwnedService {
     // Preserve, rather than reuse, a previous owned worker's cumulative counter across restart.
     try{await rename(path.join(this.runDir,'config','gpu_telemetry.json'),path.join(this.runDir,'config',`gpu_telemetry.before-${epoch}.json`));}catch(error){if(error.code!=='ENOENT')throw error;}
     this.workerId=env.SCENEWORKS_WORKER_ID;
-    this.worker=launch([this.binary],{...env,SCENEWORKS_WORKER_ONLY:'1',SCENEWORKS_WORKER_CHILD:'1'},this.swRoot,path.join(this.dir,`worker-${epoch}.log`));assert.ok(this.worker.pid>1);
-    const record={epoch,started:this.startTime,apiPid:this.api.pid,workerPid:this.worker.pid,guardianPid:this.guardian.pid,binarySha256:this.binaryHash,listenerPid:this.api.pid,runDirectory:this.runDir};this.epochs.push(record);await save(path.join(this.dir,`ownership-${epoch}.json`),record);
+    this.worker=spawnRecorded('worker',[this.binary],{...env,SCENEWORKS_API_PORT:String(this.port),SCENEWORKS_API_URL:this.baseUrl,SCENEWORKS_WORKER_ONLY:'1',SCENEWORKS_WORKER_CHILD:'1'},path.join(this.dir,`worker-${epoch}.log`));assert.ok(this.worker.pid>1);
+    // `processes` carries each child's spawn window and executable so a later run can tell this
+    // exact process from an unrelated one that reused its PID (lib/h3-owned-processes.mjs).
+    const record={epoch,started:this.startTime,requestedPort:requested,port:this.port,apiPid:this.api.pid,workerPid:this.worker.pid,guardianPid:this.guardian.pid,binarySha256:this.binaryHash,listenerPid:this.api.pid,runDirectory:this.runDir,processes};this.epochs.push(record);await save(path.join(this.dir,`ownership-${epoch}.json`),record);
   }
   async fetch(url,options={}) {
-    await this.assertOwner();assert.ok(!this.stopped);assert.equal(new URL(url).origin,this.baseUrl);assert.equal(await (this.deps.listenerPid??listenerPid)(this.c.runtime.port),this.api.pid,'listener ownership changed');
+    await this.assertOwner();assert.ok(!this.stopped);assert.equal(new URL(url).origin,this.baseUrl);assert.equal(await (this.deps.listenerPid??listenerPid)(this.port),this.api.pid,'listener ownership changed');
     return (this.deps.fetch??fetch)(url,{...options,headers:{...options.headers,'X-SceneWorks-Token':this.token}});
   }
   async request(method,route,body) {
@@ -1031,14 +1065,24 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
   const cache=c.id.endsWith('.cold-warm-staged')?verifyCacheCoverage(bundle,scenario,byJob,observed):undefined;
   return {jobs:bundle.media.map(v=>v.jobId),nativeClosures:bundle.bindings.length,comparisons:comparisons.length,...(identification?{identification}:{}),...(ownership?{ownershipEquivalence:ownership}:{}),...(cache?{cacheCoverage:cache}:{})};
 }
+/**
+ * The scenario names its planned origin. With an OS-assigned port (0) it is `http://127.0.0.1:0`
+ * and every request goes to the owned service's bound URL for the current epoch (a restart may
+ * bind a different port); a legacy fixed-port scenario must name exactly the owned origin.
+ */
+export function assertScenarioTargetsOwnedService(scenario,c,service) {
+  const planned=new URL(scenario.baseUrl);assert.ok(['127.0.0.1','[::1]','localhost'].includes(planned.hostname),'scenario must target the task-owned loopback service');
+  if(c.runtime.port===OS_ASSIGNED_PORT)assert.equal(planned.port,'0','an OS-assigned-port case scenario must not name a fixed port');
+  else assert.equal(planned.origin,service.baseUrl,'scenario must target newly owned service');
+}
 export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
   const service=await new OwnedService(p,c,swRoot,inferenceRoot,dir,deps).initialize();
   const observations=new ProcessObservations(service,{sample:deps.sample??processSample,sleepImpl:deps.sleep??sleep,intervalMs:c.runtime.sampleIntervalMs??250}).start();
   const records=[],actions=[],bound=[],traceEvents=[];let result,metrics,error;
   try {
-    const scenarioText=await readFile(c.runtime.scenario,'utf8'),scenario=JSON.parse(scenarioText);assert.equal(scenario.caseId,c.id);assert.equal(scenario.baseUrl,service.baseUrl,'scenario must target newly owned service');
+    const scenarioText=await readFile(c.runtime.scenario,'utf8'),scenario=JSON.parse(scenarioText);assert.equal(scenario.caseId,c.id);assertScenarioTargetsOwnedService(scenario,c,service);
     if(scenario.identificationControl){const input=c.inputs.find(value=>value.role==='identity-control-fixture'&&value.path===scenario.identificationControl.receipt);assert.ok(input,'staged identity-control metadata input required');assert.ok((await stat(input.path)).size<=1024*1024,'identity control receipt must be bounded metadata, never a weight payload');assert.equal(await hashFile(input.path),input.sha256);await copyFile(input.path,inside(dir,'identification-input.json'));}
-    result=await runScenario(scenario,{uploadFile:async spec=>{assert.ok(typeof spec.fileName==='string'&&!/[\\/]/.test(spec.fileName),'bounded uploaded filename required');const input=c.inputs.find(i=>i.path===spec.path&&i.sha256===spec.sha256&&i.role.startsWith('conditioning-'));assert.ok(input,'upload must bind an actual declared conditioning input');const file=await confinedTaskSource(p,spec.path),info=await stat(file);assert.ok(info.size>0&&info.size<=256*1024*1024);const data=await readFile(file);assert.equal(createHash('sha256').update(data).digest('hex'),spec.sha256);return new Blob([data],{type:spec.mimeType});},deadlineMs:deps.deadlineMs??(service.fake?Infinity:Number(process.env.H3_CASE_DEADLINE_MS??Infinity)),fetchImpl:(url,options)=>service.fetch(url,options),sleep:deps.sleep??sleep,beforeStep:async ({step,captures})=>{assert.ok(!observations.budgetExceeded,'campaign observation bound exceeded; no further job submission');await service.checkStep(step,captures);for(const action of [...(scenario.lifecycleActions??[]),...(c.runtime.actions??[])])if(action.beforeStep===step.id)actions.push(await service.action(action,captures));},onRecord:async r=>{
+    result=await runScenario(scenario,{uploadFile:async spec=>{assert.ok(typeof spec.fileName==='string'&&!/[\\/]/.test(spec.fileName),'bounded uploaded filename required');const input=c.inputs.find(i=>i.path===spec.path&&i.sha256===spec.sha256&&i.role.startsWith('conditioning-'));assert.ok(input,'upload must bind an actual declared conditioning input');const file=await confinedTaskSource(p,spec.path),info=await stat(file);assert.ok(info.size>0&&info.size<=256*1024*1024);const data=await readFile(file);assert.equal(createHash('sha256').update(data).digest('hex'),spec.sha256);return new Blob([data],{type:spec.mimeType});},deadlineMs:deps.deadlineMs??(service.fake?Infinity:Number(process.env.H3_CASE_DEADLINE_MS??Infinity)),baseUrl:()=>service.baseUrl,fetchImpl:(url,options)=>service.fetch(url,options),sleep:deps.sleep??sleep,beforeStep:async ({step,captures})=>{assert.ok(!observations.budgetExceeded,'campaign observation bound exceeded; no further job submission');await service.checkStep(step,captures);for(const action of [...(scenario.lifecycleActions??[]),...(c.runtime.actions??[])])if(action.beforeStep===step.id)actions.push(await service.action(action,captures));},onRecord:async r=>{
       records.push(r);
       if(r.result?.id && r.method==='POST' && (r.route==='/api/v1/models/import'||r.route==='/api/v1/loras/import'||r.route==='/api/v1/video/jobs'||/\/(retry|duplicate)$/.test(r.route)))service.jobs.add(r.result.id);
       await writeFile(path.join(dir,'api-transcript.json'),JSON.stringify({caseId:c.id,proof_kind:service.fake?'unit_fake':'campaign_native',transcript:records},null,2));
@@ -1080,7 +1124,7 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     await save(path.join(dir,'comparisons.json'),comparisons);
     const primary=proofs[0];const h=await (deps.hardware??hardware)(c.backend,c.runtime.deviceId);
     const sourceCancelReceipt=sourceCancel?receiptNameFor(sourceCancel.jobId):undefined;
-    const e={status:'executed',proof_kind:service.fake?'unit_fake':'campaign_native',sceneworks:p.sceneworks,inference:p.inference,caseId:c.id,backend:c.backend,hardware:h,runtimeBindings:'source-job-output.json',files:[...bound.map(v=>v.av),...conditioningBindings.map(v=>v.file),...(scenario.identificationControl?['identification-input.json']:[]),'api-transcript.json','source-job-output.json','comparisons.json','service-build.json','service-build.log','raw-observations.json','service-lifecycle.json','source-cancel-actions.json',...(sourceCancelReceipt?[sourceCancelReceipt]:[]),...service.epochs.flatMap(v=>[`api-${v.epoch}.log`,`worker-${v.epoch}.log`,`guardian-${v.epoch}.log`,`ownership-${v.epoch}.json`,`exits-${v.epoch}.json`])],apiTranscript:'api-transcript.json',testInputSha256:c.inputs[0].sha256,metrics,...(sourceCancelReceipt?{sourceCancelReceipt}:{})};
+    const e={status:'executed',proof_kind:service.fake?'unit_fake':'campaign_native',sceneworks:p.sceneworks,inference:p.inference,caseId:c.id,backend:c.backend,hardware:h,runtimeBindings:'source-job-output.json',files:[...bound.map(v=>v.av),...conditioningBindings.map(v=>v.file),...(scenario.identificationControl?['identification-input.json']:[]),'api-transcript.json','source-job-output.json','comparisons.json','service-build.json','service-build.log','raw-observations.json','service-lifecycle.json','source-cancel-actions.json',...(sourceCancelReceipt?[sourceCancelReceipt]:[]),...service.epochs.flatMap(v=>[`api-${v.epoch}.log`,`worker-${v.epoch}.log`,`guardian-${v.epoch}.log`,`ownership-${v.epoch}.json`,`exits-${v.epoch}.json`])],apiTranscript:'api-transcript.json',servicePorts:service.epochs.map(v=>({epoch:v.epoch,requestedPort:v.requestedPort,port:v.port})),testInputSha256:c.inputs[0].sha256,metrics,...(sourceCancelReceipt?{sourceCancelReceipt}:{})};
     if(primary){Object.assign(e,{runtimeIdentity:primary.runtimeIdentity,loadEvent:primary.event,completedJob:{id:primary.job.id,status:primary.job.status,providerId:normalizeLoadEvent(primary.event).providerId,output:primary.media.av},av:primary.media.av});}
     if(c.artifact)Object.assign(e,{source:p.source,artifact:c.artifact});
     if(c.group==='capability') {assert.ok(comparisons.length);const control=proofs.find(v=>v.job.id===comparisons[0].interventionJobId);e.control={av:control.media.av,checkpointSha256:control.runtimeIdentity.checkpointSha256,seed:control.runtimeIdentity.seed,intervention:'Actual scenario comparison manifest; see all source-bound contrasts',comparisons:'comparisons.json',bindings:'source-job-output.json'};}

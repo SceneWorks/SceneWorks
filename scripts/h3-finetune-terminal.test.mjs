@@ -763,6 +763,7 @@ test('three individual source mutations are killed by executed assertions, not s
   await mkdir(path.join(dir, 'lib'), { recursive: true });
   await writeFile(path.join(dir, 'lib', 'h3-campaign-build-profile.mjs'), await readFile(new URL('./lib/h3-campaign-build-profile.mjs', import.meta.url)));
   await writeFile(path.join(dir, 'lib', 'windows-verbatim-path.mjs'), await readFile(new URL('./lib/windows-verbatim-path.mjs', import.meta.url)));
+  await writeFile(path.join(dir, 'lib', 'h3-owned-processes.mjs'), await readFile(new URL('./lib/h3-owned-processes.mjs', import.meta.url)));
   await writeFile(path.join(dir, 'lib', 'h3-peer-lane.mjs'), await readFile(new URL('./lib/h3-peer-lane.mjs', import.meta.url)));
   for (const [needle, pattern] of [
     ['assert.equal(e.inference, p.inference);', 'receipt mutation rejects wrong source revision'],

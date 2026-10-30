@@ -40,7 +40,7 @@ const mutations=[
 test('terminal repair source mutants are killed by executed focused assertions',async t=>{
   const dir=await mkdtemp(path.join(os.tmpdir(),'h3-repair-assertion-mutants-'));t.after(()=>rm(dir,{recursive:true,force:true}));
   const scripts=path.join(dir,'scripts');await mkdir(path.join(scripts,'ci'),{recursive:true});await mkdir(path.join(scripts,'lib'),{recursive:true});await mkdir(path.join(dir,'docs','testing'),{recursive:true});
-  const files=[A,C,R,'h3-finetune-terminal-reduced.mjs','h3-finetune-terminal-stage.mjs','h3-finetune-terminal-api.mjs',casesTest,runtimeTest,avTest,'select-windows-cargo-cache.mjs','ci/h3-import-native-proof.mjs','lib/h3-campaign-build-profile.mjs','lib/windows-verbatim-path.mjs','lib/h3-peer-lane.mjs'];
+  const files=[A,C,R,'h3-finetune-terminal-reduced.mjs','h3-finetune-terminal-stage.mjs','h3-finetune-terminal-api.mjs',casesTest,runtimeTest,avTest,'select-windows-cargo-cache.mjs','ci/h3-import-native-proof.mjs','lib/h3-campaign-build-profile.mjs','lib/h3-owned-processes.mjs','lib/windows-verbatim-path.mjs','lib/h3-peer-lane.mjs'];
   const originals=new Map();for(const name of files){const source=await readFile(new URL(`scripts/${name}`,root),'utf8');originals.set(name,source);await writeFile(path.join(scripts,name),source);}
   await writeFile(path.join(dir,'docs','testing','sc-26691-h3-cases.json'),await readFile(new URL('docs/testing/sc-26691-h3-cases.json',root)));
   const env={...process.env,HF_HOME:path.join(dir,'hf'),HF_HUB_CACHE:path.join(dir,'hf','hub'),HUGGINGFACE_HUB_CACHE:path.join(dir,'hf','hub'),SCENEWORKS_DATA_DIR:path.join(dir,'data'),HF_HUB_OFFLINE:'1',HF_DATASETS_OFFLINE:'1'};delete env.NODE_TEST_CONTEXT;

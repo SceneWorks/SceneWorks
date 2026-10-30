@@ -7,6 +7,8 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat, rea
 import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,advertisedStallBudget,cancelDrainBoundMs,postDrainShutdownMs,STALL_BUDGET_EVENT,WORKER_VIDEO_STALL_GRACE_SECONDS,DEFAULT_CANCEL_DRAIN_SECONDS,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
 import { CASE_SHUTDOWN_BOUND_FILE,assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
+import { liveOwnedProcesses,processInfo,portHolder,formatPortHolder,parseLsofListen,parseNetstatListen,parseEtimeSeconds,boundApiPort,recordedProcesses,sameProcess,campaignRunRoots,isServicePort,isBindFailure } from './lib/h3-owned-processes.mjs';
+import { runScenario } from './h3-finetune-terminal-api.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
 // Tests must never write under a real HF cache: neither the Windows campaign root nor the HF_HOME
 // / ~/.cache/huggingface this process inherited. Every path a test materializes stays in its temp dir.
@@ -23,10 +25,10 @@ async function fixture(t,group='capability',check='image',backend='mlx') {
   const input=path.join(root,'synthetic-checkpoint');await writeFile(input,'unit_fake NOT MODEL WEIGHTS');const digest=await hashFile(input);
   const component=path.join(root,'synthetic-component');await writeFile(component,'unit_fake component');const componentHash=await hashFile(component);
   const scenarioPath=path.join(root,'scenario.json');
-  const c={...requiredCases().find(c=>c.id===`${backend}.${group}.${check}`),timeoutSeconds:30,evidence:'evidence.json',inputs:[{path:input,sha256:digest,role:'checkpoint'},{path:component,sha256:componentHash,role:'component'}],loadHostBudgetBytes:100000,loadDeviceBudgetBytes:100000,minimumControlDelta:0.01,controlStream:'video',runtime:{port:43210,gpuId:'unit_fake_gpu',deviceId:'unit_fake_device',scenario:scenarioPath,sampleIntervalMs:1}};
+  const c={...requiredCases().find(c=>c.id===`${backend}.${group}.${check}`),timeoutSeconds:30,evidence:'evidence.json',inputs:[{path:input,sha256:digest,role:'checkpoint'},{path:component,sha256:componentHash,role:'component'}],loadHostBudgetBytes:100000,loadDeviceBudgetBytes:100000,minimumControlDelta:0.01,controlStream:'video',runtime:{port:0,gpuId:'unit_fake_gpu',deviceId:'unit_fake_device',scenario:scenarioPath,sampleIntervalMs:1}};
   const p={proof_kind:'unit_fake',sceneworks:sw,inference:inf,source:SOURCE,output:root,responsibleTask:'sc-26691'};
   const execution={licenseAuthority:{kind:'unit_fake',acknowledged:true,approvedBy:'unit_fake only',reference:'synthetic consent, never real approval',approvedAt:'2026-10-25T00:00:00Z',subjects:[{role:'source',sha256:digest},{role:'component',sha256:componentHash}]},label:'test',mode:'image_to_video',model:{modelId:'imported_unit_fake',sourcePath:input,sha256:digest,baseModel:'minimax_h3',partition:'fl2va',topology:'full',componentTier:'q4',supportedModes:['image_to_video'],components:[{sha256:componentHash,source:'unit_fake',revision:inf,licenseAcknowledged:true}]},sampling:{contractSource:'unit_fake recipe',steps:50,width:576,height:320,fps:24,duration:5.1667}};
-  const parameters={proof_kind:'unit_fake',baseUrl:'http://127.0.0.1:43210',projectId:'unit_fake_project',requestedGpu:'unit_fake_gpu',timeoutSeconds:30,seed:42,assets:{imageA:'unit_fake_red',imageB:'unit_fake_blue'},sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.005}};
+  const parameters={proof_kind:'unit_fake',baseUrl:'http://127.0.0.1:0',projectId:'unit_fake_project',requestedGpu:'unit_fake_gpu',timeoutSeconds:30,seed:42,assets:{imageA:'unit_fake_red',imageB:'unit_fake_blue'},sensitivity:{minimumControlDelta:0.01,maximumBaselineDelta:0.005}};
   const scenario=(group==='capability'||(group==='lifecycle'&&check==='cancel'))?buildScenario(c,parameters,[execution]):{baseUrl:parameters.baseUrl,caseId:c.id,timeoutSeconds:30,steps:[{id:'import',method:'POST',path:'/api/v1/models/import',body:{modelId:'imported_unit_fake',sourcePath:input,licenseAcknowledged:true},expectedStatus:201,assert:[{pointer:'/payload/modelId',equals:'imported_unit_fake'}]},{id:'installed',waitJob:{$capture:'import/id'},assert:[{pointer:'/result/modelId',equals:'imported_unit_fake'}]}]};
   await writeFile(scenarioPath,JSON.stringify(scenario));c.inputs.push({path:scenarioPath,sha256:await hashFile(scenarioPath),role:'scenario'});
   c.declaredSourceBindings=[execution];
@@ -35,6 +37,8 @@ async function fixture(t,group='capability',check='image',backend='mlx') {
 async function replaceScenario(f,c,executions,parameters=f.parameters){
   Object.assign(f.c,c);f.c.declaredSourceBindings=executions;f.scenario=buildScenario(f.c,parameters,executions);await writeFile(f.c.runtime.scenario,JSON.stringify(f.scenario));f.c.inputs.find(v=>v.role==='scenario').sha256=await hashFile(f.c.runtime.scenario);return f.scenario;
 }
+// The fake OS hands out a fresh ephemeral port per bind, across every fake service in this file.
+let fakeEphemeralPort=49152;
 function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok'],signalWhileActive=false}={}) {
   let healthCalls=0;
   let pid=7000,jobNo=0,nativeLoadCount=0,serviceDir,activeWorker,heartbeat=Date.now();const children=[],calls=[],jobs=new Map(),assets=new Map();
@@ -48,7 +52,9 @@ function fakeRuntime(f,{wrongListener=false,backend='mlx',health=['ok'],signalWh
     const kind=argv[0]===process.execPath?'guardian':env.SCENEWORKS_WORKER_ONLY==='1'?'worker':'api';
     serviceDir=path.dirname(env.SCENEWORKS_CONFIG_DIR);let code=null,logs='';let resolveExit;const done=new Promise(r=>resolveExit=r);
     const child={pid:++pid,kind,env,argv,logPath,exitCode:()=>code,log:()=>logs,append:v=>{logs+=JSON.stringify(v)+'\n';},close:()=>{if(code!==null)return;code=0;resolveExit({code:0,signal:null});},stdin:{end:()=>{calls.push(['end',kind,child.pid]);child.close();if(kind==='guardian')for(const c of children.filter(c=>c.kind==='api'&&c.env.SCENEWORKS_PARENT_PID===String(child.pid)))c.close();}},signal:s=>{assert.equal(s,'SIGTERM');assert.ok(signalWhileActive||[...jobs.values()].every(j=>['completed','canceled','failed'].includes(j.status)),'no signal before cooperative completion');calls.push(['signal',kind,child.pid,s]);child.close();},exit:async()=>{const result=await done;await writeFile(logPath,logs,{flag:'wx'});return result;}};
-    children.push(child);calls.push(['spawn',kind,child.pid]);if(kind==='worker'){activeWorker=child;nativeLoadCount=0;}return child;
+    children.push(child);calls.push(['spawn',kind,child.pid]);if(kind==='worker'){activeWorker=child;nativeLoadCount=0;}
+    if(kind==='api')child.append({event:'api_listening',level:'info',address:`127.0.0.1:${env.SCENEWORKS_API_PORT==='0'?++fakeEphemeralPort:env.SCENEWORKS_API_PORT}`,message:'SceneWorks API bootstrap health/access surface listening'});
+    return child;
   };
   const deps={proof_kind:'unit_fake',platform:'darwin',sleep:pause,spawnOwned,requireFreePort:async port=>{calls.push(['free',port]);},listenerPid:async()=>wrongListener?99999:children.filter(c=>c.kind==='api'&&c.exitCode()===null).at(-1)?.pid,
     runProcess:async(argv,options)=>{calls.push(['build',argv]);assert.ok(argv.includes('sceneworks-rust-api'));const binary=path.join(options.env.CARGO_TARGET_DIR,'release','sceneworks-rust-api');await mkdir(path.dirname(binary),{recursive:true});await writeFile(binary,'unit_fake binary, never executable');await writeFile(options.logPath,'unit_fake build log',{flag:'wx'});},
@@ -136,7 +142,7 @@ test('owned API pipeline binds real-shaped jobs/assets/load events, compares med
   assert.equal(r.evidence.runtimeIdentity.checkpointSha256,f.digest);assert.equal(r.evidence.completedJob.output,r.evidence.av);
   assert.ok(r.evidence.files.includes('service-lifecycle.json'));for(const name of r.evidence.files)await readFile(path.join(f.dir,name));
   validatePeakMetrics(r.evidence.metrics,f.c);
-  assert.ok(fake.children.every(c=>c.exitCode()===0));assert.equal(fake.calls.filter(c=>c[0]==='free').length,1);
+  assert.ok(fake.children.every(c=>c.exitCode()===0));assert.equal(fake.calls.filter(c=>c[0]==='free').length,0,'an OS-assigned port has no check-then-bind probe');
   await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta),/unit_fake/);
   assert.equal((await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true})).comparisons,1);
   await assert.rejects(validateEvidence(f.p,f.c,f.dir,'H3_API_ASSERTIONS_EXECUTED=1'),/unit_fake/);
@@ -651,4 +657,106 @@ test('seal progress is attributed only through the product span scope, never a f
   const scoped={...flat,span,spans:[{name:'job',jobId:'job_outer'},span]};
   assert.equal(tracedJobId(scoped),'job_81cbc014f0cc7171e185068d2e5888e3','the leaf span names the job');
   assert.equal(tracedJobId({...flat,spans:[span]}),'job_81cbc014f0cc7171e185068d2e5888e3');
+});
+
+// ---- sc-26691: OS-assigned per-case ports, bind-conflict holders, leftover owned processes ----
+test('each case service binds an OS-assigned port, threads it to the worker and records it in the evidence',async t=>{
+  const ports=[];
+  for(let i=0;i<2;i++){
+    const f=await fixture(t),fake=fakeRuntime(f);const r=await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
+    const api=fake.children.find(c=>c.kind==='api'),worker=fake.children.find(c=>c.kind==='worker'),bound=boundApiPort(api.log());
+    assert.equal(f.scenario.baseUrl,'http://127.0.0.1:0');assert.equal(api.env.SCENEWORKS_API_PORT,'0');assert.ok(!('SCENEWORKS_API_URL' in api.env),'the API derives its self URL from the bound listener');
+    assert.equal(worker.env.SCENEWORKS_API_PORT,String(bound));assert.equal(worker.env.SCENEWORKS_API_URL,`http://127.0.0.1:${bound}`);
+    assert.ok(fake.calls.filter(c=>c[0]==='request').every(c=>c[1].startsWith('/api/v1/')));
+    const ownership=JSON.parse(await readFile(path.join(f.dir,'ownership-1.json'),'utf8'));assert.equal(ownership.requestedPort,0);assert.equal(ownership.port,bound);
+    assert.deepEqual(ownership.processes.map(p=>p.role),['guardian','api','worker']);for(const p of ownership.processes)assert.ok(p.pid>1&&p.executable&&Date.parse(p.spawnedFrom)<=Date.parse(p.spawnedTo));
+    assert.deepEqual(r.evidence.servicePorts,[{epoch:1,requestedPort:0,port:bound}]);assert.notEqual(bound,43210);
+    ports.push(bound);
+  }
+  assert.equal(new Set(ports).size,2,'two cases get their own ports');
+});
+test('a restart may bind a new port and the scenario follows the live owned origin',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f);const service=await new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize();const first=service.baseUrl;
+  await service.action({kind:'restart'},{});assert.notEqual(service.baseUrl,first);assert.deepEqual(service.epochs.map(e=>e.port),[first,service.baseUrl].map(u=>Number(new URL(u).port)));
+  const urls=[];await runScenario({baseUrl:'http://127.0.0.1:0',caseId:'x',timeoutSeconds:5,steps:[{id:'h',method:'GET',path:'/api/v1/health',expectedStatus:200,assert:[{pointer:'/service',equals:'sceneworks-api'}]}]},{baseUrl:()=>service.baseUrl,fetchImpl:async(url,o)=>{urls.push(url.origin);return service.fetch(url,o);}});
+  assert.deepEqual(urls,[service.baseUrl]);
+  await assert.rejects(runScenario({baseUrl:'http://127.0.0.1:0',caseId:'x',timeoutSeconds:5,steps:[{id:'h',method:'GET',path:'/api/v1/health',expectedStatus:200}]},{fetchImpl:async()=>assert.fail('never contacted')}),/OS-assigned port/);
+  await service.stop();
+});
+test('validators accept OS-assigned and archived fixed ports, never require 43210',()=>{
+  for(const port of [0,43210,1025,65535])assert.ok(isServicePort(port),String(port));
+  for(const port of [80,1024,65536,-1,'0',null,1.5])assert.ok(!isServicePort(port),String(port));
+});
+test('a legacy fixed-port bind conflict names the listener in startup-failure.json',async t=>{
+  const f=await fixture(t);f.c.runtime.port=43210;f.scenario.baseUrl='http://127.0.0.1:43210';await writeFile(f.c.runtime.scenario,JSON.stringify(f.scenario));f.c.inputs.find(v=>v.role==='scenario').sha256=await hashFile(f.c.runtime.scenario);
+  const fake=fakeRuntime(f);fake.deps.requireFreePort=async()=>{const e=new Error('listen EADDRINUSE: address already in use 127.0.0.1:43210');e.code='EADDRINUSE';throw e;};
+  fake.deps.portHolder=async(port,{platform})=>portHolder(port,{platform,exec:async()=>({code:0,stdout:'COMMAND   PID    USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\nsceneworks 4242 michael 9u IPv4 0x1 0t0 TCP 127.0.0.1:43210 (LISTEN)\n',stderr:''}),info:async pid=>({pid,command:'/Users/michael/run/target/release/sceneworks-rust-api',startedAt:Date.parse('2026-10-29T22:10:00Z')})});
+  await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize(),/EADDRINUSE.*held by pid 4242 \(\/Users\/michael\/run\/target\/release\/sceneworks-rust-api\)/);
+  const failure=JSON.parse(await readFile(path.join(f.dir,'startup-failure.json'),'utf8'));
+  assert.equal(failure.requestedPort,43210);assert.equal(failure.portHolder.tool,'lsof -nP -iTCP:43210 -sTCP:LISTEN');assert.deepEqual(failure.portHolder.holders,[{pid:4242,command:'/Users/michael/run/target/release/sceneworks-rust-api',startedAt:'2026-10-29T22:10:00.000Z'}]);
+  assert.match(failure.portHolder.output,/4242/);assert.equal(fake.children.length,0,'nothing spawned against a held port');
+});
+test('a foreign listener on the bound port is named, never contacted',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f,{wrongListener:true});fake.deps.portHolder=async port=>({port,tool:'unit_fake',exitCode:0,output:'',holders:[{pid:99999,command:'foreign'}]});
+  await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir,fake.deps).initialize(),/not owned by this child.*held by pid 99999 \(foreign\)/);
+  const failure=JSON.parse(await readFile(path.join(f.dir,'startup-failure.json'),'utf8'));assert.equal(failure.portHolder.holders[0].pid,99999);assert.equal(fake.calls.filter(c=>c[0]==='request').length,0);
+});
+test('holder diagnostics parse lsof and netstat and format the holder',async()=>{
+  assert.deepEqual(parseLsofListen('COMMAND   PID    USER   FD   TYPE DEVICE SIZE/OFF NODE NAME\nnode    501 michael   23u  IPv4 0xabc      0t0  TCP 127.0.0.1:43210 (LISTEN)\n'),[{command:'node',pid:501,user:'michael',name:'127.0.0.1:43210 (LISTEN)'}]);
+  const netstat='\r\nActive Connections\r\n\r\n  Proto  Local Address          Foreign Address        State           PID\r\n  TCP    127.0.0.1:43210        0.0.0.0:0              LISTENING       8812\r\n  TCP    127.0.0.1:432100       0.0.0.0:0              LISTENING       1\r\n  TCP    127.0.0.1:43210        127.0.0.1:5000         ESTABLISHED     8812\r\n';
+  assert.deepEqual(parseNetstatListen(netstat,43210),[{pid:8812,local:'127.0.0.1:43210'}]);
+  const win=await portHolder(43210,{platform:'win32',exec:async(file,args)=>{assert.equal(file,'netstat');assert.deepEqual(args,['-ano','-p','TCP']);return {code:0,stdout:netstat,stderr:''};},info:async()=>null});
+  assert.deepEqual(win.holders,[{pid:8812,command:null}]);assert.equal(formatPortHolder(win),'port 43210 is held by pid 8812 (command unknown)');assert.doesNotMatch(win.output,/432100|Active/);
+  const none=await portHolder(5,{platform:'darwin',exec:async()=>({code:1,stdout:'',stderr:''})});assert.equal(formatPortHolder(none),'no listener on port 5 reported by lsof -nP -iTCP:5 -sTCP:LISTEN');
+  const missing=await portHolder(5,{platform:'darwin',exec:async()=>({code:-1,stdout:'',stderr:'',error:'spawn lsof ENOENT'})});assert.match(formatPortHolder(missing),/holder unknown .*ENOENT/);
+  assert.ok(isBindFailure({code:'EADDRINUSE'}));assert.ok(isBindFailure({message:'Error: Address already in use (os error 48)'}));assert.ok(!isBindFailure(new Error('owned API listener timeout')));
+  assert.equal(boundApiPort('{"fields":{"event":"api_listening","address":"[::1]:6001"}}'),6001);assert.equal(boundApiPort('{"event":"api_ready"}\nnot json api_listening'),undefined);
+});
+test('process identity reads ps/CIM start time and command',async()=>{
+  assert.equal(parseEtimeSeconds('05:07'),307);assert.equal(parseEtimeSeconds('2-03:04:05'),183845);assert.equal(parseEtimeSeconds('bogus'),null);
+  const now=()=>Date.parse('2026-10-30T12:00:00Z');
+  const ps=await processInfo(321,{platform:'darwin',now,exec:async(file,args)=>{assert.equal(file,'ps');assert.deepEqual(args,['-ww','-o','etime=','-o','command=','-p','321']);return {code:0,stdout:'   01:00:00 /x/target/release/sceneworks-rust-api\n',stderr:''};}});
+  assert.deepEqual(ps,{pid:321,command:'/x/target/release/sceneworks-rust-api',startedAt:Date.parse('2026-10-30T11:00:00Z')});
+  assert.equal(await processInfo(321,{platform:'darwin',exec:async()=>({code:1,stdout:'',stderr:''})}),null);
+  const cim=await processInfo(77,{platform:'win32',exec:async file=>{assert.equal(file,'powershell.exe');return {code:0,stdout:'2026-10-30T10:00:00.0000000Z\r\n"C:\\r\\sceneworks-rust-api.exe"\r\n',stderr:''};}});
+  assert.equal(cim.startedAt,Date.parse('2026-10-30T10:00:00Z'));assert.match(cim.command,/sceneworks-rust-api\.exe/);
+});
+async function campaignParent(t){
+  const temp=await mkdtemp(path.join(os.tmpdir(),'sc26691-leftover-unit-fake-'));t.after(()=>rm(temp,{recursive:true,force:true}));
+  const parent=path.join(temp,'sc26691-private');await mkdir(parent);return parent;
+}
+async function writeOwnership(root,caseId,record,epoch=1){const dir=path.join(root,caseId);await mkdir(dir,{recursive:true});await writeFile(path.join(dir,`ownership-${epoch}.json`),JSON.stringify(record));return dir;}
+test('a live owned process from an older run root refuses the case with run, case, PID and command, untouched',async t=>{
+  const parent=await campaignParent(t),old=path.join(parent,'40903116430-1-bootstrap-'+'a'.repeat(40)),current=path.join(parent,'41044021373-1-bootstrap-'+'b'.repeat(40));
+  // Legacy record shape (no processes[]): the cancelled run's API is still alive as itself.
+  const started='2026-10-29T22:50:00.000Z';await writeOwnership(old,'mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo',{epoch:1,started,apiPid:5101,workerPid:5102,guardianPid:5100,listenerPid:5101,runDirectory:'/x'});
+  await writeFile(path.join(old,'not-a-case.json'),'{}');await mkdir(path.join(parent,'40903116430-1'));await mkdir(path.join(parent,'stray-dir'));
+  const live=new Map([[5101,{pid:5101,command:'/Users/michael/actions-runner-sceneworks/_work/target/release/sceneworks-rust-api',startedAt:Date.parse(started)-200}],[5100,{pid:5100,command:'/opt/node/bin/node -e process.stdin.resume();',startedAt:Date.parse('2026-10-30T09:00:00Z')}]]);
+  const info=async pid=>live.get(pid)??null;
+  assert.deepEqual((await campaignRunRoots(current)).map(v=>path.basename(v)).sort(),[path.basename(old),path.basename(current)].sort());
+  const found=await liveOwnedProcesses({roots:await campaignRunRoots(current),info});
+  assert.deepEqual(found.map(v=>[v.runId,v.runAttempt,v.caseId,v.role,v.pid]),[['40903116430','1','mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo','api',5101]],'the guardian PID was reused by a later node process: not attributed');
+  // The case refuses before any build/spawn and writes the finding beside its evidence.
+  const f=await fixture(t);f.p.output=current;const dir=path.join(current,f.c.id);await mkdir(dir,{recursive:true});const fake=fakeRuntime(f);fake.deps.processInfo=info;
+  await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,dir,fake.deps).initialize(),/H3_LEFTOVER_OWNED_PROCESSES: refusing .*run 40903116430-1 case mlx\.reduced\.artifact-0-ordered-mixed-baseline-ref-turbo epoch 1 api pid 5101 \(\/Users\/michael\/actions-runner-sceneworks\/_work\/target\/release\/sceneworks-rust-api/);
+  const record=JSON.parse(await readFile(path.join(dir,'leftover-processes.json'),'utf8'));assert.equal(record.found[0].pid,5101);assert.match(record.meaning,/nothing was signalled/);
+  assert.equal(fake.children.length,0);assert.equal(fake.calls.filter(c=>c[0]==='build'||c[0]==='signal').length,0);
+});
+test('dead PIDs, reused PIDs and this case\'s own records never refuse',async t=>{
+  const parent=await campaignParent(t),old=path.join(parent,'40797515762-1-bootstrap-'+'c'.repeat(40)),current=path.join(parent,'41044021373-2-bootstrap-'+'d'.repeat(40));
+  const from='2026-10-29T10:00:00.000Z',to='2026-10-29T10:00:00.050Z';
+  await writeOwnership(old,'mlx.reduced.case-a',{epoch:1,started:to,requestedPort:0,port:50111,apiPid:6001,workerPid:6002,guardianPid:6000,processes:[{role:'guardian',pid:6000,executable:'/usr/bin/node',spawnedFrom:from,spawnedTo:to},{role:'api',pid:6001,executable:'/w/target/release/sceneworks-rust-api',spawnedFrom:from,spawnedTo:to},{role:'worker',pid:6002,executable:'/w/target/release/sceneworks-rust-api',spawnedFrom:'2026-10-29T10:00:20.000Z',spawnedTo:'2026-10-29T10:00:20.010Z'}]});
+  const ownDir=await writeOwnership(current,'mlx.reduced.case-b',{epoch:1,started:new Date().toISOString(),apiPid:7001});
+  const live=new Map([
+    [6001,{pid:6001,command:'/w/target/release/sceneworks-rust-api',startedAt:Date.parse('2026-10-30T08:00:00Z')}], // same command, started a day later: PID reused
+    [6002,{pid:6002,command:'/usr/sbin/mDNSResponder',startedAt:Date.parse('2026-10-29T10:00:20Z')}],               // same start window, different command
+    [7001,{pid:7001,command:'/w/target/release/sceneworks-rust-api',startedAt:Date.now()}]]);                         // this case's own record is excluded
+  const found=await liveOwnedProcesses({roots:await campaignRunRoots(current),exclude:[ownDir],info:async pid=>live.get(pid)??null});
+  assert.deepEqual(found,[]);
+  // The new record shape matches its own live process within the spawn window.
+  const [api]=recordedProcesses({processes:[{role:'api',pid:6001,executable:'/w/target/release/sceneworks-rust-api',spawnedFrom:from,spawnedTo:to}]});
+  assert.ok(sameProcess(api,{pid:6001,command:'/w/target/release/sceneworks-rust-api',startedAt:Date.parse(from)+1000}));
+  assert.ok(!sameProcess(api,{pid:6001,command:'/elsewhere/sceneworks-rust-api-other',startedAt:Date.parse(from)}));
+  // A unit_fake output outside sc26691-private never scans its OS-temp siblings.
+  assert.deepEqual(await campaignRunRoots(path.join(os.tmpdir(),'some-unit-fake-root')),[path.resolve(path.join(os.tmpdir(),'some-unit-fake-root'))]);
 });

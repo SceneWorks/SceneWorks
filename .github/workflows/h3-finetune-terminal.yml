@@ -264,14 +264,24 @@ jobs:
           import {spawnSync} from "node:child_process";
           import {readdir, rm, statfs} from "node:fs/promises";
           import path from "node:path";
+          import {pathToFileURL} from "node:url";
+          const {liveOwnedProcesses, formatLeftovers, RUN_OUTPUT_ROOT} = await import(pathToFileURL(path.join(process.env.GITHUB_WORKSPACE, "sceneworks", "scripts", "lib", "h3-owned-processes.mjs")).href);
           // The stage's privateRunRoot parent: E:\\huggingface on Windows, $HF_HOME elsewhere.
           const hfHome = process.platform === "win32" ? "E:\\huggingface" : process.env.HF_HOME;
           if (!hfHome || !path.isAbsolute(hfHome)) throw new Error("an absolute HF_HOME is required to locate the private run roots");
           const parent = path.join(hfHome, "sc26691-private"), current = process.env.GITHUB_RUN_ID;
           const entries = await readdir(parent, {withFileTypes: true}).catch(e => { if (e.code === "ENOENT") return []; throw e; });
+          // An owned API/worker/guardian an earlier run recorded and that is still alive as itself
+          // (MLX run 41044021373 hit one holding 127.0.0.1:43210) keeps that run's roots: it may
+          // still read them and hold Metal/CUDA memory. It is never signalled - stopping it is the
+          // operator's decision - and the lane fails here, before staging, instead of at its first case.
+          const outputRoots = entries.filter(e => e.isDirectory() && RUN_OUTPUT_ROOT.test(e.name) && !e.name.startsWith(`${current}-`)).map(e => path.join(parent, e.name));
+          const leftovers = await liveOwnedProcesses({roots: outputRoots});
+          const heldRuns = new Set(leftovers.map(p => p.runId));
           for (const entry of entries) {
             const match = /^(\d+)-\d+(?:-bootstrap-[0-9a-f]{40}|-target|-native|-fixture)?$/.exec(entry.name);
             if (!entry.isDirectory() || !match || match[1] === current) continue;
+            if (heldRuns.has(match[1])) { console.log(`keeping ${entry.name}: run ${match[1]} still has live owned processes`); continue; }
             // A directory whose name only LOOKS like a run root (a stray test leftover such as
             // `1-1-native` or `101-1`) has no run behind it: the lookup 404s. That is a reason to
             // keep the directory and say so, never to fail the campaign; deletion stays limited to
@@ -289,6 +299,7 @@ jobs:
           }
           const fs = await statfs(hfHome);
           console.log(`${hfHome} free ${(fs.bavail * fs.bsize / 2 ** 30).toFixed(1)} GiB`);
+          if (leftovers.length) throw new Error(`H3_LEFTOVER_OWNED_PROCESSES: ${leftovers.length} owned process(es) from earlier campaign runs are still alive on this host and were left untouched; stop them, then re-dispatch: ${formatLeftovers(leftovers)}`);
           NODE
       - name: Bootstrap the reduced terminal campaign when requested
         id: bootstrap

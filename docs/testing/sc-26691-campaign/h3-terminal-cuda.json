@@ -25,7 +25,6 @@
       "seed": 314159,
       "requestedGpu": "1",
       "gpuId": "1",
-      "port": 43210,
       "componentTier": "q4",
       "hostBudgetBytes": 68719476736,
       "deviceBudgetBytes": 102641958912,

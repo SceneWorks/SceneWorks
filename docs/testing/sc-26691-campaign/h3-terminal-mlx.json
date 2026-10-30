@@ -25,7 +25,6 @@
       "seed": 314159,
       "requestedGpu": "mlx",
       "gpuId": "mlx",
-      "port": 43210,
       "componentTier": "q4",
       "hostBudgetBytes": 128849018880,
       "deviceBudgetBytes": 128849018880,

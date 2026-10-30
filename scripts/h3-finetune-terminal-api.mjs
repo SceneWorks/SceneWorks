@@ -51,9 +51,15 @@ export function isSettledJobSnapshot(job) {
 }
 /** Same bound the product's own film harness gives the terminal-to-persisted window. */
 export const ASSET_SETTLE_GRACE_MS = 30000;
-export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {}, deadlineMs = Infinity, uploadFile } = {}) {
-  const base = new URL(s.baseUrl);
-  assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(base.hostname), 'task-owned loopback API required');
+// `baseUrl` (a string or a function of no arguments) is the live owned service origin. A scenario
+// planned against an OS-assigned port names `http://127.0.0.1:0` and requires it; the function form
+// follows a restart that bound a new port.
+export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), onRecord = async () => {}, beforeStep = async () => {}, deadlineMs = Infinity, uploadFile, baseUrl } = {}) {
+  const loopback = url => { assert.ok(['127.0.0.1', '[::1]', 'localhost'].includes(url.hostname), 'task-owned loopback API required'); return url; };
+  const planned = loopback(new URL(s.baseUrl));
+  assert.ok(baseUrl !== undefined || planned.port !== '0', 'a scenario planned against an OS-assigned port needs the owned service\'s bound base URL');
+  const currentBase = () => loopback(new URL(baseUrl === undefined ? s.baseUrl : typeof baseUrl === 'function' ? baseUrl() : baseUrl));
+  currentBase();
   assert.ok(s.timeoutSeconds > 0 && s.timeoutSeconds <= 7200);
   assert.ok(s.caseId && Array.isArray(s.steps) && s.steps.length > 0);
   assert.ok(deadlineMs===Infinity||Number.isFinite(deadlineMs)&&deadlineMs>now(),'explicit case deadline expired');
@@ -62,7 +68,7 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
   const record = async r => { transcript.push(r); await onRecord(r); };
   async function request(method, route, body, expectedStatus, upload) {
     assert.ok(route.startsWith('/api/v1/') && !route.includes('..'), 'existing app API route required');
-    const url = new URL(route, base); assert.equal(url.origin, base.origin);
+    const base = currentBase(), url = new URL(route, base); assert.equal(url.origin, base.origin);
     assert.ok(now() < deadline, 'scenario timeout');
     let wireBody=body===undefined?undefined:JSON.stringify(body),headers={'content-type':'application/json'},recordedBody=body;
     if(upload){assert.equal(method,'POST');assert.match(route,/^\/api\/v1\/projects\/[^/]+\/assets$/,'only the existing asset upload endpoint accepts files');assert.equal(typeof uploadFile,'function','source-bound upload adapter required');assert.equal(body,undefined,'upload fields are explicit, not arbitrary request bodies');const blob=await uploadFile(upload);assert.ok(blob instanceof Blob&&blob.size>0);const form=new FormData();form.set('file',blob,upload.fileName);wireBody=form;headers={};recordedBody={multipartFile:{path:upload.path,sha256:upload.sha256,mimeType:upload.mimeType,fileName:upload.fileName}};}
@@ -121,7 +127,7 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
     // Cooperative product cancellation, never process-kill a native GPU buffer.
     if (activeJob) {
       try {
-        const r = await fetchImpl(new URL(`/api/v1/jobs/${encodeURIComponent(activeJob)}/cancel`, base), { method: 'POST', signal: AbortSignal.timeout(10000) });
+        const r = await fetchImpl(new URL(`/api/v1/jobs/${encodeURIComponent(activeJob)}/cancel`, currentBase()), { method: 'POST', signal: AbortSignal.timeout(10000) });
         await record({ cancellation: activeJob, status: r.status });
       } catch (cancelError) { await record({ cancellation: activeJob, error: cancelError.message }); }
     }

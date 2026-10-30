@@ -3,6 +3,7 @@
 import assert from 'node:assert/strict';
 import { campaignProfileArgs } from './lib/h3-campaign-build-profile.mjs';
 import { stripVerbatim } from './lib/windows-verbatim-path.mjs';
+import { isServicePort } from './lib/h3-owned-processes.mjs';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, realpath, rename, stat, writeFile, copyFile } from 'node:fs/promises';
@@ -79,7 +80,7 @@ export function validatePlan(p) {
     positive(c.loadHostBudgetBytes); positive(c.loadDeviceBudgetBytes);
     if (c.runtime?.scenario) {
       assert.ok(absolutePath(c.runtime.scenario) && c.inputs.some(i => i.path === c.runtime.scenario && i.role === 'scenario'), 'actual bound API scenario required');
-      assert.ok(Number.isInteger(c.runtime.port) && c.runtime.port > 1024 && c.runtime.port <= 65535 && typeof c.runtime.gpuId === 'string', 'owned service port/device configuration required');
+      assert.ok(isServicePort(c.runtime.port) && typeof c.runtime.gpuId === 'string', 'owned service port (0 = OS-assigned per epoch) and device configuration required');
     }
     if(c.kind==='actual-artifact-probe'){assert.ok(c.actualArtifactProbe && c.inputs.some(i=>i.role==='checkpoint') && (p.preparationState==='awaiting-inline-assets'||c.inputs.some(i=>i.role==='staging-receipt')),'actual payload probe and full staging authority required');}
     else if (c.group === 'numeric' && c.numericProof?.kind === 'native-pinned-fixture') {
