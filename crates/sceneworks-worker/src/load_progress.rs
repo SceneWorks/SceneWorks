@@ -22,6 +22,7 @@ struct Latest {
     pending: bool,
     baseline: Option<Arc<ProgressRequest>>,
     compute: Option<(String, ProgressStage)>,
+    prompt_encoding: bool,
     closed: bool,
 }
 
@@ -76,6 +77,7 @@ impl Session {
             if !phase_update {
                 state.activity = None;
                 state.compute = None;
+                state.prompt_encoding = false;
             }
             state.revision = state.revision.wrapping_add(1);
             previous
@@ -164,19 +166,22 @@ impl Session {
 tokio::task_local! { static JOB: Arc<Session>; }
 thread_local! { static THREAD_JOB: RefCell<Option<Arc<Session>>> = const { RefCell::new(None) }; }
 
-pub(crate) fn current(job_id: &str) -> Option<Arc<Session>> {
+fn current_session() -> Option<Arc<Session>> {
     JOB.try_with(Arc::clone)
         .ok()
         .or_else(|| THREAD_JOB.with(|slot| slot.borrow().clone()))
-        .filter(|session| session.job_id == job_id)
+}
+
+pub(crate) fn current(job_id: &str) -> Option<Arc<Session>> {
+    current_session().filter(|session| session.job_id == job_id)
 }
 
 fn note_compute(message: String, stage: ProgressStage) {
-    let session = JOB
-        .try_with(Arc::clone)
-        .ok()
-        .or_else(|| THREAD_JOB.with(|slot| slot.borrow().clone()));
-    let Some(session) = session else {
+    note_compute_phase(message, stage, false);
+}
+
+fn note_compute_phase(message: String, stage: ProgressStage, prompt_encoding: bool) {
+    let Some(session) = current_session() else {
         return;
     };
     let mut state = session.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -185,6 +190,7 @@ fn note_compute(message: String, stage: ProgressStage) {
     }
     state.activity = None;
     state.compute = Some((message, stage));
+    state.prompt_encoding = prompt_encoding;
     state.pending = true;
     state.revision = state.revision.wrapping_add(1);
     session.changed.send_replace(state.revision);
@@ -193,7 +199,28 @@ fn note_compute(message: String, stage: ProgressStage) {
 /// Called at the producer's universal callback, before a possibly backpressured event channel.
 /// A slow ordinary progress POST therefore cannot leave an earlier I/O label current.
 pub(crate) fn generator_progress(progress: &gen_core::Progress) {
+    // This logical end only retires the underlying prompt label. Actual file I/O may still
+    // override it, and a later compute phase must survive a delayed completion callback.
+    if matches!(progress, gen_core::Progress::PromptEncodingComplete) {
+        let Some(session) = current_session() else {
+            return;
+        };
+        let mut state = session.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.closed || !state.prompt_encoding {
+            return;
+        }
+        state.prompt_encoding = false;
+        state.compute = Some((
+            "Preparing generation.".to_owned(),
+            ProgressStage::Generating,
+        ));
+        state.pending = true;
+        state.revision = state.revision.wrapping_add(1);
+        session.changed.send_replace(state.revision);
+        return;
+    }
     let (message, stage) = match progress {
+        gen_core::Progress::PromptEncodingComplete => unreachable!("handled above"),
         gen_core::Progress::Loading(phase) => (
             generator_phase(*phase).to_owned(),
             if matches!(phase, gen_core::LoadPhase::EncodingPrompt) {
@@ -219,7 +246,14 @@ pub(crate) fn generator_progress(progress: &gen_core::Progress) {
             ProgressStage::Generating,
         ),
     };
-    note_compute(message, stage);
+    note_compute_phase(
+        message,
+        stage,
+        matches!(
+            progress,
+            gen_core::Progress::Loading(gen_core::LoadPhase::EncodingPrompt)
+        ),
+    );
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
@@ -723,6 +757,156 @@ mod tests {
             state.posts.lock().unwrap().last().unwrap().1["message"],
             "Encoding prompt."
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn prompt_end_retires_only_prompt_label_and_preserves_actual_io() {
+        let settings = crate::tests::test_settings("http://unused".to_owned(), None);
+        let api = ApiClient::new(&settings);
+        with_job(&api, "job", async {
+            let context = gen_core::LoadActivityContext::capture();
+            generator_progress(&gen_core::Progress::Loading(
+                gen_core::LoadPhase::EncodingPrompt,
+            ));
+            context.report(Some(report("transformer", 1_000_000_000)));
+            generator_progress(&gen_core::Progress::PromptEncodingComplete);
+            let session = current("job").unwrap();
+            {
+                let state = session.state.lock().unwrap();
+                assert_eq!(state.activity.as_ref().unwrap().component, "transformer");
+                assert_eq!(state.compute.as_ref().unwrap().0, "Preparing generation.");
+                assert!(!state.prompt_encoding);
+            }
+            context.report(None);
+            let state = session.state.lock().unwrap();
+            assert!(state.activity.is_none());
+            assert_eq!(state.compute.as_ref().unwrap().0, "Preparing generation.");
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn late_prompt_end_preserves_newer_compute_and_other_prompt_contracts() {
+        let settings = crate::tests::test_settings("http://unused".to_owned(), None);
+        let api = ApiClient::new(&settings);
+        with_job(&api, "job", async {
+            for (progress, expected) in [
+                (
+                    gen_core::Progress::Step {
+                        current: 4,
+                        total: 8,
+                    },
+                    "Generating step 4/8.",
+                ),
+                (gen_core::Progress::Decoding, "Decoding."),
+                (
+                    gen_core::Progress::Loading(gen_core::LoadPhase::Renderer),
+                    "Preparing generation.",
+                ),
+                (gen_core::Progress::ConditioningComplete, "Generating."),
+            ] {
+                generator_progress(&gen_core::Progress::Loading(
+                    gen_core::LoadPhase::EncodingPrompt,
+                ));
+                generator_progress(&progress);
+                let session = current("job").unwrap();
+                let revision = session.state.lock().unwrap().revision;
+                generator_progress(&gen_core::Progress::PromptEncodingComplete);
+                let state = session.state.lock().unwrap();
+                assert_eq!(state.compute.as_ref().unwrap().0, expected);
+                assert_eq!(state.revision, revision, "late completion must be a no-op");
+            }
+            // LLM prompt encoding uses the same display text, but a separate typed contract.
+            generator_progress(&gen_core::Progress::Loading(
+                gen_core::LoadPhase::EncodingPrompt,
+            ));
+            let request = gen_core::core_llm::TextLlmRequest {
+                progress: Some(text_observer()),
+                ..Default::default()
+            };
+            let _guard = request.install_progress();
+            gen_core::core_llm::report_generation_phase(
+                gen_core::core_llm::GenerationPhase::EncodingPrompt,
+            );
+            generator_progress(&gen_core::Progress::PromptEncodingComplete);
+            let session = current("job").unwrap();
+            assert_eq!(
+                session.state.lock().unwrap().compute.as_ref().unwrap().0,
+                "Encoding prompt."
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn slow_posts_and_queued_prompt_updates_cannot_restore_completed_encoding() {
+        let (api, state, server) = api().await;
+        state.slow.store(true, Ordering::SeqCst);
+        with_job(&api, "job", async {
+            generator_progress(&gen_core::Progress::Loading(
+                gen_core::LoadPhase::EncodingPrompt,
+            ));
+            tokio::time::timeout(Duration::from_secs(5), state.entered.notified())
+                .await
+                .unwrap();
+            let context = gen_core::LoadActivityContext::capture();
+            context.report(Some(report("transformer", 1_000_000_000)));
+            generator_progress(&gen_core::Progress::PromptEncodingComplete);
+            // Model an older ordinary channel event already waiting behind the slow POST.
+            let queued = spawn({
+                let api = api.clone();
+                async move {
+                    crate::progress::update_job(&api, "job", normal("Encoding prompt."))
+                        .await
+                        .unwrap();
+                }
+            });
+            tokio::task::yield_now().await;
+            state.release.notify_one();
+            queued.await.unwrap();
+            wait_for(&state, |posts| {
+                posts
+                    .last()
+                    .is_some_and(|p| p.1["message"] == "Loading transformer — 1.0 / 2.0 GB")
+            })
+            .await;
+            context.report(None);
+            wait_for(&state, |posts| {
+                posts
+                    .last()
+                    .is_some_and(|p| p.1["message"] == "Preparing generation.")
+            })
+            .await;
+            crate::progress::update_job(&api, "job", normal("Encoding prompt."))
+                .await
+                .unwrap();
+            assert_eq!(
+                state.posts.lock().unwrap().last().unwrap().1["message"],
+                "Preparing generation."
+            );
+            generator_progress(&gen_core::Progress::Step {
+                current: 5,
+                total: 8,
+            });
+            generator_progress(&gen_core::Progress::PromptEncodingComplete);
+            crate::progress::update_job(&api, "job", normal("Encoding prompt."))
+                .await
+                .unwrap();
+            assert_eq!(
+                state.posts.lock().unwrap().last().unwrap().1["message"],
+                "Generating step 5/8."
+            );
+        })
+        .await;
+        let posts = state.posts.lock().unwrap();
+        let transformer = posts
+            .iter()
+            .position(|p| p.1["message"] == "Loading transformer — 1.0 / 2.0 GB")
+            .unwrap();
+        assert!(posts[transformer..]
+            .iter()
+            .all(|p| p.1["message"] != "Encoding prompt."));
         server.abort();
     }
 

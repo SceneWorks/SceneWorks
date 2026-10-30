@@ -171,7 +171,10 @@ async fn prepare_image_route_with_progress<T: Send + 'static>(
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     crate::load_progress::generator_progress(&progress);
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
-    if matches!(progress, Progress::ConditioningComplete) {
+    if matches!(
+        progress,
+        Progress::ConditioningComplete | Progress::PromptEncodingComplete
+    ) {
         return;
     }
     // The prompt-upsampling COMPLETION boundary has no consumer on this lane and stays internal
@@ -186,7 +189,9 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             current,
             total,
         },
-        Progress::ConditioningComplete | Progress::PromptUpsamplingComplete => {
+        Progress::ConditioningComplete
+        | Progress::PromptEncodingComplete
+        | Progress::PromptUpsamplingComplete => {
             unreachable!("internal boundary filtered above")
         }
         Progress::Decoding => GenEvent::Decoding { index },
@@ -445,6 +450,37 @@ where
 fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     send_gen_progress(&tx, 2, Progress::ConditioningComplete);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    send_gen_progress(
+        &tx,
+        2,
+        Progress::Step {
+            current: 1,
+            total: 4,
+        },
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(GenEvent::Step {
+            index: 2,
+            current: 1,
+            total: 4
+        })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn prompt_encoding_complete_stays_internal_and_preserves_first_positive_step() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    send_gen_progress(&tx, 2, Progress::PromptEncodingComplete);
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)

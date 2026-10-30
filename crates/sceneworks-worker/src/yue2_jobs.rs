@@ -1045,6 +1045,9 @@ impl Yue2Progress {
     /// The job fraction and message after `progress`.
     pub(crate) fn observe(&mut self, progress: Progress) -> (f64, String) {
         let message = match progress {
+            Progress::PromptEncodingComplete => {
+                return (self.fraction, "Preparing generation.".to_owned())
+            }
             Progress::PromptUpsamplingComplete => {
                 return (self.fraction, "Generating audio.".to_owned())
             }
