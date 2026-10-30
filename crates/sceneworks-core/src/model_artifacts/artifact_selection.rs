@@ -838,6 +838,17 @@ pub fn receipt_requirements_for_model(
                         .files
                         .iter()
                         .any(|file| allow_pattern_matches(file, &declared_files)))
+                // A co-requisite row reads receipts without a model id, so any receipt in its
+                // repository can reach it, including the primary's when both rows share one
+                // snapshot (sc-27985: MOSS-Image SFT's `moss-shared-snapshot` row inherited the
+                // transformer receipt and lost its own text encoder and VAE files). It belongs to
+                // the row only when every recorded file is one the row declares.
+                || (is_co_requisite_download(download)
+                    && !declared_files.is_empty()
+                    && !receipt
+                        .files
+                        .iter()
+                        .all(|file| allow_pattern_matches(file, &declared_files)))
             {
                 continue;
             }
@@ -938,10 +949,18 @@ pub fn selected_requirements_for_closure(
     let mut requirements = receipt_requirements_for_model(selected, data_dir);
     let receipt_backed = !requirements.is_empty();
     for declared in declared_exact_requirements_for_model(selected) {
+        // Covered only when an existing requirement of the same row identity already holds every
+        // declared file. Several rows can share a repository and variant with different files
+        // (MOSS's `moss-dmd-lora` / `-time` / `-dataspace` rows), and matching on identity alone
+        // kept only the first (sc-27985).
         if !requirements.iter().any(|requirement| {
             requirement.repository == declared.repository
                 && requirement.variant == declared.variant
                 && requirement.is_primary == declared.is_primary
+                && declared
+                    .files
+                    .iter()
+                    .all(|file| requirement.files.contains(file))
         }) {
             requirements.push(declared);
         }
