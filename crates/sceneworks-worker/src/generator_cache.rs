@@ -326,6 +326,7 @@ impl LoadIdentity {
             text_encoder,
             components,
             prepared_files,
+            imported_h3,
             released_resident,
             sdxl_cuda_offload_policy,
         } = self;
@@ -354,6 +355,7 @@ impl LoadIdentity {
         field!(text_encoder);
         field!(components);
         field!(prepared_files);
+        field!(imported_h3);
         field!(released_resident);
         field!(sdxl_cuda_offload_policy);
         changed
@@ -2177,6 +2179,11 @@ mod tests {
         let before = prepare("source-bound-plan:schedule-a");
         assert_eq!(before, prepare("source-bound-plan:schedule-a"));
         assert_ne!(before, prepare("source-bound-plan:schedule-b"));
+        // sc-27985 cache-miss reasons must name the imported closure, not report an empty diff.
+        assert_eq!(
+            before.changed_fields(&prepare("source-bound-plan:schedule-b")),
+            ["imported_h3"]
+        );
         std::fs::write(
             backbone.path().join("transformer_ref/model.safetensors"),
             b"different reference table",
