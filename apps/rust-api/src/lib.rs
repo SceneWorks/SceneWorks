@@ -1347,7 +1347,9 @@ fn create_app_with_state_mode(
             "jobs_retention_recovery",
             StartupCriticality::ReadinessCritical,
         );
-        let jobs_store = Arc::new(JobsStore::new(&settings.jobs_db_path));
+        let jobs_store = Arc::new(
+            JobsStore::new(&settings.jobs_db_path).with_session_started_at(now_unix_seconds()),
+        );
         jobs_store.initialize()?;
         let purged_terminal_jobs =
             jobs_store.purge_terminal_jobs_older_than(settings.jobs_retention_days)?;
