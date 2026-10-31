@@ -197,8 +197,10 @@ export async function awaitPeerLane({ gh, repository, headSha, selfRunId, peerBa
  * The adaptive matrix's anchor wait. It lasts exactly as long as the paired peer can still deliver:
  * it returns the newest paired-run anchors that `validate` accepts, throws as soon as the peer lane
  * is observed ended, failed or absent without valid anchors, and is otherwise bounded only by
- * `deadline` (this lane's work deadline minus what it still needs afterwards; it used to stop at a
- * fixed six hours never sized against a measured peer duration). `download(artifact)` is IO: a
+ * `deadline` (this lane's work deadline minus what it runs under either matrix outcome; it used to
+ * stop at a fixed six hours never sized against a measured peer duration). A deadline already past
+ * is refused before any poll: the caller (peerAnchorWaitDeadline) raises its own "cannot fit even
+ * its guaranteed cases" error first. `download(artifact)` is IO: a
  * failure is retried with backoff (the caller uses a fresh directory each try) and the candidate is
  * kept for the next poll. Only `validate(artifact, directory)` rejects a candidate permanently. A
  * transient Actions API failure is retried; only a continuous outage past API_OUTAGE_LIMIT_MS ends
@@ -213,7 +215,7 @@ export async function waitForPeerAnchors({ gh, repository, name, headSha, selfRu
   const pause = ms => sleep(Math.max(0, Math.min(ms, deadline - now())));
   let interval = pollMs, fingerprint, outageSince = null, polls = 0;
   for (;;) {
-    if (now() >= deadline) throw new Error(`adaptive_matrix: this lane reached its peer-anchor wait deadline ${new Date(deadline).toISOString()} (its work deadline minus the time its remaining cases need) while the paired ${peerBackend} lane was still able to deliver but had published no valid inline anchors; no backend or timing is guessed.${notes()}`);
+    if (now() >= deadline) throw new Error(`adaptive_matrix: this lane reached its peer-anchor wait deadline ${new Date(deadline).toISOString()} (its work deadline minus the time its guaranteed cases need under either matrix outcome) while the paired ${peerBackend} lane was still able to deliver but had published no valid inline anchors; no backend or timing is guessed.${notes()}`);
     let observed;
     try { observed = await observer.observe({ name }); outageSince = null; }
     catch (error) {

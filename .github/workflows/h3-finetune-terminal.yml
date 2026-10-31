@@ -672,17 +672,20 @@ jobs:
           import path from "node:path";
           import {readFile,writeFile,mkdtemp} from "node:fs/promises";
           import {execFileSync} from "node:child_process";
-          import {laneBudget,ownAnchorTimings,peerAnchorWaitDeadline,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
+          import {laneBudget,ownAnchorTimings,peerAnchorWaitDeadline,assertLaneAllocationFits,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
           import {anchorArtifactBase,waitForPeerAnchors} from "./scripts/lib/h3-peer-lane.mjs";
           const env=process.env,p=JSON.parse(await readFile(env.PLAN,"utf8")),backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
           const name=anchorArtifactBase({backend:peer,sceneworks:p.sceneworks,inference:p.inference,evidence:p.nativeEvidence.sha});
           const budget=await laneBudget(p,backend);
           const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
           // The wait ends at this lane's work deadline (budget and job timeout, minus the evidence
-          // reserve) minus the measured estimate of every case it may still run (each case: its
-          // anchor family's fixed part plus its own step count at the measured per-step time).
-          const wait=peerAnchorWaitDeadline(p,backend,budget,{timings:await ownAnchorTimings(p,backend)});
-          console.log(JSON.stringify({peerAnchorWait:{until:new Date(wait.deadline).toISOString(),workDeadline:new Date(wait.workDeadline).toISOString(),remainingMs:wait.remainingMs,displacedMs:wait.displacedMs,remainingCases:wait.remaining,basis:wait.basis,perCase:wait.perCase}}));
+          // reserve) minus the measured estimate of the cases it runs under EITHER matrix outcome
+          // (the displaced allocation; each case: its anchor family's fixed part plus its own step
+          // count at the per-step time from the anchor's job progress). A lane that cannot fit even
+          // those refuses here with its own error; the selected allocation is checked after the decision.
+          const timings=await ownAnchorTimings(p,backend);
+          const wait=peerAnchorWaitDeadline(p,backend,budget,{timings});
+          console.log(JSON.stringify({peerAnchorWait:{until:new Date(wait.deadline).toISOString(),workDeadline:new Date(wait.workDeadline).toISOString(),guaranteedMs:wait.guaranteedMs,guaranteedCases:wait.guaranteedCases,selectedMs:wait.selectedMs,selectedCases:wait.selectedCases,basis:wait.basis,perCase:wait.perCase}}));
           // Wait for as long as the paired peer lane can still deliver: it throws at once when the
           // peer is observed ended, failed or absent without valid anchors. A download is IO and is
           // retried (a fresh directory each try); only a failed packet check rejects a candidate. The
@@ -700,6 +703,9 @@ jobs:
             }});
           const plan=result.plan;assert.equal(plan.sceneworks,p.sceneworks);
           await writeFile(env.PLAN,JSON.stringify(plan,null,2)+"\n");console.log(JSON.stringify({peerAnchors:{artifact:artifact.id,name:artifact.name,run:artifact.workflow_run.id,attempt:artifact.runAttempt},measuredMatrixDecision:result.decision,omittedAVStatus:"NOT proven on the displaced backend"}));
+          // The allocation the decision gave this lane must fit its work deadline: the displaced one
+          // does by construction of the wait; a selected one that does not fails here, with numbers.
+          console.log(JSON.stringify({laneAllocation:assertLaneAllocationFits(plan,backend,budget,{timings})}));
           for(const c of executionCases(plan).filter(c=>c.backend===backend&&![1,15].includes(c.index)))execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,c.id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
           NODE
       - name: Retain terminal staging and conditioning receipts without uploading weights

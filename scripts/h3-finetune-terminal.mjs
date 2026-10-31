@@ -737,16 +737,55 @@ export function caseDeadlines({ timeoutSeconds, now = Date.now(), workDeadline =
   return { soft: Math.min(now + timeoutSeconds * 1000, hard - CASE_SHUTDOWN_RESERVE_MS), hard };
 }
 /**
- * The measured cost model of one inline anchor: its wall time split into the per-case fixed part
- * (import, normalization, encoders, DiT load, decode) and its per-denoise-step time, from the
- * anchor case's own worker logs ("minimax-h3: denoise step done" with elapsed_ms). Real CUDA run
- * 40903166111: the reference anchor was 2687 s with 4 x ~54 s steps, the prompt anchor 858 s with
- * 4 x ~18 s, so the fixed part dominates and a step count must not scale the whole wall. When an
- * engine logs no per-step timing (the MLX engine), the whole wall is attributed to its steps: a
- * pessimistic, labelled basis, never a guess in the optimistic direction.
+ * The per-step part of an anchor from the API job progress the case transcript retains (both
+ * engines post it): "Generating frames — step N/M." is posted when step N COMPLETES (with the job's
+ * updatedAt), so a step's time is the gap between consecutive completions. Step 1's gap from the
+ * previous message also carries the render-component load, so the per-step time is taken over
+ * steps 2..N only — (t(N) - t(first)) / (N - first) — and step 1 lands in the fixed part. The last
+ * step's completion is its own "step M/M" when a poll saw it, else the job's next message
+ * ("Decoding frames."). Real MLX run 41135700602 reference anchor: steps done at 00:11:45,
+ * 00:17:08, 00:22:13, 00:27:18 (311 s/step over steps 2..4) after a ~6 min component load from
+ * 00:05:52. Returns null when no generate job reached its last declared step.
  */
-export function anchorTimingFromLogs({ wallMs, steps, logText = '' }) {
+export function stepSplitFromProgress(transcript, steps) {
+  const entries = Array.isArray(transcript) ? transcript : Array.isArray(transcript?.transcript) ? transcript.transcript : [];
+  const jobs = new Map();
+  for (const entry of entries) {
+    const r = entry?.result;
+    if (entry?.method !== 'GET' || !/\/api\/v1\/jobs\//.test(entry.route ?? '') || !r?.id) continue;
+    const at = Date.parse(r.updatedAt); if (!Number.isFinite(at)) continue;
+    if (!jobs.has(r.id)) jobs.set(r.id, []);
+    const match = /\bstep (\d+)\/(\d+)\b/.exec(r.message ?? '');
+    jobs.get(r.id).push({ at, step: match && Number(match[2]) === steps ? Number(match[1]) : null });
+  }
+  let spanMs = 0, spanSteps = 0, measuredJobs = 0;
+  for (const events of jobs.values()) {
+    const done = new Map(); let last = -1;
+    events.forEach((event, i) => { if (event.step !== null) { if (!done.has(event.step)) done.set(event.step, event.at); last = i; } });
+    if (last < 0) continue;
+    if (!done.has(steps)) { const next = events.slice(last + 1).find(event => event.step === null); if (next) done.set(steps, next.at); }
+    const first = Math.min(...done.keys());
+    if (!done.has(steps) || first >= steps || done.get(steps) < done.get(first)) continue;
+    spanMs += done.get(steps) - done.get(first); spanSteps += steps - first; measuredJobs++;
+  }
+  return measuredJobs ? { stepMs: spanMs / spanSteps, jobs: measuredJobs } : null;
+}
+/**
+ * The measured cost model of one inline anchor: its wall time split into the per-case fixed part
+ * (import, normalization, encoders, component load, step 1, decode) and its per-denoise-step time.
+ * The uniform source is the API job progress in the anchor's api-transcript.json
+ * (stepSplitFromProgress), present on both engines: the MLX worker logs no per-step lines, and
+ * run 41135700602 refused its peer wait because the whole 66 min anchor wall was charged per step.
+ * The worker's "minimax-h3: denoise step done" elapsed_ms lines (CUDA) are used only when the
+ * transcript has no step progress. Real CUDA run 40903166111: the reference anchor was 2687 s with
+ * 4 x ~54 s steps, the prompt anchor 858 s with 4 x ~18 s, so the fixed part dominates and a step
+ * count must not scale the whole wall. With neither source the whole wall is attributed to its
+ * steps: a pessimistic, labelled basis, never a guess in the optimistic direction.
+ */
+export function anchorTimingFromLogs({ wallMs, steps, logText = '', transcript }) {
   assert.ok(Number.isFinite(wallMs) && wallMs > 0 && Number.isInteger(steps) && steps > 0, 'measured anchor wall and its declared step count required');
+  const progress = transcript === undefined ? null : stepSplitFromProgress(transcript, steps);
+  if (progress) return { wallMs, steps, stepMs: progress.stepMs, fixedMs: Math.max(0, wallMs - progress.jobs * steps * progress.stepMs), basis: 'job-progress-step-split (steps 2..N; step 1 and component load in the fixed part)' };
   const stepMs = [];
   for (const line of logText.split('\n')) { try { const event = JSON.parse(line); if (event.message === 'minimax-h3: denoise step done' && Number.isFinite(Number(event.elapsed_ms))) stepMs.push(Number(event.elapsed_ms)); } catch {} }
   if (stepMs.length >= steps) { const perStep = stepMs.slice(-steps).reduce((a, b) => a + b, 0) / steps; return { wallMs, steps, stepMs: perStep, fixedMs: Math.max(0, wallMs - steps * perStep), basis: 'measured-step-split' }; }
@@ -759,9 +798,11 @@ export async function ownAnchorTimings(p, backend) {
   for (const [role, index] of [['reference', 1], ['prompt', 15]]) {
     const c = p.cases.find(v => v.backend === backend && v.index === index); assert.ok(c, `${backend} anchor case ${index} missing`);
     const dir = contained(p.output, c.id), row = await json(path.join(dir, 'execution.json')); assert.equal(row.status, 'passed', `${c.id} anchor has not passed`);
-    let logText = '';
-    for (const name of (await readdir(dir)).filter(name => /^worker-\d+\.log$/.test(name)).sort()) logText += await readFile(path.join(dir, name), 'utf8') + '\n';
-    timings[role] = anchorTimingFromLogs({ wallMs: Date.parse(row.completed) - Date.parse(row.started), steps: c.declaredSourceBindings?.[0]?.sampling?.steps, logText });
+    const names = await readdir(dir);
+    let logText = '', transcript;
+    for (const name of names.filter(name => /^worker-\d+\.log$/.test(name)).sort()) logText += await readFile(path.join(dir, name), 'utf8') + '\n';
+    if (names.includes('api-transcript.json')) transcript = await json(path.join(dir, 'api-transcript.json'));
+    timings[role] = anchorTimingFromLogs({ wallMs: Date.parse(row.completed) - Date.parse(row.started), steps: c.declaredSourceBindings?.[0]?.sampling?.steps, logText, transcript });
   }
   return timings;
 }
@@ -780,24 +821,46 @@ export function estimateCaseMs(c, timings) {
   return anchor.fixedMs + steps * anchor.stepMs;
 }
 /**
- * The cases this lane still runs after its anchors. Before the peer's anchors arrive the matrix
- * decision is unknown, so the bound is the larger allocation: the SELECTED backend runs every
- * remaining case; the displaced one omits BROAD_MATRIX_CASES (executionCases).
+ * The cases this lane still runs after its anchors under either matrix outcome: the SELECTED
+ * backend runs every remaining case; the displaced one omits BROAD_MATRIX_CASES (executionCases),
+ * so the displaced allocation is what this lane runs regardless of the decision.
  */
 export function remainingLaneCases(p, backend, { displaced = false } = {}) {
   return p.cases.filter(c => c.backend === backend && ![1, 15].includes(c.index) && !(displaced && BROAD_MATRIX_CASES.includes(c.slug)));
 }
+const sumMs = rows => rows.reduce((sum, row) => sum + row.ms, 0);
+const hours = ms => `${(ms / 3600000).toFixed(2)} h`;
 /**
- * When the peer-anchor wait must give up: the lane's work deadline minus the measured estimate of
- * every case it may still run (the selected-backend allocation) and one case shutdown reserve. A
- * lane whose remaining work alone exceeds its budget cannot finish either way and refuses at once.
+ * When the peer-anchor wait must give up. Before the peer's anchors arrive the matrix decision is
+ * unknown, so the wait reserves only the work this lane runs under EITHER outcome — the displaced
+ * allocation — plus one case shutdown reserve: the lane's work deadline minus that. Reserving the
+ * selected allocation assumed this lane wins before the peer was measured and refused the MLX
+ * lane's wait outright (run 41135700602). Whether the selected allocation fits is decided after the
+ * decision, by assertLaneAllocationFits. A lane that cannot fit even its guaranteed cases refuses
+ * at once with its own distinct error, never with a wait deadline already in the past.
  */
-export function peerAnchorWaitDeadline(p, backend, budget, { jobStartedAt, timings } = {}) {
+export function peerAnchorWaitDeadline(p, backend, budget, { jobStartedAt, timings, now = Date.now() } = {}) {
   assert.ok(timings?.reference && timings?.prompt, 'the peer-anchor wait is sized from this lane\'s own measured anchor timings');
-  const cases = remainingLaneCases(p, backend), perCase = cases.map(c => ({ caseId: c.id, ms: Math.round(estimateCaseMs(c, timings)) }));
-  const remainingMs = perCase.reduce((sum, row) => sum + row.ms, 0), displacedMs = remainingLaneCases(p, backend, { displaced: true }).reduce((sum, c) => sum + estimateCaseMs(c, timings), 0);
-  const work = laneWorkDeadline(budget, { jobStartedAt });
-  return { deadline: work - remainingMs - CASE_SHUTDOWN_RESERVE_MS, workDeadline: work, remainingMs, displacedMs: Math.round(displacedMs), reserveMs: remainingMs + CASE_SHUTDOWN_RESERVE_MS, remaining: cases.length, perCase, basis: { reference: timings.reference.basis, prompt: timings.prompt.basis } };
+  const estimate = cases => cases.map(c => ({ caseId: c.id, ms: Math.round(estimateCaseMs(c, timings)) }));
+  const guaranteed = estimate(remainingLaneCases(p, backend, { displaced: true })), selected = estimate(remainingLaneCases(p, backend));
+  const guaranteedMs = sumMs(guaranteed), selectedMs = sumMs(selected), work = laneWorkDeadline(budget, { jobStartedAt });
+  const deadline = work - guaranteedMs - CASE_SHUTDOWN_RESERVE_MS;
+  if (deadline <= now) throw new Error(`adaptive_matrix: this ${backend} lane cannot fit even its guaranteed cases: the ${guaranteed.length} cases it runs under either matrix outcome need an estimated ${hours(guaranteedMs)} plus the ${hours(CASE_SHUTDOWN_RESERVE_MS)} case shutdown reserve, but only ${hours(Math.max(0, work - now))} remain before its work deadline ${new Date(work).toISOString()}; it does not wait for the paired lane's anchors. Estimate basis: reference ${timings.reference.basis}; prompt ${timings.prompt.basis}.`);
+  return { deadline, workDeadline: work, guaranteedMs, selectedMs, reserveMs: guaranteedMs + CASE_SHUTDOWN_RESERVE_MS, guaranteedCases: guaranteed.length, selectedCases: selected.length, perCase: selected, basis: { reference: timings.reference.basis, prompt: timings.prompt.basis } };
+}
+/**
+ * After the matrix decision: the allocation the decision gave this lane (executionCases) must fit
+ * its work deadline. The displaced allocation always fits when the peer wait ended before its
+ * deadline; the selected one may not, and fails here with the numbers instead of running cases
+ * into their deadlines.
+ */
+export function assertLaneAllocationFits(plan, backend, budget, { jobStartedAt, timings, now = Date.now() } = {}) {
+  assert.ok(timings?.reference && timings?.prompt, 'the allocation check uses this lane\'s own measured anchor timings');
+  const cases = executionCases(plan).filter(c => c.backend === backend && ![1, 15].includes(c.index));
+  const ms = sumMs(cases.map(c => ({ ms: Math.round(estimateCaseMs(c, timings)) }))), work = laneWorkDeadline(budget, { jobStartedAt });
+  const role = plan.matrixDecision?.status === 'selected' ? (plan.matrixDecision.displacedBackend === backend ? 'displaced' : 'selected') : 'unresolved';
+  if (now + ms + CASE_SHUTDOWN_RESERVE_MS > work) throw new Error(`adaptive_matrix: the matrix decision gave this ${backend} lane the ${role} allocation (${cases.length} cases, an estimated ${hours(ms)} plus the ${hours(CASE_SHUTDOWN_RESERVE_MS)} case shutdown reserve), but only ${hours(Math.max(0, work - now))} remain before its work deadline ${new Date(work).toISOString()}; the ${role} allocation does not fit this lane's 24 h budget.`);
+  return { role, cases: cases.length, estimatedMs: ms, workDeadline: work, slackMs: work - now - ms - CASE_SHUTDOWN_RESERVE_MS };
 }
 export async function laneBudget(p,backend,{now=Date.now(),startedAt=process.env.H3_TERMINAL_LANE_STARTED_AT}={}) {
   const filename=contained(p.output,`lane-budget-${backend}.json`),totalSeconds=86400;

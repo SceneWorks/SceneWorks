@@ -208,7 +208,7 @@ test('case and lane deadlines stay inside the Actions job timeout and leave the 
 // published 16:58:40. Reference anchor (case 1) 2687313 ms with steps 53558/53581/53799/54018 ms;
 // prompt anchor (case 15) 857867 ms with 17871/17968/18236/18747 ms. Remaining step counts are the
 // plan's declared CUDA samplings (50-step: cases 2, 4, 20, 25 — 8 on MLX since 2026-10-30; 8-step: 17, 18, 21; the rest 4).
-test('the peer-anchor wait is sized from real measured per-case work and lets CUDA wait for a ~3 h MLX anchor', async () => {
+test('the peer-anchor wait reserves the measured guaranteed (displaced) work and lets CUDA wait for a ~3 h MLX anchor', async () => {
   const { peerAnchorWaitDeadline, anchorTimingFromLogs, estimateCaseMs, remainingLaneCases, CASE_SHUTDOWN_RESERVE_MS, LANE_FINALIZE_RESERVE_MS } = await import('./h3-finetune-terminal.mjs');
   const { OPERATIONAL_CASE_DEFS } = await import('./h3-finetune-terminal-reduced.mjs');
   const stepLog = ms => ms.map((elapsed, i) => JSON.stringify({ message: 'minimax-h3: denoise step done', step: i + 1, total: ms.length, elapsed_ms: elapsed })).join('\n');
@@ -227,20 +227,22 @@ test('the peer-anchor wait is sized from real measured per-case work and lets CU
   assert.equal(Math.round(byIndex(16)), 857867); assert.equal(Math.round(byIndex(5)), 2687313);
   assert.equal(Math.round(byIndex(2)), Math.round(timings.reference.fixedMs + 50 * timings.reference.stepMs));
   const budget = { deadline: '2026-10-30T15:35:56.000Z' }, published = Date.parse('2026-10-29T16:58:40Z');
-  const wait = peerAnchorWaitDeadline(p, 'cuda', budget, { jobStartedAt: '2026-10-29T15:35:51Z', timings });
+  const wait = peerAnchorWaitDeadline(p, 'cuda', budget, { jobStartedAt: '2026-10-29T15:35:51Z', timings, now: published });
   assert.equal(wait.workDeadline, Date.parse('2026-10-30T15:35:51Z') - LANE_FINALIZE_RESERVE_MS);
-  assert.equal(wait.deadline, wait.workDeadline - wait.remainingMs - CASE_SHUTDOWN_RESERVE_MS);
-  assert.ok(Math.abs(wait.remainingMs / 3600000 - 15.10) < 0.01, `remaining CUDA work ${(wait.remainingMs / 3600000).toFixed(2)} h`);
-  assert.equal(new Date(wait.deadline).toISOString().slice(0, 16), '2026-10-29T23:24');
+  assert.equal(wait.deadline, wait.workDeadline - wait.guaranteedMs - CASE_SHUTDOWN_RESERVE_MS, 'only the cases run under either matrix outcome are reserved');
+  assert.equal(wait.guaranteedCases, 16); assert.equal(wait.selectedCases, 23);
+  assert.ok(Math.abs(wait.selectedMs / 3600000 - 15.10) < 0.01, `selected-allocation CUDA work ${(wait.selectedMs / 3600000).toFixed(2)} h`);
+  assert.ok(Math.abs(wait.guaranteedMs / 3600000 - 10.89) < 0.01, `guaranteed CUDA work ${(wait.guaranteedMs / 3600000).toFixed(2)} h`);
+  assert.equal(new Date(wait.deadline).toISOString().slice(0, 16), '2026-10-30T03:37');
   const waitHours = (wait.deadline - published) / 3600000;
-  assert.ok(waitHours > 6 && waitHours < 7, `CUDA may wait ${waitHours.toFixed(2)} h for the MLX anchors`);
+  assert.ok(waitHours > 10 && waitHours < 11, `CUDA may wait ${waitHours.toFixed(2)} h for the MLX anchors`);
   assert.ok(wait.deadline - published > 3 * 3600000, 'a ~3 h MLX anchor publication fits');
   // The formula this replaces (remaining x (longest anchor + 20 min)) would have refused at once.
   assert.ok(published > wait.workDeadline - 23 * (2687313 + CASE_SHUTDOWN_RESERVE_MS));
   // An engine without per-step timing is charged pessimistically (whole wall per step), labelled.
   const flat = anchorTimingFromLogs({ wallMs: 4 * 600000, steps: 4 });
   assert.equal(flat.stepMs, 600000); assert.equal(flat.fixedMs, 0); assert.match(flat.basis, /no per-step timing/);
-  assert.throws(() => peerAnchorWaitDeadline(p, 'cuda', budget, {}), /measured anchor timings/);
+  assert.throws(() => peerAnchorWaitDeadline(p, 'cuda', budget, { now: published }), /measured anchor timings/);
 });
 // sc-26691 user-approved scope decision (2026-10-30): the compatible-base cases run 8 steps on MLX
 // (one MLX step measured ~5.4-6.6 min in run 41061562586), 50 on CUDA. Each lane's peer-wait
@@ -265,12 +267,17 @@ test('the peer-anchor wait charges each lane its own per-backend declared steps'
   // An 8-step MLX compatible-base case fits the 7200 s case bound; 50 steps would not.
   assert.ok(estimateCaseMs(at('mlx', 2), mlx) < 7200000);
   assert.ok(mlx.reference.fixedMs + 50 * 360000 > 7200000);
-  const wait = peerAnchorWaitDeadline(p, 'mlx', { deadline: '2026-10-31T12:00:00.000Z' }, { jobStartedAt: '2026-10-30T12:00:00Z', timings: mlx });
+  const wait = peerAnchorWaitDeadline(p, 'mlx', { deadline: '2026-10-31T12:00:00.000Z' }, { jobStartedAt: '2026-10-30T12:00:00Z', timings: mlx, now: Date.parse('2026-10-30T14:00:00Z') });
   for (const index of [2, 4, 20]) assert.equal(wait.perCase.find(row => row.caseId === at('mlx', index).id).ms, Math.round(estimateCaseMs(at('mlx', index), mlx)));
-  const fiftyStep = peerAnchorWaitDeadline({ cases: p.cases.map(c => c.backendSteps ? { ...c, declaredSourceBindings: [{ sampling: { steps: 50 } }] } : c) }, 'mlx', { deadline: '2026-10-31T12:00:00.000Z' }, { jobStartedAt: '2026-10-30T12:00:00Z', timings: mlx });
-  assert.equal(fiftyStep.remainingMs - wait.remainingMs, 3 * 42 * 360000, 'three denoising compatible-base cases x 42 fewer steps on MLX (case 25 cancels before any step)');
+  const fifty = { cases: p.cases.map(c => c.backendSteps ? { ...c, declaredSourceBindings: [{ sampling: { steps: 50 } }] } : c) };
+  const { remainingLaneCases } = await import('./h3-finetune-terminal.mjs');
+  const total = (plan, displaced) => remainingLaneCases(plan, 'mlx', { displaced }).reduce((sum, c) => sum + Math.round(estimateCaseMs(c, mlx)), 0);
+  assert.equal(total(fifty, false) - wait.selectedMs, 3 * 42 * 360000, 'three denoising compatible-base cases x 42 fewer steps on MLX (case 25 cancels before any step)');
+  assert.equal(total(fifty, true) - wait.guaranteedMs, 3 * 42 * 360000, 'the compatible-base cases are not broad-matrix cases: both allocations run them');
+  // At 50 MLX steps even the guaranteed allocation exceeds the lane: refused at once, distinctly.
+  assert.throws(() => peerAnchorWaitDeadline(fifty, 'mlx', { deadline: '2026-10-31T12:00:00.000Z' }, { jobStartedAt: '2026-10-30T12:00:00Z', timings: mlx, now: Date.parse('2026-10-30T14:00:00Z') }), /cannot fit even its guaranteed cases/);
 });
-test('own anchor timings come from the retained anchor case receipts and worker logs', async t => {
+test('own anchor timings fall back to the worker step logs when the anchor has no transcript', async t => {
   const { ownAnchorTimings } = await import('./h3-finetune-terminal.mjs');
   const output = await mkdtemp(path.join(os.tmpdir(), 'sc26691-anchor-timing-')); t.after(() => rm(output, { recursive: true, force: true }));
   const cases = [[1, 'artifact-0-ordered-mixed-baseline-ref-turbo', '2026-10-29T15:57:52.037Z', '2026-10-29T16:42:39.350Z', [53558, 53581, 53799, 54018]], [15, 'real-hybrid-text', '2026-10-29T16:44:20.489Z', '2026-10-29T16:58:38.356Z', [17871, 17968, 18236, 18747]]];
@@ -285,6 +292,117 @@ test('own anchor timings come from the retained anchor case receipts and worker 
   const timings = await ownAnchorTimings(p, 'cuda');
   assert.equal(timings.reference.wallMs, 2687313); assert.equal(timings.reference.stepMs, 53739); assert.equal(timings.prompt.wallMs, 857867);
   assert.equal(timings.prompt.basis, 'measured-step-split');
+});
+// sc-26691 MLX run 41135700602: both MLX anchors passed and published, then the peer-anchor wait
+// refused at once — its deadline 2026-10-30T20:18 was already past. The MLX worker logs no
+// per-step lines, so each anchor's whole wall was charged per step (66 min/step for a 4-step case),
+// and the reserve assumed this lane runs the selected allocation before the peer was measured.
+// The fixture is trimmed from those real anchors' api-transcript.json job polls (and run
+// 41061562586's reference anchor, whose polls missed "step 4/4" and saw "Decoding frames." next).
+const MLX_PROGRESS = JSON.parse(await readFile(new URL('./fixtures/sc26691-h3-mlx-anchor-progress.json', import.meta.url), 'utf8'));
+const progressAnchor = key => { const row = MLX_PROGRESS.cases[key]; return { wallMs: Date.parse(row.execution.completed) - Date.parse(row.execution.started), steps: 4, transcript: row.transcript }; };
+const CUDA_STEP_LOG = ms => ms.map((elapsed_ms, i) => JSON.stringify({ message: 'minimax-h3: denoise step done', step: i + 1, total: ms.length, elapsed_ms })).join('\n');
+async function realLaneShapes() {
+  const { anchorTimingFromLogs } = await import('./h3-finetune-terminal.mjs');
+  const { operationalCases, declaredBackendSteps } = await import('./h3-finetune-terminal-reduced.mjs');
+  const recipeSteps = { 17: 8, 18: 8, 21: 8 };
+  const p = { cases: operationalCases().map(c => ({ ...c, ...(c.kind === 'actual-artifact-probe' ? {} : { declaredSourceBindings: [{ sampling: { steps: declaredBackendSteps(c) ?? recipeSteps[c.index] ?? 4 } }] }) })) };
+  const mlx = { reference: anchorTimingFromLogs(progressAnchor('run41135700602-reference')), prompt: anchorTimingFromLogs(progressAnchor('run41135700602-prompt')) };
+  const cuda = { reference: anchorTimingFromLogs({ wallMs: 2687313, steps: 4, logText: CUDA_STEP_LOG([53558, 53581, 53799, 54018]) }), prompt: anchorTimingFromLogs({ wallMs: 857867, steps: 4, logText: CUDA_STEP_LOG([17871, 17968, 18236, 18747]) }) };
+  return { p, mlx, cuda };
+}
+// Run 41135700602's real clock: job (and lane budget) from 2026-10-30T22:05:20Z, MLX anchors
+// published as the job reached 01:06:49. The paired CUDA lane is modelled on the same start with
+// run 40903166111's measured 1 h 22 m 49 s to its own published anchors.
+const H3_JOB = '2026-10-30T22:05:20Z', H3_BUDGET = { deadline: '2026-10-31T22:05:20.000Z' };
+const MLX_PUBLISHED = Date.parse('2026-10-31T01:06:49Z'), CUDA_PUBLISHED = Date.parse(H3_JOB) + (Date.parse('2026-10-29T16:58:40Z') - Date.parse('2026-10-29T15:35:51Z'));
+test('anchor per-step time comes from the real API job progress, steps 2..N, with step 1 and the component load in the fixed part', async () => {
+  const { stepSplitFromProgress, anchorTimingFromLogs } = await import('./h3-finetune-terminal.mjs');
+  const reference = anchorTimingFromLogs(progressAnchor('run41135700602-reference'));
+  // step 1/4 00:11:45, 2/4 00:17:08, 3/4 00:22:13, 4/4 00:27:18: (00:27:18 - 00:11:45) / 3 = 311 s.
+  assert.equal(reference.wallMs, 3945072); assert.equal(reference.stepMs, 311000); assert.equal(reference.fixedMs, 3945072 - 4 * 311000);
+  assert.match(reference.basis, /^job-progress-step-split/);
+  const prompt = anchorTimingFromLogs(progressAnchor('run41135700602-prompt'));
+  assert.equal(prompt.wallMs, 1629253); assert.equal(Math.round(prompt.stepMs), 102333);
+  // A poll that missed "step 4/4": the job's next message ("Decoding frames." 16:08:53) closes step 4.
+  const earlier = progressAnchor('run41061562586-reference');
+  assert.ok(!JSON.stringify(earlier.transcript).includes('step 4/4'));
+  assert.equal(Math.round(stepSplitFromProgress(earlier.transcript, 4).stepMs), Math.round((Date.parse('2026-10-30T16:08:53Z') - Date.parse('2026-10-30T15:51:18Z')) / 3));
+  // Progress beats the worker step logs, and an engine with neither stays pessimistic and labelled.
+  assert.equal(anchorTimingFromLogs({ ...progressAnchor('run41135700602-reference'), logText: CUDA_STEP_LOG([1, 1, 1, 1]) }).stepMs, 311000);
+  assert.match(anchorTimingFromLogs({ wallMs: 3945072, steps: 4, transcript: { transcript: [] } }).basis, /no per-step timing/);
+  assert.equal(stepSplitFromProgress(earlier.transcript, 8), null, 'progress of another step count is not this anchor\'s');
+});
+test('own anchor timings read the retained api-transcript.json job progress (MLX logs no step lines)', async t => {
+  const { ownAnchorTimings } = await import('./h3-finetune-terminal.mjs');
+  const output = await mkdtemp(path.join(os.tmpdir(), 'sc26691-anchor-progress-')); t.after(() => rm(output, { recursive: true, force: true }));
+  const p = { output, cases: [[1, 'run41135700602-reference'], [15, 'run41135700602-prompt']].map(([index, key]) => ({ index, key, backend: 'mlx', kind: 'full-av', id: MLX_PROGRESS.cases[key].caseId, declaredSourceBindings: [{ sampling: { steps: 4 } }] })) };
+  for (const c of p.cases) {
+    const dir = path.join(output, c.id); await mkdir(dir);
+    await writeFile(path.join(dir, 'execution.json'), JSON.stringify(MLX_PROGRESS.cases[c.key].execution));
+    await writeFile(path.join(dir, 'api-transcript.json'), JSON.stringify(MLX_PROGRESS.cases[c.key].transcript));
+    await writeFile(path.join(dir, 'worker-1.log'), JSON.stringify({ event: 'artifact_seal_hash_progress' }) + '\n');
+  }
+  const timings = await ownAnchorTimings(p, 'mlx');
+  assert.equal(timings.reference.stepMs, 311000); assert.equal(timings.reference.fixedMs, 2701072); assert.match(timings.prompt.basis, /^job-progress-step-split/);
+});
+test('with the real anchor shapes MLX now waits long enough for the CUDA anchors and CUDA for MLX\'s', async () => {
+  const { peerAnchorWaitDeadline, estimateCaseMs, LANE_FINALIZE_RESERVE_MS, CASE_SHUTDOWN_RESERVE_MS } = await import('./h3-finetune-terminal.mjs');
+  const { p, mlx, cuda } = await realLaneShapes();
+  const at = (backend, index) => p.cases.find(c => c.backend === backend && c.index === index);
+  // MLX ~5.2 min/step measured; an 8-step compatible-base case is its 45 min fixed part + 8 steps.
+  assert.equal(Math.round(estimateCaseMs(at('mlx', 2), mlx)), 2701072 + 8 * 311000);
+  assert.ok(estimateCaseMs(at('mlx', 2), mlx) < 7200000, 'fits the 7200 s case bound');
+  const m = peerAnchorWaitDeadline(p, 'mlx', H3_BUDGET, { jobStartedAt: H3_JOB, timings: mlx, now: MLX_PUBLISHED });
+  assert.equal(m.workDeadline, Date.parse('2026-10-31T21:20:20.000Z'), 'the failed run logged this work deadline');
+  assert.equal(m.workDeadline, Date.parse(H3_JOB) + 24 * 3600000 - LANE_FINALIZE_RESERVE_MS);
+  assert.equal(m.guaranteedCases, 16); assert.equal(m.selectedCases, 23);
+  assert.ok(Math.abs(m.guaranteedMs / 3600000 - 14.43) < 0.01, `MLX guaranteed ${(m.guaranteedMs / 3600000).toFixed(2)} h`);
+  assert.ok(Math.abs(m.selectedMs / 3600000 - 20.81) < 0.01, `MLX selected ${(m.selectedMs / 3600000).toFixed(2)} h`);
+  assert.equal(m.deadline, m.workDeadline - m.guaranteedMs - CASE_SHUTDOWN_RESERVE_MS);
+  assert.equal(new Date(m.deadline).toISOString().slice(0, 16), '2026-10-31T06:34');
+  assert.ok(m.deadline - MLX_PUBLISHED > 5 * 3600000, `MLX may wait ${((m.deadline - MLX_PUBLISHED) / 3600000).toFixed(2)} h after publishing its own anchors`);
+  assert.ok(m.deadline > CUDA_PUBLISHED);
+  const c = peerAnchorWaitDeadline(p, 'cuda', H3_BUDGET, { jobStartedAt: H3_JOB, timings: cuda, now: CUDA_PUBLISHED });
+  assert.ok(Math.abs(c.guaranteedMs / 3600000 - 10.89) < 0.01 && Math.abs(c.selectedMs / 3600000 - 15.10) < 0.01, `CUDA ${(c.guaranteedMs / 3600000).toFixed(2)} / ${(c.selectedMs / 3600000).toFixed(2)} h`);
+  assert.equal(new Date(c.deadline).toISOString().slice(0, 16), '2026-10-31T10:06');
+  assert.ok(c.deadline - MLX_PUBLISHED > 8 * 3600000, `CUDA keeps waiting ${((c.deadline - MLX_PUBLISHED) / 3600000).toFixed(2)} h past the real MLX publication`);
+  // The defects this replaces: whole-wall-per-step MLX timings and the selected-allocation reserve
+  // put the MLX deadline in the past at publication (the failed run's 20:18).
+  const { anchorTimingFromLogs } = await import('./h3-finetune-terminal.mjs');
+  const wholeWall = { reference: anchorTimingFromLogs({ wallMs: 3945072, steps: 4 }), prompt: anchorTimingFromLogs({ wallMs: 1629253, steps: 4 }) };
+  const selectedReserve = p.cases.filter(v => v.backend === 'mlx' && ![1, 15].includes(v.index)).reduce((sum, v) => sum + Math.round(estimateCaseMs(v, wholeWall)), 0);
+  assert.ok(m.workDeadline - selectedReserve - CASE_SHUTDOWN_RESERVE_MS < MLX_PUBLISHED);
+});
+test('a lane that cannot fit even its guaranteed cases refuses with its own error, never a past wait deadline', async () => {
+  const { peerAnchorWaitDeadline } = await import('./h3-finetune-terminal.mjs');
+  const { p, mlx } = await realLaneShapes();
+  // 14.43 h guaranteed + 20 min reserve: at 06:40 on the real clock the lane can no longer wait at all.
+  assert.throws(() => peerAnchorWaitDeadline(p, 'mlx', H3_BUDGET, { jobStartedAt: H3_JOB, timings: mlx, now: Date.parse('2026-10-31T06:40:00Z') }),
+    /adaptive_matrix: this mlx lane cannot fit even its guaranteed cases: the 16 cases it runs under either matrix outcome need an estimated 14\.43 h plus the 0\.33 h case shutdown reserve, but only 14\.67 h remain before its work deadline 2026-10-31T21:20:20\.000Z/);
+  assert.doesNotThrow(() => peerAnchorWaitDeadline(p, 'mlx', H3_BUDGET, { jobStartedAt: H3_JOB, timings: mlx, now: Date.parse('2026-10-31T06:30:00Z') }));
+});
+test('after the matrix decision the allocation it gave the lane is checked against the work deadline', async () => {
+  const { assertLaneAllocationFits, peerAnchorWaitDeadline } = await import('./h3-finetune-terminal.mjs');
+  const { chooseMatrixBackend } = await import('./h3-finetune-terminal-reduced.mjs');
+  const { p, mlx, cuda } = await realLaneShapes();
+  const row = (backend, role, wallMs) => ({ backend, role, wallMs, recipe: { role }, geometry: { role }, sourceSha: 'c1006469d', pinSha: '354b41cca', hardware: backend });
+  const plan = anchors => { const matrixAnchors = { mlx: [row('mlx', 'reference', anchors.mlx[0]), row('mlx', 'prompt', anchors.mlx[1])], cuda: [row('cuda', 'reference', anchors.cuda[0]), row('cuda', 'prompt', anchors.cuda[1])] }; return { ...p, inventory: 'reduced-v1', matrixAnchors, matrixDecision: chooseMatrixBackend({ anchors: matrixAnchors }) }; };
+  // The real anchors select CUDA: MLX is displaced and runs its 16 guaranteed cases, which fit.
+  const real = plan({ mlx: [3945072, 1629253], cuda: [2687313, 857867] });
+  assert.equal(real.matrixDecision.selectedBackend, 'cuda');
+  const mlxFit = assertLaneAllocationFits(real, 'mlx', H3_BUDGET, { jobStartedAt: H3_JOB, timings: mlx, now: MLX_PUBLISHED });
+  assert.equal(mlxFit.role, 'displaced'); assert.equal(mlxFit.cases, 16); assert.ok(mlxFit.slackMs > 0);
+  const cudaFit = assertLaneAllocationFits(real, 'cuda', H3_BUDGET, { jobStartedAt: H3_JOB, timings: cuda, now: MLX_PUBLISHED });
+  assert.equal(cudaFit.role, 'selected'); assert.equal(cudaFit.cases, 23); assert.ok(cudaFit.slackMs > 4 * 3600000);
+  // Coherent with the wait: any moment before the wait deadline leaves the displaced allocation room.
+  const wait = peerAnchorWaitDeadline(p, 'mlx', H3_BUDGET, { jobStartedAt: H3_JOB, timings: mlx, now: MLX_PUBLISHED });
+  assert.ok(assertLaneAllocationFits(real, 'mlx', H3_BUDGET, { jobStartedAt: H3_JOB, timings: mlx, now: wait.deadline - 1 }).slackMs >= 0);
+  // Hypothetical anchors that select MLX: its 20.81 h selected allocation does not fit from 01:06.
+  const mlxWins = plan({ mlx: [2000000, 800000], cuda: [2687313, 857867] });
+  assert.equal(mlxWins.matrixDecision.selectedBackend, 'mlx');
+  assert.throws(() => assertLaneAllocationFits(mlxWins, 'mlx', H3_BUDGET, { jobStartedAt: H3_JOB, timings: mlx, now: MLX_PUBLISHED }),
+    /the matrix decision gave this mlx lane the selected allocation \(23 cases, an estimated 20\.81 h plus the 0\.33 h case shutdown reserve\), but only 20\.23 h remain before its work deadline 2026-10-31T21:20:20\.000Z; the selected allocation does not fit/);
 });
 test('the case process exits deterministically when owned handles outlive its bounded shutdown', async t => {
   const { dir } = await fixture(t);
@@ -1104,7 +1222,7 @@ test('the anchor wait stops as soon as the peer lane is observed failed', async 
 test('the anchor wait is bounded by its deadline, never a fixed cap, and backs off while nothing changes', async () => {
   const clock = { t: 0 };
   const { gh, calls } = fakeGh({ runs: livePair(), jobs: { 40855343040: realJobs('mlx', 'in_progress', null) } });
-  await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 19 * HOUR, validate: async () => assert.fail('nothing to validate') })), /reached its peer-anchor wait deadline 1970-01-01T19:00:00.000Z \(its work deadline minus the time its remaining cases need\) while the paired mlx lane was still able to deliver/);
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 19 * HOUR, validate: async () => assert.fail('nothing to validate') })), /reached its peer-anchor wait deadline 1970-01-01T19:00:00.000Z \(its work deadline minus the time its guaranteed cases need under either matrix outcome\) while the paired mlx lane was still able to deliver/);
   assert.equal(clock.t, 19 * HOUR, 'the deadline is the bound, exactly');
   // 19 h of an unchanged live peer: the poll backs off to 5 min, so the Actions API budget holds.
   assert.ok(calls.length < 19 * 12 * 3 + 30, `${calls.length} gh api calls in 19 h`);
