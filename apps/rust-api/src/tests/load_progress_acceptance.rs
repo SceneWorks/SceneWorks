@@ -483,6 +483,24 @@ fn asset_file_path(asset: &Value) -> Result<&str> {
     field(&asset["file"], "path")
 }
 
+fn training_export_evidence(completed: &Value) -> Result<Value> {
+    use sceneworks_core::contracts::JobStatus;
+
+    let status: JobStatus =
+        serde_json::from_value(completed["status"].clone()).map_err(|e| e.to_string())?;
+    require(
+        status == JobStatus::Completed && completed["result"]["stepsCompleted"] == 1,
+        "one-update trainer did not complete",
+    )?;
+    let output = PathBuf::from(field(&completed["result"], "outputPath")?);
+    let bytes = std::fs::read(&output).map_err(|e| e.to_string())?;
+    require(bytes.len() > 8, "empty adapter export")?;
+    // Keep trained weights in owned state; upload only their identity with the acceptance logs.
+    Ok(
+        json!({"path":output,"sha256":sha(&bytes),"bytes":bytes.len(),"loraId":completed["result"]["loraId"]}),
+    )
+}
+
 async fn output_evidence(
     api: &Api,
     root: &Path,
@@ -491,18 +509,7 @@ async fn output_evidence(
     training: bool,
 ) -> Result<Value> {
     if training {
-        require(
-            completed["result"]["stepsCompleted"] == 1
-                && completed["result"]["trainedArtifactExported"] == true,
-            "one-update trainer did not export",
-        )?;
-        let output = PathBuf::from(field(&completed["result"], "outputPath")?);
-        let bytes = std::fs::read(&output).map_err(|e| e.to_string())?;
-        require(bytes.len() > 8, "empty adapter export")?;
-        // Keep trained weights in owned state; upload only their identity with the acceptance logs.
-        Ok(
-            json!({"path":output,"sha256":sha(&bytes),"bytes":bytes.len(),"loraId":completed["result"]["loraId"]}),
-        )
+        training_export_evidence(completed)
     } else {
         let assets = completed["result"]["assets"]
             .as_array()
@@ -912,4 +919,43 @@ fn generated_asset_paths_follow_the_typed_image_and_audio_file_contract() {
     ] {
         assert!(asset_file_path(&asset).is_err());
     }
+}
+
+#[test]
+fn training_export_collector_accepts_normal_completion_and_requires_the_actual_export() {
+    use sceneworks_core::contracts::JobStatus;
+
+    let temp = tempfile::tempdir().unwrap();
+    let output = temp.path().join("adapter.safetensors");
+    let bytes = b"declared opaque export fixture";
+    std::fs::write(&output, bytes).unwrap();
+    // Normal training_result fields; trainedArtifactExported is only a canceled-export marker.
+    let completed = json!({
+        "status":JobStatus::Completed,
+        "result":{"mode":"train","loraId":"load-progress-one-update","backend":"candle",
+                  "steps":1,"stepsCompleted":1,"outputPath":output}
+    });
+    let evidence = training_export_evidence(&completed).unwrap();
+    assert_eq!(evidence["path"], json!(output));
+    assert_eq!(evidence["bytes"], bytes.len());
+    assert_eq!(evidence["sha256"], sha(bytes));
+    assert_eq!(evidence["loraId"], completed["result"]["loraId"]);
+
+    let mut canceled = completed.clone();
+    canceled["status"] = json!(JobStatus::Canceled);
+    canceled["result"]["trainedArtifactExported"] = json!(true);
+    assert!(training_export_evidence(&canceled).is_err());
+    let mut no_step = completed.clone();
+    no_step["result"]["stepsCompleted"] = json!(0);
+    assert!(training_export_evidence(&no_step).is_err());
+    let mut missing_path = completed.clone();
+    missing_path["result"]
+        .as_object_mut()
+        .unwrap()
+        .remove("outputPath");
+    assert!(training_export_evidence(&missing_path).is_err());
+    std::fs::write(&output, []).unwrap();
+    assert!(training_export_evidence(&completed).is_err());
+    std::fs::remove_file(&output).unwrap();
+    assert!(training_export_evidence(&completed).is_err());
 }
