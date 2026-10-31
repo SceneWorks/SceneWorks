@@ -4,12 +4,13 @@ import importlib.util
 import inspect
 import json
 import os
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 HERE = Path(__file__).resolve().parent
 
@@ -132,6 +133,170 @@ class CudaExecutionTests(unittest.TestCase):
         self.assertEqual(len(locks.held), 2)
         shared.release_all(handles, locks)
         self.assertEqual(locks.held, set())
+
+
+class FunctionalAdmissionTests(unittest.TestCase):
+    setUp = CudaExecutionTests.setUp
+    probe = CudaExecutionTests.probe
+    environment = {"GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_WORKFLOW_REF":
+        "SceneWorks/SceneWorks/.github/workflows/memory-catalog-campaign.yml@refs/heads/feature/test",
+        "SCENEWORKS_GPU_ID": "1", "CUDA_VISIBLE_DEVICES": "1", "NVIDIA_VISIBLE_DEVICES": "1",
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID"}
+
+    def require_policy(self, environment=None, actor="load-progress-acceptance", **selection):
+        shared.require_admission_policy(shared.FUNCTIONAL_POLICY, actor,
+            self.environment if environment is None else environment,
+            selection.get("physical_indices"), selection.get("cuda_ordinals", "0"), selection.get("probe_visible", "1"))
+
+    def test_functional_policy_is_explicit_actor_manual_workflow_and_fixed_gpu1_only(self):
+        self.require_policy()
+        direct = dict(self.environment, GITHUB_WORKFLOW_REF=
+            "SceneWorks/SceneWorks/.github/workflows/load-progress-acceptance.yml@refs/heads/main")
+        self.require_policy(direct)
+        for environment in [dict(self.environment, GITHUB_EVENT_NAME="push"),
+                dict(self.environment, GITHUB_WORKFLOW_REF="other"),
+                dict(self.environment, CUDA_DEVICE_ORDER="FASTEST_FIRST")]:
+            with self.assertRaises(RuntimeError): self.require_policy(environment)
+        for key in ("SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"):
+            for value in ("0", "", "0,1"):
+                with self.assertRaises(RuntimeError): self.require_policy(dict(self.environment, **{key: value}))
+        with self.assertRaises(RuntimeError): self.require_policy(actor="another-actor")
+        for selection in ({"physical_indices": "1"}, {"cuda_ordinals": "1"}, {"probe_visible": "0"}):
+            with self.assertRaises(RuntimeError): self.require_policy(**selection)
+        # Existing callers keep their strict policy and device semantics.
+        shared.require_admission_policy(shared.STRICT_POLICY, "legacy-actor", {}, "0", "all", None)
+
+    def test_functional_device_only_probe_and_exact_binding_refuse_gpu0_missing_or_wrong_uuid(self):
+        devices = Mock(return_value=SimpleNamespace(stdout="0, GPU-one\n1, GPU-two\n"))
+        identity = shared.DeviceIdentity("trusted-smi", devices)
+        for rows, accepted in [([{"ordinal": 0, "uuid": "GPU-two"}], True),
+                ([{"ordinal": 0, "uuid": "GPU-one"}], False),
+                ([{"ordinal": 0, "uuid": "GPU-missing"}], False), ([], False)]:
+            launch = Mock()
+            try:
+                binding = shared.resolve_binding(identity, self.out, time.monotonic()+30,
+                    self.environment, probe_visible="1", run=self.probe(rows))
+                shared.require_functional_binding(binding)
+            except RuntimeError:
+                self.assertFalse(accepted)
+            else:
+                self.assertTrue(accepted)
+                launch()
+            self.assertEqual(launch.call_count, int(accepted))
+        for value in ("0, GPU-one\n1, \n", "0, GPU-one\n1, GPU-one\n", ""):
+            devices.return_value.stdout = value
+            with self.assertRaises(RuntimeError): identity.inventory(self.out, "invalid", time.monotonic()+30)
+        self.assertTrue(all(call.args[0] == ["trusted-smi", "--query-gpu=index,uuid",
+            "--format=csv,noheader,nounits"] for call in devices.call_args_list))
+
+    def test_foreign_compute_permits_functional_but_default_strict_rejects_and_no_baseline_is_sampled(self):
+        vendor = shared.component("veda_cuda_guard.py", shared.GUARD_SHA)
+        self.two.update(used_mib=65000, utilization_percent=100)
+        self.guard.inventory.return_value = ([self.one, self.two], [["GPU-two", "57052", "foreign", "C"]])
+        self.guard.idle.side_effect = vendor.idle
+        self.guard.sample_baseline.side_effect = AssertionError("functional must not require benchmark baseline")
+        class Locker:
+            LK_NBLCK, LK_UNLCK = 2, 0
+            def locking(self, *_): pass
+        now = [0]
+        with self.assertRaises(TimeoutError):
+            shared.claim_uuids(["GPU-two"], self.guard, self.out, 2, self.out, Locker(),
+                clock=lambda: now[0], sleep=lambda seconds: now.__setitem__(0, now[0]+seconds))
+        self.guard.idle.reset_mock()
+        selected, handles, baseline, _ = shared.claim_uuids(["GPU-two"], self.guard,
+            self.out, 10, self.out, Locker(), required_indices={"GPU-two": 1},
+            admission_policy=shared.FUNCTIONAL_POLICY, clock=lambda: 0)
+        self.assertEqual(selected, [self.two]); self.assertEqual(baseline, {})
+        self.guard.idle.assert_not_called(); self.guard.sample_baseline.assert_not_called()
+        self.assertFalse((self.out / "SceneWorks/gpu-locks/GPU-one.lock").exists())
+        shared.release_all(handles, Locker())
+
+    def test_functional_uuid_contention_budget_and_physical_recheck_remain_fail_closed(self):
+        class Locker:
+            LK_NBLCK, LK_UNLCK = 2, 0
+            def __init__(self, busy): self.busy = busy; self.held = set()
+            def locking(self, fd, mode, _):
+                if mode == self.LK_NBLCK:
+                    if self.busy: self.busy -= 1; raise OSError("same UUID is leased")
+                    self.held.add(fd)
+                else: self.held.remove(fd)
+        for busy, deadline, succeeds in [(2, 5, True), (20, 2, False)]:
+            locker = Locker(busy); now = [0]
+            def claim():
+                return shared.claim_uuids(["GPU-two"], self.guard, self.out, deadline,
+                    self.out, locker, required_indices={"GPU-two": 1},
+                    admission_policy=shared.FUNCTIONAL_POLICY, clock=lambda: now[0],
+                    sleep=lambda seconds: now.__setitem__(0, now[0]+seconds))
+            if succeeds:
+                _, handles, _, waited = claim(); self.assertEqual(waited, 2)
+                self.assertEqual(len(locker.held), 1); shared.release_all(handles, locker)
+            else:
+                with self.assertRaises(TimeoutError): claim()
+                self.assertEqual(now[0], deadline)
+            self.assertEqual(locker.held, set())
+        self.guard.inventory.return_value = ([dict(self.two, index=0)], [])
+        with self.assertRaisesRegex(RuntimeError, "index/UUID binding changed"):
+            shared.claim_uuids(["GPU-two"], self.guard, self.out, 10, self.out, Locker(0),
+                required_indices={"GPU-two": 1}, admission_policy=shared.FUNCTIONAL_POLICY, clock=lambda: 0)
+
+    def test_functional_completion_requires_success_no_timeout_empty_owned_tree_and_never_claims_idle(self):
+        self.guard.verify_idle.side_effect = RuntimeError("foreign baseline changed")
+        for result, accepted in [({"returncode": 0, "timeout": False, "owned_tree_empty": True}, True),
+                ({"returncode": 3, "timeout": False, "owned_tree_empty": True}, False),
+                ({"returncode": None, "timeout": True, "owned_tree_empty": True}, False),
+                ({"returncode": 0, "timeout": False, "owned_tree_empty": False}, False)]:
+            receipt = shared.resource_receipt("load-progress-acceptance", ["original-actor"], shared.FUNCTIONAL_POLICY)
+            shared.complete_resource(receipt, result, [self.two], self.guard, self.out, {}, shared.FUNCTIONAL_POLICY)
+            self.assertEqual(receipt["resource_completed"], accepted)
+            for key in ("post_child_idle_verified", "isolated_device", "vram_measurement", "performance_measurement", "model_inference_proof"):
+                self.assertIs(receipt[key], False)
+            self.assertTrue(receipt["shared_device"])
+        self.guard.verify_idle.assert_not_called()
+        with self.assertRaisesRegex(RuntimeError, "foreign baseline changed"):
+            shared.complete_resource({}, {"returncode": 0, "timeout": False}, [self.two],
+                self.guard, self.out, {"GPU-two": {}}, shared.STRICT_POLICY)
+
+    def test_main_validates_physical_one_before_and_after_lock_and_reports_only_owned_completion(self):
+        def binding(index=1, identifier="GPU-two"):
+            return {"kind": "context-free-cuda-ordinal-uuid", "devices": [{"index": index, "uuid": identifier}],
+                    "mapping": [{"cuda_ordinal": 0, "uuid": identifier, "nvml_index": index}], "key": [(0, identifier)]}
+        valid = binding()
+        cases = [(valid, valid, True), (binding(index=0), valid, False),
+                 (binding(identifier=None), valid, False), (valid, binding(index=0), False),
+                 (valid, binding(identifier="GPU-remapped"), False)]
+        for attempt, (before, after, accepted) in enumerate(cases, 1):
+            env = dict(self.environment, GITHUB_RUN_ID=str(attempt), GITHUB_RUN_ATTEMPT="1",
+                       RUNNER_TEMP=str(self.out), PUBLIC=str(self.out))
+            executor = Mock(return_value={"returncode": 0, "timeout": False, "owned_tree_empty": True})
+            with patch.object(shared, "os", SimpleNamespace(name="nt", environ=env)), \
+                 patch.object(shared.sys, "argv", ["wrapper", "--actor", "load-progress-acceptance",
+                     "--admission-policy", "functional-coexistence", "--budget-minutes", "1",
+                     "--cuda-ordinals", "0", "--probe-visible", "1", "--", "original-actor"]), \
+                 patch.dict(shared.sys.modules, {"msvcrt": SimpleNamespace()}), \
+                 patch.object(shared, "prepared_components", return_value=(self.guard, SimpleNamespace(WindowsJob=object))), \
+                 patch.object(shared, "resolve_binding", side_effect=[before, after]), \
+                 patch.object(shared, "claim_uuids", return_value=([self.two], [], {}, 0)), \
+                 patch.object(shared, "execute_owned", executor):
+                self.assertEqual(shared.main(), 0 if accepted else 1)
+            receipt = json.loads((self.out / f"sceneworks-cuda-execution-{attempt}-1-load-progress-acceptance/resource-receipt.json").read_text())
+            self.assertEqual(receipt["resource_completed"], accepted)
+            self.assertEqual(executor.call_count, int(accepted))
+            self.assertIs(receipt["post_child_idle_verified"], False)
+            self.assertIs(receipt["performance_measurement"], False)
+            if accepted:
+                self.assertEqual(receipt["binding_rechecked"]["devices"][0]["index"], 1)
+        self.guard.verify_idle.assert_not_called()
+
+    def test_owned_timeout_terminates_only_the_assigned_job_and_waits_for_empty_tree(self):
+        child = Mock(); child.wait.side_effect = subprocess.TimeoutExpired("owned", 1)
+        job = Mock()
+        result = shared.execute_owned(["owned"], self.out, time.monotonic()+10,
+            lambda: job, {}, popen=Mock(return_value=child))
+        job.assign_and_resume.assert_called_once_with(child)
+        job.terminate_and_reap.assert_called_once_with(child, 10)
+        job.close.assert_called_once()
+        child.kill.assert_not_called()
+        self.assertTrue(result["timeout"]); self.assertTrue(result["owned_tree_empty"])
 
 
 class HostServiceTransactionTests(unittest.TestCase):

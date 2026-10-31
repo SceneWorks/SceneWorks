@@ -113,7 +113,7 @@ impl JobMetricsProbe {
             let load = load_permille_max.clone();
             let used = mem_used_mb_max.clone();
             let total = mem_total_mb.clone();
-            Some(tokio::spawn(async move {
+            Some(crate::load_progress::spawn(async move {
                 let mut ticker = tokio::time::interval(GPU_SAMPLE_INTERVAL);
                 ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
                 loop {

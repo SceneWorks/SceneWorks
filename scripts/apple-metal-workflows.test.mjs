@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { execFileSync, spawnSync } from "node:child_process";
 const source = (name) => readFile(new URL(name, import.meta.url), "utf8");
 function job(workflow, name) {
   const start = workflow.indexOf(`\n  ${name}:`);
@@ -36,21 +37,54 @@ test("all terminal GPU tuples hold the actual GPU and API-port resource through 
   assert.match(launcher, /await withMacMetalExecutionLease\(budget \* 60, async \(\) => \{/);
   assert.ok(launcher.indexOf("await withMacMetalExecutionLease") < launcher.indexOf('process.on("SIGINT", interrupt)'), "queued cancellation must not later launch a model");
 });
-test("self-hosted Metal kernel step is leased; hosted isolated macOS job remains unchanged", async () => {
+test("NAX kernels execute only in the dedicated approved manual workflow", async () => {
   const workflow = await source("../.github/workflows/macos-mlx.yml");
-  const original = "node scripts/unit-hf-sandbox\\.mjs -- cargo test -p sceneworks-worker --test nax_guard";
-  const guard = new RegExp("python3\\.12 -I scripts/ci/metal_execution_lock\\.py --wait-seconds [0-9]+ --\\n\\s+" + original);
-  assert.match(workflow, guard);
+  const manual = await source("../.github/workflows/nax-kernel-validation.yml");
+  const ordinary = job(workflow, "nax-worker");
+  assert.match(ordinary, /run: cargo test -p sceneworks-worker --test nax_guard --no-run/);
+  assert.doesNotMatch(workflow, /unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard/);
+  const dispatch = job(workflow, "nax-kernel-validation");
+  assert.match(dispatch, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(dispatch, /inputs\.verification_profile == 'nax-kernel-guard'/);
+  assert.match(dispatch, /uses: \.\/\.github\/workflows\/nax-kernel-validation\.yml/);
+  assert.match(dispatch, /source_sha: \$\{\{ inputs\.source_sha \}\}/);
+  assert.match(dispatch, /mac_go: \$\{\{ inputs\.mac_go \}\}/);
+  const triggers = manual.slice(manual.indexOf("\non:"), manual.indexOf("\npermissions:"));
+  assert.match(triggers, /workflow_dispatch:/);
+  assert.match(triggers, /workflow_call:/);
+  assert.doesNotMatch(triggers, /\n  (?:push|pull_request|schedule|merge_group):/);
+  assert.match(manual, /github\.event_name == 'workflow_dispatch'/);
+  assert.match(manual, /runs-on: \[self-hosted, macOS, ARM64, nax\]/);
+  assert.match(manual, /CARGO_TARGET_DIR: \$\{\{ github\.workspace \}\}\/\.\.\/cargo-target/);
+  assert.match(manual, /fetch-prebuilt-mlx\.sh --github-env/);
+  assert.doesNotMatch(manual, /MACOSX_DEPLOYMENT_TARGET:|MACOSX_DEPLOYMENT_TARGET=/);
+  assert.match(manual, /bind-metallib\.mjs .* --debug-worker/);
+  assert.match(manual, /metal_execution_lock\.py --wait-seconds 2700 --/);
+  assert.match(manual, /unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard/);
+  assert.match(manual, /tee "\$RUNNER_TEMP\/nax-guard\.log"/);
+  assert.match(manual, /cancel-in-progress: false/);
   assert.match(workflow, /workflow_dispatch' && format\('manual-\{0\}-\{1\}', github.run_id, github.run_attempt\)/);
   assert.match(workflow, /github.event_name == 'pull_request' && github.ref \|\| github.sha/);
-  assert.match(job(workflow, "nax-worker"), /bind-metallib\.mjs .* --debug-worker/);
-  assert.equal((job(workflow, "nax-worker").match(/manual-native-release-build\.jsonl" --print-path/g) ?? []).length, 2,
-    "both existing manual captures bind their actual selected release artifact before execution");
-  assert.ok(workflow.includes("macos-26"));
-  const calls = workflow.split("\n").filter((line) => line.includes("metal_execution_lock.py"));
-  assert.equal(calls.length, 1, "only the shared self-hosted raw-kernel step gets this lease");
-  assert.throws(() => assert.match(workflow.replace("metal_execution_lock.py", "unguarded.py"), guard));
+  assert.match(ordinary, /bind-metallib\.mjs .* --debug-worker/);
+  assert.equal((ordinary.match(/manual-native-release-build\.jsonl" --print-path/g) ?? []).length, 2);
 });
+
+test("NAX manual startup rejects missing approval and mismatched source before native setup", async () => {
+  const manual = await source("../.github/workflows/nax-kernel-validation.yml");
+  const step = manual.match(/- name: Require exact selected source and explicit GPU approval before native setup[\s\S]*?run: \|\n([\s\S]*?)(?=\n      - )/);
+  assert.ok(step);
+  const body = step[1].replace(/^          /gm, "");
+  assert.ok(manual.indexOf(step[0]) < manual.indexOf("dtolnay/rust-toolchain@"));
+  const cwd = new URL("..", import.meta.url);
+  const sha = execFileSync("git", ["rev-parse", "HEAD"], { cwd, encoding: "utf8" }).trim();
+  const valid = { ...process.env, SELECTED_SOURCE: sha, DISPATCH_SOURCE: sha, MAC_GO: "true" };
+  const run = patch => spawnSync("bash", ["-euc", body], { cwd, env: { ...valid, ...patch }, encoding: "utf8" });
+  assert.equal(run({}).status, 0);
+  for (const patch of [{ MAC_GO: "false" }, { MAC_GO: "" }, { SELECTED_SOURCE: "main" }, { DISPATCH_SOURCE: "0".repeat(40) }, { SELECTED_SOURCE: "0".repeat(40), DISPATCH_SOURCE: "0".repeat(40) }]) {
+    assert.notEqual(run(patch).status, 0, JSON.stringify(patch));
+  }
+});
+
 test("Iris and app lifecycle retain every ready request and never upload staged executables/shaders", async () => {
   for (const name of ["iris-mlx-real-weights", "qwen-image-2-1-app-lifecycle", "supra2-mlx-real-weights"]) {
     const workflow = await source(`../.github/workflows/${name}.yml`);

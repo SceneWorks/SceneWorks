@@ -383,9 +383,10 @@ jobs:
     if: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && !(github.event_name == 'workflow_dispatch' && inputs.run_yue2_terminal_cuda && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.run_imported_nvfp4_proof && !inputs.capability_facts_only) && !(github.event_name == 'workflow_dispatch' && inputs.quant_kernel_only) && !(github.event_name == 'workflow_dispatch' && inputs.run_moss_native_validation) }}
     # Actions keys retain each guarded execution request; they are not GPU mutexes.
     # Actual GPU execution takes the shared host-global UUID lease and owned Windows Job.
-    # Pure file provisioning retains its existing compatibility group.
+    # Only a pure snapshot download leaves the legacy GPU compatibility group.
+    # Every runtime/profile flag must be false; mixed selections retain their prior routing.
     concurrency:
-      group: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && 'windows-candle-gpu-real-weights' || format('windows-candle-gpu-{0}-{1}', github.run_id, github.run_attempt) }}
+      group: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.capability_facts_only && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_yue2_terminal_cuda && !inputs.yue2_acceptance_only && !inputs.yue2_fp8_profile_only && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke && !inputs.run_imported_nvfp4_proof && !inputs.quant_kernel_only && !inputs.run_moss_native_validation && 'windows-candle-cpu-provision' || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && 'windows-candle-gpu-real-weights' || format('windows-candle-gpu-{0}-{1}', github.run_id, github.run_attempt) }}
       cancel-in-progress: false
     # A provisioning or five-rung dispatch additionally requires `real-weights`; ordinary PR and
     # push runs keep the full `cuda` pool (sc-18677). This mirrors macos-mlx.yml:450 exactly, which

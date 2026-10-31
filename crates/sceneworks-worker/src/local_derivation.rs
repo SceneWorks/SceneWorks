@@ -124,7 +124,7 @@ pub(crate) async fn derive_local_tier(
     };
     // One bounded, CPU-bound conversion with no step loop to interrupt: keep the heartbeat alive
     // while it runs (a multi-GB conversion outlasts the stale-worker timeout).
-    let task = tokio::task::spawn_blocking(move || {
+    let task = crate::load_progress::spawn_blocking(move || {
         prepare(&spec).map_err(|error| WorkerError::Engine(format!("tier derivation: {error}")))
     });
     let derived = heartbeat_while_blocking(api, settings, &job.id, "tier derivation", task).await;
@@ -363,7 +363,7 @@ mod tests {
             .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        crate::load_progress::spawn(async move { axum::serve(listener, app).await.unwrap() });
         format!("http://{address}")
     }
 

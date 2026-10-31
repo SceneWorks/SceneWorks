@@ -1,0 +1,137 @@
+name: Manual NAX inference kernel validation
+# No ordinary push/PR caller. Preserve the existing production-kernel numerical assertions.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact SceneWorks SHA, matching the selected dispatch ref
+        required: true
+        type: string
+      mac_go:
+        description: Michael explicitly approved this Mac GPU run
+        required: true
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      mac_go:
+        required: true
+        type: boolean
+permissions:
+  contents: read
+concurrency:
+  group: nax-kernel-validation-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' }}
+    runs-on: [self-hosted, macOS, ARM64, nax]
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_NET_OFFLINE: "true"
+      CARGO_TARGET_DIR: ${{ github.workspace }}/../cargo-target
+      CARGO_BUILD_JOBS: "2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+      - name: Require exact selected source and explicit GPU approval before native setup
+        env:
+          SELECTED_SOURCE: ${{ inputs.source_sha }}
+          DISPATCH_SOURCE: ${{ github.sha }}
+          MAC_GO: ${{ inputs.mac_go }}
+        run: |
+          [[ "$SELECTED_SOURCE" =~ ^[0-9a-f]{40}$ ]]
+          test "$SELECTED_SOURCE" = "$DISPATCH_SOURCE"
+          test "$(git rev-parse HEAD)" = "$SELECTED_SOURCE"
+          test "$MAC_GO" = true
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
+        with:
+          toolchain: "1.98.0"
+          components: clippy
+      - name: Fetch prebuilt MLX (sc-21382)
+        # pmetal-mlx-sys's cmake build of libmlx is ≈6 min on every cache miss; this self-hosted runner keeps the extracted tarball in ~/.cache/pmetal/prebuilt across runs
+        # (plus a network fetch of MLX). The SceneWorks/mlx-rs fork publishes that build per
+        # commit (`prebuilt-<sha12>` releases, cell = target × deployment target × Debug/Release);
+        # scripts/fetch-prebuilt-mlx.sh picks the asset for the mlx-rs rev pinned in Cargo.lock
+        # (it moves with the inference pin) and this job's MACOSX_DEPLOYMENT_TARGET, and exports
+        # PMETAL_MLX_PREBUILT_DIR and PMETAL_METALLIB_PATH (sc-20799 -- with a prebuilt or a warm
+        # cargo cache pmetal-mlx-sys's build.rs does not re-run, so nothing populates
+        # ~/.cache/pmetal/lib and the test/dump binaries, which have no compiled-in metallib,
+        # cannot load one). build.rs links the archives only after checking the manifest against
+        # its own key -- a mismatch FAILS the build. The one failure tolerated here is "no prebuilt
+        # published for this rev" (exit 1): the right answer then is the source build, surfaced
+        # as a workflow annotation. Anything else is an error. Same step as inference ci.yml.
+        run: |
+          set +e
+          scripts/fetch-prebuilt-mlx.sh --github-env
+          rc=$?
+          set -e
+          if [ "$rc" = 1 ]; then
+            echo "::warning title=prebuilt MLX unavailable::no prebuilt for the pinned mlx-rs rev; building libmlx from source (see step log)"
+          elif [ "$rc" != 0 ]; then
+            exit "$rc"
+          fi
+      - name: Fetch the pinned inference release
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: cargo fetch --locked
+      - name: Select the active Xcode SDK for native builds
+        run: |
+          sdkroot="$(xcrun --sdk macosx --show-sdk-path)"
+          test -d "$sdkroot"
+          echo "SDKROOT=$sdkroot" >> "$GITHUB_ENV"
+      # No MACOSX_DEPLOYMENT_TARGET override: the workspace /.cargo/config.toml pins
+      # 26.2, so the NAX kernels compile in and the fast path is actually built.
+      - name: Build the MLX GPU worker (mlx-gen linked, NAX at 26.2)
+        run: |
+          set -o pipefail
+          cargo build -p sceneworks-worker --message-format=json-render-diagnostics \
+            | tee "$RUNNER_TEMP/nax-native-build.jsonl"
+          mkdir -p "$RUNNER_TEMP/nax-native-binding"
+          WORK_DIR_NATIVE="$RUNNER_TEMP/nax-native-binding" \
+            node scripts/ci/memory-catalog/bind-metallib.mjs "$RUNNER_TEMP/nax-native-build.jsonl" --debug-worker
+      - name: Retain selected native kernel binding metadata
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nax-native-binding-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nax-native-binding/native-metallib-binding.json
+          if-no-files-found: warn
+      - name: Record source and device identity
+        run: |
+          set -euo pipefail
+          {
+            git rev-parse HEAD
+            shasum -a 256 Cargo.lock crates/sceneworks-worker/tests/nax_guard.rs
+            rustc -Vv
+            sw_vers
+            sysctl -n machdep.cpu.brand_string
+            xcodebuild -version
+          } | tee "$RUNNER_TEMP/nax-guard-identity.log"
+          system_profiler SPDisplaysDataType -json > "$RUNNER_TEMP/nax-guard-devices.json"
+      - name: NAX 16-bit SDPA guard (needs M5 matrix units)
+        run: |
+          set -euo pipefail
+          python3.12 -I scripts/ci/metal_execution_lock.py --wait-seconds 2700 -- \
+            node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-worker --test nax_guard \
+            2>&1 | tee "$RUNNER_TEMP/nax-guard.log"
+          grep -Eq '^test result: ok\. 1 passed; 0 failed; 0 ignored;' "$RUNNER_TEMP/nax-guard.log"
+      - name: Retain actual guard output and native identity
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: nax-kernel-validation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/nax-guard.log
+            ${{ runner.temp }}/nax-guard-identity.log
+            ${{ runner.temp }}/nax-guard-devices.json
+            ${{ runner.temp }}/nax-native-binding/native-metallib-binding.json
+          if-no-files-found: error
+          retention-days: 14
