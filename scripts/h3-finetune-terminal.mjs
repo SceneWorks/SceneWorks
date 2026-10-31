@@ -13,7 +13,8 @@ import { execFile } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {assertRecordedAssertion} from './h3-finetune-terminal-api.mjs';
-import { operationalCases, operationalCaseById, BROAD_MATRIX_CASES, OPERATIONAL_CASE_DEFS, validateMatrixDecision, buildCatalogCoverage, catalogCoverageCounts, summarizeUniqueExecutions, chooseMatrixBackend, assertDeclaredBackendSteps, validateNativeWitnessMarkers, CONDITIONING_WITNESS_SELECTOR, ADAPTER_WITNESS_SELECTOR } from './h3-finetune-terminal-reduced.mjs';
+import { deterministicAnchorRejection } from './lib/h3-peer-lane.mjs';
+import { operationalCases, operationalCaseById, BROAD_MATRIX_CASES, OPERATIONAL_CASE_DEFS, validateMatrixDecision, buildCatalogCoverage, catalogCoverageCounts, summarizeUniqueExecutions, chooseMatrixBackend, MATRIX_CONDITIONING_FIELDS, assertDeclaredBackendSteps, validateNativeWitnessMarkers, CONDITIONING_WITNESS_SELECTOR, ADAPTER_WITNESS_SELECTOR } from './h3-finetune-terminal-reduced.mjs';
 export function plannedCases(p) {return p.inventory==='reduced-v1'?operationalCases(p.backend):requiredCases();}
 export function executionCases(p) {
   if(p.matrixDecision){validateMatrixDecision(p.matrixDecision);if(p.matrixDecision.status==='selected'){assert.ok(p.matrixAnchors,'measured inline anchors required before asymmetry');assert.deepEqual(p.matrixDecision,chooseMatrixBackend({anchors:p.matrixAnchors}),'matrix choice must derive from measured anchors');}}
@@ -1211,6 +1212,23 @@ export async function loadRetainedProofIndex(p) {
   }
   return proofs;
 }
+// sc-26691: each conditioning asset in an anchor recipe carries the AUTHORED source identity the
+// bootstrap recorded on its plan input (casebook ffmpeg recipe, or pinned dataset row). Every lane
+// renders the bytes with its own host ffmpeg, so the matrix compares this identity (see
+// matrixComparableRecipe) and keeps the byte sha256 as per-backend evidence. Fails closed: an asset
+// without a recorded identity, or bytes claimed by two different identities, is refused.
+export function attachConditioningSources(recipe,inputs=[]) {
+  const out=structuredClone(recipe);
+  const attach=(entry,label)=>{
+    if(typeof entry==='string')return entry;
+    const matches=inputs.filter(input=>input.sha256===entry?.sha256&&typeof input.role==='string'&&input.role.startsWith('conditioning-'));
+    assert.ok(matches.length&&matches.every(input=>input.source&&typeof input.source==='object'),`anchor conditioning ${label} (sha256 ${entry?.sha256}) has no authored source identity on its plan input; host-rendered bytes are never compared across backends`);
+    assert.equal(new Set(matches.map(input=>JSON.stringify(input.source))).size,1,`anchor conditioning ${label} bytes are claimed by two different source identities`);
+    return {...entry,source:structuredClone(matches[0].source)};
+  };
+  for(const field of MATRIX_CONDITIONING_FIELDS)if(out[field]!==undefined)out[field]=Array.isArray(out[field])?out[field].map((entry,index)=>attach(entry,`${field}[${index}]`)):attach(out[field],field);
+  return out;
+}
 export async function writeInlineAnchorBundle(p,backend) {
   const {normalizedControlRequest}=await import('./h3-finetune-terminal-runtime.mjs');
   const directory=contained(p.output,`inline-anchor-bundle-${backend}`);await mkdir(directory);
@@ -1220,7 +1238,7 @@ export async function writeInlineAnchorBundle(p,backend) {
     const dir=contained(p.output,c.id),executionPath=path.join(dir,'execution.json'),row=await json(executionPath);assert.equal(row.status,'passed');assert.equal(row.planSha256,digest(p));assert.ok(row.runId&&row.runAttempt);
     const e=await json(contained(dir,c.evidence)),bundle=await json(path.join(dir,'source-job-output.json')),binding=bundle.bindings[0],request=bundle.requests.find(v=>v.route==='/api/v1/video/jobs')?.request;
     const normalized=normalizedControlRequest(request,{conditioningBindings:bundle.conditioningBindings,runtimeIdentity:binding.runtimeIdentity,declaredSourceBindings:c.declaredSourceBindings});
-    const recipe=Object.fromEntries(['model','mode','prompt','seed','advanced','loras','sourceAssetId','lastFrameAssetId','referenceAssetIds','sourceClipAssetIds','referenceAudioAssetIds'].filter(k=>normalized[k]!==undefined).map(k=>[k,normalized[k]]));
+    const recipe=attachConditioningSources(Object.fromEntries(['model','mode','prompt','seed','advanced','loras',...MATRIX_CONDITIONING_FIELDS].filter(k=>normalized[k]!==undefined).map(k=>[k,normalized[k]])),c.inputs);
     const wallMs=Date.parse(row.completed)-Date.parse(row.started);positive(wallMs);
     const receiptInput=await copy({path:executionPath,sha256:await hashFile(executionPath)},`${c.index}.execution.json`);
     anchors.push({backend,caseId:c.id,role:c.index===1?'reference':'prompt',wallMs,recipe,geometry:Object.fromEntries(['width','height','duration','fps'].map(k=>[k,request[k]])),sourceSha:p.sceneworks,pinSha:p.inference,hardware:JSON.stringify(e.hardware),receiptInput,measurement:'actual inline execution/build/acquisition/AV-validation elapsed; initial input audit excluded'});
@@ -1235,14 +1253,18 @@ export async function writeInlineAnchorBundle(p,backend) {
 export async function receiveInlineAnchorBundle(p,backend,directory,{expectedRunId,expectedRunAttempt}={}) {
   assert.ok(expectedRunId!==undefined&&expectedRunAttempt!==undefined,'the peer anchor artifact run id and attempt are required');
   assert.ok((await stat(contained(directory,'anchors.json'))).size<=8*1024*1024,'anchor metadata size bound exceeded');
-  const packet=await json(contained(directory,'anchors.json'));assert.equal(packet.version,1);assert.equal(packet.backend,backend==='mlx'?'cuda':'mlx');assert.ok(Array.isArray(packet.files)&&packet.files.length<=32);assert.equal(packet.anchors?.length,2);assert.equal(packet.sceneworks,p.sceneworks);assert.equal(packet.productPin,p.inference);assert.equal(packet.nativeEvidenceSha,p.nativeEvidence.sha);assert.equal(String(packet.runId),String(expectedRunId));assert.equal(String(packet.runAttempt),String(expectedRunAttempt),'anchor packet attempt does not match its artifact');
+  const packet=await json(contained(directory,'anchors.json'));
+  // A packet whose identity or workload cannot pair with this lane is rejected DETERMINISTICALLY: no
+  // later poll can change it, and the peer applies the same checks to this lane's packet (both lanes
+  // used to poll each other for ~9 h). Run/attempt labels and file integrity stay ordinary rejections.
+  deterministicAnchorRejection(()=>{assert.equal(packet.version,1);assert.equal(packet.backend,backend==='mlx'?'cuda':'mlx');assert.ok(Array.isArray(packet.files)&&packet.files.length<=32);assert.equal(packet.anchors?.length,2);assert.equal(packet.sceneworks,p.sceneworks);assert.equal(packet.productPin,p.inference);assert.equal(packet.nativeEvidenceSha,p.nativeEvidence.sha);});assert.equal(String(packet.runId),String(expectedRunId));assert.equal(String(packet.runAttempt),String(expectedRunAttempt),'anchor packet attempt does not match its artifact');
   for(const file of packet.files){const name=contained(directory,file.path),actual=await realpath(name);contained(await realpath(directory),actual);assert.ok((await stat(actual)).size<=64*1024*1024,'anchor exchange contains metadata only');assert.equal(await hashFile(actual),file.sha256);}
   const rebase=input=>{assert.ok(packet.files.some(f=>f.path===input.path&&f.sha256===input.sha256),'anchor packet omitted a referenced receipt/log');return {...input,path:contained(directory,input.path)};};
   const peerAnchors=packet.anchors.map(anchor=>({...anchor,receiptInput:rebase(anchor.receiptInput)}));
   const own=await json(contained(p.output,`inline-anchor-bundle-${backend}/anchors.json`));
   p.matrixAnchors=[...own.anchors.map(anchor=>({...anchor,receiptInput:{...anchor.receiptInput,path:contained(p.output,`inline-anchor-bundle-${backend}/${anchor.receiptInput.path}`)}})),...peerAnchors];
   for(const proof of packet.proofs){const value={...proof,receiptInput:rebase(proof.receiptInput),logInputs:proof.logInputs.map(rebase)};if(!(p.proofIndex??[]).some(v=>v.id===value.id))p.proofIndex=[...(p.proofIndex??[]),value];}
-  p.matrixDecision=chooseMatrixBackend({anchors:p.matrixAnchors});await verifyMatrixAdmission(p);return p.matrixDecision;
+  p.matrixDecision=deterministicAnchorRejection(()=>chooseMatrixBackend({anchors:p.matrixAnchors}));await deterministicAnchorRejection(()=>verifyMatrixAdmission(p));return p.matrixDecision;
 }
 export async function ensureInlineNativeWitnesses(p,backend,swRoot,{run=runProcess,productRoot}={}) {
   authorized(p,{backend});assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');

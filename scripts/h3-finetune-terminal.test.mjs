@@ -1290,3 +1290,148 @@ test('a dispatch whose jobs are not created yet is a possible peer only while ac
   assert.equal(classifyPeerLane({ runs: [realRun(40855343040, 'completed', 'cancelled')], jobsByRun: new Map([['40855343040', []]]), selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).state, 'absent');
   assert.equal(classifyPeerLane({ runs: [{ ...realRun(40855343040, 'queued', null), head_sha: 'c85f515525819c8ddc87af09e53dd9b829c9d150' }], jobsByRun: new Map(), selfRunId: 1, headSha: PEER_SHA, peerBackend: 'mlx' }).state, 'absent', 'a run at another SHA is never the peer');
 });
+
+// ---------------------------------------------------------------------------
+// sc-26691: the paired campaign at d4d2b60f3 (CUDA 41154673028, MLX 41154648838) deadlocked: each
+// lane rejected the other's inline anchors because the raw recipe carries the platform install
+// closure and the host-rendered conditioning bytes. These are those two real packets.
+const REAL_ANCHORS = JSON.parse(await readFile(new URL('./fixtures/sc26691-h3-anchor-recipes-41154673028-41154648838.json', import.meta.url), 'utf8'));
+// The plan inputs each lane's bootstrap now records: its own rendered bytes, the shared authored identity.
+const realConditioningInputs = backend => REAL_ANCHORS.conditioning.map(c => ({ path: `/stage/${backend}/${c.assetKey}`, sha256: c.sha256[backend], role: c.role, source: structuredClone(c.source) }));
+async function realProjectedAnchors() {
+  const { attachConditioningSources } = await import('./h3-finetune-terminal.mjs');
+  return Object.entries(REAL_ANCHORS.packets).flatMap(([backend, packet]) => packet.anchors.map(anchor => ({ ...structuredClone(anchor), recipe: attachConditioningSources(anchor.recipe, realConditioningInputs(backend)) })));
+}
+test('the real paired anchors select a backend under the backend-neutral workload projection', async () => {
+  const { chooseMatrixBackend, firstDifference, matrixComparableRecipe } = await import('./h3-finetune-terminal-reduced.mjs');
+  const raw = role => Object.fromEntries(Object.entries(REAL_ANCHORS.packets).map(([backend, packet]) => [backend, packet.anchors.find(a => a.role === role).recipe]));
+  // The raw recipes really differ (what deadlocked the pair): platform closure on both roles, host bytes on the reference.
+  assert.match(firstDifference(raw('prompt').mlx, raw('prompt').cuda), /componentClosure\[0\]\.download\.platforms/);
+  assert.notEqual(raw('reference').mlx.referenceAssetIds[0].sha256, raw('reference').cuda.referenceAssetIds[0].sha256);
+  assert.equal(raw('prompt').cuda.model.components.length, raw('prompt').mlx.model.components.length + 1, 'off-Mac installs FL2VA/audio_vae/model.safetensors too');
+  // The un-annotated real packets are refused, never compared by bytes.
+  assert.throws(() => chooseMatrixBackend({ anchors: Object.values(REAL_ANCHORS.packets).flatMap(p => p.anchors) }), /referenceAssetIds\[0\] has no authored source identity/);
+  const anchors = await realProjectedAnchors();
+  const decision = chooseMatrixBackend({ anchors });
+  assert.equal(decision.status, 'selected'); assert.equal(decision.selectedBackend, 'cuda'); assert.equal(decision.displacedBackend, 'mlx');
+  assert.deepEqual(decision.numbers.cuda, { referenceWallMs: 3018196, promptWallMs: 763510, weightedCost: 3018196 * 5 + 763510 * 2 });
+  assert.deepEqual(decision.numbers.mlx, { referenceWallMs: 3869276, promptWallMs: 1534781, weightedCost: 3869276 * 5 + 1534781 * 2 });
+  // What the projection keeps of the real reference recipe, and that the full recipe keeps the bytes.
+  const reference = anchors.find(a => a.backend === 'cuda' && a.role === 'reference'), projected = matrixComparableRecipe(reference.recipe);
+  assert.equal(projected.model.checkpointSha256, 'db3ec568863db6f5ec1840210d41653afef73d4df7b0cb489c52ad458b6f8a7f');
+  assert.equal(projected.model.quantization.sourceEncoding, 'convrot_int8'); assert.equal(projected.model.components, undefined);
+  assert.deepEqual(projected.model.quantization.observedAssembly.componentClosure.find(e => e.componentId === 'fl2va_audio_vae_config'), { componentId: 'fl2va_audio_vae_config', provider: 'huggingface', repo: 'MiniMaxAI/MiniMax-H3', revision: '939557dc319dd91227e30195a763f272ba7f8765', subdir: 'FL2VA/audio_vae', variant: null, coRequisite: true });
+  assert.deepEqual(Object.keys(projected.referenceAudioAssetIds[0]).sort(), ['metadata', 'source']);
+  assert.equal(reference.recipe.referenceAudioAssetIds[0].sha256, '83cd539a928fe81b4a09a0010aa062f62d850b9d4183fa9cead00d6896685507', 'host bytes stay as per-backend evidence');
+  assert.deepEqual(projected.loras, [{ weight: 1, sha256: '9e642fc8749c74f8da5e2382877ab5c7aa37b9a73b7fd0d6d457bd1b3cb1ae99' }]);
+});
+test('a real workload change is still refused under the projection; only host bytes and the platform closure are dropped', async () => {
+  const { chooseMatrixBackend } = await import('./h3-finetune-terminal-reduced.mjs');
+  const mlxRole = (anchors, role) => anchors.find(a => a.backend === 'mlx' && a.role === role).recipe;
+  const refused = {
+    prompt: [a => { mlxRole(a, 'prompt').prompt += ' Slowly.'; }, /prompt workload recipe differs across backends at \.prompt/],
+    seed: [a => { mlxRole(a, 'prompt').seed = 1; }, /at \.seed/],
+    steps: [a => { mlxRole(a, 'prompt').advanced.steps = 8; }, /at \.advanced\.steps/],
+    shift: [a => { mlxRole(a, 'reference').advanced.schedulerShift = 5; }, /reference workload recipe differs .* at \.advanced\.schedulerShift/],
+    mode: [a => { mlxRole(a, 'prompt').mode = 'image_to_video'; }, /at \.mode/],
+    checkpoint: [a => { mlxRole(a, 'prompt').model.checkpointSha256 = 'f'.repeat(64); }, /at \.model\.checkpointSha256/],
+    topology: [a => { mlxRole(a, 'prompt').model.topology.rank = 16; }, /at \.model\.topology\.rank/],
+    quantEncoding: [a => { mlxRole(a, 'prompt').model.quantization.sourceEncoding = 'bf16'; }, /at \.model\.quantization\.sourceEncoding/],
+    assembly: [a => { mlxRole(a, 'prompt').model.quantization.observedAssembly.partition = 'fl2va'; }, /observedAssembly\.partition/],
+    componentRevision: [a => { mlxRole(a, 'prompt').model.quantization.observedAssembly.componentClosure.find(e => e.download.componentId === 'video_vae').download.revision = 'e'.repeat(40); }, /observedAssembly\.componentClosure/],
+    missingComponent: [a => { const c = mlxRole(a, 'prompt').model.quantization.observedAssembly.componentClosure; c.splice(c.findIndex(e => e.download.componentId === 'audio_vae'), 1); }, /componentClosure \(length/],
+    adapterSha: [a => { mlxRole(a, 'reference').loras[0].sha256 = 'e'.repeat(64); }, /at \.loras\[0\]\.sha256/],
+    adapterWeight: [a => { mlxRole(a, 'prompt').loras[0].weight = 0.5; }, /at \.loras\[0\]\.weight/],
+    conditioningSource: [a => { mlxRole(a, 'reference').sourceClipAssetIds[1].source.recipeSha256 = 'd'.repeat(64); }, /at \.sourceClipAssetIds\[1\]\.source\.recipeSha256/],
+    speechRow: [a => { mlxRole(a, 'reference').referenceAudioAssetIds[0].source.sourceAudioSha256 = 'd'.repeat(64); }, /referenceAudioAssetIds\[0\]\.source\.sourceAudioSha256/],
+    conditioningOrder: [a => { mlxRole(a, 'reference').referenceAssetIds.reverse(); }, /at \.referenceAssetIds\[0\]\.source/],
+    conditioningMetadata: [a => { mlxRole(a, 'reference').sourceClipAssetIds[0].metadata.mimeType = 'video/webm'; }, /sourceClipAssetIds\[0\]\.metadata\.mimeType/],
+    unknownField: [a => { mlxRole(a, 'prompt').negativePrompt = 'blurry'; }, /at \.negativePrompt/],
+    geometry: [a => { a.find(x => x.backend === 'mlx' && x.role === 'prompt').geometry.width = 576; }, /prompt geometry differs across backends at \.width/],
+  };
+  for (const [name, [mutate, pattern]] of Object.entries(refused)) {
+    const anchors = await realProjectedAnchors(); mutate(anchors);
+    assert.throws(() => chooseMatrixBackend({ anchors }), pattern, name);
+  }
+  // Per-host differences alone never block the comparison.
+  const anchors = await realProjectedAnchors();
+  mlxRole(anchors, 'reference').referenceAssetIds[0].sha256 = '0'.repeat(64);
+  mlxRole(anchors, 'prompt').model.components.push('0'.repeat(64));
+  mlxRole(anchors, 'prompt').model.quantization.observedAssembly.componentClosure.reverse()[0].download.platforms = ['linux'];
+  assert.equal(chooseMatrixBackend({ anchors }).status, 'selected');
+});
+test('anchor conditioning takes its authored source identity from the plan input, failing closed', async () => {
+  const { attachConditioningSources } = await import('./h3-finetune-terminal.mjs');
+  const recipe = { prompt: 'p', referenceAssetIds: [{ sha256: 'a'.repeat(64), metadata: { type: 'image' } }, 'unit-fake-locator'] };
+  const source = { kind: 'casebook-ffmpeg-recipe', assetKey: 'imageA', recipeSha256: 'c'.repeat(64) };
+  const attached = attachConditioningSources(recipe, [{ path: '/a', sha256: 'a'.repeat(64), role: 'conditioning-image', source }]);
+  assert.deepEqual(attached.referenceAssetIds, [{ sha256: 'a'.repeat(64), metadata: { type: 'image' }, source }, 'unit-fake-locator']);
+  assert.equal(recipe.referenceAssetIds[0].source, undefined, 'the input recipe is not mutated');
+  assert.throws(() => attachConditioningSources(recipe, [{ path: '/a', sha256: 'a'.repeat(64), role: 'conditioning-image' }]), /referenceAssetIds\[0\] .* has no authored source identity on its plan input/);
+  assert.throws(() => attachConditioningSources(recipe, [{ path: '/a', sha256: 'a'.repeat(64), role: 'checkpoint', source }]), /no authored source identity/, 'only a conditioning input can supply it');
+  assert.throws(() => attachConditioningSources(recipe, [{ path: '/a', sha256: 'a'.repeat(64), role: 'conditioning-image', source }, { path: '/b', sha256: 'a'.repeat(64), role: 'conditioning-image', source: { ...source, assetKey: 'imageB' } }]), /claimed by two different source identities/);
+});
+test('a received peer packet whose workload cannot pair is rejected deterministically; a mislabeled attempt is not', async t => {
+  const { receiveInlineAnchorBundle } = await import('./h3-finetune-terminal.mjs');
+  const output = await mkdtemp(path.join(os.tmpdir(), 'sc26691-receive-')); t.after(() => rm(output, { recursive: true, force: true }));
+  const real = await realProjectedAnchors(), pair = { sceneworks: real[0].sourceSha, inference: real[0].pinSha, evidence: 'c'.repeat(40) };
+  const p = { output, sceneworks: pair.sceneworks, inference: pair.inference, nativeEvidence: { sha: pair.evidence }, cases: [] };
+  const bundle = async (directory, backend, runId, runAttempt, edit = anchors => anchors) => {
+    await mkdir(directory, { recursive: true }); const files = [];
+    const anchors = edit(structuredClone(real.filter(a => a.backend === backend)));
+    for (const anchor of anchors) { const name = `${anchor.role}.execution.json`; await writeFile(path.join(directory, name), JSON.stringify({ caseId: anchor.caseId })); const sha256 = await hashFile(path.join(directory, name)); files.push({ path: name, sha256 }); anchor.receiptInput = { path: name, sha256 }; }
+    await writeFile(path.join(directory, 'anchors.json'), JSON.stringify({ version: 1, backend, sceneworks: pair.sceneworks, productPin: pair.inference, nativeEvidenceSha: pair.evidence, runId, runAttempt, anchors, proofs: [], files }));
+    return directory;
+  };
+  await bundle(path.join(output, 'inline-anchor-bundle-cuda'), 'cuda', '41154673028', '1');
+  const peer = await bundle(path.join(output, 'peer-ok'), 'mlx', '41154648838', '1');
+  // The real pair now passes the workload comparison; the next gate (both native witnesses) is a
+  // property of the packets too, so it is also deterministic.
+  const witness = await receiveInlineAnchorBundle(structuredClone(p), 'cuda', peer, { expectedRunId: '41154648838', expectedRunAttempt: '1' }).catch(error => error);
+  assert.match(witness.message, /both actual encoded-native witnesses/); assert.equal(witness.deterministic, true);
+  const changed = await bundle(path.join(output, 'peer-changed'), 'mlx', '41154648838', '1', anchors => { anchors.find(a => a.role === 'prompt').recipe.seed = 7; return anchors; });
+  const mismatch = await receiveInlineAnchorBundle(structuredClone(p), 'cuda', changed, { expectedRunId: '41154648838', expectedRunAttempt: '1' }).catch(error => error);
+  assert.match(mismatch.message, /anchor prompt workload recipe differs across backends at \.seed \(7 != 314159\)/); assert.equal(mismatch.deterministic, true);
+  const relabeled = await receiveInlineAnchorBundle(structuredClone(p), 'cuda', peer, { expectedRunId: '41154648838', expectedRunAttempt: '2' }).catch(error => error);
+  assert.match(relabeled.message, /attempt does not match its artifact/); assert.notEqual(relabeled.deterministic, true);
+  const otherPin = await receiveInlineAnchorBundle({ ...structuredClone(p), inference: 'd'.repeat(40) }, 'cuda', peer, { expectedRunId: '41154648838', expectedRunAttempt: '1' }).catch(error => error);
+  assert.equal(otherPin.deterministic, true, 'a packet for another product pin can never pair');
+});
+test('deterministic rejection marks packet failures but never an operating-system IO error', async () => {
+  const { deterministicAnchorRejection } = await import('./lib/h3-peer-lane.mjs');
+  assert.equal(deterministicAnchorRejection(() => 5), 5);
+  assert.equal(await deterministicAnchorRejection(async () => 6), 6);
+  const sync = (() => { try { deterministicAnchorRejection(() => assert.equal(1, 2)); } catch (error) { return error; } })();
+  assert.equal(sync.deterministic, true);
+  const io = await deterministicAnchorRejection(async () => { throw Object.assign(new Error('EIO: i/o error, read'), { code: 'EIO', syscall: 'read' }); }).catch(error => error);
+  assert.equal(io.code, 'EIO'); assert.equal(io.deterministic, undefined);
+});
+test('the anchor wait fails at once when the paired run\'s newest attempt is deterministically rejected', async () => {
+  const deterministic = message => Object.assign(new Error(message), { deterministic: true });
+  // The real deadlock: the live peer's only attempt fails the cross-backend workload check.
+  const clock = { t: 0 }, logs = [], tried = [];
+  const { gh } = fakeGh({ runs: livePair(), jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: [anchorArtifact(91, 1, '2026-10-31T05:00:00Z')] });
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 24 * HOUR, log: line => logs.push(line), validate: async artifact => { tried.push(artifact.id); throw deterministic('anchor reference workload recipe differs across backends at .seed (1 != 2) (mlx != cuda); no valid matrix comparison'); } })),
+    /the paired mlx lane's newest inline anchors \(artifact 91 .*attempt 1\) were rejected for a deterministic reason .*at \.seed \(1 != 2\)/);
+  assert.equal(clock.t, 0, 'no polling to the deadline'); assert.deepEqual(tried, [91]);
+  assert.ok(logs.some(line => /H3_PEER_ANCHORS_REJECTED: artifact 91/.test(line)));
+  // A newer attempt of the paired run has not published yet: the older attempt's rejection is
+  // superseded, so the wait continues until that attempt's valid anchors arrive.
+  const rerun = { t: 0 };
+  const newer = fakeGh({ runs: [realRun(40855384972, 'in_progress', null), { ...realRun(40855343040, 'in_progress', null), run_attempt: 2 }], jobs: { 40855343040: realJobs('mlx', 'in_progress', null) }, artifacts: () => rerun.t >= HOUR ? [anchorArtifact(92, 1, '2026-10-31T05:00:00Z'), anchorArtifact(93, 2, '2026-10-31T06:00:00Z')] : [anchorArtifact(92, 1, '2026-10-31T05:00:00Z')] });
+  const result = await waitForPeerAnchors(waitArgs(newer.gh, rerun, { deadline: 24 * HOUR, validate: async artifact => { if (artifact.id === 92) throw deterministic('stale attempt'); return artifact.id; } }));
+  assert.equal(result.artifact.id, 93); assert.ok(rerun.t >= HOUR);
+  // A non-deterministic validation failure still falls through and keeps waiting (the attempt-label
+  // case above), and a download failure is still retried, never rejected.
+});
+test('the backed-off anchor wait logs progress at least every ~30 minutes', async () => {
+  const { ANCHOR_WAIT_HEARTBEAT_MS } = await import('./lib/h3-peer-lane.mjs');
+  const clock = { t: 0 }, beats = [];
+  const { gh } = fakeGh({ runs: livePair(), jobs: { 40855343040: realJobs('mlx', 'in_progress', null) } });
+  await assert.rejects(waitForPeerAnchors(waitArgs(gh, clock, { deadline: 9 * HOUR, log: line => { if (/^H3_PEER_ANCHOR_WAIT: paired mlx lane is alive/.test(line)) beats.push(clock.t); }, validate: async () => assert.fail('nothing to validate') })), /peer-anchor wait deadline/);
+  assert.equal(beats[0], 0, 'the first poll logs');
+  const gaps = beats.slice(1).map((t, i) => t - beats[i]);
+  assert.ok(Math.max(...gaps, 9 * HOUR - beats.at(-1)) <= 30 * 60000, `longest silence ${Math.max(...gaps) / 60000} min`);
+  assert.ok(gaps.every(gap => gap >= ANCHOR_WAIT_HEARTBEAT_MS), 'and no more often than the heartbeat');
+  assert.ok(beats.length >= 17, `${beats.length} progress lines in 9 h`);
+});

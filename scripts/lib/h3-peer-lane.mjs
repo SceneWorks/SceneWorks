@@ -83,6 +83,22 @@ export const GH_BACKOFF_MS = 5000;
 export const API_OUTAGE_LIMIT_MS = 30 * 60 * 1000;
 /** Download attempts per candidate per poll (a fresh directory each); a failed download is retried next poll, never rejected. */
 export const DOWNLOAD_ATTEMPTS = 3;
+/** The longest the anchor wait stays silent: a progress line at least this often (plus one backed-off poll). */
+export const ANCHOR_WAIT_HEARTBEAT_MS = 25 * 60 * 1000;
+
+/**
+ * Run a validation step whose failure is DETERMINISTIC: the same packet fails it on every poll, and
+ * the peer lane applies the same check to this lane's packet (a cross-backend workload mismatch made
+ * both lanes of runs 41154673028/41154648838 reject each other and poll ~9 h). A thrown error is
+ * marked `deterministic` so waitForPeerAnchors fails at once with its detail; an operating-system
+ * error (it has a `syscall`) is IO, not a property of the packet, and is left unmarked.
+ */
+export function deterministicAnchorRejection(check) {
+  const mark = error => { if (error && typeof error === 'object' && !error.syscall) error.deterministic = true; throw error; };
+  let result;
+  try { result = check(); } catch (error) { mark(error); }
+  return result && typeof result.then === 'function' ? result.catch(mark) : result;
+}
 
 /** The pin-bound part of a lane's inline-anchor artifact name. */
 export function anchorArtifactBase({ backend, sceneworks, inference, evidence }) {
@@ -204,16 +220,23 @@ export async function awaitPeerLane({ gh, repository, headSha, selfRunId, peerBa
  * failure is retried with backoff (the caller uses a fresh directory each try) and the candidate is
  * kept for the next poll. Only `validate(artifact, directory)` rejects a candidate permanently. A
  * transient Actions API failure is retried; only a continuous outage past API_OUTAGE_LIMIT_MS ends
- * the wait. The poll interval backs off while nothing observable changes.
+ * the wait. The poll interval backs off while nothing observable changes, and a progress line is
+ * logged at least every ANCHOR_WAIT_HEARTBEAT_MS so a live log never looks silent for hours.
+ *
+ * A rejection marked `deterministic` (deterministicAnchorRejection) of the paired run's NEWEST
+ * attempt ends the wait at once with the detail: no poll can change it, and the peer rejects this
+ * lane's packet the same way. An older attempt's deterministic rejection is only recorded, since the
+ * newest attempt (or a newer attempt of the paired run still to publish) supersedes it.
  */
-export async function waitForPeerAnchors({ gh, repository, name, headSha, selfRunId, peerBackend, startedAt, deadline, download, validate, now = () => Date.now(), sleep = defaultSleep, pollMs = ANCHOR_POLL_MS, maxPollMs = ANCHOR_POLL_MAX_MS, graceMs = PEER_APPEARANCE_GRACE_MS, outageLimitMs = API_OUTAGE_LIMIT_MS, downloadAttempts = DOWNLOAD_ATTEMPTS, log = () => {} }) {
+export async function waitForPeerAnchors({ gh, repository, name, headSha, selfRunId, peerBackend, startedAt, deadline, download, validate, now = () => Date.now(), sleep = defaultSleep, pollMs = ANCHOR_POLL_MS, maxPollMs = ANCHOR_POLL_MAX_MS, graceMs = PEER_APPEARANCE_GRACE_MS, outageLimitMs = API_OUTAGE_LIMIT_MS, downloadAttempts = DOWNLOAD_ATTEMPTS, heartbeatMs = ANCHOR_WAIT_HEARTBEAT_MS, log = () => {} }) {
   if (!Number.isFinite(deadline)) throw new Error('the anchor wait requires this lane\'s work deadline');
   if (typeof download !== 'function' || typeof validate !== 'function') throw new Error('the anchor wait requires separate download (retryable) and validate (permanent) steps');
   const observer = new PeerLaneObserver({ gh, repository, headSha, selfRunId, peerBackend, sleep, log });
   const rejected = new Map(), lastDownloadError = new Map();
   const notes = () => `${rejected.size ? ` Rejected anchors: ${[...rejected].map(([id, reason]) => `${id}: ${reason}`).join('; ')}.` : ''}${lastDownloadError.size ? ` Last download errors: ${[...lastDownloadError].map(([id, reason]) => `${id}: ${reason}`).join('; ')}.` : ''}`;
   const pause = ms => sleep(Math.max(0, Math.min(ms, deadline - now())));
-  let interval = pollMs, fingerprint, outageSince = null, polls = 0;
+  let interval = pollMs, fingerprint, outageSince = null, lastHeartbeat = null;
+  const waitStarted = now();
   for (;;) {
     if (now() >= deadline) throw new Error(`adaptive_matrix: this lane reached its peer-anchor wait deadline ${new Date(deadline).toISOString()} (its work deadline minus the time its guaranteed cases need under either matrix outcome) while the paired ${peerBackend} lane was still able to deliver but had published no valid inline anchors; no backend or timing is guessed.${notes()}`);
     let observed;
@@ -233,7 +256,12 @@ export async function waitForPeerAnchors({ gh, repository, name, headSha, selfRu
       }
       if (directory === undefined) continue; // Kept: tried again on the next poll.
       try { return { state: 'anchors', artifact, directory, result: await validate(artifact, directory) }; }
-      catch (error) { rejected.set(artifact.id, error.message); log(`H3_PEER_ANCHORS_REJECTED: artifact ${artifact.id} (${artifact.name}, run ${artifact.workflow_run?.id}): ${error.message}`); }
+      catch (error) {
+        rejected.set(artifact.id, error.message);
+        log(`H3_PEER_ANCHORS_REJECTED: artifact ${artifact.id} (${artifact.name}, run ${artifact.workflow_run?.id}): ${error.message}`);
+        const newest = artifact === observed.candidates[0] && !(Number(observed.paired?.run_attempt) > artifact.runAttempt);
+        if (error.deterministic === true && newest) throw new Error(`adaptive_matrix: the paired ${peerBackend} lane's newest inline anchors (artifact ${artifact.id} ${artifact.name}, run ${artifact.workflow_run?.id} attempt ${artifact.runAttempt}) were rejected for a deterministic reason no further polling can change, and the peer validates this lane's anchors the same way: ${error.message}. Refusing to wait for anchors that can never validate; fix the cross-backend comparison, or dispatch with adaptive_matrix:false.${notes()}`);
+      }
     }
     const pendingDownloads = observed.candidates.some(artifact => !rejected.has(artifact.id));
     let classification;
@@ -241,7 +269,10 @@ export async function waitForPeerAnchors({ gh, repository, name, headSha, selfRu
     catch (error) { error.message += notes(); throw error; }
     interval = observed.fingerprint === fingerprint && !pendingDownloads ? Math.min(interval * 2, maxPollMs) : pollMs;
     fingerprint = observed.fingerprint;
-    if (polls++ % 10 === 0) log(`H3_PEER_ANCHOR_WAIT: paired ${peerBackend} lane is ${classification.state}${observed.paired ? ` (paired run ${observed.paired.id})` : ''}; waiting until ${new Date(deadline).toISOString()} at the latest`);
+    if (lastHeartbeat === null || now() - lastHeartbeat >= heartbeatMs) {
+      lastHeartbeat = now();
+      log(`H3_PEER_ANCHOR_WAIT: paired ${peerBackend} lane is ${classification.state}${observed.paired ? ` (paired run ${observed.paired.id} attempt ${observed.paired.run_attempt})` : ''}; waited ${Math.round((now() - waitStarted) / 60000)} min, next poll in ${Math.round(interval / 1000)} s; waiting until ${new Date(deadline).toISOString()} at the latest.${notes()}`);
+    }
     await pause(interval);
   }
 }

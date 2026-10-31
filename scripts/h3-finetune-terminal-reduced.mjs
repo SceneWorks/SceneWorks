@@ -89,8 +89,74 @@ export function assertDeclaredBackendSteps(c, sampling, backend = c?.backend) {
   assert.deepEqual(sampling.stepPolicy, backendStepPolicy(c, backend), `${c.id ?? c.slug} step policy differs from the declared ${backend} decision`);
 }
 // The inline anchors whose timings choose the matrix backend; compared across backends, so their
-// recipe (steps included) must be identical on both.
+// workload (steps included) must be identical on both.
 export const MATRIX_ANCHOR_ROLES = Object.freeze({ reference: 'artifact-0-ordered-mixed-baseline-ref-turbo', prompt: 'real-hybrid-text' });
+
+// The request fields whose values normalizedControlRequest resolves to retained conditioning bytes.
+export const MATRIX_CONDITIONING_FIELDS = Object.freeze(['sourceAssetId', 'lastFrameAssetId', 'referenceAssetIds', 'sourceClipAssetId', 'sourceClipAssetIds', 'referenceClipAssetId', 'referenceAudioAssetIds']);
+
+// The matrix compares the timing of the SAME work on both backends, so the anchor recipe it compares
+// is the backend-neutral workload identity (sc-26691: paired runs 41154673028/41154648838 each
+// rejected the other's raw recipe and polled ~9 h). Everything that changes the work is kept and
+// compared literally: mode, prompt, seed, advanced sampling (steps, shifts, quantize), loras with
+// their content sha256, the model's checkpoint sha256 / topology / quantization (source encoding and
+// observed assembly), any field this projection does not know, and for conditioning the AUTHORED
+// source identity (casebook recipe or pinned dataset row) plus the asset metadata. Exactly two
+// per-host things are dropped:
+//  1. the platform install closure: model.components (the flat SHA union of every installed file)
+//     and each observedAssembly.componentClosure entry's platforms / file list / sizes. Each entry is
+//     reduced to the component it binds and the pinned repo revision it is read from. The one real
+//     file difference, FL2VA/audio_vae/model.safetensors installed only off-Mac, holds the same 1087
+//     tensors byte for byte as audio_vae/diffusion_pytorch_model.safetensors, which the MLX engine
+//     reads instead (the two files differ only by a `format: pt` header metadata entry).
+//  2. conditioning sha256: every lane renders the casebook ffmpeg recipes (and the pinned speech row)
+//     with its own host ffmpeg, so the bytes differ while the authored content is the same. The bytes
+//     stay in the full recipe as per-backend evidence; an entry without an authored source identity
+//     is refused, never compared by bytes alone.
+// A string recipe/model/asset value (unit fixtures, unresolved unit_fake locators) compares literally.
+export function matrixComparableRecipe(recipe) {
+  if (!recipe || typeof recipe !== 'object' || Array.isArray(recipe)) return recipe;
+  const projected = {};
+  for (const [key, value] of Object.entries(recipe)) {
+    if (key === 'model') projected.model = comparableModel(value);
+    else if (MATRIX_CONDITIONING_FIELDS.includes(key)) projected[key] = Array.isArray(value) ? value.map((entry, index) => comparableConditioning(entry, `${key}[${index}]`)) : comparableConditioning(value, key);
+    else projected[key] = structuredClone(value);
+  }
+  return projected;
+}
+const byJson = (a, b) => { const x = JSON.stringify(a), y = JSON.stringify(b); return x < y ? -1 : x > y ? 1 : 0; };
+function comparableModel(model) {
+  if (!model || typeof model !== 'object' || Array.isArray(model)) return model;
+  const { components: _installedFileShas, ...rest } = model, projected = structuredClone(rest);
+  const assembly = projected.quantization?.observedAssembly;
+  if (assembly && Array.isArray(assembly.componentClosure)) {
+    assembly.componentClosure = assembly.componentClosure.map(entry => {
+      const download = entry?.download ?? {};
+      return { componentId: download.componentId ?? null, provider: download.provider ?? null, repo: download.repo ?? null, revision: download.revision ?? entry?.revision ?? null, subdir: download.subdir ?? null, variant: download.variant ?? null, coRequisite: download.coRequisite ?? null };
+    }).sort(byJson);
+  }
+  return projected;
+}
+function comparableConditioning(entry, label) {
+  if (typeof entry === 'string') return entry;
+  assert.ok(entry && typeof entry === 'object' && !Array.isArray(entry), `anchor conditioning ${label} must be a resolved asset`);
+  assert.ok(entry.source && typeof entry.source === 'object' && !Array.isArray(entry.source), `anchor conditioning ${label} has no authored source identity; its host-rendered bytes (sha256 ${entry.sha256}) are per-backend evidence and are never compared across backends`);
+  const { sha256: _hostRenderedBytes, ...rest } = entry;
+  return structuredClone(rest);
+}
+/** The first JSON path at which two values differ (null when equal), for an actionable rejection. */
+export function firstDifference(a, b, at = '') {
+  if (JSON.stringify(a) === JSON.stringify(b)) return null;
+  if (a && b && typeof a === 'object' && typeof b === 'object' && Array.isArray(a) === Array.isArray(b)) {
+    if (Array.isArray(a) && a.length !== b.length) return `${at || '.'} (length ${a.length} != ${b.length})`;
+    for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      const found = firstDifference(a[key], b[key], Array.isArray(a) ? `${at}[${key}]` : `${at}.${key}`);
+      if (found) return found;
+    }
+  }
+  const show = value => { const text = JSON.stringify(value); return text === undefined ? 'undefined' : text.length > 120 ? `${text.slice(0, 117)}...` : text; };
+  return `${at || '.'} (${show(a)} != ${show(b)})`;
+}
 
 // 25 operational cases per backend. max = 22 full-av + 2 actual-artifact probes + 1 source-cancel.
 export const OPERATIONAL_CASE_DEFS = Object.freeze([
@@ -514,10 +580,14 @@ export function chooseMatrixBackend(anchorsOrOptions = {}) {
       assert.ok(Number.isFinite(row.wallMs) && row.wallMs > 0, `anchor ${role}/${row.backend} needs finite positive observed wall time`);
       assert.ok(row.recipe && row.geometry && row.sourceSha && row.pinSha && row.hardware, `anchor ${role}/${row.backend} needs recipe/geometry/source/pin/hardware`);
     }
+    // The recipe is compared through its backend-neutral workload projection (matrixComparableRecipe);
+    // the full per-backend recipe stays on the anchor as evidence.
     for (const field of ['recipe', 'geometry', 'sourceSha', 'pinSha']) {
-      const mlx = selected.find(row => row.backend === 'mlx')?.[field], cuda = selected.find(row => row.backend === 'cuda')?.[field];
+      const value = backend => { const raw = selected.find(row => row.backend === backend)?.[field]; return field === 'recipe' && raw !== undefined ? matrixComparableRecipe(raw) : raw; };
+      const mlx = value('mlx'), cuda = value('cuda');
       assert.ok(mlx !== undefined && cuda !== undefined, `anchor ${role} lacks ${field}`);
-      assert.deepEqual(mlx, cuda, `anchor ${role} ${field} differs across backends; no valid matrix comparison`);
+      const difference = firstDifference(mlx, cuda);
+      assert.ok(difference === null, `anchor ${role} ${field === 'recipe' ? 'workload recipe' : field} differs across backends at ${difference} (mlx != cuda); no valid matrix comparison`);
     }
     for (const backend of BACKENDS) {
       const row = selected.find(value => value.backend === backend);
