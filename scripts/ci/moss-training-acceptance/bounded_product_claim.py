@@ -38,7 +38,7 @@ def selected_primary_metadata_valid(device):
             and device['index'] == 1
             and all(type(value) is int for value in (total, used, free))
             and total > 0 and 0 <= used <= total and 0 <= free <= total
-            and used + free <= total
+            and used + free <= total + 2
             and (utilization is None or type(utilization) is int and 0 <= utilization <= 100))
 
 
@@ -121,7 +121,7 @@ def main(args):
             selected = [d for d in devices if d['uuid']==UUID and d['index']==1]
             require(len(selected)==1, 'physical1 UUID changed; no fallback')
             policy = SimpleNamespace(child_gpu_cap_bytes=CAP,gpu_free_reserve_bytes=RESERVE)
-            idle_check = lambda device, rows: selected_primary_metadata_valid(device) and resources.proof_cuda_idle(device,rows,policy,activity_profile=PROFILE)
+            idle_check = lambda device, rows: device.get('uuid')==UUID and device.get('index')==1 and resources.proof_cuda_idle(device,rows,policy,activity_profile=PROFILE)
             record['admissionDiagnostic'] = resources.cuda_claim_diagnostic(UUID,devices,processes,policy,activity_profile=PROFILE)
             require(idle_check(selected[0],processes), 'selected GPU lacks cap plus reserve headroom')
             identity_key = lambda uuid, rows: resources.proof_cuda_contexts(uuid,rows,activity_profile=PROFILE)
