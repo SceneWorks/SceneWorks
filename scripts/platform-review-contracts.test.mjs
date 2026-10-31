@@ -1153,12 +1153,32 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
     candleWorker,
     /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
   );
-  assert.ok(
-    candleWorker.includes(
-      "      group: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && 'windows-candle-gpu-real-weights' || format('windows-candle-gpu-{0}-{1}', github.run_id, github.run_attempt) }}",
-    ),
-    "pure provisioning retains its compatibility group; guarded GPU execution uses per-run queue keys, not a GHA mutex",
+  const group = workflowExpression(candleWorker, "group");
+  const prior = "github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && 'windows-candle-gpu-real-weights' || format('windows-candle-gpu-{0}-{1}', github.run_id, github.run_attempt)";
+  assert.ok(group.endsWith(` || ${prior}`), "non-pure selections retain the exact previous routing");
+  const evaluateGroup = (expression, event, inputs) => Function("github", "inputs", "format", `return (${expression});`)(
+    {event_name:event,run_id:123,run_attempt:2}, inputs,
+    (pattern,...values)=>pattern.replace(/\{(\d+)\}/g,(_,index)=>values[Number(index)]),
   );
+  const pure = {provision_snapshot:true};
+  assert.equal(evaluateGroup(group,"workflow_dispatch",pure),"windows-candle-cpu-provision");
+  // Every declared boolean besides provisioning can select runtime/model work or a
+  // different profile. New flags fail this exhaustive contract until classified.
+  const dispatch = candle.slice(candle.indexOf("  workflow_dispatch:"),candle.indexOf("\njobs:"));
+  const flags = [...dispatch.matchAll(/^      ([a-z_0-9]+):\n((?:        .*\n|\n)*)/gm)]
+    .filter(match=>match[2].includes("type: boolean") && match[1]!=="provision_snapshot")
+    .map(match=>match[1]);
+  assert.equal(flags.length,12);
+  for(const flag of flags) {
+    assert.equal(evaluateGroup(group,"workflow_dispatch",{...pure,[flag]:true}),
+      evaluateGroup(prior,"workflow_dispatch",{...pure,[flag]:true}),`mixed ${flag} retains GPU routing`);
+  }
+  for(const event of ["pull_request","push","workflow_dispatch"]) {
+    for(const inputs of [{},{run_five_rung_reference:true},{run_iris_worker_smoke:true},
+      {provision_snapshot:true,run_five_rung_reference:true},{quant_kernel_only:true}]) {
+      assert.equal(evaluateGroup(group,event,inputs),evaluateGroup(prior,event,inputs));
+    }
+  }
   assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
 });
 
