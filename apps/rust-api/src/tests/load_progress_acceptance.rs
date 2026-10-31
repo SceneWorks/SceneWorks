@@ -451,9 +451,10 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
                     require(
                         previous_source != identity
                             || bytes >= previous_bytes
-                            // Independent S3Gen readers explicitly restart at zero. The
-                            // rounded wire cannot distinguish unobserved/coalesced opens.
-                            || (audio && bytes == 0. && source.contains("s3gen.safetensors")),
+                            // Independent S3Gen constructors read the same file, and
+                            // coalescing can omit their initial zero. Their construction
+                            // window is bounded above; HTTP cannot identify each reader.
+                            || (audio && loading.is_some() && source.contains("s3gen.safetensors")),
                         "IO bytes regressed within a read epoch",
                     )?;
                 }
@@ -1086,6 +1087,12 @@ fn audio_reader_epochs_and_output_finishing_are_distinct() {
     .map(str::to_owned)
     .collect();
     validate_progress(&expected, "audio").unwrap();
+    let coalesced_reader: Vec<_> = expected
+        .iter()
+        .filter(|m| m.as_str() != "Loading s3gen.safetensors — 0.0 / 1.1 GB")
+        .cloned()
+        .collect();
+    validate_progress(&coalesced_reader, "audio").unwrap();
     // Brief compute markers need not survive the HTTP coalescer. The later PerTh
     // IO boundary still forbids restoration of a completed renderer step.
     let coalesced: Vec<_> = expected
@@ -1103,7 +1110,7 @@ fn audio_reader_epochs_and_output_finishing_are_distinct() {
         (16, "Generating step 3/3."), // No stage may return after actual HiFT decode.
         (17, "Generating step 3/3."),
         (7, "Loading t3 cfg.safetensors — 0.2 / 2.1 GB"),
-        (7, "Loading s3gen.safetensors — 0.2 / 1.1 GB"),
+        (3, "Loading t3 cfg.safetensors — 0.0 / 2.1 GB"),
     ] {
         let mut stale = expected.clone();
         stale.insert(position, obsolete.into());
