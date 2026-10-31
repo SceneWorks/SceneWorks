@@ -4991,6 +4991,24 @@ pub(crate) async fn model_catalog_snapshot(state: &AppState) -> Result<Arc<Vec<V
         }
     }
 
+    // sc-28037 (GitHub #3235): the build runs as its own task, not inside this
+    // request's future. Its filesystem sweep is `spawn_blocking` work that a
+    // dropped future cannot stop, so a client that disconnected mid-build used
+    // to release the serializer while that sweep kept running, and the next
+    // caller started a second sweep on top of it. Detached, an abandoned build
+    // still finishes and publishes, and every later caller joins its result.
+    let builder_state = state.clone();
+    tokio::spawn(
+        async move { build_and_publish_model_catalog_snapshot(&builder_state, backend).await },
+    )
+    .await
+    .map_err(|err| ApiError::internal(format!("model catalog build task failed: {err}")))?
+}
+
+async fn build_and_publish_model_catalog_snapshot(
+    state: &AppState,
+    backend: &'static str,
+) -> Result<Arc<Vec<Value>>, ApiError> {
     // Serialize only builders. The synchronous generation/snapshot state lock
     // is never held across the expensive filesystem sweep.
     let _build_guard = state.model_catalog_cache.build_serializer.lock().await;

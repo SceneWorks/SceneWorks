@@ -1405,7 +1405,7 @@ pub fn probe_binding(
         }
         Err(_) => return unknown_probe(),
     };
-    let identity = match physical_identity(&canonical) {
+    let identity = match observed_physical_identity(&canonical) {
         Ok(identity) => identity,
         Err(_) => return unknown_probe(),
     };
@@ -1572,6 +1572,48 @@ fn physical_identity(path: &Path) -> Result<ExternalLibraryPhysicalIdentity, Ext
 
     let directory = File::open(path)?;
     let metadata = directory.metadata()?;
+    Ok(ExternalLibraryPhysicalIdentity {
+        volume_id: macos_volume_id(path)?,
+        directory_id: metadata.ino(),
+    })
+}
+
+/// The read-side identity probe. Bind and relocation writes keep calling [`physical_identity`],
+/// which always spawns `df` + `diskutil`; this one reuses a volume UUID probed moments ago for the
+/// same canonical path, `st_dev` and directory inode (see [`VolumeIdentityMemo`]).
+#[cfg(target_os = "macos")]
+fn observed_physical_identity(
+    path: &Path,
+) -> Result<ExternalLibraryPhysicalIdentity, ExternalLibraryError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let directory = File::open(path)?;
+    let metadata = directory.metadata()?;
+    let key = VolumeIdentityKey {
+        canonical_path: path.to_path_buf(),
+        device: metadata.dev(),
+        directory_id: metadata.ino(),
+    };
+    let volume_id =
+        VOLUME_IDENTITY_MEMO.volume_id(key, std::time::Instant::now(), || macos_volume_id(path))?;
+    Ok(ExternalLibraryPhysicalIdentity {
+        volume_id,
+        directory_id: metadata.ino(),
+    })
+}
+
+/// `stat` is the cheap identity everywhere but macOS, so there is nothing to memoize.
+#[cfg(not(target_os = "macos"))]
+fn observed_physical_identity(
+    path: &Path,
+) -> Result<ExternalLibraryPhysicalIdentity, ExternalLibraryError> {
+    physical_identity(path)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_volume_id(path: &Path) -> Result<String, ExternalLibraryError> {
+    #[cfg(test)]
+    TEST_MACOS_VOLUME_PROBES.with(|probes| probes.set(probes.get() + 1));
     // SceneWorks forbids unsafe code in core. `diskutil -plist` is Apple's supported native volume
     // identity surface and returns the persistent VolumeUUID for the exact existing path (unlike
     // st_dev, which is only a mount-session number). No nearest-parent fallback is permitted.
@@ -1611,10 +1653,74 @@ fn physical_identity(path: &Path) -> Result<ExternalLibraryPhysicalIdentity, Ext
     )?;
     let compact =
         macos_volume_uuid_from_diskutil(output.status.success(), &output.stdout, &output.stderr)?;
-    Ok(ExternalLibraryPhysicalIdentity {
-        volume_id: format!("macos-volume:{compact}"),
-        directory_id: metadata.ino(),
-    })
+    Ok(format!("macos-volume:{compact}"))
+}
+
+// Volume-UUID probes this thread has spawned `df` + `diskutil` for, so a test can count the
+// probes one catalog sweep costs.
+#[cfg(all(test, target_os = "macos"))]
+thread_local! {
+    static TEST_MACOS_VOLUME_PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How long a probed volume UUID may be reused for an unchanged [`VolumeIdentityKey`].
+#[cfg(any(target_os = "macos", test))]
+const VOLUME_IDENTITY_MEMO_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[cfg(target_os = "macos")]
+static VOLUME_IDENTITY_MEMO: std::sync::LazyLock<VolumeIdentityMemo> =
+    std::sync::LazyLock::new(VolumeIdentityMemo::default);
+
+#[cfg(any(target_os = "macos", test))]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct VolumeIdentityKey {
+    canonical_path: PathBuf,
+    device: u64,
+    directory_id: u64,
+}
+
+/// Memo of the macOS persistent volume UUID (sc-28037, GitHub #3235).
+///
+/// `diskutil info -plist` costs 0.1–0.8 s per call, and every catalog row, submission preflight
+/// and worker pre-loader guard probes the bound library through [`probe_binding`]. Spawning it per
+/// row made a 140-row `/models` sweep cost rows × diskutil latency, serialized by the ledger lock.
+///
+/// The memo never changes what a probe decides. The directory inode is always read fresh, and an
+/// entry is reused only for the same canonical path, `st_dev` and inode, inside
+/// [`VOLUME_IDENTITY_MEMO_TTL`]. A remount gets a new `st_dev`, a different directory at the path
+/// gets a new inode, and the TTL bounds the one case those miss (a different disk handed the same
+/// device node and inode within seconds), so disconnect and foreign-volume detection hold. Errors
+/// are never cached. The lock is held across the probe, so concurrent sweeps that miss together
+/// share one `diskutil` call instead of each spawning their own.
+#[cfg(any(target_os = "macos", test))]
+#[derive(Default)]
+struct VolumeIdentityMemo {
+    entries: parking_lot::Mutex<
+        std::collections::HashMap<VolumeIdentityKey, (std::time::Instant, String)>,
+    >,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl VolumeIdentityMemo {
+    fn volume_id(
+        &self,
+        key: VolumeIdentityKey,
+        now: std::time::Instant,
+        probe: impl FnOnce() -> Result<String, ExternalLibraryError>,
+    ) -> Result<String, ExternalLibraryError> {
+        let mut entries = self.entries.lock();
+        if let Some((probed_at, volume_id)) = entries.get(&key) {
+            if now.saturating_duration_since(*probed_at) < VOLUME_IDENTITY_MEMO_TTL {
+                return Ok(volume_id.clone());
+            }
+        }
+        let volume_id = probe()?;
+        entries.retain(|_, (probed_at, _)| {
+            now.saturating_duration_since(*probed_at) < VOLUME_IDENTITY_MEMO_TTL
+        });
+        entries.insert(key, (now, volume_id.clone()));
+        Ok(volume_id)
+    }
 }
 
 #[cfg(target_os = "macos")]
