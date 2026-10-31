@@ -24,18 +24,18 @@ test('CUDA retains established physical GPU0 restrictions for all candle cases',
   for(const selected of ['audio','training']) assert.doesNotThrow(()=>admission({...cuda,LOAD_PROGRESS_CASE:selected},'win32'));
 });
 test('workflow preflight normalizes Windows artifact paths and preserves resource/source refusal', async()=>{
-  const selected={...env,LOAD_PROGRESS_CASE:'cuda_all',DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_OUTPUT:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../load-progress-123-1',LOAD_PROGRESS_TARGET_DIR:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../target-cuda',SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
+  const selected={...env,LOAD_PROGRESS_BACKEND:'cuda',LOAD_PROGRESS_CASE:'cuda_all',DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_OUTPUT:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../load-progress-123-1',LOAD_PROGRESS_TARGET_DIR:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../target-cuda',SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
   const actual=workflowEnvironment(selected,'win32');
   assert.equal(actual.output,'directory=D:/runner/_work/SceneWorks/load-progress-123-1\n');
   assert(actual.environment.includes('LOAD_PROGRESS_TARGET_DIR=D:\\runner\\_work\\SceneWorks\\target-cuda\n'));
   assert.throws(()=>workflowEnvironment({...selected,DISPATCH_SHA:'c'.repeat(40)},'win32'),/dispatch/);
   assert.throws(()=>workflowEnvironment({...selected,CUDA_VISIBLE_DEVICES:'1'},'win32'),/required/);
   assert.throws(()=>workflowEnvironment({...selected,LOAD_PROGRESS_OUTPUT:'D:/output\ninjected=yes'},'win32'),/absolute/);
-  const mac={...env,DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_TARGET_DIR:'/tmp/worker/../target',LOAD_PROGRESS_MAC_GO:'false'};
+  const mac={...env,LOAD_PROGRESS_BACKEND:'mlx',DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_TARGET_DIR:'/tmp/worker/../target',LOAD_PROGRESS_MAC_GO:'false'};
   assert.throws(()=>workflowEnvironment(mac,'darwin'),/explicit.*go/);
   assert.equal(workflowEnvironment({...mac,BUILD_ONLY:'true'},'darwin').output,'directory=/tmp/load-progress-case\n');
   const workflow=await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
-  assert.match(workflow,/id: preflight-cuda\n        if: \$\{\{ inputs.backend == 'cuda' \}\}\n        shell: powershell/);
+  assert.match(workflow,/id: preflight-cuda\n        if: \$\{\{ inputs.backend == 'cuda' \|\| inputs.backend == 'cpu' \}\}\n        shell: powershell/);
   assert.match(workflow,/id: preflight-mlx\n        if: \$\{\{ inputs.backend == 'mlx' \}\}\n        shell: bash/);
   assert.match(workflow,/node scripts\/load-progress-acceptance.mjs --workflow-preflight/);
   assert.match(workflow,/steps.preflight-cuda.outputs.directory \|\| steps.preflight-mlx.outputs.directory/);
@@ -94,17 +94,17 @@ test('cache preflight stats only exact frozen files and retains all missing comp
   assert.equal(result.totalPresentBytes,0);
 });
 
-test('ORT session construction is selected once before CUDA image only, never ordinary CI',()=>{
+test('ORT session construction is a separate CPU case, never part of any GPU case',()=>{
   assert.equal(ORT_FILTER,'model_io::tests::external_initializer_session_creation_acceptance');
-  assert.equal(ortSmokeRequired('image_cuda','win32'),true);
-  for(const selected of ['image_mlx','audio','training']) assert.equal(ortSmokeRequired(selected,'win32'),false);
+  assert.equal(ortSmokeRequired('ort_cpu','win32'),true);
+  for(const selected of [...NATIVE_CASES,'cuda_all']) assert.equal(ortSmokeRequired(selected,'win32'),false);
   for(const selected of CASES) assert.equal(ortSmokeRequired(selected,'darwin'),false);
 });
 
 test('ORT receipt binds actual session result to bounded byte ranges and refusal coverage',()=>{
-  const receipt={kind:'sc27980-ort-session-acceptance',passed:true,outputs:4,externalFileBytes:16777216,selectedExternalBytes:40,nestedExternalData:true,omittedLength:true,aliasesAndOverlaps:true,decimalOffsetPadding:true,sourceModelUnchanged:true,missingTruncatedOverflowRefusals:true};
+  const receipt={kind:'sc27980-ort-session-acceptance',passed:true,executionProvider:'CPUExecutionProvider',tensorValuesVerified:true,outputs:4,externalFileBytes:16777216,selectedExternalBytes:40,nestedExternalData:true,omittedLength:true,aliasesAndOverlaps:true,decimalOffsetPadding:true,sourceModelUnchanged:true,missingTruncatedOverflowRefusals:true};
   assert.doesNotThrow(()=>validateOrtReceipt(receipt));
-  for(const [key,value] of [['selectedExternalBytes',16777216],['outputs',0],['sourceModelUnchanged',false],['missingTruncatedOverflowRefusals',false]]) assert.throws(()=>validateOrtReceipt({...receipt,[key]:value}));
+  for(const [key,value] of [['executionProvider','CUDAExecutionProvider'],['tensorValuesVerified',false],['selectedExternalBytes',16777216],['outputs',0],['sourceModelUnchanged',false],['missingTruncatedOverflowRefusals',false]]) assert.throws(()=>validateOrtReceipt({...receipt,[key]:value}));
 });
 
 test('CUDA aggregate selector is explicit and rejected on MLX',()=>{
@@ -127,7 +127,7 @@ test('CUDA aggregate runs the existing cases sequentially with one target and in
     assert.deepEqual(calls.map(child=>child.LOAD_PROGRESS_CASE),CUDA_CASES);
     assert.equal(new Set(calls.map(child=>child.LOAD_PROGRESS_TARGET_DIR)).size,1);
     assert.equal(new Set(calls.map(child=>child.LOAD_PROGRESS_OUTPUT)).size,3);
-    assert.deepEqual(calls.filter(child=>ortSmokeRequired(child.LOAD_PROGRESS_CASE,'win32')).map(child=>child.LOAD_PROGRESS_CASE),['image_cuda']);
+    assert.deepEqual(calls.filter(child=>ortSmokeRequired(child.LOAD_PROGRESS_CASE,'win32')).map(child=>child.LOAD_PROGRESS_CASE),[]);
     const saved=JSON.parse(await readFile(path.join(selected.LOAD_PROGRESS_OUTPUT,'evidence/controller.json'),'utf8'));
     assert.deepEqual(saved.cases.map(item=>item.case),CUDA_CASES);
     assert.equal(saved.status,'passed');
@@ -190,4 +190,42 @@ test('zero-match and unrelated libtest listings cannot reach acceptance executio
   const selected='tests::load_progress_acceptance::image_cuda';
   assert.deepEqual(ignoredTestRegistration(`${selected}: test\r\n\r\n1 test, 0 benchmarks\r\n`,selected),{filter:selected,registered:true});
   for(const listing of ['0 tests, 0 benchmarks\n','tests::other: test\n1 test, 0 benchmarks\n',`${selected}: test\ntests::other: test\n2 tests, 0 benchmarks\n`]) assert.throws(()=>ignoredTestRegistration(listing,selected),/exact ignored test is not registered/);
+});
+
+const cpuEnv={...env,LOAD_PROGRESS_CASE:'ort_cpu',LOAD_PROGRESS_BACKEND:'cpu',SCENEWORKS_GPU_ID:'cpu',CUDA_VISIBLE_DEVICES:'',NVIDIA_VISIBLE_DEVICES:''};
+test('CPU selector is independent of model cache and Mac go, with exact source and worker filter',()=>{
+  const inputs={profile:'load-progress-acceptance',ref:env.LOAD_PROGRESS_SOURCE_SHA,inference_sha:env.LOAD_PROGRESS_INFERENCE_SHA,backend:'candle',moss_options_json:JSON.stringify({case:'ort_cpu',build_only:false})};
+  assert.deepEqual(dispatchOptions(inputs,inputs.ref),{case:'ort_cpu',backend:'cpu',hf_hub_cache:'',build_only:false,mac_go:false});
+  assert.throws(()=>dispatchOptions({...inputs,backend:'mlx'},inputs.ref),/Windows candle/);
+  assert.throws(()=>dispatchOptions(inputs,'c'.repeat(40)),/exact dispatched/);
+  assert.equal(admission(cpuEnv,'win32'),ORT_FILTER);
+  assert.throws(()=>admission(cpuEnv,'darwin'),/Windows/);
+  for(const key of ['CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES']) assert.throws(()=>admission({...cpuEnv,[key]:'0'},'win32'),/empty/);
+  assert.throws(()=>admission({...cpuEnv,SCENEWORKS_GPU_ID:'0'},'win32'),/CPU device/);
+  for(const selectedCase of [...NATIVE_CASES,'cuda_all']) assert.throws(()=>admission({...cpuEnv,LOAD_PROGRESS_CASE:selectedCase},'win32'),/case\/backend mismatch/);
+  for(const backend of ['cuda','mlx']) assert.throws(()=>admission({...cpuEnv,LOAD_PROGRESS_BACKEND:backend},'win32'),/case\/backend mismatch/);
+  const preflight={...cpuEnv,DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_TARGET_DIR:'C:/targets/ort',LOAD_PROGRESS_OUTPUT:'C:/acceptance/ort'};
+  assert.doesNotThrow(()=>workflowEnvironment(preflight,'win32'));
+  assert.throws(()=>workflowEnvironment({...preflight,LOAD_PROGRESS_BACKEND:undefined},'win32'),/explicit workflow backend/);
+  const child=childEnvironment({...cpuEnv,CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0'},'state','evidence','win32');
+  assert.equal(child.SCENEWORKS_GPU_ID,'cpu'); assert.equal(child.CUDA_VISIBLE_DEVICES,''); assert.equal(child.NVIDIA_VISIBLE_DEVICES,'');
+});
+test('dedicated CPU route preserves GPU guards and bypasses model compilation, inventory and device probes',async()=>{
+  const controller=await readFile(new URL('./load-progress-acceptance.mjs',import.meta.url),'utf8');
+  const workflow=await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
+  const fixture=await readFile(new URL('../crates/sceneworks-worker/src/model_io.rs',import.meta.url),'utf8');
+  assert.match(controller,/if\(!cpu\) receipt.binary=await compileTest\('sceneworks-rust-api'/);
+  assert.match(controller,/if \(!buildOnly && !cpu\)/);
+  assert.match(controller,/if\(cpu\) \{\s+receipt.device=\{executionProvider:'CPUExecutionProvider'/);
+  assert.match(controller,/process.env.LOAD_PROGRESS_CASE!=='ort_cpu' && await enterMacMetalExecution/);
+  assert.match(workflow,/inputs.backend == 'cpu' && fromJSON\('\["self-hosted","Windows","X64","cuda"\]'/);
+  const gpuStep=workflow.split('      - name: Compile then execute the selected bounded CUDA jobs')[1].split('      - name:')[0];
+  assert.match(gpuStep,/if: \$\{\{ inputs.backend == 'cuda' \}\}/);
+  assert.match(gpuStep,/windows_cuda_execution.py/);
+  const cpuStep=workflow.split('      - name: Compile then execute only the explicit CPU ORT fixture')[1].split('      - name:')[0];
+  assert.match(cpuStep,/if: \$\{\{ inputs.backend == 'cpu' \}\}/);
+  assert.doesNotMatch(cpuStep,/windows_cuda_execution|nvidia-smi|metal/);
+  assert.match(fixture,/with_no_environment_execution_providers\(\)/);
+  assert.match(fixture,/with_execution_providers\(\[ort::ep::CPU::default\(\).build\(\).error_on_failure\(\)\]\)/);
+  assert.match(fixture,/"executionProvider":"CPUExecutionProvider"/);
 });

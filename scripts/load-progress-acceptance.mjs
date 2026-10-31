@@ -14,10 +14,10 @@ const execFile = promisify(execFileCb);
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const NATIVE_CASES = ['image_mlx', 'image_cuda', 'audio', 'training'];
 export const CUDA_CASES = ['image_cuda', 'audio', 'training'];
-export const CASES = [...NATIVE_CASES, 'cuda_all'];
+export const CASES = [...NATIVE_CASES, 'cuda_all', 'ort_cpu'];
 export const API_TEST_TARGET = {args:['--lib'],name:'sceneworks_rust_api',source:'apps/rust-api/src/lib.rs'};
 export const ORT_FILTER = 'model_io::tests::external_initializer_session_creation_acceptance';
-export function ortSmokeRequired(selectedCase, platform) { return selectedCase === 'image_cuda' && platform === 'win32'; }
+export function ortSmokeRequired(selectedCase, platform) { return selectedCase === 'ort_cpu' && platform === 'win32'; }
 export function ignoredTestRegistration(stdout, filter) {
   const tests=stdout.split(/\r?\n/).map(line=>line.trim()).filter(line=>line.endsWith(': test'));
   assert.deepEqual(tests,[`${filter}: test`],`exact ignored test is not registered: ${filter}`);
@@ -25,7 +25,8 @@ export function ignoredTestRegistration(stdout, filter) {
 }
 export function validateOrtReceipt(value) {
   assert.equal(value.kind,'sc27980-ort-session-acceptance');
-  assert.equal(value.passed,true); assert.equal(value.outputs,4);
+  assert.equal(value.passed,true); assert.equal(value.executionProvider,'CPUExecutionProvider');
+  assert.equal(value.tensorValuesVerified,true); assert.equal(value.outputs,4);
   assert.equal(value.externalFileBytes,16 * 1024 * 1024); assert.equal(value.selectedExternalBytes,40);
   for(const field of ['nestedExternalData','omittedLength','aliasesAndOverlaps','decimalOffsetPadding','sourceModelUnchanged','missingTruncatedOverflowRefusals']) assert.equal(value[field],true,`ORT acceptance missing ${field}`);
 }
@@ -36,6 +37,14 @@ export function admission(env, platform = process.platform, { execute = true } =
   assert(/^[a-f0-9]{40}$/.test(env.LOAD_PROGRESS_SOURCE_SHA ?? ''), 'exact source SHA required');
   assert(/^[a-f0-9]{40}$/.test(env.LOAD_PROGRESS_INFERENCE_SHA ?? ''), 'exact inference SHA required');
   assert(env.LOAD_PROGRESS_OUTPUT && (platform==='win32'?path.win32:path.posix).isAbsolute(env.LOAD_PROGRESS_OUTPUT), 'absolute unique output directory required');
+  const cpu = env.LOAD_PROGRESS_CASE === 'ort_cpu';
+  if (env.LOAD_PROGRESS_BACKEND !== undefined) assert.equal(env.LOAD_PROGRESS_BACKEND,cpu?'cpu':platform==='darwin'?'mlx':'cuda','case/backend mismatch');
+  if (cpu) {
+    assert.equal(platform,'win32','ORT CPU case needs Windows');
+    assert.equal(env.SCENEWORKS_GPU_ID,'cpu','CPU device required');
+    for (const key of ['CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES']) assert.equal(env[key],'',`${key} must be empty for CPU`);
+    return ORT_FILTER;
+  }
   if (platform === 'darwin') {
     if (execute) assert.equal(env.LOAD_PROGRESS_MAC_GO, 'true', "Michael's explicit dev Mac GPU go required");
     assert(!['image_cuda','cuda_all'].includes(env.LOAD_PROGRESS_CASE), 'CUDA case needs Windows');
@@ -55,6 +64,7 @@ export function workflowEnvironment(env, platform = process.platform) {
     assert(env[key] && paths.isAbsolute(env[key]) && !/[\r\n]/.test(env[key]), `${key} must be absolute`);
     selected[key] = paths.normalize(env[key]);
   }
+  assert(['cpu','cuda','mlx'].includes(selected.LOAD_PROGRESS_BACKEND),'explicit workflow backend required');
   admission(selected, platform, { execute: env.BUILD_ONLY !== 'true' });
   return {
     environment: ['LOAD_PROGRESS_OUTPUT', 'LOAD_PROGRESS_TARGET_DIR'].map(key => `${key}=${selected[key]}\n`).join(''),
@@ -71,11 +81,13 @@ export function dispatchOptions(inputs, dispatchedSha) {
   assert(options && typeof options==='object' && !Array.isArray(options), 'load progress options must be an object');
   assert(Object.keys(options).every(key=>['case','hf_hub_cache','build_only','mac_go'].includes(key)), 'unknown load progress option');
   for(const key of ['build_only','mac_go']) assert(options[key]===undefined || typeof options[key]==='boolean', `${key} must be boolean`);
-  const backend=inputs.backend==='mlx'?'mlx':'cuda', platform=backend==='mlx'?'darwin':'win32';
-  assert(typeof options.hf_hub_cache==='string' && (platform==='win32'?path.win32:path.posix).isAbsolute(options.hf_hub_cache), 'absolute existing HF hub cache required');
-  assert(!/[\r\n]/.test(options.hf_hub_cache), 'invalid cache path');
-  const selected={case:options.case,backend,hf_hub_cache:options.hf_hub_cache,build_only:options.build_only??true,mac_go:options.mac_go??false};
-  admission({LOAD_PROGRESS_CASE:selected.case,LOAD_PROGRESS_SOURCE_SHA:inputs.ref,LOAD_PROGRESS_INFERENCE_SHA:inputs.inference_sha,LOAD_PROGRESS_OUTPUT:platform==='win32'?'C:/load-progress':'/tmp/load-progress',LOAD_PROGRESS_MAC_GO:String(selected.mac_go),SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'},platform,{execute:!selected.build_only});
+  const cpu=options.case==='ort_cpu';
+  if(cpu) assert.equal(inputs.backend,'candle','ORT CPU requires the Windows candle compiler');
+  const backend=cpu?'cpu':inputs.backend==='mlx'?'mlx':'cuda', platform=backend==='mlx'?'darwin':'win32';
+  if(!cpu) assert(typeof options.hf_hub_cache==='string' && (platform==='win32'?path.win32:path.posix).isAbsolute(options.hf_hub_cache), 'absolute existing HF hub cache required');
+  assert(!/[\r\n]/.test(options.hf_hub_cache??''), 'invalid cache path');
+  const selected={case:options.case,backend,hf_hub_cache:cpu?'':options.hf_hub_cache,build_only:options.build_only??true,mac_go:options.mac_go??false};
+  admission({LOAD_PROGRESS_CASE:selected.case,LOAD_PROGRESS_SOURCE_SHA:inputs.ref,LOAD_PROGRESS_INFERENCE_SHA:inputs.inference_sha,LOAD_PROGRESS_OUTPUT:platform==='win32'?'C:/load-progress':'/tmp/load-progress',LOAD_PROGRESS_MAC_GO:String(selected.mac_go),LOAD_PROGRESS_BACKEND:backend,SCENEWORKS_GPU_ID:cpu?'cpu':'0',CUDA_VISIBLE_DEVICES:cpu?'':'0',NVIDIA_VISIBLE_DEVICES:cpu?'':'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'},platform,{execute:!selected.build_only});
   return selected;
 }
 // Exact manifest filenames only: metadata/stat, no recursive scans, hashes or model reads.
@@ -101,6 +113,7 @@ export async function cacheInventory(hub, selectedCase, manifest = null) {
 }
 export function childEnvironment(env, state, evidence, platform = process.platform) {
   const child = { ...env };
+  if(env.LOAD_PROGRESS_CASE==='ort_cpu') Object.assign(child,{SCENEWORKS_GPU_ID:'cpu',CUDA_VISIBLE_DEVICES:'',NVIDIA_VISIBLE_DEVICES:''});
   if (platform === 'win32') {
     const keys = Object.keys(child).filter(key => key.toLowerCase() === 'path');
     const value = env.PATH ?? keys.map(key => env[key]).find(value => value !== undefined) ?? '';
@@ -149,8 +162,9 @@ export async function runCudaAll(env, options = {}, runCase = run) {
 export async function run(env = process.env, { checkOnly = false, buildOnly = false } = {}) {
   const filter = admission(env, process.platform, { execute: !checkOnly && !buildOnly });
   if (env.LOAD_PROGRESS_CASE==='cuda_all') return runCudaAll(env,{checkOnly,buildOnly});
+  const cpu=ortSmokeRequired(env.LOAD_PROGRESS_CASE,process.platform);
   const {output,evidence}=await freshOutput(env.LOAD_PROGRESS_OUTPUT);
-  const receipt = { schemaVersion:1, case:env.LOAD_PROGRESS_CASE, status:'preflight', sourceSha:env.LOAD_PROGRESS_SOURCE_SHA, inferenceSha:env.LOAD_PROGRESS_INFERENCE_SHA, startedAt:new Date().toISOString(), platform:process.platform, runner:env.RUNNER_NAME ?? null, test:filter };
+  const receipt = { schemaVersion:1, case:env.LOAD_PROGRESS_CASE, status:'preflight', sourceSha:env.LOAD_PROGRESS_SOURCE_SHA, inferenceSha:env.LOAD_PROGRESS_INFERENCE_SHA, startedAt:new Date().toISOString(), platform:process.platform, architecture:process.arch, runner:env.RUNNER_NAME ?? null, executionBackend:cpu?'cpu':process.platform==='darwin'?'mlx':'cuda', test:filter };
   const persist = () => writeFile(path.join(evidence,'controller.json'), JSON.stringify(receipt,null,2)+'\n');
   const childEnv = childEnvironment(env,path.join(output,'state'),path.join(evidence,'case'));
   childEnv.CARGO_TARGET_DIR = path.resolve(env.LOAD_PROGRESS_TARGET_DIR ?? path.join(path.dirname(output), `sc27980-target-${env.LOAD_PROGRESS_SOURCE_SHA}-${process.platform}`));
@@ -166,7 +180,9 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
     receipt.lockSha256 = createHash('sha256').update(lock).digest('hex');
     // Record resolved mlx-rs source identity without requiring a particular pre-terminal pin.
     receipt.mlxSources = [...new Set([...lock.matchAll(/source = "(git\+https:\/\/github.com\/michaeltrefry\/mlx-rs[^"\n]+)"/g)].map(m=>m[1]))];
-    if (process.platform === 'darwin') {
+    if(cpu) {
+      receipt.device={executionProvider:'CPUExecutionProvider',gpuId:'cpu',cudaVisibleDevices:'',nvidiaVisibleDevices:''};
+    } else if (process.platform === 'darwin') {
       const hardware = JSON.parse((await execFile('system_profiler',['SPHardwareDataType','-json'],{timeout:30000})).stdout);
       receipt.hardware = hardware.SPHardwareDataType?.map(({chip_type,physical_memory,machine_model})=>({chip_type,physical_memory,machine_model}));
     } else {
@@ -175,7 +191,7 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
     }
     await persist();
     if (checkOnly) { receipt.status='checked-no-model-execution'; return receipt; }
-    if (!buildOnly) {
+    if (!buildOnly && !cpu) {
       receipt.cache=await cacheInventory(env.HF_HUB_CACHE,env.LOAD_PROGRESS_CASE); await persist();
       assert.equal(receipt.cache.missing.length,0,'provision missing frozen model files before acceptance; see controller.json');
     }
@@ -205,10 +221,10 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
       childEnv.ORT_DYLIB_PATH=runtime;
       childEnv.PATH=path.dirname(runtime)+path.delimiter+(childEnv.PATH??'');
       childEnv.SCENEWORKS_LOAD_PROGRESS_ORT_EVIDENCE=path.join(evidence,'ort-session.json');
-      receipt.ortRuntime={path:runtime,bytes:metadata.size};
+      receipt.ortRuntime={path:runtime,bytes:metadata.size,sha256:createHash('sha256').update(await readFile(runtime)).digest('hex')};
     }
     receipt.status='building'; await persist();
-    receipt.binary=await compileTest('sceneworks-rust-api',API_TEST_TARGET.args,API_TEST_TARGET.name,'build');
+    if(!cpu) receipt.binary=await compileTest('sceneworks-rust-api',API_TEST_TARGET.args,API_TEST_TARGET.name,'build');
     if (ortRequired) receipt.ortBinary=await compileTest('sceneworks-worker',['--lib'],'sceneworks_worker','ort-build');
     const listIgnored=async (binary,testName,logName)=>{
       // The same compiler-artifact executable/hash is listed and subsequently executed.
@@ -216,7 +232,7 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
       await execute(binary.path,[testName,'--list','--ignored','--exact'],logName);
       return ignoredTestRegistration(await readFile(path.join(evidence,`${logName}.log`),'utf8'),testName);
     };
-    receipt.testRegistration=await listIgnored(receipt.binary,filter,'tests-list');
+    if(!cpu) receipt.testRegistration=await listIgnored(receipt.binary,filter,'tests-list');
     if (ortRequired) receipt.ortTestRegistration=await listIgnored(receipt.ortBinary,ORT_FILTER,'ort-tests-list');
     if (buildOnly) { receipt.status='compiled-no-model-execution'; return receipt; }
     if (ortRequired) {
@@ -225,6 +241,7 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
       receipt.ortSmoke=JSON.parse(await readFile(path.join(evidence,'ort-session.json'),'utf8'));
       // The ignored smoke asserts actual ORT session construction and byte ranges internally.
       validateOrtReceipt(receipt.ortSmoke);
+      receipt.status='passed'; return receipt;
     }
     const executable=receipt.binary.path;
     receipt.status='running'; await persist();
@@ -238,7 +255,7 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
-    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. Mac requires LOAD_PROGRESS_MAC_GO=true; Windows uses established physical GPU0 visibility. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
+    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all|ort_cpu, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. Mac requires LOAD_PROGRESS_MAC_GO=true; Windows GPU cases use physical GPU0. ort_cpu uses CPU only with empty CUDA/NVIDIA visibility and GPU_ID=cpu. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
   } else if (process.argv.includes('--workflow-preflight')) {
     try {
       const prepared = workflowEnvironment(process.env);
@@ -250,7 +267,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
     try {
       const checkOnly=process.argv.includes('--check-only'), buildOnly=process.argv.includes('--build-only');
       admission(process.env,process.platform,{execute:!checkOnly&&!buildOnly});
-      if (!checkOnly && !buildOnly && await enterMacMetalExecution(3600)) { /* existing lease helper owns child */ }
+      if (!checkOnly && !buildOnly && process.env.LOAD_PROGRESS_CASE!=='ort_cpu' && await enterMacMetalExecution(3600)) { /* existing lease helper owns child */ }
       else await run(process.env,{checkOnly,buildOnly});
     } catch(error) { process.stderr.write(`${error.message}\n`); process.exitCode=1; }
   }

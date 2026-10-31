@@ -16,8 +16,9 @@ on:
         required: true
         type: string
       hf_hub_cache:
-        required: true
+        required: false
         type: string
+        default: ""
       build_only:
         required: false
         type: boolean
@@ -40,15 +41,15 @@ on:
         description: One bounded job, or cuda_all for the three sequential CUDA jobs sharing one build
         required: true
         type: choice
-        options: [image_mlx, image_cuda, audio, training, cuda_all]
+        options: [image_mlx, image_cuda, audio, training, cuda_all, ort_cpu]
       backend:
-        description: MLX uses the explicitly approved primary dev Mac; CUDA preserves physical GPU0
+        description: MLX requires Mac go; CUDA preserves GPU0; cpu accepts only ort_cpu
         required: true
         type: choice
-        options: [cuda, mlx]
+        options: [cuda, mlx, cpu]
       hf_hub_cache:
-        description: Absolute existing provisioned HF hub directory on selected host (no downloads)
-        required: true
+        description: Absolute provisioned HF hub for GPU cases; unused by ort_cpu (no downloads)
+        required: false
         type: string
       build_only:
         description: Compile ignored acceptance tests without executing models
@@ -64,7 +65,7 @@ permissions:
   contents: read
 jobs:
   accept:
-    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
+    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || inputs.backend == 'cpu' && fromJSON('["self-hosted","Windows","X64","cuda"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
     timeout-minutes: 180
     concurrency:
       # Distinct pending requests must remain queued; preserve the existing physical GPU0 binding.
@@ -73,6 +74,7 @@ jobs:
     env:
       LOAD_PROGRESS_SOURCE_SHA: ${{ inputs.source_sha }}
       LOAD_PROGRESS_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      LOAD_PROGRESS_BACKEND: ${{ inputs.backend }}
       LOAD_PROGRESS_CASE: ${{ inputs.case }}
       LOAD_PROGRESS_MAC_GO: ${{ inputs.mac_go }}
       LOAD_PROGRESS_OUTPUT: ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}
@@ -80,7 +82,7 @@ jobs:
       HF_HUB_CACHE: ${{ inputs.hf_hub_cache }}
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
-      SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '0' || 'mlx' }}
+      SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cpu' && 'cpu' || inputs.backend == 'cuda' && '0' || 'mlx' }}
       CUDA_DEVICE_ORDER: PCI_BUS_ID
       CUDA_COMPUTE_CAP: "120"
       CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
@@ -103,7 +105,7 @@ jobs:
           node-version: 22
       - name: Require selected CUDA dispatch before native setup
         id: preflight-cuda
-        if: ${{ inputs.backend == 'cuda' }}
+        if: ${{ inputs.backend == 'cuda' || inputs.backend == 'cpu' }}
         shell: powershell
         env:
           DISPATCH_SHA: ${{ github.sha }}
@@ -119,17 +121,17 @@ jobs:
         run: |
           node scripts/load-progress-acceptance.mjs --workflow-preflight
       - uses: ./.github/actions/prepare-rust-runner
-        if: ${{ inputs.backend == 'cuda' }}
+        if: ${{ inputs.backend == 'cuda' || inputs.backend == 'cpu' }}
         with:
           workspace-directory: .
       - name: Preserve listener-owned CUDA dependency and kernel build caches
-        if: ${{ inputs.backend == 'cuda' }}
+        if: ${{ inputs.backend == 'cuda' || inputs.backend == 'cpu' }}
         shell: powershell
         run: |
           node scripts/select-windows-cargo-cache.mjs
           if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
       - name: Fetch the exact locked CUDA dependencies
-        if: ${{ inputs.backend == 'cuda' }}
+        if: ${{ inputs.backend == 'cuda' || inputs.backend == 'cpu' }}
         shell: powershell
         env:
           CARGO_NET_OFFLINE: "false"
@@ -171,6 +173,14 @@ jobs:
           if errorlevel 1 exit /b %errorlevel%
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
           if "%BUILD_ONLY%"=="true" (node scripts/load-progress-acceptance.mjs --build-only) else (python -I scripts/ci/windows_cuda_execution.py --actor load-progress-acceptance --budget-minutes 170 --cuda-ordinals 0 --probe-visible 0 -- node scripts/load-progress-acceptance.mjs)
+      - name: Compile then execute only the explicit CPU ORT fixture
+        if: ${{ inputs.backend == 'cpu' }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b %errorlevel%
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          if "%BUILD_ONLY%"=="true" (node scripts/load-progress-acceptance.mjs --build-only) else (node scripts/load-progress-acceptance.mjs)
       - name: Retain progress POSTs, output identities and failure evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

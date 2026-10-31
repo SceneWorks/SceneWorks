@@ -826,7 +826,13 @@ mod tests {
         let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let sink = observed.clone();
         let _observer = gen_core::LoadActivityObserver::new(move |v| sink.lock().unwrap().push(v));
-        let mut session = ort_session(ort::session::Session::builder().unwrap(), &path).unwrap();
+        let builder = ort::session::Session::builder()
+            .unwrap()
+            .with_no_environment_execution_providers()
+            .unwrap()
+            .with_execution_providers([ort::ep::CPU::default().build().error_on_failure()])
+            .unwrap();
+        let mut session = ort_session(builder, &path).unwrap();
         assert_eq!(session.outputs().len(), 4);
         let condition = ort::value::Tensor::from_array((Vec::<usize>::new(), vec![true])).unwrap();
         let output = session.run(ort::inputs!["condition" => condition]).unwrap();
@@ -851,7 +857,7 @@ mod tests {
         // Raw refusal cases cannot invoke ORT and belong in normal CI too.
         invalid_external_ranges_fail_before_reading_or_allocating_source_file_size();
         if let Some(output) = std::env::var_os("SCENEWORKS_LOAD_PROGRESS_ORT_EVIDENCE") {
-            std::fs::write(output, r#"{"kind":"sc27980-ort-session-acceptance","passed":true,"tensorValuesVerified":true,"outputs":4,"externalFileBytes":16777216,"selectedExternalBytes":40,"nestedExternalData":true,"omittedLength":true,"aliasesAndOverlaps":true,"decimalOffsetPadding":true,"sourceModelUnchanged":true,"missingTruncatedOverflowRefusals":true}"#).unwrap();
+            std::fs::write(output, r#"{"kind":"sc27980-ort-session-acceptance","executionProvider":"CPUExecutionProvider","passed":true,"tensorValuesVerified":true,"outputs":4,"externalFileBytes":16777216,"selectedExternalBytes":40,"nestedExternalData":true,"omittedLength":true,"aliasesAndOverlaps":true,"decimalOffsetPadding":true,"sourceModelUnchanged":true,"missingTruncatedOverflowRefusals":true}"#).unwrap();
         }
     }
 }
