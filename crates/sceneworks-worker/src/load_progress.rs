@@ -354,14 +354,35 @@ impl Context {
             _observer: self.activity.install(),
         }
     }
-    pub(crate) async fn scope<F: Future>(&self, future: F) -> F::Output {
-        tokio::pin!(future);
-        std::future::poll_fn(|cx| {
-            // Install on each poll: Tokio may move the task to another runtime thread.
-            let _guard = self.install();
-            future.as_mut().poll(cx)
-        })
-        .await
+    pub(crate) fn scope<F: Future>(&self, future: F) -> ScopedFuture<F> {
+        self.scope_boxed(Box::pin(future))
+    }
+
+    fn scope_boxed<F: Future>(&self, future: std::pin::Pin<Box<F>>) -> ScopedFuture<F> {
+        ScopedFuture {
+            context: self.clone(),
+            future,
+        }
+    }
+}
+
+/// Keep a potentially large dispatch future off the caller's stack while preserving per-poll TLS.
+/// Boxing happens when the scope is constructed, before an async wrapper can retain F inline.
+pub(crate) struct ScopedFuture<F: Future> {
+    context: Context,
+    future: std::pin::Pin<Box<F>>,
+}
+impl<F: Future> Future for ScopedFuture<F> {
+    type Output = F::Output;
+
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        let this = self.get_mut();
+        // Install on each poll: Tokio may move the task to another runtime thread.
+        let _guard = this.context.install();
+        this.future.as_mut().poll(cx)
     }
 }
 
@@ -383,40 +404,51 @@ where
     F::Output: Send + 'static,
 {
     let context = Context::capture();
-    tokio::spawn(async move { context.scope(future).await })
+    tokio::spawn(context.scope(future))
 }
 
 /// Covers route preparation, cache loads, render drives, analysis and training with one observer.
-pub(crate) async fn with_job<F: Future>(api: &ApiClient, job_id: &str, future: F) -> F::Output {
-    let (changed, rx) = watch::channel(0);
-    let session = Arc::new(Session {
-        job_id: job_id.to_owned(),
-        state: Mutex::new(Latest::default()),
-        changed,
-        post_order: AsyncMutex::new(()),
-    });
-    let observed = session.clone();
-    let context = {
-        let _observer = LoadActivityObserver::new(move |activity| observed.observe(activity));
-        Context {
-            activity: LoadActivityContext::capture(),
-            session: Some(session.clone()),
+pub(crate) fn with_job<F: Future>(
+    api: &ApiClient,
+    job_id: &str,
+    future: F,
+) -> impl Future<Output = F::Output> {
+    // The handler contains the platform's complete job dispatch. Heap-own it before constructing
+    // this async state machine, rather than duplicating its inline storage through nested scopes.
+    let future = Box::pin(future);
+    let api = api.clone();
+    let job_id = job_id.to_owned();
+    async move {
+        let (changed, rx) = watch::channel(0);
+        let session = Arc::new(Session {
+            job_id,
+            state: Mutex::new(Latest::default()),
+            changed,
+            post_order: AsyncMutex::new(()),
+        });
+        let observed = session.clone();
+        let context = {
+            let _observer = LoadActivityObserver::new(move |activity| observed.observe(activity));
+            Context {
+                activity: LoadActivityContext::capture(),
+                session: Some(session.clone()),
+            }
+        };
+        let poster = tokio::spawn(session.clone().publish(api, rx));
+        struct Close(Arc<Session>, tokio::task::JoinHandle<()>);
+        impl Drop for Close {
+            fn drop(&mut self) {
+                self.0
+                    .state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .closed = true;
+                self.1.abort();
+            }
         }
-    };
-    let poster = tokio::spawn(session.clone().publish(api.clone(), rx));
-    struct Close(Arc<Session>, tokio::task::JoinHandle<()>);
-    impl Drop for Close {
-        fn drop(&mut self) {
-            self.0
-                .state
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .closed = true;
-            self.1.abort();
-        }
+        let _close = Close(session.clone(), poster);
+        JOB.scope(session, context.scope_boxed(future)).await
     }
-    let _close = Close(session.clone(), poster);
-    JOB.scope(session, context.scope(future)).await
 }
 
 pub(crate) fn message(activity: Option<&LoadActivity>) -> String {
@@ -899,6 +931,36 @@ mod tests {
         assert!(posts[transformer..]
             .iter()
             .all(|p| p.1["message"] != "Encoding prompt."));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn observer_scopes_keep_large_future_storage_off_the_parent_stack() {
+        struct LargeFuture([u8; 64 * 1024]);
+        impl Future for LargeFuture {
+            type Output = u8;
+            fn poll(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<u8> {
+                std::task::Poll::Ready(self.0[0])
+            }
+        }
+        let context = Context::capture();
+        let scoped = context.scope(LargeFuture([7; 64 * 1024]));
+        assert!(
+            std::mem::size_of_val(&scoped) < 1024,
+            "a scope must not inline the handler's storage"
+        );
+        assert_eq!(scoped.await, 7);
+        assert_eq!(spawn(LargeFuture([8; 64 * 1024])).await.unwrap(), 8);
+        let (api, _, server) = api().await;
+        let job = with_job(&api, "job", LargeFuture([9; 64 * 1024]));
+        assert!(
+            std::mem::size_of_val(&job) < 1024,
+            "the job observer must not inline the handler's storage"
+        );
+        assert_eq!(job.await, 9);
         server.abort();
     }
 
