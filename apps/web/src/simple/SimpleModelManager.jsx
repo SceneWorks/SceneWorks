@@ -2,6 +2,10 @@ import React, { useMemo, useState } from "react";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
 import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
+import {
+  hasImportedCheckpointSurface,
+  importedSourceSummary,
+} from "../components/ImportedCheckpointSurface.jsx";
 import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { useAppContext } from "../context/AppContext.js";
 import { terminalStatuses } from "../constants.js";
@@ -103,7 +107,9 @@ export function SimpleModelManager() {
       .map((model) => ({
         id: model.id,
         name: model.name ?? model.id,
-        meta: [sizeLabel(model), needsLabel(model, tierOptions)].filter(Boolean).join(" · "),
+        meta: [sizeLabel(model), needsLabel(model, tierOptions), importedCheckpointLabel(model)]
+          .filter(Boolean)
+          .join(" · "),
         memoryTitle: needsLabel(model, tierOptions)?.startsWith("Q4 optimized ")
           ? sdxlCudaMemoryEstimate(model, "q4", tierOptions.backend)?.description : undefined,
         manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
@@ -266,6 +272,23 @@ export function SimpleModelManager() {
       ) : null}
     </div>
   );
+}
+
+// The imported-checkpoint line in a row's meta (sc-26687): which source variant was imported and
+// how much of its component assembly is present here. Simple deliberately keeps to one-line rows
+// and hands repair to the advanced Models screen through "Manage", so this states the state and the
+// full card offers the fix — the same split the memory-number comment above describes.
+function importedCheckpointLabel(model) {
+  if (!hasImportedCheckpointSurface(model)) {
+    return null;
+  }
+  const summary = importedSourceSummary(model);
+  const components = model?.componentReadiness?.components;
+  if (!Array.isArray(components) || components.length === 0) {
+    return summary || null;
+  }
+  const ready = components.filter((component) => component.present === true).length;
+  return `${summary ? `${summary} · ` : ""}${ready}/${components.length} components ready`;
 }
 
 // The catalog's own human-readable download size; `~` marks an estimate, exactly as the

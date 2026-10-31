@@ -27764,6 +27764,7 @@ fn the_linked_import_stamp_carries_the_plan_identity_and_no_install_path() {
             plan_id: plan_id.to_owned(),
             family: "krea_2".to_owned(),
             layers: Vec::new(),
+            context: Default::default(),
         },
         // sc-20636 reports same-digest siblings on a compile; the stamp does not read them.
         duplicate_checkpoint_ids: Vec::new(),

@@ -302,9 +302,9 @@ where
 
     let sidecar_path = media_path.with_extension("sceneworks.json");
     let project_id = required_payload_string(&job.payload, "projectId")?;
-    source
+    let asset = source
         .store
-        .persist_native_asset_sidecar(project_id, &sidecar_path, &asset)?;
+        .persist_native_asset_sidecar(project_id, &sidecar_path, asset)?;
 
     Ok((asset_id, asset, extra))
 }
@@ -2442,8 +2442,11 @@ impl TimelineExport<'_> {
         );
         let sidecar_path = output_path.with_extension("sceneworks.json");
         let asset_id = required_value_str(&asset, "id")?.to_owned();
-        self.store
-            .persist_native_asset_sidecar(&self.request.project_id, &sidecar_path, &asset)?;
+        let asset = self.store.persist_native_asset_sidecar(
+            &self.request.project_id,
+            &sidecar_path,
+            asset,
+        )?;
 
         let mut result = JsonObject::new();
         result.insert("assetIds".to_owned(), json!([asset_id]));

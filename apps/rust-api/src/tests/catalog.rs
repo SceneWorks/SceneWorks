@@ -5313,6 +5313,7 @@ fn managed_upload_provenance() -> sceneworks_core::checkpoint_import::ManagedPro
         version_id: None,
         file_id: None,
         credential_host: None,
+        ..Default::default()
     }
 }
 

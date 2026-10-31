@@ -1577,6 +1577,23 @@ pub struct Recipe {
     pub style_preset: Option<String>,
     pub normalized_settings: JsonObject,
     pub raw_adapter_settings: JsonObject,
+    /// The imported checkpoint this generation selected, when it ran from an imported,
+    /// plan-backed checkpoint rather than a builtin catalog entry (sc-26687).
+    ///
+    /// `model` alone names the selection; this records WHICH import answered it, so a replay or
+    /// an API consumer re-resolves the same checkpoint instead of a same-named builtin. Absent
+    /// for every generation that did not come from an import, which is why it is optional rather
+    /// than a defaulted empty object: an empty object would claim "an import, unnamed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_model_ref: Option<JsonObject>,
+    /// The server-derived immutable provenance of the checkpoint that produced this generation
+    /// (sc-26687 / sc-26690), with the inherited component license acknowledgments inside it.
+    ///
+    /// Written only by the server from the persisted import plan — never taken from a client
+    /// payload and never synthesized from the catalog entry. Absent for a generation with no bound
+    /// plan behind it (a builtin entry, or a legacy job predating the field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provenance: Option<JsonObject>,
     #[serde(flatten)]
     pub extra: ExtraFields,
 }

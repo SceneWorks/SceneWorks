@@ -54,6 +54,62 @@ pub(crate) async fn upsert_manifest_entry(
     .map_err(|error| task_join_error("manifest upsert", error))?
 }
 
+/// Publish an import with compare-and-swap semantics under the existing cross-process manifest
+/// lock. Repair replaces the selection, not arbitrary existing IDs; failure leaves it untouched.
+pub(crate) async fn publish_model_import_manifest(
+    path: &Path,
+    data_dir: &Path,
+    entry: serde_json::Map<String, Value>,
+    expected: Option<&Value>,
+    live_claim_check: impl FnOnce() -> WorkerResult<()> + Send + 'static,
+) -> WorkerResult<()> {
+    let path = path.to_owned();
+    let data_dir = data_dir.to_owned();
+    let expected = expected.cloned();
+    tokio::task::spawn_blocking(move || {
+        let id = entry.get("id").and_then(Value::as_str).ok_or_else(|| WorkerError::InvalidPayload("import requires model ID".into()))?;
+        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        let _guard = ManifestLock::acquire(&path)?;
+        let mut manifest: Value = match std::fs::read_to_string(&path) {
+            Ok(text) => serde_json::from_str(&strip_jsonc_comments(&text))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({"schemaVersion":1,"models":[]}),
+            Err(error) => return Err(error.into()),
+        };
+        let models = manifest.get_mut("models").and_then(Value::as_array_mut)
+            .ok_or_else(|| WorkerError::InvalidPayload("models manifest must contain an array".into()))?;
+        let current = models.iter().position(|model| model.get("id").and_then(Value::as_str) == Some(id));
+        let mut replacement = Value::Object(entry.clone());
+        match (current, expected.as_ref()) {
+            (Some(index), expected) => {
+                let old = models[index].as_object().ok_or_else(|| WorkerError::InvalidPayload("invalid existing model".into()))?;
+                // A replay after successful publication is idempotent only for the exact same
+                // persisted installation/plan, never just the same ID or display name.
+                let same_install = old.get("importPlan").is_some_and(|plan| entry.get("importPlan") == Some(plan))
+                    && old.get("paths").is_some_and(|paths| entry.get("paths") == Some(paths));
+                if same_install { return live_claim_check(); } // Preserve user metadata, not stale claim authority.
+                {
+                    let actual = sceneworks_core::model_artifacts::provenance::managed_repair_binding(&data_dir, old)
+                        .map_err(WorkerError::InvalidPayload)?;
+                    if expected != Some(&actual) || expected.and_then(|v| v.get("modelId")).and_then(Value::as_str) != Some(id) {
+                        return Err(WorkerError::InvalidPayload("Import selection changed before repair publication; original selection was not modified".into()));
+                    }
+                    if old.get("paths") == entry.get("paths") {
+                        return Err(WorkerError::InvalidPayload("Repair must stage a separate managed installation".into()));
+                    }
+                }
+                if let Some(created) = old.get("createdAt") { replacement["createdAt"] = created.clone(); }
+                models[index] = replacement;
+            }
+            (None, Some(_)) => return Err(WorkerError::InvalidPayload("Repair selection was removed before publication".into())),
+            (None, None) => models.push(replacement),
+        }
+        // The worker may have lost its claim while waiting for this manifest lock or resolving
+        // the repair CAS. Re-read control-plane authority HERE, after all filesystem work and
+        // immediately before the atomic catalog mutation, while the same lock is still held.
+        write_json_value_blocking_with_check(&path, &manifest, live_claim_check)
+    }).await.map_err(|error| task_join_error("import publication", error))?
+}
+
 /// Merge `entry` into an entry that ALREADY EXISTS in `collection_key`, and write
 /// nothing at all when its id is absent. Returns whether the merge landed.
 ///
@@ -223,6 +279,14 @@ fn manifest_lock_path(manifest_path: &Path) -> PathBuf {
 /// Blocking sibling of [`write_json_value`]: atomic temp-write + rename. Used inside
 /// the manifest lock's critical section (which is already off the async runtime).
 fn write_json_value_blocking(path: &Path, value: &Value) -> WorkerResult<()> {
+    write_json_value_blocking_with_check(path, value, || Ok(()))
+}
+
+fn write_json_value_blocking_with_check(
+    path: &Path,
+    value: &Value,
+    check: impl FnOnce() -> WorkerResult<()>,
+) -> WorkerResult<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -237,6 +301,12 @@ fn write_json_value_blocking(path: &Path, value: &Value) -> WorkerResult<()> {
     let mut file = std::fs::File::create(&tmp_path)?;
     file.write_all(&output)?;
     file.sync_all()?;
+    drop(file);
+    // Validate AFTER the temporary-file I/O too: only the following rename changes the catalog.
+    if let Err(error) = check() {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(error);
+    }
     std::fs::rename(&tmp_path, path)?;
     Ok(())
 }
@@ -297,6 +367,157 @@ mod tests {
             "a manifest lock released by its owner must not stay held by an inherited descriptor"
         );
         drop(inherited);
+    }
+
+    /// No listeners or model execution: real claimed rows, actual manifest CAS/lock, and an
+    /// interleaving after initial authentication. The in-lock fence must prevent the disk mutation.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn import_publication_refuses_claim_loss_after_authentication_and_lock_wait() {
+        use sceneworks_core::jobs_store::{CreateJob, JobsStore, RegisterWorker};
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        for change in [
+            "owner",
+            "interrupted",
+            "attempt",
+            "cancel",
+            "missing",
+            "live",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let data = temp.path().join("data");
+            let original = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+                &data,
+                "claim-fenced-selection",
+            );
+            let replacement = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(
+                &data,
+                "claim-fenced-replacement",
+            );
+            let original_path = original
+                .install_dir
+                .join("diffusion_pytorch_model.safetensors");
+            let original_bytes = std::fs::read(&original_path).unwrap();
+            let replacement_path = replacement
+                .install_dir
+                .join("diffusion_pytorch_model.safetensors");
+            let replacement_bytes = std::fs::read(&replacement_path).unwrap();
+            let manifest = temp.path().join("user.models.jsonc");
+            let before =
+                serde_json::to_vec(&json!({"schemaVersion":1,"models":[original.entry]})).unwrap();
+            std::fs::write(&manifest, &before).unwrap();
+            let binding = sceneworks_core::model_artifacts::provenance::managed_repair_binding(
+                &data,
+                &original.entry,
+            )
+            .unwrap();
+            let mut entry = replacement.entry.clone();
+            entry["id"] = json!("claim-fenced-selection");
+            let store = Arc::new(JobsStore::new(temp.path().join("claims.db")));
+            store.initialize().unwrap();
+            store
+                .create_job(CreateJob {
+                    job_type: JobType::ModelImport,
+                    project_id: None,
+                    project_name: None,
+                    payload: json!({"modelId":"claim-fenced-selection","manifestEntry":entry})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                    requested_gpu: "auto".into(),
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 1,
+                    initial_status: None,
+                })
+                .unwrap();
+            store
+                .register_worker(RegisterWorker {
+                    worker_id: "fenced-worker".into(),
+                    gpu_id: "cpu".into(),
+                    gpu_name: None,
+                    capabilities: vec![WorkerCapability::ModelImport],
+                    loaded_models: vec![],
+                    utilization: None,
+                })
+                .unwrap();
+            let expected = store.claim_next_job("fenced-worker").unwrap().unwrap();
+            crate::model_jobs::validate_import_publication_claim(
+                "fenced-worker",
+                &expected,
+                &expected,
+            )
+            .unwrap();
+            let held = ManifestLock::acquire(&manifest).unwrap();
+            let (started, waiting) = tokio::sync::oneshot::channel();
+            let checks = Arc::new(AtomicUsize::new(0));
+            let checked = checks.clone();
+            let observed = store.clone();
+            let path = manifest.clone();
+            let job = expected.clone();
+            let publish = tokio::spawn(async move {
+                started.send(()).unwrap();
+                publish_model_import_manifest(&path, &data, entry, Some(&binding), move || {
+                    checked.fetch_add(1, Ordering::SeqCst);
+                    let current = observed.get_job(&job.id).map_err(|error| {
+                        WorkerError::InvalidPayload(format!("cannot re-read import claim: {error}"))
+                    })?;
+                    crate::model_jobs::validate_import_publication_claim(
+                        "fenced-worker",
+                        &job,
+                        &current,
+                    )
+                })
+                .await
+            });
+            waiting.await.unwrap();
+            let sql = match change {
+                "owner" => Some("update jobs set worker_id='replacement-worker' where id=?1"),
+                "interrupted" => Some("update jobs set status='interrupted' where id=?1"),
+                "attempt" => Some("update jobs set attempts=attempts+1 where id=?1"),
+                "cancel" => Some("update jobs set cancel_requested=1 where id=?1"),
+                "missing" => Some("delete from jobs where id=?1"),
+                _ => None,
+            };
+            if let Some(sql) = sql {
+                let connection = rusqlite::Connection::open(store.db_path()).unwrap();
+                assert_eq!(
+                    connection
+                        .execute(sql, rusqlite::params![expected.id])
+                        .unwrap(),
+                    1
+                );
+            }
+            drop(held);
+            let result = publish.await.unwrap();
+            if change == "live" {
+                result.expect("a still-live claim must publish through the same lock/CAS");
+                assert_ne!(std::fs::read(&manifest).unwrap(), before);
+            } else {
+                assert!(
+                    result.is_err(),
+                    "{change}: stale claim must refuse BEFORE manifest mutation"
+                );
+                assert_eq!(
+                    std::fs::read(&manifest).unwrap(),
+                    before,
+                    "{change}: original selection untouched"
+                );
+            }
+            assert_eq!(
+                checks.load(Ordering::SeqCst),
+                1,
+                "claim is re-read at the actual publication boundary"
+            );
+            assert_eq!(std::fs::read(original_path).unwrap(), original_bytes);
+            assert_eq!(
+                std::fs::read(replacement_path).unwrap(),
+                replacement_bytes,
+                "recovery never adopts or deletes a committed install on claim loss"
+            );
+        }
     }
 
     fn entry(id: &str) -> serde_json::Map<String, Value> {

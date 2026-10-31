@@ -169,6 +169,7 @@ import {
 const execFileAsync = promisify(execFile);
 const REVISION = "0123456789abcdef0123456789abcdef01234567";
 const UPSTREAM = "fedcba9876543210fedcba9876543210fedcba98";
+const DOWNLOAD_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
 
 function fakeModels() {
   return [
@@ -4707,7 +4708,7 @@ test("no candle plan row names a superseded version of an identity the pinned en
 // as a receipt they sealed themselves. `wan_2_2_i2v_14b:bf16:mlx` died on the FIRST probe after a
 // 383-second load before the arm mirrored that.
 //
-// The Wan half of the arm asks the engine for its token (`wan_i2v_memory::RECEIPT_VERSION` is
+// The Wan half of the arm asks the engine for its token (`gen_core_memory_wan::RECEIPT_VERSION` is
 // `pub`); the SCAIL-2 half cannot, because `mlx-gen-scail2` compares its token as a bare literal
 // inside `validate_context_revision_shape` and publishes no const for it. Both are bound to the
 // pinned engine source HERE so a rename reds rather than silently widening the arm's skip — and the
@@ -7311,8 +7312,6 @@ async function fakePlanRoot(anchors, models) {
   );
   return root;
 }
-
-const DOWNLOAD_REVISION = "abcdef0123456789abcdef0123456789abcdef01";
 
 function downloadFixture() {
   return {

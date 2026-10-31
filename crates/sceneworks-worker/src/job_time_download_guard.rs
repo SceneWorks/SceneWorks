@@ -280,6 +280,27 @@ enum CacheRole {
 /// day one appears, this list has to say so out loud.
 const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     // ---- crates/sceneworks-worker/src ---------------------------------------------------------
+    // Test-support private HF-layout source library; only generated synthetic fixture bytes.
+    (
+        "worker",
+        "minimax_h3_import_fixture.rs",
+        "fixture-hub",
+        CacheRole::HfCache,
+    ),
+    // Regenerable synthetic component headers/configuration used to populate that private library.
+    (
+        "worker",
+        "minimax_h3_import_fixture.rs",
+        "synthetic-component-staging",
+        CacheRole::Scratch,
+    ),
+    // Explicit per-fixture HF-layout library for pinned-vs-mutable-source regression cases.
+    (
+        "worker",
+        "video_jobs/minimax_h3_import_tests.rs",
+        "source-library",
+        CacheRole::HfCache,
+    ),
     // Prepared control-training datasets, regenerated from the source images.
     (
         "worker",
@@ -292,6 +313,34 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "worker",
         "training_jobs.rs",
         "training-inputs",
+        CacheRole::Scratch,
+    ),
+    // Staged symlink directory for imported dense H3 DiT assembly (transformer + reference links).
+    (
+        "worker",
+        "video_jobs/minimax_h3.rs",
+        "minimax-h3-assemblies",
+        CacheRole::Scratch,
+    ),
+    // Runtime directory links/hardlinks joining already-installed exact component snapshots.
+    (
+        "worker",
+        "video_jobs/minimax_h3.rs",
+        "minimax-h3-shared",
+        CacheRole::Scratch,
+    ),
+    // The same existing assembly aliases, authenticated at the shared core staging boundary.
+    (
+        "core",
+        "model_artifacts/provenance.rs",
+        "minimax-h3-assemblies",
+        CacheRole::Scratch,
+    ),
+    // Runtime aliases to the frozen shared-component snapshots; never a new weight destination.
+    (
+        "core",
+        "model_artifacts/provenance.rs",
+        "minimax-h3-shared",
         CacheRole::Scratch,
     ),
     // ControlNet weights, one destination per family (sc-17628…sc-17631 migrate these).
@@ -506,6 +555,8 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
     ),
     ("rust-api", "loras.rs", "lora-uploads", CacheRole::Upload),
     ("rust-api", "models.rs", "model-uploads", CacheRole::Upload),
+    // Ownership-aware reclamation of model upload retry inputs; never a model-weight download.
+    ("rust-api", "lib.rs", "model-uploads", CacheRole::Upload),
     ("rust-api", "poses.rs", "pose-uploads", CacheRole::Upload),
     // Generated media thumbnails.
     ("rust-api", "lib.rs", "media-thumbnails", CacheRole::Scratch),
@@ -583,6 +634,7 @@ const PARAMETERIZED_CACHE_HELPERS: &[(&str, usize)] = &[
     ("write_upload_field_to_dir_bounded", 2),
     ("sweep_stale_uploads", 1),
     ("sweep_stale_uploads_cancellable", 1),
+    ("sweep_stale_uploads_retaining", 1),
 ];
 
 /// Functions that hand out the **bare** `<data_dir>/cache` root, as `(crate label, file, fn name)`.
@@ -2590,6 +2642,19 @@ fn job_time_download_sites_match_the_allow_list() {
     );
 }
 
+type CacheDestinationKey = (String, String, String);
+
+fn unregistered_cache_destinations(
+    found: &BTreeSet<CacheDestinationKey>,
+    allowed: &BTreeMap<CacheDestinationKey, CacheRole>,
+) -> Vec<String> {
+    found
+        .iter()
+        .filter(|key| !allowed.contains_key(*key))
+        .map(|(label, rel, subdir)| format!("{label}/{rel}  ->  <data_dir>/cache/{subdir}"))
+        .collect()
+}
+
 /// **AC9, half two.** The set of `<data_dir>/cache/<subdir>` destinations must equal
 /// [`CACHE_DESTINATIONS`] exactly, across all four crates that can write under the data dir.
 #[test]
@@ -2636,11 +2701,7 @@ fn cache_destinations_match_the_allow_list() {
         "CACHE_DESTINATIONS has a duplicate (crate, file, subdir) entry"
     );
 
-    let added: Vec<String> = found
-        .iter()
-        .filter(|key| !allowed.contains_key(*key))
-        .map(|(label, rel, subdir)| format!("{label}/{rel}  ->  <data_dir>/cache/{subdir}"))
-        .collect();
+    let added = unregistered_cache_destinations(&found, &allowed);
     let removed: Vec<String> = allowed
         .keys()
         .filter(|key| !found.contains(*key))
@@ -2681,6 +2742,96 @@ fn cache_destinations_match_the_allow_list() {
          a new weight destination just landed outside the app-managed Hugging Face cache, which is \
          what AC9 forbids."
     );
+}
+
+#[test]
+fn synthetic_fixture_cache_roles_do_not_authorize_new_destinations() {
+    let allowed: BTreeMap<CacheDestinationKey, CacheRole> = CACHE_DESTINATIONS
+        .iter()
+        .map(|(label, rel, subdir, role)| {
+            (((*label).into(), (*rel).into(), (*subdir).into()), *role)
+        })
+        .collect();
+    for (file, subdir, role) in [
+        (
+            "minimax_h3_import_fixture.rs",
+            "fixture-hub",
+            CacheRole::HfCache,
+        ),
+        (
+            "minimax_h3_import_fixture.rs",
+            "synthetic-component-staging",
+            CacheRole::Scratch,
+        ),
+        (
+            "video_jobs/minimax_h3_import_tests.rs",
+            "source-library",
+            CacheRole::HfCache,
+        ),
+    ] {
+        assert_eq!(
+            allowed.get(&("worker".into(), file.into(), subdir.into())),
+            Some(&role),
+            "fixture role is exact, not permission for arbitrary generated weight caches"
+        );
+    }
+    let discovered = cache_destinations(
+        "let p = data_dir.join(\"cache\").join(\"fixture-hub-new-unregistered\");",
+        &BTreeMap::new(),
+    );
+    assert!(
+        discovered.contains("fixture-hub-new-unregistered"),
+        "the real scanner must see the negative control"
+    );
+    let found = discovered
+        .into_iter()
+        .map(|subdir| {
+            (
+                "worker".into(),
+                "minimax_h3_import_fixture.rs".into(),
+                subdir,
+            )
+        })
+        .collect();
+    let rejected = unregistered_cache_destinations(&found, &allowed);
+    assert_eq!(
+        rejected.len(),
+        1,
+        "an unregistered destination in the SAME fixture file must still fail the guard"
+    );
+    assert!(rejected[0].contains("fixture-hub-new-unregistered"));
+    for subdir in ["minimax-h3-shared", "minimax-h3-assemblies"] {
+        assert_eq!(
+            allowed.get(&(
+                "core".into(),
+                "model_artifacts/provenance.rs".into(),
+                subdir.into()
+            )),
+            Some(&CacheRole::Scratch)
+        );
+    }
+    let discovered = cache_destinations(
+        "let p = data_dir.join(\"cache/minimax-h3-shared-new-unregistered\");",
+        &BTreeMap::new(),
+    );
+    assert!(discovered.contains("minimax-h3-shared-new-unregistered"));
+    let found = discovered
+        .into_iter()
+        .map(|subdir| {
+            (
+                "core".into(),
+                "model_artifacts/provenance.rs".into(),
+                subdir,
+            )
+        })
+        .collect();
+    let rejected = unregistered_cache_destinations(&found, &allowed);
+    assert_eq!(
+        rejected.len(),
+        1,
+        "literal known assembly roots do not authorize a new core destination"
+    );
+    assert!(rejected[0].contains("minimax-h3-shared-new-unregistered"));
 }
 
 /// **AC9, the surface the other two gates stand on.** [`DOWNLOAD_PRIMITIVES`] must name the whole

@@ -702,6 +702,40 @@ fn an_altered_derivative_bundle_is_refused_at_the_lease_boundary() {
     }
 }
 
+/// sc-26691 end to end: `ensure` hashes each output as the producer writes it, and publication
+/// records the content verdict that stream earned, so the first lease redeems it instead of
+/// re-reading the bundle. The digest recorded in the journal is the real digest of the bytes.
+#[test]
+fn a_produced_derivative_carries_its_write_stream_digest_into_the_first_lease() {
+    use sha2::{Digest, Sha256};
+    let fx = fixture("hash-once");
+    let resolved = resolve(&fx);
+    let produced = match fx
+        .store
+        .ensure(&fx.checkpoint_id, &request(), write_index)
+        .unwrap()
+    {
+        CheckpointDerivativeOutcomeV1::Produced(metadata) => metadata,
+        other => panic!("the fixture derivative must be produced, got {other:?}"),
+    };
+    let cache_key = fx.store.cache_key(&resolved, &request()).unwrap();
+    let entry = fx.store.cache().entry_path(&cache_key).unwrap();
+    assert!(
+        entry.join("content.verification.json").exists(),
+        "publication of a produced bundle records the verdict its write streams earned"
+    );
+    let index = entry.join("bundle").join("index.json");
+    let recorded = produced.artifact.closure.members[0].files[0]
+        .sha256
+        .clone()
+        .unwrap();
+    assert_eq!(
+        recorded,
+        format!("sha256:{:x}", Sha256::digest(fs::read(&index).unwrap()))
+    );
+    assert!(fx.store.acquire(&resolved, &request()).unwrap().is_some());
+}
+
 /// The request validator refuses key material it cannot key on, rather than digesting it and
 /// producing a key two different requests could share.
 #[test]
@@ -938,4 +972,62 @@ fn a_pinned_derivative_holds_a_managed_teardown_instead_of_being_orphaned_by_it(
         !install_dir.exists(),
         "a completed managed teardown removes the SceneWorks-owned install tree"
     );
+}
+
+#[test]
+fn conversion_provenance_receipt_binds_actual_source_codec_and_complete_artifact() {
+    let fx = fixture("provenance-receipt");
+    let source_before = tree_snapshot(&fx.library_dir);
+    let request = request();
+    fx.store
+        .ensure(&fx.checkpoint_id, &request, write_index)
+        .unwrap();
+    let resolved = resolve(&fx);
+    let provenance = sceneworks_core::model_artifacts::provenance::checkpoint_model_provenance(
+        &resolved.plan,
+        "my-krea-import",
+    )
+    .unwrap();
+    let key = fx.store.cache_key(&resolved, &request).unwrap();
+    // A complete older cache entry does not invent historical codec provenance. The producer's
+    // real acquisition supplies the exact request/plan binding before a receipt is redeemable.
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .is_err());
+    let lease = fx.store.acquire(&resolved, &request).unwrap().unwrap();
+    let receipt = fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .unwrap();
+    assert_eq!(receipt["request"]["codecId"], "dense-bf16");
+    assert_eq!(receipt["cacheKey"], key);
+    let mut wrong_source = provenance.clone();
+    wrong_source["sources"][0]["sha256"] = json!("f".repeat(64));
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &wrong_source)
+        .is_err());
+    let mut wrong_plan = provenance.clone();
+    wrong_plan["plan"]["semanticDigest"] = json!(format!("sha256:{}", "f".repeat(64)));
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &wrong_plan)
+        .is_err());
+    drop(lease);
+    let path = fx
+        .store
+        .cache()
+        .entry_path(&key)
+        .unwrap()
+        .join("checkpoint-conversion.receipt.json");
+    let mut tampered: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    tampered["request"]["codecVersion"] = json!("another-codec");
+    fs::write(&path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+    assert!(fx
+        .store
+        .verified_provenance_receipt(&key, &provenance)
+        .is_err());
+    assert_eq!(tree_snapshot(&fx.library_dir), source_before);
+    println!("SC26690_CPU_DERIVATIVE_PROVENANCE_SMOKE: compiled Krea fixture -> produced+leased index -> verified source/plan/codec-bound receipt; source tree unchanged");
 }

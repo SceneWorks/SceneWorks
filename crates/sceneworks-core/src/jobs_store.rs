@@ -47,7 +47,9 @@ pub use routing::catalog::{
     candle_routed_image_models, checkpoint_plan_checkpoint_id, imported_control_intent_is_material,
     imported_entry_installed_path, imported_entry_loadable_path, imported_entry_source_codec,
     imported_image_model_lora_advertisement, imported_image_request_provider_eligible,
-    imported_pose_control_mode_is_supported, imported_provider_routes, is_builtin_image_model,
+    imported_pose_control_mode_is_supported, imported_provider_routes,
+    imported_video_adapter_surface_claimable, imported_video_lane_claims_with_lora,
+    imported_video_model_candle_support, imported_video_model_mac_support, is_builtin_image_model,
     mac_capabilities, model_candle_support, model_mac_support, training_kernel_is_candle_routed,
     video_job_type_for_mode, ImportedProviderSurface, MacCapabilities, ModelCandleSupport,
     MAC_NOT_AVAILABLE_LABEL, MLX_ROUTED_TRAINING_KERNELS,
@@ -685,6 +687,9 @@ impl JobsStore {
             ",
         )?;
         ensure_column(&transaction, "workers", "utilization_json", "text")?;
+        // Unknown historical provenance is NULL, not a reconstruction from today's catalog.
+        // Only the API's validated-plan handoff may freeze this write-once column.
+        ensure_column(&transaction, "jobs", "model_provenance_json", "text")?;
         // Durable worker-queue priority. Zero is the normal FIFO lane; positive ranks are
         // assigned monotonically whenever a job jumps to the front. Prompt-refinement jobs get a
         // rank automatically at creation, while the Queue screen can rank any still-pending jobs
@@ -1136,10 +1141,20 @@ impl JobsStore {
     }
 
     pub fn create_job(&self, request: CreateJob) -> JobsStoreResult<JobSnapshot> {
+        self.create_job_with_model_provenance(request, None)
+    }
+
+    /// Enqueue and freeze a SERVER-VALIDATED source projection in one transaction, before a worker
+    /// can claim the row. Raw client payload metadata is never a value for this argument.
+    pub fn create_job_with_model_provenance(
+        &self,
+        request: CreateJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.create_job_on_connection(&transaction, request, None)?;
+        let job = self.create_job_on_connection(&transaction, request, None, provenance)?;
         transaction.commit()?;
         Ok(job)
     }
@@ -1156,9 +1171,25 @@ impl JobsStore {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let job = self.create_job_on_connection(&transaction, request, Some(id))?;
+        let job = self.create_job_on_connection(&transaction, request, Some(id), None)?;
         transaction.commit()?;
         Ok(job)
+    }
+
+    /// Read the immutable handoff after a restart without guessing from mutable model metadata.
+    pub fn model_provenance(&self, job_id: &str) -> JobsStoreResult<Option<Value>> {
+        let connection = self.open_connection()?;
+        let stored: Option<String> = connection
+            .query_row(
+                "select model_provenance_json from jobs where id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| JobsStoreError::NotFound(job_id.to_owned()))?;
+        stored
+            .map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     /// Promote a `pending_caption` job to `queued`, optionally rewriting its payload first
@@ -1496,6 +1527,22 @@ impl JobsStore {
         let jobs =
             collect_jobs(statement.query_map(params_from_iter(bindings.iter()), row_to_job)?)?;
         Ok(jobs)
+    }
+
+    /// Retained model-import retry inputs, without the queue UI's 500-row cap. Cleared or
+    /// completed jobs relinquish ownership; failed, canceled and interrupted jobs remain retryable.
+    pub fn model_upload_sources_for_recovery(&self) -> JobsStoreResult<Vec<String>> {
+        let connection = self.open_connection()?;
+        let mut statement = connection.prepare(
+            "select json_extract(payload_json, '$.sourcePath') from jobs
+             where type = 'model_import' and status != 'completed' and cleared_at is null
+               and json_extract(payload_json, '$.uploadedSourcePath') = 1
+               and json_type(payload_json, '$.sourcePath') = 'text'",
+        )?;
+        let sources = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(sources)
     }
 
     /// Every non-completed Create-from-Prompt parent that an API restart must resume or clean.
@@ -1978,6 +2025,16 @@ impl JobsStore {
     }
 
     pub fn retry_job(&self, job_id: &str, request: RetryJob) -> JobsStoreResult<JobSnapshot> {
+        self.retry_job_with_model_provenance(job_id, request, None)
+    }
+
+    /// Replay with a freshly server-canonical source binding in the same enqueue transaction.
+    pub fn retry_job_with_model_provenance(
+        &self,
+        job_id: &str,
+        request: RetryJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1987,6 +2044,17 @@ impl JobsStore {
                 max_attempts: MAX_JOB_ATTEMPTS,
             });
         }
+        let same_source = !request.payload_changes.contains_key("model")
+            && !request.payload_changes.contains_key("modelManifestEntry");
+        let source_provenance = provenance.cloned().or_else(|| {
+            same_source
+                .then(|| {
+                    job.extra
+                        .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+                        .cloned()
+                })
+                .flatten()
+        });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
         let job = self.create_job_on_connection(
@@ -2006,6 +2074,7 @@ impl JobsStore {
                 initial_status: None,
             },
             None,
+            source_provenance.as_ref(),
         )?;
         transaction.commit()?;
         Ok(job)
@@ -2016,7 +2085,17 @@ impl JobsStore {
         job_id: &str,
         request: DuplicateJob,
     ) -> JobsStoreResult<JobSnapshot> {
-        self.duplicate_job_with_optional_id(None, job_id, request)
+        self.duplicate_job_with_options(None, job_id, request, None)
+    }
+
+    /// Duplicate with source authority from canonical admission, never from payload metadata.
+    pub fn duplicate_job_with_model_provenance(
+        &self,
+        job_id: &str,
+        request: DuplicateJob,
+        provenance: Option<&Value>,
+    ) -> JobsStoreResult<JobSnapshot> {
+        self.duplicate_job_with_options(None, job_id, request, provenance)
     }
 
     /// Duplicate under a preallocated id when the copied product plan must reference its own new
@@ -2027,19 +2106,34 @@ impl JobsStore {
         job_id: &str,
         request: DuplicateJob,
     ) -> JobsStoreResult<JobSnapshot> {
-        self.duplicate_job_with_optional_id(Some(id), job_id, request)
+        self.duplicate_job_with_options(Some(id), job_id, request, None)
     }
 
-    fn duplicate_job_with_optional_id(
+    /// The general duplicate: an optional preallocated id (see [`Self::duplicate_job_with_id`])
+    /// and optional source authority from canonical admission (see
+    /// [`Self::duplicate_job_with_model_provenance`]).
+    pub fn duplicate_job_with_options(
         &self,
         id: Option<String>,
         job_id: &str,
         request: DuplicateJob,
+        provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
         let mut guard = self.lock.lock();
         let connection = self.write_connection(&mut guard)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let job = self.get_job_on_connection(&transaction, job_id)?;
+        let same_source = !request.payload_changes.contains_key("model")
+            && !request.payload_changes.contains_key("modelManifestEntry");
+        let source_provenance = provenance.cloned().or_else(|| {
+            same_source
+                .then(|| {
+                    job.extra
+                        .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+                        .cloned()
+                })
+                .flatten()
+        });
         let mut payload = job.payload;
         payload.extend(request.payload_changes);
         // A duplicated YuE2 job is a new take with its own run directory (sc-22999).
@@ -2060,6 +2154,7 @@ impl JobsStore {
                 initial_status: None,
             },
             id,
+            source_provenance.as_ref(),
         )?;
         transaction.commit()?;
         Ok(job)
@@ -3020,6 +3115,30 @@ impl JobsStore {
             worker_gpu_id.clone()
         };
         let now = utc_now();
+        // sc-26691: the claim is the execution boundary every render crosses, so the resize mode
+        // the worker is about to render with is stamped onto the persisted job here. A MiniMax-H3
+        // job queued before the key existed then records the `match` it actually renders, and the
+        // only unstamped H3 record left is one claimed and rendered before the upgrade (replayed
+        // as the legacy `diffusers`). The stamp changes no routing fact, so the projected claim
+        // facts stay current with the new payload revision.
+        if matches!(
+            queued.job_type,
+            JobType::VideoGenerate
+                | JobType::VideoExtend
+                | JobType::VideoBridge
+                | JobType::PersonReplace
+        ) {
+            let mut payload = queued.payload.clone();
+            if crate::video_request::stamp_claimed_reference_image_resize_mode(&mut payload) {
+                transaction.execute(
+                    "update jobs
+                        set payload_json = ?1,
+                            claim_payload_revision = payload_revision + 1
+                      where id = ?2 and status = 'queued'",
+                    params![dumps(&payload)?, queued.id],
+                )?;
+            }
+        }
         transaction.execute(
             "
             update jobs
@@ -3171,6 +3290,16 @@ impl JobsStore {
             // per-step SSE fan-out OOM-kills the WebView2 renderer mid-batch). A slim
             // tick omitting them must not blank them off the durable row.
             merge_progress_result_accumulations(Some(&current.result), result);
+            result.remove(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY);
+            if let Some(provenance) = current
+                .extra
+                .get(crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY)
+            {
+                result.insert(
+                    crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+                    provenance.clone(),
+                );
+            }
         }
         transaction.execute(
             "
@@ -3547,6 +3676,7 @@ impl JobsStore {
         connection: &Connection,
         request: CreateJob,
         job_id: Option<String>,
+        provenance: Option<&Value>,
     ) -> JobsStoreResult<JobSnapshot> {
         let requested_gpu = normalize_requested_gpu(&request.requested_gpu);
         if job_requires_gpu(&request.job_type) && requested_gpu == "cpu" {
@@ -3589,7 +3719,7 @@ impl JobsStore {
               claim_required_capability, claim_real_training, claim_model_key_1,
               claim_model_key_2, claim_model_key_3, claim_model_key_4,
               progress, stage, message, attempts, source_job_id, duplicate_of_job_id,
-              created_at, updated_at
+              created_at, updated_at, model_provenance_json
             ) values (
               ?1, ?2, ?12,
               case when ?13 != 0
@@ -3597,7 +3727,7 @@ impl JobsStore {
                    else 0 end,
               ?3, ?4, ?5, '{}', ?6,
               ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25,
-              0, ?12, ?7, ?8, ?9, ?10, ?11, ?11
+              0, ?12, ?7, ?8, ?9, ?10, ?11, ?11, ?26
             )
             ",
             params![
@@ -3626,6 +3756,7 @@ impl JobsStore {
                 claim_facts.model_key(1),
                 claim_facts.model_key(2),
                 claim_facts.model_key(3),
+                optional_dumps(provenance)?,
             ],
         )?;
         self.get_job_on_connection(connection, &job_id)
@@ -3809,6 +3940,19 @@ fn row_to_job(row: &Row<'_>) -> rusqlite::Result<JobSnapshot> {
     let mut extra = ExtraFields::default();
     extra.insert("revision".to_owned(), Value::from(revision));
     extra.insert("queueRank".to_owned(), Value::from(queue_rank));
+    if let Some(encoded) = row.get::<_, Option<String>>("model_provenance_json")? {
+        let provenance: Value = serde_json::from_str(&encoded).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
+        extra.insert(
+            crate::model_artifacts::provenance::MODEL_PROVENANCE_KEY.to_owned(),
+            provenance,
+        );
+    }
     Ok(JobSnapshot {
         id: row.get("id")?,
         job_type,

@@ -1515,6 +1515,165 @@ pub(crate) fn checkpoint_plan_checkpoint_id_of_payload_entry(
         .and_then(checkpoint_plan_checkpoint_id)
 }
 
+/// Whether one backend lane claims this plan-backed H3 video probe WITH a compatible adapter.
+/// The catalog's advertisement derives from the same predicates the scheduler consults, so the
+/// UI can never offer an adapter stack no lane will claim.
+pub fn imported_video_lane_claims_with_lora(lane: &str, probe: &Map<String, Value>) -> bool {
+    match lane {
+        "mlx" => super::mlx::video_request_is_mlx_eligible(&JobType::VideoGenerate, probe),
+        "candle" => super::candle::video_request_is_candle_eligible(&JobType::VideoGenerate, probe),
+        _ => false,
+    }
+}
+
+/// Whether ANY valid supported shape of this plan-backed imported H3 entry is claimable WITH a
+/// compatible adapter on the given lane pair. Every UI mode is probed through the SAME
+/// mode-conditioning machinery the support projection uses — a reference-partition (Ref2VA)
+/// import is advertised through the reference shape it actually serves, a hybrid through its
+/// base shape — so a text-only probe can never withdraw an adapter surface the entry genuinely
+/// claims on some other shape.
+pub fn imported_video_adapter_surface_claimable(
+    entry: &Map<String, Value>,
+    mlx_lane_available: bool,
+    candle_lane_available: bool,
+) -> bool {
+    let Some(id) = entry.get("id").and_then(Value::as_str) else {
+        return false;
+    };
+    VIDEO_UI_MODES.iter().any(|mode| {
+        let mut payload = video_mode_probe_payload(id, mode);
+        payload.insert(
+            "modelManifestEntry".to_owned(),
+            Value::Object(entry.clone()),
+        );
+        payload.insert(
+            "loras".to_owned(),
+            Value::Array(vec![json!({ "id": "minimax_h3_turbo_4step_v01" })]),
+        );
+        (mlx_lane_available
+            && super::mlx::video_request_is_mlx_eligible(&JobType::VideoGenerate, &payload))
+            || (candle_lane_available
+                && super::candle::video_request_is_candle_eligible(
+                    &JobType::VideoGenerate,
+                    &payload,
+                ))
+    })
+}
+
+/// The video shapes an IMPORTED dense MiniMax-H3 DiT (sc-26680) is claimable on — on BOTH native
+/// lanes, because both providers load a staged DiT directory through the same `transformer`
+/// component seam.
+///
+/// Keyed on the forwarded `modelManifestEntry` ([`crate::minimax_h3_import::entry_is_imported_minimax_h3`]),
+/// never on the model id, and narrow on every axis because a claim is a promise a worker arm exists:
+/// * **id** — never a builtin video id. A builtin id names the shipped weights; a plan forwarded
+///   under one would render the imported bytes under another checkpoint's name (or, on a lane that
+///   ignored the plan, the shipped bytes under the imported one).
+/// * **shape** — the explicitly declared FL2VA, Ref2VA, or hybrid operation union. Tensor shapes
+///   and model names never imply task compatibility. Builtin predicates validate conditioning,
+///   while the imported entry and plan remain the weight identity.
+/// * **adapters** — the native H3 LoRA/LoKr and turbo surface. The same partition predicate owns
+///   request shape; source topology, target namespace and pruning-basis compatibility are validated
+///   by the native installer against the selected imported task, never by substituting stock weights.
+///
+/// This is a claim, not a load: the worker still resolves and re-verifies the plan, the binding and
+/// the resident components, and refuses by name when it cannot.
+pub(crate) fn plan_backed_minimax_h3_video_eligible(
+    model: &str,
+    payload: &Map<String, Value>,
+) -> bool {
+    let Some(entry) = payload.get("modelManifestEntry").and_then(Value::as_object) else {
+        return false;
+    };
+    if !crate::minimax_h3_import::entry_is_imported_minimax_h3(entry) {
+        return false;
+    }
+    if matches!(
+        model,
+        crate::minimax_h3_import::MINIMAX_H3_BASE_PARTITION_MODEL
+            | crate::minimax_h3_import::MINIMAX_H3_REFERENCE_PARTITION_MODEL
+    ) || VIDEO_MLX_ROUTED_MODELS.contains(&model)
+        || CANDLE_VIDEO_ROUTED_MODELS.contains(&model)
+    {
+        return false;
+    }
+    let has_references = payload.get("mode").and_then(Value::as_str) == Some("reference_to_video");
+    let Ok(partition) = crate::minimax_h3_import::entry_partition_model(entry, has_references)
+    else {
+        return false;
+    };
+    super::candle::video_request_candle_eligible(partition, payload)
+}
+
+/// Per-mode Mac support for an imported, plan-backed video entry (sc-26680) — the
+/// [`video_model_mac_support`] twin that asks the REAL MLX claim predicate with the entry forwarded,
+/// exactly as a submitted job forwards it. The id-keyed form cannot answer for an imported model:
+/// its probe carries no entry, so every plan-backed predicate answers `false` and the Video Studio
+/// would hide a model the lane serves.
+pub fn imported_video_model_mac_support(entry: &Map<String, Value>) -> ModelMacSupport {
+    let model = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    let video_modes: BTreeMap<String, bool> = VIDEO_UI_MODES
+        .iter()
+        .map(|mode| {
+            let payload = imported_video_mode_probe_payload(model, mode, entry);
+            let job_type = video_job_type_for_mode(mode);
+            (
+                (*mode).to_owned(),
+                super::mlx::video_request_is_mlx_eligible(&job_type, &payload),
+            )
+        })
+        .collect();
+    if video_modes.values().any(|eligible| *eligible) {
+        return ModelMacSupport {
+            supported: true,
+            reason: None,
+            features: ModelMacFeatures {
+                video_modes,
+                ..ModelMacFeatures::default()
+            },
+        };
+    }
+    video_model_mac_support(model)
+}
+
+/// The off-Mac twin of [`imported_video_model_mac_support`].
+pub fn imported_video_model_candle_support(entry: &Map<String, Value>) -> ModelCandleSupport {
+    let model = entry.get("id").and_then(Value::as_str).unwrap_or_default();
+    let video_modes: BTreeMap<String, bool> = VIDEO_UI_MODES
+        .iter()
+        .map(|mode| {
+            let payload = imported_video_mode_probe_payload(model, mode, entry);
+            let job_type = video_job_type_for_mode(mode);
+            (
+                (*mode).to_owned(),
+                super::candle::video_request_is_candle_eligible(&job_type, &payload),
+            )
+        })
+        .collect();
+    if video_modes.values().any(|eligible| *eligible) {
+        return ModelCandleSupport {
+            supported: true,
+            reason: None,
+            features: ModelCandleFeatures { video_modes },
+        };
+    }
+    video_model_candle_support(model)
+}
+
+/// [`video_mode_probe_payload`] with the imported entry forwarded as `modelManifestEntry`.
+fn imported_video_mode_probe_payload(
+    model: &str,
+    mode: &str,
+    entry: &Map<String, Value>,
+) -> Map<String, Value> {
+    let mut payload = video_mode_probe_payload(model, mode);
+    payload.insert(
+        "modelManifestEntry".to_owned(),
+        Value::Object(entry.clone()),
+    );
+    payload
+}
+
 /// The path a bespoke imported lane actually LOADS from, in the order the entry may spell it.
 /// `None` when every spelling is absent or blank.
 ///
@@ -1560,13 +1719,13 @@ pub fn imported_entry_installed_path(entry: &Map<String, Value>) -> Option<&str>
 }
 
 /// The **source codec** an imported manifest entry's weights are stored in — the engine's stable
-/// codec id (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"dense-bf16-v1"`, …), derived from the header
-/// classification the import gate persisted as `importQuantFormat` (sc-21484, epic 11037).
+/// identity (`"nvfp4-v1"`, `"int8-per-row-v1"`, `"convrot-int8-native"`, …). Registered decoders
+/// use the persisted header classification. Native H3 ConvRot instead requires the format stamp
+/// AND matching assembly encoding derived from the strictly validated source inventory.
 ///
-/// One place turns the persisted classification into the codec vocabulary, so admission and the
-/// worker's route cannot drift on what "this checkpoint is stored as NVFP4" means. `None` when the
-/// entry carries no classification, when the string is not one this build knows, or when the
-/// classification has no proved engine codec.
+/// One place turns those persisted source proofs into the codec vocabulary, so admission and the
+/// worker cannot disagree about the source format. `None` means the entry provides no known,
+/// proved codec identity; it never asserts dense storage, dense execution, or a default tier.
 ///
 /// **This is the SOURCE fact only.** It says nothing about how a load would execute the weights: a
 /// checkpoint stored `nvfp4-v1` reports `nvfp4-v1` here on a Mac, on CPU, on datacenter `sm_100`
@@ -1583,6 +1742,20 @@ pub fn imported_entry_source_codec(entry: &Map<String, Value>) -> Option<&'stati
         .and_then(Value::as_str)?
         .trim()
         .to_ascii_lowercase();
+    if matches!(label.as_str(), "convrot_int8" | "asym_w4a8_int8")
+        && crate::minimax_h3_import::entry_is_imported_minimax_h3(entry)
+        && crate::minimax_h3_import::entry_assembly(entry).is_some_and(|assembly| {
+            assembly.get("sourceEncoding").and_then(Value::as_str) == Some(label.as_str())
+        })
+    {
+        // The strict compiled source inventory supplies this assembly stamp. Coarse header
+        // classification or a family name alone never establishes a rotated operand format.
+        return Some(if label == "asym_w4a8_int8" {
+            crate::checkpoint_weight_facts::W4A8_INT8_CODEC_ID
+        } else {
+            crate::checkpoint_weight_facts::CONVROT_INT8_CODEC_ID
+        });
+    }
     crate::base_weights::QuantFormat::from_label(&label)?.source_codec_id()
 }
 

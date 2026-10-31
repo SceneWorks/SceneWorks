@@ -188,6 +188,19 @@ describe("FilmShots", () => {
 
   // sc-24026. `audio` is required on every shot by plan schema 3, and this textarea is the only
   // place in the workspace it can be written or repaired.
+  // sc-26691. The resize policy sits beside the short edge it governs; blank leaves the engine's
+  // own default, so a plan that never picks one carries no key at all.
+  it("edits the reference image resize mode beside the short edge", async () => {
+    await render();
+    const select = container.querySelector('select[aria-label="Reference image resize mode"]');
+    expect(select.value).toBe("");
+    expect([...select.options].map((option) => option.value)).toEqual(["", "match", "max", "diffusers"]);
+    await act(async () => change(select, "diffusers"));
+    expect(latest.draft.productionPlan.model.advanced.referenceImageResizeMode).toBe("diffusers");
+    await act(async () => change(container.querySelector('select[aria-label="Reference image resize mode"]'), ""));
+    expect(latest.draft.productionPlan.model.advanced).not.toHaveProperty("referenceImageResizeMode");
+  });
+
   it("edits the required audio sentence into the shot the draft saves", async () => {
     await render();
     const audio = container.querySelector('textarea[aria-label="Shot SH010 audio"]');

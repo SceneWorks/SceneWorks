@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { readFile, readdir, mkdtemp, mkdir, realpath, rm, symlink, writeFile, utimes, stat } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { proofSelection, requireManualSelection, verifyProofResult, cudaDeviceEvidence, requireMetalHeadroom, observeMetalCase, streamProofBuild } from "./ci/h3-import-native-proof.mjs";
+import { writeFileSync } from "node:fs";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { historyRequirements } from "./prepare-inference-history.mjs";
@@ -25,6 +27,11 @@ async function source(path) {
 }
 
 const CANDLE_FACTS_UPLOAD_IF = "always() && (steps.verify_candle_capabilities.outcome == 'failure' || (github.event_name == 'workflow_dispatch' && inputs.capability_facts_only && steps.verify_candle_capabilities.outcome == 'success'))";
+function workflowOperations(workflow) {
+  const menu = workflow.match(/starvector_terminal_operation:[\s\S]*?options: \[([^\]]+)\]/)?.[1];
+  assert.ok(menu, "the registered manual operation menu exists");
+  return menu.split(",").map((choice) => choice.trim());
+}
 function workflowExpression(block, field = "if") {
   const expression = block.match(new RegExp(`^ +${field}: \\$\\{\\{ (.+) \\}\\}$`, "m"))?.[1];
   assert.ok(expression, `workflow must retain an evaluable ${field}`);
@@ -51,6 +58,303 @@ function workflowStep(job, name) {
   const next = job.indexOf("\n      - ", at + marker.length);
   return job.slice(at, next === -1 ? undefined : next);
 }
+
+function assertH3RootToolchainReader(job) {
+  const reader = workflowStep(job, "Read checkout Rust toolchain");
+  assert.match(reader, /id: h3_admission_toolchain/);
+  assert.ok(reader.includes('channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]'));
+  assert.ok(reader.includes('if not re.fullmatch(r"[0-9]+\\.[0-9]+\\.[0-9]+", channel):'));
+  assert.match(reader, /open\(os\.environ\["GITHUB_OUTPUT"\], "a"\) as output:/);
+  assert.match(reader, /print\(f"channel=\{channel\}", file=output\)/);
+  assert.equal((reader.match(/^\s*channel\s*=/gm) ?? []).length, 1, "only the checkout TOML supplies the channel");
+  assert.doesNotMatch(reader, /\$\{\{\s*inputs\./);
+  assert.match(job, /toolchain: \$\{\{ steps\.h3_admission_toolchain\.outputs\.channel \}\}/);
+  assert.ok(job.indexOf(reader) < job.indexOf("uses: dtolnay/rust-toolchain@"), "the checkout pin is read before installing Rust");
+}
+
+test("ordinary hosted macOS CI never opts into ignored H3 model forwards", async () => {
+  const hosted = workflowJob(await source(".github/workflows/macos-mlx.yml"), "macos-checks");
+  assert.doesNotMatch(hosted, /pruned_import_native_\w+_projection_smoke|\b\w*w4(?:a8)?\w*smoke\b/i,
+    "pruned/W4 model forwards belong only in explicitly selected manual validation");
+  assert.doesNotMatch(hosted, /--ignored\b/,
+    "ordinary PR/main CI must not opt into ignored model execution, even with synthetic weights");
+  assert.match(hosted, /run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct/,
+    "retain the ordinary workspace unit/math checks");
+  assert.match(hosted, /cargo clippy/,
+    "retain ordinary compilation/lint coverage");
+});
+
+test("H3 model-level forwards stay out of ordinary CI and require positive manual selection", async () => {
+  const server = await source(".github/workflows/server-candle-linux.yml");
+  assert.match(server, /^on:\n  workflow_dispatch:/m);
+  assert.doesNotMatch(server, /^  (push|pull_request|merge_group|schedule):/m);
+  for (const file of ["macos-mlx.yml", "windows-candle.yml"]) {
+    const ordinary = await source(`.github/workflows/${file}`);
+    assert.doesNotMatch(ordinary, /(?:pruned|w4a8)_import_native_(?:mlx|cuda)_projection_smoke/);
+  }
+  assert.match(await source(".github/workflows/macos-mlx.yml"), /run: node scripts\/unit-hf-sandbox\.mjs -- cargo test -- --skip nax_16bit_sdpa_is_correct/);
+  for (const backend of ["mlx", "cuda"]) {
+    const job = workflowJob(server, `h3-import-${backend}`);
+    const expression = workflowExpression(job);
+    for (const event of ["push", "pull_request", "merge_group", "workflow_dispatch"]) {
+      for (const operation of [undefined, "", "unknown-selector", ...workflowOperations(server)]) {
+        assert.equal(Boolean(evaluateWorkflow(expression, event, { starvector_terminal_operation: operation })),
+          event === "workflow_dispatch" && [`h3-import-${backend}`, "h3-import-both"].includes(operation));
+      }
+    }
+    assert.match(job, /cancel-in-progress: false/);
+    assert.match(job, /if: \$\{\{ always\(\) \}\}/);
+    assert.match(job, /if-no-files-found: error/);
+    assert.match(job, new RegExp(`node scripts/ci/h3-import-native-proof\\.mjs ${backend}`));
+  }
+  assert.match(workflowJob(server, "h3-import-mlx"), /runs-on: \[self-hosted, macOS, ARM64, rw-llm\]/);
+  assert.match(workflowJob(server, "h3-import-mlx"), /test "\$RUNNER_NAME" = nax-macos-2/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /runs-on: \[self-hosted, Windows, X64, cuda\]/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /group: windows-candle-gpu-real-weights/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /CUDA_VISIBLE_DEVICES: "1"/);
+  assert.match(workflowJob(server, "h3-import-cuda"), /SCENEWORKS_GPU_ID: "1"/);
+  const fixture = await source("crates/sceneworks-worker/src/minimax_h3_import_fixture.rs");
+  for (const backend of ["mlx", "cuda"]) {
+    for (const name of proofSelection(backend)) {
+      const bare = name.split("::").at(-1);
+      assert.match(fixture, new RegExp(`#\\[ignore[^\\n]*\\]\\nfn ${bare}\\(`), `${bare} remains ignored in ordinary cargo test`);
+    }
+  }
+});
+
+test("H3 admission proof is a positively selected hosted CPU job with real Cargo evidence", async () => {
+  const server = await source(".github/workflows/server-candle-linux.yml");
+  const operations = workflowOperations(server);
+  for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both", "h3-admission-proof"]) {
+    assert.equal(operations.filter((choice) => choice === operation).length, 1, `${operation} remains explicitly selectable`);
+  }
+  const job = workflowJob(server, "h3-admission-proof");
+  const expression = workflowExpression(job);
+  for (const event of ["push", "pull_request", "merge_group", "schedule", "workflow_dispatch"]) {
+    for (const operation of [undefined, "", "unknown-selector", ...operations]) {
+      assert.equal(Boolean(evaluateWorkflow(expression, event, { starvector_terminal_operation: operation })),
+        event === "workflow_dispatch" && operation === "h3-admission-proof");
+    }
+  }
+  // The new CPU choice cannot accidentally enter any pre-existing GPU or StarVector job.
+  const jobs = [...server.slice(server.indexOf("\njobs:")).matchAll(/^  ([A-Za-z0-9_-]+):\s*$/gm)].map((match) => match[1]);
+  for (const name of jobs.filter((name) => name !== "h3-admission-proof")) {
+    for (const operation of ["h3-admission-proof", "unknown-selector"]) {
+      assert.equal(Boolean(evaluateWorkflow(workflowExpression(workflowJob(server, name)), "workflow_dispatch", { starvector_terminal_operation: operation })), false, `${name} refuses ${operation}`);
+    }
+  }
+  assert.match(job, /runs-on: ubuntu-latest/);
+  assert.match(job, /CARGO_NET_OFFLINE: "true"/);
+  assert.match(job, /CARGO_BUILD_JOBS: "2"/);
+  assert.match(job, /python-version: "3\.12"/);
+  assertH3RootToolchainReader(job);
+  assert.match(job, /Swatinem\/rust-cache@[a-f0-9]{40}/);
+  assert.match(job, /persist-credentials: false/);
+  const fetch = workflowStep(job, "Fetch the pinned inference source, never model weights");
+  assert.match(fetch, /CARGO_NET_OFFLINE: "false"/);
+  assert.match(fetch, /cargo fetch --locked/);
+  const run = workflowStep(job, "Prove H3 admission baseline, assertion reds and restored greens on CPU");
+  assert.match(run, /set -euo pipefail/);
+  assert.match(run, /bwrap --unshare-net --unshare-pid --die-with-parent/);
+  assert.match(run, /--tmpfs "\$HOME\/\.cache\/huggingface"/);
+  assert.match(run, /--tmpfs "\$HOME\/SceneWorks\/data"/);
+  assert.match(run, /--dev \/dev/);
+  assert.match(run, /runuser --user "\$USER" --preserve-environment/);
+  assert.match(run, /python3 scripts\/ci\/h3_admission_mutation_proof\.py/);
+  assert.match(run, /--output-dir "\$H3_ADMISSION_EVIDENCE\/proof" --cfg default/);
+  assert.doesNotMatch(run, /unit_fake|--fake|runner=|CARGO_NET_OFFLINE.*false/);
+  assert.ok(job.indexOf(fetch) < job.indexOf(run));
+  assert.doesNotMatch(job, /self-hosted|windows-candle-gpu-real-weights|rw-llm|CUDA_COMPUTE_CAP|cuda-toolkit|--features backend-candle|--ignored|h3-import-native-proof/);
+  const upload = workflowStep(job, "Keep actual H3 CPU source, pin, assertions and restoration evidence");
+  assert.match(upload, /if: \$\{\{ always\(\) \}\}/);
+  assert.match(upload, /actions\/upload-artifact@[a-f0-9]{40}/);
+  assert.match(upload, /h3-admission-cpu-\$\{\{ github\.sha \}\}-\$\{\{ github\.run_id \}\}-\$\{\{ github\.run_attempt \}\}/);
+  assert.match(upload, /if-no-files-found: error/);
+});
+
+test("H3 derived Rust selection cannot float, use another file or run after setup", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-admission-proof");
+  const reader = workflowStep(job, "Read checkout Rust toolchain");
+  assertH3RootToolchainReader(job);
+  for (const mutated of [
+    job.replace('Path("rust-toolchain.toml")', 'Path("other-toolchain.toml")'),
+    job.replace('if not re.fullmatch', 'if re.fullmatch'),
+    job.replace("${{ steps.h3_admission_toolchain.outputs.channel }}", '"stable"'),
+    job.replace(reader, "") + "\n" + reader,
+  ]) assert.throws(() => assertH3RootToolchainReader(mutated));
+});
+
+test("H3 native proof evidence refuses zero tests, ignored tests, wrong selection and failed commands", async () => {
+  for (const backend of ["mlx", "cuda"]) {
+    for (const name of proofSelection(backend)) {
+      const good = `running 1 test\ntest ${name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 42 filtered out;`;
+      verifyProofResult(good, name, 0);
+      for (const bad of [good.replace("1 passed", "0 passed"), good.replace("0 ignored", "1 ignored"), good.replace("0 failed", "1 failed"), good.replace("running 1 test", "running 0 tests"), good.replace(name, "unrelated_test")]) {
+        assert.throws(() => verifyProofResult(bad, name, 0));
+      }
+      assert.throws(() => verifyProofResult(good, name, 1));
+    }
+    requireManualSelection("workflow_dispatch", backend, backend);
+    requireManualSelection("workflow_dispatch", "both", backend);
+    for (const event of ["push", "pull_request", "merge_group", undefined]) assert.throws(() => requireManualSelection(event, backend, backend));
+    for (const selection of [undefined, "standard", "", backend === "mlx" ? "cuda" : "mlx"]) assert.throws(() => requireManualSelection("workflow_dispatch", selection, backend));
+  }
+  assert.throws(() => proofSelection("cpu"));
+  const runner = await source("scripts/ci/h3-import-native-proof.mjs");
+  for (const token of ["sourceSha", "inferenceSha", "fixtureSha256", "configuration", "durationMs", "receipt.json", "--exact", "--ignored", "--test-threads=1", "--no-run", "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HUGGINGFACE_HUB_CACHE", "SCENEWORKS_DATA_DIR", "tree_guard.py", '"8", "180"']) assert.ok(runner.includes(token), token);
+});
+
+test("H3 CUDA proof preserves PCI ordering and records the actual selected physical GPU", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-import-cuda");
+  assert.match(job, /^      CUDA_DEVICE_ORDER: PCI_BUS_ID$/m);
+  const env = { CUDA_DEVICE_ORDER: "PCI_BUS_ID", CUDA_VISIBLE_DEVICES: "1", SCENEWORKS_GPU_ID: "1" };
+  // NVML order deliberately disagrees with PCI order: PCI-ordered physical device 1 is GPU-high.
+  const csv = "0, GPU-high, 00000000:41:00.0, card-high, 580.1\n1, GPU-low, 00000000:01:00.0, card-low, 580.1\n";
+  const evidence = cudaDeviceEvidence(env, csv);
+  assert.equal(evidence.cudaDeviceOrder, "PCI_BUS_ID");
+  assert.deepEqual(evidence.selectedPhysicalDevice, { nvmlIndex: 0, uuid: "GPU-high", pciBusId: "00000000:41:00.0", name: "card-high", driverVersion: "580.1" });
+  for (const order of [undefined, "", "FASTEST_FIRST"]) assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_DEVICE_ORDER: order }, csv));
+  assert.throws(() => cudaDeviceEvidence({ ...env, CUDA_VISIBLE_DEVICES: "0" }, csv), /physical device 1/);
+  assert.throws(() => cudaDeviceEvidence({ ...env, SCENEWORKS_GPU_ID: "0" }, csv), /SCENEWORKS_GPU_ID/);
+  assert.throws(() => cudaDeviceEvidence(env, "1, GPU-only, 00000000:01:00.0, card, 580.1"), /physical CUDA device 1/);
+  for (const malformed of ["", "0, GPU-unknown, nope, card, 580", "0, missing-uuid, 0000:01:00.0, card, 580"]) assert.throws(() => cudaDeviceEvidence(env, malformed));
+  assert.match(await source("scripts/ci/h3-import-native-proof.mjs"), /receipt\.cuda = cudaDeviceEvidence\(process\.env, inventory\)/);
+});
+
+test("H3 dispatch queues are unique per run and leave old StarVector and ordinary keys unchanged", async () => {
+  const workflow = await source(".github/workflows/server-candle-linux.yml");
+  const root = workflow.slice(workflow.indexOf("\nconcurrency:"), workflow.indexOf("\njobs:"));
+  const expression = workflowExpression(root, "group");
+  const original = "(inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge'";
+  assert.ok(root.includes("cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}"));
+  const evaluate = (event, operation, id, attempt = 1, selected = expression) => Function("github", "inputs", "format", `return (${selected});`)(
+    { event_name: event, ref: "refs/heads/feature", run_id: id, run_attempt: attempt }, { starvector_terminal_operation: operation },
+    (template, ...values) => template.replace(/\{(\d+)\}/g, (_, index) => values[Number(index)]));
+  // Parentheses may change when a dispatch-only arm is removed. Preserve the actual legacy
+  // keys for every event instead of freezing a byte substring of the expression's formatting.
+  const legacy = ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", "unknown", undefined];
+  for (const event of ["workflow_dispatch", "push", "pull_request", "merge_group", "schedule", undefined]) {
+    for (const operation of legacy) assert.equal(evaluate(event, operation, 10), evaluate(event, operation, 10, 1, original), `legacy queue changed: ${event}/${operation}`);
+    if (event !== "workflow_dispatch") for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both", "h3-admission-proof", "h3-ui-proof", "h3-terminal-mlx", "h3-terminal-cuda"]) assert.equal(evaluate(event, operation, 10), "starvector-terminal-bridge", "H3 queue isolation is positively manual");
+  }
+  for (const operation of ["h3-terminal-mlx", "h3-terminal-cuda"]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10, 2), "h3-terminal-bridge-10-2");
+    assert.notEqual(evaluate("workflow_dispatch", operation, 10, 2), evaluate("workflow_dispatch", operation, 10, 3));
+  }
+  assert.equal(evaluate("workflow_dispatch", "h3-ui-proof", 10, 2), "h3-ui-hosted-10-2");
+  for (const operation of ["standard", "", "source", "provision", "readiness", "campaign", "diagnostic-candle-1b", undefined]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10), ["standard", ""].includes(operation) ? "server-candle-linux-refs/heads/feature" : "starvector-terminal-bridge");
+  }
+  for (const operation of ["h3-import-mlx", "h3-import-cuda", "h3-import-both"]) {
+    assert.equal(evaluate("workflow_dispatch", operation, 10), "h3-import-native-10");
+    assert.equal(evaluate("workflow_dispatch", operation, 11), "h3-import-native-11");
+  }
+  assert.equal(evaluate("workflow_dispatch", "h3-admission-proof", 10), "h3-admission-cpu-10");
+  assert.equal(evaluate("workflow_dispatch", "h3-admission-proof", 11), "h3-admission-cpu-11");
+  assert.equal(evaluate("push", "h3-admission-proof", 10), "starvector-terminal-bridge", "CPU dispatch isolation is positively manual, not a recurring event route");
+});
+
+test("H3 Candle proof clears an installed wrapper immediately after Rust runner preparation", async () => {
+  const job = workflowJob(await source(".github/workflows/server-candle-linux.yml"), "h3-import-cuda");
+  const clear = workflowStep(job, "Disable sccache for the heavy Candle proof build");
+  assert.match(clear, /\$env:RUSTC_WRAPPER = ''/);
+  assert.match(clear, /'RUSTC_WRAPPER=' \| Out-File -FilePath \$env:GITHUB_ENV/);
+  assert.match(job, /uses: \.\/\.github\/actions\/prepare-rust-runner\n      - name: Disable sccache/);
+  assert.ok(job.indexOf(clear) < job.indexOf("Fetch source dependencies only"));
+});
+
+test("H3 Metal proof rechecks and records available memory immediately before every case", async () => {
+  const GiB = 2 ** 30;
+  requireMetalHeadroom({ totalBytes: 128 * GiB, freePercent: 50 });
+  requireMetalHeadroom({ totalBytes: 100 * GiB, freePercent: 18 });
+  for (const observation of [{ totalBytes: 100 * GiB, freePercent: 17 }, { totalBytes: 128 * GiB, freePercent: NaN }, { totalBytes: NaN, freePercent: 100 }]) assert.throws(() => requireMetalHeadroom(observation));
+  const receipt = {};
+  const saved = [];
+  const save = () => saved.push(structuredClone(receipt));
+  observeMetalCase("first", receipt, save, () => ({ totalBytes: 128 * GiB, freePercent: 50 }));
+  assert.throws(() => observeMetalCase("second", receipt, save, () => ({ totalBytes: 128 * GiB, freePercent: 10 })));
+  assert.equal(saved.length, 2);
+  assert.equal(saved[1].memoryObservations[1].name, "second");
+  assert.equal(saved[1].memoryObservations[1].freePercent, 10);
+  const runner = await source("scripts/ci/h3-import-native-proof.mjs");
+  const cases = runner.slice(runner.indexOf("for (const name of proofSelection(backend))"));
+  assert.match(cases, /if \(backend === "mlx"\) observeMetalCase\(name, receipt, save\);\n      const result/);
+});
+
+async function waitForBuildLog(file, marker) {
+  const until = Date.now() + 3000;
+  while (Date.now() < until) {
+    const text = await readFile(file, "utf8").catch(() => "");
+    if (text.includes(marker)) return text;
+    await new Promise(resolve => setTimeout(resolve, 15));
+  }
+  assert.fail(`live compiler log never contained ${marker}`);
+}
+
+function buildEvidence(evidence) {
+  const receipt = { status: "running", cases: [] };
+  const save = () => writeFileSync(path.join(evidence, "receipt.json"), JSON.stringify(receipt));
+  return { evidence, receipt, save, env: process.env };
+}
+
+test("H3 build evidence exists before compiler completion and streams both output files live", async () => {
+  const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-live-"));
+  const options = buildEvidence(evidence);
+  const pending = streamProofBuild(process.execPath, ["-e", 'console.log("live-out"); console.error("live-err"); setTimeout(() => process.exit(0), 700);'], options);
+  try {
+    const initial = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+    assert.equal(initial.build.state, "running");
+    assert.ok(initial.build.startedAt);
+    assert.equal(initial.build.completedAt, undefined);
+    await waitForBuildLog(path.join(evidence, "build.jsonl"), "live-out");
+    await waitForBuildLog(path.join(evidence, "build.log"), "live-err");
+    assert.equal(options.receipt.build.state, "running", "diagnostics must exist while the compiler is still running");
+    assert.match(await pending, /live-out/);
+    assert.equal(options.receipt.build.state, "passed");
+    assert.ok(options.receipt.build.durationMs >= 0);
+  } finally {
+    await pending.catch(() => {});
+    await rm(evidence, { recursive: true, force: true });
+  }
+});
+
+test("H3 failed compiler preserves diagnostics and a failed build receipt", async () => {
+  const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-fail-"));
+  const options = buildEvidence(evidence);
+  try {
+    await assert.rejects(streamProofBuild(process.execPath, ["-e", 'console.log("partial-json"); console.error("compiler failed"); process.exit(7);'], options), /proof build failed/);
+    assert.match(await readFile(path.join(evidence, "build.log"), "utf8"), /compiler failed/);
+    const saved = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+    assert.equal(saved.build.state, "failed");
+    assert.equal(saved.build.status, 7);
+    assert.ok(saved.build.completedAt);
+    assert.notEqual(saved.status, "passed");
+  } finally { await rm(evidence, { recursive: true, force: true }); }
+});
+
+test("H3 bounded build timeout and interruption retain partial logs without reporting success", async () => {
+  for (const interrupt of [false, true]) {
+    const evidence = await mkdtemp(path.join(tmpdir(), "h3-fake-build-stop-"));
+    const options = { ...buildEvidence(evidence), timeoutMs: interrupt ? 5000 : 250, graceMs: 50 };
+    const listeners = process.listenerCount("SIGTERM");
+    const pending = streamProofBuild(process.execPath, ["-e", 'console.log("partial-before-stop"); setTimeout(() => process.exit(0), 2000);'], options);
+    const rejected = assert.rejects(pending, /proof build failed/);
+    try {
+      if (interrupt) {
+        await waitForBuildLog(path.join(evidence, "build.jsonl"), "partial-before-stop");
+        process.emit("SIGTERM"); // only the fake compiler is terminated, never this test process
+      }
+      await rejected;
+      const saved = JSON.parse(await readFile(path.join(evidence, "receipt.json"), "utf8"));
+      assert.equal(saved.build.state, "interrupted");
+      assert.equal(saved.build.termination, interrupt ? "SIGTERM" : "timeout");
+      assert.ok(saved.build.terminationRequestedAt);
+      assert.match(await readFile(path.join(evidence, "build.jsonl"), "utf8"), /partial-before-stop/);
+      assert.notEqual(saved.status, "passed");
+      assert.equal(process.listenerCount("SIGTERM"), listeners);
+    } finally { await rejected; await rm(evidence, { recursive: true, force: true }); }
+  }
+});
 
 test("RunPod validation provisions the same inference fixtures as PR scaffold checks", async () => {
   const publish = workflowJob(await source(".github/workflows/publish-runpod.yml"), "publish");
@@ -384,6 +688,19 @@ test("Windows Cargo cache directory guard preserves content and rejects linked o
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+// Inference 354b41cc put candle-flash-attn (a ~20 min nvcc build) into every backend-candle graph.
+// The selector (single mechanism, sc-28031) exports the persistent per-listener object cache; every
+// heavy compile step must run after it, and the cold-time-sized 90 min ordinary budget is pinned below.
+test("Windows candle lanes select the FlashAttention object cache before every heavy compile step", async () => {
+  const select = await source("scripts/select-windows-cargo-cache.mjs");
+  assert.match(select, /CANDLE_FLASH_ATTN_BUILD_DIR=\$\{flashAttention\}/, "the selection step exports the cache to every later compile step");
+  const job = workflowJob(await source(".github/workflows/windows-candle.yml"), "candle-worker");
+  const selectStep = workflowStep(job, "Isolate Cargo dependency checkout");
+  for (const heavy of ["Test the candle GPU worker (backend-candle)", "Check the candle sidecar builds (rust-api, backend-candle)", "Check and test the candle memory adapter (lib + memory-candle-adapter)", "Clippy (candle worker)"]) {
+    assert.ok(job.indexOf(selectStep) < job.indexOf(workflowStep(job, heavy)), `${heavy} runs after the cache is selected`);
+  }
+});
+
 test("Windows Cargo cache diagnostic distinguishes an actual locked Git commit from empty or unrelated caches", async () => {
   const root = await mkdtemp(path.join(await realpath(tmpdir()), "cargo-listener-git-"));
   const git = promisify(execFile);
@@ -680,7 +997,7 @@ test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung t
   const workflow = await source(".github/workflows/windows-candle.yml");
   const runbook = await source("docs/epic-20738-terminal-cuda.md");
   const timeoutContract =
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 60 \}\}/;
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 90 \}\}/;
   const validateTimeout = (candidate) => {
     assert.match(candidate, timeoutContract);
     const job = workflowJob(candidate, "candle-worker");
@@ -697,11 +1014,12 @@ test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung t
 
   const terminalArm =
     "github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720";
-  const ordinaryArm = "inputs.run_five_rung_reference && 120 || 60";
+  const ordinaryArm = "inputs.run_five_rung_reference && 120 || 90";
   for (const [name, mutated] of [
     ["terminal timeout regressed to 360", workflow.replace(terminalArm, terminalArm.replace("720", "360"))],
     ["terminal timeout arm removed", workflow.replace(` || ${terminalArm}`, "")],
-    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("60", "45"))],
+    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("90", "45"))],
+    ["ordinary timeout regressed to the pre-flash-attn 60", workflow.replace(ordinaryArm, ordinaryArm.replace("90", "60"))],
   ]) {
     assert.notEqual(mutated, workflow, `${name} mutation must modify the workflow fixture`);
     assert.throws(
@@ -3522,6 +3840,12 @@ test("the Rust toolchain is pinned to one concrete version, everywhere", async (
     );
     for (const value of inputs) {
       inputsSeen += 1;
+      if (file === "server-candle-linux.yml" && value === "${{ steps.h3_admission_toolchain.outputs.channel }}") {
+        // This one manual CPU route reads the checkout pin directly, so a main toolchain sync
+        // cannot leave a stale literal. Other expressions/floating channels remain forbidden.
+        assertH3RootToolchainReader(workflowJob(workflow, "h3-admission-proof"));
+        continue;
+      }
       assert.equal(
         value,
         `"${pin}"`,

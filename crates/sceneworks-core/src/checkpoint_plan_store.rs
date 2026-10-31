@@ -280,7 +280,7 @@ pub struct SourceStampV1 {
 }
 
 impl SourceStampV1 {
-    fn of(path: &Path, clock: StoreClockV1) -> std::io::Result<Self> {
+    pub(crate) fn of(path: &Path, clock: StoreClockV1) -> std::io::Result<Self> {
         #[cfg(unix)]
         use std::os::unix::fs::MetadataExt as _;
         #[cfg(windows)]
@@ -316,7 +316,7 @@ impl SourceStampV1 {
 
     /// Whether `other` describes the same filesystem entry as this stamp — every field except
     /// `observed_nanos`, which dates the observation rather than the file.
-    fn identifies_same_entry(&self, other: &Self) -> bool {
+    pub(crate) fn identifies_same_entry(&self, other: &Self) -> bool {
         let mut compared = self.clone();
         compared.observed_nanos = other.observed_nanos;
         compared == *other
@@ -335,7 +335,7 @@ impl SourceStampV1 {
     ///
     /// An undated stamp (v1 bindings) and an undated mtime are both untrusted for the same reason:
     /// there is nothing to measure.
-    fn is_racy(&self) -> bool {
+    pub(crate) fn is_racy(&self) -> bool {
         match (self.observed_nanos, self.modified_nanos) {
             (Some(observed), Some(modified)) => {
                 observed.saturating_sub(modified) < SOURCE_STAMP_GRANULARITY_NANOS
@@ -1174,9 +1174,11 @@ fn verify_source_and_capture_stamp(
     expected_sha256: &str,
     stamp: SourceStampV1,
     before_hash: impl FnOnce(),
+    check: &dyn Fn() -> std::io::Result<()>,
 ) -> Result<SourceStampV1, CheckpointPlanError> {
     before_hash();
-    let hashed = sha256_file(path).map_err(|error| io_error(path, error))?;
+    let hashed =
+        source_file_sha256_with_check(path, check).map_err(|error| io_error(path, error))?;
     if hashed == expected_sha256 {
         return Ok(stamp);
     }
@@ -1190,17 +1192,57 @@ fn verify_source_and_capture_stamp(
     })
 }
 
-fn sha256_file(path: &Path) -> std::io::Result<String> {
+/// One bounded source-content pass, returning lowercase SHA-256 without a prefix.
+/// Cancellation never returns or persists a partial digest.
+pub fn source_file_sha256_with_check(
+    path: &Path,
+    check: &dyn Fn() -> std::io::Result<()>,
+) -> std::io::Result<String> {
+    check()?;
+    let target = fs::canonicalize(path)?;
+    let before = SourceStampV1::of(path, StoreClockV1::SYSTEM)?;
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
+    let mut hashed_bytes = 0u64;
+    let checkpoint = |hashed_bytes| match check() {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+                acquisition = "ColdContentRead", state = if error.kind() == std::io::ErrorKind::Interrupted { "Canceled" } else { "Failed" },
+                hashed_bytes, source_bytes = before.size_bytes,
+                "Source content acquisition stopped; no digest was published");
+            Err(error)
+        }
+    };
     loop {
+        checkpoint(hashed_bytes)?;
         let read = file.read(&mut buffer)?;
+        check()?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        hashed_bytes += read as u64;
+        if hashed_bytes == read as u64 || hashed_bytes % (256 * 1024 * 1024) < read as u64 {
+            tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+                acquisition = "ColdContentRead", state = "Reading", hashed_bytes,
+                source_bytes = before.size_bytes, "Actual bounded source-content hash progress");
+        }
+        checkpoint(hashed_bytes)?;
     }
+    checkpoint(hashed_bytes)?;
+    let after = SourceStampV1::of(path, StoreClockV1::SYSTEM)?;
+    if !before.identifies_same_entry(&after) || fs::canonicalize(path)? != target {
+        return Err(std::io::Error::other(format!(
+            "source changed while hashing {}",
+            path.display()
+        )));
+    }
+    checkpoint(hashed_bytes)?;
+    tracing::info!(event = "source_file_hash_progress", path = %path.display(),
+        acquisition = "ColdContentRead", state = "Acquired", hashed_bytes,
+        source_bytes = before.size_bytes, "Complete source digest acquired after source identity verification");
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -1340,6 +1382,55 @@ impl CheckpointPlanStore {
             .open(&path)
             .map_err(|error| io_error(&path, error))?;
         FileLock::exclusive(file).map_err(|error| io_error(&path, error))
+    }
+
+    /// Hold verified source ownership through provider use, including dense sources that need no
+    /// derivative. Advisory locks live in the app store, never in a user-owned linked library.
+    /// The caller must acquire this BEFORE resolving/pinning the plan.
+    pub fn lease_source(&self, checkpoint_id: &str) -> Result<FileLock, CheckpointPlanError> {
+        let (path, file) = self.source_lock_file(checkpoint_id)?;
+        FileLock::try_shared(file).map_err(|error| io_error(&path, error))
+    }
+
+    /// Refuse teardown before any source bytes or registry state are removed. Keep the guard
+    /// through filesystem removal; a preflight that drops it would race a new provider load.
+    pub fn lock_source_for_removal(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<FileLock, CheckpointPlanError> {
+        let (path, file) = self.source_lock_file(checkpoint_id)?;
+        FileLock::try_exclusive(file).map_err(|error| CheckpointPlanError::Io {
+            path,
+            message: format!("checkpoint {checkpoint_id:?} is in use; release its source lease before removal: {error}"),
+        })
+    }
+
+    fn source_lock_file(
+        &self,
+        checkpoint_id: &str,
+    ) -> Result<(PathBuf, fs::File), CheckpointPlanError> {
+        let directory = self.root.join("source-leases");
+        fs::create_dir_all(&directory).map_err(|error| io_error(&directory, error))?;
+        let path = directory.join(format!(
+            "{:x}.lock",
+            Sha256::digest(checkpoint_id.as_bytes())
+        ));
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(CheckpointPlanError::Io {
+                    path,
+                    message: "source lease lock is not a regular file".into(),
+                });
+            }
+        }
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| io_error(&path, error))?;
+        Ok((path, file))
     }
 
     fn write_atomic(&self, path: &Path, payload: &[u8]) -> Result<(), CheckpointPlanError> {
@@ -1555,6 +1646,14 @@ impl CheckpointPlanStore {
     /// leaves a root with no checkpoints — a state a retry of `remove_root` converges from.
     pub fn remove_root(&self, root_id: &str) -> Result<RootRemovalV1, CheckpointPlanError> {
         let _guard = self.lock_store()?;
+        let prefix = format!("linked/{root_id}/");
+        let _source_guards = self
+            .inventory()?
+            .records
+            .iter()
+            .filter(|record| record.checkpoint_id.starts_with(&prefix))
+            .map(|record| self.lock_source_for_removal(&record.checkpoint_id))
+            .collect::<Result<Vec<_>, _>>()?;
         let mut roots = self.approved_roots()?;
         let root = roots
             .get(root_id)
@@ -1823,7 +1922,9 @@ impl CheckpointPlanStore {
     /// path component. Returns `false` when there was nothing to remove.
     pub fn remove_managed(&self, install_id: &str) -> Result<bool, CheckpointPlanError> {
         let install_path = self.install_dir(install_id)?;
-        let removed_record = self.invalidate(&managed_checkpoint_id(install_id))?;
+        let checkpoint_id = managed_checkpoint_id(install_id);
+        let _source = self.lock_source_for_removal(&checkpoint_id)?;
+        let removed_record = self.invalidate_unleased(&checkpoint_id)?;
         let removed_bytes = match fs::remove_dir_all(&install_path) {
             Ok(()) => true,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
@@ -1854,12 +1955,36 @@ impl CheckpointPlanStore {
     /// Inspect `<root>/<relative_path>` as a linked checkpoint and persist its plan, catalog record,
     /// and source bindings. Identity is `rootId + relativePath`; an unrunnable inspection refuses
     /// with the inspector's typed diagnostics and persists nothing.
+    /// A missing saved document can be reconstructed only when source reinspection reproduces its
+    /// semantic identity. Lost external authority must be supplied through
+    /// [`Self::compile_linked_with_context`], never silently replaced with an empty context.
     pub fn compile_linked(
         &self,
         root_id: &str,
         relative_path: &str,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         self.compile_linked_with_hook(root_id, relative_path, |_| {})
+    }
+
+    pub fn compile_linked_with_context(
+        &self,
+        root_id: &str,
+        relative_path: &str,
+        context: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        let root_path = self.resolve_root(root_id)?;
+        let mut request = CheckpointInspectionRequestV1::linked(
+            linked_checkpoint_id(root_id, relative_path),
+            &root_path,
+            relative_path,
+            root_id,
+        )
+        .map_err(|reason| CheckpointPlanError::InvalidRelativePath {
+            relative_path: relative_path.into(),
+            reason,
+        })?;
+        request.context = context;
+        self.compile(&request, &root_path, "linked")
     }
 
     /// Test-only equivalent of [`Self::compile_linked`] with a deterministic boundary after a
@@ -1907,10 +2032,20 @@ impl CheckpointPlanStore {
         relative_path: &str,
         provenance: ManagedProvenanceV1,
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
+        self.compile_managed_with_context(install_id, relative_path, provenance, Default::default())
+    }
+
+    pub fn compile_managed_with_context(
+        &self,
+        install_id: &str,
+        relative_path: &str,
+        provenance: ManagedProvenanceV1,
+        context: std::collections::BTreeMap<String, serde_json::Value>,
+    ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let install_path = self.resolve_install(install_id)?;
         validate_portable_relative_path(relative_path)?;
         let checkpoint_id = managed_checkpoint_id(install_id);
-        let request = CheckpointInspectionRequestV1::managed(
+        let mut request = CheckpointInspectionRequestV1::managed(
             checkpoint_id.clone(),
             install_path.clone(),
             relative_path,
@@ -1921,6 +2056,23 @@ impl CheckpointPlanStore {
             relative_path: relative_path.to_owned(),
             reason,
         })?;
+        request.context = context;
+        // H3 providers open the whole component directory, not just the digest's primary file.
+        // Bind its architecture and shard index/closure too. The primary remains the transfer-
+        // digest target; changing the inspection target never changes its integrity check.
+        let parent = Path::new(relative_path).parent().unwrap_or(Path::new(""));
+        let config = install_path.join(parent).join("config.json");
+        let declares_h3 = crate::minimax_h3_codec::read_h3_descriptor(&config)
+            .ok()
+            .is_some_and(|v| {
+                v.get("_class_name").and_then(serde_json::Value::as_str)
+                    == Some("MiniMaxH3Transformer3DModel")
+            });
+        if declares_h3 {
+            // Empty here means the already-confined managed install root. It is not serialized as
+            // a locator: discovery emits nonempty relative paths for every contained artifact.
+            request.relative_path = parent.to_path_buf();
+        }
         self.compile(&request, &install_path, "managed")
     }
 
@@ -1947,7 +2099,35 @@ impl CheckpointPlanStore {
         hook: &mut dyn FnMut(CheckpointPlanVerificationEventV1),
     ) -> Result<CompiledCheckpointV1, CheckpointPlanError> {
         let checkpoint_id = request.checkpoint_id.clone();
-        let inspection = inspect_checkpoint(request);
+        // Retain context only from a validated plan. Missing or tampered documents may be
+        // rebuilt from source only when inspection reproduces the catalog's old commitment.
+        let mut request = request.clone();
+        let mut unavailable_plan = None;
+        if request.context.is_empty() {
+            if let Ok(record) = self.record(&checkpoint_id) {
+                match self.plan(&checkpoint_id, &record.plan.plan_id) {
+                    Ok(plan) => match record.validate_loaded_plan(&plan) {
+                        Ok(()) => request.context = plan.context,
+                        Err(error) => {
+                            unavailable_plan = Some((
+                                record.plan.semantic_digest,
+                                CheckpointPlanError::PlanTampered {
+                                    checkpoint_id: checkpoint_id.clone(),
+                                    reason: format!(
+                                        "{error}; source-only repair must reproduce the committed semantic digest; otherwise explicitly reimport with the original bound context"
+                                    ),
+                                },
+                            ));
+                        }
+                    },
+                    Err(error @ CheckpointPlanError::MissingPlan { .. }) => {
+                        unavailable_plan = Some((record.plan.semantic_digest, error));
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        let inspection = inspect_checkpoint(&request);
         let errors: Vec<CheckpointDiagnosticV1> = inspection
             .diagnostics
             .iter()
@@ -1987,6 +2167,13 @@ impl CheckpointPlanStore {
                 ),
             })?;
         record.validate_loaded_plan(&plan)?;
+        if let Some((expected_digest, error)) = unavailable_plan {
+            if record.plan.semantic_digest != expected_digest {
+                // Neither lost external authority nor changed source bytes may be silently
+                // adopted while reconstructing an unavailable or untrusted plan document.
+                return Err(error);
+            }
+        }
 
         // A persisted stamp is a cache key for a later resolve, so it must be bound to the bytes
         // the plan names. Sampling a stamp and trusting the inspector's earlier hash would let a
@@ -2013,6 +2200,7 @@ impl CheckpointPlanStore {
                 fingerprint,
                 sampled,
                 || hook(CheckpointPlanVerificationEventV1::LayerStampCaptured),
+                &|| Ok(()),
             )?;
             stamps.insert(layer.layer_id.clone(), stamp);
         }
@@ -2023,8 +2211,7 @@ impl CheckpointPlanStore {
         };
         // Reported against the inventory as it stands BEFORE this record is published, so a
         // recompile of the same checkpoint never reports itself as its own duplicate.
-        let duplicate_checkpoint_ids =
-            self.duplicates_of(&record.summary.semantic_digest, &checkpoint_id)?;
+        let duplicate_checkpoint_ids = self.duplicates_of_plan(&plan, &checkpoint_id)?;
 
         self.persist_plan(&plan)?;
         self.persist_bindings(&bindings)?;
@@ -2035,6 +2222,34 @@ impl CheckpointPlanStore {
             plan,
             duplicate_checkpoint_ids,
         })
+    }
+
+    /// Same bytes and execution semantics, regardless of provenance-only declarations. Read
+    /// immutable plans rather than changing inventory digests or rewriting historical identities.
+    pub fn duplicates_of_plan(
+        &self,
+        plan: &ImportPlanV1,
+        exclude_checkpoint_id: &str,
+    ) -> Result<Vec<String>, CheckpointPlanError> {
+        let digest = plan.duplicate_equivalence_digest()?;
+        let mut duplicates = Vec::new();
+        for record in self.inventory()?.records {
+            if record.checkpoint_id == exclude_checkpoint_id {
+                continue;
+            }
+            // Duplicate reporting is advisory, not load admission. An unavailable or tampered
+            // unrelated plan is not evidence of equivalence and must not block a new import.
+            let Ok(candidate) = self.plan(&record.checkpoint_id, &record.plan.plan_id) else {
+                continue;
+            };
+            if record.validate_loaded_plan(&candidate).is_err() {
+                continue;
+            }
+            if candidate.duplicate_equivalence_digest()? == digest {
+                duplicates.push(record.checkpoint_id);
+            }
+        }
+        Ok(duplicates)
     }
 
     /// Every persisted checkpoint other than `exclude_checkpoint_id` whose plan carries
@@ -2136,6 +2351,11 @@ impl CheckpointPlanStore {
 
     /// Remove a checkpoint's record, plan, and bindings. Never touches the linked source.
     pub fn invalidate(&self, checkpoint_id: &str) -> Result<bool, CheckpointPlanError> {
+        let _source = self.lock_source_for_removal(checkpoint_id)?;
+        self.invalidate_unleased(checkpoint_id)
+    }
+
+    fn invalidate_unleased(&self, checkpoint_id: &str) -> Result<bool, CheckpointPlanError> {
         let _guard = self.lock_store()?;
         let inventory = self.inventory()?;
         let Some(record) = inventory
@@ -2189,7 +2409,17 @@ impl CheckpointPlanStore {
         &self,
         checkpoint_id: &str,
     ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
-        self.resolve_with_verification(checkpoint_id, |_| {})
+        self.resolve_with_check_and_verification(checkpoint_id, &|| Ok(()), |_| {})
+    }
+
+    /// Resolve the same immutable plan, cooperatively stopping between bounded hash reads.
+    /// An interrupted digest never refreshes a persisted source stamp.
+    pub fn resolve_with_check(
+        &self,
+        checkpoint_id: &str,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        self.resolve_with_check_and_verification(checkpoint_id, check, |_| {})
     }
 
     /// Observe actual content verification. `Some(path)` brackets a hash read and `None`
@@ -2197,8 +2427,20 @@ impl CheckpointPlanStore {
     pub fn resolve_with_verification(
         &self,
         checkpoint_id: &str,
+        observe: impl FnMut(Option<&Path>),
+    ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        self.resolve_with_check_and_verification(checkpoint_id, &|| Ok(()), observe)
+    }
+
+    /// Both: the cooperative `check` between bounded hash reads, and the `observe` brackets
+    /// around each actual content verification.
+    pub fn resolve_with_check_and_verification(
+        &self,
+        checkpoint_id: &str,
+        check: &dyn Fn() -> std::io::Result<()>,
         mut observe: impl FnMut(Option<&Path>),
     ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
+        check().map_err(|error| io_error(&self.root, error))?;
         let record = self.record(checkpoint_id)?;
         let plan = self.plan(checkpoint_id, &record.plan.plan_id)?;
         record
@@ -2232,6 +2474,7 @@ impl CheckpointPlanStore {
         let mut refreshed = !bindings_are_current;
         bindings.schema_version = SOURCE_BINDINGS_SCHEMA_VERSION;
         for layer in &plan.layers {
+            check().map_err(|error| io_error(&self.root, error))?;
             // The root a layer's relative path is joined onto is chosen by the LOCATOR, never by
             // the caller: a linked layer resolves under its approved library root, a managed layer
             // under its own SceneWorks-owned install directory. A managed layer naming an install
@@ -2305,6 +2548,7 @@ impl CheckpointPlanStore {
                     fingerprint,
                     current,
                     || {},
+                    check,
                 );
                 observe(None);
                 let verified_stamp = verified_stamp?;
@@ -2319,9 +2563,11 @@ impl CheckpointPlanStore {
                 rehashed,
             });
         }
+        check().map_err(|error| io_error(&self.root, error))?;
         if refreshed {
             self.persist_bindings(&bindings)?;
         }
+        check().map_err(|error| io_error(&self.root, error))?;
         Ok(ResolvedCheckpointV1 {
             checkpoint_id: checkpoint_id.to_owned(),
             record,
@@ -2334,6 +2580,54 @@ impl CheckpointPlanStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_hash_cancellation_interrupts_bounded_reads_and_retry_hashes_complete_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("source.safetensors");
+        let bytes = vec![17u8; HASH_BUFFER_BYTES * 3 + 19];
+        fs::write(&path, &bytes).unwrap();
+        let calls = std::cell::Cell::new(0usize);
+        let error = source_file_sha256_with_check(&path, &|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 4 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "cancel hash",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(
+            calls.get(),
+            4,
+            "stop within the second bounded read, not at EOF"
+        );
+        assert_eq!(
+            source_file_sha256_with_check(&path, &|| Ok(())).unwrap(),
+            format!("{:x}", Sha256::digest(&bytes))
+        );
+        assert_eq!(
+            fs::read(&path).unwrap(),
+            bytes,
+            "hashing never changes a linked original"
+        );
+    }
+
+    #[test]
+    fn source_hash_checks_cancellation_before_any_source_or_memo_lookup() {
+        let error = source_file_sha256_with_check(Path::new("absent-source"), &|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Interrupted,
+                "cancel before metadata",
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+    }
 
     /// A released store lock must be free IMMEDIATELY, even while a descriptor this process handed
     /// to a child still references the same open file description. `flock(2)` locks live on the

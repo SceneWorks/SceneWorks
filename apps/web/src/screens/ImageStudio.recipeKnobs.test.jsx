@@ -1055,6 +1055,39 @@ describe("a replayed recipe reaches every allow-listed control", () => {
     expect(payload.advanced).not.toHaveProperty("enhancePrompt");
   });
 
+  it("restores a normalized singular character reference into the serialized request", async () => {
+    const reference = { id: "normalized-ref", type: "image", projectId: "project_1", file: { path: "ref.png" } };
+    const decoy = { ...reference, id: "decoy" };
+    const character = { id: "character", name: "Character", looks: [], approvedReferences: [{ assetId: decoy.id, asset: decoy }, { assetId: reference.id, asset: reference }] };
+    const recipe = { ...everyKnobRecipe(), mode: "character_image", model: FLUX2_DEV.id, normalizedSettings: { characterId: character.id, referenceAssetId: reference.id }, rawAdapterSettings: { referenceAssetId: "stale-raw" } };
+    const context = baseContext({ assets: [decoy, reference], characters: [character], studioLaunch: launch(recipe) });
+    await render(context);
+    await click(buttonByText("Generate"));
+    expect(context.createImageJob.mock.calls[0][0].referenceAssetId).toBe(reference.id);
+  });
+
+  for (const raw of [["stale"], []]) {
+    it(`treats normalized empty reference list as authoritative over raw ${JSON.stringify(raw)} and prior state`, async () => {
+      const multi = { ...FLUX2_DEV, ui: { multiReference: true } };
+      const ref = { id: "stale", type: "image", projectId: "project_1", file: { path: "ref.png" } };
+      seedOpenDisclosures({ mode: "edit_image", model: multi.id, referenceAssetIds: [ref.id] });
+      const context = baseContext({ imageModels: [multi], assets: [ref], studioLaunch: launch({ ...everyKnobRecipe(), mode: "edit_image", model: multi.id, normalizedSettings: { referenceAssetIds: [] }, rawAdapterSettings: { referenceAssetIds: raw } }) });
+      await render(context);
+      expect(persistedStudioSettings().referenceAssetIds).toEqual([]);
+      expect(buttonByText("Generate").disabled).toBe(true);
+      expect(context.createImageJob).not.toHaveBeenCalled();
+    });
+  }
+  it("falls back to raw ordered references only when the normalized list is absent", async () => {
+    const multi = { ...FLUX2_DEV, ui: { multiReference: true } };
+    const refs = ["second", "first"].map(id => ({ id, type: "image", projectId: "project_1", file: { path: `${id}.png` } }));
+    const context = baseContext({ imageModels: [multi], assets: refs, studioLaunch: launch({ ...everyKnobRecipe(), mode: "edit_image", model: multi.id, normalizedSettings: {}, rawAdapterSettings: { referenceAssetIds: refs.map(r => r.id) } }) });
+    await render(context);
+    await click(buttonByText("Generate"));
+    expect(context.createImageJob).toHaveBeenCalledOnce();
+    expect(context.createImageJob.mock.calls[0][0].referenceAssetIds).toEqual(["second", "first"]);
+  });
+
   it("leaves the boolean decoders OFF when the recipe did not record them", async () => {
     // `buildImageJobAdvanced` emits these only when they are on, so an absent key means the run had
     // them off — inheriting the user's own sticky toggle would replay someone else's recipe with a

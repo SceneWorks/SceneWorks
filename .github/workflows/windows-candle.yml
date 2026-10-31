@@ -402,7 +402,7 @@ jobs:
     # job simply queues for a box that has the weights.
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
-      SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
+      SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 90 }}
       # Automatic PR/push validation may construct a CUDA context for weights-free
       # trainer metadata/config checks; learned kernels remain dispatch-only.
       # Preserve the existing manual-dispatch default and its step-local overrides.
@@ -429,11 +429,21 @@ jobs:
     # component set is 144.051 GB (210.332 GB once transformer_ref joins in sc-17149) against
     # Krea q4's ~14 GB, so it is the branch that most
     # needs the long budget. Krea's two dispatch shapes keep their exact previous values --
-    # five-rung + provision 240, five-rung alone 120, everything else 60.
+    # five-rung + provision 240, five-rung alone 120, everything else 90.
+    # The ordinary (PR/push) arm is sized from measured cold time, not from a warm run: inference
+    # 354b41cc made runtime-cuda's default `media-flash-attn` pull candle-flash-attn into all four
+    # compile graphs (worker test, sidecar check, memory adapter, clippy). Its FlashAttention-2
+    # nvcc build is ~20 min, and job targets are disposable, so every graph rebuilt it and run
+    # 41043982039 (both attempts) hit 60 min inside the memory adapter: worker test 30 min, sidecar
+    # 23 min. The Cargo cache selector (scripts/select-windows-cargo-cache.mjs) now gives the kernels a persistent per-listener
+    # CANDLE_FLASH_ATTN_BUILD_DIR, written per object as nvcc finishes (so a cancelled job keeps
+    # what it compiled). Cold on a listener after a kernel/pin change: setup+fetch ~2, worker test
+    # ~30 (measured), sidecar ~5, memory adapter <=20 and clippy ~6 (warm-history maxima 9/19/6),
+    # capability verification ~10 => ~73 min; 90 keeps ~20% headroom. Warm runs stay ~25-45 min.
     # The LTX Eros acceptance capture (sc-18902, from main) keeps its own six-hour ceiling.
     # The strictly serial 19-cell epic-20738 terminal campaign gets a job-level twelve-hour
     # ceiling; no individual step receives a timeout above GitHub's 360-minute step limit.
-    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 90 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Register before builds so post cleanup also covers failed/cancelled jobs.
@@ -884,6 +894,33 @@ jobs:
           if "%CAPABILITY_FACTS_ONLY%"=="true" exit /b 0
           node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-worker --features backend-candle
           if errorlevel 1 exit /b 1
+      # sc-26683: exercise the consumer's real managed-import -> native projection seam.
+      # Plain manual dispatch only: no weights, provisioning or measurement campaign.
+      - name: Run the synthetic MiniMax-H3 ConvRot CUDA import projection
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke }}
+        timeout-minutes: 3
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          set "HF_HOME="
+          for /f %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString()"') do set "HF_HOME=%RUNNER_TEMP%\sc-26683-convrot-%%G"
+          if not defined HF_HOME exit /b 1
+          if exist "%HF_HOME%" exit /b 1
+          set "HF_HUB_CACHE=%HF_HOME%\hub"
+          set "HUGGINGFACE_HUB_CACHE=%HF_HOME%\hub"
+          set "HF_HUB_OFFLINE=1"
+          set "TRANSFORMERS_OFFLINE=1"
+          mkdir "%HF_HUB_CACHE%"
+          if errorlevel 1 exit /b 1
+          set "SCENEWORKS_H3_SMOKE_LOG=%HF_HOME%\native-cuda.txt"
+          cargo test --locked -p sceneworks-worker --features backend-candle --lib minimax_h3_import_fixture::convrot_import_native_cuda_projection_smoke -- --exact --ignored --nocapture --test-threads=1 > "%SCENEWORKS_H3_SMOKE_LOG%" 2>&1
+          set "smoke_exit=%ERRORLEVEL%"
+          type "%SCENEWORKS_H3_SMOKE_LOG%"
+          if not "%smoke_exit%"=="0" exit /b %smoke_exit%
+          powershell -NoProfile -Command "$text=[IO.File]::ReadAllText($env:SCENEWORKS_H3_SMOKE_LOG); if ($text -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;' -or $text -notmatch 'minimax_h3_import_fixture::convrot_import_native_cuda_projection_smoke') { throw 'exact native CUDA fixture did not execute once' }"
+      # Model-level pruned/W4A8 H3 forwards require positive selection in the registered
+      # server-candle-linux.yml manual proof route, not this default dispatch/PR lane.
       # PR guard for the desktop candle SIDECAR the hosted lane no longer builds on
       # PRs (see header). `cargo check` runs the build scripts (incl. the nvcc kernel
       # compile) and typechecks the full graph, so a candle sidecar build break is
@@ -924,6 +961,18 @@ jobs:
         run: |
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          rem Ordinary unit fixtures must never inherit a persistent model cache.
+          if not defined RUNNER_TEMP exit /b 1
+          set "HF_HOME="
+          for /f %%G in ('powershell -NoProfile -Command "[guid]::NewGuid().ToString()"') do set "HF_HOME=%RUNNER_TEMP%\sc-unit-memory-adapter-%%G"
+          if not defined HF_HOME exit /b 1
+          if exist "%HF_HOME%" exit /b 1
+          set "HF_HUB_CACHE=%HF_HOME%\hub"
+          set "HUGGINGFACE_HUB_CACHE=%HF_HOME%\hub"
+          set "HF_HUB_OFFLINE=1"
+          set "TRANSFORMERS_OFFLINE=1"
+          mkdir "%HF_HUB_CACHE%"
+          if errorlevel 1 exit /b 1
           cargo check -p sceneworks-memory-adapter --features candle --bin memory-candle-adapter
           set "capability_facts_test_args="
           if "%CAPABILITY_FACTS_ONLY%"=="true" set "capability_facts_test_args=--no-run"

@@ -1,0 +1,66 @@
+{
+  "stationary_pair_authorized": true,
+  "sceneworks_sha": "03cdc056c57746ac025a06552a658b47fd40eaf8",
+  "inference_sha": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+  "native_evidence_ref": "main",
+  "native_evidence_sha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+  "expected_runner": "nax-macos",
+  "adaptive_matrix": true,
+  "bootstrap": {
+    "casebook": "sc-26691-h3-cases-v1",
+    "cohort": "reduced-v1",
+    "componentSelections": [
+      {
+        "modelId": "minimax_h3",
+        "tier": "q4"
+      },
+      {
+        "modelId": "minimax_h3_ref",
+        "tier": "q4"
+      }
+    ],
+    "operator": {
+      "compatibleBase": "builtin:minimax_h3",
+      "projectName": "H3 reduced terminal proof",
+      "seed": 314159,
+      "requestedGpu": "mlx",
+      "gpuId": "mlx",
+      "componentTier": "q4",
+      "hostBudgetBytes": 128849018880,
+      "deviceBudgetBytes": 128849018880,
+      "minimumControlDelta": 0.01,
+      "maximumBaselineDelta": 0.001,
+      "width": 1088,
+      "height": 544,
+      "wideWidth": 1344,
+      "wideHeight": 768,
+      "timeoutSeconds": 7200,
+      "lokrAmplitude": 0.05,
+      "pulpcutSampling": {
+        "steps": 8,
+        "schedulerShift": 12,
+        "audioSchedulerShift": 3,
+        "contractSource": "Pinned publisher declares eight steps; shifts explicitly selected by the operator, not asserted as a published trained recipe"
+      }
+    },
+    "legalAuthority": {
+      "acknowledged": false,
+      "assetSets": [
+        "singularity",
+        "hybrid",
+        "pulpcut",
+        "turbo",
+        "speech"
+      ],
+      "licenseIds": [
+        "MiniMax-H3-Community-License-Agreement",
+        "Apache-2.0",
+        "CC-BY-4.0"
+      ],
+      "inheritedLicenseIds": [
+        "MiniMax-H3-Community-License-Agreement"
+      ],
+      "includeSelectedComponents": true
+    }
+  }
+}

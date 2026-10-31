@@ -25481,7 +25481,7 @@
         // are pinned against the runtime probe list from BOTH sides: by
         // `minimax_h3_downloads_cover_every_path_the_loader_probes` in
         // crates/sceneworks-core/src/builtin_manifests.rs and by
-        // `minimax_h3_macos_download_set_covers_every_probed_shared_file` in the worker, each reading
+        // `minimax_h3_download_set_covers_every_probed_shared_file_on_every_platform` in the worker, each reading
         // `mlx_tier_completeness::MINIMAX_H3_*` rather than a second hand-copied list.
         {
           "provider": "huggingface",
@@ -25495,14 +25495,17 @@
           // `<root>/tokenizer/tokenizer.json` on every load, and
           // `mlx_tier_completeness::minimax_h3_shared_is_complete` mirrors that probe AS A FILE — but
           // no macOS row supplied the directory, so a manifest-driven install of ANY tier failed the
-          // gate before it reached the loader. `minimax_h3_macos_download_set_covers_every_probed_
-          // shared_file` binds the two together so a future probe added on one side goes red on the
+          // gate before it reached the loader. `minimax_h3_download_set_covers_every_probed_shared_
+          // file_on_every_platform` binds the two together so a future probe added on one side goes red on the
           // other.
           //
           // No `variant`: the tokenizer is dense and identical in every tier, so it is a floor no
           // tier shrinks — the `video_vae` / `audio_vae` shape, not the per-tier `text_encoder` one.
           "files": ["tokenizer/*"],
-          "platforms": ["macos"],
+          // Every platform: `candle-gen-minimax-h3` opens `<root>/tokenizer/tokenizer.json` exactly as
+          // the MLX loader does, so an off-Mac install without this row could not load, and an
+          // imported checkpoint's component closure had no tokenizer to bind (sc-26691 CUDA lane).
+          "platforms": ["macos", "windows", "linux"],
           // 4 files: tokenizer.json, tokenizer_config.json, vocab.json, merges.txt. Measured
           // directory bytes at the pinned revision. NOT the same directory as the seven tokenizer
           // sidecars inside `text_encoder/` — the loader opens this one by its own path.
@@ -26265,7 +26268,10 @@
           // catalog id: installing only Ref2VA must still bring every shared component the engine
           // probes.
           "files": ["tokenizer/*"],
-          "platforms": ["macos"],
+          // Every platform: `candle-gen-minimax-h3` opens `<root>/tokenizer/tokenizer.json` exactly as
+          // the MLX loader does, so an off-Mac install without this row could not load, and an
+          // imported checkpoint's component closure had no tokenizer to bind (sc-26691 CUDA lane).
+          "platforms": ["macos", "windows", "linux"],
           "estimatedSizeBytes": 11492078
         },
         {

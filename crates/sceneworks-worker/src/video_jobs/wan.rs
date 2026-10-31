@@ -1381,6 +1381,9 @@ pub(super) struct VideoGenInput {
     /// sc-23402). `None` ⇒ the engine's own default; set only by the reference-partition arms, since
     /// it sizes a reference and a request carrying none has nothing to apply it to.
     pub(super) reference_image_short_edge: Option<u32>,
+    /// MiniMax-H3's image-reference resize policy (`advanced.referenceImageResizeMode`, sc-26691).
+    /// `None` ⇒ the engine's own default (`match`); set only by the MiniMax-H3 arms.
+    pub(super) reference_image_resize_mode: Option<gen_core::ReferenceImageResizeMode>,
     /// Stage the tier's alternate diffusion decoder instead of the default Conv VAE.
     pub(super) use_diffusion_decoder: bool,
     pub(super) steps: Option<u32>,
@@ -1469,6 +1472,16 @@ pub(super) struct VideoGenInput {
     /// separate from `memory`: a Resident selection still carries context while preserving the
     /// provider's request defaults with `memory == None`.
     pub(super) memory_context: Option<gen_core::MemoryRunContext>,
+    /// Imported H3 plan/source identity. The shared load handoff seals the actual native component
+    /// closure before deriving the warm key. This is not an executed-tensor attestation.
+    pub(super) imported_h3_identity: Option<Value>,
+    pub(super) imported_h3_authority: Option<sceneworks_core::minimax_h3_load::H3SourceAuthority>,
+    /// The EXPLICIT frozen companion directory for imported H3 loads whose DiT keeps its direct
+    /// path (Candle FL2VA): prepared-file acquisition pins it so the frozen component closure
+    /// verifies, without staging, substitution, or cross-volume links. `None` on every route
+    /// whose staged assembly already exposes the companion as the DiT's sibling.
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    pub(super) imported_h3_companion_dir: Option<PathBuf>,
     /// Optional fallible admission consumed only by the serialized generator-cache cold-miss path.
     /// SCAIL Candle and the uncalibrated dual-expert VACE-Fun lane set it; other video families leave
     /// it `None`. It is deliberately outside
@@ -1487,6 +1500,10 @@ impl Default for VideoGenInput {
         Self {
             memory: None,
             memory_context: None,
+            imported_h3_identity: None,
+            imported_h3_authority: None,
+            #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+            imported_h3_companion_dir: None,
             engine_id: "",
             veda: None,
             veda_predictor: None,
@@ -1505,6 +1522,7 @@ impl Default for VideoGenInput {
             auto_duration: None,
             temporal_upsample_rounds: None,
             reference_image_short_edge: None,
+            reference_image_resize_mode: None,
             use_diffusion_decoder: false,
             steps: None,
             guidance: None,
@@ -2208,6 +2226,9 @@ pub(super) fn run_loaded_video_generation(
         // sc-23402. `None` ⇒ gen-core's own `REFERENCE_IMAGE_SHORT_EDGE_DEFAULT`; an out-of-range
         // value never reaches here, because the parse that produced it refused it.
         reference_image_short_edge: input.reference_image_short_edge,
+        // sc-26691. `None` ⇒ gen-core's `match`; a misspelt mode never reaches here, because the
+        // parse that produced it refused it.
+        reference_image_resize_mode: input.reference_image_resize_mode,
         steps: input.steps,
         guidance: input.guidance,
         scheduler_shift: input.scheduler_shift,
@@ -2302,13 +2323,49 @@ pub(super) fn run_video_generation(
 ///
 /// MiniMax-H3 and the Wan A14B engines are request-aware exceptions: one legitimate step grows
 /// with the request's workload and can exceed this default on a legal clip. See
-/// [`video_stall_timeout_policy`]. `SCENEWORKS_VIDEO_STALL_SECS` remains an absolute operator
+/// [`video_stall_timeout_policy`] and, for H3's packed-sequence model,
+/// [`super::minimax_h3_sequence`]. `SCENEWORKS_VIDEO_STALL_SECS` remains an absolute operator
 /// override for every engine.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The silent window allowed before an engine's FIRST denoise step: request preparation plus a
+/// cold model load, which emits no progress of its own on the Candle MiniMax-H3 engine. The
+/// per-step budgets above model the gap between steps, not this. Measured on the RTX PRO 6000
+/// Windows host (sc-26691): an imported 31.7 GB MiniMax-H3 int8 DiT loaded at ~38 MB/s
+/// (2.3 GB/min of device memory) and was still loading 13 minutes in, on course for about 25
+/// minutes before its first step, so the 600 s step budget cancelled a healthy render. A load that
+/// truly wedges is still caught, just later. Never shortens a larger per-step budget, and an
+/// operator override stays absolute. MiniMax-H3 adds its reference-encode allowance and one full
+/// step on top of this (its first `Step` event arrives only after the first step completes); see
+/// [`super::minimax_h3_sequence`].
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) const VIDEO_PRE_STEP_STALL_TIMEOUT: Duration = Duration::from_secs(45 * 60);
+
+/// The stall window in force: the request's per-step budget once a denoise step has arrived, the
+/// policy's pre-step window (cold load, reference preparation and, for MiniMax-H3, the first
+/// step itself) before then. Every progress event the engine reports resets the watchdog clock, so
+/// an engine that reports its load phases (MLX H3's `Loading`) gets this window per phase.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn video_stall_window(
+    policy: VideoStallTimeoutPolicy,
+    first_step_seen: bool,
+) -> Duration {
+    if first_step_seen {
+        policy.timeout
+    } else {
+        policy.pre_step
+    }
+}
 
 /// The timeout policy and its receipt-facing basis. Keeping the basis next to the duration makes a
 /// request-aware watchdog observable instead of leaving an unexplained, model-specific number in a
@@ -2319,8 +2376,27 @@ pub(super) const VIDEO_STALL_TIMEOUT: Duration = Duration::from_secs(600);
 ))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct VideoStallTimeoutPolicy {
+    /// The silent window allowed between denoise-step events.
     pub(super) timeout: Duration,
+    /// The silent window allowed before the first denoise-step event.
+    pub(super) pre_step: Duration,
     pub(super) basis: &'static str,
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+impl VideoStallTimeoutPolicy {
+    /// A per-step budget whose pre-step window is the generic cold-load window (or the larger
+    /// per-step budget): every engine except MiniMax-H3 and an operator override.
+    pub(super) fn with_generic_pre_step(timeout: Duration, basis: &'static str) -> Self {
+        Self {
+            timeout,
+            pre_step: timeout.max(VIDEO_PRE_STEP_STALL_TIMEOUT),
+            basis,
+        }
+    }
 }
 
 /// Grace period granted after a stall is detected and engine cancellation is requested, before
@@ -2347,18 +2423,24 @@ fn video_stall_timeout(input: &VideoGenInput) -> VideoStallTimeoutPolicy {
         input.height,
         input.frames,
         input.guidance,
+        super::minimax_h3_sequence::MinimaxH3StallRequest {
+            prompt: &input.prompt,
+            conditioning: &input.conditioning,
+            reference_image_short_edge: input.reference_image_short_edge,
+            reference_image_resize_mode: input.reference_image_resize_mode,
+        },
     )
 }
 
 /// Resolve the forward-progress timeout without reading process-global state (the test seam).
 ///
-/// A positive `SCENEWORKS_VIDEO_STALL_SECS` value is absolute. Without one, every engine except
-/// MiniMax-H3 and the Wan A14B engines retains the 600-second default. MiniMax-H3 scales only when its effective packed pixel-frame
-/// workload exceeds the measured shortest/full-canvas baseline: `768 * 1344 * 124`. The scale is
-/// linear, rounded up, and bounded at the engine's largest legal workload (`768 * 1344 * 345`).
-/// Small canvases and the shortest full-canvas request therefore retain the existing watchdog,
-/// while a legal 243-frame full-canvas step is not misclassified as the Metal wedge this watchdog
-/// was introduced to catch.
+/// A positive `SCENEWORKS_VIDEO_STALL_SECS` value is absolute, before and after the first step.
+/// Without one, every engine except MiniMax-H3 and the Wan A14B engines retains the 600-second
+/// default. MiniMax-H3 (sc-26691) is budgeted on its **packed DiT sequence** (text, vision tokens,
+/// reference image/clip latents and audio, not just the target canvas) with a linear-plus-quadratic
+/// step cost scaled from the 600 s baseline at the shortest full-canvas request (`768 * 1344 *
+/// 124`); `h3` carries the reference geometry that sequence is derived from. See
+/// [`super::minimax_h3_sequence`] for the estimator, the cost model and the pre-step window.
 ///
 /// The Wan A14B dual-expert engines scale too (sc-10299); see [`wan_a14b_stall_timeout`].
 /// `guidance` is the resolved engine guidance (`None` ⇒ the engine's CFG-on default).
@@ -2373,13 +2455,16 @@ pub(super) fn video_stall_timeout_policy(
     height: u32,
     frames: u32,
     guidance: Option<f32>,
+    h3: super::minimax_h3_sequence::MinimaxH3StallRequest<'_>,
 ) -> VideoStallTimeoutPolicy {
     if let Some(seconds) = raw_override
         .and_then(|raw| raw.trim().parse::<u64>().ok())
         .filter(|secs| *secs > 0)
     {
+        let timeout = Duration::from_secs(seconds);
         return VideoStallTimeoutPolicy {
-            timeout: Duration::from_secs(seconds),
+            timeout,
+            pre_step: timeout,
             basis: "operator_override",
         };
     }
@@ -2392,36 +2477,10 @@ pub(super) fn video_stall_timeout_policy(
     }
 
     if engine_id != "minimax_h3" {
-        return VideoStallTimeoutPolicy {
-            timeout: VIDEO_STALL_TIMEOUT,
-            basis: "default",
-        };
+        return VideoStallTimeoutPolicy::with_generic_pre_step(VIDEO_STALL_TIMEOUT, "default");
     }
 
-    let legal_frames = sceneworks_core::video_request::MINIMAX_H3_LEGAL_FRAME_COUNTS;
-    let min_frames = u64::from(legal_frames[0]);
-    let max_frames = u64::from(legal_frames[legal_frames.len() - 1]);
-    let max_pixels = u64::from(super::minimax_h3::MINIMAX_H3_CANVAS_MAX_PIXELS);
-    let pixels = u64::from(width)
-        .saturating_mul(u64::from(height))
-        .min(max_pixels);
-    let effective_frames = u64::from(frames).clamp(min_frames, max_frames);
-    let baseline_work = max_pixels.saturating_mul(min_frames);
-    let max_work = max_pixels.saturating_mul(max_frames);
-    let bounded_work = pixels
-        .saturating_mul(effective_frames)
-        .clamp(baseline_work, max_work);
-    let numerator = VIDEO_STALL_TIMEOUT.as_secs().saturating_mul(bounded_work);
-    let seconds = numerator.div_ceil(baseline_work);
-
-    VideoStallTimeoutPolicy {
-        timeout: Duration::from_secs(seconds),
-        basis: if bounded_work == baseline_work {
-            "minimax_h3_baseline"
-        } else {
-            "minimax_h3_pixel_frames"
-        },
-    }
+    super::minimax_h3_sequence::minimax_h3_stall_timeout(width, height, frames, h3)
 }
 
 /// Measured silent gap between consecutive denoise-step events of the candle Wan A14B engine at
@@ -2506,11 +2565,11 @@ fn wan_a14b_stall_timeout(
     let step_secs = (WAN_A14B_REFERENCE_STEP_SECS * passes)
         .saturating_mul(tokens)
         .div_ceil(WAN_A14B_REFERENCE_TOKENS);
-    VideoStallTimeoutPolicy {
-        timeout: WAN_A14B_LOAD_ALLOWANCE
+    VideoStallTimeoutPolicy::with_generic_pre_step(
+        WAN_A14B_LOAD_ALLOWANCE
             + Duration::from_secs(WAN_A14B_STEP_HEADROOM.saturating_mul(step_secs)),
-        basis: "wan_a14b_token_work",
-    }
+        "wan_a14b_token_work",
+    )
 }
 
 /// First-detection handling for the in-loop video cancel poller (sc-5516): trip the engine
@@ -2843,6 +2902,7 @@ pub(super) async fn generate_video_using(
         height = input.height,
         frames = input.frames,
         stallSeconds = stall_timeout.as_secs(),
+        preStepStallSeconds = stall_policy.pre_step.as_secs(),
         basis = stall_policy.basis,
         "selected the request's forward-progress watchdog budget"
     );
@@ -2853,8 +2913,12 @@ pub(super) async fn generate_video_using(
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Progress>(64);
     let blocking = {
         let cancel = cancel.clone();
-        let spec = video_load_spec(&input);
         let engine_id = input.engine_id;
+        let receipt_job_id = job.id.clone();
+        let receipt_backend = backend.to_owned();
+        // The frozen component closure comparison resolves the persisted declaration against the
+        // data dir's source library; captured before `input` moves so it reaches the spawned task.
+        let preparation_data_dir = settings.data_dir.clone();
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let cold_load_admission = input.cold_load_admission.take();
         // sc-10671: an in-place ComfyUI Wan MoE takes the bespoke **uncached** load path
@@ -2877,7 +2941,6 @@ pub(super) async fn generate_video_using(
         // `spec` itself moves into the loader) and lets both derivations happen inside `run`, which
         // executes on the generator cache thread — the same position the image lane derives its
         // own from, inside the blocking closure.
-        let admission_spec = spec.clone();
         let admission_geometry = (
             input.width,
             input.height,
@@ -2887,6 +2950,95 @@ pub(super) async fn generate_video_using(
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let host_probe_runtime = tokio::runtime::Handle::current();
         tokio::spawn(async move {
+            let mut spec = video_load_spec(&input);
+            let (spec, h3_receipt) = if let Some(identity) = input.imported_h3_identity.clone() {
+                let authority = input.imported_h3_authority.clone().ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "imported H3 load is missing its resolved source authority".into(),
+                    )
+                })?;
+                // Finding 4's generation-time guarantee: the frozen component closure recorded at
+                // import must be compared against the components ACTUALLY acquired for this render.
+                // A closure that does not match the acquired seals refuses by component, revision
+                // and hash; a historical assembly with no captured closure refuses the same way.
+                let assembly = identity.get("assembly").cloned().ok_or_else(|| {
+                    WorkerError::InvalidPayload(
+                        "imported H3 load is missing its validated assembly binding".into(),
+                    )
+                })?;
+                let preparation_cancel = cancel.clone();
+                // The explicit frozen companion for direct-path imports: its files must be
+                // ACQUIRED alongside the DiT or the frozen component closure refuses the render.
+                #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+                let companion = input.imported_h3_companion_dir.clone();
+                #[cfg(not(all(not(target_os = "macos"), feature = "backend-candle")))]
+                let companion = None;
+                let preparation_span = tracing::info_span!("h3_import_preparation",
+                    jobId = %receipt_job_id, phase = "component-file-acquisition");
+                tokio::task::spawn_blocking(move || {
+                    let _entered = preparation_span.enter();
+                    let receipt =
+                        sceneworks_core::minimax_h3_load::PreparedH3Load::prepare_authorized_with_check(
+                            &mut spec,
+                            Some(authority),
+                            companion,
+                            &|| super::minimax_h3::h3_preparation_checkpoint(&preparation_cancel),
+                        )
+                        .map_err(|message| {
+                            if preparation_cancel.is_cancelled() && message.contains(super::minimax_h3::H3_PREPARATION_CANCELED) {
+                                WorkerError::Canceled(message)
+                            } else { WorkerError::InvalidPayload(message) }
+                        })?;
+                    sceneworks_core::model_artifacts::provenance::verify_prepared_h3_component_closure_with_staging(
+                        &preparation_data_dir,
+                        &assembly,
+                        receipt.files(),
+                        &receipt.component_staging(),
+                    )
+                    .map_err(|message| {
+                        WorkerError::InvalidPayload(format!(
+                            "[checkpoint-plan:incompatible-component] {message}"
+                        ))
+                    })?;
+                    Ok::<_, WorkerError>((spec, Some(receipt)))
+                })
+                .await
+                .map_err(|e| WorkerError::Engine(e.to_string()))??
+            } else {
+                (spec, None)
+            };
+            let prepared_h3_context =
+                h3_receipt
+                    .as_ref()
+                    .map(|receipt| crate::generator_cache::PreparedH3CacheContext {
+                        identity:
+                            json!({"import":input.imported_h3_identity, "operation":admission_mode,
+                    "steps":input.steps,"schedulerShift":input.scheduler_shift,
+                    "sampler":input.sampler,"scheduler":input.scheduler})
+                            .to_string(),
+                        receipt: receipt.clone(),
+                    });
+            if cancel.is_cancelled() {
+                return Err(WorkerError::Canceled(
+                    "Video generation canceled before H3 native load.".into(),
+                ));
+            }
+            let cold_h3_receipt = h3_receipt.clone();
+            let load_generator = move |id: &str, spec: &LoadSpec| {
+                if let Some(receipt) = &cold_h3_receipt {
+                    receipt
+                        .validate(spec)
+                        .map_err(gen_core::Error::Unsupported)?;
+                }
+                let generator = load_generator(id, spec)?;
+                if let Some(receipt) = &cold_h3_receipt {
+                    receipt
+                        .validate(spec)
+                        .map_err(gen_core::Error::Unsupported)?;
+                }
+                Ok(generator)
+            };
+            let admission_spec = spec.clone();
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let cold_load_cancel = cancel.clone();
             let run = move |generator: &dyn Generator,
@@ -2902,6 +3054,40 @@ pub(super) async fn generate_video_using(
                 );
                 let load_policy = loaded_policy.offload_policy;
                 let mut input = input;
+                let execution_span = if let Some(identity) = &input.imported_h3_identity {
+                    tracing::info_span!("h3_import_execution", jobId = %receipt_job_id,
+                        checkpointId = %identity["checkpointId"], semanticDigest = %identity["semanticDigest"])
+                } else {
+                    tracing::Span::none()
+                };
+                let _entered = execution_span.enter();
+                if let (Some(receipt), Some(identity)) = (&h3_receipt, &input.imported_h3_identity)
+                {
+                    receipt
+                        .validate(&admission_spec)
+                        .map_err(WorkerError::InvalidPayload)?;
+                    tracing::info!(
+                        event = "h3_import_prepared_load",
+                        jobId = %receipt_job_id,
+                        provider = engine_id,
+                        backend = %receipt_backend,
+                        native_backend = if cfg!(target_os = "macos") { "mlx" } else { "cuda" },
+                        seal_validated = true,
+                        identity = %identity,
+                        prepared_sources = %receipt.prepared_sources_json(),
+                        cache_state = ?cache_state,
+                        cache_layer = "generator_metadata",
+                        retains_dit_weights = false,
+                        loaded_spec_offload_policy = ?load_policy,
+                        loaded_spec_load_shape = ?loaded_policy.load_shape,
+                        provider_resident_delta_bytes = provider_resident_bytes,
+                        operation = %admission_mode,
+                        steps = ?input.steps,
+                        scheduler_shift = ?input.scheduler_shift,
+                        seed = input.seed,
+                        "Imported H3 acquired a generator with its sealed file closure; not an executed-tensor or peak-memory receipt"
+                    );
+                }
                 let admission_tier =
                     crate::mlx_fit_gate::resolved_video_numeric_tier(engine_id, &admission_spec)?;
                 let spec_headroom_bytes =
@@ -2926,7 +3112,7 @@ pub(super) async fn generate_video_using(
                     generator.memory_strategy_contract(),
                 )?;
                 let sparse_bound = generator
-                    .veda_workspace_bound(gen_core::veda::workspace::Request {
+                    .veda_workspace_bound(gen_core_h3::veda::workspace::Request {
                         veda: input.veda.as_ref(),
                         width: input.width,
                         height: input.height,
@@ -2935,12 +3121,29 @@ pub(super) async fn generate_video_using(
                         prompt: &input.prompt,
                         conditioning: &input.conditioning,
                         reference_image_short_edge: input.reference_image_short_edge,
-                        // Wan inputs carry no resize-mode control; `None` keeps the workspace
-                        // bound exactly as before the field existed upstream.
-                        reference_image_resize_mode: None,
+                        reference_image_resize_mode: input.reference_image_resize_mode,
                     })
                     .map_err(|e| WorkerError::InvalidPayload(e.to_string()))?;
+                let native_quant_request = generator
+                    .memory_strategy_contract()
+                    .and_then(|contract| contract.phase_facts.as_ref())
+                    .and_then(|phase| phase.native_quant.as_ref())
+                    .map(|_| crate::video_admission::NativeQuantRequest {
+                        shape: gen_core_h3::veda::workspace::Request {
+                            veda: input.veda.as_ref(),
+                            width: input.width,
+                            height: input.height,
+                            frames: input.frames,
+                            count: 1,
+                            prompt: &input.prompt,
+                            conditioning: &input.conditioning,
+                            reference_image_short_edge: input.reference_image_short_edge,
+                            reference_image_resize_mode: input.reference_image_resize_mode,
+                        },
+                        evaluations: input.steps,
+                    });
                 let mut admission_inputs = crate::video_admission::VideoAdmissionInputs {
+                    native_quant_request,
                     model_id: &admission_model_id,
                     model_family: &admission_model_family,
                     route: engine_id,
@@ -3074,7 +3277,7 @@ pub(super) async fn generate_video_using(
                     None => {
                         crate::generator_cache::with_cached_generator_for_request_using(
                             engine_id,
-                            spec,
+                            (spec, prepared_h3_context),
                             "video load failed",
                             load_generator,
                             run,
@@ -3088,7 +3291,7 @@ pub(super) async fn generate_video_using(
                 let _ = comfyui_load;
                 crate::generator_cache::with_cached_generator_for_request_using(
                     engine_id,
-                    spec,
+                    (spec, prepared_h3_context),
                     "video load failed",
                     load_generator,
                     run,
@@ -3119,6 +3322,9 @@ pub(super) async fn generate_video_using(
     // Time of the most recent progress event; the forward-progress watchdog fails the job if
     // this goes stale for `stall_timeout` (covers both the silent load phase and step-to-step).
     let mut last_progress = Instant::now();
+    // Until the first denoise step the job is preparing and cold-loading, which the per-step
+    // budget does not model; see [`video_stall_window`].
+    let mut first_step_seen = false;
     // Interval arm so the cold model-load phase (crate::inference_runtime::load emits no progress)
     // still heartbeats and polls cancel, instead of looking dead to the API's
     // staleness check until the first denoise step (sc-4276 / F-MLXW-12; mirrors
@@ -3165,6 +3371,7 @@ pub(super) async fn generate_video_using(
                     // still owned by the fraction/message match below.
                     match &progress {
                         Progress::Step { total, .. } => {
+                            first_step_seen = true;
                             phase_timer.mark_sample_step(Instant::now());
                             if video_effective_steps.is_none() {
                                 video_effective_steps = Some(*total);
@@ -3232,12 +3439,14 @@ pub(super) async fn generate_video_using(
                     // (the block runs on a separate thread), so the API sees a healthy job forever.
                     // If no progress has arrived for `stall_timeout`, request engine cancel and start
                     // the abandon countdown.
-                    if !canceled && last_progress.elapsed() >= stall_timeout {
+                    let stall_window = video_stall_window(stall_policy, first_step_seen);
+                    if !canceled && last_progress.elapsed() >= stall_window {
                         tracing::warn!(
                             event = "rust_worker_video_stalled",
                             jobId = %job.id,
                             engine = %log_engine_id,
-                            stallSeconds = stall_timeout.as_secs(),
+                            stallSeconds = stall_window.as_secs(),
+                            firstStepSeen = first_step_seen,
                             "no progress within the stall window — requesting engine cancel"
                         );
                         cancel.cancel();
@@ -3286,7 +3495,7 @@ pub(super) async fn generate_video_using(
     if stalled {
         return Err(WorkerError::Engine(format!(
             "Video generation stalled: no progress for {}s. The job was canceled.",
-            stall_timeout.as_secs()
+            video_stall_window(stall_policy, first_step_seen).as_secs()
         )));
     }
     if canceled {

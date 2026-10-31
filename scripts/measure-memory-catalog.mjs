@@ -227,14 +227,14 @@ export function requiredComponentsFor(family, backend) {
 /** The ONE upstream repository all three Iris-3B task routes load from (sc-25690). */
 export const IRIS_REPOSITORY = "speridlabs/iris-3b";
 /**
- * The generation task's files at the snapshot ROOT — `gen_core::iris::CONFIG_FILE` and
+ * The generation task's files at the snapshot ROOT — `gen_core_iris::CONFIG_FILE` and
  * `BACKBONE_WEIGHTS_FILE`, exactly the manifest's `iris_3b` download closure.
  */
 export const IRIS_GENERATION_FILES = Object.freeze(["config.yaml", "model.safetensors"]);
 /**
  * A downstream task export's files inside its folder (`depth/`, `upscaler/`): the fine-tuned
  * backbone, its config (whose `task` section the engine checks) and the shipped empty-prompt
- * conditioning (`gen_core::iris::downstream::EMPTY_PROMPT_FILE`).
+ * conditioning (`gen_core_iris::downstream::EMPTY_PROMPT_FILE`).
  */
 export const IRIS_TASK_EXPORT_FILES = Object.freeze([
   "config.yaml", "model.safetensors", "empty_prompt.safetensors",
@@ -254,13 +254,13 @@ export const IRIS_GENERATION_COMPONENTS = Object.freeze([
   },
 ]);
 
-/** The pinned Supra2-IMG upstream repository (sc-24217) — `gen_core::supra2::SUPRA2_SOURCE.repo`. */
+/** The pinned Supra2-IMG upstream repository (sc-24217) — `gen_core_checkpoint::supra2::SUPRA2_SOURCE.repo`. */
 export const SUPRA2_REPOSITORY = "SupraLabs/Supra2-IMG";
-/** The one upstream file the install converts — `gen_core::supra2::SUPRA2_SOURCE`'s only file. */
+/** The one upstream file the install converts — `gen_core_checkpoint::supra2::SUPRA2_SOURCE`'s only file. */
 export const SUPRA2_SOURCE_FILES = Object.freeze(["model_final_ema.pt"]);
 /**
  * Supra2's two caller-staged co-requisites (`LoadSpec::components["text_encoder"|"vae"]`), in the
- * `{ env, repo, files }` shape: exactly the files `gen_core::supra2::FLAN_T5_BASE` / `SD_VAE` pin
+ * `{ env, repo, files }` shape: exactly the files `gen_core_checkpoint::supra2::FLAN_T5_BASE` / `SD_VAE` pin
  * (and the manifest's co-requisite rows download). Both engines require both, so no `arms`.
  */
 export const SUPRA2_COMPONENTS = Object.freeze([
@@ -1434,7 +1434,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
   //
   // Generation alone loads a text encoder — the pinned Qwen3-VL-4B-Instruct snapshot the manifest
   // ships as a `coRequisite` and the worker stages as `LoadSpec::components["text_encoder"]`
-  // (`gen_core::iris::TEXT_ENCODER_COMPONENT`). Depth and restoration run on their export's shipped
+  // (`gen_core_iris::TEXT_ENCODER_COMPONENT`). Depth and restoration run on their export's shipped
   // empty-prompt states and REFUSE a staged text encoder, so they declare none.
   iris_3b: {
     env: "IRIS_3B", repo: IRIS_REPOSITORY, arms: ["mlx", "candle"], layout: "flat",
@@ -1450,7 +1450,7 @@ export const PROVIDER_FAMILIES = Object.freeze({
     requiredTierFiles: IRIS_TASK_EXPORT_FILES,
   },
   // Supra2-IMG (sc-24217, epic 24212). The root this row binds is the pinned UPSTREAM snapshot at
-  // its ROOT, holding the one file the install converts (`gen_core::supra2::SUPRA2_SOURCE`). It is
+  // its ROOT, holding the one file the install converts (`gen_core_checkpoint::supra2::SUPRA2_SOURCE`). It is
   // NOT what the engine loads: both adapter arms convert it into the native bundle in a SEPARATE
   // adapter process before the measured process loads anything (or reuse a bundle that already
   // passes the provider's pin contract), so conversion never sits inside a measured window. The

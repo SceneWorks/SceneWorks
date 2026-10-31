@@ -107,6 +107,38 @@ describe("LicensesScreen", () => {
     }
   });
 
+  // sc-26691: the CUDA backend links the vendored FlashAttention-2 kernels built on CUTLASS. The
+  // FlashAttention licence names "the respective contributors, as shown by the AUTHORS file", so
+  // the AUTHORS list ships beside both BSD-3-Clause texts.
+  it("ships the FlashAttention-2 and CUTLASS licences with the FlashAttention authors", async () => {
+    await render();
+    const item = [...container.querySelectorAll(".licenses-item")].find((button) =>
+      button.textContent.includes("FlashAttention-2 and CUTLASS"),
+    );
+    expect(item).toBeTruthy();
+    await act(async () => item.click());
+    const cases = [
+      ["FlashAttention BSD 3-Clause License", "as shown by the AUTHORS file"],
+      ["CUTLASS BSD 3-Clause License", "NVIDIA CORPORATION"],
+      ["FlashAttention authors", "Tri Dao"],
+    ];
+    for (const [label, needle] of cases) {
+      const tab = [...container.querySelectorAll(".segmented-control button")].find((b) =>
+        b.textContent.includes(label),
+      );
+      expect(tab, label).toBeTruthy();
+      await act(async () => tab.click());
+      expect(container.querySelector(".licenses-text").textContent).toContain(needle);
+    }
+    // Every declared document resolves to a bundled file (an unwired key is silently dropped).
+    const component = bundledLicenses.find((entry) => entry.id === "flash-attention");
+    expect(component.documents.map((doc) => doc.key)).toEqual([
+      "flash-attention-license",
+      "cutlass-license",
+      "flash-attention-authors",
+    ]);
+  });
+
   it("records the ACE-Step SFT Cover-restyle co-requisite under MIT (sc-13821)", async () => {
     await render();
     const sftCover = [...container.querySelectorAll(".licenses-item")].find((b) =>

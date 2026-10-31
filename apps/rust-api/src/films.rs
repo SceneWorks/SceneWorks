@@ -421,7 +421,9 @@ fn render_resolutions(plan: &ProductionPlan, capabilities: &PlannerCapabilities)
 fn clear_step_override(plan: &mut ProductionPlan) {
     if let Some(advanced) = plan.model.advanced.as_mut() {
         advanced.steps = None;
-        if advanced.reference_image_short_edge.is_none() {
+        if advanced.reference_image_short_edge.is_none()
+            && advanced.reference_image_resize_mode.is_none()
+        {
             plan.model.advanced = None;
         }
     }

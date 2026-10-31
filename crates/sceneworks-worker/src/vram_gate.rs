@@ -2795,7 +2795,7 @@ pub(crate) fn minimax_h3_fit_error_with_sparse(
     adapter_bytes: u64,
     gpu_id: &str,
     budget: Option<VramBudget>,
-    sparse: Option<&gen_core::veda::workspace::WorkspaceBound>,
+    sparse: Option<&gen_core_h3::veda::workspace::WorkspaceBound>,
 ) -> Option<WorkerError> {
     const MEASURED_PIXELS: u64 = 1_032_192;
     let candle = manifest_entry.get("candle");

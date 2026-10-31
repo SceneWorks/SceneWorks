@@ -47,6 +47,171 @@ Downstream consumers of this document:
 | sc-17158 | the `downloads[]` shape (§4), two manifest ids, the license gate (§8) |
 | sc-17149 | `transformer_ref` lands as its own catalog entry (§7) |
 
+## Dense community DiT imports (sc-26680, sc-26681, sc-26682)
+
+The existing model Add/Import workflow accepts dense F16/BF16/F32 H3 Diffusers component
+directories (single-file or indexed shards) and native/ComfyUI single-file checkpoints.
+Diffusers directories carry `config.json` declaring `MiniMaxH3Transformer3DModel`; a sharded
+directory also carries `diffusion_pytorch_model.safetensors.index.json`, whose exact tensor-to-file
+map must agree with every shard header. Shard and checkpoint names are arbitrary; tensor content
+identifies H3, not a publisher/name allowlist.
+The shared inspector persists an import plan and a component assembly binding on the new
+video model entry. Select that imported entry in Video Studio and generate normally; its
+model id and plan identity remain attached to the job and resulting asset.
+Imported ids may share the `minimax_h3` prefix (for example, `minimax_h3_custom`); only the
+exact resident ids `minimax_h3` and `minimax_h3_ref` are reserved for shipped checkpoints.
+
+Architecture identity does **not** prove task compatibility: FL2VA and Ref2VA use identical
+tensor shapes but different weights. In the existing Add/Import workflow, explicitly select the
+compatible base and declare `minimaxH3Partition`:
+
+This declaration also constrains the detected source architecture, even if `family` is omitted.
+Non-H3 local, remote, or linked checkpoint bytes are refused before registration; managed staging
+is discarded and refused linked plan bindings are invalidated without changing library files.
+
+| Declaration | Exact `baseModel` | Supported operations |
+| --- | --- | --- |
+| `fl2va` | `minimax_h3` | Text, first frame, first/last frames |
+| `ref2va` | `minimax_h3_ref` | Ordered image/video/audio references (at least one visual reference) |
+| `hybrid` | `minimax_h3` | Explicit compatibility with both operation sets |
+
+No declaration is inferred from a name, directory, or tensor shape. Hybrid is an operation union,
+not simultaneous keyframes plus references: the pinned engine refuses that combination. Every
+accepted operation uses the imported DiT, including reference tasks; film plans retain the imported
+catalog id instead of choosing a stock reference checkpoint. Synchronized output audio and the
+provider's conditioning/sampling restrictions are preserved.
+
+The persisted assembly records the plan's DiT and the compatible installed text encoder,
+tokenizer/processor, video VAE, audio VAE and constructor documents. The provider implements H3's
+processor; there is no independent generic processor-config substitution. Native loads validate
+these shared config contracts with the pinned provider's parsers. MLX eagerly requires both task
+directories: a single-partition import records the opposite resident DiT as a **load-only**
+companion, while an explicitly compatible hybrid binds the imported DiT at both task paths.
+Candle stages the same task-selected imported bytes, with explicit base companionship for Ref2VA.
+Missing or incompatible shared components, a changed plan binding, and unsupported operations
+refuse before provider loading. There is no stock-weight substitution. Quantized execution and
+adapters belong to other epic slices.
+
+Native files and provider-incompatible filename suffixes are streamed into the existing
+content-addressed checkpoint derivative cache as canonical component directories. Original
+F16/BF16/F32 precision and checkpoint identity are retained, using a fixed 1 MiB buffer and no
+whole-model dense transient. Missing, duplicate, conflicting, unknown and unconsumed backbone
+tensors fail by tensor/file name. Managed plans bind config, index and every shard; source seals
+bracket normalization, and a cache lease retains the exact derivative through rendering.
+Accepted `.SAFETENSORS`/`.SafeTensors` filenames become lowercase canonical filenames because
+both pinned providers enumerate lowercase suffixes only. All imported config/index documents
+share the inspector's 16 MiB limit before parsing, including API/managed admission.
+
+Native mapping follows the executable converter at
+[`604306cab8694584e6096b32a1c1731bee22c43e`](https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py),
+cross-checked against inference `81cff07c13137fea520cec0b1dc9b8f083514601`. Raw QKV is per-head
+interleaved; each canonical projection gathers its head rows separately. Native gate-first
+`mlp.fc1` row halves become canonical value-first SwiGLU. Reference-runtime state-dict exports
+whose QKV is already reordered explicitly declare `h3_qkv_layout=contiguous`; raw files default
+to `interleaved`. Source-owned `config.json` or string metadata `h3_config` is authoritative;
+multiple source claims must agree. Weight-only files instead bind the explicitly selected compatible
+base's exact primary configuration, never a published architecture default.
+The task-neutral codec never derives the explicit partition declaration from names or shapes.
+
+### Reduced centered-curve AdaLN imports (sc-26684)
+
+The same import workflow also accepts the source checkpoint's complete reduced AdaLN topology:
+an F32 `adaln_t_table`, every reduced block projection and the final projection, with their folded
+biases. Native/ComfyUI names are normalized without reconstructing the full timestep MLP or
+changing the source basis. Stored BF16 projection weights and F16 folded biases remain at their
+original precision in the derivative; native execution widens these supplied operands to F32.
+The table replaces the timestep MLP, not the source architecture declaration.
+
+Coordinates follow the pinned
+[WanGP implementation](https://github.com/deepbeepmeep/Wan2GP/blob/47b06ff920c16b4b7b36de068367a5de0e0968e9/models/minimax_h3/transformer.py):
+`t = 1 - sigma` in `[0, 1]`, clamped linear interpolation at `t * (grid - 1)` (no `1000` multiplier).
+Text uses the video timestep; conditioned video uses `max(video_t, 0.999)`, audio uses its own
+timestep, and conditioned audio uses `1`. The observed rank-eight topology has 1025 table rows;
+admission checks the complete supplied geometry rather than a filename or publisher allowlist.
+
+The persisted assembly binds the entire table, reduced weights and folded biases, including
+their source dtypes, to the shared engine content identity. Canonical sources also receive an
+identity-addressed derivative directory, so a different table or basis cannot share a provider
+cache entry. Missing/inconsistent pruning data, forged assembly declarations and mismatched
+sealed derivatives refuse before provider loading. Native synthetic fixtures in
+`minimax_h3_import_fixture` execute both Metal and CUDA after managed ingest, comparing endpoints,
+off-grid and conditioned timesteps against the pinned executable CPU oracle, and refusing a
+same-shaped foreign cache. No downloaded checkpoint payload is committed as a fixture.
+
+The pinned engine's shared `SourcePruneSizing` authority charges the supplied operands at their
+actual F32 compute widths plus retained F32 modulation/coordinate buffers over the full admitted
+scheduler-shift domain. Pruned precompute does not release those operands, so it receives no
+fictitious stock AdaLN eviction credit. Mixed task routes compare corrected per-task footprints;
+the worker does not maintain a second estimator. Existing dense/stock packed Q4/Q8 behavior is
+preserved.
+
+### Reusable managed and linked assembly (sc-26686)
+
+The baseline is the existing LTX/Eros compatible-base conversion and co-requisite workflow
+(`create_model_convert_job`, `resolve_convert_plan`, `convert_ltx_native`), not a claim that
+arbitrary LTX uploads were already supported by the generic checkpoint importer. H3 uses the
+existing Add/Import route for uploads, local copies, URLs, Hugging Face, Civitai download URLs,
+and approved linked roots; every transport retains the same explicit base and task declaration.
+
+Import admission derives reusable download rows from the selected base's existing catalog
+co-requisites, prefers an already complete resident tier, and otherwise provisions the catalog
+default through ordinary component-download jobs. The base's license acknowledgment applies
+even when the imported checkpoint came from an unrelated community repository. The imported
+DiT's task partition is never downloaded over or replaced. Hybrid imports do not acquire a stock
+task companion. Shared component jobs remain independently retryable and shared caches are not
+owned by the imported model. An imported entry is not installed/ready until its source plan and
+assembly resolve and every bound component row is present in its declared revision.
+The selected base's **dense architecture** primary contributes a **config-only** co-requisite
+(one literal `config.json`, no stock DiT weight glob), independently of the shared q4/q8/bf16 tier.
+Packed resident-weight policy is not architecture authority. The import worker awaits that exact
+pinned document when the source has
+no config, validates it against the complete tensor inventory, and embeds its full JSON, SHA-256,
+base/repository/revision/path and shared-tier provenance into the immutable `ImportPlanV1.context`.
+Source-owned configuration wins even when its rope/schedule/provider fields differ from the base.
+This context participates in plan semantic identity and derivative-cache identity, is replayed on
+rescan/restart, and supplies normalization and generation without a foreign loose-file locator.
+Once sealed, config-only provisioning is removed from resident component downloads; its presence
+alone never marks the stock DiT installed. Unknown provider fields and precision provenance survive.
+Native ConvRot precision is derived from the validated complete descriptor/tensor inventory as
+`context.sourceEncoding = "convrot_int8"`, then stamped as `importQuantFormat` only after plan
+validation. The approximate header hint `int8_tensorwise_per_row` is not a generic decoder claim;
+source encoding is recomputed on every inspection and unknown context encoding tokens refuse.
+The selected shared precision is persisted as `importComponentTier`, independently of imported
+DiT precision. Both native providers consume that tier and each persisted repository/revision
+binding directly, never `refs/main`, operator directory overrides, or a stock tier search. Explicit
+precision controls may confirm the selected shared tier but cannot silently substitute another
+closure. Assets retain the exact selected tier and component download bindings.
+Readiness and generation compare the bound DiT's `text_dim`, `in_channels` and
+`audio_in_channels` with the actual pinned text encoder hidden size and video/audio VAE latent
+channels. Already-resident complete components are checked before import publication too; missing
+or partial asynchronous component downloads remain unready. These interface checks do not impose
+whole-config equality, published trunk geometry, or stock rope/sampling schedules on a fine-tune.
+
+Interrupted managed transfers discard staging and can retry. A process interrupted after the
+managed commit can replay H3 publication only when the committed install marker belongs to that
+same job and the persisted source plan still verifies; another job's install is never replaced.
+Uploaded model inputs are retained across failed attempts and process restarts (hard-linked into
+staging on the same volume rather than consumed). Successful publication releases the upload;
+only unowned or explicitly cleared/expired retry inputs use the 24-hour stale-upload cleanup policy.
+Queued, active, failed, canceled and interrupted retained model-import jobs protect their exact
+upload input through both synchronous restart and deferred maintenance sweeps, regardless of age.
+Checksum recovery uses the same normalization as initial ingestion, including `sha256:` prefixes.
+Cancellation and manifest-publication failures roll back unpublished managed installs. Linked
+source drift makes the imported entry incomplete; an explicit rescan refreshes the binding while
+retaining its original base/partition declaration. Relinking preserves root and checkpoint identity.
+Duplicate content is reported to the caller for either ownership mode, never automatically deleted.
+Provider resolution retains a cross-process source lease for dense, native and sharded imports,
+in addition to any derivative lease. Removal refuses in-use sources before touching files or the
+model registry. Managed removal owns only the app install; linked removal drops app metadata and
+derivatives without changing library bytes. Multiple catalog names referencing one linked source
+retain its plan until the last name is removed; a refused new alias cannot invalidate an existing
+model's unchanged binding.
+
+The Linux parity lane provisions the distro FFmpeg through the canonical signed Ubuntu
+archives rather than the hosted image's Azure-first mirror list. This changes only the
+download route: the image's suites, components, keyring and package verification remain
+intact, and the real encode/decode tests remain mandatory (`SCENEWORKS_REQUIRE_FFMPEG=1`).
+
 ---
 
 ## 1. Summary of decisions

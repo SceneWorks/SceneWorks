@@ -7529,6 +7529,50 @@ fn video_job_typed(job_type: JobType, payload: Value, requested_gpu: &str) -> Cr
     }
 }
 
+/// sc-26691, the upgrade window: a MiniMax-H3 job queued before `referenceImageResizeMode`
+/// existed carries no key, and the worker that claims it renders the engine default `match`. The
+/// claim stamps exactly that onto the PERSISTED job, so its later replay reproduces what ran
+/// rather than reading the absence as a pre-upgrade (`diffusers`) render.
+#[test]
+fn claiming_an_unstamped_h3_job_stamps_the_resize_mode_it_renders() {
+    let store = store("h3-claim-resize-stamp");
+    register_gpu_worker(&store, "worker-mlx", "mlx", video_caps());
+    let legacy = store
+        .create_job(video_job_with(
+            json!({
+                "model": "minimax_h3",
+                "mode": "text_to_video",
+                "prompt": "a lighthouse",
+                "advanced": { "referenceImageShortEdge": 1536 }
+            }),
+            "auto",
+        ))
+        .expect("job creates");
+    assert!(legacy.payload["advanced"]
+        .get("referenceImageResizeMode")
+        .is_none());
+
+    let claimed = store
+        .claim_next_job("worker-mlx")
+        .expect("claim ok")
+        .expect("the mlx worker claims the H3 job");
+    assert_eq!(claimed.id, legacy.id);
+    assert_eq!(
+        claimed.payload["advanced"]["referenceImageResizeMode"],
+        json!("match")
+    );
+    assert_eq!(
+        claimed.payload["advanced"]["referenceImageShortEdge"],
+        json!(1536)
+    );
+    let persisted = store.get_job(&legacy.id).expect("job reads");
+    assert_eq!(
+        persisted.payload["advanced"]["referenceImageResizeMode"],
+        json!("match"),
+        "the stamp is durable, not only in the claim response"
+    );
+}
+
 #[test]
 fn mlx_eligible_video_job_defers_from_torch_worker_to_idle_mlx_worker() {
     let store = store("mlx-video-routing-defer");

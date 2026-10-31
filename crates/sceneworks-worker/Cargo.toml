@@ -67,6 +67,7 @@ tokio = { version = "1.40", features = ["fs", "io-util", "macros", "process", "r
 uuid = { version = "1.11", features = ["v4"] }
 
 [dev-dependencies]
+sceneworks-core = { path = "../sceneworks-core", features = ["test-support"] }
 axum = "0.7"
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "354b41ccaccdc14afccff0d0fb1ae1b0be04836e" }
 quote = "1.0"
@@ -82,9 +83,10 @@ tracing-subscriber = { workspace = true }
 sceneworks-image-quality = { path = "../sceneworks-image-quality" }
 
 [features]
-# Opt-in integration-test access to the existing trainer-loader seam. No runtime
-# bundle or ordinary worker build enables this feature.
-test-support = ["dep:mlx-gen-moss-image", "dep:candle-gen-moss-image", "dep:sceneworks-gen-core-testkit"]
+# Opt-in test seams, enabled by no runtime bundle or ordinary worker build: synthetic CPU import
+# fixtures shared with mounted API/real-utility-worker tests, and integration-test access to the
+# existing trainer-loader seam.
+test-support = ["sceneworks-core/test-support", "dep:mlx-gen-moss-image", "dep:candle-gen-moss-image", "dep:sceneworks-gen-core-testkit"]
 # Native Candle inference stays opt-in because CUDA toolchain/runtime requirements do not belong in
 # the ordinary desktop build. The bundle owns the complete provider and LLM composition.
 backend-candle = ["dep:runtime-cuda", "dep:candle-gen", "dep:candle-gen-ltx", "dep:ort"]

@@ -81,6 +81,7 @@ import {
   turboRecipeSummary,
   turboVariantsForModel,
 } from "../minimaxH3Turbo.js";
+import { isMinimaxH3Entry, recipeReferenceResize } from "../minimaxH3ReferenceResize.js";
 import { PROMPT_REFINE_MODEL_ID, WAN_A14B_LIGHTNING_MODEL_IDS } from "../constants.js";
 import {
   DEFAULT_MAC_CAPABILITIES,
@@ -359,11 +360,17 @@ export function VideoStudio() {
     videoModels[0]?.id ??
     ltxVideoModelId;
   const [model, setModel] = useState(saved.model ?? defaultVideoModelId);
+  const [expectedImportedModelRef, setExpectedImportedModelRef] = useState(saved.expectedImportedModelRef ?? null);
+  // sc-26691: the MiniMax-H3 reference-sizing knobs a replayed H3 recipe recorded (the studio has
+  // no control for them). Replay-only state, like the imported identity above.
+  const [replayReferenceResize, setReplayReferenceResize] = useState(null);
   // Every USER model picker must retire replay-only state. Automatic catalog/mode/recipe snaps use
   // the raw state setter below and preserve the replay while its target model becomes active.
   const setUserModel = useCallback((nextModel) => {
     setRecipeModelNotice("");
     setRecipeTierRequest(null);
+    setExpectedImportedModelRef(null);
+    setReplayReferenceResize(null);
     setModel(nextModel);
   }, []);
   const textEncoderModel =
@@ -394,6 +401,24 @@ export function VideoStudio() {
     }
   }, [macVideoModels, model]);
   const selectedModel = videoModels.find((item) => item.id === model) ?? videoModels[0];
+  // Imported catalog entries carry their explicit task partition; an id prefix/family alone
+  // cannot prove FL2VA support (Ref2VA shares the same architecture).
+  // An IMPORTED H3 partition that serves a last-only request (sc-26687). Stock `minimax_h3` is
+  // deliberately NOT in this set: an ambient first frame is part of the shipped stock behaviour
+  // for that model, and changing it here would alter an existing model rather than fix the
+  // import platform this epic is about.
+  const importedLastOnlyModel = (entry) => Boolean(
+    entry?.family === "minimax-h3" && entry?.baseModel === "minimax_h3" &&
+    entry?.importSourceShape === "transformer_directory" &&
+    Boolean(entry?.importPlan?.checkpointId?.trim?.()) &&
+    ["fl2va", "hybrid"].includes(entry?.minimaxH3Partition) &&
+    entry?.capabilities?.includes("image_to_video")
+  );
+  const supportsLastOnly = (entry) => entry?.id === "minimax_h3" || importedLastOnlyModel(entry);
+  const acceptsLastOnly = supportsLastOnly(selectedModel);
+  // Whether an ambient first frame must be withheld from this model's request (sc-26687).
+  // IMPORTED H3 partitions only; stock `minimax_h3` keeps its shipped behaviour.
+  const importedLastOnly = importedLastOnlyModel(selectedModel);
   const ltx25Dev = model === ltx25VideoModelId && transformerVariant === "dev";
   const ltx25AutoDurationEnabled = model === ltx25VideoModelId && autoDuration;
   // Multi-reference SCAIL-2 needs a reference/mask pair per character. Keep this source-ready UI
@@ -539,11 +564,29 @@ export function VideoStudio() {
   // (sendAssetToVideo) still sets the source directly in an effect below, overriding this seed. A
   // one-shot restore-validation effect drops any restored id that no longer resolves once the asset
   // / person-track catalogs land.
-  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId || (saved.model === "minimax_h3" && saved.lastFrameAssetId));
-  const [sourceAssetId, setSourceAssetId] = useState(
-    hasRestoredSource
-      ? (saved.sourceAssetId ?? "")
-      : (["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : ""),
+  const hasRestoredSource = Boolean(saved.sourceAssetId || saved.sourceClipAssetId || (supportsLastOnly(videoModels.find((entry) => entry.id === saved.model)) && saved.lastFrameAssetId));
+  const restoredSourceAssetId = hasRestoredSource ? (saved.sourceAssetId ?? "") : "";
+  const ambientSourceAssetId = !hasRestoredSource && ["image", "frame"].includes(selectedAsset?.type) ? selectedAsset.id : "";
+  const [sourceAssetId, setSourceAssetId] = useState(restoredSourceAssetId || ambientSourceAssetId);
+  // Where the current FIRST frame came from. "ambient" = the studio adopted the app's current
+  // asset selection on the user's behalf (the seed above, or the selection sync below);
+  // "explicit" = the user picked it here, or a recipe restored it. A last-only-capable IMPORTED
+  // model must not condition on a first frame the user never chose: choosing the LAST frame frames
+  // the request around it, and an ambient first frame would ride along as an invented first frame
+  // (sc-26687 S8). The API accepts a last-only request, so the studio has to be able to send one.
+  //
+  // It is STATE, not a ref, so it is persisted with the snapshot and can never drift from the value
+  // the request is built from. A snapshot written before this field existed restores as "explicit",
+  // which is the behaviour that shipped.
+  const [sourceAssetOrigin, setSourceAssetOrigin] = useState(
+    // A snapshot that records the origin is authoritative. One that does NOT is not proof that the
+    // user chose the frame: the studio's ambient seed is the common producer of a saved
+    // sourceAssetId, so a snapshot without the origin is read as ambient. That only ever withholds
+    // a frame from an IMPORTED last-only request, so no other model is affected — and the import
+    // platform ships with this epic, so there is no such legacy state in the wild either.
+    saved.sourceAssetOrigin === "explicit"
+      ? "explicit"
+      : (restoredSourceAssetId ? "ambient" : (ambientSourceAssetId ? "ambient" : "none")),
   );
   // How the starting image is fitted to the output resolution for the image-conditioned
   // modes (sc-6139), mirroring Image Studio Edit. Crop/Pad only — video has no inpaint
@@ -1078,6 +1121,9 @@ export function VideoStudio() {
       return;
     }
     if (selectedAsset.type === "image" || selectedAsset.type === "frame") {
+      // The app's selection, not a first-frame pick made in this studio: it stays AMBIENT, so a
+      // last-only request never inherits it as a first frame the user never chose.
+      setSourceAssetOrigin("ambient");
       setSourceAssetId(selectedAsset.id);
     }
     if (selectedAsset.type === "video") {
@@ -1125,6 +1171,8 @@ export function VideoStudio() {
       setSourceClipAssetId(selectedAsset.id);
     }
     if (selectedAsset?.type === "image" || selectedAsset?.type === "frame") {
+      // The user sent THIS asset to the Video Studio: an explicit first frame.
+      setSourceAssetOrigin("explicit");
       setSourceAssetId(selectedAsset.id);
     }
     // A persistent launch is applied once per launch/asset identity, not on catalog object refresh.
@@ -1222,9 +1270,18 @@ export function VideoStudio() {
   useEffect(() => {
     if (launchRequest?.view !== "Video" || !launchRequest.recipe) {
       setRecipeTierRequest(null);
+      // A non-recipe launch is a new request, not a continuation of the last replay: carrying its
+      // original imported identity onto a different selection would be refused as a mismatch.
+      if (launchRequest?.view === "Video") {
+        setExpectedImportedModelRef(null);
+        setReplayReferenceResize(null);
+      }
       return;
     }
     const recipe = launchRequest.recipe;
+    setExpectedImportedModelRef(recipe.importedModelRef ?? null);
+    // How the recorded H3 clip encoded its references (`diffusers` for a pre-sc-26691 asset).
+    setReplayReferenceResize(recipeReferenceResize(recipe));
     const settings = recipe.normalizedSettings ?? {};
     const rawSettings = recipe.rawAdapterSettings ?? {};
     const { loraIds, loraWeights: recipeWeights } = recipeLoraSelection(recipe);
@@ -1348,6 +1405,8 @@ export function VideoStudio() {
 
     // Sources. A deleted asset is left to the existing `hasInputs` + validation machinery to
     // surface — the same path a user hits by clearing a picker, rather than a bespoke gate.
+    // A recipe's recorded source is the user's own earlier pick, restored verbatim.
+    setSourceAssetOrigin(sourceAssetIdFromRecipe ? "explicit" : "none");
     setSourceAssetId(sourceAssetIdFromRecipe);
     setLastFrameAssetId(lastFrameAssetIdFromRecipe);
     setSourceClipAssetId(settings.sourceClipAssetId ?? "");
@@ -1545,6 +1604,11 @@ export function VideoStudio() {
     // not model defaults, so they persist here and restore across a full restart — kept out of the
     // defaults-reset path. Restore-validation (above) drops any id whose asset/track is gone.
     sourceAssetId,
+    // How that first frame was chosen (sc-26687): "ambient" = the app's current selection,
+    // adopted on the user's behalf; "explicit" = the user's own pick. Only an explicit one may
+    // ride along in an imported last-only request.
+    sourceAssetOrigin,
+    expectedImportedModelRef,
     lastFrameAssetId,
     sourceClipAssetId,
     bridgeRightClipAssetId,
@@ -1707,7 +1771,7 @@ export function VideoStudio() {
     outgoingSourceClipAssetIds.length === 0;
   const hasInputs =
     mode === "text_to_video" ||
-    (mode === "image_to_video" && (sourceAssetId || (model === "minimax_h3" && lastFrameAssetId))) ||
+    (mode === "image_to_video" && (sourceAssetId || (acceptsLastOnly && lastFrameAssetId))) ||
     (mode === "first_last_frame" && sourceAssetId && lastFrameAssetId) ||
     (mode === "extend_clip" && sourceClipAssetId) ||
     (mode === "video_bridge" && sourceClipAssetId && bridgeRightClipAssetId) ||
@@ -1891,6 +1955,7 @@ export function VideoStudio() {
         // (and the worker discards anyway) would be a ghost input on the recipe.
         negativePrompt: supportsNegativePrompt ? (stackActive ? composedStack.negativePrompt : negativePrompt) : "",
         model,
+        expectedImportedModelRef: expectedImportedModelRef ?? undefined,
         // The duration head chooses a legal duration only when the user explicitly opts in. Do not
         // send the visible manual-picker value alongside it: provider precedence is intentionally
         // represented by absence, so an explicit duration always wins by switching this toggle off.
@@ -1910,14 +1975,28 @@ export function VideoStudio() {
         presetPromptResolvedClientSide: stackActive || styleApplied || undefined,
         characterId: characterId || null,
         characterLookId: characterLookId || null,
-        sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode) ? sourceAssetId || null : null,
+        // The authoritative guard (sc-26687): an IMPORTED H3 partition that accepts a last-only
+        // request must never carry a first frame the user did not choose. The picker clears the
+        // ambient one when a last frame is picked, but the ambient selection can also arrive
+        // afterwards and the mode can change afterwards, so the request is decided HERE, where
+        // the payload is built. A first frame the user chose here is theirs and is sent.
+        //
+        // The withdrawal needs a LAST frame to be about: without one this is an ordinary
+        // image-to-video request, and withholding the first frame would leave it with no source
+        // at all — which the API refuses ("Image to Video requires a source image"), while the
+        // studio's own input check still saw the raw id and left Render enabled.
+        sourceAssetId: ["image_to_video", "first_last_frame"].includes(mode)
+          ? (importedLastOnly && mode === "image_to_video" && sourceAssetOrigin === "ambient" && lastFrameAssetId
+            ? null
+            : (sourceAssetId || null))
+          : null,
         // Crop/Pad fit for the starting image (sc-6139) — only the image-conditioned
         // modes carry it; `effectiveFitMode(_, false)` coerces any stale outpaint back to
         // crop (video has no inpaint mask). Other modes omit it (DTO defaults to crop).
         fitMode: ["image_to_video", "first_last_frame"].includes(mode)
           ? effectiveFitMode(fitMode, false)
           : undefined,
-        lastFrameAssetId: mode === "first_last_frame" || (model === "minimax_h3" && mode === "image_to_video") ? lastFrameAssetId || null : null,
+        lastFrameAssetId: mode === "first_last_frame" || (acceptsLastOnly && mode === "image_to_video") ? lastFrameAssetId || null : null,
         sourceClipAssetId: [
           "extend_clip",
           "replace_person",
@@ -1975,6 +2054,9 @@ export function VideoStudio() {
           // the worker; no backend change). Emitted only when a style is applied so styleless recipes
           // stay byte-identical.
           ...(styleApplied ? { styleId, stylePrompt: stylePromptBase } : {}),
+          // sc-26691: a replayed H3 recipe's reference sizing, only while an H3 model is active
+          // (any other family refuses the key at enqueue).
+          ...(replayReferenceResize && isMinimaxH3Entry(selectedModel) ? replayReferenceResize : {}),
           ...(model === ltxVideoModelId ? { ltxPipeline, distilledVariant, precision } : {}),
           ...(model === ltx25VideoModelId
             ? {
@@ -2175,13 +2257,17 @@ export function VideoStudio() {
                 eyebrow="Video Studio"
                 importAsset={importAsset}
                 label="First frame"
-                onChange={setSourceAssetId}
+                onChange={(value) => {
+                  // The user picked the first frame here: it is theirs, and it stays theirs.
+                  setSourceAssetOrigin(value ? "explicit" : "none");
+                  setSourceAssetId(value);
+                }}
                 projectId={activeProject?.id}
                 value={sourceAssetId}
               />
             ) : null}
 
-            {mode === "first_last_frame" || (model === "minimax_h3" && mode === "image_to_video") ? (
+            {mode === "first_last_frame" || (acceptsLastOnly && mode === "image_to_video") ? (
               <ImageEditSourcePickerField
                 assets={imageAssets}
                 buttonLabel="Select image"
@@ -2190,7 +2276,20 @@ export function VideoStudio() {
                 eyebrow="Video Studio"
                 importAsset={importAsset}
                 label="Last frame"
-                onChange={setLastFrameAssetId}
+                onChange={(value) => {
+                  setLastFrameAssetId(value);
+                  // Choosing the LAST frame frames the request around it. In Image-to-Video on an
+                  // IMPORTED H3 partition that accepts a last-only request, the studio's ambient
+                  // first frame (the app's current asset, never chosen here) is dropped rather
+                  // than sent as an invented first frame. A first frame the user DID choose stays,
+                  // and so does the ambient one in First -> Last, where the first frame is REQUIRED.
+                  // The request itself is guarded at submit time as well, because this picker is
+                  // not the only way the ambient selection can arrive.
+                  if (value && mode === "image_to_video" && importedLastOnly && sourceAssetOrigin === "ambient") {
+                    setSourceAssetOrigin("none");
+                    setSourceAssetId("");
+                  }
+                }}
                 projectId={activeProject?.id}
                 value={lastFrameAssetId}
               />

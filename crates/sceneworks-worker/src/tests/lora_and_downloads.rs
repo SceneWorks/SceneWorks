@@ -1,4 +1,3 @@
-
 #[tokio::test]
 async fn lora_file_and_directory_import_preserve_copy_semantics() {
     let temp = tempdir().expect("tempdir creates");
@@ -180,7 +179,9 @@ async fn paired_moe_upload_rejects_single_digest_before_network_or_file_move() {
         .await
         .expect_err("one digest cannot verify a two-file upload");
     assert!(
-        error.to_string().contains("ambiguous with secondarySourcePath"),
+        error
+            .to_string()
+            .contains("ambiguous with secondarySourcePath"),
         "digest contract rejection must win before the unreachable heartbeat: {error:?}"
     );
     assert!(high_upload.is_file(), "high staged source was not moved");
@@ -317,13 +318,16 @@ async fn lora_url_import_records_the_downloaded_adapters_declared_metadata() {
     let written = tokio::fs::read_to_string(&manifest_path)
         .await
         .expect("manifest written");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-        &written,
-    ))
-        .expect("manifest parses as JSON");
+    let manifest: Value =
+        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(&written))
+            .expect("manifest parses as JSON");
     let entry = manifest["loras"]
         .as_array()
-        .and_then(|entries| entries.iter().find(|entry| entry["id"] == "mage_flow_realism"))
+        .and_then(|entries| {
+            entries
+                .iter()
+                .find(|entry| entry["id"] == "mage_flow_realism")
+        })
         .expect("the imported entry is in the manifest");
 
     assert_eq!(entry["networkType"], json!("lokr"));
@@ -729,7 +733,10 @@ fn derived_tokenizer_overlay_revisions_are_pinned_commits_not_main() {
     ] {
         let (_, revision, _) =
             derived_tokenizer_overlay(base, snap).expect("known base has an overlay");
-        assert_ne!(revision, "main", "{base} tokenizer must pin a fixed revision");
+        assert_ne!(
+            revision, "main",
+            "{base} tokenizer must pin a fixed revision"
+        );
         assert_eq!(
             revision.len(),
             40,
@@ -1249,18 +1256,28 @@ async fn spawn_empty_tree_stub() -> (String, std::sync::Arc<std::sync::Mutex<Vec
 async fn spawn_tree_stub_with_files(
     files: Vec<(&'static str, u64)>,
 ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
-    use std::sync::{Arc, Mutex};
-    type Posts = Arc<Mutex<Vec<Value>>>;
-    let sizes: Arc<std::collections::HashMap<String, u64>> = Arc::new(
-        files
-            .iter()
-            .map(|(path, size)| ((*path).to_owned(), *size))
-            .collect(),
-    );
-    let tree = Arc::new(Value::Array(
+    spawn_tree_stub_with_bodies(
         files
             .into_iter()
-            .map(|(path, size)| json!({ "type": "file", "path": path, "size": size }))
+            .map(|(path, size)| (path.to_owned(), vec![b'x'; size as usize]))
+            .collect(),
+    )
+    .await
+}
+
+async fn spawn_tree_stub_with_bodies(
+    files: Vec<(String, Vec<u8>)>,
+) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Value>>>) {
+    use std::sync::{Arc, Mutex};
+    type Posts = Arc<Mutex<Vec<Value>>>;
+    type ClaimedRows = Arc<Mutex<Option<(tempfile::TempDir, sceneworks_core::jobs_store::JobsStore)>>>;
+    type StubState = (Posts, ClaimedRows);
+    let bodies: Arc<std::collections::HashMap<String, Vec<u8>>> =
+        Arc::new(files.into_iter().collect());
+    let tree = Arc::new(Value::Array(
+        bodies
+            .iter()
+            .map(|(path, bytes)| json!({"type":"file","path":path,"size":bytes.len()}))
             .collect(),
     ));
     let tree_route = {
@@ -1273,27 +1290,57 @@ async fn spawn_tree_stub_with_files(
     // Serve exactly the byte count the tree declared for this path, so the transfer isn't rejected as
     // truncated (see `download_snapshot_rejects_truncated_file`).
     let blob_route = {
-        let sizes = sizes.clone();
+        let bodies = bodies.clone();
         move |axum::extract::Path((_owner, _repo, _revision, path)): axum::extract::Path<(
             String,
             String,
             String,
             String,
         )>| {
-            let sizes = sizes.clone();
+            let bodies = bodies.clone();
             async move {
-                match sizes.get(&path) {
-                    Some(size) => vec![b'x'; *size as usize].into_response(),
+                match bodies.get(&path) {
+                    Some(bytes) => bytes.clone().into_response(),
                     None => axum::http::StatusCode::NOT_FOUND.into_response(),
                 }
             }
         }
     };
-    async fn job_route(axum::extract::Path(job_id): axum::extract::Path<String>) -> Response {
+    async fn job_route(
+        State((_, claims)): State<StubState>,
+        axum::extract::Path(job_id): axum::extract::Path<String>,
+    ) -> Response {
+        if let Some((_, store)) = claims.lock().unwrap().as_ref() {
+            if let Ok(job) = store.get_job(&job_id) { return Json(job).into_response(); }
+        }
         Json(job_snapshot_json(&job_id, false)).into_response()
     }
+    async fn claim_fixture_job(
+        State((_, claims)): State<StubState>,
+        Json(job): Json<JobSnapshot>,
+    ) -> Response {
+        use sceneworks_core::jobs_store::{CreateJob, JobsStore, RegisterWorker};
+        assert_eq!(job.job_type, super::JobType::ModelImport);
+        let temp = tempfile::tempdir().unwrap();
+        let store = JobsStore::new(temp.path().join("claims.db"));
+        store.initialize().unwrap();
+        store.create_job_with_id(job.id.clone(), CreateJob {
+            job_type: job.job_type, project_id: job.project_id, project_name: job.project_name,
+            payload: job.payload, requested_gpu: job.requested_gpu, source_job_id: job.source_job_id,
+            duplicate_of_job_id: job.duplicate_of_job_id, attempts: job.attempts, initial_status: None,
+        }).unwrap();
+        let worker_id = job.worker_id.expect("fixture worker owns its claim");
+        store.register_worker(RegisterWorker {
+            worker_id: worker_id.clone(), gpu_id: "cpu".into(), gpu_name: None,
+            capabilities: vec![super::WorkerCapability::ModelImport], loaded_models: vec![], utilization: None,
+        }).unwrap();
+        let claimed = store.claim_next_job(&worker_id).unwrap().expect("actual fixture row is claimable");
+        assert_eq!(claimed.id, job.id);
+        *claims.lock().unwrap() = Some((temp, store));
+        Json(claimed).into_response()
+    }
     async fn progress_route(
-        State(posts): State<Posts>,
+        State((posts, _)): State<StubState>,
         axum::extract::Path(job_id): axum::extract::Path<String>,
         Json(body): Json<Value>,
     ) -> Response {
@@ -1315,8 +1362,12 @@ async fn spawn_tree_stub_with_files(
         .route("/:owner/:repo/resolve/:revision/*path", get(blob_route))
         .route("/api/v1/jobs/:job_id", get(job_route))
         .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat_route))
-        .with_state(posts.clone());
+        .route("/fixture/claimed-model-import", post(claim_fixture_job))
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        )
+        .with_state((posts.clone(), Arc::new(Mutex::new(None))));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener binds");
@@ -1374,7 +1425,10 @@ async fn model_download_fails_when_the_tier_resolves_no_files() {
         .join("models")
         .join(safe_download_dir("SceneWorks/sdxl-base-mlx"))
         .join(INSTALL_MARKER);
-    assert!(!marker.exists(), "no completion marker for a zero-file download");
+    assert!(
+        !marker.exists(),
+        "no completion marker for a zero-file download"
+    );
 
     // A Failed progress post naming the empty tier was recorded.
     let posts = posts.lock().expect("posts lock");
@@ -1427,7 +1481,10 @@ async fn model_download_fails_when_one_declared_pattern_matches_nothing() {
         .join("models")
         .join(safe_download_dir("SceneWorks/krea-2-raw-mlx"))
         .join(INSTALL_MARKER);
-    assert!(!marker.exists(), "no completion marker for a partial download");
+    assert!(
+        !marker.exists(),
+        "no completion marker for a partial download"
+    );
 
     let posts = posts.lock().expect("posts lock");
     let failed = posts.iter().any(|post| {
@@ -1441,14 +1498,20 @@ async fn model_download_fails_when_one_declared_pattern_matches_nothing() {
                     message.contains("Incomplete download") && message.contains("q8/tokenizer/*")
                 })
     });
-    assert!(failed, "expected a failed post naming the unmatched pattern, got {posts:?}");
+    assert!(
+        failed,
+        "expected a failed post naming the unmatched pattern, got {posts:?}"
+    );
     // The patterns that DID match must not be blamed.
     let blames_matched = posts.iter().any(|post| {
         post.get("message")
             .and_then(Value::as_str)
             .is_some_and(|message| message.contains("q8/transformer/*"))
     });
-    assert!(!blames_matched, "only the unmatched pattern should be named");
+    assert!(
+        !blames_matched,
+        "only the unmatched pattern should be named"
+    );
 }
 
 #[tokio::test]
@@ -1535,12 +1598,17 @@ async fn lora_download_fails_when_one_of_several_declared_files_is_absent() {
                         && message.contains("low_noise.safetensors")
                 })
     });
-    assert!(failed, "expected a failed post naming the absent half, got {posts:?}");
+    assert!(
+        failed,
+        "expected a failed post naming the absent half, got {posts:?}"
+    );
     // The half that DID resolve must not be blamed.
     let blames_present = posts.iter().any(|post| {
         post.get("message")
             .and_then(Value::as_str)
-            .is_some_and(|message| message.contains("nothing matches") && message.contains("high_noise"))
+            .is_some_and(|message| {
+                message.contains("nothing matches") && message.contains("high_noise")
+            })
     });
     assert!(!blames_present, "only the absent file should be named");
 }
@@ -1778,15 +1846,10 @@ async fn pinned_snapshot_layout_materializes_without_network() {
     let client = reqwest::Client::new();
     let repo_dir = temp.path().join(pin.repo_slug());
 
-    let snapshot = HuggingFaceSnapshot::resolve(
-        &client,
-        &settings,
-        &pin.repo,
-        &pin.revision,
-        &pin.files,
-    )
-    .await
-    .expect("resolves the stubbed tree");
+    let snapshot =
+        HuggingFaceSnapshot::resolve(&client, &settings, &pin.repo, &pin.revision, &pin.files)
+            .await
+            .expect("resolves the stubbed tree");
     assert_eq!(
         snapshot.files.len(),
         pin.files.len(),
@@ -1888,10 +1951,7 @@ async fn spawn_pinned_repo_stub(
         .iter()
         .map(|file| (file.clone(), format!("content of {file}").into_bytes()))
         .collect();
-    contents.insert(
-        decoy.to_owned(),
-        format!("content of {decoy}").into_bytes(),
-    );
+    contents.insert(decoy.to_owned(), format!("content of {decoy}").into_bytes());
 
     #[derive(Clone)]
     struct PinnedRepoState {
@@ -2034,12 +2094,21 @@ async fn resolve_follows_tree_pagination_across_pages() {
     let settings = test_settings(base_url, None);
     let client = reqwest::Client::new();
 
-    let snapshot =
-        HuggingFaceSnapshot::resolve(&client, &settings, "owner/repo", "main", &["q8/*".to_owned()])
-            .await
-            .expect("resolves across pages");
+    let snapshot = HuggingFaceSnapshot::resolve(
+        &client,
+        &settings,
+        "owner/repo",
+        "main",
+        &["q8/*".to_owned()],
+    )
+    .await
+    .expect("resolves across pages");
 
-    let paths: Vec<&str> = snapshot.files.iter().map(|file| file.path.as_str()).collect();
+    let paths: Vec<&str> = snapshot
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
     assert_eq!(
         paths,
         vec!["q8/unet/model.safetensors"],
@@ -2069,7 +2138,10 @@ async fn spawn_cancelling_job_stub() -> String {
     let app = Router::new()
         .route("/api/v1/jobs/:job_id", get(job_route))
         .route("/api/v1/jobs/:job_id/progress", post(progress_route))
-        .route("/api/v1/workers/:worker_id/heartbeat", post(heartbeat_route));
+        .route(
+            "/api/v1/workers/:worker_id/heartbeat",
+            post(heartbeat_route),
+        );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listener binds");
@@ -2112,8 +2184,26 @@ fn sha256_hex(path: &std::path::Path) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Hosted HTTP-fixture setup: create and claim a REAL JobsStore row before exercising the worker.
+/// The job GET route then returns that exact row, not a permissive generic lora-import snapshot.
+async fn run_claimed_model_import_fixture(
+    api: &ApiClient,
+    settings: &Settings,
+    client: &reqwest::Client,
+    job: &JobSnapshot,
+) -> super::WorkerResult<()> {
+    claim_model_import_fixture(api, job).await?;
+    super::model_jobs::run_model_import_job(api, settings, client, job).await
+}
+
+async fn claim_model_import_fixture(api: &ApiClient, job: &JobSnapshot) -> super::WorkerResult<()> {
+    let claimed: JobSnapshot = api.post_json("/fixture/claimed-model-import", job).await?;
+    super::model_jobs::validate_import_publication_claim(&api.worker_id, job, &claimed)
+}
+
 struct ManagedImportFixture {
     _temp: tempfile::TempDir,
+    _cache: sceneworks_core::hf_home::test_support::CacheRootGuard,
     settings: Settings,
     source: PathBuf,
     install_dir: PathBuf,
@@ -2125,10 +2215,7 @@ async fn managed_import_fixture(base_url: String) -> ManagedImportFixture {
     managed_import_fixture_with_id(base_url, "managed_krea").await
 }
 
-async fn managed_import_fixture_with_id(
-    base_url: String,
-    model_id: &str,
-) -> ManagedImportFixture {
+async fn managed_import_fixture_with_id(base_url: String, model_id: &str) -> ManagedImportFixture {
     let temp = tempdir().expect("tempdir creates");
     let mut settings = test_settings(base_url.clone(), None);
     settings.api_url = base_url;
@@ -2139,14 +2226,18 @@ async fn managed_import_fixture_with_id(
     let manifest_path = manifests.join("user.models.jsonc");
     std::fs::write(&manifest_path, r#"{ "schemaVersion": 1, "models": [] }"#)
         .expect("manifest writes");
-    let source = settings.data_dir.join("models/incoming/kreamania.safetensors");
-    write_krea_native_safetensors(&source, 0x5a);
-    let install_dir = settings
+    let source = settings
         .data_dir
-        .join("models/imports")
-        .join(model_id);
+        .join("models/incoming/kreamania.safetensors");
+    write_krea_native_safetensors(&source, 0x5a);
+    let install_dir = settings.data_dir.join("models/imports").join(model_id);
+    let cache = sceneworks_core::hf_home::test_support::CacheRootGuard::new(
+        settings.data_dir.clone(),
+        settings.data_dir.join("cache/fixture-hub"),
+    );
     ManagedImportFixture {
         _temp: temp,
+        _cache: cache,
         settings,
         source,
         install_dir,
@@ -2218,9 +2309,7 @@ impl ManagedImportFixture {
             &self.settings.data_dir,
         );
         assert!(
-            store
-                .record(&format!("managed/{}", self.model_id))
-                .is_err(),
+            store.record(&format!("managed/{}", self.model_id)).is_err(),
             "{context}"
         );
         assert_eq!(
@@ -2264,7 +2353,7 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
         .compile_linked(&root.root_id, "kreamania.safetensors")
         .expect("a linked twin compiles");
 
-    super::model_jobs::run_model_import_job(
+    run_claimed_model_import_fixture(
         &api,
         &fixture.settings,
         &client,
@@ -2293,12 +2382,19 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
 
     // Committed: the install is at the path imported models have always occupied.
     assert!(fixture.install_dir.join("kreamania.safetensors").is_file());
-    assert_eq!(sha256_hex(&fixture.install_dir.join("kreamania.safetensors")), expected);
-    assert!(fixture.source.is_file(), "a local copy never moves the user's file");
+    assert_eq!(
+        sha256_hex(&fixture.install_dir.join("kreamania.safetensors")),
+        expected
+    );
+    assert!(
+        fixture.source.is_file(),
+        "a local copy never moves the user's file"
+    );
 
     // Published: the plan resolves and re-verifies, and its locator is MANAGED with provenance.
-    let store =
-        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+        &fixture.settings.data_dir,
+    );
     let resolved = store
         .resolve("managed/managed_krea")
         .expect("the published plan resolves");
@@ -2320,8 +2416,13 @@ async fn managed_model_import_commits_atomically_and_stamps_the_plan_binding() {
 
     // Bound: the manifest entry carries the checkpoint identity the plan route resolves through,
     // beside the installed path its family's bespoke lane still uses.
-    let entry = fixture.manifest_entry().expect("the import writes a manifest entry");
-    assert_eq!(entry["importPlan"]["checkpointId"], json!("managed/managed_krea"));
+    let entry = fixture
+        .manifest_entry()
+        .expect("the import writes a manifest entry");
+    assert_eq!(
+        entry["importPlan"]["checkpointId"],
+        json!("managed/managed_krea")
+    );
     assert_eq!(entry["importSourceShape"], json!("transformer_file"));
     assert_eq!(
         entry["paths"]["model"],
@@ -2374,7 +2475,7 @@ async fn an_install_under_a_registered_variant_id_is_confirmed_against_its_regis
     let api = ApiClient::new(&fixture.settings);
     let client = reqwest::Client::new();
 
-    super::model_jobs::run_model_import_job(
+    run_claimed_model_import_fixture(
         &api,
         &fixture.settings,
         &client,
@@ -2425,9 +2526,14 @@ async fn a_hash_mismatched_managed_import_leaves_no_partial_install() {
     let api = ApiClient::new(&fixture.settings);
     let client = reqwest::Client::new();
 
-    super::model_jobs::run_model_import_job(&api, &fixture.settings, &client, &fixture.job(Some(&declared)))
-        .await
-        .expect("a hash mismatch fails the job rather than erroring the worker");
+    run_claimed_model_import_fixture(
+        &api,
+        &fixture.settings,
+        &client,
+        &fixture.job(Some(&declared)),
+    )
+    .await
+    .expect("a hash mismatch fails the job rather than erroring the worker");
 
     fixture.assert_nothing_installed("hash mismatch");
 
@@ -2480,4 +2586,951 @@ async fn a_cancelled_managed_import_leaves_no_partial_install() {
     );
 
     fixture.assert_nothing_installed("cancel");
+}
+
+/// The managed import job for a dense MiniMax-H3 DiT DIRECTORY (sc-26680), with the request
+/// guessing `type: "image"` — content decides.
+fn h3_import_job(fixture: &ManagedImportFixture, source: &std::path::Path) -> JobSnapshot {
+    h3_import_job_for_partition(fixture, source, "fl2va")
+}
+
+/// Choose the task and its complete component declaration together, BEFORE immutable capture.
+fn h3_import_job_for_partition(
+    fixture: &ManagedImportFixture,
+    source: &std::path::Path,
+    partition: &str,
+) -> JobSnapshot {
+    assert!(matches!(partition, "fl2va" | "ref2va" | "hybrid"));
+    crate::minimax_h3_import_fixture::stage_component_snapshots(&fixture.settings.data_dir);
+    let mut job = fixture.job(None);
+    job.payload.insert(
+        "sourcePath".to_owned(),
+        json!(source.to_str().expect("utf-8 source")),
+    );
+    let entry = job
+        .payload
+        .get_mut("manifestEntry")
+        .and_then(Value::as_object_mut)
+        .expect("manifest entry");
+    // What the API's synchronous gate resolved the family to from the same bytes.
+    entry.insert("family".to_owned(), json!("minimax-h3"));
+    entry.insert("baseModel".to_owned(), json!(if partition == "ref2va" { "minimax_h3_ref" } else { "minimax_h3" }));
+    entry.insert("minimaxH3Partition".to_owned(), json!(partition));
+    entry.insert("importComponentTier".to_owned(), json!("q4"));
+    entry.insert(
+        "downloads".to_owned(),
+        json!(crate::minimax_h3_import_fixture::component_downloads(
+            "q4", partition
+        )),
+    );
+    job
+}
+
+/// sc-26680 AC1: a dense H3 DiT component directory imported through the existing managed import
+/// job persists a plan the H3 assembly binds and becomes a selectable VIDEO entry carrying the
+/// validated binding — the shape `minimax_h3_import_fixture::stage_managed_minimax_h3_import`
+/// builds for the arm tests, pinned here against the real job.
+#[tokio::test]
+async fn managed_h3_dit_import_stamps_a_selectable_video_entry() {
+    let _env = isolate_hf_cache();
+    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let fixture = managed_import_fixture_with_id(base_url, "my_h3_finetune").await;
+    let source = fixture.settings.data_dir.join("models/incoming/my-h3");
+    crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    run_claimed_model_import_fixture(
+        &api,
+        &fixture.settings,
+        &client,
+        &h3_import_job(&fixture, &source),
+    )
+    .await
+    .expect("a dense H3 DiT directory imports");
+
+    let entry = fixture
+        .manifest_entry()
+        .expect("the import writes a manifest entry");
+    let entry = entry.as_object().expect("entry object");
+    assert_eq!(entry["type"], json!("video"), "content decides the type");
+    assert_eq!(entry["family"], json!("minimax-h3"));
+    assert_eq!(entry["importSourceShape"], json!("transformer_directory"));
+    assert_eq!(entry["importQuantFormat"], json!("bf16"));
+    assert_eq!(
+        entry["importPlan"]["checkpointId"],
+        json!("managed/my_h3_finetune")
+    );
+    assert!(
+        sceneworks_core::minimax_h3_import::entry_is_imported_minimax_h3(entry),
+        "the job must stamp the binding every consumer keys on: {entry:?}"
+    );
+    assert_eq!(
+        entry["capabilities"],
+        json!(["text_to_video", "image_to_video", "first_last_frame"])
+    );
+    // The stamped entry advertises exactly the H3 family the native imported route serves
+    // (terminal finding 1): a withdrawn advertisement (missing/empty families) or a family no
+    // imported-H3 lane can claim must fail here, not pass silently.
+    assert_eq!(
+        entry["loraCompatibility"]["families"],
+        json!(["minimax-h3"]),
+        "the imported H3 entry advertises its servable LoRA family: {entry:?}"
+    );
+
+    // The binding is the persisted plan's own, re-derived through the store.
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+        &fixture.settings.data_dir,
+    );
+    let resolved = store
+        .resolve("managed/my_h3_finetune")
+        .expect("the persisted plan resolves");
+    assert_eq!(resolved.family(), "minimax-h3");
+    sceneworks_core::minimax_h3_import::verify_entry_assembly(entry, &resolved.plan)
+        .expect("the stamped binding is the plan's");
+    assert_eq!(entry["importPlan"]["planId"], json!(resolved.plan.plan_id));
+    assert!(
+        sceneworks_core::base_weights::is_minimax_h3_transformer_dir(&fixture.install_dir),
+        "the install is the complete DiT directory the provider opens"
+    );
+
+    // And the arm-test fixture builds the same discriminating fields the job wrote.
+    let data = tempdir().expect("tempdir");
+    let staged =
+        crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(data.path(), "twin");
+    for key in [
+        "type",
+        "family",
+        "importSourceShape",
+        "capabilities",
+        "limits",
+    ] {
+        assert_eq!(staged.entry[key], entry[key], "{key}");
+    }
+    assert_eq!(
+        staged.entry["importPlan"]["assembly"],
+        entry["importPlan"]["assembly"]
+    );
+}
+
+/// sc-26680 E6: an H3 directory carrying a second weight file is an ambiguous assembly — the
+/// provider would map it unbound — so the job refuses and nothing is installed or registered.
+#[tokio::test]
+async fn an_h3_directory_with_a_stray_weight_file_is_refused_and_nothing_is_installed() {
+    let _env = isolate_hf_cache();
+    let (base_url, _posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    let fixture = managed_import_fixture_with_id(base_url, "stray_h3").await;
+    let source = fixture.settings.data_dir.join("models/incoming/stray-h3");
+    crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+    crate::minimax_h3_import_fixture::write_safetensors(
+        &source.join("extra.safetensors"),
+        &[("token_refiner.refiner_blocks.0.x.weight", "BF16")],
+        0x01,
+    );
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+
+    let _ = super::model_jobs::run_model_import_job(
+        &api,
+        &fixture.settings,
+        &client,
+        &h3_import_job(&fixture, &source),
+    )
+    .await;
+
+    assert!(
+        fixture.manifest_entry().is_none(),
+        "an ambiguous H3 assembly must never become a catalog entry"
+    );
+    assert!(!fixture.install_dir.exists(), "nothing may stay installed");
+}
+
+#[tokio::test]
+async fn h3_import_registration_requires_exact_task_compatibility() {
+    let _env = isolate_hf_cache();
+    let (base_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    for (index, declaration, accepted) in [
+        (0, json!({}), false),
+        (
+            1,
+            json!({"baseModel":"wan_2_2","minimaxH3Partition":"fl2va"}),
+            false,
+        ),
+        (
+            2,
+            json!({"baseModel":"minimax_h3","minimaxH3Partition":"ref2va"}),
+            false,
+        ),
+        (
+            3,
+            json!({"baseModel":"minimax_h3_ref","minimaxH3Partition":"ref2va"}),
+            true,
+        ),
+        (
+            4,
+            json!({"baseModel":"minimax_h3","minimaxH3Partition":"hybrid"}),
+            true,
+        ),
+    ] {
+        let id = format!("declared_h3_{index}");
+        let fixture = managed_import_fixture_with_id(base_url.clone(), &id).await;
+        let source = fixture.settings.data_dir.join("models/incoming/declared");
+        crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+        let partition = declaration["minimaxH3Partition"].as_str().unwrap_or("fl2va");
+        let mut job = h3_import_job_for_partition(&fixture, &source, partition);
+        let entry = job.payload["manifestEntry"].as_object_mut().unwrap();
+        entry.remove("baseModel");
+        entry.remove("minimaxH3Partition");
+        entry.extend(declaration.as_object().unwrap().clone());
+        posts.lock().unwrap().clear();
+        run_claimed_model_import_fixture(
+            &ApiClient::new(&fixture.settings),
+            &fixture.settings,
+            &reqwest::Client::new(),
+            &job,
+        )
+        .await.expect("the worker reports declaration refusal or completes the actual claimed import");
+        let updates = posts.lock().unwrap().clone();
+        assert_eq!(updates.iter().any(|post| post["status"] == "completed"), accepted, "{declaration}: {updates:?}");
+        assert_eq!(updates.iter().any(|post| post["status"] == "failed"), !accepted, "{declaration}: {updates:?}");
+        let registered = fixture.manifest_entry();
+        assert_eq!(registered.is_some(), accepted, "{declaration}");
+        if let Some(entry) = registered {
+            assert_eq!(
+                entry["minimaxH3Partition"],
+                declaration["minimaxH3Partition"]
+            );
+            assert_eq!(
+                entry["importPlan"]["assembly"]["partition"],
+                declaration["minimaxH3Partition"]
+            );
+            assert!(entry["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("reference_to_video")));
+        } else {
+            assert!(
+                !fixture.install_dir.exists(),
+                "ambiguous/incompatible assembly must roll back"
+            );
+        }
+    }
+}
+
+fn write_sdxl_negative_source(path: &std::path::Path) {
+    crate::minimax_h3_import_fixture::write_safetensors(path,&[
+        ("model.diffusion_model.input_blocks.7.0.out_layers.3.weight","F16"),
+        ("model.diffusion_model.middle_block.1.transformer_blocks.0.attn1.to_q.weight","F16"),
+        ("conditioner.embedders.0.transformer.text_model.embeddings.token_embedding.weight","F16"),
+        ("conditioner.embedders.1.model.transformer.resblocks.9.attn.in_proj_weight","F16"),
+        ("first_stage_model.encoder.conv_in.weight","F16"),
+        ("first_stage_model.decoder.conv_out.weight","F16"),
+    ],0x31);
+}
+
+#[tokio::test]
+async fn h3_declarations_refuse_non_h3_bytes_in_every_ownership_and_transfer_path() {
+    let _env = isolate_hf_cache();
+    let (api_url, posts) = spawn_tree_stub_with_files(vec![("model.safetensors", 8)]).await;
+    for kind in ["managed", "remote", "linked"] {
+        for declaration_on_entry in [false, true] {
+            let fixture = managed_import_fixture_with_id(
+                api_url.clone(),
+                &format!("foreign_{kind}_{declaration_on_entry}"),
+            )
+            .await;
+            write_sdxl_negative_source(&fixture.source);
+            let original = std::fs::read(&fixture.source).unwrap();
+            let mut job = fixture.job(None);
+            job.payload.remove("family");
+            let entry = job.payload["manifestEntry"].as_object_mut().unwrap();
+            entry.remove("family");
+            entry.insert("type".to_owned(), json!("video"));
+            let declaration = json!({"baseModel":"minimax_h3","minimaxH3Partition":"fl2va"})
+                .as_object()
+                .unwrap()
+                .clone();
+            if declaration_on_entry {
+                entry.extend(declaration);
+            } else {
+                job.payload.extend(declaration);
+            }
+            let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+                &fixture.settings.data_dir,
+            );
+            let linked_id = if kind == "linked" {
+                let root = store
+                    .approve_root(fixture.source.parent().unwrap())
+                    .unwrap();
+                // Prove the negative control from bounded content evidence, not by publishing a
+                // runnable SDXL plan that the refused H3 alias would then be expected to destroy.
+                let sceneworks_core::base_weights::BaseWeightDetection::Recognized(verdict) =
+                    sceneworks_core::base_weights::detect_base_weight_file(&fixture.source).unwrap()
+                    else { panic!("negative source must have a recognized family"); };
+                assert_eq!(verdict.family.as_deref(),Some("sdxl"),
+                    "the negative control must contain a supported, different architecture");
+                let checkpoint_id = sceneworks_core::checkpoint_plan_store::linked_checkpoint_id(&root.root_id,"kreamania.safetensors");
+                assert!(store.record(&checkpoint_id).is_err(),"preflight starts without a published target plan");
+                job.payload.remove("sourcePath");
+                job.payload
+                    .insert("ownershipMode".to_owned(), json!("linked"));
+                job.payload
+                    .insert("linkedRootId".to_owned(), json!(root.root_id));
+                job.payload.insert(
+                    "linkedRelativePath".to_owned(),
+                    json!("kreamania.safetensors"),
+                );
+                Some(checkpoint_id)
+            } else {
+                None
+            };
+            if kind == "remote" {
+                let source_url = spawn_binary_stub(original.clone()).await;
+                job.payload.remove("sourcePath");
+                job.payload.insert(
+                    "sourceUrl".to_owned(),
+                    json!(format!("{source_url}/sdxl.safetensors")),
+                );
+            }
+            posts.lock().unwrap().clear();
+            let _ = super::model_jobs::run_model_import_job(
+                &ApiClient::new(&fixture.settings),
+                &fixture.settings,
+                &reqwest::Client::new(),
+                &job,
+            )
+            .await;
+            assert!(posts.lock().unwrap().iter().any(|post| post.get("status").and_then(Value::as_str) == Some("failed") && post.get("error").and_then(Value::as_str).is_some_and(|error| error.contains("family-mismatch") && error.contains("sdxl"))), "must fail for source compatibility, not for incidental setup: {kind}, entry={declaration_on_entry}");
+            fixture.assert_nothing_installed(kind);
+            assert!(!posts.lock().unwrap().iter().any(|post|post["status"]=="completed"),"family refusal cannot report completion");
+            if let Some(id) = linked_id {
+                assert!(store.record(&id).is_err(),"family preflight must not create a target plan");
+                assert!(
+                    store.resolve(&id).is_err(),
+                    "refused linked plan must not remain ready"
+                );
+            }
+            assert_eq!(
+                std::fs::read(&fixture.source).unwrap(),
+                original,
+                "library/source bytes are untouched"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn linked_family_preflight_refuses_before_components_without_invalidating_an_existing_owner() {
+    let _env = isolate_hf_cache();
+    let (url,posts) = spawn_tree_stub_with_files(vec![]).await;
+    let fixture = managed_import_fixture_with_id(url,"refused_h3_alias").await;
+    write_sdxl_negative_source(&fixture.source);
+    let original = std::fs::read(&fixture.source).unwrap();
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+    let root = store.approve_root(fixture.source.parent().unwrap()).unwrap();
+    let compiled = store.compile_linked(&root.root_id,"kreamania.safetensors").unwrap();
+    assert_eq!(compiled.plan.family,"sdxl");
+    let owner = json!({"id":"existing_sdxl_owner","family":"sdxl","type":"image",
+        "source":{"provider":"linked-library","rootId":root.root_id,"relativePath":"kreamania.safetensors"},
+        "importPlan":{"checkpointId":compiled.checkpoint_id,"planId":compiled.plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}});
+    std::fs::write(&fixture.manifest_path,json!({"schemaVersion":1,"models":[owner]}).to_string()).unwrap();
+    let manifest_before = std::fs::read(&fixture.manifest_path).unwrap();
+    let inventory_before = store.inventory().unwrap();
+    let mut job = fixture.job(None);
+    job.payload.remove("sourcePath");
+    job.payload.insert("linkedRootId".into(),json!(root.root_id));
+    job.payload.insert("linkedRelativePath".into(),json!("kreamania.safetensors"));
+    let entry = job.payload["manifestEntry"].as_object_mut().unwrap();
+    entry.remove("family");
+    entry.insert("baseModel".into(),json!("minimax_h3"));
+    entry.insert("minimaxH3Partition".into(),json!("fl2va"));
+    // No resident/config rows: source mismatch must be conclusive BEFORE any component work.
+    run_claimed_model_import_fixture(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
+    let updates = posts.lock().unwrap();
+    assert!(updates.iter().any(|update| update["status"]=="failed" && update["error"].as_str().is_some_and(|error|error.contains("family-mismatch") && error.contains("sdxl"))),"{updates:?}");
+    assert!(!updates.iter().any(|update|update["status"]=="completed"));
+    assert!(fixture.manifest_entry().is_none(),"refused alias must not publish a model selection");
+    assert_eq!(std::fs::read(&fixture.manifest_path).unwrap(),manifest_before);
+    assert_eq!(store.inventory().unwrap(),inventory_before,"no new persisted plan or invalidation of another owner");
+    assert_eq!(store.plan(&compiled.checkpoint_id,&compiled.plan.plan_id).unwrap(),compiled.plan);
+    assert_eq!(std::fs::read(&fixture.source).unwrap(),original);
+    assert!(store.resolve(&compiled.checkpoint_id).is_ok(),"the existing linked SDXL owner remains ready");
+}
+
+#[tokio::test]
+async fn all_h3_ingestion_workers_produce_equivalent_assemblies_and_original_bytes() {
+    let _env = isolate_hf_cache();
+    let seed = tempdir().unwrap();
+    let native = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+        seed.path(),
+        "seed",
+        "native",
+        "fl2va",
+    );
+    let original = std::fs::read(
+        native
+            .install_dir
+            .join("renamed-user-checkpoint.safetensors"),
+    )
+    .unwrap();
+    let (hf_url, _) =
+        spawn_tree_stub_with_bodies(vec![("community.safetensors".into(), original.clone())]).await;
+    let binary_url = spawn_binary_stub(original.clone()).await;
+    let mut assembly = None;
+    let mut semantic = None;
+    for transport in ["copy", "upload", "url", "civitai", "huggingface", "linked"] {
+        let fixture =
+            managed_import_fixture_with_id(hf_url.clone(), &format!("h3_{transport}")).await;
+        let source = fixture
+            .settings
+            .data_dir
+            .join("models/incoming/community.safetensors");
+        std::fs::write(&source, &original).unwrap();
+        let mut job = h3_import_job(&fixture, &source);
+        job.payload
+            .insert("importProvenance".into(), json!({"source":transport}));
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+            &fixture.settings.data_dir,
+        );
+        if transport == "upload" {
+            let upload = fixture
+                .settings
+                .data_dir
+                .join("cache/model-uploads/fixture/community.safetensors");
+            std::fs::create_dir_all(upload.parent().unwrap()).unwrap();
+            std::fs::write(&upload, &original).unwrap();
+            job.payload
+                .insert("sourcePath".into(), json!(upload.display().to_string()));
+            job.payload.insert("uploadedSourcePath".into(), json!(true));
+        } else if matches!(transport, "url" | "civitai") {
+            job.payload.remove("sourcePath");
+            job.payload.insert(
+                "sourceUrl".into(),
+                json!(format!("{binary_url}/community.safetensors")),
+            );
+            if transport == "civitai" {
+                job.payload.insert(
+                    "importProvenance".into(),
+                    json!({"source":"civitai","versionId":"71","fileId":"9"}),
+                );
+            }
+        } else if transport == "huggingface" {
+            job.payload.remove("sourcePath");
+            job.payload.insert("repo".into(), json!("fixture/h3"));
+            job.payload.insert("revision".into(), json!("fixture-sha"));
+            job.payload
+                .insert("files".into(), json!(["community.safetensors"]));
+        } else if transport == "linked" {
+            let root = store.approve_root(source.parent().unwrap()).unwrap();
+            job.payload.remove("sourcePath");
+            job.payload.insert("ownershipMode".into(), json!("linked"));
+            job.payload
+                .insert("linkedRootId".into(), json!(root.root_id));
+            job.payload
+                .insert("linkedRelativePath".into(), json!("community.safetensors"));
+        }
+        run_claimed_model_import_fixture(
+            &ApiClient::new(&fixture.settings),
+            &fixture.settings,
+            &reqwest::Client::new(),
+            &job,
+        )
+        .await
+        .unwrap();
+        let entry = fixture
+            .manifest_entry()
+            .unwrap_or_else(|| panic!("{transport} was not published"));
+        let checkpoint = entry["importPlan"]["checkpointId"].as_str().unwrap();
+        let resolved = store.resolve(checkpoint).unwrap();
+        sceneworks_core::minimax_h3_import::verify_entry_assembly(
+            entry.as_object().unwrap(),
+            &resolved.plan,
+        )
+        .unwrap();
+        let digest = resolved.plan.semantic_digest().unwrap();
+        if let Some(expected) = &semantic {
+            assert_eq!(&digest, expected, "{transport}");
+        } else {
+            semantic = Some(digest);
+        }
+        let components = entry["importPlan"]["assembly"].clone();
+        if let Some(expected) = &assembly {
+            assert_eq!(&components, expected, "{transport}");
+        } else {
+            assembly = Some(components);
+        }
+        assert_eq!(
+            std::fs::read(&source).unwrap(),
+            original,
+            "the user's {transport} original is immutable"
+        );
+        assert_eq!(
+            resolved
+                .layers
+                .iter()
+                .find(|layer| layer.layer.role == "transformer")
+                .map(|layer| std::fs::read(&layer.path).unwrap()),
+            Some(original.clone())
+        );
+        assert_eq!(entry["baseModel"], "minimax_h3");
+        assert_eq!(entry["minimaxH3Partition"], "fl2va");
+    }
+}
+
+#[tokio::test]
+async fn weight_only_h3_imports_bind_exact_config_only_across_public_transports() {
+    let _env = isolate_hf_cache();
+    let seed = tempdir().unwrap();
+    crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(seed.path());
+    let original = std::fs::read(seed.path().join("diffusion_pytorch_model.safetensors")).unwrap();
+    let mut config: Value =
+        serde_json::from_slice(&std::fs::read(seed.path().join("config.json")).unwrap()).unwrap();
+    config["rope_theta"] = json!(123456.0);
+    config["provider_extension"] = json!({"trained_schedule":[0.125,0.75],"precision":"bf16"});
+    let (hf_url, posts) = spawn_tree_stub_with_bodies(vec![
+        ("community.safetensors".into(), original.clone()),
+        (
+            "bf16/transformer/config.json".into(),
+            serde_json::to_vec(&config).unwrap(),
+        ),
+    ])
+    .await;
+    let binary_url = spawn_binary_stub(original.clone()).await;
+    let mut semantic = None;
+    for transport in ["copy", "upload", "url", "civitai", "huggingface", "linked"] {
+        let fixture =
+            managed_import_fixture_with_id(hf_url.clone(), &format!("weight_only_{transport}"))
+                .await;
+        let source = fixture
+            .settings
+            .data_dir
+            .join("models/incoming/community.safetensors");
+        std::fs::write(&source, &original).unwrap();
+        let mut job = h3_import_job(&fixture, &source);
+        // Match the typed API: complete resident assembly PLUS the optional config-only row.
+        // Replacing residents with the config row correctly fails the immutable closure capture.
+        let residents = crate::minimax_h3_import_fixture::component_downloads("bf16","fl2va");
+        let mut downloads = residents.clone();
+        downloads.push(json!({"provider":"huggingface","repo":"fixture/base-config","revision":"1111111111111111111111111111111111111111","files":["bf16/transformer/config.json"],"coRequisite":true,"componentId":"import_transformer_config","variant":"bf16"}));
+        job.payload["manifestEntry"]["downloads"] = json!(downloads);
+        job.payload["manifestEntry"]["importComponentTier"] = json!("bf16");
+        posts.lock().unwrap().clear();
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+            &fixture.settings.data_dir,
+        );
+        if transport == "upload" {
+            let upload = fixture
+                .settings
+                .data_dir
+                .join("cache/model-uploads/fixture/community.safetensors");
+            std::fs::create_dir_all(upload.parent().unwrap()).unwrap();
+            std::fs::write(&upload, &original).unwrap();
+            job.payload
+                .insert("sourcePath".into(), json!(upload.display().to_string()));
+            job.payload.insert("uploadedSourcePath".into(), json!(true));
+        } else if matches!(transport, "url" | "civitai") {
+            job.payload.remove("sourcePath");
+            job.payload.insert(
+                "sourceUrl".into(),
+                json!(format!("{binary_url}/community.safetensors")),
+            );
+            if transport == "civitai" {
+                job.payload.insert(
+                    "importProvenance".into(),
+                    json!({"source":"civitai","versionId":"71","fileId":"9"}),
+                );
+            }
+        } else if transport == "huggingface" {
+            job.payload.remove("sourcePath");
+            job.payload.insert("repo".into(), json!("fixture/weights"));
+            job.payload.insert("revision".into(), json!("fixture-sha"));
+            job.payload
+                .insert("files".into(), json!(["community.safetensors"]));
+        } else if transport == "linked" {
+            let root = store.approve_root(source.parent().unwrap()).unwrap();
+            job.payload.remove("sourcePath");
+            job.payload.insert("ownershipMode".into(), json!("linked"));
+            job.payload
+                .insert("linkedRootId".into(), json!(root.root_id));
+            job.payload
+                .insert("linkedRelativePath".into(), json!("community.safetensors"));
+        }
+        run_claimed_model_import_fixture(
+            &ApiClient::new(&fixture.settings),
+            &fixture.settings,
+            &reqwest::Client::new(),
+            &job,
+        )
+        .await
+        .unwrap();
+        {
+            let updates = posts.lock().unwrap();
+            assert!(!updates.iter().any(|update|update["status"]=="failed"),"{transport}: failure was reported, not successful publication: {updates:?}");
+            assert!(updates.iter().any(|update|update["status"]=="completed"),"{transport}: successful import must emit completed progress: {updates:?}");
+        }
+        let entry = fixture
+            .manifest_entry()
+            .unwrap_or_else(|| panic!("{transport} was not published; progress={:?}",posts.lock().unwrap()));
+        let restarted = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+            &fixture.settings.data_dir,
+        );
+        let resolved = restarted
+            .resolve(entry["importPlan"]["checkpointId"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(resolved.plan.context["transformerConfig"]["config"], config);
+        assert_eq!(
+            resolved.plan.context["transformerConfig"]["provenance"]["revision"],
+            "1111111111111111111111111111111111111111"
+        );
+        assert_eq!(entry["downloads"],json!(residents),"the complete resident assembly remains bound after config-only provisioning");
+        assert!(entry["downloads"].as_array().unwrap().iter().all(|row|
+            row.get("componentId").and_then(Value::as_str)!=Some("import_transformer_config")),
+            "config-only provisioning is not a resident component");
+        let digest = resolved.plan.semantic_digest().unwrap();
+        if let Some(expected) = &semantic {
+            assert_eq!(&digest, expected, "{transport}");
+        } else {
+            semantic = Some(digest);
+        }
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
+}
+
+#[tokio::test]
+async fn h3_import_reports_missing_or_unresolvable_residents_without_publication() {
+    let _env = isolate_hf_cache();
+    let (url,posts) = spawn_tree_stub_with_files(vec![]).await;
+    for missing in [false,true] {
+        let fixture = managed_import_fixture_with_id(url.clone(),&format!("missing_h3_residents_{missing}")).await;
+        let source = fixture.settings.data_dir.join("models/incoming/real-h3-headers");
+        crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+        let original = std::fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap();
+        let mut job = h3_import_job(&fixture,&source);
+        job.payload["manifestEntry"]["downloads"] = if missing {
+            json!([{"provider":"huggingface","repo":"fixture/unavailable-components","revision":"1".repeat(40),
+                "coRequisite":true,"variant":"q4","componentId":"text_encoder","subdir":"q4/text_encoder","files":["q4/text_encoder/model.safetensors"]}])
+        } else {
+            json!([{"provider":"huggingface","repo":"fixture/config-only","revision":"1".repeat(40),
+                "coRequisite":true,"variant":"q4","componentId":"import_transformer_config","files":["transformer/config.json"]}])
+        };
+        posts.lock().unwrap().clear();
+        // Ok means the failure report was accepted, NOT that the import completed/published.
+        run_claimed_model_import_fixture(&ApiClient::new(&fixture.settings),&fixture.settings,&reqwest::Client::new(),&job).await.unwrap();
+        let updates = posts.lock().unwrap();
+        let reason = if missing {"component unavailable"} else {"component closure is missing"};
+        assert!(updates.iter().any(|update|update["status"]=="failed" && update["error"].as_str().is_some_and(|error|error.contains(reason))),"{updates:?}");
+        assert!(!updates.iter().any(|update|update["status"]=="completed"),"incomplete authority must never report completion");
+        fixture.assert_nothing_installed(reason);
+        assert_eq!(std::fs::read(source.join("diffusion_pytorch_model.safetensors")).unwrap(),original);
+    }
+}
+
+#[tokio::test]
+async fn manually_rerunning_a_snapshot_is_not_authenticated_import_recovery() {
+    let _env = isolate_hf_cache();
+    // This generic control-plane stub deliberately has no server-stored ModelImport ancestry.
+    // Real new-ID/multihop success is exercised by rust-api tests::import_repair against mounted
+    // retry routes and the actual utility worker, not by manually rerunning this snapshot.
+    let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
+    let fixture = managed_import_fixture_with_id(url, "recover_h3").await;
+    let staged = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import(&fixture.settings.data_dir, "recover_h3");
+    let source = fixture.settings.data_dir.join("models/incoming/recover_h3");
+    let job = h3_import_job(&fixture, &source);
+    super::imports::seal_import_recovery_fixture(&fixture.settings.data_dir, &staged.install_dir, &job.payload, &job.id).await.unwrap();
+    let bytes = std::fs::read(staged.install_dir.join("diffusion_pytorch_model.safetensors")).unwrap();
+    std::fs::remove_dir_all(&source).unwrap();
+    super::model_jobs::run_model_import_job(&ApiClient::new(&fixture.settings), &fixture.settings, &reqwest::Client::new(), &job).await.unwrap();
+    assert!(fixture.manifest_entry().is_none(), "a client-side old snapshot cannot authenticate recovery");
+    assert!(posts.lock().unwrap().iter().any(|post|post["status"] == "failed"));
+    assert_eq!(std::fs::read(staged.install_dir.join("diffusion_pytorch_model.safetensors")).unwrap(),bytes, "unrelated installs must not be deleted");
+}
+
+#[tokio::test]
+async fn h3_manifest_publication_failure_rolls_back_and_can_retry() {
+    let _env = isolate_hf_cache();
+    let (url, _) = spawn_tree_stub_with_files(vec![]).await;
+    let fixture = managed_import_fixture_with_id(url, "publish_retry_h3").await;
+    let source = fixture.settings.data_dir.join("models/incoming/h3");
+    crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+    let job = h3_import_job(&fixture, &source);
+    std::fs::remove_file(&fixture.manifest_path).unwrap();
+    std::fs::create_dir(&fixture.manifest_path).unwrap();
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+    let error = super::model_jobs::run_model_import_job(&api, &fixture.settings, &client, &job)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, WorkerError::Io(_)),
+        "the deliberately unwritable manifest must fail IO, not source detection: {error}"
+    );
+    assert!(
+        !fixture.install_dir.exists(),
+        "unpublished bytes must roll back"
+    );
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+        &fixture.settings.data_dir,
+    );
+    assert!(store.record("managed/publish_retry_h3").is_err());
+    assert!(source.join("diffusion_pytorch_model.safetensors").is_file());
+    std::fs::remove_dir(&fixture.manifest_path).unwrap();
+    std::fs::write(&fixture.manifest_path, r#"{"schemaVersion":1,"models":[]}"#).unwrap();
+    run_claimed_model_import_fixture(&api, &fixture.settings, &client, &job)
+        .await
+        .unwrap();
+    assert!(fixture.manifest_entry().is_some());
+}
+
+#[tokio::test]
+async fn a_refused_linked_h3_alias_cannot_invalidate_an_existing_models_unchanged_plan() {
+    let _env = isolate_hf_cache();
+    let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
+    let fixture = managed_import_fixture_with_id(url, "linked_h3_owner").await;
+    let source = fixture.settings.data_dir.join("models/incoming/shared_h3");
+    crate::minimax_h3_import_fixture::write_minimax_h3_dit_dir(&source);
+    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+        &fixture.settings.data_dir,
+    );
+    let root = store.approve_root(source.parent().unwrap()).unwrap();
+    let mut job = h3_import_job(&fixture, &source);
+    job.payload.remove("sourcePath");
+    job.payload
+        .insert("linkedRootId".into(), json!(root.root_id));
+    job.payload
+        .insert("linkedRelativePath".into(), json!("shared_h3"));
+    let api = ApiClient::new(&fixture.settings);
+    let client = reqwest::Client::new();
+    run_claimed_model_import_fixture(&api, &fixture.settings, &client, &job)
+        .await
+        .unwrap();
+    let original = fixture.manifest_entry().unwrap();
+    let checkpoint_id = original["importPlan"]["checkpointId"].as_str().unwrap();
+    let original_plan = store.resolve(checkpoint_id).unwrap().plan;
+    posts.lock().unwrap().clear();
+    job.payload.insert("modelId".into(), json!("bad_alias"));
+    job.payload["manifestEntry"]["id"] = json!("bad_alias");
+    job.payload["manifestEntry"]
+        .as_object_mut()
+        .unwrap()
+        .remove("minimaxH3Partition");
+    run_claimed_model_import_fixture(&api, &fixture.settings, &client, &job)
+        .await
+        .unwrap();
+    {
+        let updates = posts.lock().unwrap();
+        let failed = updates
+            .iter()
+            .find(|post| post["status"] == "failed")
+            .expect("declaration refusal must use the established failed-job update");
+        assert!(
+            failed.to_string().contains("minimaxH3Partition"),
+            "{failed}"
+        );
+        assert!(!updates.iter().any(|post| post["status"] == "completed"));
+    }
+    let resolved = store
+        .resolve(checkpoint_id)
+        .expect("the registered owner's source binding must survive");
+    assert_eq!(
+        resolved.plan, original_plan,
+        "refusal cannot replace the owner's immutable plan"
+    );
+    sceneworks_core::minimax_h3_import::verify_entry_assembly(
+        original.as_object().unwrap(),
+        &resolved.plan,
+    )
+    .unwrap();
+    assert_eq!(fixture.manifest_entry(), Some(original));
+}
+
+#[test]
+fn uploaded_h3_retry_survives_real_dispatch_failure_then_releases_input_on_success() {
+    // The full utility dispatcher embeds every handler future; isolate this end-to-end harness
+    // from Rust test threads' small default stack without changing any production runtime policy.
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let _env = isolate_hf_cache();
+                    let (url, posts) = spawn_tree_stub_with_files(vec![]).await;
+                    let fixture = managed_import_fixture_with_id(url, "upload_retry_h3").await;
+                    let seed = tempdir().unwrap();
+                    let native =
+                        crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+                            seed.path(),
+                            "seed",
+                            "native",
+                            "fl2va",
+                        );
+                    let bytes = std::fs::read(
+                        native
+                            .install_dir
+                            .join("renamed-user-checkpoint.safetensors"),
+                    )
+                    .unwrap();
+                    let upload = fixture
+                        .settings
+                        .data_dir
+                        .join("cache/model-uploads/upload-retry/community.safetensors");
+                    std::fs::create_dir_all(upload.parent().unwrap()).unwrap();
+                    std::fs::write(&upload, &bytes).unwrap();
+                    let mut job = h3_import_job(&fixture, &upload);
+                    let base = Value::Object(sceneworks_core::builtin_manifests::builtin_model_entry("minimax_h3").unwrap().clone());
+                    let config_row = sceneworks_core::minimax_h3_import::import_config_download(&base, "q4", std::env::consts::OS).unwrap();
+                    let config_cache = sceneworks_core::hf_home::huggingface_repo_cache_path(&fixture.settings.data_dir, config_row["repo"].as_str().unwrap()).unwrap()
+                        .join("snapshots").join(config_row["revision"].as_str().unwrap())
+                        .join(config_row["files"][0].as_str().unwrap());
+                    assert!(config_cache.starts_with(&fixture.settings.data_dir));
+                    std::fs::create_dir_all(config_cache.parent().unwrap()).unwrap();
+                    // Native fixture metadata embeds this exact config; its install has no sidecar.
+                    let config_bytes = serde_json::to_vec(&crate::minimax_h3_import_fixture::h3_fixture_config()).unwrap();
+                    std::fs::write(&config_cache, &config_bytes).unwrap();
+                    job.payload["manifestEntry"]["downloads"].as_array_mut().unwrap().push(config_row.clone());
+                    job.payload.insert("uploadedSourcePath".into(), json!(true));
+                    job.payload
+                        .insert("importProvenance".into(), json!({"source":"upload"}));
+                    std::fs::remove_file(&fixture.manifest_path).unwrap();
+                    std::fs::create_dir(&fixture.manifest_path).unwrap();
+                    let api = ApiClient::new(&fixture.settings);
+                    let client = reqwest::Client::new();
+                    claim_model_import_fixture(&api, &job).await.unwrap();
+                    super::run_utility_job(
+                        &api,
+                        &fixture.settings,
+                        &client,
+                        job.clone(),
+                        gen_core::CancelFlag::new(),
+                    )
+                    .await;
+                    let failed_updates = posts.lock().unwrap().clone();
+                    let failure = failed_updates.iter().find(|post| post["status"] == "failed")
+                        .unwrap_or_else(|| panic!("unwritable publication must report failure: {failed_updates:?}"));
+                    let error = failure["error"].as_str().unwrap();
+                    assert!(error.contains("directory") || error.contains("denied") || error.contains("os error"), "the deliberate manifest I/O fault, not component setup, must fail: {failure}");
+                    assert!(!failed_updates.iter().any(|post| post["status"] == "completed"), "{failed_updates:?}");
+                    assert_eq!(
+                        std::fs::read(&upload).unwrap(),
+                        bytes,
+                        "dispatch must retain the exact retry input"
+                    );
+                    assert!(!fixture.install_dir.exists());
+                    std::fs::remove_dir(&fixture.manifest_path).unwrap();
+                    std::fs::write(&fixture.manifest_path, r#"{"schemaVersion":1,"models":[]}"#)
+                        .unwrap();
+                    let mut retry = job.clone();
+                    retry.id = "job-upload-retry".into();
+                    retry.source_job_id = Some(job.id.clone());
+                    retry.attempts = job.attempts.checked_add(1).unwrap();
+                    claim_model_import_fixture(&api, &retry).await.unwrap();
+                    posts.lock().unwrap().clear();
+                    super::run_utility_job(
+                        &api,
+                        &fixture.settings,
+                        &client,
+                        retry,
+                        gen_core::CancelFlag::new(),
+                    )
+                    .await;
+                    let completed = posts.lock().unwrap().clone();
+                    assert!(!completed.iter().any(|post| post["status"] == "failed"), "{completed:?}");
+                    assert!(completed.iter().any(|post| post["status"] == "completed"), "{completed:?}");
+                    let published = fixture.manifest_entry().unwrap_or_else(|| panic!("successful retry must publish: {completed:?}"));
+                    assert!(!published["downloads"].as_array().unwrap().iter().any(|row| row["componentId"] == "import_transformer_config"));
+                    let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&fixture.settings.data_dir);
+                    let resolved = store.resolve(published["importPlan"]["checkpointId"].as_str().unwrap()).unwrap();
+                    // This retry source embeds h3_config: the pinned fallback must not replace
+                    // its exact source-owned config, digest, or provenance. Weight-only fallback
+                    // is covered separately by the public-transport config-binding test.
+                    assert_eq!(
+                        resolved.plan.context["transformerConfig"],
+                        sceneworks_core::minimax_h3_import::config_binding(
+                            crate::minimax_h3_import_fixture::h3_fixture_config(),
+                            json!({"kind":"source"}),
+                        ),
+                        "retry must retain the exact embedded source configuration, not selected-base authority"
+                    );
+                    assert_eq!(std::fs::read(&config_cache).unwrap(), config_bytes, "repair never changes the pinned configuration source");
+                    assert_eq!(
+                        std::fs::read(fixture.install_dir.join("community.safetensors")).unwrap(),
+                        bytes
+                    );
+                    assert!(
+                        !upload.exists(),
+                        "completed publication releases the owned upload cache"
+                    );
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn convrot_h3_worker_import_stamps_only_inventory_proven_native_precision() {
+    let _env = isolate_hf_cache();
+    let seed = tempdir().unwrap();
+    let native = crate::minimax_h3_import_fixture::stage_managed_minimax_h3_import_source(
+        seed.path(),
+        "seed",
+        "convrot",
+        "fl2va",
+    );
+    let original = std::fs::read(
+        native
+            .install_dir
+            .join("renamed-user-checkpoint.safetensors"),
+    )
+    .unwrap();
+    let (url, _) = spawn_tree_stub_with_files(vec![]).await;
+    for transport in ["copy", "linked"] {
+        let fixture =
+            managed_import_fixture_with_id(url.clone(), &format!("convrot_{transport}")).await;
+        let source = fixture
+            .settings
+            .data_dir
+            .join("models/incoming/community.safetensors");
+        std::fs::write(&source, &original).unwrap();
+        assert_eq!(
+            super::model_jobs::base_weight_manifest_classification(&source),
+            Some(("transformer_file", "int8_tensorwise_per_row"))
+        );
+        let mut job = h3_import_job(&fixture, &source);
+        let store = sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(
+            &fixture.settings.data_dir,
+        );
+        if transport == "linked" {
+            let root = store.approve_root(source.parent().unwrap()).unwrap();
+            job.payload.remove("sourcePath");
+            job.payload.insert("ownershipMode".into(), json!("linked"));
+            job.payload
+                .insert("linkedRootId".into(), json!(root.root_id));
+            job.payload
+                .insert("linkedRelativePath".into(), json!("community.safetensors"));
+        }
+        run_claimed_model_import_fixture(
+            &ApiClient::new(&fixture.settings),
+            &fixture.settings,
+            &reqwest::Client::new(),
+            &job,
+        )
+        .await
+        .unwrap();
+        let entry = fixture
+            .manifest_entry()
+            .expect("validated native checkpoint publishes");
+        let resolved = store
+            .resolve(entry["importPlan"]["checkpointId"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(resolved.plan.context["sourceEncoding"], "convrot_int8");
+        assert_eq!(
+            entry["importPlan"]["assembly"]["sourceEncoding"],
+            "convrot_int8"
+        );
+        assert_eq!(entry["importQuantFormat"], "convrot_int8");
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+    }
 }

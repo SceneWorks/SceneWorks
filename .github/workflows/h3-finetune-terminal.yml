@@ -1,0 +1,755 @@
+name: H3 fine-tune explicit terminal case
+
+# No pull_request/push/schedule trigger: real models never belong to ordinary CI.
+on:
+  # Called locally from the already registered server-candle-linux workflow at
+  # the SAME caller ref. This file need not exist/register on default main first.
+  workflow_call:
+    inputs:
+      stationary_pair_authorized:
+        required: true
+        type: boolean
+      sceneworks_sha:
+        required: true
+        type: string
+      inference_sha:
+        required: true
+        type: string
+      native_evidence_ref:
+        required: false
+        type: string
+      native_evidence_sha:
+        required: false
+        type: string
+      backend:
+        required: true
+        type: string
+      expected_runner:
+        required: true
+        type: string
+      plan_path:
+        required: false
+        type: string
+        default: ''
+      output_path:
+        required: false
+        type: string
+        default: ''
+      case_id:
+        required: false
+        type: string
+      campaign_request:
+        required: false
+        type: string
+        default: '{}'
+    secrets:
+      SCENEWORKS_INFERENCE_READ_TOKEN:
+        required: false
+permissions:
+  contents: read
+  actions: read
+# Do not cancel another pending/running acceptance case or introduce GPU ownership locks.
+concurrency:
+  group: h3-finetune-terminal-${{ github.run_id }}-${{ github.run_attempt }}
+  cancel-in-progress: false
+jobs:
+  terminal:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.stationary_pair_authorized == true && (inputs.backend == 'mlx' || inputs.backend == 'cuda') }}
+    # The Windows lane SELECTS the exact listener the request names: each approved full-weights
+    # CUDA listener carries its own name as a label, so appending the requested runner to the label
+    # set lands the job on that one. Without it, the lane's two listeners both match and the job
+    # can land on the other one, which the exact-runner assertion then refuses — a coin flip
+    # between two approved machines. The macOS lane needs only the `real-weights` label, which
+    # exactly one macOS listener carries.
+    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","real-weights"]') || fromJSON(format('["self-hosted","windows","cuda","real-weights","{0}"]', inputs.expected_runner)) }}
+    concurrency:
+      group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || 'h3-import-proofs-nax-macos' }}
+      cancel-in-progress: false
+    timeout-minutes: 1440
+    env:
+      # The macOS real-weights lane keeps its HF home on the reviewed-weights volume, so the
+      # staging probe reads the SAME hub the reviewed weights are pre-seeded into, and the
+      # lane's private copy of the staged set lands on that volume instead of the runner's
+      # smaller internal disk. The runner service does not carry HF_HOME, and without this the
+      # probe would read a different directory than the one the weights are seeded into.
+      HF_HOME: ${{ inputs.backend == 'mlx' && '/Volumes/Models/huggingface' || '' }}
+      # Native sm_120 for the RTX PRO 6000 hosts, as the shipping Windows CUDA lanes build it.
+      CUDA_COMPUTE_CAP: ${{ inputs.backend == 'cuda' && '120' || '' }}
+      H3_NATIVE_EVIDENCE_REF: ${{ inputs.native_evidence_ref }}
+      H3_NATIVE_EVIDENCE_SHA: ${{ inputs.native_evidence_sha }}
+      H3_SCENEWORKS_SHA: ${{ inputs.sceneworks_sha }}
+      H3_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      H3_OUTPUT_EFFECTIVE: ${{ inputs.output_path }}
+      H3_STAGE_BACKEND: ${{ inputs.backend }}
+      H3_STAGE_SOURCE_SHA: ${{ inputs.sceneworks_sha }}
+      H3_TERMINAL_ROUTE: h3-terminal-${{ inputs.backend }}
+      H3_STAGE_REQUEST: ${{ inputs.campaign_request }}
+    steps:
+      # The Windows lane's steps run under bash. A self-hosted Windows listener's own bash
+      # resolution falls through to the WSL relay, which has no /bin/bash there, so the job died in
+      # its very first step. Git for Windows' bash IS on the box; putting it on the PATH is how
+      # this organization selects it (the inference Windows native-terminal lane does the same), and
+      # its absence is then a loud refusal instead of a relay error.
+      - name: Select Git Bash
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: cmd
+        run: |
+          if not exist "C:\Program Files\Git\bin\bash.exe" exit /b 1
+          echo C:\Program Files\Git\bin>>"%GITHUB_PATH%"
+      # nvcc needs the MSVC host compiler, and a fresh step has no MSVC environment, so the native
+      # build failed with "nvcc fatal: Cannot find compiler 'cl.exe' in PATH". This loads the same
+      # BuildTools MSVC 14.44 the Windows Candle lanes use (CUDA 12.9 rejects VS2026's 14.51) and
+      # exports its environment to the REST of the job, because this lane builds through bash and
+      # node across several steps rather than inside one cmd invocation.
+      - name: Activate the MSVC host compiler for nvcc
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          set "NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64"
+          if not exist "%NVCC_CCBIN%\cl.exe" exit /b 1
+          rem Name the MSVC linker exactly. Git Bash puts its own usr\bin first on PATH inside every
+          rem bash step, and its coreutils `link.exe` then shadows MSVC's, so rustc invoked the wrong
+          rem binary ("/usr/bin/link: extra operand"). An absolute linker is immune to PATH order.
+          set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=%NVCC_CCBIN%\link.exe"
+          if not exist "%CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER%" exit /b 1
+          powershell -NoProfile -Command "foreach ($n in 'PATH','INCLUDE','LIB','LIBPATH','VCToolsInstallDir','VCINSTALLDIR','VCToolsVersion','WindowsSdkDir','WindowsSDKVersion','WindowsSdkBinPath','UCRTVersion','UniversalCRTSdkDir','VSCMD_ARG_TGT_ARCH','VSCMD_ARG_HOST_ARCH','NVCC_CCBIN','CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER') { $v = [Environment]::GetEnvironmentVariable($n); if ($v) { ($n + '=' + $v) | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append } }" || exit /b 1
+      - name: Record the original terminal job start
+        shell: bash
+        run: echo "H3_TERMINAL_JOB_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          ref: ${{ inputs.sceneworks_sha }}
+          path: sceneworks
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.inference_sha }}
+          path: inference
+          fetch-depth: 0
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        if: ${{ inputs.native_evidence_sha != '' }}
+        with:
+          repository: SceneWorks/inference
+          ref: ${{ inputs.native_evidence_sha }}
+          path: inference-evidence
+          fetch-depth: 0
+          token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      # sc-26691: an adaptive-matrix lane waits, after all its staging and its first two cases, for
+      # the OTHER backend's inline anchors for as long as that peer lane is alive, bounded by this
+      # lane's work deadline less its remaining cases. When that peer was never dispatched, or
+      # has already ended without publishing them, the anchors can never arrive. Check the peer
+      # before any staging or model work and fail within minutes (a bounded grace covers a peer
+      # dispatched seconds after this one); the wait loop re-checks it while waiting.
+      - name: Fail fast when the adaptive matrix has no live peer lane
+        if: ${{ inputs.case_id == '' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          GH_TOKEN: ${{ github.token }}
+          H3_ANCHOR_INFERENCE_SHA: ${{ inputs.inference_sha }}
+          H3_ANCHOR_EVIDENCE_SHA: ${{ inputs.native_evidence_sha }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {execFileSync} from "node:child_process";
+          import {awaitPeerLane} from "./scripts/lib/h3-peer-lane.mjs";
+          const env=process.env,request=JSON.parse(env.H3_STAGE_REQUEST||"{}");
+          // Only the inline reduced-v1 bootstrap is known to be adaptive this early; an external plan
+          // is classified by the wait loop's own liveness check once the plan is read.
+          if(request.adaptive_matrix===false||request.bootstrap?.cohort!=="reduced-v1"){console.log("no adaptive peer pairing requested");process.exit(0);}
+          const backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
+          const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
+          const result=await awaitPeerLane({gh,repository:env.GITHUB_REPOSITORY,headSha:env.H3_SCENEWORKS_SHA,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer,anchorName:`h3-anchors-${peer}-${env.H3_SCENEWORKS_SHA}-${env.H3_ANCHOR_INFERENCE_SHA}-${env.H3_ANCHOR_EVIDENCE_SHA}`,startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT)});
+          console.log(JSON.stringify({peerLane:result.state,peerRun:result.run?.id??result.anchors?.workflow_run?.id??null}));
+          NODE
+      # BOTH lanes SELECT the reviewed CPython 3.12 already on the runner rather than installing
+      # one, through each platform's own verified selector in this repository.
+      #
+      # Neither platform can install one here. setup-python installs into the HOSTED runner's tool
+      # cache, "/Users/runner", which does not exist on a self-hosted Mac whose home is the
+      # operator's, so the action cannot create its cache and the job dies before any model work.
+      # On Windows the same action removes the existing install and its HKLM registry entries, and
+      # the runner account cannot do the registry part ("Requested registry access is not allowed"),
+      # so the install fails there too — and it deletes the tool-cache interpreter on the way out.
+      #
+      # The macOS selector requires an absolute CPython 3.12 arm64 interpreter; the Windows probe
+      # checks the interpreter is CPython 3.12, AMD64 and 64-bit.
+      - name: Provision the pinned Windows CPython 3.12.10
+        if: ${{ runner.os == 'Windows' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        id: speech_python_windows
+        shell: powershell
+        working-directory: sceneworks
+        run: |
+          # The organization's portable CPython 3.12.10 x64: a hash-pinned NuGet package expanded
+          # into an owned root, with no installer and no registry writes. It is idempotent — an
+          # existing install that verifies is reused — and serialized by an exclusive lock, so the
+          # two CUDA listeners can share it. This is the same provisioning the StarVector terminal
+          # lane uses on these hosts; it does not depend on whatever python happens to be on PATH.
+          . (Join-Path $PWD 'scripts\provision-starvector-windows-python.ps1')
+          $pythonRoot = 'E:\huggingface\sc26691-python\cpython-3.12.10-x64-nuget'
+          $lockPath = 'E:\huggingface\sc26691-python\.locks\cpython-3.12.10-x64-nuget.lock'
+          $executable = Invoke-StarVectorWindowsPythonLock -LockPath $lockPath -ScriptBlock {
+            $installed = Install-StarVectorWindowsPythonPackage -DestinationRoot $pythonRoot -AllowedRoot $pythonRoot -RunnerTemp $env:RUNNER_TEMP
+            (Select-StarVectorBootstrapPython -CandidatePaths @($installed) -ExpectedVersion @(3, 12, 10)).Executable
+          }
+          "python-path=$executable" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Select the reviewed macOS CPython 3.12
+        if: ${{ runner.os == 'macOS' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        id: speech_python_macos
+        shell: bash
+        working-directory: sceneworks
+        run: |
+          set -euo pipefail
+          candidate="$(node scripts/select-starvector-macos-python.mjs select /opt/homebrew/bin/python3.12 /usr/local/bin/python3.12)"
+          "$candidate" --version | grep -E '^Python 3\.12\.'
+          echo "python-path=$candidate" >> "$GITHUB_OUTPUT"
+      - name: Prepare private CPU-only conditioning and source-variant tools
+        if: ${{ fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          SPEECH_BASE_PYTHON: ${{ steps.speech_python_windows.outputs.python-path || steps.speech_python_macos.outputs.python-path }}
+          EXPECTED_RUNNER: ${{ inputs.expected_runner }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {execFileSync} from "node:child_process";
+          import {appendFile,mkdir,writeFile,lstat} from "node:fs/promises";
+          import {createHash} from "node:crypto";
+          import path from "node:path";
+          import {assertCliEnvironment,parseStageRequest} from "./scripts/h3-finetune-terminal-stage.mjs";
+          const env=process.env;assertCliEnvironment({env,platform:process.platform,backend:env.H3_STAGE_BACKEND});assert.equal(env.RUNNER_NAME,env.EXPECTED_RUNNER);
+          const request=parseStageRequest(env.H3_STAGE_REQUEST||"{}"),venv=path.join(env.RUNNER_TEMP,`h3-cpu-python-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+          try{await lstat(venv);assert.fail("private CPU venv must be new");}catch(error){if(error.code!=="ENOENT")throw error;}
+          execFileSync(env.SPEECH_BASE_PYTHON,["-I","-B","-m","venv",venv],{stdio:"inherit",timeout:120000});
+          const python=path.join(venv,process.platform==="win32"?"Scripts/python.exe":"bin/python");
+          const torchArgs=["-I","-B","-m","pip","install","--isolated","--no-cache-dir","torch==2.9.1"];
+          if(process.platform==="win32")torchArgs.push("--index-url","https://download.pytorch.org/whl/cpu");
+          const bridgeNeeded=Boolean(env.H3_NATIVE_EVIDENCE_SHA);
+          if(bridgeNeeded)execFileSync(python,torchArgs,{stdio:"inherit",timeout:900000});
+          const packages=[];if(request.bootstrap?.cohort==="reduced-v1"||request.assetSets.includes("speech"))packages.push("pyarrow==19.0.1");if(request.prepare_float_variants===true)packages.push("numpy==2.2.6");
+          if(packages.length)execFileSync(python,["-I","-B","-m","pip","install","--isolated","--no-cache-dir",...packages],{stdio:"inherit",timeout:600000});
+          const versions=bridgeNeeded?JSON.parse(execFileSync(python,["-I","-B","-c","import json,sys,torch; assert sys.version_info[:2]==(3,12); assert str(torch.__version__).split('+')[0]=='2.9.1'; print(json.dumps({'python':sys.version.split()[0],'torch':str(torch.__version__)}))"],{encoding:"utf8",timeout:30000})):JSON.parse(execFileSync(python,["-I","-B","-c","import json,sys; assert sys.version_info[:2]==(3,12); print(json.dumps({'python':sys.version.split()[0],'torch':None}))"],{encoding:"utf8",timeout:30000}));
+          const help=bridgeNeeded?execFileSync(python,["-I","-B",path.join(env.GITHUB_WORKSPACE,"inference-evidence","scripts/h3_actual_checkpoint_oracle.py"),"--help"],{encoding:"utf8",timeout:30000}):"No artifact bridge requested for this legacy case.";
+          const freeze=execFileSync(python,["-I","-B","-m","pip","freeze","--all"],{encoding:"utf8",timeout:30000});
+          const evidence=path.join(env.RUNNER_TEMP,`h3-terminal-stage-${env.GITHUB_SHA}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);await mkdir(evidence,{recursive:true});
+          await writeFile(path.join(evidence,"cpu-tools-freeze.txt"),freeze);await writeFile(path.join(evidence,"cpu-bridge-help.txt"),help);
+          await writeFile(path.join(evidence,"cpu-tools.json"),JSON.stringify({kind:"h3-cpu-oracle-tools",status:"import-and-help-preflight-passed",numericProof:false,pythonExecutable:python,...versions,sourceSha:env.GITHUB_SHA,nativeEvidenceSha:env.H3_NATIVE_EVIDENCE_SHA,freezeSha256:createHash("sha256").update(freeze).digest("hex"),device:"cpu",meaning:"Actual import/version/help only; selected-artifact arithmetic remains unproven until the native/CPU comparison passes."},null,2)+"\n");
+          await appendFile(env.GITHUB_ENV,`H3_SPEECH_PYTHON=${python}\n${bridgeNeeded?"H3_PROBE_PYTHON="+python+"\n":""}`);
+          NODE
+      # Each attempt stages the verified weights into its own private root and its owned service
+      # writes real copies beside them (managed import, normalized bundle, resolved cache), and a
+      # failed attempt leaves all of it behind: a few failures filled E: and, on the macOS lane,
+      # /Volumes/Models. Clear only this campaign's earlier run roots (and their bootstrap and
+      # cargo-target siblings) under the same parent the stage derives its private root from, and
+      # only for runs GitHub reports as completed, before this run stages anything.
+      - name: Clear this campaign's completed prior-run roots on the weights volume
+        if: ${{ fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {spawnSync} from "node:child_process";
+          import {readdir, rm, statfs} from "node:fs/promises";
+          import path from "node:path";
+          import {pathToFileURL} from "node:url";
+          const {liveOwnedProcesses, formatLeftovers, RUN_OUTPUT_ROOT} = await import(pathToFileURL(path.join(process.env.GITHUB_WORKSPACE, "sceneworks", "scripts", "lib", "h3-owned-processes.mjs")).href);
+          // The stage's privateRunRoot parent: E:\\huggingface on Windows, $HF_HOME elsewhere.
+          const hfHome = process.platform === "win32" ? "E:\\huggingface" : process.env.HF_HOME;
+          if (!hfHome || !path.isAbsolute(hfHome)) throw new Error("an absolute HF_HOME is required to locate the private run roots");
+          const parent = path.join(hfHome, "sc26691-private"), current = process.env.GITHUB_RUN_ID;
+          const entries = await readdir(parent, {withFileTypes: true}).catch(e => { if (e.code === "ENOENT") return []; throw e; });
+          // An owned API/worker/guardian an earlier run recorded and that is still alive as itself
+          // (MLX run 41044021373 hit one holding 127.0.0.1:43210) keeps that run's roots: it may
+          // still read them and hold Metal/CUDA memory. It is never signalled - stopping it is the
+          // operator's decision - and the lane fails here, before staging, instead of at its first case.
+          const outputRoots = entries.filter(e => e.isDirectory() && RUN_OUTPUT_ROOT.test(e.name) && !e.name.startsWith(`${current}-`)).map(e => path.join(parent, e.name));
+          const leftovers = await liveOwnedProcesses({roots: outputRoots});
+          const heldRuns = new Set(leftovers.map(p => p.runId));
+          for (const entry of entries) {
+            const match = /^(\d+)-\d+(?:-bootstrap-[0-9a-f]{40}|-target|-native|-fixture)?$/.exec(entry.name);
+            if (!entry.isDirectory() || !match || match[1] === current) continue;
+            if (heldRuns.has(match[1])) { console.log(`keeping ${entry.name}: run ${match[1]} still has live owned processes`); continue; }
+            // A directory whose name only LOOKS like a run root (a stray test leftover such as
+            // `1-1-native` or `101-1`) has no run behind it: the lookup 404s. That is a reason to
+            // keep the directory and say so, never to fail the campaign; deletion stays limited to
+            // roots of runs of THIS repository that GitHub reports as completed.
+            const lookup = spawnSync("gh", ["api", `repos/${process.env.GITHUB_REPOSITORY}/actions/runs/${match[1]}`, "--jq", "[.status, .repository.full_name] | @tsv"], {encoding: "utf8"});
+            if (lookup.status !== 0) {
+              if (/HTTP 404|Not Found/i.test(`${lookup.stderr}${lookup.stdout}`)) { console.log(`keeping ${entry.name}: no run ${match[1]} in ${process.env.GITHUB_REPOSITORY} (404)`); continue; }
+              throw new Error(`run lookup for ${entry.name} failed: ${lookup.stderr || lookup.error?.message || lookup.status}`);
+            }
+            const [status, repository] = lookup.stdout.trim().split("\t");
+            if (repository !== process.env.GITHUB_REPOSITORY) { console.log(`keeping ${entry.name}: run ${match[1]} belongs to ${repository || "no repository"}`); continue; }
+            if (status !== "completed") { console.log(`keeping ${entry.name}: run ${match[1]} is ${status}`); continue; }
+            await rm(path.join(parent, entry.name), {recursive: true, force: false});
+            console.log(`removed ${entry.name}`);
+          }
+          const fs = await statfs(hfHome);
+          console.log(`${hfHome} free ${(fs.bavail * fs.bsize / 2 ** 30).toFixed(1)} GiB`);
+          if (leftovers.length) throw new Error(`H3_LEFTOVER_OWNED_PROCESSES: ${leftovers.length} owned process(es) from earlier campaign runs are still alive on this host and were left untouched; stop them, then re-dispatch: ${formatLeftovers(leftovers)}`);
+          NODE
+      - name: Bootstrap the reduced terminal campaign when requested
+        id: bootstrap
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN_INPUT: ${{ inputs.plan_path }}
+          OUTPUT_INPUT: ${{ inputs.output_path }}
+        run: |
+          set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
+          import path from "node:path";
+          import {bootstrapTerminal} from "./scripts/h3-finetune-terminal-bootstrap.mjs";
+          import {privateRunRoot} from "./scripts/h3-finetune-terminal-stage.mjs";
+
+          const env = process.env;
+          const request = JSON.parse(env.H3_STAGE_REQUEST || "{}");
+          const evidenceRoot = path.join(env.RUNNER_TEMP, `h3-terminal-stage-${env.GITHUB_SHA}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+          await mkdir(evidenceRoot, { recursive: true });
+          if (request.bootstrap === undefined) {
+            await appendFile(env.GITHUB_ENV, "H3_BOOTSTRAP_PREPARED=false\n");
+            await appendFile(env.GITHUB_OUTPUT, "prepared=false\n");
+          } else {
+            const bootstrap = request.bootstrap;
+            assert.ok(bootstrap && typeof bootstrap === "object" && !Array.isArray(bootstrap), "request.bootstrap must be a typed object");
+            assert.equal(bootstrap.casebook, "sc-26691-h3-cases-v1", "bootstrap casebook identity required");
+            assert.equal(bootstrap.cohort, "reduced-v1", "bootstrap cohort must be reduced-v1");
+            assert.ok(bootstrap.operator && typeof bootstrap.operator === "object", "typed operator configuration required");
+            assert.ok(Array.isArray(bootstrap.componentSelections) || Array.isArray(bootstrap.components), "explicit component selections required");
+            assert.ok(bootstrap.legalAuthority && typeof bootstrap.legalAuthority === "object", "explicit legal authority required");
+            assert.equal(env.GITHUB_SHA, env.H3_SCENEWORKS_SHA, "dispatch commit must equal the requested SceneWorks source");
+            assert.match(env.H3_SCENEWORKS_SHA ?? "", /^[a-f0-9]{40}$/, "dispatch SceneWorks SHA required");
+            assert.match(env.H3_INFERENCE_SHA ?? "", /^[a-f0-9]{40}$/, "dispatch inference SHA required");
+            // The output root sits BESIDE the per-run private staging root, on the same volume. The
+            // runtime hardlinks the staged model files into each case's data directory so a 34 GB
+            // checkpoint costs nothing per case, and a hardlink cannot cross volumes: with the
+            // output root in RUNNER_TEMP (the internal disk on macOS, D: on Windows) and the staged
+            // root on the weights volume (/Volumes/Models, E:), the first case failed with EXDEV. A
+            // sibling — not a child — keeps it out of the stage's own run-root cleanup.
+            const stagedRoot = privateRunRoot({ backend: env.H3_STAGE_BACKEND, platform: process.platform, env, runId: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT });
+            await mkdir(path.dirname(stagedRoot), { recursive: true });
+            const outputRoot = `${stagedRoot}-bootstrap-${env.GITHUB_SHA}`;
+            const result = await bootstrapTerminal({
+              request, backend: env.H3_STAGE_BACKEND, swRoot: process.cwd(),
+              inferenceRoot: path.join(env.GITHUB_WORKSPACE, "inference"), evidenceRoot, env, outputRoot,
+            });
+            assert.equal(result.prepared, true, "bootstrap must report prepared:true");
+            assert.equal(result.proof, false, "bootstrap is preparation, not proof");
+            assert.ok(typeof result.planPath === "string" && path.isAbsolute(result.planPath), "bootstrap must return an absolute planPath");
+            assert.ok(typeof result.output === "string" && path.isAbsolute(result.output), "bootstrap must return an absolute private output root");
+            const plan = JSON.parse(await readFile(result.planPath, "utf8"));
+            assert.equal(plan.sceneworks, env.H3_SCENEWORKS_SHA, "bootstrap plan must use the dispatch SceneWorks source");
+            assert.equal(plan.inference, env.H3_INFERENCE_SHA, "bootstrap plan must use the dispatch inference source");
+            assert.equal(plan.inventory, "reduced-v1", "bootstrap plan must be the reduced inventory");
+            // The output must stay in the workflow-owned, run-scoped location chosen above: beside
+            // this run's private staging root, under the same sc26691-private parent.
+            const resolvedOutput = path.resolve(result.output), ownedParent = path.resolve(path.dirname(stagedRoot));
+            assert.ok(resolvedOutput.startsWith(ownedParent + path.sep), "bootstrap output must stay beside this run's private staging root");
+            assert.equal(path.basename(ownedParent), "sc26691-private", "bootstrap output must stay under the owned sc26691-private parent");
+            assert.ok(resolvedOutput.includes(`${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`), "bootstrap output must be derived from the private run/attempt identity");
+            await writeFile(path.join(evidenceRoot, "bootstrap.json"), JSON.stringify({ kind: "h3-terminal-bootstrap", prepared: true, proof: false, planPath: result.planPath, output: result.output, sourceSha: env.H3_SCENEWORKS_SHA, inferenceSha: env.H3_INFERENCE_SHA, nativeEvidenceSha: env.H3_NATIVE_EVIDENCE_SHA ?? null }, null, 2) + "\n");
+            await appendFile(env.GITHUB_ENV, `H3_PLAN_EFFECTIVE=${result.planPath}\nH3_OUTPUT_EFFECTIVE=${result.output}\nH3_BOOTSTRAP_PREPARED=true\n`);
+            await appendFile(env.GITHUB_OUTPUT, `prepared=true\nplan=${result.planPath}\noutput=${result.output}\n`);
+            console.log(JSON.stringify({ bootstrap: "prepared", planPath: result.planPath, output: result.output, proof: false }));
+          }
+          NODE
+      - name: Ensure selected assets and conditioning in this terminal route
+        id: stage
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN: ${{ inputs.plan_path }}
+          OUTPUT: ${{ inputs.output_path }}
+        run: |
+          set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
+          import path from "node:path";
+          import {bindStagedCampaignPlan} from "./scripts/h3-finetune-terminal-cases.mjs";
+          import {lockedInferenceRevision} from "./scripts/select-windows-cargo-cache.mjs";
+          import {
+            loadCasebook, selectStageFiles, parseStageRequest, runStage, prepareReferenceFixtures,
+            identityControlSourceEntry,
+          } from "./scripts/h3-finetune-terminal-stage.mjs";
+
+          const env = process.env;
+          const bootstrapPrepared=env.H3_BOOTSTRAP_PREPARED==="true";
+          if(!bootstrapPrepared)assert.ok(typeof env.PLAN==="string"&&path.isAbsolute(env.PLAN),"external plan_path is required when request.bootstrap is absent");
+          const planPath=bootstrapPrepared?env.H3_PLAN_EFFECTIVE:env.PLAN;
+          const output=bootstrapPrepared?(env.H3_OUTPUT_EFFECTIVE||env.OUTPUT):env.OUTPUT;
+          assert.ok(typeof planPath==="string"&&path.isAbsolute(planPath),"effective plan path required before assets");
+          assert.ok(typeof output==="string"&&path.isAbsolute(output),"owned output root required before assets");
+          const originalPlan=JSON.parse(await readFile(planPath,"utf8"));
+          assert.equal(originalPlan.sceneworks,env.H3_SCENEWORKS_SHA??env.GITHUB_SHA,"plan must identify this exact dispatch source before assets");
+          assert.equal(originalPlan.inference,env.H3_INFERENCE_SHA??originalPlan.inference,"plan inference must match the dispatch source before assets");
+          assert.equal(originalPlan.output,output,"owned output must match before assets");
+          await mkdir(output,{recursive:true});
+          await appendFile(env.GITHUB_ENV,`H3_OUTPUT_EFFECTIVE=${output}\n`);
+          const laneStartPath=path.join(output,`lane-start-${env.H3_STAGE_BACKEND}.json`);
+          let laneStart;try{laneStart=JSON.parse(await readFile(laneStartPath,"utf8"));}catch(error){if(error.code!=="ENOENT")throw error;}
+          if(!laneStart){laneStart={sceneworks:originalPlan.sceneworks,inference:originalPlan.inference,startedAt:env.H3_TERMINAL_JOB_STARTED_AT||new Date().toISOString(),budgetSeconds:86400};await writeFile(laneStartPath,JSON.stringify(laneStart,null,2)+"\n",{flag:"wx"});}
+          assert.equal(laneStart.sceneworks,originalPlan.sceneworks);assert.equal(laneStart.inference,originalPlan.inference);assert.equal(laneStart.budgetSeconds,86400);
+          assert.ok(Date.now()<Date.parse(laneStart.startedAt)+86400000,"whole lane exhausted its original 24h budget; a dispatch does not reset it");
+          await appendFile(env.GITHUB_ENV,`H3_TERMINAL_LANE_STARTED_AT=${laneStart.startedAt}\n`);
+          if(originalPlan.inventory==="reduced-v1"){
+            assert.match(env.H3_NATIVE_EVIDENCE_SHA??"",/^[a-f0-9]{40}$/,"exact native evidence SHA (inference main) required independently of the product pin");
+            assert.equal(env.H3_NATIVE_EVIDENCE_REF,"main");
+          }
+          const request = parseStageRequest(env.H3_STAGE_REQUEST ?? "{}");
+          const requestedSets = request.assetSets ?? [];
+          if (request.prepare_float_variants === true) {
+            const book = await loadCasebook();
+            assert.ok(book.stagingPlan?.profileSemantics?.[request.float_source_profile], "explicit eligible raw source profile required");
+            assert.ok(requestedSets.includes(request.float_source_profile), "float variants need the actually staged source set");
+          }
+          if (request.prepare_reference_fixtures === true) assert.ok(requestedSets.includes("singularity"), "reference fixtures require the singularity set staged in this route");
+          if (request.prepare_identity_controls === true) assert.ok(requestedSets.includes("singularity"), "identity controls require the canonical singularity source staged in this route");
+          const stageRequested = ["asset_sets", "assetSets", "license_authority", "licenseAuthority"].some(key => request[key] !== undefined)
+            || request.inspect_only === true || request.inspectOnly === true
+            || request.prepare_identity_controls === true || request.prepare_reference_fixtures === true
+            || request.prepare_float_variants === true || requestedSets.includes("speech");
+          const evidence = path.join(env.RUNNER_TEMP, `h3-terminal-stage-${env.GITHUB_SHA}-${env.GITHUB_RUN_ID}-${env.GITHUB_RUN_ATTEMPT}`);
+          await mkdir(evidence, { recursive: true });
+          const consumerPin = lockedInferenceRevision(await readFile("Cargo.lock", "utf8"));
+          await appendFile(env.GITHUB_ENV, `H3_STAGE_EVIDENCE=${evidence}\nH3_STAGE_CONSUMER_PIN=${consumerPin}\n`);
+          await writeFile(path.join(evidence, "source-config.json"), JSON.stringify({ sourceSha: env.H3_SCENEWORKS_SHA??env.GITHUB_SHA, inferenceSha: env.H3_INFERENCE_SHA??null, nativeEvidenceSha: env.H3_NATIVE_EVIDENCE_SHA??null, consumerPin, backend: env.H3_STAGE_BACKEND, runner: env.RUNNER_NAME, node: process.version, bootstrapPrepared, campaignProof: false }, null, 2) + "\n");
+          const binding = { kind: "h3-terminal-stage-binding", campaignProof: false, status: "skipped-no-request", stageRequested, root: null, receiptPath: null, producedFiles: [], boundInputs: 0, blockedByAllowedRoots: 0, conditioning: null, identityControls: null, inspectOnly: request.inspect_only === true || request.inspectOnly === true };
+          if (stageRequested && !bootstrapPrepared) {
+            const planned = selectStageFiles(await loadCasebook(), request.assetSets);
+            await writeFile(path.join(evidence, "expected-assets-not-integrity-proof.json"), JSON.stringify({ requiredFiles: planned.length, completedFiles: 0, status: "not-attempted", files: planned }, null, 2) + "\n");
+            if (!binding.inspectOnly) {
+              const probeRequest = { ...request, assetSets: [...new Set([...requestedSets, "builtin-shards", "builtin-ref-shards", "community-shards-fl2va", "community-shards-ref2va"])], inspect_only: true, inspectOnly: true };
+              const probe = await runStage({ request: probeRequest, backend: env.H3_STAGE_BACKEND, env, platform: process.platform, evidenceDir: path.join(evidence, "cache-probe") });
+              await writeFile(path.join(evidence, "cache-probe.json"), JSON.stringify(probe, null, 2) + "\n");
+            }
+            const receipt = await runStage({ request, backend: env.H3_STAGE_BACKEND, env, platform: process.platform, evidenceDir: evidence });
+            binding.status = receipt.status ?? receipt.kind;
+            binding.root = receipt.settings?.privateRoot ?? null;
+            binding.receiptPath = binding.root ? path.join(binding.root, "h3-stage-receipt.json") : null;
+            binding.producedFiles = (receipt.files ?? []).map(file => ({ file: file.file, path: file.finalPath, sha256: file.observedSha256 ?? file.sha256, expectedBytes: file.expectedBytes }));
+            await writeFile(path.join(evidence, "expected-assets-not-integrity-proof.json"), JSON.stringify({ requiredFiles: (receipt.files ?? []).length, completedFiles: binding.producedFiles.length, status: binding.status, files: binding.producedFiles }, null, 2) + "\n");
+            if (request.prepare_reference_fixtures === true && binding.status === "completed" && binding.root) binding.conditioning = await prepareReferenceFixtures({ root: binding.root, evidenceDir: evidence, backend: env.H3_STAGE_BACKEND, env, platform: process.platform });
+            if (request.prepare_identity_controls === true && binding.status === "completed" && binding.root) binding.identityControls = receipt.identityControls;
+            if (binding.root) {
+              const plan = JSON.parse(await readFile(planPath, "utf8"));
+              const bound = await bindStagedCampaignPlan(plan,{receiptPath:binding.receiptPath,root:binding.root,backend:env.H3_STAGE_BACKEND,identityControls:binding.identityControls});
+              binding.boundInputs = bound.boundInputs;
+              binding.blockedByAllowedRoots = bound.blockedByAllowedRoots;
+              binding.boundPlan = path.join(output, "bound-plan.json");
+              await writeFile(binding.boundPlan, JSON.stringify(bound.plan, null, 2) + "\n");
+              await appendFile(env.GITHUB_ENV, `H3_PLAN_EFFECTIVE=${binding.boundPlan}\nH3_STAGE_ROOT=${binding.root}\n`);
+            }
+            if (binding.inspectOnly) await appendFile(env.GITHUB_ENV, "H3_TERMINAL_SKIP_RUN=1\n");
+            await appendFile(env.GITHUB_ENV, `H3_STAGE_PREPARE_FLOATS=${request.prepare_float_variants === true}\nH3_FLOAT_SOURCE_PROFILE=${request.float_source_profile ?? ""}\nH3_STAGE_PREPARE_SPEECH=${requestedSets.includes("speech") ? "true" : "false"}\n`);
+          }
+          if(bootstrapPrepared){binding.status="bootstrap-prepared";binding.stageRequested=false;binding.root=null;binding.prepared=true;binding.boundPlan=planPath;}
+          const effectivePlanPath=binding.boundPlan??planPath;
+          const effectivePlan=JSON.parse(await readFile(effectivePlanPath,"utf8"));
+          if(effectivePlan.inventory==="reduced-v1"){
+            const nativeRoot=path.join(env.GITHUB_WORKSPACE,"inference-evidence");
+            effectivePlan.nativeEvidence={ref:env.H3_NATIVE_EVIDENCE_REF,sha:env.H3_NATIVE_EVIDENCE_SHA,root:nativeRoot,productPin:effectivePlan.inference};
+            binding.boundPlan=path.join(output,"evidence-bound-plan.json");
+            await writeFile(binding.boundPlan,JSON.stringify(effectivePlan,null,2)+"\n",{flag:"wx"});
+            await appendFile(env.GITHUB_ENV,`H3_PLAN_EFFECTIVE=${binding.boundPlan}\n`);
+          }
+          await writeFile(path.join(evidence, "stage-binding.json"), JSON.stringify(binding, null, 2) + "\n");
+          await appendFile(env.GITHUB_OUTPUT, `status=${binding.status}\nroot=${binding.root ?? ""}\nbound_inputs=${binding.boundInputs}\nblocked_by_allowed_roots=${binding.blockedByAllowedRoots}\n`);
+          console.log(JSON.stringify({ stageRequested, status: binding.status, root: binding.root, boundInputs: binding.boundInputs, blockedByAllowedRoots: binding.blockedByAllowedRoots }));
+          NODE
+      - name: Derive explicit dense source variants from the actually staged raw snapshot
+        if: ${{ steps.stage.outputs.status == 'completed' && env.H3_STAGE_PREPARE_FLOATS == 'true' }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
+        run: |
+          set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          node --input-type=module <<'NODE'
+          import {execFileSync} from "node:child_process";
+          import {copyFile} from "node:fs/promises";
+          import path from "node:path";
+          const env=process.env,root=env.H3_PRIVATE_STAGE_ROOT;let failure;
+          try { execFileSync(env.H3_SPEECH_PYTHON,["-I","scripts/h3-finetune-terminal-float-variants.py","--stage-receipt",path.join(root,"h3-stage-receipt.json"),"--stage-root",root,"--source-profile",env.H3_FLOAT_SOURCE_PROFILE],{stdio:"inherit"}); } catch(error) { failure=error; }
+          finally { try { await copyFile(path.join(root,"derived","float-variants-receipt.json"),path.join(env.H3_STAGE_EVIDENCE,"float-variants-receipt.json")); } catch(error) { if(!failure)throw error; } }
+          if(failure)throw failure;
+          NODE
+      - name: Extract the pinned public row as mono 32-kHz speech and retain attribution
+        if: ${{ steps.stage.outputs.status == 'completed' && env.H3_STAGE_PREPARE_SPEECH == 'true' }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          H3_PRIVATE_STAGE_ROOT: ${{ steps.stage.outputs.root }}
+        run: |
+          set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          node --input-type=module <<'NODE'
+          import {execFileSync} from "node:child_process";
+          import {copyFile} from "node:fs/promises";
+          import path from "node:path";
+          const env=process.env,root=env.H3_PRIVATE_STAGE_ROOT;
+          let failure;
+          try { execFileSync(env.H3_SPEECH_PYTHON,["-I","scripts/h3-finetune-terminal-speech.py","--stage-receipt",path.join(root,"h3-stage-receipt.json"),"--stage-root",root],{stdio:"inherit"}); } catch(error) { failure=error; }
+          finally { try { await copyFile(path.join(root,"conditioning","speech-1272-128104-0000","speech-receipt.json"),path.join(env.H3_STAGE_EVIDENCE,"speech-receipt.json")); } catch(error) { if(!failure)throw error; } }
+          if(failure)throw failure;
+          NODE
+      - name: Resolve the reduced operational case set for this backend
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN_INPUT: ${{ inputs.plan_path }}
+          OUTPUT_INPUT: ${{ inputs.output_path }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {appendFile, readFile, writeFile} from "node:fs/promises";
+          import path from "node:path";
+          import {executionCases,validatePlan} from "./scripts/h3-finetune-terminal.mjs";
+          const env = process.env;
+          const request = JSON.parse(env.H3_STAGE_REQUEST || "{}");
+          const planPath = env.H3_PLAN_EFFECTIVE || env.PLAN_INPUT;
+          const output = env.H3_OUTPUT_EFFECTIVE || env.OUTPUT_INPUT;
+          assert.ok(typeof output === "string" && path.isAbsolute(output), "effective owned output root required");
+          const plan = JSON.parse(await readFile(planPath, "utf8"));
+          const planIds = new Set((plan.cases ?? []).map(item => item.id));
+          const explicit = Array.isArray(request.case_ids) ? request.case_ids.map(String) : (typeof request.case_id === "string" && request.case_id ? [request.case_id] : null);
+          let ids;
+          if (explicit) { for (const id of explicit) assert.ok(planIds.has(id), `explicit case ${id} is not in the plan`); ids = explicit; }
+          else {
+            validatePlan(plan);
+            assert.equal(plan.inventory,"reduced-v1","terminal execution defaults to the reduced operational inventory");
+            ids = executionCases(plan).filter(item=>item.backend===env.H3_STAGE_BACKEND).map(item => item.id);
+            const missing = ids.filter(id => !planIds.has(id));
+            assert.equal(missing.length, 0, `reduced operational cases are not in the plan; parent must wire the reduced cases API: ${missing.join(", ")}`);
+            assert.ok(ids.length===25||ids.length===18,"reduced inventory is 25 maximum or 18 on the measured displaced backend");
+          }
+          await writeFile(path.join(output, "case-ids.json"), JSON.stringify(ids, null, 2) + "\n");
+          const evidencePaths=[...ids.map(id=>path.join(output,id)),path.join(output,`backend-readback-${env.H3_STAGE_BACKEND}.json`),path.join(output,`native-witnesses-${env.H3_STAGE_BACKEND}`)];
+          await appendFile(env.GITHUB_ENV,`H3_CASE_ARTIFACT_PATHS<<H3_CASE_PATHS_END\n${evidencePaths.join("\n")}\nH3_CASE_PATHS_END\n`);
+          await appendFile(env.GITHUB_ENV, `H3_TERMINAL_CASES=${ids.join(",")}\nH3_PLAN_EFFECTIVE=${planPath}\n`);
+          console.log(JSON.stringify({ backend: env.H3_STAGE_BACKEND, cases: ids.length, plan: planPath }));
+          NODE
+      - name: Validate explicit inputs before any product execution
+        shell: bash
+        env:
+          PLAN: ${{ inputs.plan_path }}
+          OUTPUT: ${{ inputs.output_path }}
+          CASE_ID: ${{ inputs.case_id }}
+          BACKEND: ${{ inputs.backend }}
+          EXPECTED_RUNNER: ${{ inputs.expected_runner }}
+          SW_SHA: ${{ inputs.sceneworks_sha }}
+          INF_SHA: ${{ inputs.inference_sha }}
+        run: |
+          export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
+          export OUTPUT="${H3_OUTPUT_EFFECTIVE:-$OUTPUT}"
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import {readFile} from "node:fs/promises";
+            const e=process.env,p=JSON.parse(await readFile(e.PLAN,"utf8"));
+            assert.equal(e.GITHUB_SHA,e.SW_SHA,"caller workflow commit must equal the exact requested SceneWorks source");
+            assert.match(e.SW_SHA,/^[a-f0-9]{40}$/); assert.match(e.INF_SHA,/^[a-f0-9]{40}$/);
+            assert.equal(e.RUNNER_NAME,e.EXPECTED_RUNNER);
+            assert.equal(p.output,e.OUTPUT);
+            assert.equal(p.sceneworks,e.SW_SHA); assert.equal(p.inference,e.INF_SHA);
+            const ids=(e.H3_TERMINAL_CASES??e.CASE_ID??"").split(",").map(v=>v.trim()).filter(Boolean);
+            assert.ok(ids.length>0,"at least one operational case id required");
+            for(const id of ids){const c=p.cases.find(v=>v.id===id);assert.ok(c,"case "+id+" is not in the plan");assert.equal(c.backend,e.BACKEND,"case "+id+" backend");}
+          '
+      - name: Read the checked-out root Rust pin
+        shell: bash
+        working-directory: sceneworks
+        run: |
+          node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import {readFile,appendFile} from "node:fs/promises";
+            import path from "node:path";
+            import os from "node:os";
+            const pins=[...(await readFile("rust-toolchain.toml","utf8")).matchAll(/^channel\s*=\s*"([^"]+)"\s*$/gm)];
+            assert.equal(pins.length,1,"one root Rust channel is required");
+            const pin=pins[0][1]; assert.match(pin,/^\d+\.\d+\.\d+$/);
+            await appendFile(process.env.GITHUB_ENV,"RUSTUP_TOOLCHAIN="+pin+"\n");
+            await appendFile(process.env.GITHUB_PATH,path.join(process.env.CARGO_HOME || path.join(os.homedir(),".cargo"),"bin")+"\n");
+          '
+      - name: Prepare the root-pinned compiler without changing the runner default
+        shell: bash
+        working-directory: sceneworks
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update -c rustfmt -c clippy
+          rustup run "$RUSTUP_TOOLCHAIN" rustc --version
+          rustup run "$RUSTUP_TOOLCHAIN" cargo --version
+      - name: Execute or reverify the reduced operational cases
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN: ${{ inputs.plan_path }}
+          CASE_ID: ${{ inputs.case_id }}
+          H3_TERMINAL_AUTHORIZED_PAIR: ${{ inputs.sceneworks_sha }}:${{ inputs.inference_sha }}
+          CUDA_DEVICE_ORDER: ${{ inputs.backend == 'cuda' && 'PCI_BUS_ID' || '' }}
+          CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '1' || '' }}
+          SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '1' || '' }}
+        run: |
+          set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          if [ "${H3_TERMINAL_SKIP_RUN:-0}" = "1" ]; then echo "inspect-only request: no model execution"; exit 0; fi
+          export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {execFileSync} from "node:child_process";
+          import {readFile,writeFile,appendFile} from "node:fs/promises";
+          import {ensureInlineNativeWitnesses,writeInlineAnchorBundle} from "./scripts/h3-finetune-terminal.mjs";
+          const plan=JSON.parse(await readFile(process.env.PLAN,"utf8"));
+          if(plan.inventory==="reduced-v1"){
+            await ensureInlineNativeWitnesses(plan,process.env.H3_STAGE_BACKEND,`${process.env.GITHUB_WORKSPACE}/sceneworks`,{productRoot:`${process.env.GITHUB_WORKSPACE}/inference`});
+            await writeFile(process.env.PLAN,JSON.stringify(plan,null,2)+"\n");
+          }
+          const env=process.env,ids=(env.H3_TERMINAL_CASES??env.CASE_ID??"").split(",").map(v=>v.trim()).filter(Boolean);
+          assert.ok(ids.length>0,"resolved operational cases required");
+          const request=JSON.parse(env.H3_STAGE_REQUEST||"{}");
+          const adaptive=plan.inventory==="reduced-v1"&&ids.length>2&&request.adaptive_matrix!==false;
+          const selected=adaptive?plan.cases.filter(c=>c.backend===env.H3_STAGE_BACKEND&&[1,15].includes(c.index)).map(c=>c.id):ids;
+          for(const id of selected)execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
+          if(adaptive){const directory=await writeInlineAnchorBundle(plan,env.H3_STAGE_BACKEND);await appendFile(env.GITHUB_ENV,`H3_INLINE_ANCHORS=${directory}\nH3_MATRIX_PENDING=1\n`);}
+
+          NODE
+      - name: Publish only measured inline anchor metadata
+        if: env.H3_MATRIX_PENDING == '1'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          # One artifact per run attempt (anchorArtifactName in scripts/lib/h3-peer-lane.mjs): a fixed
+          # name made a rerun attempt's upload collide with its earlier attempt's in the same run.
+          name: h3-anchors-${{ inputs.backend }}-${{ inputs.sceneworks_sha }}-${{ inputs.inference_sha }}-${{ inputs.native_evidence_sha }}-attempt-${{ github.run_attempt }}
+          path: ${{ env.H3_INLINE_ANCHORS }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Choose the measured matrix backend and finish this lane
+        if: env.H3_MATRIX_PENDING == '1'
+        shell: bash
+        working-directory: sceneworks
+        env:
+          PLAN: ${{ inputs.plan_path }}
+          GH_TOKEN: ${{ github.token }}
+          H3_TERMINAL_AUTHORIZED_PAIR: ${{ inputs.sceneworks_sha }}:${{ inputs.inference_sha }}
+          CUDA_DEVICE_ORDER: ${{ inputs.backend == 'cuda' && 'PCI_BUS_ID' || '' }}
+          CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '1' || '' }}
+          SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '1' || '' }}
+        run: |
+          set -euo pipefail
+          # The macOS lane is a MacBook Pro: hold a no-sleep assertion for exactly this step (caffeinate -w
+          # exits with this shell, detached stdio holds no step pipe open). Run 40903116430 froze for 5 h.
+          if [ "${RUNNER_OS:-}" = "macOS" ]; then caffeinate -dimsu -w "$$" </dev/null >/dev/null 2>&1 & fi
+          export PLAN="${H3_PLAN_EFFECTIVE:-$PLAN}"
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import path from "node:path";
+          import {readFile,writeFile,mkdtemp} from "node:fs/promises";
+          import {execFileSync} from "node:child_process";
+          import {laneBudget,ownAnchorTimings,peerAnchorWaitDeadline,assertLaneAllocationFits,receiveInlineAnchorBundle,executionCases} from "./scripts/h3-finetune-terminal.mjs";
+          import {anchorArtifactBase,waitForPeerAnchors} from "./scripts/lib/h3-peer-lane.mjs";
+          const env=process.env,p=JSON.parse(await readFile(env.PLAN,"utf8")),backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
+          const name=anchorArtifactBase({backend:peer,sceneworks:p.sceneworks,inference:p.inference,evidence:p.nativeEvidence.sha});
+          const budget=await laneBudget(p,backend);
+          const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
+          // The wait ends at this lane's work deadline (budget and job timeout, minus the evidence
+          // reserve) minus the measured estimate of the cases it runs under EITHER matrix outcome
+          // (the displaced allocation; each case: its anchor family's fixed part plus its own step
+          // count at the per-step time from the anchor's job progress). A lane that cannot fit even
+          // those refuses here with its own error; the selected allocation is checked after the decision.
+          const timings=await ownAnchorTimings(p,backend);
+          const wait=peerAnchorWaitDeadline(p,backend,budget,{timings});
+          console.log(JSON.stringify({peerAnchorWait:{until:new Date(wait.deadline).toISOString(),workDeadline:new Date(wait.workDeadline).toISOString(),guaranteedMs:wait.guaranteedMs,guaranteedCases:wait.guaranteedCases,selectedMs:wait.selectedMs,selectedCases:wait.selectedCases,basis:wait.basis,perCase:wait.perCase}}));
+          // Wait for as long as the paired peer lane can still deliver: it throws at once when the
+          // peer is observed ended, failed or absent without valid anchors. A download is IO and is
+          // retried (a fresh directory each try); only a failed packet check rejects a candidate. The
+          // newest paired-run anchors that validate win; each is checked against its own run id AND
+          // attempt, on a copy of the plan so a rejected one leaves no trace.
+          const {artifact,result}=await waitForPeerAnchors({gh,repository:env.GITHUB_REPOSITORY,name,headSha:p.sceneworks,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer,startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT),deadline:wait.deadline,log:line=>console.log(line),
+            download:async artifact=>{
+              const directory=await mkdtemp(path.join(p.output,`peer-inline-anchors-${peer}-${artifact.id}-`));
+              execFileSync("gh",["run","download",String(artifact.workflow_run.id),"--repo",env.GITHUB_REPOSITORY,"--name",artifact.name,"--dir",directory],{stdio:"inherit",env});
+              return directory;
+            },
+            validate:async (artifact,directory)=>{
+              const plan=structuredClone(p),decision=await receiveInlineAnchorBundle(plan,backend,directory,{expectedRunId:artifact.workflow_run.id,expectedRunAttempt:artifact.runAttempt});
+              return {plan,decision};
+            }});
+          const plan=result.plan;assert.equal(plan.sceneworks,p.sceneworks);
+          await writeFile(env.PLAN,JSON.stringify(plan,null,2)+"\n");console.log(JSON.stringify({peerAnchors:{artifact:artifact.id,name:artifact.name,run:artifact.workflow_run.id,attempt:artifact.runAttempt},measuredMatrixDecision:result.decision,omittedAVStatus:"NOT proven on the displaced backend"}));
+          // The allocation the decision gave this lane must fit its work deadline: the displaced one
+          // does by construction of the wait; a selected one that does not fails here, with numbers.
+          console.log(JSON.stringify({laneAllocation:assertLaneAllocationFits(plan,backend,budget,{timings})}));
+          for(const c of executionCases(plan).filter(c=>c.backend===backend&&![1,15].includes(c.index)))execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,c.id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
+          NODE
+      - name: Retain terminal staging and conditioning receipts without uploading weights
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: h3-terminal-stage-${{ inputs.backend }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/h3-terminal-stage-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Retain reduced-case evidence including failure and resume identity
+        if: always() && inputs.case_id == '' && env.H3_OUTPUT_EFFECTIVE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h3-terminal-${{ inputs.backend }}-reduced-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.H3_CASE_ARTIFACT_PATHS }}
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/service/**
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/tmp/**
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/target/**
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/fixture-target/**
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/*.safetensors
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/*.gguf
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/*.bin
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/*.pt
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/**/*.pth
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain evidence including failure and resume identity
+        if: always() && inputs.case_id != '' && env.H3_OUTPUT_EFFECTIVE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: h3-${{ inputs.case_id }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Receipts/media only. App/cache/build state lives outside the case directory;
+          # also exclude accidentally staged checkpoint payloads from evidence publication.
+          path: |
+            ${{ env.H3_CASE_ARTIFACT_PATHS }}
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/service/**
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/**/target/**
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/**/fixture-target/**
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/**/*.safetensors
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/**/*.gguf
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/**/*.bin
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/**/*.pt
+            !${{ env.H3_OUTPUT_EFFECTIVE }}/${{ inputs.case_id }}/**/*.pth
+          if-no-files-found: error
+          retention-days: 30

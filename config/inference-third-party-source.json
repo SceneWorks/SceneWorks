@@ -1,7 +1,7 @@
 {
-  "_comment": "Audit inventory reviewed at inference revision 0b80ec51: 797 provenance candidates and 123 production-Rust crate prefixes, derived by the current scan. Incoming iOS/runtime, Iris quantization, SDXL memory contracts and source-bound security changes are retained alongside MOSS training. Existing classification context: The Supra2-IMG MLX and Candle provider crates remain classified as native architecture reimplementations of the frozen SupraLabs/Supra2-IMG SupraDiT, with the Supra2-IMG/Flan-T5-Base Apache-2.0 and SD VAE ft-MSE MIT terms disclosed in About. The FLUX.3 crates remain left to their own epic and continue to be reported as open advisory items under sc-19751; earlier MOSS-Image and body/perceptual dispositions are unchanged, and other advisory compliance items under sc-19751 remain open. Historical source and measurement records retain their own revisions; the generated inventories and digests describe this exact source without a measurement currency claim.",
+  "_comment": "Audit inventory reviewed at inference revision 354b41cc (inference main after the sc-27934 external MOSS LoRA engines; it contains 56dd728f, SceneWorks/inference#1389, the MLX tiled int8 GEMM the sc-26691 campaign needs): 804 provenance candidates and 137 production-Rust crate prefixes. Since 0b80ec51 inference epic sc-27252 split gen-core into sibling backend-neutral crates (crates/contracts/gen-core-*); that is first-party code moved out of gen-core, not new third-party source, so each sibling keeps the classification its code had (per-crate architecture areas or crate decisions), and the Veda top-k and InstantID OpenCV-kps ports follow their files into gen-core-h3 / gen-core-family. Incoming iOS/runtime, Iris quantization, SDXL memory contracts and source-bound security changes are retained alongside MOSS training. FLUX 3 (candle-gen-flux3, mlx-gen-flux3), iOS-runtime (runtime-ios, mlx-gen-ios-catalog) and vendored clip-regex sources are not classified by this review; check-license-coverage reports them as open items.",
   "inferenceRevision": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
-  "auditDigest": "559d6aa0f8c85f0de23533d601ae1604bd2436b0d003469aeb6a46904def5df6",
+  "auditDigest": "7398a37e7d8baef29d00a4476e186232ffb0e9bc6db1a406be8964fe74dc3a9d",
   "artifacts": [
     {
       "id": "cmudict",
@@ -22,15 +22,17 @@
     "markerRegex": "faithful ... port(s), ported from, port(s) of, vendor(s)/vendored, transcribed, copied ... verbatim, adapted from, mirror(s|ed|ing) ... <port-object>, derived from ... <port-object>, reimplemented/reimplementation from|of, translated/transliterated from, from the reference (not reference-), original implementation|repo(sitory), based on ... <port-object>, follow(s|ing) ... <port-object>, reimplements ... <port-object>, rewrite of ... <port-object>, model(l)ed after ... <port-object>, ported to ... from, 1:1 with ... <port-object>, line-for-line ... <port-object> (case-insensitive; <port-object> = reference(not followed by -)|upstream|python|pytorch|torch|diffusers|comfy(ui)|transformers|implementation). `original` is NOT a bare port-object and `followed` is excluded: both produced verified false positives on first-party prose (sc-15191 review).",
     "normalization": "matched marker text lowercased, internal whitespace collapsed, sorted, newline joined",
     "matchedFiles": 804,
-    "populationSha256": "294705865e86de1fa80e559d4355fea2d4bdd7116b00ab90a4508eec96f66025"
+    "populationSha256": "2dfb25b2f1e9373eb183a8a664e148db7886a7355558c26f1fa8a62fbf61a62b"
   },
   "portedSourceAreas": [
     {
       "id": "veda-sparse-source",
       "paths": [
         "crates/contracts/gen-core/src/veda/contract.rs",
-        "crates/contracts/gen-core/src/veda/topk.rs",
         "crates/contracts/gen-core/src/veda/workspace.rs",
+        "crates/contracts/gen-core-h3/src/veda/contract.rs",
+        "crates/contracts/gen-core-h3/src/veda/topk.rs",
+        "crates/contracts/gen-core-h3/src/veda/workspace.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/contract.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs",
         "crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/metal.rs",
@@ -189,9 +191,53 @@
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers.",
       "excludePaths": [
         "crates/contracts/gen-core/src/sampling/cfgpp.rs",
-        "crates/contracts/gen-core/src/sampling/solvers.rs",
-        "crates/contracts/gen-core/src/veda/topk.rs"
+        "crates/contracts/gen-core/src/sampling/solvers.rs"
       ]
+    },
+    {
+      "id": "architecture:crates/contracts/gen-core-family",
+      "pathPrefix": "crates/contracts/gen-core-family/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Backend-neutral family helpers hoisted by inference sc-27252/sc-27256 out of gen-core and out of the formerly mirrored candle-gen-* / mlx-gen-* provider crates (schedulers, resolution and request helpers, face alignment); the same first-party source those crates' architecture areas classified at the previous pin, so it keeps that disposition. Applicable upstream model/provider terms are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers. `src/instantid_kps.rs` (the OpenCV drawing port) is classified in `opencv-source`.",
+      "excludePaths": [
+        "crates/contracts/gen-core-family/src/instantid_kps.rs"
+      ]
+    },
+    {
+      "id": "architecture:crates/contracts/gen-core-image",
+      "pathPrefix": "crates/contracts/gen-core-image/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/contracts/gen-core-iris",
+      "pathPrefix": "crates/contracts/gen-core-iris/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/contracts/gen-core-ltx",
+      "pathPrefix": "crates/contracts/gen-core-ltx/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/contracts/gen-core-tokenizer",
+      "pathPrefix": "crates/contracts/gen-core-tokenizer/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/contracts/gen-core-train",
+      "pathPrefix": "crates/contracts/gen-core-train/src/",
+      "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
     },
     {
       "id": "architecture:crates/llm/candle-llm",
@@ -471,6 +517,13 @@
       "provenance": "Marker-bearing production Rust source within this concrete crate prefix describes an architectural, backend, or formula port.",
       "disposition": "architecture-reimplementation-existing-terms",
       "evidence": "Applicable upstream model/provider terms for this concrete crate are already mapped in the About manifest; the candidate inventory pins the exact source blob and normalized provenance markers."
+    },
+    {
+      "id": "architecture:crates/media/candle-gen/vendor/candle-flash-attn",
+      "pathPrefix": "crates/media/candle-gen/vendor/candle-flash-attn/",
+      "provenance": "Vendored Hugging Face Candle candle-flash-attn 0.10.2 from upstream commit 1e6aa85e867eb007cba1b8bae517a10d1aaf0c0d (multi-arch fatbin fork, sc-26691, documented in VENDORED.md), wrapping the FlashAttention-2 CUDA kernels (Tri Dao, BSD-3-Clause) built on NVIDIA CUTLASS (BSD-3-Clause); the directory ships LICENSE-FLASH-ATTENTION, AUTHORS-FLASH-ATTENTION and LICENSE-CUTLASS.txt.",
+      "disposition": "about-license",
+      "component": "flash-attention"
     },
     {
       "id": "architecture:crates/media/mlx-gen",
@@ -806,6 +859,7 @@
     {
       "id": "opencv-source",
       "paths": [
+        "crates/contracts/gen-core-family/src/instantid_kps.rs",
         "crates/media/candle-gen/candle-gen-instantid/src/kps.rs",
         "crates/media/mlx-gen/mlx-gen-instantid/src/kps.rs"
       ],
@@ -1123,6 +1177,41 @@
       "disposition": "architecture-reimplementation-existing-terms",
       "component": "moss-image-sft",
       "evidence": "Native MLX MOSS-Image Base/SFT provider: independently written Rust reimplements the frozen OpenMOSS pipeline architecture (SFT fc5de0d56fc910cbca6f6625a70f5f582b26deb1, pipeline SHA256 1dac1aca9feb1bfdfc727a401e4b67d61a505d3190706d1b7d2d784f88678b31), ordinary CFG/SLG and optional lodestones DMD recurrence/precision policies (5ff314b4c1470876b114b810146085db8a181a6e). No upstream Python is compiled into production, and this marker-free crate has no row in the 772-file candidate inventory; classify its concrete prefix explicitly rather than inventing a candidate or unused ported-source area. Official Base/SFT snapshots publish identical Apache-2.0 LICENSE files; optional DMD declares Apache-2.0 in README metadata without a standalone LICENSE. The moss-image-base, moss-image-sft and moss-image-sft-8-steps-dmd About components display those exact terms/provenance. Existing shared Qwen/FLUX.2 code retains its existing classifications."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-checkpoint",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. Holds the Supra2-IMG checkpoint conversion/pin contract (`supra2`) and the `.pth` reader (`pth`): backend-neutral conversion of pinned upstream checkpoints whose model terms are already mapped in the About manifest; no upstream source is copied and no file carries a port marker."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-dist",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored TCP collective for distributed Iris training (inference sc-27252 split it out of gen-core): socket plumbing and keepalive only, no model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-flux3",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. FLUX 3 [klein] resources, conversion, prompt-upsampler and training contracts; backend-neutral, no tensors. The FLUX 3 model terms are the same open item the flux3 backend crates carry; no file in this crate carries a port marker."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-memory-wan",
+      "disposition": "first-party-original",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. SceneWorks-authored Wan I2V memory-receipt contract (routes, fingerprints, inventories, receipts): accounting only, no model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-moss-image",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved verbatim out of `crates/contracts/gen-core` by inference epic sc-27252 (gen-core split into sibling backend-neutral crates); this is the same first-party source the `architecture:crates/contracts/gen-core` area classified at the previous pin, so it keeps that disposition. MOSS-Image schedule, guidance, DMD and package helpers and the training contract; backend-neutral, no tensors; MOSS-Image terms are already mapped in the About manifest and no file carries a port marker."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-telemetry",
+      "disposition": "first-party-original",
+      "evidence": "SceneWorks-authored host telemetry collector (process RSS sampling) split out of gen-core by inference sc-27252; no model architecture, no upstream source."
+    },
+    {
+      "prefix": "crates/contracts/gen-core-h3",
+      "disposition": "architecture-reimplementation-existing-terms",
+      "evidence": "Moved out of `crates/contracts/gen-core` by inference epic sc-27252: MiniMax-H3 memory pricing, pruned AdaLN, chunking/keyframe/schedule/reference helpers and the Veda predictor. Backend-neutral, no tensors; the MiniMax-H3 terms are mapped in the About manifest. Its one marker-bearing file, `src/veda/topk.rs`, carries the Veda-on-ComfyUI / LLVM notices and is classified file-by-file in the `veda-sparse-source` area (a `paths` area, so this crate-level decision is still owed)."
     }
   ]
 }

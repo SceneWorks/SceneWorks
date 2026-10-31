@@ -170,6 +170,7 @@ fn civitai_provenance() -> ManagedProvenanceV1 {
         version_id: Some("9931".to_owned()),
         file_id: Some("40277".to_owned()),
         credential_host: Some("civitai.com".to_owned()),
+        ..Default::default()
     }
 }
 

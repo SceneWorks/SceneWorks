@@ -1258,23 +1258,47 @@ struct DiscoveredGpu {
     utilization: Option<WorkerUtilizationSnapshot>,
 }
 
-async fn shutdown_signal() {
-    use std::sync::OnceLock;
-    use tokio::sync::watch;
+/// The process-wide shutdown latch every worker loop's [`shutdown_signal`] waits on. Created
+/// lazily and never reset: once set, every current and future wait resolves.
+fn shutdown_latch() -> &'static tokio::sync::watch::Sender<bool> {
+    static SHUTDOWN: std::sync::OnceLock<tokio::sync::watch::Sender<bool>> =
+        std::sync::OnceLock::new();
+    SHUTDOWN.get_or_init(|| tokio::sync::watch::channel(false).0)
+}
 
-    static SHUTDOWN: OnceLock<watch::Sender<bool>> = OnceLock::new();
-    let sender = SHUTDOWN.get_or_init(|| {
-        let (sender, _receiver) = watch::channel(false);
-        let signal = sender.clone();
+/// Set `latch` (sticky). Latched with `send_replace` so a request that arrives between two
+/// `select!` calls, when no receiver is subscribed, is still observed by the next wait.
+fn latch_shutdown(latch: &tokio::sync::watch::Sender<bool>) {
+    latch.send_replace(true);
+}
+
+/// Ask every worker loop in THIS process to shut down gracefully, exactly as Ctrl-C / SIGTERM /
+/// (on a supervised Windows child) stdin EOF would (sc-26691).
+///
+/// The in-process utility loops the API embeds call `run_worker_loop` directly, so their only
+/// shutdown sources used to be the OS signals — an API stopping for any other reason (its desktop
+/// parent died, or a supervisor closed its stdin) left them running, and the API then waited out
+/// its whole shutdown grace for loops that were never told to stop. The embedding process calls
+/// this the moment its own shutdown begins. Idempotent.
+pub fn request_shutdown() {
+    latch_shutdown(shutdown_latch());
+}
+
+/// Whether [`request_shutdown`] (or a process shutdown signal) has latched shutdown.
+pub fn shutdown_requested() -> bool {
+    *shutdown_latch().borrow()
+}
+
+async fn shutdown_signal() {
+    static WATCHER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    WATCHER.get_or_init(|| {
+        let latch = shutdown_latch().clone();
         tokio::spawn(async move {
             wait_for_process_shutdown_source().await;
-            // Latch the request even if it arrives between two `select!` calls,
-            // when no receiver is currently subscribed.
-            signal.send_replace(true);
+            latch_shutdown(&latch);
         });
-        sender
     });
-    let mut receiver = sender.subscribe();
+    let mut receiver = shutdown_latch().subscribe();
     wait_for_shutdown_latch(&mut receiver).await;
 }
 
@@ -2755,7 +2779,9 @@ async fn run_utility_job(
         }
     })
     .await;
-    if matches!(job.job_type, JobType::LoraImport | JobType::ModelImport) {
+    // Model uploads are retry inputs: the model importer releases them only after durable
+    // successful publication. LoRA imports retain their existing cleanup policy.
+    if job.job_type == JobType::LoraImport {
         let _ = cleanup_uploaded_import_source(settings, &job.payload).await;
     }
     if let Err((message, error)) = result {
@@ -2979,6 +3005,11 @@ mod test_env;
 
 #[cfg(test)]
 mod iris_test_weights;
+
+// Synthetic dense MiniMax-H3 DiT import fixtures shared by the import-job and video-arm tests
+// (sc-26680).
+#[cfg(any(test, feature = "test-support"))]
+pub mod minimax_h3_import_fixture;
 
 // NTFS disk discipline for the multi-gigabyte weight fixtures (StorageFull incident, 2026-08-20).
 // The `set_len`-extended fixtures the memory gates need are holes on APFS/ext4 and FULL allocations

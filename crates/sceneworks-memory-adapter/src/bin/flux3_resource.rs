@@ -359,9 +359,9 @@ pub(super) fn bind(
             _ => return Err(blocked("decoder did not return a source-mode reference")),
         };
         if generation.get("layout").is_some() {
-            request
-                .flux3_layout_bindings
-                .push(core::flux3::layouts::ReferenceBinding::oriented(id, size));
+            request.flux3_layout_bindings.push(
+                gen_core_flux3::layouts::ReferenceBinding::oriented(id, size),
+            );
         }
         inventory["decodedCarrier"] = reference_carrier(&conditioning)
             .ok_or_else(|| blocked("missing native reference carrier"))?;
@@ -374,7 +374,7 @@ pub(super) fn bind(
     }
     if let Some(layout) = generation.get("layout") {
         request.flux3_layout =
-            Some(core::flux3::layouts::Layout::from_json(layout.clone()).map_err(blocked)?);
+            Some(gen_core_flux3::layouts::Layout::from_json(layout.clone()).map_err(blocked)?);
     }
     gen_core_flux3::references::normalize_request(&mut request).map_err(blocked)?;
     let mut adapters = Vec::new();
