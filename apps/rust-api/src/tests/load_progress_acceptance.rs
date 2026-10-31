@@ -405,6 +405,10 @@ async fn submit(api: &Api, root: &Path, project: &str, case: &str) -> Result<Val
         api.json("POST", &format!("/api/v1/projects/{project}/training/jobs"), json!({"targetId":"moss_image_sft_lora","datasetId":dataset["id"],"config":config,"outputName":"load-progress-one-update","dryRun":false})).await
     }
 }
+fn asset_file_path(asset: &Value) -> Result<&str> {
+    field(&asset["file"], "path")
+}
+
 async fn output_evidence(
     api: &Api,
     root: &Path,
@@ -431,7 +435,7 @@ async fn output_evidence(
             .ok_or("completed job assets absent")?;
         require(assets.len() == 1, "expected one generated asset")?;
         let asset = &assets[0];
-        let relative = field(asset, "relativePath")?;
+        let relative = asset_file_path(asset)?;
         let response = api
             .client
             .get(format!(
@@ -752,4 +756,34 @@ fn progress_sequence_requires_bytes_and_current_phase() {
         "training"
     )
     .is_err());
+}
+
+#[test]
+fn generated_asset_paths_follow_the_typed_image_and_audio_file_contract() {
+    use sceneworks_core::contracts::AssetFile;
+
+    for (path, mime_type) in [
+        ("assets/images/genset/image.png", "image/png"),
+        ("assets/audios/genset/audio.wav", "audio/wav"),
+    ] {
+        let file = AssetFile {
+            path: path.into(),
+            mime_type: mime_type.into(),
+            width: None,
+            height: None,
+            duration: None,
+            fps: None,
+            extra: Default::default(),
+        };
+        let asset = json!({"file":file,"relativePath":"obsolete-top-level-path"});
+        assert_eq!(asset_file_path(&asset).unwrap(), path);
+    }
+    for asset in [
+        json!({"relativePath":"assets/images/legacy.png"}),
+        json!({"file":{},"relativePath":"assets/audios/legacy.wav"}),
+        json!({"file":{"path":""}}),
+        json!({"file":{"path":null}}),
+    ] {
+        assert!(asset_file_path(&asset).is_err());
+    }
 }
