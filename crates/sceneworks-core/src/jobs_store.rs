@@ -381,6 +381,11 @@ pub struct JobsStore {
     /// Deterministic evidence that the platform-reachability sweep only
     /// hydrated rows its durable headers had already identified as candidates.
     last_platform_reachability_sweep: Mutex<PlatformReachabilitySweepStats>,
+    /// When the owning API process started, as a stored-timestamp string. A stale worker whose
+    /// last heartbeat predates it never reported to this process at all, so the stale sweep can
+    /// say the app (or the machine) stopped mid-job instead of blaming a quiet worker. `None`
+    /// keeps every stale job on the generic "lost contact" wording.
+    session_started_at: Option<String>,
 }
 
 /// Selection work performed by the most recent claim on this store.
@@ -592,7 +597,15 @@ impl JobsStore {
             lock: Mutex::new(None),
             last_claim_hydration: Mutex::new(ClaimHydrationStats::default()),
             last_platform_reachability_sweep: Mutex::new(PlatformReachabilitySweepStats::default()),
+            session_started_at: None,
         }
+    }
+
+    /// Record when the owning API process started (unix seconds), so the stale sweep can tell a
+    /// job stranded by an app/machine stop apart from a worker that went quiet while the app ran.
+    pub fn with_session_started_at(mut self, unix_seconds: i64) -> Self {
+        self.session_started_at = Some(format_unix_seconds(unix_seconds));
+        self
     }
 
     pub fn db_path(&self) -> &Path {
@@ -2308,8 +2321,14 @@ impl JobsStore {
             .collect::<Vec<_>>();
         drop(statement);
         let active_jobs = self.active_jobs_for_workers(&transaction, &worker_ids)?;
-        let placeholders = placeholders_from(2, worker_ids.len());
-        let mut job_params = vec![now_text.as_str()];
+        // A worker last seen before this API process started never heartbeated to it: the app
+        // (API and worker together, or the whole machine) stopped while the job ran, and the
+        // job is only being reclaimed now that the app is back. Blaming a quiet worker there
+        // sends the user hunting for worker errors that were never written. An empty start
+        // marker compares below every timestamp, keeping the generic wording.
+        let session_started = self.session_started_at.as_deref().unwrap_or("");
+        let placeholders = placeholders_from(3, worker_ids.len());
+        let mut job_params = vec![now_text.as_str(), session_started];
         job_params.extend(worker_ids.iter().map(String::as_str));
         transaction.execute(
             &format!(
@@ -2317,8 +2336,18 @@ impl JobsStore {
                 update jobs
                    set status = 'interrupted',
                        stage = 'interrupted',
-                       message = 'Lost contact with the worker.',
-                       error = 'No heartbeat from the worker for {timeout_seconds}s. The worker may have crashed, hung, or lost its connection to the app. If it reconnects you can retry the job; if this keeps happening, check System → Logs.',
+                       message = case
+                           when (select last_seen_at from workers where workers.id = jobs.worker_id) < ?2
+                           then 'SceneWorks stopped while this job was running.'
+                           else 'Lost contact with the worker.'
+                       end,
+                       error = case
+                           when (select last_seen_at from workers where workers.id = jobs.worker_id) < ?2
+                           then 'SceneWorks stopped or restarted while this job was running, and its worker never reconnected. The last heartbeat was at '
+                                || (select last_seen_at from workers where workers.id = jobs.worker_id)
+                                || ' (UTC). The app, the worker, or the GPU driver may have crashed, or the app was closed; the app logs usually end at that moment, so check the operating system''s logs from that time. You can retry the job.'
+                           else 'No heartbeat from the worker for {timeout_seconds}s. The worker may have crashed, hung, or lost its connection to the app. If it reconnects you can retry the job; if this keeps happening, check System → Logs.'
+                       end,
                        completed_at = ?1,
                        updated_at = ?1,
                        worker_id = null
@@ -2330,6 +2359,7 @@ impl JobsStore {
             params_from_iter(job_params),
         )?;
 
+        let worker_placeholders = placeholders_from(2, worker_ids.len());
         let mut worker_params = vec![now_text.as_str()];
         worker_params.extend(worker_ids.iter().map(String::as_str));
         transaction.execute(
@@ -2340,7 +2370,7 @@ impl JobsStore {
                        current_job_id = null,
                        status_reason = null,
                        last_seen_at = ?1
-                 where id in ({placeholders})
+                 where id in ({worker_placeholders})
                 "
             ),
             params_from_iter(worker_params),
