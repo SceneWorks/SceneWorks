@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdtemp, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, rm, mkdir, realpath, symlink, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { admission, workflowEnvironment, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
+import { admission, freshOutput, outsideCheckout, workflowEnvironment, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
 const env = {LOAD_PROGRESS_CASE:'image_mlx',LOAD_PROGRESS_SOURCE_SHA:'a'.repeat(40),LOAD_PROGRESS_INFERENCE_SHA:'b'.repeat(40),LOAD_PROGRESS_OUTPUT:'/tmp/load-progress-case',LOAD_PROGRESS_MAC_GO:'true'};
 test('manual selector freezes one exact ignored test and rejects platform mismatch',()=>{
   assert.equal(admission(env,'darwin'),'tests::load_progress_acceptance::image_mlx');
@@ -228,4 +228,32 @@ test('dedicated CPU route preserves GPU guards and bypasses model compilation, i
   assert.match(fixture,/with_no_environment_execution_providers\(\)/);
   assert.match(fixture,/with_execution_providers\(\[ort::ep::CPU::default\(\).build\(\).error_on_failure\(\)\]\)/);
   assert.match(fixture,/"executionProvider":"CPUExecutionProvider"/);
+});
+
+
+test('outside-checkout boundary accepts the exact parent while retaining same-volume and containment refusals',()=>{
+  const checkout='D:\\actions-runner-3\\_work\\SceneWorks\\SceneWorks';
+  const parent=path.win32.dirname(checkout);
+  assert.equal(path.win32.relative(checkout,parent),'..');
+  assert.equal(outsideCheckout(checkout,parent,path.win32),true);
+  assert.equal(outsideCheckout(checkout,path.win32.join(parent,'load-progress-41175299803-1'),path.win32),true);
+  assert.equal(outsideCheckout(checkout,'E:\\outside',path.win32),false);
+  assert.equal(outsideCheckout(checkout,checkout,path.win32),false);
+  assert.equal(outsideCheckout(checkout,path.win32.join(checkout,'nested'),path.win32),false);
+  assert.equal(outsideCheckout('/runner/SceneWorks/SceneWorks','/runner/SceneWorks',path.posix),true);
+  assert.equal(outsideCheckout('/runner/SceneWorks/SceneWorks','/runner/SceneWorks/SceneWorks/nested',path.posix),false);
+});
+test('fresh sibling creates evidence while checkout, inside, symlink-inside and reused attempts are refused',async()=>{
+  const temp=await realpath(await mkdtemp(path.join(os.tmpdir(),'sc27980-output-boundary-')));
+  try {
+    const checkout=path.join(temp,'SceneWorks'); await mkdir(checkout);
+    const output=path.join(temp,'load-progress-attempt');
+    const created=await freshOutput(output,checkout);
+    assert.equal(created.output,output); assert((await stat(created.evidence)).isDirectory());
+    await assert.rejects(freshOutput(output,checkout),{code:'EEXIST'});
+    await assert.rejects(freshOutput(checkout,checkout),/output must be outside checkout/);
+    await assert.rejects(freshOutput(path.join(checkout,'nested'),checkout),/output must be outside checkout/);
+    const link=path.join(temp,'linked-checkout'); await symlink(checkout,link,'junction');
+    await assert.rejects(freshOutput(path.join(link,'attempt'),checkout),/output parent must physically be outside checkout/);
+  } finally { await rm(temp,{recursive:true,force:true}); }
 });

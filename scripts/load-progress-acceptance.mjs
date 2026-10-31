@@ -124,14 +124,17 @@ export function childEnvironment(env, state, evidence, platform = process.platfo
   Object.assign(child, { HF_HUB_OFFLINE:'1', TRANSFORMERS_OFFLINE:'1', HF_DATASETS_OFFLINE:'1', LOAD_PROGRESS_STATE_ROOT:state, LOAD_PROGRESS_OUTPUT:evidence, CARGO_BUILD_JOBS:'2', CARGO_INCREMENTAL:'0', RUST_TEST_THREADS:'1' });
   return child;
 }
-async function freshOutput(requested) {
+export function outsideCheckout(checkout, candidate, paths = path) {
+  const relative = paths.relative(checkout, candidate);
+  return relative === '..' || relative.startsWith(`..${paths.sep}`);
+}
+export async function freshOutput(requested, checkout = root) {
   const output = path.resolve(requested);
-  const relative = path.relative(root, output);
-  assert(relative.startsWith(`..${path.sep}`), 'output must be outside checkout');
+  assert(outsideCheckout(checkout,output), 'output must be outside checkout');
   await mkdir(path.dirname(output), { recursive:true });
   // Resolve the existing parent before creating output; a symlink must not hide the checkout.
   const parent = await realpath(path.dirname(output));
-  assert(path.relative(root,parent).startsWith(`..${path.sep}`), 'output parent must physically be outside checkout');
+  assert(outsideCheckout(checkout,parent), 'output parent must physically be outside checkout');
   await mkdir(output); // EEXIST is a fail-closed fresh-attempt requirement.
   const evidence = path.join(output,'evidence'); await mkdir(evidence);
   return {output,evidence};
