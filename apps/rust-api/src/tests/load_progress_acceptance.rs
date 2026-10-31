@@ -282,6 +282,7 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
     let mut fresh_component = None;
     let mut verification = None;
     let mut renderer_started = false;
+    let mut denoising_started = false;
     for message in &lowered {
         let loading = message.strip_prefix("loading ");
         let verifying = message.strip_prefix("verifying ");
@@ -289,6 +290,9 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
         if image && renderer_started {
             require(
                 !checking
+                    && (!denoising_started
+                        || (!message.starts_with("loading transformer")
+                            && !message.starts_with("verifying transformer")))
                     && !message.starts_with("loading text encoder")
                     && !message.starts_with("verifying text encoder")
                     && (case == "image_cuda"
@@ -362,6 +366,7 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
         {
             obsolete_io.extend(seen_io.iter().copied());
             computed = true;
+            denoising_started |= image && message.contains("step ");
             fresh_component = None;
             verification = None;
         }
@@ -859,6 +864,16 @@ fn verification_requires_a_fresh_component_epoch_after_compute() {
         stale.insert(position, message.into());
         assert!(validate_progress(&stale, "image_mlx").is_err(), "{message}");
     }
+    let mut late_transformer = mlx.clone();
+    late_transformer.insert(
+        9,
+        "Loading transformer (unseen-shard.safetensors) — 0.1 / 5.0 GB".into(),
+    );
+    late_transformer.insert(
+        10,
+        "Verifying transformer (unseen-shard.safetensors) — 0.1 / 5.0 GB".into(),
+    );
+    assert!(validate_progress(&late_transformer, "image_mlx").is_err());
     // Candle's lazy VAE decode is another real epoch after denoising, even when
     // its hash count equals the initial seal's count for the same source.
     mlx.remove(3);
