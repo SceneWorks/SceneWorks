@@ -38,7 +38,7 @@ def selected_primary_metadata_valid(device):
             and device['index'] == 1
             and all(type(value) is int for value in (total, used, free))
             and total > 0 and 0 <= used <= total and 0 <= free <= total
-            and used + free <= total + 2
+            and used + free <= total
             and (utilization is None or type(utilization) is int and 0 <= utilization <= 100))
 
 

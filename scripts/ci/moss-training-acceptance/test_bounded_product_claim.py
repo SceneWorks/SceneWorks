@@ -222,6 +222,14 @@ class BoundedClaimTests(unittest.TestCase):
         policy = SimpleNamespace(child_gpu_cap_bytes=claim.CAP, gpu_free_reserve_bytes=claim.RESERVE)
         self.assertFalse(resources.proof_cuda_idle(samples[0]['devices'][0], [], policy,
             activity_profile=claim.PROFILE), 'the original admission predicate must still refuse new work')
+        original_admission = {**samples[0]['devices'][0], 'used_mib': 2186,
+            'free_mib': 95253, 'utilization_percent': 0}
+        self.assertEqual(original_admission['total_mib'] - original_admission['used_mib'] -
+            original_admission['free_mib'], 448)
+        self.assertTrue(claim.selected_primary_metadata_valid(original_admission),
+            'driver-reserved bytes must not require used+free==total')
+        self.assertTrue(resources.proof_cuda_idle(original_admission, [], policy,
+            activity_profile=claim.PROFILE))
 
     def test_pending_native_pid_cannot_enter_release_sampling_or_succeed(self):
         observed = self.invoke(native=True, wait_results=(258, 258, 0, 0))
@@ -238,6 +246,7 @@ class BoundedClaimTests(unittest.TestCase):
                         good.replace('1, GPU-', '0, GPU-'), '', good + '\n' + good,
                         good.replace('72908', 'nan'), good.replace('97887', 'inf'),
                         good.replace('24531', '-1'), good.replace('72908', '97888'),
+                        good.replace('72908', '73357'),  # used+free exceeds total by 1 MiB.
                         good.replace(', 100', ', 101'), good.replace(', 100', ', -1')]:
             with self.subTest(invalid=invalid):
                 observed = self.invoke(native=True, release_response=invalid)
