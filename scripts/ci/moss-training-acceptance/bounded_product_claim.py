@@ -30,6 +30,18 @@ def require(condition, message):
         raise ValueError(message)
 
 
+def selected_primary_metadata_valid(device):
+    """Fresh identity/counters, independent of admitting another capped workload."""
+    total, used, free = (device.get(key) for key in ('total_mib', 'used_mib', 'free_mib'))
+    utilization = device.get('utilization_percent')
+    return (device.get('uuid') == UUID and type(device.get('index')) is int
+            and device['index'] == 1
+            and all(type(value) is int for value in (total, used, free))
+            and total > 0 and 0 <= used <= total and 0 <= free <= total
+            and used + free <= total + 2
+            and (utilization is None or type(utilization) is int and 0 <= utilization <= 100))
+
+
 def source_modules(root, pin):
     # The supplied checkout may advance on main. Only load matching pinned bytes.
     names = ('scripts/release/veda_cuda_guard.py', 'scripts/ci/model_proof_resources.py',
@@ -103,12 +115,13 @@ def main(args):
             # even when the sampling helper supplies its own five-second window.
             def selected_inventory(out=None, label='snapshot', probe_deadline=None):
                 bounded_deadline = deadline if probe_deadline is None else min(deadline, probe_deadline)
+                require(time.monotonic() < bounded_deadline, 'selected GPU metadata deadline exhausted')
                 return guard.inventory(out,label,bounded_deadline,selected_uuid=UUID)
             devices, processes = selected_inventory(output,'bounded-claimed-device',deadline)
             selected = [d for d in devices if d['uuid']==UUID and d['index']==1]
             require(len(selected)==1, 'physical1 UUID changed; no fallback')
             policy = SimpleNamespace(child_gpu_cap_bytes=CAP,gpu_free_reserve_bytes=RESERVE)
-            idle_check = lambda device, rows: device.get('uuid')==UUID and device.get('index')==1 and resources.proof_cuda_idle(device,rows,policy,activity_profile=PROFILE)
+            idle_check = lambda device, rows: selected_primary_metadata_valid(device) and resources.proof_cuda_idle(device,rows,policy,activity_profile=PROFILE)
             record['admissionDiagnostic'] = resources.cuda_claim_diagnostic(UUID,devices,processes,policy,activity_profile=PROFILE)
             require(idle_check(selected[0],processes), 'selected GPU lacks cap plus reserve headroom')
             identity_key = lambda uuid, rows: resources.proof_cuda_contexts(uuid,rows,activity_profile=PROFILE)
@@ -149,7 +162,13 @@ def main(args):
                 record['nativeProcessExited']=True
             else:
                 record['nativeProcessStarted']=False
-            guard.verify_idle(device,output,'bounded-release',baseline,idle_check=idle_check,identity_key=identity_key,permit_bounded_growth=True,require_stable_contexts=False,inventory_reader=selected_inventory)
+            # Native ownership is settled above (and rechecked before unlocking below).
+            # Shared-card release is not admission of another 80+2 GiB workload: fresh
+            # exact-card primary metadata must remain valid, but free memory, utilization
+            # and uncollected foreign contexts cannot prove or disprove owned-process exit.
+            release_check = lambda current, rows: selected_primary_metadata_valid(current)
+            record['releasePolicy'] = 'owned-native-exit-and-selected-primary-metadata'
+            guard.verify_idle(device,output,'bounded-release',dict(baseline),idle_check=release_check,identity_key=identity_key,permit_bounded_growth=True,require_stable_contexts=False,inventory_reader=selected_inventory)
             record.update(state='released',postExecutionVerified=True)
         except BaseException as error:
             record.update(state='failed',error=str(error)); raise
@@ -157,17 +176,21 @@ def main(args):
             # Never free the shared UUID lease while our authenticated native PID
             # is alive, including a parent crash or failed cooperative deadline.
             # This is a failed-run safety hold, never a success or force-kill.
-            if process_handle:
-                while kernel.WaitForSingleObject(process_handle,1000) == 258:
-                    record.update(state='failed',error=record.get('error','native root did not exit'))
-                    save()
-                require(kernel.WaitForSingleObject(process_handle,0)==0, 'native handle wait failed; lease release cannot be certified')
-                record['nativeProcessExited']=True
-                kernel.CloseHandle(process_handle)
-            if claimed:
-                handle.seek(0); msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
-                record['leaseReleased']=True
-            save()
+            try:
+                if process_handle:
+                    while kernel.WaitForSingleObject(process_handle,1000) == 258:
+                        record.update(state='failed',error=record.get('error','native root did not exit'))
+                        save()
+                    require(kernel.WaitForSingleObject(process_handle,0)==0, 'native handle wait failed; lease release cannot be certified')
+                    record['nativeProcessExited']=True
+                    require(kernel.CloseHandle(process_handle), 'owned native handle close failed')
+                if claimed:
+                    handle.seek(0); msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+                    record['leaseReleased']=True
+            except BaseException as error:
+                record.update(state='failed',error=str(error)); raise
+            finally:
+                save()
 
 
 if __name__ == '__main__':

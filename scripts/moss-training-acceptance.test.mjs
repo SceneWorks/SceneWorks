@@ -12,7 +12,7 @@ import { deflateSync } from 'node:zlib';
 import { recordInspection, parseInspectionArgs } from './moss-preview-inspection.mjs';
 import { digest } from './moss-consumer-assertions.mjs';
 import { inventoryMossTrainingCache } from './moss-training-cache-inventory.mjs';
-import { BOUNDED_PRODUCT, BOUNDED_GPU_UUID, BOUNDED_GPU_CAP_BYTES, BOUNDED_GPU_RESERVE_BYTES, checkBoundedDiscovery, validateBoundedClaim, validateBoundedSample, boundedReaderBindings, MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, validateNativeRoot, executeSupervised, remainingCaseMs, fileDigestChecked, validatePreflightChecked, decodePreviewPng, run } from './moss-training-acceptance.mjs';
+import { BOUNDED_PRODUCT, BOUNDED_GPU_UUID, BOUNDED_GPU_CAP_BYTES, BOUNDED_GPU_RESERVE_BYTES, checkBoundedDiscovery, readBoundedReleaseReceipt, validateBoundedClaim, validateBoundedSample, boundedReaderBindings, MANIFEST_SHA256, PREFIX, PREFLIGHT, CELLS, BOUNDS, NATIVE_TEST_STACK_BYTES, testsFor, parseArgs, artifactMembers, verifyBundle, checkDiscovery, validatePreflight, validateNativeRoot, executeSupervised, remainingCaseMs, fileDigestChecked, validatePreflightChecked, decodePreviewPng, run } from './moss-training-acceptance.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const fixture=t=>{const dir=mkdtempSync(path.join(os.tmpdir(),'moss-harness-unit-'));t.after(()=>{rmSync(dir,{recursive:true,force:true});rmSync(`${dir}-selected-artifacts`,{recursive:true,force:true});});return dir;};
 const source={workflowSource:'a'.repeat(40),inferencePin:'b'.repeat(40),manifestSha256:MANIFEST_SHA256,cargoLockSha256:'c'.repeat(64),driverSha256:'d'.repeat(64),workflowSha256:'e'.repeat(64)};
@@ -708,6 +708,38 @@ test('bounded run refuses campaign-shaped evidence, missing actual readers and f
  for(const options of [{wrongEvidence:true},{missingReader:true},{releaseFailure:true}]){
   const m=mockBoundedRun(t,options),receipt=await run(m.options);assert.equal(receipt.ok,false);assert.equal(m.releases(),1);assert.equal(receipt.cases.length,1);
  }
+});
+
+test('failed helper release retains authenticated final native-exit and unlock facts without accepting the run',async t=>{
+ const directory=fixture(t),claimFile=path.join(directory,'physical-claim.json');
+ const nativeRoot={scope:'native-api-worker-root',pid:4242,executable:'/mock/api',binarySha256:'f'.repeat(64)};
+ const final={...mockBoundedClaim(),state:'failed',postExecutionVerified:false,leaseReleased:true,nativeProcessExited:true,nativeRoot,error:'physical GPU occupied during bounded-release'};
+ writeFileSync(claimFile,JSON.stringify(final));
+ let failure;
+ try {readBoundedReleaseReceipt({claimFile,source,exit:1,nativeRoot});assert.fail('nonzero helper exit cannot pass');}
+ catch(error){failure=error;assert.deepEqual(error.deviceClaim,final);}
+ const m=mockBoundedRun(t);let releases=0;
+ m.options.deviceClaim=async()=>({admission:mockBoundedClaim(),claimFile,alive:()=>true,closed:()=>true,release:async()=>{releases++;throw failure;}});
+ const receipt=await run(m.options);
+ assert.equal(releases,1);assert.equal(receipt.ok,false);assert.notEqual(receipt.cellComplete,true);
+ assert.deepEqual(receipt.deviceClaim,final);assert.equal(receipt.cases[0].executionPassed,true);
+ assert.equal(receipt.deviceClaim.postExecutionVerified,false);
+ assert(receipt.failures.some(message=>message.includes('device claim helper release failed')));
+});
+
+test('final claim receipt authenticates identity/root and keeps exit, process, verification and lease failures fatal',t=>{
+ const directory=fixture(t),claimFile=path.join(directory,'physical-claim.json');
+ const nativeRoot={scope:'native-api-worker-root',pid:4242,executable:'/mock/api',binarySha256:'f'.repeat(64)};
+ const final={...mockBoundedClaim(),state:'released',postExecutionVerified:true,leaseReleased:true,nativeProcessExited:true,nativeRoot};
+ const read=(patch={},exit=0)=>{writeFileSync(claimFile,JSON.stringify({...final,...patch}));return readBoundedReleaseReceipt({claimFile,source,exit,nativeRoot});};
+ assert.deepEqual(read(),final);
+ for(const patch of [{state:'failed'},{postExecutionVerified:false},{leaseReleased:false},{nativeProcessExited:false}]) assert.throws(()=>read(patch),/release failed/);
+ assert.throws(()=>read({},1),/release failed/);
+ for(const patch of [{deviceUuid:'GPU-wrong'},{workflowSource:'b'.repeat(40)},{postExecutionVerified:'true'},{nativeRoot:{...nativeRoot,pid:99}},{nativeRoot:{...nativeRoot,binarySha256:'0'.repeat(64)}}]) {
+  assert.throws(()=>read(patch),error=>error.deviceClaim===undefined,'unauthenticated final claim must not be attached');
+ }
+ writeFileSync(claimFile,JSON.stringify({...mockBoundedClaim(),state:'released',postExecutionVerified:true,leaseReleased:true,nativeProcessStarted:false}));
+ assert.equal(readBoundedReleaseReceipt({claimFile,source,exit:0}).nativeProcessStarted,false);
 });
 
 test('bounded consumption binds successful source readers to every selected safetensors hash',t=>{

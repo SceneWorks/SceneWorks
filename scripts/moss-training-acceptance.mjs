@@ -325,7 +325,7 @@ export async function claimBoundedDevice({root,output,env,source,deadline}) {
   const helper=path.join(root,'scripts/ci/moss-training-acceptance/bounded_product_claim.py');
   const child=spawn('python',['-I',helper,'--inference-root',env.MOSS_INFERENCE_SOURCE_ROOT,'--output',output,'--selector',BOUNDED_PRODUCT,'--deadline',deadline],{cwd:root,env,stdio:['pipe','pipe','pipe'],windowsHide:true});
   const fd=openSync(path.join(output,'device-claim.log'),'w');
-  let closed=false,exit=null,problem=null,readyResolve,readyReject;
+  let closed=false,exit=null,problem=null,nativeRoot=null,readyResolve,readyReject;
   const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject;});
   const complete=new Promise(resolve=>child.on('close',code=>{closed=true;exit=code;readyReject(new Error(`device claim helper exited ${code}`));closeSync(fd);resolve();}));
   child.on('error',error=>{problem=error;readyReject(error);});
@@ -337,16 +337,28 @@ export async function claimBoundedDevice({root,output,env,source,deadline}) {
   try {
     const admission=await Promise.race([ready,new Promise((_,reject)=>{timer=setTimeout(()=>reject(new Error('device admission exceeded case deadline')),Math.max(1,Date.parse(deadline)-Date.now()));})]);
     validateBoundedClaim(admission,source);
-    return {admission,claimFile,closed:()=>closed,alive:()=>!closed&&!problem,bindRoot(root){child.stdin.write(JSON.stringify({root})+'\n');},async release() {
+    return {admission,claimFile,closed:()=>closed,alive:()=>!closed&&!problem,bindRoot(root){assert(nativeRoot===null,'native root already bound');nativeRoot=root;child.stdin.write(JSON.stringify({root})+'\n');},async release() {
       if(!closed)child.stdin.end(JSON.stringify({release:true})+'\n');
       await Promise.race([complete,new Promise((_,reject)=>{const timeout=setTimeout(()=>reject(new Error('device claim helper did not close')),BOUNDS.release);complete.finally(()=>clearTimeout(timeout));})]);
-      assert(exit===0&&!problem,'device claim helper release failed');
-      const final=json(claimFile);validateBoundedClaim(final,source);
-      assert(final.state==='released'&&final.postExecutionVerified===true&&final.leaseReleased===true,'physical UUID release not verified');
-      return final;
+      return readBoundedReleaseReceipt({claimFile,source,exit,problem,nativeRoot});
     }};
   } catch(error) {child.stdin.end();await Promise.race([complete,pause(BOUNDS.release)]);error.deviceClaimUnsafe=!closed;throw error;}
   finally {clearTimeout(timer);}
+}
+
+export function readBoundedReleaseReceipt({claimFile,source,exit,problem,nativeRoot}) {
+  // A nonzero helper exit must remain a failed release, but it must not discard
+  // authenticated final exit/unlock facts in favor of the old admitted snapshot.
+  const final=json(claimFile);validateBoundedClaim(final,source);
+  assert(typeof final.postExecutionVerified==='boolean'&&typeof final.leaseReleased==='boolean','invalid final claim verification flags');
+  if(nativeRoot) {
+    assert(final.nativeRoot?.scope===nativeRoot.scope&&final.nativeRoot?.pid===nativeRoot.pid&&final.nativeRoot?.executable===nativeRoot.executable&&final.nativeRoot?.binarySha256===nativeRoot.binarySha256,'final claim belongs to another owned native root');
+  } else assert(final.nativeProcessStarted===false,'release without an owned root must be an explicit preparation-only claim');
+  if(exit!==0||problem||final.state!=='released'||final.postExecutionVerified!==true||final.leaseReleased!==true||(nativeRoot&&final.nativeProcessExited!==true)) {
+    const error=new Error('device claim helper release failed; physical UUID release not verified');
+    error.deviceClaim=final;throw error;
+  }
+  return final;
 }
 
 export function validateBoundedClaim(value,source) {
@@ -440,7 +452,7 @@ async function runBoundedProduct({root,output,env,source,receipt,executable,base
       try {
         receipt.deviceClaim=await lease.release();
         if(nativeState?.rootProcess) assert(receipt.deviceClaim.nativeProcessExited===true&&receipt.deviceClaim.nativeRoot?.pid===nativeState.rootProcess.pid&&receipt.deviceClaim.nativeRoot?.binarySha256===receipt.executable.sha256,'UUID release did not authenticate the owned native PID/binary');
-      } catch(error) {receipt.deviceClaimUnsafe=lease.closed?!lease.closed():false;throw error;}
+      } catch(error) {if(error.deviceClaim)receipt.deviceClaim=error.deviceClaim;receipt.deviceClaimUnsafe=lease.closed?!lease.closed():false;throw error;}
     }
   }
   remainingCaseMs(caseStartedAt);
