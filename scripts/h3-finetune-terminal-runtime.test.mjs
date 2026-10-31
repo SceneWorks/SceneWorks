@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat, realpath } from 'node:fs/promises';
-import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,advertisedStallBudget,cancelDrainBoundMs,postDrainShutdownMs,STALL_BUDGET_EVENT,WORKER_VIDEO_STALL_GRACE_SECONDS,DEFAULT_CANCEL_DRAIN_SECONDS,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
+import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyIdentificationCoverage,bindsStagedFixture,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,advertisedStallBudget,cancelDrainBoundMs,postDrainShutdownMs,STALL_BUDGET_EVENT,WORKER_VIDEO_STALL_GRACE_SECONDS,DEFAULT_CANCEL_DRAIN_SECONDS,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
 import { CASE_SHUTDOWN_BOUND_FILE,assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 import { liveOwnedProcesses,processInfo,portHolder,formatPortHolder,parseLsofListen,parseNetstatListen,parseEtimeSeconds,boundApiPort,recordedProcesses,sameProcess,campaignRunRoots,isServicePort,isBindFailure } from './lib/h3-owned-processes.mjs';
@@ -578,6 +578,52 @@ test('content identity uses real copied bytes under a different layout and actua
   await replaceScenario(f,requiredCases().find(c=>c.id==='mlx.generalization.renamed'),[positive,negative],{...f.parameters,identificationControlReceipt:receipt});const fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);const verified=await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true});
   assert.equal(verified.identification.sameContentRecognized.sha256,f.digest);assert.equal(verified.identification.differentContentRefused.observedSha256,differentSHA);assert.equal(await hashFile(f.input),f.digest);
   const source=JSON.parse(await readFile(path.join(f.dir,'source-job-output.json'),'utf8'));source.captures.different_bytes_refused.status='completed';await writeFile(path.join(f.dir,'source-job-output.json'),JSON.stringify(source));await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true}),/different bytes must not be accepted/);
+});
+// sc-26691 run 41190104126 (cuda.reduced.artifact-3-opaque-renamed-linked-source): the bootstrap
+// hardlinks the managed different-bytes negative into <runDir>/data/models/sc26691-different_bytes/
+// (the API refuses a local-copy import from the staging root), so the scenario submits that seed's
+// path, not the staged fixture's. The refusal binds when the submitted path is exactly the runtime
+// seed of the different-bytes fixture in this case's own service dir; any other seed/file/case fails.
+test('different-bytes refusal binds the runtime seed of the staged fixture, never another file',async t=>{
+  const f=await fixture(t),layout=path.join(f.root,'independent-layout');await mkdir(layout);const renamed=path.join(layout,'unrelated-name.safetensors'),different=path.join(layout,'different-bytes.safetensors');await cp(f.input,renamed);const bytes=await readFile(f.input);bytes[bytes.length-1]^=1;await writeFile(different,bytes);const differentSHA=await hashFile(different);
+  const runDir=path.join(f.p.output,'services','mlx.generalization.renamed'),destination='data/models/sc26691-different_bytes/different-bytes.safetensors',seeded=path.join(runDir,...destination.split('/'));
+  const positive=structuredClone(f.execution);positive.model.sourcePath=renamed;positive.model.originalPath=f.input;positive.model.originalSha256=f.digest;
+  const negative=structuredClone(positive);negative.label='different_bytes';negative.model.modelId='imported_sc26691_identity_negative';negative.model.sourcePath=seeded;negative.model.sha256=differentSHA;negative.identityControl={kind:'different-bytes-negative',expectedSourceSha256:f.digest};for(const subject of negative.licenseAuthority.subjects)if(subject.role==='source')subject.sha256=differentSHA;
+  const receipt=path.join(f.root,'identity-controls.json');await writeFile(receipt,JSON.stringify({kind:'h3-finetune-stage-identity-controls',status:'prepared-not-modelproof',proof_kind:'unit_fake',sourcePath:f.input,sourceExpectedSHA:f.digest,sourceActualSHA:f.digest,renamed:{path:renamed,size:bytes.length,actualSHA:f.digest},differentBytes:{path:different,size:bytes.length,actualSHA:differentSHA,expectedOriginalSHA:f.digest}}));
+  f.c.inputs.push({path:renamed,sha256:f.digest,role:'checkpoint'},{path:different,sha256:differentSHA,role:'checkpoint'},{path:receipt,sha256:await hashFile(receipt),role:'identity-control-fixture'})
+  const scenario=await replaceScenario(f,requiredCases().find(c=>c.id==='mlx.generalization.renamed'),[positive,negative],{...f.parameters,identificationControlReceipt:receipt});assert.equal(path.join(f.p.output,'services',f.c.id),runDir);f.c.runtime.seedFiles=[{input:different,destination,mode:'hardlink'}];const fake=fakeRuntime(f);await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
+  const verified=await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true});assert.equal(verified.identification.differentContentRefused.observedSha256,differentSHA);
+  const bundle=JSON.parse(await readFile(path.join(f.dir,'source-job-output.json'),'utf8')),byJob=new Map(bundle.bindings.map(v=>[v.job.id,v])),request=bundle.requests.find(r=>r.route==='/api/v1/models/import'&&r.result?.id===bundle.captures.different_bytes_refused.id);
+  assert.equal(request.request.sourcePath,seeded,'the real transcript shape: the seed path, not the staged fixture path, is submitted');assert.notEqual(request.request.sourcePath,different);
+  const verify=(mutate=()=>{},dir=runDir)=>{const b=structuredClone(bundle),c=structuredClone(f.c);mutate(b,c);const by=new Map(b.bindings.map(v=>[v.job.id,v]));return verifyIdentificationCoverage(c,f.dir,b,scenario,by,{allowUnitFake:true,runDir:dir});};
+  const refusalOf=b=>b.requests.find(r=>r.route==='/api/v1/models/import'&&r.result?.id===b.captures.different_bytes_refused.id);
+  assert.equal((await verify()).differentContentRefused.jobId,bundle.captures.different_bytes_refused.id);
+  const unbound=/negative refusal must bind the actually submitted different-byte fixture/;
+  await assert.rejects(verify(()=>{},null),unbound,'a seed path cannot bind without the owning case service dir');
+  await assert.rejects(verify(()=>{},path.join(f.p.output,'services','another-case')),unbound,'a seed in another case dir binds nothing');
+  await assert.rejects(verify((b,c)=>{c.runtime.seedFiles[0].input=renamed;}),unbound,'a seed of the same-bytes renamed copy is not the different-bytes fixture');
+  await assert.rejects(verify((b,c)=>{c.runtime.seedFiles[0].destination='config/different-bytes.safetensors';}),unbound,'only a <data>/models seed is a local-copy import source');
+  await assert.rejects(verify(b=>{const r=refusalOf(b);r.request.sourcePath=r.request.sourcePath.replace('different-bytes','other');}),unbound,'a different submitted file');
+  await assert.rejects(verify(b=>{b.captures.different_bytes_refused.payload.sourcePath=different;}),unbound,'the refused job must carry the submitted path');
+  await assert.rejects(verify((b,c)=>{c.declaredSourceBindings.find(v=>v.identityControl).model.sha256=f.digest;}),unbound,'the declared negative must be the different bytes');
+  await assert.rejects(verify(b=>{b.captures.different_bytes_refused.id=b.requests.find(r=>r.route==='/api/v1/models/import'&&r.request.modelId!=='imported_sc26691_identity_negative').result.id;}),/different bytes must not be accepted|integrity check|negative refusal/,'the refusal must be the negative import job');
+  assert.equal(byJob.size,bundle.bindings.length);
+});
+// The cross-backend readback verifies the macOS (MLX) plan on Windows and the CUDA plan anywhere: the
+// seed path is rebuilt with the plan host's path flavour, so neither backend's binding depends on
+// the verifying host's separator.
+test('staged-fixture seed binding is platform-flavoured by the plan, not the verifying host',()=>{
+  const destination='data/models/sc26691-different_bytes/different-bytes.safetensors';
+  const mac={fixture:'/Volumes/H3Weights/sc26691-private/41190085284-1/fixtures/independent-layout/different-bytes.safetensors',runDir:'/Volumes/H3Weights/sc26691-private/41190085284-1-bootstrap-4a7de44/services/mlx.reduced.artifact-3-opaque-renamed-linked-source'};
+  const win={fixture:'E:\\huggingface\\sc26691-private\\41190104126-1\\fixtures\\independent-layout\\different-bytes.safetensors',runDir:'E:\\huggingface\\sc26691-private\\41190104126-1-bootstrap-4a7de44\\services\\cuda.reduced.artifact-3-opaque-renamed-linked-source'};
+  for(const [plan,submitted] of [[mac,`${mac.runDir}/data/models/sc26691-different_bytes/different-bytes.safetensors`],[win,`${win.runDir}\\data\\models\\sc26691-different_bytes\\different-bytes.safetensors`]]){
+    const c={runtime:{seedFiles:[{input:plan.fixture,destination,mode:'hardlink'}]}};
+    assert.equal(bindsStagedFixture(c,plan.runDir,submitted,plan.fixture),true);assert.equal(bindsStagedFixture(c,plan.runDir,plan.fixture,plan.fixture),true,'the unseeded fixture path itself still binds');
+    assert.equal(bindsStagedFixture(c,plan.runDir,submitted.replace('different-bytes.safetensors','unrelated-name.safetensors'),plan.fixture),false);
+    assert.equal(bindsStagedFixture(c,plan.runDir,submitted,plan.fixture.replace('different-bytes','unrelated-name')),false,'a seed of another input binds nothing');
+    assert.equal(bindsStagedFixture({runtime:{seedFiles:[{input:plan.fixture,destination:'data/models/../../escape.safetensors',mode:'hardlink'}]}},plan.runDir,submitted,plan.fixture),false);
+    assert.equal(bindsStagedFixture(c,null,submitted,plan.fixture),false);
+  }
 });
 test('review repair cache coverage rejects three cold runs and unchanged staged policy',async t=>{
   const f=await fixture(t),executions=['cold','warm','staged'].map(label=>({...structuredClone(f.execution),label,reuseInstalled:label!=='cold',...(label==='staged'?{memoryCap:{kind:'mlx-memory-gb',value:1}}:{})}));

@@ -863,7 +863,22 @@ export async function verifyOwnershipEquivalence(bundle,scenario,byJob,dir,decod
   }
   return results;
 }
-export async function verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{allowUnitFake=false}={}){
+// The bootstrap hardlinks every managed (local-copy) source into the case's own <data>/models,
+// because the API confines a local-copy import there and refuses the staging root; the scenario
+// therefore submits that seed's path, never the staged fixture's own path. A declared/submitted
+// path binds a staged fixture only when it IS the fixture, or is exactly the runtime seed whose
+// independently bound input is that fixture, inside this case's own service directory. A seed of
+// any other input, or one outside <runDir>/data/models, binds nothing. Plan paths are joined with
+// the path flavour of the host that wrote the plan (the cross-backend readback verifies a macOS
+// plan on Windows and vice versa), never the verifying host's.
+export const planPaths=root=>typeof root==='string'&&root.startsWith('/')?path.posix:path.win32;
+export function bindsStagedFixture(c,runDir,submittedPath,fixturePath){
+  if(typeof submittedPath!=='string'||!submittedPath)return false;
+  if(submittedPath===fixturePath)return true;
+  if(!runDir)return false;
+  return (c.runtime?.seedFiles??[]).some(seed=>seed.input===fixturePath&&[undefined,'copy','hardlink'].includes(seed.mode)&&typeof seed.destination==='string'&&seed.destination.startsWith('data/models/')&&seed.destination.length>'data/models/'.length&&!seed.destination.split('/').includes('..')&&planPaths(runDir).join(runDir,...seed.destination.split('/'))===submittedPath);
+}
+export async function verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{allowUnitFake=false,runDir}={}){
   const spec=scenario.identificationControl;assert.ok(spec,'content identification requires actual renamed and different-bytes fixtures');
   const input=c.inputs.find(value=>value.role==='identity-control-fixture'&&value.path===spec.receipt);assert.ok(input,'actual staged control receipt must be independently input-bound');
   const copied=inside(dir,'identification-input.json');assert.equal(await hashFile(copied),input.sha256);const control=await json(copied);
@@ -871,9 +886,10 @@ export async function verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{
   assert.equal(control.sourcePath,spec.originalPath);assert.equal(control.sourceExpectedSHA,spec.expectedSha256);assert.equal(control.sourceActualSHA,spec.expectedSha256);assert.equal(control.renamed.actualSHA,spec.expectedSha256);assert.notEqual(control.renamed.path,control.sourcePath);assert.notEqual(control.differentBytes.actualSHA,spec.expectedSha256);assert.equal(control.differentBytes.expectedOriginalSHA,spec.expectedSha256);
   for(const [file,sha256]of [[control.sourcePath,spec.expectedSha256],[control.renamed.path,spec.expectedSha256],[control.differentBytes.path,control.differentBytes.actualSHA]])assert.ok(c.inputs.some(value=>value.role==='checkpoint'&&value.path===file&&value.sha256===sha256),'all original/copied/different source bytes must be actual verified input roles');
   const positive=bundle.captures?.[`${spec.positive}_av0_done`],binding=byJob.get(positive?.id);assert.ok(binding,'renamed source must actually generate with a native closure/output');assert.equal(binding.runtimeIdentity.checkpointSha256,spec.expectedSha256);
-  const selected=c.declaredSourceBindings.find(value=>value.model.modelId===positive.payload.model);assert.equal(selected?.model.sourcePath,control.renamed.path,'the actual renamed copy must be the selected import source');assert.ok(bundle.requests.some(record=>record.route==='/api/v1/models/import'&&record.request?.modelId===selected.model.modelId&&(selected.ownershipMode==='linked'?record.request.linkedRootId===expand(selected.linkedRootId,bundle.captures??{})&&record.request.linkedRelativePath===selected.linkedRelativePath:record.request.sourcePath===control.renamed.path)&&record.request.expectedSha256===spec.expectedSha256),'renamed source must be actually submitted, not substituted by an original/builtin');
+  const selected=c.declaredSourceBindings.find(value=>value.model.modelId===positive.payload.model);assert.ok(selected&&(selected.ownershipMode==='linked'?selected.model.sourcePath===control.renamed.path:bindsStagedFixture(c,runDir,selected.model.sourcePath,control.renamed.path)),'the actual renamed copy must be the selected import source');assert.ok(bundle.requests.some(record=>record.route==='/api/v1/models/import'&&record.request?.modelId===selected.model.modelId&&(selected.ownershipMode==='linked'?record.request.linkedRootId===expand(selected.linkedRootId,bundle.captures??{})&&record.request.linkedRelativePath===selected.linkedRelativePath:record.request.sourcePath===selected.model.sourcePath)&&record.request.expectedSha256===spec.expectedSha256),'renamed source must be actually submitted, not substituted by an original/builtin');
   const negative=bundle.captures?.[`${spec.negative}_refused`];assert.equal(negative?.status,'failed','different bytes must not be accepted as the original source');assert.equal(negative.payload.expectedSha256,spec.expectedSha256);assert.ok(negative.error?.includes('integrity check')&&negative.error.includes(control.differentBytes.actualSHA)&&negative.error.includes(spec.expectedSha256),'actual API checksum refusal must identify both observed and expected content');
-  const request=bundle.requests.find(record=>record.route==='/api/v1/models/import'&&record.result?.id===negative.id);assert.ok(request&&request.request.sourcePath===control.differentBytes.path&&request.request.expectedSha256===spec.expectedSha256,'negative refusal must bind the actually submitted different-byte fixture');
+  const request=bundle.requests.find(record=>record.route==='/api/v1/models/import'&&record.result?.id===negative.id);const declaredNegative=c.declaredSourceBindings.find(value=>value.model.modelId===request?.request?.modelId);
+  assert.ok(request&&declaredNegative?.identityControl?.kind==='different-bytes-negative'&&declaredNegative.identityControl.expectedSourceSha256===spec.expectedSha256&&declaredNegative.model.sha256===control.differentBytes.actualSHA&&request.request.linkedRootId===undefined&&request.request.sourcePath===declaredNegative.model.sourcePath&&bindsStagedFixture(c,runDir,request.request.sourcePath,control.differentBytes.path)&&request.request.expectedSha256===spec.expectedSha256&&negative.payload.sourcePath===request.request.sourcePath,'negative refusal must bind the actually submitted different-byte fixture');
   return {sameContentRecognized:{original:control.sourcePath,relocated:control.renamed.path,sha256:spec.expectedSha256,nativeJobId:positive.id},differentContentRefused:{jobId:negative.id,observedSha256:control.differentBytes.actualSHA,expectedSha256:spec.expectedSha256},meaning:'content identity independent of name/path/repository layout; no new training claimed'};
 }
 export const tracedJobId=event=>(event.fields??event).jobId??event.span?.jobId??(Array.isArray(event.spans)?[...event.spans].reverse().find(span=>span?.jobId)?.jobId:undefined);
@@ -1064,7 +1080,7 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
     const actual=await compareControlMedia(inside(dir,b.media.av),inside(dir,r.media.av),inside(dir,i.media.av),comparison.stream,comparison.minimumDelta,comparison.maximumBaselineDelta,decode,delta);
     if(!contentReadback)for(const key of ['interventionDelta','repeatedBaselineDelta','threshold'])assert.equal(actual[key],comparison[key],'retained sensitivity differs from actual decoded media'); // Portable decoding rechecks declared bounds, not a host-specific ffmpeg scalar golden.
   }
-  const identification=(c.sourceVariant==='opaque-renamed-linked'||c.id.endsWith('.renamed'))?await verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{allowUnitFake}):undefined;
+  const identification=(c.sourceVariant==='opaque-renamed-linked'||c.id.endsWith('.renamed'))?await verifyIdentificationCoverage(c,dir,bundle,scenario,byJob,{allowUnitFake,runDir:planPaths(p.output).join(p.output,'services',c.id)}):undefined;
   const ownership=c.id.endsWith('.managed-linked-equivalence')?await verifyOwnershipEquivalence(bundle,scenario,byJob,dir,decode,delta):undefined;
   const cache=c.id.endsWith('.cold-warm-staged')?verifyCacheCoverage(bundle,scenario,byJob,observed):undefined;
   return {jobs:bundle.media.map(v=>v.jobId),nativeClosures:bundle.bindings.length,comparisons:comparisons.length,...(identification?{identification}:{}),...(ownership?{ownershipEquivalence:ownership}:{}),...(cache?{cacheCoverage:cache}:{})};
