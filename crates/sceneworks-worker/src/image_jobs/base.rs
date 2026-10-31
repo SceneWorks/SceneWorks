@@ -8699,6 +8699,7 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PostProcessing => on_progress(Progress::PostProcessing),
         Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
         Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
@@ -8766,6 +8767,7 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PostProcessing => on_progress(Progress::PostProcessing),
         Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
         Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),

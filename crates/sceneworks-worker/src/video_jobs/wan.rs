@@ -3173,7 +3173,7 @@ pub(super) async fn generate_video_using(
                         }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
                         Progress::Loading(_) => {}
-                        Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => {}
+                        Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete | Progress::PostProcessing => {}
                         // FLUX 3 image enhancement is not a Wan sampling/decode boundary.
                         Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
                     }
@@ -3185,6 +3185,9 @@ pub(super) async fn generate_video_using(
                             ProgressStage::Generating,
                             0.25 + 0.30 * (current as f64 / total.max(1) as f64),
                             format!("Generating frames — step {current}/{total}."),
+                        ),
+                        Progress::PostProcessing => (
+                            JobStatus::Running, ProgressStage::Generating, 0.58, "Finishing output.".to_owned(),
                         ),
                         Progress::Decoding => (
                             JobStatus::Running,

@@ -1480,6 +1480,11 @@ impl SynthesisProgress {
                 self.fraction,
                 crate::load_progress::generator_phase(phase).to_owned(),
             ),
+            Progress::PostProcessing => (
+                ProgressStage::Generating,
+                self.fraction,
+                "Finishing output.".to_owned(),
+            ),
             Progress::Decoding => (
                 ProgressStage::Generating,
                 0.85,
@@ -6786,6 +6791,9 @@ mod yue_job_surface_tests {
             .expect("step")
             .1,
         );
+        let finishing = fold.engine(Progress::PostProcessing).expect("finishing");
+        assert_eq!(finishing.2, "Finishing output.");
+        fractions.push(finishing.1);
         fractions.push(fold.chunk(1).1);
         fractions.push(
             fold.engine(Progress::Loading(gen_core::LoadPhase::Renderer))

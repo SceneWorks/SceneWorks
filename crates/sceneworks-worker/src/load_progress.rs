@@ -286,6 +286,9 @@ pub(crate) fn generator_progress(progress: &gen_core::Progress) {
             ProgressStage::Generating,
         ),
         gen_core::Progress::Decoding => ("Decoding.".to_owned(), ProgressStage::Generating),
+        gen_core::Progress::PostProcessing => {
+            ("Finishing output.".to_owned(), ProgressStage::Generating)
+        }
         gen_core::Progress::Upsampling { tokens, max_tokens } => (
             format!("Enhancing prompt ({tokens}/{max_tokens} tokens)."),
             ProgressStage::Generating,
@@ -1194,6 +1197,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn postprocessing_retires_steps_before_io_and_survives_io_completion() {
+        let settings = crate::tests::test_settings("http://unused".to_owned(), None);
+        let api = ApiClient::new(&settings);
+        with_job(&api, "job", async {
+            let context = gen_core::LoadActivityContext::capture();
+            generator_progress(&gen_core::Progress::Step {
+                current: 3,
+                total: 3,
+            });
+            generator_progress(&gen_core::Progress::PostProcessing);
+            let session = current("job").unwrap();
+            assert_eq!(
+                session.state.lock().unwrap().compute.as_ref().unwrap().0,
+                "Finishing output."
+            );
+            context.report(Some(report("output_processor", 1_000_000)));
+            {
+                let state = session.state.lock().unwrap();
+                assert!(state.activity.is_some());
+                assert_eq!(state.compute.as_ref().unwrap().0, "Finishing output.");
+            }
+            generator_progress(&gen_core::Progress::PromptEncodingComplete);
+            context.report(None);
+            let state = session.state.lock().unwrap();
+            assert!(state.activity.is_none());
+            assert_eq!(state.compute.as_ref().unwrap().0, "Finishing output.");
+            assert_eq!(state.compute.as_ref().unwrap().1, ProgressStage::Generating);
+        })
+        .await;
+    }
+
+    #[tokio::test]
     async fn prompt_end_retires_only_prompt_label_and_preserves_actual_io() {
         let settings = crate::tests::test_settings("http://unused".to_owned(), None);
         let api = ApiClient::new(&settings);
@@ -1233,6 +1268,7 @@ mod tests {
                     "Generating step 4/8.",
                 ),
                 (gen_core::Progress::Decoding, "Decoding."),
+                (gen_core::Progress::PostProcessing, "Finishing output."),
                 (
                     gen_core::Progress::Loading(gen_core::LoadPhase::Renderer),
                     "Preparing generation.",

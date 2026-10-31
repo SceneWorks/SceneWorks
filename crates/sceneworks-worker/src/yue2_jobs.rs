@@ -1059,6 +1059,7 @@ impl Yue2Progress {
                 self.fraction = self.fraction.max(0.08);
                 crate::load_progress::generator_phase(phase).to_owned()
             }
+            Progress::PostProcessing => return (self.fraction, "Finishing output.".to_owned()),
             Progress::Decoding => {
                 self.fraction = self.fraction.max(0.86);
                 "Decoding audio.".to_owned()

@@ -1677,6 +1677,7 @@ fn krea_imported_generate_one(
         }),
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PostProcessing => on_progress(Progress::PostProcessing),
         Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
         Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
@@ -1721,6 +1722,7 @@ fn krea_imported_generate_one(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
+        Progress::PostProcessing => on_progress(Progress::PostProcessing),
         Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
         Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
