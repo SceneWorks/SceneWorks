@@ -35,8 +35,8 @@ fn resolve_checkpoint_plan_with_progress(
 ) -> Result<ResolvedCheckpointV1, CheckpointPlanError> {
     let mut verification = None;
     store.resolve_with_verification(checkpoint_id, |path| {
-        verification = path.map(|_| {
-            gen_core::LoadActivityScope::enter(gen_core::LoadActivity::VerifyingFiles)
+        verification = path.map(|path| {
+            gen_core::LoadActivityScope::file(gen_core::LoadActivityPhase::Verifying, path, None)
         });
     })
 }

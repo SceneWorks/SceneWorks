@@ -8699,7 +8699,7 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        boundary @ (Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete) => on_progress(boundary),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
@@ -8765,7 +8765,7 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
+        boundary @ (Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete) => on_progress(boundary),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
@@ -16331,11 +16331,6 @@ async fn consume_gen_events_with_disclosure(
             }
             GenEvent::LoadActivity { index, pending } => {
                 let activity = load_progress::take(&pending);
-                let (status, stage) = if activity == Some(gen_core::LoadActivity::EncodingPrompt) {
-                    (JobStatus::Running, ProgressStage::Generating)
-                } else {
-                    (JobStatus::LoadingModel, ProgressStage::LoadingModel)
-                };
                 mark_started(index);
                 tracing::info!(event = "image_load_activity", job_id = %job.id,
                     image_index = index, activity = ?activity);
@@ -16343,8 +16338,8 @@ async fn consume_gen_events_with_disclosure(
                     api,
                     &job.id,
                     image_progress(
-                        status,
-                        stage,
+                        JobStatus::LoadingModel,
+                        ProgressStage::LoadingModel,
                         step_fraction(index, 0, 1, total_u32),
                         &progress_with_auto_tier_streaming(
                             &format!("Image {}/{total} — {}.", index + 1,
@@ -16358,19 +16353,20 @@ async fn consume_gen_events_with_disclosure(
             }
             GenEvent::Loading { index, phase } => {
                 mark_started(index);
-                let component = match phase {
-                    LoadPhase::TextEncoder => "text encoder",
-                    LoadPhase::Renderer => "render components",
+                let (status, stage, message) = match phase {
+                    LoadPhase::TextEncoder => (JobStatus::LoadingModel, ProgressStage::LoadingModel, "loading text encoder"),
+                    LoadPhase::Renderer => (JobStatus::LoadingModel, ProgressStage::LoadingModel, "loading render components"),
+                    LoadPhase::EncodingPrompt => (JobStatus::Running, ProgressStage::Generating, "encoding prompt"),
                 };
                 update_job(
                     api,
                     &job.id,
                     image_progress(
-                        JobStatus::LoadingModel,
-                        ProgressStage::LoadingModel,
+                        status,
+                        stage,
                         step_fraction(index, 0, 1, total_u32),
                         &progress_with_auto_tier_streaming(
-                            &format!("Image {}/{total} — loading {component}.", index + 1),
+                            &format!("Image {}/{total} — {message}.", index + 1),
                             auto_tier_streaming,
                         ),
                         Some(streaming_result(plan, asset_writes)),

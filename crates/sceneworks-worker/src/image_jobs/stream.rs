@@ -208,7 +208,7 @@ async fn prepare_image_route_with_progress<T: Send + 'static>(
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
-    if matches!(progress, Progress::ConditioningComplete) {
+    if matches!(progress, Progress::ConditioningComplete | Progress::PromptEncodingComplete) {
         return;
     }
     // The prompt-upsampling COMPLETION boundary has no consumer on this lane and stays internal
@@ -223,7 +223,7 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             current,
             total,
         },
-        Progress::ConditioningComplete | Progress::PromptUpsamplingComplete => {
+        Progress::ConditioningComplete | Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => {
             unreachable!("internal boundary filtered above")
         }
         Progress::Decoding => GenEvent::Decoding { index },
@@ -532,10 +532,14 @@ fn prompt_upsampling_tokens_are_emitted_but_completion_stays_internal() {
         })
     ));
     send_gen_progress(&tx, 0, Progress::PromptUpsamplingComplete);
+    send_gen_progress(&tx, 0, Progress::PromptEncodingComplete);
+    send_gen_progress(&tx, 0, Progress::ConditioningComplete);
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
+    send_gen_progress(&tx, 0, Progress::Loading(LoadPhase::EncodingPrompt));
+    assert!(matches!(rx.try_recv(), Ok(GenEvent::Loading { index: 0, phase: LoadPhase::EncodingPrompt })));
 }
 
 /// Release MLX's freed-buffer cache between batch images so peak memory doesn't carry

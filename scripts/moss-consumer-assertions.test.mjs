@@ -284,20 +284,22 @@ test("owned CPU identity rejects reused and foreign processes and tolerates know
 
 if (!process.env.MOSS_ASSERTIONS_MUTATION_CHILD) test("named driver-policy bypasses are killed by original tests without Cargo", async t => {
   const source = readFileSync(path.join(ROOT, "scripts/moss-consumer-assertions.mjs"), "utf8");
-  for (const [id, target, old, replacement] of [
-    ["DRV-child-recipe", "CPU child inherits the selected incremental recipe and logs only its whitelist", '["CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"', '["CARGO_BUILD_JOBS"'],
+  // These three children exercise POSIX process APIs and already skip on Windows.
+  // Mirror only their explicit platform guard; every supported mutation must still fail.
+  for (const [id, target, old, replacement, options] of [
+    ["DRV-child-recipe", "CPU child inherits the selected incremental recipe and logs only its whitelist", '["CARGO_INCREMENTAL", "CARGO_BUILD_JOBS"', '["CARGO_BUILD_JOBS"', posixOnly],
     ["DRV-initial-verbose", "synthetic executor proves compile-once, exact positive counts, mutation red, touch restore and final green", '["cargo", "test", "--locked", "--verbose", "-p", "sceneworks-core"', '["cargo", "test", "--locked", "-p", "sceneworks-core"'],
     ["DRV-restore-before-reap", "unreaped compiler fails closed without racing source restoration", "} finally { if (!state.unsafeToRestore) restore();", "} finally { restore();"],
     ["DRV-restore-unchanged", "restore rewrites and touches only changed files while auditing every mutable source", "if (!current?.equals(originals[file]))", "if (true)"],
     ["DRV-restore-touch", "restore rewrites and touches only changed files while auditing every mutable source", "utimesSync(path.join(root, file), new Date(), new Date());", "utimesSync(path.join(root, file), new Date(1000), new Date(1000));"],
     ["DRV-source-hash", "receipt validates case IDs, exact selected test counts, implementation hashes and complete restoration", "JSON.stringify(result.source_before) === JSON.stringify(result.source_after)", "true"],
-    ["DRV-owned-identity", "owned CPU identity rejects reused and foreign processes and tolerates known ESRCH races", "row && row.uid === identity.uid && row.birth === identity.birth", "row"],
-    ["DRV-signal-EPERM", "CPU signal EPERM stays explicit and fail-closed without replacing the deadline", 'if (error.code !== "ESRCH") errors.push', 'if (false) errors.push'],
+    ["DRV-owned-identity", "owned CPU identity rejects reused and foreign processes and tolerates known ESRCH races", "row && row.uid === identity.uid && row.birth === identity.birth", "row", posixOnly],
+    ["DRV-signal-EPERM", "CPU signal EPERM stays explicit and fail-closed without replacing the deadline", 'if (error.code !== "ESRCH") errors.push', 'if (false) errors.push', posixOnly],
     ["DRV-positive-count", "positive and assertion-red parser rejects compilation, crash, no selection and wrong named test", "record.passed === 1", "record.passed >= 0"],
     ["DRV-restore", "synthetic executor proves compile-once, exact positive counts, mutation red, touch restore and final green", "writeFileSync(path.join(root, file), originals[file]);", "void originals[file];"],
     ["DRV-no-stale-carry", "receipt validates case IDs, exact selected test counts, implementation hashes and complete restoration", 'requireFact(!Object.hasOwn(result, "carried"), "stale carried evidence is not accepted; every registry case must execute");', ""],
     ["DRV-case-binding", "receipt validates case IDs, exact selected test counts, implementation hashes and complete restoration", "row.id === spec.cases[index].id", "true"],
-  ]) await t.test(id, () => {
+  ]) await t.test(id, options ?? {}, () => {
     const scratch = mkdtempSync(path.join(os.tmpdir(), "moss-driver-policy-mutation-"));
     try {
       assert.equal(source.split(old).length - 1, 1, id);

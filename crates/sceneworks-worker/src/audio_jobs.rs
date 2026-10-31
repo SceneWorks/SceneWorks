@@ -1462,7 +1462,7 @@ impl SynthesisProgress {
     fn engine(&mut self, progress: Progress) -> Option<SynthesisUpdate> {
         let (stage, candidate, message) = match progress {
             // Image prompt upsampling is not an audio synthesis phase.
-            Progress::PromptUpsamplingComplete => return None,
+            Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => return None,
             Progress::ConditioningComplete | Progress::Upsampling { .. } => return None,
             Progress::Step { current, total } => {
                 if total == 0 {
@@ -1476,9 +1476,14 @@ impl SynthesisProgress {
                 )
             }
             Progress::Loading(phase) => (
-                ProgressStage::LoadingModel,
+                if phase == gen_core::LoadPhase::EncodingPrompt {
+                    ProgressStage::Generating
+                } else {
+                    ProgressStage::LoadingModel
+                },
                 self.fraction,
                 match phase {
+                    gen_core::LoadPhase::EncodingPrompt => "Encoding prompt.".to_owned(),
                     gen_core::LoadPhase::TextEncoder => "Loading the text encoder.".to_owned(),
                     gen_core::LoadPhase::Renderer => "Loading model weights.".to_owned(),
                 },
