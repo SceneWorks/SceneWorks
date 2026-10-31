@@ -60,6 +60,23 @@ fn successful_idle_claim_poll_does_not_emit_request_duration_noise() {
     );
 }
 
+#[test]
+fn successful_worker_heartbeat_never_emits_request_duration() {
+    const HEARTBEAT: &str = "/api/v1/workers/:worker_id/heartbeat";
+    assert!(
+        !should_log_api_request_duration(HEARTBEAT, StatusCode::OK, 1.186),
+        "routine heartbeats must not flood session logs"
+    );
+    assert!(
+        !should_log_api_request_duration(HEARTBEAT, StatusCode::OK, 5_000.0),
+        "a successful heartbeat is never logged, however slow"
+    );
+    assert!(
+        should_log_api_request_duration(HEARTBEAT, StatusCode::NOT_FOUND, 1.186),
+        "failed heartbeats remain observable"
+    );
+}
+
 #[tokio::test]
 async fn api_timing_adds_numeric_server_timing_to_success_and_error_responses() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
