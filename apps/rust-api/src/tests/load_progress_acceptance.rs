@@ -273,19 +273,85 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
         })
         .ok_or("missing compute progress after loading")?;
     require(load < compute, "compute precedes byte-bearing load")?;
-    // Invalidate IO labels at EVERY compute transition, including denoising after a lazy
-    // transformer read. Distinct later lazy reads (Candle VAE decode) remain truthful.
+    // Compute invalidates prior IO. A subsequent byte-bearing load establishes a new
+    // component epoch: read_hashed_file loads bytes, then hashes those bytes afresh, so
+    // its verification labels may equal labels from the earlier cold source seal.
     let mut seen_io = std::collections::BTreeSet::<&str>::new();
     let mut obsolete_io = std::collections::BTreeSet::<&str>::new();
+    let mut computed = false;
+    let mut fresh_component = None;
+    let mut verification = None;
+    let mut renderer_started = false;
     for message in &lowered {
-        if message.contains("loading ")
-            || message.contains("verifying ")
-            || message.contains("checking model files")
-        {
+        let loading = message.strip_prefix("loading ");
+        let verifying = message.strip_prefix("verifying ");
+        let checking = message.contains("checking model files");
+        if image && renderer_started {
             require(
-                !obsolete_io.contains(message.as_str()),
-                "earlier IO label reappeared after compute",
+                !checking
+                    && !message.starts_with("loading text encoder")
+                    && !message.starts_with("verifying text encoder")
+                    && (case == "image_cuda"
+                        || (!message.starts_with("loading vae")
+                            && !message.starts_with("verifying vae"))),
+                "completed component IO returned during transformer execution",
             )?;
+        }
+        if loading.is_some() || verifying.is_some() || checking {
+            if let Some(label) = verifying {
+                let (source, progress) =
+                    label.split_once(" — ").ok_or("verification lacks bytes")?;
+                let component = source.split(" (").next().unwrap();
+                require(
+                    !computed || fresh_component == Some(component),
+                    "verification returned after compute without a fresh component load",
+                )?;
+                let current = progress.split(" / ").next().unwrap();
+                let unit = progress
+                    .rsplit_once(' ')
+                    .ok_or("verification lacks units")?
+                    .1;
+                let amount: f64 = current
+                    .split_whitespace()
+                    .next()
+                    .ok_or("verification lacks byte count")?
+                    .parse()
+                    .map_err(|_| "invalid verification bytes")?;
+                let scale = match unit {
+                    "b" | "bytes" => 1.,
+                    "kb" => 1_000.,
+                    "mb" => 1_000_000.,
+                    "gb" => 1_000_000_000.,
+                    "tb" => 1_000_000_000_000.,
+                    _ => return Err("unknown verification byte unit".into()),
+                };
+                let bytes = amount * scale;
+                if let Some((previous_source, previous_bytes)) = verification {
+                    require(
+                        previous_source != source || bytes >= previous_bytes,
+                        "verification bytes regressed within a read epoch",
+                    )?;
+                }
+                verification = Some((source, bytes));
+            } else {
+                require(
+                    !obsolete_io.contains(message.as_str()),
+                    "earlier IO label reappeared after compute",
+                )?;
+                if let Some(label) = loading.filter(|_| has_bytes(message)) {
+                    fresh_component = Some(
+                        label
+                            .split(" (")
+                            .next()
+                            .unwrap()
+                            .split(" — ")
+                            .next()
+                            .unwrap(),
+                    );
+                    verification = None;
+                    renderer_started |= label.starts_with("transformer");
+                }
+            }
             seen_io.insert(message.as_str());
         }
         if message.contains("encoding prompt")
@@ -295,6 +361,9 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
             || message.contains("synthes")
         {
             obsolete_io.extend(seen_io.iter().copied());
+            computed = true;
+            fresh_component = None;
+            verification = None;
         }
     }
     Ok(())
@@ -756,6 +825,48 @@ fn progress_sequence_requires_bytes_and_current_phase() {
         "training"
     )
     .is_err());
+}
+
+#[test]
+fn verification_requires_a_fresh_component_epoch_after_compute() {
+    let seal = "Verifying transformer (shard.safetensors) — 0.3 / 5.0 GB";
+    let mut mlx: Vec<String> = [
+        "Checking model files (0/1).",
+        seal,
+        "Loading text encoder — 1.0 / 2.0 GB",
+        "Loading vae — 1.0 / 2.0 GB",
+        "Encoding prompt.",
+        "Loading transformer (shard.safetensors) — 1.9 / 5.0 GB",
+        seal,
+        "Verifying transformer (shard.safetensors) — 0.9 / 5.0 GB",
+        "Generating step 1/2.",
+        "Decoding.",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    // Same source and rounded byte count are legitimate in a new load -> hash epoch.
+    validate_progress(&mlx, "image_mlx").unwrap();
+    for (position, message) in [
+        (5, seal), // Hash replay before the new transformer load.
+        (8, seal), // Bytes regress from 0.9 to 0.3 within the current hash.
+        (9, seal), // Hash replay after denoising, without a fresh read.
+        (6, "Verifying text encoder — 1.0 / 2.0 GB"),
+        (6, "Checking model files (0/1)."),
+        (6, "Loading vae — 1.5 / 2.0 GB"),
+    ] {
+        let mut stale = mlx.clone();
+        stale.insert(position, message.into());
+        assert!(validate_progress(&stale, "image_mlx").is_err(), "{message}");
+    }
+    // Candle's lazy VAE decode is another real epoch after denoising, even when
+    // its hash count equals the initial seal's count for the same source.
+    mlx.remove(3);
+    let vae_seal = "Verifying vae — 0.1 / 2.0 GB";
+    mlx.insert(1, vae_seal.into());
+    mlx.push("Loading vae — 1.0 / 2.0 GB".into());
+    mlx.push(vae_seal.into());
+    validate_progress(&mlx, "image_cuda").unwrap();
 }
 
 #[test]
