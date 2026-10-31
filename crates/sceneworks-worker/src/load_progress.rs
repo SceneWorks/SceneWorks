@@ -1045,6 +1045,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_prompt_resumes_after_internal_io_until_its_paired_end() {
+        let (api, recorded, server) = api().await;
+        with_job(&api, "job", async {
+            generator_progress(&gen_core::Progress::Loading(
+                gen_core::LoadPhase::EncodingPrompt,
+            ));
+            crate::progress::update_job(&api, "job", normal("ordinary prompt snapshot"))
+                .await
+                .unwrap();
+            let context = gen_core::LoadActivityContext::capture();
+            for bytes in [1, 2] {
+                // Lazy text-weight reads belong to the still-active encoding call. There is no
+                // new compute callback when the read returns; only the paired end retires it.
+                context.report(Some(report("text_encoder", bytes)));
+                crate::progress::update_job(&api, "job", normal("ordinary prompt snapshot"))
+                    .await
+                    .unwrap();
+                assert!(recorded.posts.lock().unwrap().last().unwrap().1["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Loading text encoder"));
+                context.report(None);
+                crate::progress::update_job(&api, "job", normal("ordinary prompt snapshot"))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    recorded.posts.lock().unwrap().last().unwrap().1["message"],
+                    "Encoding prompt."
+                );
+            }
+            generator_progress(&gen_core::Progress::PromptEncodingComplete);
+            crate::progress::update_job(&api, "job", normal("ordinary prompt snapshot"))
+                .await
+                .unwrap();
+            assert_eq!(
+                recorded.posts.lock().unwrap().last().unwrap().1["message"],
+                "Preparing generation."
+            );
+        })
+        .await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn active_step_resumes_after_internal_io_without_guessing_completion_from_its_counter() {
+        let (api, recorded, server) = api().await;
+        with_job(&api, "job", async {
+            let context = gen_core::LoadActivityContext::capture();
+            for current in [1, 2] {
+                // Universal Step is a schedule position, not an end-of-compute signal, even
+                // when current == total. Lazy reads may interrupt the same position repeatedly.
+                generator_progress(&gen_core::Progress::Step { current, total: 2 });
+                for bytes in [1, 2] {
+                    context.report(Some(report("transformer", bytes)));
+                    crate::progress::update_job(&api, "job", normal("ordinary step snapshot"))
+                        .await
+                        .unwrap();
+                    assert!(recorded.posts.lock().unwrap().last().unwrap().1["message"]
+                        .as_str()
+                        .unwrap()
+                        .starts_with("Loading transformer"));
+                    context.report(None);
+                    crate::progress::update_job(&api, "job", normal("ordinary step snapshot"))
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        recorded.posts.lock().unwrap().last().unwrap().1["message"],
+                        format!("Generating step {current}/2.")
+                    );
+                }
+            }
+            generator_progress(&gen_core::Progress::Decoding);
+            crate::progress::update_job(&api, "job", normal("ordinary step snapshot"))
+                .await
+                .unwrap();
+            assert_eq!(
+                recorded.posts.lock().unwrap().last().unwrap().1["message"],
+                "Decoding."
+            );
+        })
+        .await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn explicit_renderer_construction_replaces_sampling_across_lazy_decode_weight_io() {
+        let (api, recorded, server) = api().await;
+        with_job(&api, "job", async {
+            generator_progress(&gen_core::Progress::Step {
+                current: 2,
+                total: 2,
+            });
+            let mut snapshot = normal("ordinary final step snapshot");
+            crate::progress::update_job(&api, "job", snapshot.clone())
+                .await
+                .unwrap();
+            // The producer owns the phase transition: sampling returned, then construction of
+            // the decode component starts. The existing Renderer event must precede that read.
+            generator_progress(&gen_core::Progress::Loading(gen_core::LoadPhase::Renderer));
+            let context = gen_core::LoadActivityContext::capture();
+            context.report(Some(report("vae", 25_200_000)));
+            snapshot.progress = serde_json::Number::from_f64(0.95).unwrap();
+            snapshot.eta_seconds = Some(serde_json::Number::from(7));
+            crate::progress::update_job(&api, "job", snapshot.clone())
+                .await
+                .unwrap();
+            assert!(recorded.posts.lock().unwrap().last().unwrap().1["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Loading vae"));
+            context.report(None);
+            for eta in [6, 5] {
+                // Delayed consumer snapshots (including ETA-only polls) cannot replace a newer
+                // producer phase, even after HTTP ordering has delayed the ordinary event.
+                snapshot.eta_seconds = Some(serde_json::Number::from(eta));
+                crate::progress::update_job(&api, "job", snapshot.clone())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    recorded.posts.lock().unwrap().last().unwrap().1["message"],
+                    "Preparing generation."
+                );
+            }
+            generator_progress(&gen_core::Progress::Decoding);
+            crate::progress::update_job(&api, "job", snapshot)
+                .await
+                .unwrap();
+            assert_eq!(
+                recorded.posts.lock().unwrap().last().unwrap().1["message"],
+                "Decoding."
+            );
+        })
+        .await;
+        let posts = recorded.posts.lock().unwrap();
+        let read = posts
+            .iter()
+            .position(|p| {
+                p.1["message"]
+                    .as_str()
+                    .is_some_and(|m| m.starts_with("Loading vae"))
+            })
+            .unwrap();
+        assert!(posts[read..]
+            .iter()
+            .all(|p| p.1["message"] != "Generating step 2/2."));
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn prompt_end_retires_only_prompt_label_and_preserves_actual_io() {
         let settings = crate::tests::test_settings("http://unused".to_owned(), None);
         let api = ApiClient::new(&settings);
