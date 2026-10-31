@@ -1157,11 +1157,20 @@ fn normalized_api_route(path: &str, matched_path: Option<&str>) -> Option<String
 /// Worker claim is a one-second idle poll, so logging every successful sub-millisecond response
 /// floods the session ring buffer and pushes actionable events out of the Logs screen. Keep the
 /// Server-Timing header on every response, but emit the duration event for this route only when the
-/// request fails or is unexpectedly slow. All other API/MCP routes retain per-request timing logs.
+/// request fails or is unexpectedly slow. Worker heartbeats are the same kind of liveness traffic,
+/// and a successful one is never logged at all; only failures surface. All other API/MCP routes
+/// retain per-request timing logs.
 const SLOW_CLAIM_REQUEST_MS: f64 = 1_000.0;
 
 fn should_log_api_request_duration(route: &str, status: StatusCode, elapsed_ms: f64) -> bool {
-    route != "/api/v1/jobs/claim" || !status.is_success() || elapsed_ms >= SLOW_CLAIM_REQUEST_MS
+    if !status.is_success() {
+        return true;
+    }
+    match route {
+        "/api/v1/workers/:worker_id/heartbeat" => false,
+        "/api/v1/jobs/claim" => elapsed_ms >= SLOW_CLAIM_REQUEST_MS,
+        _ => true,
+    }
 }
 
 async fn api_request_timing(request: AxumRequest, next: Next) -> Response {
