@@ -274,7 +274,7 @@ fn validate_audio_epochs(messages: &[String]) -> Result<()> {
         }
         // Brief Decoding/PostProcessing callbacks may coalesce on the HTTP wire.
         // PerTh IO above also retires the completed renderer step unconditionally.
-        if message == "finishing output." || (flow && message.contains("decoding")) {
+        if message == "finishing output." || message.contains("decoding") {
             finishing = true;
         }
     }
@@ -1099,6 +1099,8 @@ fn audio_reader_epochs_and_output_finishing_are_distinct() {
         (9, "Generating step 63/4096."),
         (12, "Loading s3gen.safetensors — 0.2 / 1.1 GB"),
         (14, "Generating step 2/3."),
+        (9, "Decoding."), // Premature decode cannot precede renderer IO or stages.
+        (16, "Generating step 3/3."), // No stage may return after actual HiFT decode.
         (17, "Generating step 3/3."),
         (7, "Loading t3 cfg.safetensors — 0.2 / 2.1 GB"),
         (7, "Loading s3gen.safetensors — 0.2 / 1.1 GB"),
