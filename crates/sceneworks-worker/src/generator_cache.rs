@@ -272,6 +272,62 @@ struct CacheIdentityWeights {
 }
 
 impl LoadIdentity {
+    /// Names of the identity fields that differ from `other`, in declaration order. Explains a cache
+    /// miss (sc-27985): a reload that silently discards a resident model is otherwise
+    /// indistinguishable from a cache defect.
+    pub(crate) fn changed_fields(&self, other: &Self) -> Vec<&'static str> {
+        // Exhaustive destructure: a new identity field fails to compile until it is reported here.
+        let Self {
+            engine_id,
+            resolved_route,
+            decode_geometry_policies,
+            decode_geometry_policy_authoritative,
+            decode_quality_runtime_identity,
+            weights,
+            quantize,
+            precision,
+            control,
+            extra_controls,
+            ip_adapter,
+            adapters,
+            pid,
+            identity,
+            text_encoder,
+            components,
+            prepared_files,
+            released_resident,
+            sdxl_cuda_offload_policy,
+        } = self;
+        let mut changed = Vec::new();
+        macro_rules! field {
+            ($name:ident) => {
+                if *$name != other.$name {
+                    changed.push(stringify!($name));
+                }
+            };
+        }
+        field!(engine_id);
+        field!(resolved_route);
+        field!(decode_geometry_policies);
+        field!(decode_geometry_policy_authoritative);
+        field!(decode_quality_runtime_identity);
+        field!(weights);
+        field!(quantize);
+        field!(precision);
+        field!(control);
+        field!(extra_controls);
+        field!(ip_adapter);
+        field!(adapters);
+        field!(pid);
+        field!(identity);
+        field!(text_encoder);
+        field!(components);
+        field!(prepared_files);
+        field!(released_resident);
+        field!(sdxl_cuda_offload_policy);
+        changed
+    }
+
     /// The named components (`LoadSpec::components` ids, e.g. Iris's `text_encoder`) this identity
     /// was loaded with. Test/introspection helper.
     #[cfg(test)]
@@ -544,6 +600,25 @@ fn run_generator_cache_worker(rx: mpsc::Receiver<GeneratorJob>, idle_timeout: Op
             );
         },
     );
+}
+
+/// Documented event (docs/observability.md): why a request cold-loads instead of reusing the
+/// resident generator — an empty cache, or the identity fields that differ from the resident key.
+fn log_generator_cache_miss(resident: Option<&LoadIdentity>, incoming: &LoadIdentity) {
+    match resident {
+        None => tracing::info!(
+            event = "generator_cache_miss",
+            engine = %incoming.engine_id,
+            reason = "empty",
+        ),
+        Some(resident) => tracing::info!(
+            event = "generator_cache_miss",
+            engine = %incoming.engine_id,
+            reason = "identity_changed",
+            residentEngine = %resident.engine_id,
+            changed = %resident.changed_fields(incoming).join(","),
+        ),
+    }
 }
 
 fn generator_cache_idle_timeout_from_env() -> Option<Duration> {
@@ -1507,10 +1582,13 @@ where
             cached.provider_resident_bytes,
         )
     };
+    let incoming_key = key.clone();
     cache_thread::run_cached_with_access_after_cold_admission(
         worker,
         key,
         move |resident| {
+            log_generator_cache_miss(resident.map(|(key, _)| key), &incoming_key);
+            let resident = resident.map(|(_, cached)| cached);
             admission_spec
                 .validate_prepared_file_pins()
                 .map_err(|error| {
@@ -1953,6 +2031,31 @@ mod tests {
         assert_ne!(
             LoadIdentity::from_load_spec("z_image_turbo", &with_adapter),
             LoadIdentity::from_load_spec("z_image_turbo", &different_scale)
+        );
+    }
+
+    #[test]
+    fn cache_miss_reason_names_only_the_changed_identity_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let adapter = dir.path().join("style.safetensors");
+        std::fs::write(&adapter, b"adapter").expect("write adapter");
+        let base = LoadSpec::new(WeightsSource::Dir(PathBuf::from("/models/base")))
+            .with_resolved_route("moss_image_sft:Off:edit=false");
+        let mut with_adapter = base.clone();
+        with_adapter.adapters = vec![AdapterSpec::new(adapter, 1.0, AdapterKind::Lora)];
+        let accelerated = base
+            .clone()
+            .with_resolved_route("moss_image_sft:Dmd:edit=false");
+        let identity = |spec: &LoadSpec| LoadIdentity::from_load_spec("moss_image_sft", spec);
+
+        assert!(identity(&base).changed_fields(&identity(&base)).is_empty());
+        assert_eq!(
+            identity(&with_adapter).changed_fields(&identity(&base)),
+            ["adapters"]
+        );
+        assert_eq!(
+            identity(&base).changed_fields(&identity(&accelerated)),
+            ["resolved_route"]
         );
     }
 

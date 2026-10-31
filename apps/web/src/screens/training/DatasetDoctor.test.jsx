@@ -493,6 +493,75 @@ describe("DatasetDoctorDistributions", () => {
 });
 
 describe("NearDuplicateClusters (sc-8564)", () => {
+  const similarReport = () => report({
+    items: [
+      { itemId: "a", flags: [{ check: "near_duplicate_embedding", severity: "warn", value: 0.98, peers: ["b"] }] },
+      { itemId: "c", flags: [{ check: "near_duplicate_embedding", severity: "warn", value: 0.97, peers: ["d"] }] },
+    ],
+  });
+
+  it("allows manual selection in similarity-only groups and deletes only the selected row's images", async () => {
+    let finishDelete;
+    const onDeleteSelected = vi.fn(() => new Promise((resolve) => { finishDelete = resolve; }));
+    mount(<NearDuplicateClusters report={similarReport()} onDeleteSelected={onDeleteSelected} />);
+    const rows = container.querySelectorAll(".dataset-doctor-nearup");
+    const deleteButtons = [...rows].map((row) => row.querySelector("button"));
+    expect(deleteButtons.every((button) => button.disabled)).toBe(true);
+    act(() => rows[0].querySelector('input[aria-label="Select b"]').click());
+    act(() => rows[1].querySelector('input[aria-label="Select c"]').click());
+    expect(deleteButtons[0].textContent).toBe("Delete selected (1)");
+    act(() => deleteButtons[0].click());
+    expect(onDeleteSelected).toHaveBeenCalledExactlyOnceWith(["b"]);
+    expect(deleteButtons[0].textContent).toBe("Deleting…");
+    expect(rows[0].querySelector("input").disabled).toBe(true);
+    act(() => deleteButtons[0].click());
+    expect(onDeleteSelected).toHaveBeenCalledTimes(1);
+    await act(async () => finishDelete(true));
+    expect(rows[0].querySelector('input[aria-label="Select b"]').checked).toBe(false);
+    expect(rows[1].querySelector('input[aria-label="Select c"]').checked).toBe(true);
+  });
+
+  it("keeps selections available for retry after failed deletion and respects the dataset busy state", async () => {
+    const onDeleteSelected = vi.fn().mockRejectedValueOnce(new Error("Save failed")).mockResolvedValue(false);
+    const props = { report: similarReport(), onDeleteSelected };
+    mount(<NearDuplicateClusters {...props} />);
+    const input = container.querySelector("input");
+    act(() => input.click());
+    await act(async () => container.querySelector("button").click());
+    expect(container.querySelector('[role="alert"]').textContent).toBe("Save failed");
+    expect(input.checked).toBe(true);
+    await act(async () => container.querySelector("button").click());
+    expect(input.checked).toBe(true);
+    mount(<NearDuplicateClusters {...props} busy />);
+    expect(input.disabled).toBe(true);
+    expect(container.querySelector("button").disabled).toBe(true);
+  });
+
+  it("shows a 4x preview on hover or keyboard focus, stays in the viewport, and dismisses it", () => {
+    mount(<NearDuplicateClusters report={similarReport()} onDeleteSelected={vi.fn()}
+      renderThumbnail={(id) => <img src={`/${id}.png`} alt="" />} />);
+    const thumb = container.querySelector(".dataset-doctor-nearup-thumb");
+    thumb.getBoundingClientRect = () => ({ left: window.innerWidth - 56, top: window.innerHeight - 56, width: 48, bottom: window.innerHeight - 8 });
+    act(() => thumb.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    const preview = document.body.querySelector(".dataset-doctor-nearup-preview");
+    expect(preview.querySelector("img").getAttribute("src")).toBe("/a.png");
+    expect(preview.style.width).toBe("192px");
+    expect(preview.style.height).toBe("192px");
+    expect(parseFloat(preview.style.left) + 192).toBeLessThanOrEqual(window.innerWidth - 8);
+    expect(parseFloat(preview.style.top) + 192).toBeLessThan(window.innerHeight - 56);
+    // The portal escapes the thumbnail's clipping box.
+    expect(preview.parentElement).toBe(document.body);
+    act(() => thumb.dispatchEvent(new MouseEvent("mouseout", { bubbles: true })));
+    expect(document.body.querySelector(".dataset-doctor-nearup-preview")).toBeNull();
+    act(() => thumb.querySelector("input").focus());
+    expect(document.body.querySelector(".dataset-doctor-nearup-preview")).not.toBeNull();
+    act(() => thumb.querySelector("input").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true })));
+    expect(document.body.querySelector(".dataset-doctor-nearup-preview")).toBeNull();
+    act(() => thumb.dispatchEvent(new MouseEvent("mouseover", { bubbles: true })));
+    act(() => window.dispatchEvent(new Event("scroll")));
+    expect(document.body.querySelector(".dataset-doctor-nearup-preview")).toBeNull();
+  });
+
   it("renders each cluster's sibling thumbnails, similarity label, and a scoped remove action", () => {
     const onRemoveDuplicates = vi.fn();
     const r = report({

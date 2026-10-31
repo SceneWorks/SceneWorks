@@ -215,6 +215,192 @@ fn sibling_tiers_of_one_repository_stay_distinct_members() {
     );
 }
 
+/// sc-27985: MOSS-Image SFT splits one snapshot across a primary row and a co-requisite row that
+/// both list LICENSE. One member per row wrote that path twice, so every promotion declined with
+/// "duplicate artifact output file" and the model always loaded from the slow external library.
+/// Same-snapshot rows now promote as one member and the bundle still serves the original rows.
+#[test]
+fn rows_sharing_one_snapshot_and_a_file_promote_as_one_member() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    let library = temp.path().join("library");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    for (file, body) in [
+        ("LICENSE", b"license".as_slice()),
+        ("transformer/model.safetensors", b"transformer"),
+        ("text_encoder/model.safetensors", b"encoder"),
+    ] {
+        install_snapshot_file(&library, "owner/model", PRIMARY_REVISION, file, body);
+    }
+    let requirements = [
+        requirement(
+            "owner/model",
+            Some(PRIMARY_REVISION),
+            "default",
+            &["LICENSE", "transformer/model.safetensors"],
+            true,
+        ),
+        requirement(
+            "owner/model",
+            Some(PRIMARY_REVISION),
+            "default",
+            &["LICENSE", "text_encoder/model.safetensors"],
+            false,
+        ),
+    ];
+
+    let candidate = promotion_candidate_for_requirements(&resolver_for(&library), &requirements)
+        .expect("rows sharing a snapshot file promote");
+
+    let members = &candidate.artifact.closure.members;
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].role, ArtifactMemberRole::Primary);
+    assert_eq!(members[0].component_id, None);
+    assert_eq!(
+        members[0]
+            .files
+            .iter()
+            .map(|file| file.relative_path.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        [
+            "LICENSE",
+            "text_encoder/model.safetensors",
+            "transformer/model.safetensors"
+        ]
+    );
+
+    let store = ResolvedCacheStore::open(&data_dir).unwrap();
+    let outcome = ResolvedCacheMaterializer::new(store)
+        .materialize(
+            &candidate,
+            &library,
+            "owner/model",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap();
+    let MaterializationOutcome::Published(metadata) = outcome else {
+        panic!("expected a published bundle, got {outcome:?}");
+    };
+    assert!(
+        local_artifact_for_requirements(std::slice::from_ref(&metadata.artifact), &requirements)
+            .is_some(),
+        "the merged bundle must cover both original rows"
+    );
+}
+
+/// sc-27985 regression: MOSS-Image SFT installs one receipt (the transformer row) while its
+/// co-requisite rows carry the text encoder/VAE snapshot of the same repository and three DMD files
+/// of a receipt-less repository. Co-requisite rows inherited the primary's receipt and same-identity
+/// declared rows collapsed to the first, so the promoted bundle held only the transformer and one
+/// DMD file; a job served from it failed on the missing `moss-dmd-time` component. Every row's
+/// files must reach the bundle.
+#[test]
+fn a_moss_shaped_entry_promotes_every_co_requisite_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let data_dir = temp.path().join("data");
+    let library = temp.path().join("library");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let primary = ["LICENSE", "transformer/model.safetensors"];
+    let shared = [
+        "LICENSE",
+        "text_encoder/model.safetensors",
+        "vae/model.safetensors",
+    ];
+    let dmd = [
+        "lora.safetensors",
+        "time_embedding.safetensors",
+        "dataspace.safetensors",
+    ];
+    for file in primary.iter().chain(&shared) {
+        install_snapshot_file(
+            &library,
+            "owner/moss",
+            PRIMARY_REVISION,
+            file,
+            file.as_bytes(),
+        );
+    }
+    for file in dmd {
+        install_snapshot_file(&library, "owner/dmd", OTHER_REVISION, file, file.as_bytes());
+    }
+    write_receipts(
+        &data_dir,
+        "owner/moss",
+        json!([{
+            "repo": "owner/moss",
+            "modelId": "moss",
+            "variant": "default",
+            "resolvedFiles": primary,
+            "snapshotRevision": PRIMARY_REVISION,
+        }]),
+    );
+    let model = json!({
+        "id": "moss",
+        "downloads": [
+            {"provider": "huggingface", "repo": "owner/moss", "revision": PRIMARY_REVISION,
+             "default": true, "files": primary},
+            {"provider": "huggingface", "repo": "owner/moss", "revision": PRIMARY_REVISION,
+             "coRequisite": true, "componentId": "shared", "files": shared},
+            {"provider": "huggingface", "repo": "owner/dmd", "revision": OTHER_REVISION,
+             "coRequisite": true, "componentId": "dmd-lora", "files": [dmd[0]]},
+            {"provider": "huggingface", "repo": "owner/dmd", "revision": OTHER_REVISION,
+             "coRequisite": true, "componentId": "dmd-time", "files": [dmd[1]]},
+            {"provider": "huggingface", "repo": "owner/dmd", "revision": OTHER_REVISION,
+             "coRequisite": true, "componentId": "dmd-dataspace", "files": [dmd[2]]}
+        ]
+    });
+
+    let selected = selected_requirements_for_model(&model, std::env::consts::OS, None, &data_dir);
+    assert!(selected.receipt_backed);
+    let candidate =
+        promotion_candidate_for_requirements(&resolver_for(&library), &selected.requirements)
+            .expect("the full MOSS-shaped closure promotes");
+    let bundled = |repository: &str| {
+        candidate
+            .artifact
+            .closure
+            .members
+            .iter()
+            .filter(|member| member.source.repository == repository)
+            .flat_map(|member| member.files.iter())
+            .map(|file| file.relative_path.to_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert_eq!(
+        bundled("owner/moss"),
+        primary
+            .iter()
+            .chain(&shared)
+            .map(|file| file.to_string())
+            .collect()
+    );
+    assert_eq!(
+        bundled("owner/dmd"),
+        dmd.iter().map(|file| file.to_string()).collect()
+    );
+
+    let store = ResolvedCacheStore::open(&data_dir).unwrap();
+    let outcome = ResolvedCacheMaterializer::new(store)
+        .materialize(
+            &candidate,
+            &library,
+            "owner/moss",
+            &MaterializationCancellation::default(),
+        )
+        .unwrap();
+    let MaterializationOutcome::Published(metadata) = outcome else {
+        panic!("expected a published bundle, got {outcome:?}");
+    };
+    assert!(
+        local_artifact_for_requirements(
+            std::slice::from_ref(&metadata.artifact),
+            &selected.requirements
+        )
+        .is_some(),
+        "the bundle must cover the closure that produced it"
+    );
+}
+
 /// A legacy receipt that never recorded its snapshot revision adopts the only installed snapshot
 /// that holds its exact recorded file set.
 #[test]

@@ -1066,6 +1066,45 @@ async fn invalidation_before_snapshot_publication_forces_current_generation_rebu
     );
 }
 
+/// sc-28037 (GitHub #3235): a `/models` client that disconnects mid-build must not
+/// leave its sweep running while the next request starts another. The build is
+/// detached, so it finishes and publishes, and the next caller joins that result.
+#[tokio::test]
+async fn a_dropped_request_mid_build_does_not_start_a_second_sweep() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let config_dir = temp_dir.path().join("config/manifests");
+    single_model_manifest(&config_dir, "abandoned_model", "abandoned/model");
+    let (app, state) =
+        create_app_with_state(test_settings(&temp_dir)).expect("app and state create");
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    crate::test_reset_catalog_build_counters();
+    let publish_hook = crate::models::ModelCatalogBeforePublishTestHook::blocked();
+    state
+        .model_catalog_cache
+        .set_before_publish_test_hook(publish_hook.clone());
+
+    let abandoned = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    tokio::time::timeout(Duration::from_secs(2), publish_hook.wait_until_reached())
+        .await
+        .expect("the first build reaches its pre-publication boundary");
+    abandoned.abort();
+    assert!(abandoned.await.unwrap_err().is_cancelled());
+
+    let retry = tokio::spawn(request(app.clone(), "GET", "/api/v1/models", Value::Null));
+    publish_hook.release();
+    let (status, models) = tokio::time::timeout(Duration::from_secs(2), retry)
+        .await
+        .expect("the retry completes")
+        .expect("the retry joins");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(models[0]["id"], "abandoned_model");
+    assert_eq!(
+        crate::test_model_catalog_builds(),
+        1,
+        "the retry must join the abandoned request's build, not sweep again"
+    );
+}
+
 #[tokio::test]
 async fn models_catalog_disabled_size_estimation_skips_upstream_requests() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");

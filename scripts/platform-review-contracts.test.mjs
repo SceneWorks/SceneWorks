@@ -9,7 +9,7 @@ import test from "node:test";
 
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { historyRequirements } from "./prepare-inference-history.mjs";
-import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision } from "./select-windows-cargo-cache.mjs";
+import { selectWindowsCargoCache, ensurePhysicalCargoCache, lockedInferenceRevision, cachedInferenceRevision, flashAttentionBuildDirectory } from "./select-windows-cargo-cache.mjs";
 import { bindQwenPersistentCache } from "./ci/memory-catalog/bind-qwen-persistent-cache.mjs";
 
 // sc-22514 deleted the SC-18946 plan GENERATOR. Its three outputs stay as retained historical
@@ -318,6 +318,25 @@ test("Windows Cargo cache preserves only the matching service cache and remains 
     assert.deepEqual(selectWindowsCargoCache({ runnerName, cargoHome, runnerToolCache: root }), selected);
   }
   assert.equal(caches.size, 4);
+});
+
+test("Windows FlashAttention objects persist in the listener cache, outside the deleted checkout target", () => {
+  // sc-28031: without this the vendored flash-attn kernels rebuilt from scratch in every job.
+  const directories = new Set();
+  for (let i = 1; i <= 4; i++) {
+    const runnerName = `cuda-windows${i === 1 ? "" : `-${i}`}`;
+    const selected = selectWindowsCargoCache({ runnerName, cargoHome: `D:\\cargo-home-${i}`, runnerToolCache: "C:\\tools" });
+    const directory = flashAttentionBuildDirectory(selected.cache);
+    assert.equal(directory, `${selected.cache}\\candle-flash-attn`);
+    assert.doesNotMatch(directory, /\\_work\\|\\target(\\|$)/i);
+    directories.add(directory);
+  }
+  assert.equal(directories.size, 4);
+  const fallback = selectWindowsCargoCache({ runnerName: "cuda-windows-2", runnerToolCache: "C:\\tools" });
+  assert.equal(flashAttentionBuildDirectory(fallback.cache), "C:\\tools\\SceneWorks\\cargo\\cuda-windows-2\\candle-flash-attn");
+  for (const cache of [undefined, "", "relative", "C:\\tools\\..\\shared", "\\\\server\\share"]) {
+    assert.throws(() => flashAttentionBuildDirectory(cache), /safe listener/);
+  }
 });
 
 test("Windows Cargo cache rejects another listener's cache and shared or missing homes", () => {

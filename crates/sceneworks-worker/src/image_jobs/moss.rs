@@ -1051,10 +1051,11 @@ async fn generate_moss_stream_with_runtime(
     let output_plan = plan.clone();
     let output_path = project_path.to_owned();
     let output_raw = raw.clone();
+    let adapter_count = spec.adapters.len();
     let (cancel, rx, blocking) = start_cached_gen_stream_with_request_state_using_owned(
         job.id.clone(),
         engine_id,
-        0,
+        adapter_count,
         spec,
         "MOSS exact native load".into(),
         CachedGeneratorFactory {
