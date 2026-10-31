@@ -1,7 +1,6 @@
 """One dispatched, shared-device quant kernel check; no model/VRAM proof or lease."""
 from __future__ import annotations
 import argparse
-import csv
 import importlib.util
 import json
 import os
@@ -18,27 +17,7 @@ COMMAND = ("cargo", "test", "--locked", "-p", "sceneworks-worker", "--features",
            "--nocapture", "--test-threads=1")
 
 
-class DeviceIdentity:
-    """Only physical index/UUID inventory; never process, utilization or memory census."""
-    def __init__(self, executable, run=subprocess.run):
-        self.executable, self.run = executable, run
-
-    def inventory(self, out, label, deadline):
-        remaining = min(30, deadline - time.monotonic())
-        if remaining <= 0:
-            raise TimeoutError("device identity deadline exhausted")
-        result = self.run([self.executable, "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
-                          capture_output=True, text=True, check=True, timeout=remaining)
-        devices = []
-        for row in csv.reader(result.stdout.splitlines()):
-            if len(row) != 2 or not re.fullmatch(r"[0-9]+", row[0].strip()) or not re.fullmatch(r"GPU-[A-Za-z0-9-]+", row[1].strip()):
-                raise RuntimeError("invalid physical device identity")
-            devices.append({"index": int(row[0].strip()), "uuid": row[1].strip()})
-        if (not devices or len({d["index"] for d in devices}) != len(devices)
-                or len({d["uuid"].casefold() for d in devices}) != len(devices)):
-            raise RuntimeError("ambiguous physical device identity")
-        return devices, []
-
+DeviceIdentity = owned.DeviceIdentity
 
 def require_dispatch(environment):
     owned.require_outermost(environment)

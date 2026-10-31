@@ -52,7 +52,7 @@ test('workflow preflight normalizes Windows artifact paths and preserves resourc
 });
 test('actual CUDA acceptance owns the shared UUID lease while build-only stays outside it',async()=>{
   const workflow=await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
-  assert.match(workflow,/if "%BUILD_ONLY%"=="true" \(node scripts\/load-progress-acceptance.mjs --build-only\) else \(python -I scripts\/ci\/windows_cuda_execution.py --actor load-progress-acceptance --budget-minutes 170 --cuda-ordinals 0 --probe-visible 1 -- node scripts\/load-progress-acceptance.mjs\)/);
+  assert.match(workflow,/if "%BUILD_ONLY%"=="true" \(node scripts\/load-progress-acceptance.mjs --build-only\) else \(python -I scripts\/ci\/windows_cuda_execution.py --actor load-progress-acceptance --admission-policy functional-coexistence --budget-minutes 170 --cuda-ordinals 0 --probe-visible 1 -- node scripts\/load-progress-acceptance.mjs\)/);
   for(const key of ['SCENEWORKS_GPU_ID','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES']) {
     const assignment=workflow.split('\n').find(line=>line.trimStart().startsWith(`${key}:`));
     assert(assignment.includes("inputs.backend == 'cuda' && '1'"),`${key} must select physical1`);
@@ -242,6 +242,11 @@ test('dedicated CPU route preserves GPU guards and bypasses model compilation, i
   const cpuStep=workflow.split('      - name: Compile then execute only the explicit CPU ORT fixture')[1].split('      - name:')[0];
   assert.match(cpuStep,/if: \$\{\{ inputs.backend == 'cpu' \}\}/);
   assert.doesNotMatch(cpuStep,/windows_cuda_execution|nvidia-smi|metal/);
+  assert.doesNotMatch(cpuStep,/functional-coexistence/);
+  const mlxStep=workflow.split('      - name: Compile then execute the one selected MLX case')[1].split('      - name:')[0];
+  assert.doesNotMatch(mlxStep,/functional-coexistence|windows_cuda_execution/);
+  assert.equal((workflow.match(/--admission-policy functional-coexistence/g)??[]).length,1);
+  assert.match(gpuStep,/--actor load-progress-acceptance --admission-policy functional-coexistence/);
   assert.match(fixture,/with_no_environment_execution_providers\(\)/);
   assert.match(fixture,/with_execution_providers\(\[ort::ep::CPU::default\(\).build\(\).error_on_failure\(\)\]\)/);
   assert.match(fixture,/"executionProvider":"CPUExecutionProvider"/);
