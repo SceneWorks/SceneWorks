@@ -225,7 +225,7 @@ fn ltx_eros_candle_gpu_smoke() {
                 println!("[sc-18902] decoding");
             }
             Progress::Loading(phase) => println!("[sc-18902] loading {phase:?}"),
-            Progress::PromptUpsamplingComplete => {}
+            Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => {}
             Progress::ConditioningComplete => {}
             Progress::Upsampling { tokens, max_tokens } => {
                 println!("[sc-18902] enhancing prompt {tokens}/{max_tokens}");

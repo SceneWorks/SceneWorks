@@ -402,7 +402,7 @@ jobs:
     # job simply queues for a box that has the weights.
     runs-on: ${{ (github.event_name == 'workflow_dispatch' && (inputs.provision_snapshot || inputs.run_five_rung_reference)) && fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda"]') }}
     env:
-      SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && 120 || 60 }}
+      SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.run_ltx_eros_acceptance && 360 || github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720 || github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && 240 || 120 }}
       # Automatic PR/push validation may construct a CUDA context for weights-free
       # trainer metadata/config checks; learned kernels remain dispatch-only.
       # Preserve the existing manual-dispatch default and its step-local overrides.
