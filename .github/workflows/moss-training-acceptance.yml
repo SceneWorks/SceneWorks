@@ -101,7 +101,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - uses: ./sceneworks-source/.github/actions/prepare-rust-runner
@@ -135,7 +135,7 @@ jobs:
             exit "$rc"
           fi
       - name: Consume the exact shared fixed-dataset artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: moss-dataset
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
@@ -173,7 +173,7 @@ jobs:
           dataset: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
       - name: Preserve raw logs, native records, exports, previews and supervision even on failure
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: capture-${{ matrix.backend }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/capture-${{ matrix.backend }}/
@@ -244,7 +244,7 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - uses: ./sceneworks-source/.github/actions/prepare-rust-runner
@@ -272,13 +272,13 @@ jobs:
           elif [ "$rc" != 0 ]; then
             exit "$rc"
           fi
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: capture-*-attempt-*
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers
           merge-multiple: false
       - name: Consume the same fixed-dataset bytes for cross-load identity
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: moss-dataset
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset
@@ -300,7 +300,7 @@ jobs:
           node scripts/moss-training-acceptance.mjs --phase cross-load --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/cross-load-${{ matrix.backend }}" --backend ${{ matrix.backend }} --manifest scripts/ci/moss-training-acceptance/campaign.json --peer-artifacts "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers"
       - name: Preserve raw logs, native records, exports, previews and supervision even on failure
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: cross-load-${{ matrix.backend }}-attempt-${{ github.run_attempt }}
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/cross-load-${{ matrix.backend }}/
@@ -334,18 +334,18 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || github.token }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Install static schema validator (no native model execution)
         run: python3 -m pip install 'jsonschema==4.26.0' 'Pillow>=11,<13'
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.moss_evidence_run_id }}
           pattern: capture-*-attempt-*
           path: ${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           github-token: ${{ github.token }}
           run-id: ${{ inputs.moss_evidence_run_id }}
@@ -355,7 +355,7 @@ jobs:
         env:
           MOSS_ACTIONS_READ_TOKEN: ${{ github.token }}
         run: node scripts/moss-training-acceptance.mjs --phase finalize --root . --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/finalize" --backend mlx --manifest scripts/ci/moss-training-acceptance/campaign.json --peer-artifacts "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/peers"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: ${{ always() }}
         with:
           name: finalize

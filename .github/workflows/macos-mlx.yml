@@ -408,7 +408,7 @@ jobs:
       # `jobs:`; pointing the two at different directories caches nothing and says nothing,
       # which is exactly what the first version of this step did.
       # Save only on `main` — see the note on the `parity-rust` cache step in check.yml.
-      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+      - uses: Swatinem/rust-cache@c8037a86dde8214a8310e9f54a8fc61ab362aa31 # v2 (v2.9.1+1)
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Ensure Metal compiler
@@ -520,7 +520,7 @@ jobs:
           fi
       - name: Upload fresh MLX capability facts
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: backend-capability-facts-mlx
           path: ${{ runner.temp }}/engine-capability-facts-verify
@@ -581,7 +581,7 @@ jobs:
             echo "CARGO_TARGET_DIR=$root/target"
             echo "BROWSER_FIXTURE_OUTPUT=$root/output"
           } >> "$GITHUB_ENV"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
       - name: Validate browser fixture producer selection contracts
@@ -752,7 +752,7 @@ jobs:
           PY
           test -f "$BROWSER_FIXTURE_OUTPUT/manifest.json"
       - name: Upload complete browser fixture artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rust-api-browser-libtest-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.BROWSER_FIXTURE_OUTPUT }}
@@ -829,7 +829,7 @@ jobs:
             echo "CARGO_TARGET_DIR=$root/target"
             echo "MOSS_NATIVE_OUTPUT=$root/output"
           } >> "$GITHUB_ENV"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "20"
       - name: Fetch current prebuilt MLX metallib
@@ -854,7 +854,7 @@ jobs:
           node scripts/moss-native-api-validation.mjs --root . --output "$MOSS_NATIVE_OUTPUT" --backend mlx
       - name: Upload MOSS native validation evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: moss-native-api-mlx-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.MOSS_NATIVE_OUTPUT }}
@@ -1003,7 +1003,7 @@ jobs:
             node scripts/ci/memory-catalog/bind-metallib.mjs "$RUNNER_TEMP/nax-native-build.jsonl" --debug-worker
       - name: Retain selected native kernel binding metadata
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: nax-native-binding-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nax-native-binding/native-metallib-binding.json
@@ -1336,7 +1336,7 @@ jobs:
             --source-root "$SCENEWORKS_MEMORY_CAPTURE_DIR"
       - name: Upload raw schema-checked MLX calibration evidence
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: memory-mlx-evidence-${{ inputs.qwen_tier }}-${{ github.run_id }}
           path: |
@@ -1369,7 +1369,7 @@ jobs:
             --input "$RUNNER_TEMP/sc-16059-mlx-fresh.json"
       - name: Upload the raw schema-checked Z-Image MLX anchor
         if: ${{ success() && github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: sc-16059-mlx-anchor-${{ github.run_id }}
           path: |
@@ -1422,7 +1422,7 @@ jobs:
           ref: ${{ github.workflow_sha }}
           path: control
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
       - name: Validate manual request before source execution
@@ -1484,7 +1484,7 @@ jobs:
         run: node "$GITHUB_WORKSPACE/control/scripts/remote-macos-verification.mjs" run "$VERIFICATION_CANDIDATE_PATH" "$VERIFICATION_OUTPUT"
       - name: Upload remote verification artifact
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: macos-verification-${{ inputs.verification_profile }}-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.VERIFICATION_OUTPUT }}
