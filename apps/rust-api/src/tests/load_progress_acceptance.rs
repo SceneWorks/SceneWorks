@@ -202,41 +202,59 @@ fn has_bytes(message: &str) -> bool {
 // Each renderer submodule opens the same S3Gen file independently. Rounded HTTP
 // labels carry no operation ID: equality is not evidence of an obsolete operation.
 fn validate_audio_epochs(messages: &[String]) -> Result<()> {
-    let mut prompt = false;
-    let mut autoregressive = false;
-    let mut renderer = false;
-    let mut flow = false;
-    let mut finishing = false;
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+    enum Phase {
+        Preparation,
+        Prompt,
+        Autoregressive,
+        Renderer,
+        Stages,
+        Decoding,
+        PostProcessing,
+        Saving,
+        Output,
+    }
+    let mut phase = Phase::Preparation;
     let mut last_step = None;
     for message in messages {
         let io = message.starts_with("loading ") || message.starts_with("verifying ");
         if io {
             require(
-                !prompt
+                phase == Phase::Preparation
                     || (!message.contains("ve.safetensors")
                         && !message.contains("t3 cfg.safetensors")),
                 "completed audio conditioning IO returned after prompt encoding",
             )?;
             if message.contains("s3gen.safetensors") {
                 require(
-                    !flow && !finishing,
+                    phase <= Phase::Renderer,
                     "renderer IO returned after S3Gen execution began",
                 )?;
-                renderer |= autoregressive;
+                // Reference tokenization also reads S3Gen before the prompt. After an
+                // observed prompt/AR phase the same file belongs to renderer construction,
+                // even if every intervening AR callback coalesced. With neither observed,
+                // these operation identities cannot be recovered from rounded HTTP labels.
+                if phase >= Phase::Prompt {
+                    phase = Phase::Renderer;
+                }
             }
             if message.contains("perth implicit.safetensors") {
-                finishing = true;
+                require(
+                    phase <= Phase::PostProcessing,
+                    "postprocessing IO returned after audio saving began",
+                )?;
+                phase = Phase::PostProcessing;
             }
         }
         if message.contains("encoding prompt") {
             require(
-                !autoregressive && !renderer && !finishing,
+                phase <= Phase::Prompt,
                 "audio prompt label returned after sampling began",
             )?;
-            prompt = true;
+            phase = Phase::Prompt;
         }
         require(
-            !autoregressive || !message.contains("synthes"),
+            phase == Phase::Preparation || !message.contains("synthes"),
             "audio preparation label returned after sampling began",
         )?;
         if let Some(step) = message
@@ -247,15 +265,20 @@ fn validate_audio_epochs(messages: &[String]) -> Result<()> {
             let current: u32 = current.parse().map_err(|_| "invalid audio step")?;
             let total: u32 = total.parse().map_err(|_| "invalid audio total")?;
             require(
-                !finishing,
+                phase <= Phase::Stages,
                 "audio step returned after output finishing began",
             )?;
             require(
                 total > 0 && current > 0 && current <= total,
                 "invalid audio step bounds",
             )?;
+            let next = if total == 3 {
+                Phase::Stages
+            } else {
+                Phase::Autoregressive
+            };
             require(
-                !renderer || total == 3,
+                phase <= next,
                 "autoregressive step returned during renderer execution",
             )?;
             if let Some((previous, previous_total)) = last_step {
@@ -264,18 +287,34 @@ fn validate_audio_epochs(messages: &[String]) -> Result<()> {
                     "audio step counter regressed",
                 )?;
             }
-            if total == 3 {
-                flow = true;
-                renderer = true;
-            } else {
-                autoregressive = true;
-            }
+            phase = next;
             last_step = Some((current, total));
         }
-        // Brief Decoding/PostProcessing callbacks may coalesce on the HTTP wire.
-        // PerTh IO above also retires the completed renderer step unconditionally.
-        if message == "finishing output." || message.contains("decoding") {
-            finishing = true;
+        // A later observed phase retires earlier states even when intermediate
+        // callbacks coalesce. Duplicate snapshots of the current phase remain valid.
+        if message.contains("decoding") {
+            require(
+                phase <= Phase::Decoding,
+                "audio decoding returned after postprocessing began",
+            )?;
+            phase = Phase::Decoding;
+        }
+        if message == "finishing output." {
+            require(
+                phase <= Phase::PostProcessing,
+                "postprocessing returned after audio saving began",
+            )?;
+            phase = Phase::PostProcessing;
+        }
+        if message == "saving audio." {
+            require(
+                phase <= Phase::Saving,
+                "audio saving returned after output completion",
+            )?;
+            phase = Phase::Saving;
+        }
+        if message == "generated audio." {
+            phase = Phase::Output;
         }
     }
     Ok(())
@@ -1117,6 +1156,74 @@ fn audio_reader_epochs_and_output_finishing_are_distinct() {
         assert!(
             validate_progress(&stale, "audio").is_err(),
             "{obsolete} at {position}"
+        );
+    }
+    // Retirement follows any observed later phase, even when earlier callbacks
+    // were coalesced. No omitted marker is required to appear on the wire.
+    let omitted_prompt: Vec<_> = expected
+        .iter()
+        .filter(|m| m.as_str() != "Encoding prompt.")
+        .cloned()
+        .collect();
+    validate_progress(&omitted_prompt, "audio").unwrap();
+    let mut late_conditioning = omitted_prompt;
+    let ar = late_conditioning
+        .iter()
+        .position(|m| m.contains("13/4096"))
+        .unwrap();
+    late_conditioning.insert(ar + 1, "Loading t3 cfg.safetensors — 0.2 / 2.1 GB".into());
+    assert!(validate_progress(&late_conditioning, "audio").is_err());
+    let omitted_ar: Vec<_> = expected
+        .iter()
+        .filter(|m| !m.contains("/4096"))
+        .cloned()
+        .collect();
+    validate_progress(&omitted_ar, "audio").unwrap();
+    let renderer = omitted_ar
+        .iter()
+        .position(|m| m.contains("0.3 / 1.1"))
+        .unwrap();
+    for obsolete in ["Encoding prompt.", "Generating step 63/4096."] {
+        let mut stale = omitted_ar.clone();
+        stale.insert(renderer + 1, obsolete.into());
+        assert!(validate_progress(&stale, "audio").is_err(), "{obsolete}");
+    }
+    for later in [
+        "Generating step 1/3.",
+        "Decoding.",
+        "Finishing output.",
+        "Loading perth implicit.safetensors — 0.0 / 37.4 MB",
+    ] {
+        let mut omitted_early: Vec<_> = expected
+            .iter()
+            .filter(|m| m.as_str() != "Encoding prompt." && !m.contains("/4096"))
+            .cloned()
+            .collect();
+        validate_progress(&omitted_early, "audio").unwrap();
+        let boundary = omitted_early
+            .iter()
+            .position(|m| m.as_str() == later)
+            .unwrap();
+        omitted_early.insert(boundary + 1, "Synthesizing audio.".into());
+        assert!(
+            validate_progress(&omitted_early, "audio").is_err(),
+            "{later}"
+        );
+    }
+    for later in [
+        "Finishing output.",
+        "Loading perth implicit.safetensors — 0.0 / 37.4 MB",
+        "Saving audio.",
+    ] {
+        let mut stale_decode = expected.clone();
+        let boundary = stale_decode
+            .iter()
+            .position(|m| m.as_str() == later)
+            .unwrap();
+        stale_decode.insert(boundary + 1, "Decoding.".into());
+        assert_eq!(
+            validate_progress(&stale_decode, "audio").unwrap_err(),
+            "audio decoding returned after postprocessing began"
         );
     }
     let mut stale = coalesced;
