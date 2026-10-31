@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { spawn, execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile, mkdir, open, stat, realpath } from 'node:fs/promises';
+import { readFile, writeFile, appendFile, mkdir, open, stat, realpath } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { stripJsoncComments } from './lib/jsonc.mjs';
@@ -47,6 +47,21 @@ export function admission(env, platform = process.platform, { execute = true } =
   }
   return `tests::load_progress_acceptance::${env.LOAD_PROGRESS_CASE}`;
 }
+export function workflowEnvironment(env, platform = process.platform) {
+  const paths = platform === 'win32' ? path.win32 : path.posix;
+  assert.equal(env.DISPATCH_SHA, env.LOAD_PROGRESS_SOURCE_SHA, 'dispatch must match selected source');
+  const selected = { ...env };
+  for (const key of ['LOAD_PROGRESS_OUTPUT', 'LOAD_PROGRESS_TARGET_DIR']) {
+    assert(env[key] && paths.isAbsolute(env[key]) && !/[\r\n]/.test(env[key]), `${key} must be absolute`);
+    selected[key] = paths.normalize(env[key]);
+  }
+  admission(selected, platform, { execute: env.BUILD_ONLY !== 'true' });
+  return {
+    environment: ['LOAD_PROGRESS_OUTPUT', 'LOAD_PROGRESS_TARGET_DIR'].map(key => `${key}=${selected[key]}\n`).join(''),
+    // Artifact v7 forbids literal dot/dotdot segments, even in absolute paths.
+    output: `directory=${selected.LOAD_PROGRESS_OUTPUT.replaceAll('\\', '/')}\n`,
+  };
+}
 // Pure registered-dispatcher selector. It cannot start or load anything.
 export function dispatchOptions(inputs, dispatchedSha) {
   assert.equal(inputs.profile, 'load-progress-acceptance');
@@ -84,8 +99,14 @@ export async function cacheInventory(hub, selectedCase, manifest = null) {
   const files=[...rows.values()];
   return {model,hub,requiredFiles:files.length,presentFiles:files.filter(f=>f.present).length,totalPresentBytes:files.reduce((sum,f)=>sum+(f.bytes??0),0),missing:files.filter(f=>!f.present),files};
 }
-export function childEnvironment(env, state, evidence) {
+export function childEnvironment(env, state, evidence, platform = process.platform) {
   const child = { ...env };
+  if (platform === 'win32') {
+    const keys = Object.keys(child).filter(key => key.toLowerCase() === 'path');
+    const value = env.PATH ?? keys.map(key => env[key]).find(value => value !== undefined) ?? '';
+    for (const key of keys) delete child[key];
+    child.PATH = value;
+  }
   for (const key of Object.keys(child)) if (/TOKEN|SECRET|PASSWORD|CREDENTIAL|API_KEY/i.test(key) || (key.startsWith('SCENEWORKS_') && !['SCENEWORKS_GPU_ID', 'SCENEWORKS_METAL_EXECUTION_LOCK_FD'].includes(key))) delete child[key];
   Object.assign(child, { HF_HUB_OFFLINE:'1', TRANSFORMERS_OFFLINE:'1', HF_DATASETS_OFFLINE:'1', LOAD_PROGRESS_STATE_ROOT:state, LOAD_PROGRESS_OUTPUT:evidence, CARGO_BUILD_JOBS:'2', CARGO_INCREMENTAL:'0', RUST_TEST_THREADS:'1' });
   return child;
@@ -218,6 +239,13 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
     process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. Mac requires LOAD_PROGRESS_MAC_GO=true; Windows uses established physical GPU0 visibility. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
+  } else if (process.argv.includes('--workflow-preflight')) {
+    try {
+      const prepared = workflowEnvironment(process.env);
+      assert(process.env.GITHUB_ENV && process.env.GITHUB_OUTPUT, 'workflow command files required');
+      await appendFile(process.env.GITHUB_ENV, prepared.environment);
+      await appendFile(process.env.GITHUB_OUTPUT, prepared.output);
+    } catch(error) { process.stderr.write(`${error.message}\n`); process.exitCode=1; }
   } else {
     try {
       const checkOnly=process.argv.includes('--check-only'), buildOnly=process.argv.includes('--build-only');

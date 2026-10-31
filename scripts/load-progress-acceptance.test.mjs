@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { admission, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
+import { admission, workflowEnvironment, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
 const env = {LOAD_PROGRESS_CASE:'image_mlx',LOAD_PROGRESS_SOURCE_SHA:'a'.repeat(40),LOAD_PROGRESS_INFERENCE_SHA:'b'.repeat(40),LOAD_PROGRESS_OUTPUT:'/tmp/load-progress-case',LOAD_PROGRESS_MAC_GO:'true'};
 test('manual selector freezes one exact ignored test and rejects platform mismatch',()=>{
   assert.equal(admission(env,'darwin'),'tests::load_progress_acceptance::image_mlx');
@@ -23,11 +23,42 @@ test('CUDA retains established physical GPU0 restrictions for all candle cases',
   for(const key of ['SCENEWORKS_GPU_ID','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES']) assert.throws(()=>admission({...cuda,[key]:'1'},'win32'),/required/);
   for(const selected of ['audio','training']) assert.doesNotThrow(()=>admission({...cuda,LOAD_PROGRESS_CASE:selected},'win32'));
 });
+test('workflow preflight normalizes Windows artifact paths and preserves resource/source refusal', async()=>{
+  const selected={...env,LOAD_PROGRESS_CASE:'cuda_all',DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_OUTPUT:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../load-progress-123-1',LOAD_PROGRESS_TARGET_DIR:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../target-cuda',SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
+  const actual=workflowEnvironment(selected,'win32');
+  assert.equal(actual.output,'directory=D:/runner/_work/SceneWorks/load-progress-123-1\n');
+  assert(actual.environment.includes('LOAD_PROGRESS_TARGET_DIR=D:\\runner\\_work\\SceneWorks\\target-cuda\n'));
+  assert.throws(()=>workflowEnvironment({...selected,DISPATCH_SHA:'c'.repeat(40)},'win32'),/dispatch/);
+  assert.throws(()=>workflowEnvironment({...selected,CUDA_VISIBLE_DEVICES:'1'},'win32'),/required/);
+  assert.throws(()=>workflowEnvironment({...selected,LOAD_PROGRESS_OUTPUT:'D:/output\ninjected=yes'},'win32'),/absolute/);
+  const mac={...env,DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_TARGET_DIR:'/tmp/worker/../target',LOAD_PROGRESS_MAC_GO:'false'};
+  assert.throws(()=>workflowEnvironment(mac,'darwin'),/explicit.*go/);
+  assert.equal(workflowEnvironment({...mac,BUILD_ONLY:'true'},'darwin').output,'directory=/tmp/load-progress-case\n');
+  const workflow=await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
+  assert.match(workflow,/id: preflight-cuda\n        if: \$\{\{ inputs.backend == 'cuda' \}\}\n        shell: powershell/);
+  assert.match(workflow,/id: preflight-mlx\n        if: \$\{\{ inputs.backend == 'mlx' \}\}\n        shell: bash/);
+  assert.match(workflow,/node scripts\/load-progress-acceptance.mjs --workflow-preflight/);
+  assert.match(workflow,/steps.preflight-cuda.outputs.directory \|\| steps.preflight-mlx.outputs.directory/);
+  assert.doesNotMatch(workflow,/path: \|[\s\S]*github.workspace.*\/\.\.\//);
+});
+test('actual CUDA acceptance owns the shared UUID lease while build-only stays outside it',async()=>{
+  const workflow=await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
+  assert.match(workflow,/if "%BUILD_ONLY%"=="true" \(node scripts\/load-progress-acceptance.mjs --build-only\) else \(python -I scripts\/ci\/windows_cuda_execution.py --actor load-progress-acceptance --budget-minutes 170 --cuda-ordinals 0 --probe-visible 0 -- node scripts\/load-progress-acceptance.mjs\)/);
+  assert.match(workflow,/sceneworks-cuda-execution-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}-load-progress-acceptance\//);
+});
 test('child setup keeps frozen cache and device but removes credentials and mutable app state',()=>{
-  const child=childEnvironment({...env,HF_TOKEN:'private',GH_TOKEN:'private',SCENEWORKS_DATA_DIR:'/production',SCENEWORKS_GPU_ID:'0',HF_HUB_CACHE:'/frozen/hub',SCENEWORKS_METAL_EXECUTION_LOCK_FD:'5'},'/owned/state','/owned/evidence');
+  const child=childEnvironment({...env,HF_TOKEN:'private',GH_TOKEN:'private',SCENEWORKS_DATA_DIR:'/production',SCENEWORKS_GPU_ID:'0',HF_HUB_CACHE:'/frozen/hub',SCENEWORKS_METAL_EXECUTION_LOCK_FD:'5',SW_CI_CUDA_EXECUTION_ACTIVE:'load-progress-acceptance'},'/owned/state','/owned/evidence');
   assert.equal(child.HF_TOKEN,undefined);assert.equal(child.GH_TOKEN,undefined);assert.equal(child.SCENEWORKS_DATA_DIR,undefined);
   assert.equal(child.HF_HUB_CACHE,'/frozen/hub');assert.equal(child.SCENEWORKS_GPU_ID,'0');assert.equal(child.SCENEWORKS_METAL_EXECUTION_LOCK_FD,'5');
   assert.equal(child.HF_HUB_OFFLINE,'1');assert.equal(child.TRANSFORMERS_OFFLINE,'1');assert.equal(child.CARGO_BUILD_JOBS,'2');
+  assert.equal(child.SW_CI_CUDA_EXECUTION_ACTIVE,'load-progress-acceptance');
+});
+test('Windows child retains toolchain search path once before adding the ORT DLL directory',()=>{
+  const child=childEnvironment({...env,Path:'C:\\Rust\\bin;C:\\MSVC\\bin'},'/owned/state','/owned/evidence','win32');
+  assert.equal(child.PATH,'C:\\Rust\\bin;C:\\MSVC\\bin');
+  assert.deepEqual(Object.keys(child).filter(key=>key.toLowerCase()==='path'),['PATH']);
+  child.PATH='C:\\ORT;'+child.PATH;
+  assert.equal(child.PATH,'C:\\ORT;C:\\Rust\\bin;C:\\MSVC\\bin');
 });
 test('all four real cases are ignored and the existing eight-cell campaign remains separate',async()=>{
   const source=await readFile(new URL('../apps/rust-api/src/tests/load_progress_acceptance.rs',import.meta.url),'utf8');

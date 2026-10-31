@@ -82,6 +82,7 @@ jobs:
       TRANSFORMERS_OFFLINE: "1"
       SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '0' || 'mlx' }}
       CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_COMPUTE_CAP: "120"
       CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
       NVIDIA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '0' || '' }}
       RUSTC_WRAPPER: ""
@@ -100,16 +101,41 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
-      - name: Require selected dispatch ref and case before native setup
+      - name: Require selected CUDA dispatch before native setup
+        id: preflight-cuda
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: powershell
+        env:
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          node scripts/load-progress-acceptance.mjs --workflow-preflight
+          if ($LASTEXITCODE -ne 0) { throw 'load progress admission failed' }
+      - name: Require selected MLX dispatch before native setup
+        id: preflight-mlx
+        if: ${{ inputs.backend == 'mlx' }}
         shell: bash
         env:
           DISPATCH_SHA: ${{ github.sha }}
         run: |
-          node --input-type=module -e 'import assert from "node:assert/strict"; import {admission} from "./scripts/load-progress-acceptance.mjs"; assert.equal(process.env.DISPATCH_SHA,process.env.LOAD_PROGRESS_SOURCE_SHA); admission(process.env,process.platform,{execute:process.env.BUILD_ONLY!=="true"});'
+          node scripts/load-progress-acceptance.mjs --workflow-preflight
       - uses: ./.github/actions/prepare-rust-runner
         if: ${{ inputs.backend == 'cuda' }}
         with:
           workspace-directory: .
+      - name: Preserve listener-owned CUDA dependency and kernel build caches
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated persistent Cargo cache selection failed' }
+      - name: Fetch the exact locked CUDA dependencies
+        if: ${{ inputs.backend == 'cuda' }}
+        shell: powershell
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: |
+          cargo fetch --locked
+          if ($LASTEXITCODE -ne 0) { throw 'locked dependency fetch failed' }
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable branch
         if: ${{ inputs.backend == 'mlx' }}
         with:
@@ -144,7 +170,7 @@ jobs:
           call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
           if errorlevel 1 exit /b %errorlevel%
           set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
-          if "%BUILD_ONLY%"=="true" (node scripts/load-progress-acceptance.mjs --build-only) else (node scripts/load-progress-acceptance.mjs)
+          if "%BUILD_ONLY%"=="true" (node scripts/load-progress-acceptance.mjs --build-only) else (python -I scripts/ci/windows_cuda_execution.py --actor load-progress-acceptance --budget-minutes 170 --cuda-ordinals 0 --probe-visible 0 -- node scripts/load-progress-acceptance.mjs)
       - name: Retain progress POSTs, output identities and failure evidence
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -152,9 +178,10 @@ jobs:
           name: load-progress-${{ inputs.backend }}-${{ inputs.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Aggregate child evidence is retained without uploading case state or build targets.
           path: |
-            ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/evidence/
-            ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/image_cuda/evidence/
-            ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/audio/evidence/
-            ${{ github.workspace }}/../load-progress-${{ github.run_id }}-${{ github.run_attempt }}/training/evidence/
+            ${{ steps.preflight-cuda.outputs.directory || steps.preflight-mlx.outputs.directory }}/evidence/
+            ${{ steps.preflight-cuda.outputs.directory || steps.preflight-mlx.outputs.directory }}/image_cuda/evidence/
+            ${{ steps.preflight-cuda.outputs.directory || steps.preflight-mlx.outputs.directory }}/audio/evidence/
+            ${{ steps.preflight-cuda.outputs.directory || steps.preflight-mlx.outputs.directory }}/training/evidence/
+            ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-load-progress-acceptance/
           if-no-files-found: error
           retention-days: 30
