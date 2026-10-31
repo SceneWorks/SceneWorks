@@ -16,6 +16,11 @@ export const NATIVE_CASES = ['image_mlx', 'image_cuda', 'audio', 'training'];
 export const CUDA_CASES = ['image_cuda', 'audio', 'training'];
 export const CASES = [...NATIVE_CASES, 'cuda_all', 'ort_cpu'];
 export const API_TEST_TARGET = {args:['--lib'],name:'sceneworks_rust_api',source:'apps/rust-api/src/lib.rs'};
+// Match WORKER_ENTRY_STACK_BYTES and the established MOSS native libtest harness.
+export const NATIVE_TEST_STACK_BYTES = 8 * 1024 * 1024;
+export function nativeTestEnvironment(env) {
+  return {...env,RUST_MIN_STACK:String(NATIVE_TEST_STACK_BYTES)};
+}
 export const ORT_FILTER = 'model_io::tests::external_initializer_session_creation_acceptance';
 export function ortSmokeRequired(selectedCase, platform) { return selectedCase === 'ort_cpu' && platform === 'win32'; }
 export function ignoredTestRegistration(stdout, filter) {
@@ -167,7 +172,7 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
   if (env.LOAD_PROGRESS_CASE==='cuda_all') return runCudaAll(env,{checkOnly,buildOnly});
   const cpu=ortSmokeRequired(env.LOAD_PROGRESS_CASE,process.platform);
   const {output,evidence}=await freshOutput(env.LOAD_PROGRESS_OUTPUT);
-  const receipt = { schemaVersion:1, case:env.LOAD_PROGRESS_CASE, status:'preflight', sourceSha:env.LOAD_PROGRESS_SOURCE_SHA, inferenceSha:env.LOAD_PROGRESS_INFERENCE_SHA, startedAt:new Date().toISOString(), platform:process.platform, architecture:process.arch, runner:env.RUNNER_NAME ?? null, executionBackend:cpu?'cpu':process.platform==='darwin'?'mlx':'cuda', test:filter };
+  const receipt = { schemaVersion:1, case:env.LOAD_PROGRESS_CASE, status:'preflight', sourceSha:env.LOAD_PROGRESS_SOURCE_SHA, inferenceSha:env.LOAD_PROGRESS_INFERENCE_SHA, startedAt:new Date().toISOString(), platform:process.platform, architecture:process.arch, runner:env.RUNNER_NAME ?? null, executionBackend:cpu?'cpu':process.platform==='darwin'?'mlx':'cuda', libtestStackBytes:NATIVE_TEST_STACK_BYTES, test:filter };
   const persist = () => writeFile(path.join(evidence,'controller.json'), JSON.stringify(receipt,null,2)+'\n');
   const childEnv = childEnvironment(env,path.join(output,'state'),path.join(evidence,'case'));
   childEnv.CARGO_TARGET_DIR = path.resolve(env.LOAD_PROGRESS_TARGET_DIR ?? path.join(path.dirname(output), `sc27980-target-${env.LOAD_PROGRESS_SOURCE_SHA}-${process.platform}`));
@@ -201,7 +206,9 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
     const execute = async (command,args,name) => {
       const log = await open(path.join(evidence,`${name}.log`),'wx');
       try {
-        const child = spawn(command,args,metalChildOptions({cwd:root,env:childEnv,stdio:['ignore',log.fd,log.fd],windowsHide:true}));
+        // Only native libtest execution gets the production worker stack; preparation is unchanged.
+        const executionEnv=['native','ort-native'].includes(name)?nativeTestEnvironment(childEnv):childEnv;
+        const child = spawn(command,args,metalChildOptions({cwd:root,env:executionEnv,stdio:['ignore',log.fd,log.fd],windowsHide:true}));
         const result = await new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',(code,signal)=>resolve({code,signal}));});
         assert.equal(result.code,0,`${name} failed (${JSON.stringify(result)}); inspect retained log`);
       } finally { await log.close(); }

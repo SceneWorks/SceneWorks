@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFile, mkdtemp, rm, mkdir, realpath, symlink, stat } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { admission, freshOutput, outsideCheckout, workflowEnvironment, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
+import { admission, NATIVE_TEST_STACK_BYTES, nativeTestEnvironment, freshOutput, outsideCheckout, workflowEnvironment, childEnvironment, dispatchOptions, cacheInventory, ortSmokeRequired, validateOrtReceipt, ignoredTestRegistration, API_TEST_TARGET, ORT_FILTER, runCudaAll, CUDA_CASES, NATIVE_CASES, CASES } from './load-progress-acceptance.mjs';
 const env = {LOAD_PROGRESS_CASE:'image_mlx',LOAD_PROGRESS_SOURCE_SHA:'a'.repeat(40),LOAD_PROGRESS_INFERENCE_SHA:'b'.repeat(40),LOAD_PROGRESS_OUTPUT:'/tmp/load-progress-case',LOAD_PROGRESS_MAC_GO:'true'};
 test('manual selector freezes one exact ignored test and rejects platform mismatch',()=>{
   assert.equal(admission(env,'darwin'),'tests::load_progress_acceptance::image_mlx');
@@ -256,4 +256,28 @@ test('fresh sibling creates evidence while checkout, inside, symlink-inside and 
     const link=path.join(temp,'linked-checkout'); await symlink(checkout,link,'junction');
     await assert.rejects(freshOutput(path.join(link,'attempt'),checkout),/output parent must physically be outside checkout/);
   } finally { await rm(temp,{recursive:true,force:true}); }
+});
+
+
+test('native libtest matches the production worker stack despite ambient overrides, without changing preparation',async()=>{
+  assert.equal(NATIVE_TEST_STACK_BYTES,8*1024*1024);
+  const worker=await readFile(new URL('../crates/sceneworks-worker/src/lib.rs',import.meta.url),'utf8');
+  assert.match(worker,/pub const WORKER_ENTRY_STACK_BYTES: usize = 8 \* 1024 \* 1024;/);
+  const established=await readFile(new URL('./moss-training-acceptance.mjs',import.meta.url),'utf8');
+  assert.match(established,/export const NATIVE_TEST_STACK_BYTES = 8 \* 1024 \* 1024;/);
+  for(const selectedCase of CASES) {
+    for(const ambient of [undefined,'65536','33554432']) {
+      const original={...cpuEnv,LOAD_PROGRESS_CASE:selectedCase,RUST_MIN_STACK:ambient};
+      const preparation=childEnvironment(original,'state','evidence','win32');
+      const native=nativeTestEnvironment(preparation);
+      assert.equal(native.RUST_MIN_STACK,String(NATIVE_TEST_STACK_BYTES));
+      assert.equal(preparation.RUST_MIN_STACK,ambient);
+      assert.equal(original.RUST_MIN_STACK,ambient);
+      assert.equal(native.SCENEWORKS_GPU_ID,preparation.SCENEWORKS_GPU_ID);
+      assert.equal(native.CUDA_VISIBLE_DEVICES,preparation.CUDA_VISIBLE_DEVICES);
+    }
+  }
+  const controller=await readFile(new URL('./load-progress-acceptance.mjs',import.meta.url),'utf8');
+  assert.match(controller,/\['native','ort-native'\].includes\(name\)\?nativeTestEnvironment\(childEnv\):childEnv/);
+  assert.match(controller,/libtestStackBytes:NATIVE_TEST_STACK_BYTES/);
 });
