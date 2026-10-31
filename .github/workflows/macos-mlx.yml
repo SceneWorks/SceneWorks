@@ -1030,7 +1030,11 @@ jobs:
       # Deliberately NOT `-p sceneworks-worker` for anything but this test target. The
       # narrow spelling is what sc-17026 removed, and re-introducing it for the suite
       # would re-dark every non-worker crate.
+      # Keep automatic compile coverage; numerical execution is explicitly dispatched.
+      - name: Compile the NAX 16-bit SDPA guard
+        run: cargo test -p sceneworks-worker --test nax_guard --no-run
       - name: NAX 16-bit SDPA guard (needs M5 matrix units)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         run: >-
           python3.12 -I scripts/ci/metal_execution_lock.py --wait-seconds 2700 --
           node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-worker --test nax_guard

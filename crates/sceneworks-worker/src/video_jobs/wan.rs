@@ -3172,12 +3172,12 @@ pub(super) async fn generate_video_using(
                         }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
                         Progress::Loading(_) => {}
-                        Progress::PromptUpsamplingComplete => {}
+                        Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => {}
                         // FLUX 3 image enhancement is not a Wan sampling/decode boundary.
                         Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
                     }
                     let (status, stage, fraction, message) = match progress {
-                        Progress::PromptUpsamplingComplete => continue,
+                        Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => continue,
                         Progress::ConditioningComplete | Progress::Upsampling { .. } => continue,
                         Progress::Step { current, total } => (
                             JobStatus::Running,
@@ -3192,10 +3192,11 @@ pub(super) async fn generate_video_using(
                             "Decoding frames.".to_owned(),
                         ),
                         Progress::Loading(phase) => (
-                            JobStatus::LoadingModel,
-                            ProgressStage::LoadingModel,
+                            if phase == LoadPhase::EncodingPrompt { JobStatus::Running } else { JobStatus::LoadingModel },
+                            if phase == LoadPhase::EncodingPrompt { ProgressStage::Generating } else { ProgressStage::LoadingModel },
                             0.24,
                             match phase {
+                                LoadPhase::EncodingPrompt => "Encoding prompt.",
                                 LoadPhase::TextEncoder => "Loading text encoder.",
                                 LoadPhase::Renderer => "Loading render components.",
                             }
