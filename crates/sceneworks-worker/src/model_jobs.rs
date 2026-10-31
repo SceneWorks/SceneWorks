@@ -1748,7 +1748,7 @@ pub(crate) async fn run_model_convert_job(
             base_dir,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_flux2_klein_diffusers(&source_file, &base_dir, &temp).map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
@@ -1760,7 +1760,7 @@ pub(crate) async fn run_model_convert_job(
             bits,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_ltx_native(&source_file, &upscaler_dir, &temp, bits).map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
@@ -1772,7 +1772,7 @@ pub(crate) async fn run_model_convert_job(
             group_size,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_flux2_dev_prequant(&source_dir, &temp, bits, group_size).map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
@@ -1785,7 +1785,7 @@ pub(crate) async fn run_model_convert_job(
             group_size,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_sd3_prequant(&source_dir, &temp, variant, bits, group_size).map_err(
                     |detail| WorkerError::Engine(format!("{backend} conversion failed. {detail}")),
                 )
@@ -1799,7 +1799,7 @@ pub(crate) async fn run_model_convert_job(
             group_size,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_anima_prequant(
                     &dit_source,
                     &te_source,
@@ -1819,7 +1819,7 @@ pub(crate) async fn run_model_convert_job(
             vae_dir,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_supra2_bundle(&source_file, &text_encoder_dir, &vae_dir, &temp).map_err(
                     |detail| WorkerError::Engine(format!("{backend} conversion failed. {detail}")),
                 )
@@ -4701,7 +4701,7 @@ where
     let temp_dir = temp_dir.to_path_buf();
     let final_dir = final_dir.to_path_buf();
     let data_dir = data_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         finalize_converted_dir_blocking(&temp_dir, &final_dir, &data_dir, after_aside)
     })
     .await
@@ -5004,9 +5004,11 @@ fn lock_conversion_file(file: std::fs::File, path: &Path, shared: bool) -> Worke
 /// is missing, the newest backup is restored before older copies are removed.
 pub async fn recover_stranded_model_conversions(data_dir: &Path) -> WorkerResult<()> {
     let data_dir = data_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || sweep_stranded_conversion_backups_blocking(&data_dir))
-        .await
-        .map_err(|error| task_join_error("converted model startup sweep", error))?
+    crate::load_progress::spawn_blocking(move || {
+        sweep_stranded_conversion_backups_blocking(&data_dir)
+    })
+    .await
+    .map_err(|error| task_join_error("converted model startup sweep", error))?
 }
 
 fn sweep_stranded_conversion_backups_blocking(data_dir: &Path) -> WorkerResult<()> {
@@ -5959,32 +5961,33 @@ async fn run_linked_checkpoint_import_job(
     let root_id = root_id.to_owned();
     let relative_path = relative_path.to_owned();
     // Full-content compile streams every byte through SHA-256, so it runs off the async runtime.
-    let compiled =
-        match tokio::task::spawn_blocking(move || store.compile_linked(&root_id, &relative_path))
-            .await
-        {
-            Ok(Ok(compiled)) => compiled,
-            // Every refusal is already a typed `[checkpoint-plan:<code>]` diagnostic naming what is
-            // wrong with the source; surface it verbatim rather than flattening it to "import failed".
-            Ok(Err(error)) => {
-                return fail_job(
-                    api,
-                    &job.id,
-                    "Linked checkpoint import failed.",
-                    Some(error.to_string()),
-                )
-                .await;
-            }
-            Err(error) => {
-                return fail_job(
-                    api,
-                    &job.id,
-                    "Linked checkpoint import failed.",
-                    Some(format!("Checkpoint inspection task failed: {error}")),
-                )
-                .await;
-            }
-        };
+    let compiled = match crate::load_progress::spawn_blocking(move || {
+        store.compile_linked(&root_id, &relative_path)
+    })
+    .await
+    {
+        Ok(Ok(compiled)) => compiled,
+        // Every refusal is already a typed `[checkpoint-plan:<code>]` diagnostic naming what is
+        // wrong with the source; surface it verbatim rather than flattening it to "import failed".
+        Ok(Err(error)) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(error.to_string()),
+            )
+            .await;
+        }
+        Err(error) => {
+            return fail_job(
+                api,
+                &job.id,
+                "Linked checkpoint import failed.",
+                Some(format!("Checkpoint inspection task failed: {error}")),
+            )
+            .await;
+        }
+    };
 
     if let Some(manifest_entry) = job
         .payload
@@ -5995,11 +5998,11 @@ async fn run_linked_checkpoint_import_job(
         // The SAME header classification the managed branch runs, over the user's own file. Reading
         // a safetensors header is a bounded seek-and-parse, but it is still blocking I/O.
         let classification = match linked_file {
-            Some(path) => {
-                tokio::task::spawn_blocking(move || base_weight_manifest_classification(&path))
-                    .await
-                    .unwrap_or(None)
-            }
+            Some(path) => crate::load_progress::spawn_blocking(move || {
+                base_weight_manifest_classification(&path)
+            })
+            .await
+            .unwrap_or(None),
             None => None,
         };
         let manifest_entry =

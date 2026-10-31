@@ -1192,6 +1192,11 @@ fn verify_source_and_capture_stamp(
 
 fn sha256_file(path: &Path) -> std::io::Result<String> {
     let mut file = fs::File::open(path)?;
+    let progress = gen_core::LoadActivityContext::capture().file(
+        gen_core::LoadActivityPhase::Verifying,
+        path,
+        Some(file.metadata()?.len()),
+    );
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; HASH_BUFFER_BYTES];
     loop {
@@ -1200,7 +1205,9 @@ fn sha256_file(path: &Path) -> std::io::Result<String> {
             break;
         }
         hasher.update(&buffer[..read]);
+        progress.add_bytes(read as u64);
     }
+    progress.finish();
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -2231,7 +2238,7 @@ impl CheckpointPlanStore {
         let mut layers = Vec::with_capacity(plan.layers.len());
         let mut refreshed = !bindings_are_current;
         bindings.schema_version = SOURCE_BINDINGS_SCHEMA_VERSION;
-        for layer in &plan.layers {
+        for (index, layer) in plan.layers.iter().enumerate() {
             // The root a layer's relative path is joined onto is chosen by the LOCATOR, never by
             // the caller: a linked layer resolves under its approved library root, a managed layer
             // under its own SceneWorks-owned install directory. A managed layer naming an install
@@ -2261,6 +2268,12 @@ impl CheckpointPlanStore {
                 }
             };
             let path = confined_root_join(checkpoint_id, &root_path, relative_path)?;
+            let checking = gen_core::LoadActivityContext::capture().file(
+                gen_core::LoadActivityPhase::Checking,
+                &path,
+                None,
+            );
+            checking.checked(index, Some(plan.layers.len()));
             let current = match SourceStampV1::of(&path, self.clock) {
                 Ok(stamp) => stamp,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2313,6 +2326,7 @@ impl CheckpointPlanStore {
                     .insert(layer.layer_id.clone(), verified_stamp);
                 refreshed = true;
             }
+            checking.checked(index + 1, Some(plan.layers.len()));
             layers.push(ResolvedLayerV1 {
                 layer: layer.clone(),
                 path,
@@ -2334,6 +2348,27 @@ impl CheckpointPlanStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_checkpoint_hash_reports_actual_bytes_and_clears_on_completion() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("checkpoint.bin");
+        std::fs::write(&file, [7; 129]).unwrap();
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = events.clone();
+        let _observer = gen_core::LoadActivityObserver::new(move |activity| {
+            observed.lock().unwrap().push(activity);
+        });
+        sha256_file(&file).unwrap();
+        let events = events.lock().unwrap();
+        let reports: Vec<_> = events.iter().flatten().collect();
+        assert!(reports
+            .iter()
+            .all(|event| event.phase == gen_core::LoadActivityPhase::Verifying));
+        assert_eq!(reports.last().unwrap().bytes_read, 129);
+        assert_eq!(reports.last().unwrap().total_bytes, Some(129));
+        assert!(events.last().unwrap().is_none());
+    }
 
     /// A released store lock must be free IMMEDIATELY, even while a descriptor this process handed
     /// to a child still references the same open file description. `flock(2)` locks live on the

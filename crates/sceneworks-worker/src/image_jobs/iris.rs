@@ -721,7 +721,7 @@ mod tests {
             .with_state((posts.clone(), cancel_requested));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), posts)

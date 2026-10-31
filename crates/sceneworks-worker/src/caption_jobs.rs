@@ -269,7 +269,7 @@ async fn run_training_caption_job_using(
             JobStatus::LoadingModel,
             ProgressStage::LoadingModel,
             0.08,
-            &format!("Loading JoyCaption model ({}).", backend.to_uppercase()),
+            crate::load_progress::PREPARING_MODEL,
             None,
             backend,
         ),
@@ -294,7 +294,7 @@ async fn run_training_caption_job_using(
     let blocking_backend = backend.to_owned();
     let blocking_mode = mode.clone();
     let job_id = job.id.clone();
-    let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+    let blocking = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
         emit_event(
             "caption_pipeline_load_start",
             json!({
@@ -1271,7 +1271,7 @@ mod tests {
             .await
             .expect("listener binds");
         let address = listener.local_addr().expect("listener has address");
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.expect("stub serves");
         });
         (format!("http://{address}"), state)

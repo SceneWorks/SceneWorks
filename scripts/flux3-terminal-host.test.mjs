@@ -69,7 +69,9 @@ test('run is refused until this host lane\'s addendum is recorded (another lane\
 });
 test('the workflow can never upload: no artifact/upload step, no secrets, manual registered profile only', async () => {
   const text = await readFile(new URL('../.github/workflows/flux3-image-klein-terminal-host.yml', import.meta.url), 'utf8');
-  assert.doesNotMatch(text, /upload-artifact|actions\/cache|upload-pages|gh release|gists?|secrets\./i, 'no upload or secret path of any kind');
+  const publicationRoutes = /upload-artifact|actions\/cache|upload-pages|gh release|\bgists?\b|secrets\./i;
+  assert.match('gist', publicationRoutes);
+  assert.doesNotMatch(text, publicationRoutes, 'no upload or secret path of any kind');
   assert.match(text, /^on:\n {2}workflow_call:/m, 'reusable only: reached through the manual campaign dispatcher');
   assert.doesNotMatch(text, /^ {2}(push|pull_request|schedule|workflow_dispatch):/m);
   assert.match(text, /\[\[ "\$RUNNER_NAME" == "\$FLUX3_TERMINAL_HOST" \]\]/, 'runner name checked before checkout');

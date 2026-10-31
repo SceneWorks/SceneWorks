@@ -351,7 +351,7 @@ async fn execute<B: crate::yue2_transcription::TranscriptionBackend>(
             JobStatus::Running,
             ProgressStage::Generating,
             0.05,
-            "Loading YuE2.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             &backend,
         ),
@@ -1045,6 +1045,9 @@ impl Yue2Progress {
     /// The job fraction and message after `progress`.
     pub(crate) fn observe(&mut self, progress: Progress) -> (f64, String) {
         let message = match progress {
+            Progress::PromptEncodingComplete => {
+                return (self.fraction, "Preparing generation.".to_owned())
+            }
             Progress::PromptUpsamplingComplete => {
                 return (self.fraction, "Generating audio.".to_owned())
             }
@@ -1052,9 +1055,9 @@ impl Yue2Progress {
             Progress::ConditioningComplete | Progress::Upsampling { .. } => {
                 return (self.fraction, "Generating audio.".to_owned())
             }
-            Progress::Loading(_) => {
+            Progress::Loading(phase) => {
                 self.fraction = self.fraction.max(0.08);
-                "Loading YuE2 weights.".to_owned()
+                crate::load_progress::generator_phase(phase).to_owned()
             }
             Progress::Decoding => {
                 self.fraction = self.fraction.max(0.86);
@@ -1139,7 +1142,7 @@ async fn generate(
     let mut tracker = Yue2Progress::new(spec);
     let handle = {
         let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<GenerationReport> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<GenerationReport> {
             let _residency = crate::yue2_transcription::residency_lock()
                 .read()
                 .unwrap_or_else(|poison| poison.into_inner());
@@ -1160,6 +1163,7 @@ async fn generate(
                 return Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()));
             }
             let mut on_progress = |progress: Progress| {
+                crate::load_progress::generator_progress(&progress);
                 lease.observe(&progress);
                 let update = tracker.observe(progress);
                 // The pump may be gone; generation never depends on its progress sink.
@@ -1176,7 +1180,7 @@ async fn generate(
         let job_id = job.id.clone();
         let backend = backend_label(&settings.gpu_id).to_owned();
         let cancel = cancel.clone();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             let mut posts = 0usize;
             let mut last_post: Option<Instant> = None;
             while rx.changed().await.is_ok() {
@@ -1583,7 +1587,7 @@ async fn publish_audio(
     {
         let media_path = media_path.clone();
         let info = wav_licence_info(usage_policy);
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             let tags: Vec<([u8; 4], &str)> =
                 info.iter().map(|(id, text)| (*id, text.as_str())).collect();
             write_wav_pcm16_with_info(&wav, &media_path, &tags)
