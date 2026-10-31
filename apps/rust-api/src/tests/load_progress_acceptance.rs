@@ -254,7 +254,8 @@ fn validate_audio_epochs(messages: &[String]) -> Result<()> {
             phase = Phase::Prompt;
         }
         require(
-            phase == Phase::Preparation || !message.contains("synthes"),
+            phase == Phase::Preparation
+                || (!message.contains("synthes") && message != "preparing audio."),
             "audio preparation label returned after sampling began",
         )?;
         if let Some(step) = message
@@ -1148,6 +1149,7 @@ fn audio_reader_epochs_and_output_finishing_are_distinct() {
         (9, "Decoding."), // Premature decode cannot precede renderer IO or stages.
         (16, "Generating step 3/3."), // No stage may return after actual HiFT decode.
         (17, "Generating step 3/3."),
+        (18, "Preparing audio."),
         (7, "Loading t3 cfg.safetensors — 0.2 / 2.1 GB"),
         (3, "Loading t3 cfg.safetensors — 0.0 / 2.1 GB"),
     ] {
