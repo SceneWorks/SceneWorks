@@ -2532,7 +2532,7 @@ pub(crate) async fn begin_video_cancel(
     backend: &str,
 ) {
     cancel.cancel();
-    let _ = update_job(
+    let _ = crate::progress::update_job_cancelling(
         api,
         job_id,
         video_progress(

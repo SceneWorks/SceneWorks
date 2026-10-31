@@ -661,6 +661,20 @@ pub(crate) async fn update_job(
     post_job_progress(api, job_id, payload).await
 }
 
+/// Post a nonterminal cancellation acknowledgement with precedence over later phase reports.
+/// The explicit control channel avoids inferring cancellation from a UI message or shared stage.
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+pub(crate) async fn update_job_cancelling(
+    api: &ApiClient,
+    job_id: &str,
+    payload: ProgressRequest,
+) -> WorkerResult<JobSnapshot> {
+    if let Some(session) = crate::load_progress::current(job_id) {
+        return session.post_cancelling(api, payload).await;
+    }
+    post_job_progress(api, job_id, payload).await
+}
+
 pub(crate) async fn post_job_progress(
     api: &ApiClient,
     job_id: &str,

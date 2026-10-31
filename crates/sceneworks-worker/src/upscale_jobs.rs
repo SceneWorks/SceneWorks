@@ -923,7 +923,7 @@ where
         CANCEL_MESSAGE,
         "upscale task",
         Some(|| async move {
-            update_job(
+            crate::progress::update_job_cancelling(
                 api,
                 job_id,
                 progress_payload(
@@ -1390,7 +1390,7 @@ pub(crate) async fn restore_with_progress(
         IRIS_CANCEL_MESSAGE,
         "Iris restoration task",
         Some(|| async move {
-            update_job(
+            crate::progress::update_job_cancelling(
                 api,
                 job_id,
                 progress_payload(

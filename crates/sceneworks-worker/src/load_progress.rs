@@ -21,6 +21,7 @@ struct Latest {
     activity: Option<LoadActivity>,
     pending: bool,
     baseline: Option<Arc<ProgressRequest>>,
+    cancellation: Option<Arc<ProgressRequest>>,
     compute: Option<(String, ProgressStage)>,
     prompt_encoding: bool,
     closed: bool,
@@ -33,10 +34,17 @@ pub(crate) struct Session {
     post_order: AsyncMutex<()>,
 }
 
+fn terminal(status: &JobStatus) -> bool {
+    matches!(
+        status,
+        JobStatus::Completed | JobStatus::Failed | JobStatus::Canceled | JobStatus::Interrupted
+    )
+}
+
 impl Session {
     fn observe(&self, activity: Option<LoadActivity>) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closed {
+        if state.closed || state.cancellation.is_some() {
             return;
         }
         state.activity = activity;
@@ -48,7 +56,25 @@ impl Session {
     pub(crate) async fn post(
         &self,
         api: &ApiClient,
+        payload: ProgressRequest,
+    ) -> WorkerResult<JobSnapshot> {
+        self.post_with_control(api, payload, false).await
+    }
+
+    #[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+    pub(crate) async fn post_cancelling(
+        &self,
+        api: &ApiClient,
+        payload: ProgressRequest,
+    ) -> WorkerResult<JobSnapshot> {
+        self.post_with_control(api, payload, true).await
+    }
+
+    async fn post_with_control(
+        &self,
+        api: &ApiClient,
         mut payload: ProgressRequest,
+        cancelling: bool,
     ) -> WorkerResult<JobSnapshot> {
         let phase_update = matches!(
             payload.stage,
@@ -57,24 +83,23 @@ impl Session {
                 | ProgressStage::Training
                 | ProgressStage::CachingLatents
                 | ProgressStage::Checkpointing
-        ) && !matches!(
-            payload.status,
-            JobStatus::Completed | JobStatus::Failed | JobStatus::Canceled
-        );
+        ) && !terminal(&payload.status);
         // Clone potentially large result/provenance fields outside the floor callback's lock.
         let baseline = Arc::new(payload.clone());
         // Invalidate queued I/O reports BEFORE awaiting an already-running slow POST.
         let previous = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.pending = false;
+            // This typed acknowledgement is authoritative before waiting on an in-flight POST.
+            // No status/stage or human-readable message can identify cancellation by itself.
+            if cancelling && !state.closed && state.cancellation.is_none() {
+                state.cancellation = Some(baseline.clone());
+            }
             let previous = state.baseline.replace(baseline);
-            if matches!(
-                payload.status,
-                JobStatus::Completed | JobStatus::Failed | JobStatus::Canceled
-            ) {
+            if terminal(&payload.status) {
                 state.closed = true;
             }
-            if !phase_update {
+            if !phase_update || state.cancellation.is_some() {
                 state.activity = None;
                 state.compute = None;
                 state.prompt_encoding = false;
@@ -86,23 +111,50 @@ impl Session {
         let _order = self.post_order.lock().await;
         // Re-read AFTER network ordering: callbacks may have advanced while an earlier POST was
         // in flight. Never send a phase snapshot prepared before that wait.
-        if phase_update {
+        {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(activity) = &state.activity {
-                payload.message = message(Some(activity));
-                payload.status = JobStatus::LoadingModel;
-                payload.stage = ProgressStage::LoadingModel;
-            } else if let Some((message, stage)) = &state.compute {
-                payload.message = message.clone();
-                payload.stage = stage.clone();
-                payload.status = if *stage == ProgressStage::LoadingModel {
-                    JobStatus::LoadingModel
-                } else {
-                    JobStatus::Running
-                };
+            if let Some(control) = state
+                .cancellation
+                .as_ref()
+                .filter(|_| !terminal(&payload.status))
+            {
+                // Retain fresh results/provenance, but a late ordinary or observer phase must not
+                // replace cancellation's nonterminal control state while the task winds down.
+                payload.message = control.message.clone();
+                payload.status = control.status.clone();
+                payload.stage = control.stage.clone();
+                payload.progress = control.progress.clone();
+                payload.eta_seconds = control.eta_seconds.clone();
+            } else if phase_update {
+                if let Some(activity) = &state.activity {
+                    payload.message = message(Some(activity));
+                    payload.status = JobStatus::LoadingModel;
+                    payload.stage = ProgressStage::LoadingModel;
+                } else if let Some((message, stage)) = &state.compute {
+                    payload.message = message.clone();
+                    payload.stage = stage.clone();
+                    payload.status = if *stage == ProgressStage::LoadingModel {
+                        JobStatus::LoadingModel
+                    } else {
+                        JobStatus::Running
+                    };
+                }
             }
         }
-        crate::progress::post_job_progress(api, &self.job_id, payload).await
+        let is_terminal = terminal(&payload.status);
+        let result = crate::progress::post_job_progress(api, &self.job_id, payload).await;
+        if is_terminal && result.is_ok() {
+            // Keep the latch while earlier queued requests drain. The terminal acknowledgement,
+            // rather than merely scheduling its POST, ends cancellation's control precedence.
+            let previous = self
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .cancellation
+                .take();
+            drop(previous);
+        }
+        result
     }
 
     async fn publish(self: Arc<Self>, api: ApiClient, mut changed: watch::Receiver<u64>) {
@@ -115,7 +167,7 @@ impl Session {
             let _order = self.post_order.lock().await;
             let (baseline, activity, compute) = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.closed {
+                if state.closed || state.cancellation.is_some() {
                     return;
                 }
                 if !state.pending {
@@ -185,7 +237,7 @@ fn note_compute_phase(message: String, stage: ProgressStage, prompt_encoding: bo
         return;
     };
     let mut state = session.state.lock().unwrap_or_else(|e| e.into_inner());
-    if state.closed {
+    if state.closed || state.cancellation.is_some() {
         return;
     }
     state.activity = None;
@@ -206,7 +258,7 @@ pub(crate) fn generator_progress(progress: &gen_core::Progress) {
             return;
         };
         let mut state = session.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closed || !state.prompt_encoding {
+        if state.closed || state.cancellation.is_some() || !state.prompt_encoding {
             return;
         }
         state.prompt_encoding = false;
@@ -711,6 +763,214 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[tokio::test]
+    async fn cancellation_control_survives_every_phase_until_terminal_without_message_matching() {
+        let (api, recorded, server) = api().await;
+        for (stage, terminal_status, terminal_stage) in [
+            (
+                ProgressStage::Generating,
+                JobStatus::Canceled,
+                ProgressStage::Canceled,
+            ),
+            (
+                ProgressStage::Training,
+                JobStatus::Failed,
+                ProgressStage::Failed,
+            ),
+            (
+                ProgressStage::Running,
+                JobStatus::Completed,
+                ProgressStage::Completed,
+            ),
+            (
+                ProgressStage::Generating,
+                JobStatus::Interrupted,
+                ProgressStage::Interrupted,
+            ),
+        ] {
+            with_job(&api, "job", async {
+                generator_progress(&gen_core::Progress::Step {
+                    current: 1,
+                    total: 5,
+                });
+                crate::progress::update_job(&api, "job", normal("ordinary"))
+                    .await
+                    .unwrap();
+                let mut acknowledgement = normal("authoritative control");
+                acknowledgement.stage = stage.clone();
+                crate::progress::update_job_cancelling(&api, "job", acknowledgement)
+                    .await
+                    .unwrap();
+                let session = current("job").unwrap();
+                gen_core::LoadActivityContext::capture().report(Some(report("transformer", 1)));
+                generator_progress(&gen_core::Progress::Loading(
+                    gen_core::LoadPhase::EncodingPrompt,
+                ));
+                generator_progress(&gen_core::Progress::PromptEncodingComplete);
+                let request = gen_core::core_llm::TextLlmRequest {
+                    progress: Some(text_observer()),
+                    ..Default::default()
+                };
+                {
+                    let _guard = request.install_progress();
+                    gen_core::core_llm::report_generation_phase(
+                        gen_core::core_llm::GenerationPhase::Prefilling,
+                    );
+                }
+                {
+                    let state = session.state.lock().unwrap();
+                    assert!(!state.pending);
+                    assert!(state.activity.is_none() && state.compute.is_none());
+                }
+                let mut late = normal("late ordinary progress");
+                late.status = JobStatus::Saving;
+                late.stage = ProgressStage::Saving;
+                late.progress = serde_json::Number::from(1);
+                late.eta_seconds = Some(serde_json::Number::from(99));
+                late.result =
+                    Some(serde_json::from_value(serde_json::json!({"freshAsset": true})).unwrap());
+                crate::progress::update_job(&api, "job", late)
+                    .await
+                    .unwrap();
+                {
+                    let posts = recorded.posts.lock().unwrap();
+                    let last = &posts.last().unwrap().1;
+                    assert_eq!(last["message"], "authoritative control");
+                    assert_eq!(last["status"], "running");
+                    assert_eq!(last["stage"], serde_json::to_value(stage).unwrap());
+                    assert_eq!(last["progress"], 0.4);
+                    assert!(last.get("etaSeconds").is_none());
+                    assert_eq!(
+                        last["result"]["freshAsset"], true,
+                        "control precedence retains fresh result data"
+                    );
+                }
+                let mut done = normal("terminal outcome");
+                done.status = terminal_status.clone();
+                done.stage = terminal_stage;
+                crate::progress::update_job(&api, "job", done)
+                    .await
+                    .unwrap();
+                gen_core::LoadActivityContext::capture().report(Some(report("vae", 2)));
+                generator_progress(&gen_core::Progress::Decoding);
+                let state = session.state.lock().unwrap();
+                assert!(state.closed && !state.pending);
+                assert!(state.cancellation.is_none());
+                let posts = recorded.posts.lock().unwrap();
+                let last = &posts.last().unwrap().1;
+                assert_eq!(last["message"], "terminal outcome");
+                assert_eq!(
+                    last["status"],
+                    serde_json::to_value(terminal_status).unwrap()
+                );
+            })
+            .await;
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancellation_latches_before_slow_posts_and_cannot_be_replaced_by_queued_progress() {
+        let (api, recorded, server) = api().await;
+        with_job(&api, "job", async {
+            recorded.slow.store(true, Ordering::SeqCst);
+            let first_api = api.clone();
+            let first = spawn(async move {
+                crate::progress::update_job(&first_api, "job", normal("in flight")).await
+            });
+            tokio::time::timeout(Duration::from_secs(5), recorded.entered.notified())
+                .await
+                .unwrap();
+            let ack_api = api.clone();
+            let acknowledgement = spawn(async move {
+                crate::progress::update_job_cancelling(
+                    &ack_api,
+                    "job",
+                    normal("control acknowledgement"),
+                )
+                .await
+            });
+            let session = current("job").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let latched = session.state.lock().unwrap().cancellation.is_some();
+                    if latched {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            // Both I/O and compute callbacks arrive while the acknowledgement waits for HTTP order.
+            gen_core::LoadActivityContext::capture().report(Some(report("transformer", 1)));
+            generator_progress(&gen_core::Progress::Step {
+                current: 2,
+                total: 5,
+            });
+            let late_api = api.clone();
+            let late = spawn(async move {
+                crate::progress::update_job(&late_api, "job", normal("obsolete queued phase")).await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let queued = session
+                        .state
+                        .lock()
+                        .unwrap()
+                        .baseline
+                        .as_ref()
+                        .is_some_and(|p| p.message == "obsolete queued phase");
+                    if queued {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            let terminal_api = api.clone();
+            let terminal_post = spawn(async move {
+                let mut done = normal("terminal cancellation");
+                done.status = JobStatus::Canceled;
+                done.stage = ProgressStage::Canceled;
+                crate::progress::update_job(&terminal_api, "job", done).await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let closed = session.state.lock().unwrap().closed;
+                    if closed {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            recorded.release.notify_one();
+            first.await.unwrap().unwrap();
+            acknowledgement.await.unwrap().unwrap();
+            late.await.unwrap().unwrap();
+            terminal_post.await.unwrap().unwrap();
+            let posts = recorded.posts.lock().unwrap();
+            assert_eq!(
+                posts.len(),
+                4,
+                "observer callbacks must not schedule a post after cancellation"
+            );
+            assert_eq!(posts[0].1["message"], "in flight");
+            assert!(posts[1..3]
+                .iter()
+                .all(|post| post.1["message"] == "control acknowledgement"));
+            assert_eq!(posts[3].1["message"], "terminal cancellation");
+            assert_eq!(posts[3].1["status"], "canceled");
+            let state = session.state.lock().unwrap();
+            assert!(state.closed && !state.pending && state.cancellation.is_none());
+        })
+        .await;
+        server.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -3761,7 +3761,7 @@ pub(crate) async fn begin_training_cancel(
     backend: &str,
 ) {
     cancel.cancel();
-    let _ = update_job(
+    let _ = crate::progress::update_job_cancelling(
         api,
         job_id,
         training_progress(
