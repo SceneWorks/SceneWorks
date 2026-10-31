@@ -197,10 +197,98 @@ fn has_bytes(message: &str) -> bool {
             .iter()
             .any(|u| message.contains(u))
 }
+// The frozen Chatterbox path loads reference/tokenizer weights, encodes the prompt,
+// samples AR tokens, constructs the renderer, then runs its three stages and HiFT.
+// Each renderer submodule opens the same S3Gen file independently. Rounded HTTP
+// labels carry no operation ID: equality is not evidence of an obsolete operation.
+fn validate_audio_epochs(messages: &[String]) -> Result<()> {
+    let mut prompt = false;
+    let mut autoregressive = false;
+    let mut renderer = false;
+    let mut flow = false;
+    let mut finishing = false;
+    let mut last_step = None;
+    for message in messages {
+        let io = message.starts_with("loading ") || message.starts_with("verifying ");
+        if io {
+            require(
+                !prompt
+                    || (!message.contains("ve.safetensors")
+                        && !message.contains("t3 cfg.safetensors")),
+                "completed audio conditioning IO returned after prompt encoding",
+            )?;
+            if message.contains("s3gen.safetensors") {
+                require(
+                    !flow && !finishing,
+                    "renderer IO returned after S3Gen execution began",
+                )?;
+                renderer |= autoregressive;
+            }
+            if message.contains("perth implicit.safetensors") {
+                finishing = true;
+            }
+        }
+        if message.contains("encoding prompt") {
+            require(
+                !autoregressive && !renderer && !finishing,
+                "audio prompt label returned after sampling began",
+            )?;
+            prompt = true;
+        }
+        require(
+            !autoregressive || !message.contains("synthes"),
+            "audio preparation label returned after sampling began",
+        )?;
+        if let Some(step) = message
+            .strip_prefix("generating step ")
+            .and_then(|s| s.strip_suffix('.'))
+        {
+            let (current, total) = step.split_once('/').ok_or("audio step lacks counters")?;
+            let current: u32 = current.parse().map_err(|_| "invalid audio step")?;
+            let total: u32 = total.parse().map_err(|_| "invalid audio total")?;
+            require(
+                !finishing,
+                "audio step returned after output finishing began",
+            )?;
+            require(
+                total > 0 && current > 0 && current <= total,
+                "invalid audio step bounds",
+            )?;
+            require(
+                !renderer || total == 3,
+                "autoregressive step returned during renderer execution",
+            )?;
+            if let Some((previous, previous_total)) = last_step {
+                require(
+                    previous_total != total || current >= previous,
+                    "audio step counter regressed",
+                )?;
+            }
+            if total == 3 {
+                flow = true;
+                renderer = true;
+            } else {
+                autoregressive = true;
+            }
+            last_step = Some((current, total));
+        }
+        // Brief Decoding/PostProcessing callbacks may coalesce on the HTTP wire.
+        // PerTh IO above also retires the completed renderer step unconditionally.
+        if message == "finishing output." || (flow && message.contains("decoding")) {
+            finishing = true;
+        }
+    }
+    Ok(())
+}
+
 fn validate_progress(messages: &[String], case: &str) -> Result<()> {
     let image = case.starts_with("image_");
     let training = case == "training";
+    let audio = case == "audio";
     let lowered: Vec<_> = messages.iter().map(|m| m.to_lowercase()).collect();
+    if audio {
+        validate_audio_epochs(&lowered)?;
+    }
     let load = lowered
         .iter()
         .position(|m| m.contains("loading ") && has_bytes(m))
@@ -318,7 +406,7 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
             )?;
         }
         if loading.is_some() || verifying.is_some() || checking {
-            if let Some(label) = loading.filter(|_| !image && has_bytes(message)) {
+            if let Some(label) = loading.filter(|_| !image && !audio && has_bytes(message)) {
                 fresh_component = Some(
                     label
                         .split(" (")
@@ -330,7 +418,7 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
                 );
                 read_progress = None;
             }
-            if let Some(label) = verifying.or(loading.filter(|_| image)) {
+            if let Some(label) = verifying.or(loading.filter(|_| image || audio)) {
                 let (source, progress) = label.split_once(" — ").ok_or("IO report lacks bytes")?;
                 let component = source.split(" (").next().unwrap();
                 if verifying.is_some() {
@@ -361,16 +449,20 @@ fn validate_progress(messages: &[String], case: &str) -> Result<()> {
                 let identity = (verifying.is_some(), source);
                 if let Some((previous_source, previous_bytes)) = read_progress {
                     require(
-                        previous_source != identity || bytes >= previous_bytes,
+                        previous_source != identity
+                            || bytes >= previous_bytes
+                            // Independent S3Gen readers explicitly restart at zero. The
+                            // rounded wire cannot distinguish unobserved/coalesced opens.
+                            || (audio && bytes == 0. && source.contains("s3gen.safetensors")),
                         "IO bytes regressed within a read epoch",
                     )?;
                 }
                 read_progress = Some((identity, bytes));
             }
             // Image epochs are delimited by actual compute windows above. Their fresh
-            // reads may repeat rounded byte strings from cold preparation. Other lanes
-            // retain the existing stale-label check.
-            if (!image && verifying.is_none()) || checking {
+            // reads may repeat rounded byte strings from cold preparation. Audio epochs
+            // are checked above; training retains the existing stale-label check.
+            if (!image && !audio && verifying.is_none()) || checking {
                 require(
                     !obsolete_io.contains(message.as_str()),
                     "earlier IO label reappeared after compute",
@@ -964,6 +1056,70 @@ fn candle_preparation_and_materialization_have_distinct_truthful_read_epochs() {
     let mut no_decode_read = messages;
     no_decode_read.remove(13);
     assert!(validate_progress(&no_decode_read, "image_cuda").is_err());
+}
+
+#[test]
+fn audio_reader_epochs_and_output_finishing_are_distinct() {
+    // Pure source-shaped expectation, not a substitute for a new native trace.
+    let expected: Vec<String> = [
+        "Loading s3gen.safetensors — 0.1 / 1.1 GB",
+        "Synthesizing audio.",
+        "Loading t3 cfg.safetensors — 0.1 / 2.1 GB",
+        "Encoding prompt.",
+        "Generating step 13/4096.",
+        "Generating step 62/4096.",
+        "Loading s3gen.safetensors — 0.3 / 1.1 GB",
+        "Loading s3gen.safetensors — 0.0 / 1.1 GB",
+        "Loading s3gen.safetensors — 0.1 / 1.1 GB",
+        "Preparing generation.",
+        "Loading s3gen.safetensors — 0.1 / 1.1 GB",
+        "Generating step 1/3.",
+        "Generating step 2/3.",
+        "Generating step 3/3.",
+        "Decoding.",
+        "Finishing output.",
+        "Loading perth implicit.safetensors — 0.0 / 37.4 MB",
+        "Finishing output.",
+        "Saving audio.",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    validate_progress(&expected, "audio").unwrap();
+    // Brief compute markers need not survive the HTTP coalescer. The later PerTh
+    // IO boundary still forbids restoration of a completed renderer step.
+    let coalesced: Vec<_> = expected
+        .iter()
+        .filter(|m| !matches!(m.as_str(), "Decoding." | "Finishing output."))
+        .cloned()
+        .collect();
+    validate_progress(&coalesced, "audio").unwrap();
+    for (position, obsolete) in [
+        (7, "Encoding prompt."),
+        (9, "Generating step 63/4096."),
+        (12, "Loading s3gen.safetensors — 0.2 / 1.1 GB"),
+        (14, "Generating step 2/3."),
+        (17, "Generating step 3/3."),
+        (7, "Loading t3 cfg.safetensors — 0.2 / 2.1 GB"),
+        (7, "Loading s3gen.safetensors — 0.2 / 1.1 GB"),
+    ] {
+        let mut stale = expected.clone();
+        stale.insert(position, obsolete.into());
+        assert!(
+            validate_progress(&stale, "audio").is_err(),
+            "{obsolete} at {position}"
+        );
+    }
+    let mut stale = coalesced;
+    let perth = stale
+        .iter()
+        .position(|m| m.contains("perth implicit"))
+        .unwrap();
+    stale.insert(perth + 1, "Generating step 3/3.".into());
+    assert_eq!(
+        validate_progress(&stale, "audio").unwrap_err(),
+        "audio step returned after output finishing began"
+    );
 }
 
 #[test]
