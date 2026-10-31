@@ -17,19 +17,28 @@ test('Mac compute requires explicit go; compilation and metadata checks do not',
   assert.throws(()=>admission(noGo,'darwin'),/explicit.*go/);
   assert.doesNotThrow(()=>admission(noGo,'darwin',{execute:false}));
 });
-test('CUDA retains established physical GPU0 restrictions for all candle cases',()=>{
-  const cuda={...env,LOAD_PROGRESS_CASE:'image_cuda',SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
-  assert.equal(admission(cuda,'win32'),'tests::load_progress_acceptance::image_cuda');
-  for(const key of ['SCENEWORKS_GPU_ID','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES']) assert.throws(()=>admission({...cuda,[key]:'1'},'win32'),/required/);
-  for(const selected of ['audio','training']) assert.doesNotThrow(()=>admission({...cuda,LOAD_PROGRESS_CASE:selected},'win32'));
+test('all CUDA cases require physical GPU1 consistently and reject GPU0 or mixed visibility',()=>{
+  const keys=['SCENEWORKS_GPU_ID','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES'];
+  for(const selectedCase of [...CUDA_CASES,'cuda_all']) {
+    const cuda={...env,LOAD_PROGRESS_CASE:selectedCase,SCENEWORKS_GPU_ID:'1',CUDA_VISIBLE_DEVICES:'1',NVIDIA_VISIBLE_DEVICES:'1',CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
+    assert.equal(admission(cuda,'win32'),`tests::load_progress_acceptance::${selectedCase}`);
+    for(const key of keys) for(const invalid of ['0','2','','0,1']) assert.throws(()=>admission({...cuda,[key]:invalid},'win32'),/required/);
+    assert.throws(()=>admission({...cuda,SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0'},'win32'),/required/);
+    const child=childEnvironment(cuda,'/owned/state','/owned/evidence','win32');
+    const native=nativeTestEnvironment(child);
+    for(const key of keys) { assert.equal(child[key],'1'); assert.equal(native[key],'1'); }
+    const input={profile:'load-progress-acceptance',ref:env.LOAD_PROGRESS_SOURCE_SHA,inference_sha:env.LOAD_PROGRESS_INFERENCE_SHA,backend:'candle',moss_options_json:JSON.stringify({case:selectedCase,hf_hub_cache:'E:/hub',build_only:false})};
+    assert.equal(dispatchOptions(input,input.ref).case,selectedCase);
+    assert.equal(dispatchOptions(input,input.ref).backend,'cuda');
+  }
 });
 test('workflow preflight normalizes Windows artifact paths and preserves resource/source refusal', async()=>{
-  const selected={...env,LOAD_PROGRESS_BACKEND:'cuda',LOAD_PROGRESS_CASE:'cuda_all',DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_OUTPUT:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../load-progress-123-1',LOAD_PROGRESS_TARGET_DIR:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../target-cuda',SCENEWORKS_GPU_ID:'0',CUDA_VISIBLE_DEVICES:'0',NVIDIA_VISIBLE_DEVICES:'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
+  const selected={...env,LOAD_PROGRESS_BACKEND:'cuda',LOAD_PROGRESS_CASE:'cuda_all',DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_OUTPUT:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../load-progress-123-1',LOAD_PROGRESS_TARGET_DIR:'D:\\runner\\_work\\SceneWorks\\SceneWorks/../target-cuda',SCENEWORKS_GPU_ID:'1',CUDA_VISIBLE_DEVICES:'1',NVIDIA_VISIBLE_DEVICES:'1',CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
   const actual=workflowEnvironment(selected,'win32');
   assert.equal(actual.output,'directory=D:/runner/_work/SceneWorks/load-progress-123-1\n');
   assert(actual.environment.includes('LOAD_PROGRESS_TARGET_DIR=D:\\runner\\_work\\SceneWorks\\target-cuda\n'));
   assert.throws(()=>workflowEnvironment({...selected,DISPATCH_SHA:'c'.repeat(40)},'win32'),/dispatch/);
-  assert.throws(()=>workflowEnvironment({...selected,CUDA_VISIBLE_DEVICES:'1'},'win32'),/required/);
+  assert.throws(()=>workflowEnvironment({...selected,CUDA_VISIBLE_DEVICES:'0'},'win32'),/required/);
   assert.throws(()=>workflowEnvironment({...selected,LOAD_PROGRESS_OUTPUT:'D:/output\ninjected=yes'},'win32'),/absolute/);
   const mac={...env,LOAD_PROGRESS_BACKEND:'mlx',DISPATCH_SHA:env.LOAD_PROGRESS_SOURCE_SHA,LOAD_PROGRESS_TARGET_DIR:'/tmp/worker/../target',LOAD_PROGRESS_MAC_GO:'false'};
   assert.throws(()=>workflowEnvironment(mac,'darwin'),/explicit.*go/);
@@ -43,13 +52,21 @@ test('workflow preflight normalizes Windows artifact paths and preserves resourc
 });
 test('actual CUDA acceptance owns the shared UUID lease while build-only stays outside it',async()=>{
   const workflow=await readFile(new URL('../.github/workflows/load-progress-acceptance.yml',import.meta.url),'utf8');
-  assert.match(workflow,/if "%BUILD_ONLY%"=="true" \(node scripts\/load-progress-acceptance.mjs --build-only\) else \(python -I scripts\/ci\/windows_cuda_execution.py --actor load-progress-acceptance --budget-minutes 170 --cuda-ordinals 0 --probe-visible 0 -- node scripts\/load-progress-acceptance.mjs\)/);
+  assert.match(workflow,/if "%BUILD_ONLY%"=="true" \(node scripts\/load-progress-acceptance.mjs --build-only\) else \(python -I scripts\/ci\/windows_cuda_execution.py --actor load-progress-acceptance --budget-minutes 170 --cuda-ordinals 0 --probe-visible 1 -- node scripts\/load-progress-acceptance.mjs\)/);
+  for(const key of ['SCENEWORKS_GPU_ID','CUDA_VISIBLE_DEVICES','NVIDIA_VISIBLE_DEVICES']) {
+    const assignment=workflow.split('\n').find(line=>line.trimStart().startsWith(`${key}:`));
+    assert(assignment.includes("inputs.backend == 'cuda' && '1'"),`${key} must select physical1`);
+    assert(!assignment.includes("'0'"),`${key} must leave physical0 alone`);
+  }
+  const controller=await readFile(new URL('./load-progress-acceptance.mjs',import.meta.url),'utf8');
+  assert.match(controller,/nvidia-smi',\['-i','1','--query-gpu/);
+  assert.match(controller,/device = \{gpuId:'1',cudaVisibleDevices:'1',nvidiaVisibleDevices:'1'/);
   assert.match(workflow,/sceneworks-cuda-execution-\$\{\{ github.run_id \}\}-\$\{\{ github.run_attempt \}\}-load-progress-acceptance\//);
 });
 test('child setup keeps frozen cache and device but removes credentials and mutable app state',()=>{
-  const child=childEnvironment({...env,HF_TOKEN:'private',GH_TOKEN:'private',SCENEWORKS_DATA_DIR:'/production',SCENEWORKS_GPU_ID:'0',HF_HUB_CACHE:'/frozen/hub',SCENEWORKS_METAL_EXECUTION_LOCK_FD:'5',SW_CI_CUDA_EXECUTION_ACTIVE:'load-progress-acceptance'},'/owned/state','/owned/evidence');
+  const child=childEnvironment({...env,HF_TOKEN:'private',GH_TOKEN:'private',SCENEWORKS_DATA_DIR:'/production',SCENEWORKS_GPU_ID:'1',HF_HUB_CACHE:'/frozen/hub',SCENEWORKS_METAL_EXECUTION_LOCK_FD:'5',SW_CI_CUDA_EXECUTION_ACTIVE:'load-progress-acceptance'},'/owned/state','/owned/evidence');
   assert.equal(child.HF_TOKEN,undefined);assert.equal(child.GH_TOKEN,undefined);assert.equal(child.SCENEWORKS_DATA_DIR,undefined);
-  assert.equal(child.HF_HUB_CACHE,'/frozen/hub');assert.equal(child.SCENEWORKS_GPU_ID,'0');assert.equal(child.SCENEWORKS_METAL_EXECUTION_LOCK_FD,'5');
+  assert.equal(child.HF_HUB_CACHE,'/frozen/hub');assert.equal(child.SCENEWORKS_GPU_ID,'1');assert.equal(child.SCENEWORKS_METAL_EXECUTION_LOCK_FD,'5');
   assert.equal(child.HF_HUB_OFFLINE,'1');assert.equal(child.TRANSFORMERS_OFFLINE,'1');assert.equal(child.CARGO_BUILD_JOBS,'2');
   assert.equal(child.SW_CI_CUDA_EXECUTION_ACTIVE,'load-progress-acceptance');
 });

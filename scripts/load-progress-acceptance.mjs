@@ -55,8 +55,8 @@ export function admission(env, platform = process.platform, { execute = true } =
     assert(!['image_cuda','cuda_all'].includes(env.LOAD_PROGRESS_CASE), 'CUDA case needs Windows');
   } else {
     assert.notEqual(env.LOAD_PROGRESS_CASE, 'image_mlx', 'MLX case needs Mac');
-    // Reuse the established real-weights workflow physical GPU0 restriction.
-    for (const key of ['SCENEWORKS_GPU_ID', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES']) assert.equal(env[key], '0', `${key}=0 required`);
+    // Bind this dedicated acceptance to the authorized physical GPU1.
+    for (const key of ['SCENEWORKS_GPU_ID', 'CUDA_VISIBLE_DEVICES', 'NVIDIA_VISIBLE_DEVICES']) assert.equal(env[key], '1', `${key}=1 required`);
     assert.equal(env.CUDA_DEVICE_ORDER, 'PCI_BUS_ID');
   }
   return `tests::load_progress_acceptance::${env.LOAD_PROGRESS_CASE}`;
@@ -92,7 +92,7 @@ export function dispatchOptions(inputs, dispatchedSha) {
   if(!cpu) assert(typeof options.hf_hub_cache==='string' && (platform==='win32'?path.win32:path.posix).isAbsolute(options.hf_hub_cache), 'absolute existing HF hub cache required');
   assert(!/[\r\n]/.test(options.hf_hub_cache??''), 'invalid cache path');
   const selected={case:options.case,backend,hf_hub_cache:cpu?'':options.hf_hub_cache,build_only:options.build_only??true,mac_go:options.mac_go??false};
-  admission({LOAD_PROGRESS_CASE:selected.case,LOAD_PROGRESS_SOURCE_SHA:inputs.ref,LOAD_PROGRESS_INFERENCE_SHA:inputs.inference_sha,LOAD_PROGRESS_OUTPUT:platform==='win32'?'C:/load-progress':'/tmp/load-progress',LOAD_PROGRESS_MAC_GO:String(selected.mac_go),LOAD_PROGRESS_BACKEND:backend,SCENEWORKS_GPU_ID:cpu?'cpu':'0',CUDA_VISIBLE_DEVICES:cpu?'':'0',NVIDIA_VISIBLE_DEVICES:cpu?'':'0',CUDA_DEVICE_ORDER:'PCI_BUS_ID'},platform,{execute:!selected.build_only});
+  admission({LOAD_PROGRESS_CASE:selected.case,LOAD_PROGRESS_SOURCE_SHA:inputs.ref,LOAD_PROGRESS_INFERENCE_SHA:inputs.inference_sha,LOAD_PROGRESS_OUTPUT:platform==='win32'?'C:/load-progress':'/tmp/load-progress',LOAD_PROGRESS_MAC_GO:String(selected.mac_go),LOAD_PROGRESS_BACKEND:backend,SCENEWORKS_GPU_ID:cpu?'cpu':'1',CUDA_VISIBLE_DEVICES:cpu?'':'1',NVIDIA_VISIBLE_DEVICES:cpu?'':'1',CUDA_DEVICE_ORDER:'PCI_BUS_ID'},platform,{execute:!selected.build_only});
   return selected;
 }
 // Exact manifest filenames only: metadata/stat, no recursive scans, hashes or model reads.
@@ -194,8 +194,8 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
       const hardware = JSON.parse((await execFile('system_profiler',['SPHardwareDataType','-json'],{timeout:30000})).stdout);
       receipt.hardware = hardware.SPHardwareDataType?.map(({chip_type,physical_memory,machine_model})=>({chip_type,physical_memory,machine_model}));
     } else {
-      receipt.hardware = (await execFile('nvidia-smi',['-i','0','--query-gpu=index,uuid,name,memory.total','--format=csv,noheader'],{timeout:30000})).stdout.trim();
-      receipt.device = {gpuId:'0',cudaVisibleDevices:'0',nvidiaVisibleDevices:'0',cudaDeviceOrder:'PCI_BUS_ID'};
+      receipt.hardware = (await execFile('nvidia-smi',['-i','1','--query-gpu=index,uuid,name,memory.total','--format=csv,noheader'],{timeout:30000})).stdout.trim();
+      receipt.device = {gpuId:'1',cudaVisibleDevices:'1',nvidiaVisibleDevices:'1',cudaDeviceOrder:'PCI_BUS_ID'};
     }
     await persist();
     if (checkOnly) { receipt.status='checked-no-model-execution'; return receipt; }
@@ -265,7 +265,7 @@ export async function run(env = process.env, { checkOnly = false, buildOnly = fa
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) {
   if (process.argv.includes('--help')) {
-    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all|ort_cpu, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. Mac requires LOAD_PROGRESS_MAC_GO=true; Windows GPU cases use physical GPU0. ort_cpu uses CPU only with empty CUDA/NVIDIA visibility and GPU_ID=cpu. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
+    process.stdout.write('Set LOAD_PROGRESS_CASE=image_mlx|image_cuda|audio|training|cuda_all|ort_cpu, LOAD_PROGRESS_SOURCE_SHA, LOAD_PROGRESS_INFERENCE_SHA, LOAD_PROGRESS_OUTPUT. Mac requires LOAD_PROGRESS_MAC_GO=true; Windows GPU cases use physical GPU1. ort_cpu uses CPU only with empty CUDA/NVIDIA visibility and GPU_ID=cpu. --check-only validates source/device metadata; --build-only compiles ignored tests without model execution. cuda_all runs the three existing CUDA jobs sequentially with one shared build target. Run at the final clean pin pair.\n');
   } else if (process.argv.includes('--workflow-preflight')) {
     try {
       const prepared = workflowEnvironment(process.env);
