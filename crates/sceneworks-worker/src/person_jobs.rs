@@ -842,7 +842,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
             .with_execution_providers([CUDA::default().build().error_on_failure()])
             .map_err(ort_err)?;
     }
-    b.commit_from_file(path).map_err(ort_err)
+    crate::model_io::ort_session(b, path)
 }
 
 /// Loaded ONNX YOLO11m detector: the `ort` session plus the device it runs on.

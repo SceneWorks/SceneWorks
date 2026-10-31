@@ -274,7 +274,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
                 .map_err(ort_err)?;
         }
     }
-    b.commit_from_file(path).map_err(ort_err)
+    crate::model_io::ort_session(b, path)
 }
 
 impl Upscaler {
@@ -872,7 +872,7 @@ pub(crate) async fn upscale_image_in_memory(
                 settings,
                 &job.id,
                 cancel.clone(),
-                tokio::spawn(async move {
+                crate::load_progress::spawn(async move {
                     run_seedvr2_upscale(dir, source, factor, softness, seed, task_cancel).await
                 }),
             )
@@ -889,7 +889,7 @@ pub(crate) async fn upscale_image_in_memory(
                 settings,
                 &job.id,
                 cancel.clone(),
-                tokio::task::spawn_blocking(move || {
+                crate::load_progress::spawn_blocking(move || {
                     upscale_blocking(onnx, factor, source, task_cancel)
                 }),
             )
@@ -1078,7 +1078,7 @@ pub(crate) async fn run_image_upscale_job(
     // geometry. `None` for an opaque source, which leaves that lane exactly as it was.
     let (source_image, source_alpha) = {
         let source_path = source_path.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             crate::image_decode::decode_image_any(&source_path)
                 .map_err(|e| {
                     WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}"))
@@ -1100,7 +1100,7 @@ pub(crate) async fn run_image_upscale_job(
                 JobStatus::Running,
                 ProgressStage::Downloading,
                 0.25,
-                "Loading SeedVR2 weights.",
+                crate::load_progress::PREPARING_MODEL,
                 None,
                 None,
                 None,
@@ -1131,7 +1131,7 @@ pub(crate) async fn run_image_upscale_job(
             settings,
             &job.id,
             cancel.clone(),
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 run_seedvr2_upscale(dir, source_image, factor, softness, seed, cancel).await
             }),
         )
@@ -1150,7 +1150,7 @@ pub(crate) async fn run_image_upscale_job(
                 JobStatus::Running,
                 ProgressStage::Downloading,
                 0.25,
-                "Loading Real-ESRGAN weights.",
+                crate::load_progress::PREPARING_MODEL,
                 None,
                 None,
                 None,
@@ -1179,7 +1179,7 @@ pub(crate) async fn run_image_upscale_job(
             settings,
             &job.id,
             cancel.clone(),
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 upscale_blocking(onnx_path, factor, source_image, cancel)
             }),
         )
@@ -1369,7 +1369,7 @@ pub(crate) async fn restore_with_progress(
     // heartbeat's cancel poll (5-15 s — longer than a whole warm restore, which would otherwise
     // publish an asset the user had canceled).
     let forward_cancel = cancel.clone();
-    let forwarder = tokio::spawn(async move {
+    let forwarder = crate::load_progress::spawn(async move {
         while let Some((current, total)) = tile_rx.recv().await {
             // A failed progress post must not abort the restore; the heartbeat path owns liveness.
             if let Ok(snapshot) =
@@ -1406,7 +1406,7 @@ pub(crate) async fn restore_with_progress(
             .await
             .map(|_| ())
         }),
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             restore_image_using(
                 loader,
                 export_dir,
@@ -1512,7 +1512,7 @@ pub(crate) async fn run_iris_restore_job_using(
     let source_display = source.display_name;
     // Upright pixels first (upstream `exif_transpose`s before restoring), then split any alpha plane
     // off: the transform takes RGB and the plane is re-attached at the output geometry.
-    let (source_image, source_alpha) = tokio::task::spawn_blocking(move || {
+    let (source_image, source_alpha) = crate::load_progress::spawn_blocking(move || {
         crate::iris_restore::decode_oriented(&source_path)
             .map_err(|e| {
                 WorkerError::InvalidPayload(format!("Source image could not be loaded: {e}"))
@@ -1765,9 +1765,9 @@ pub(crate) async fn run_dataset_upscale_job(
         &job.id,
         progress_payload(
             JobStatus::LoadingModel,
-            ProgressStage::Downloading,
+            ProgressStage::LoadingModel,
             0.1,
-            "Loading upscaler.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             None,
             None,
@@ -1815,7 +1815,7 @@ pub(crate) async fn run_dataset_upscale_job(
             settings,
             &job.id,
             cancel,
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 // Deliberately RGB, unlike the library-asset lane above (sc-24111). This writes a
                 // TRAINING dataset derivative, and the trainers consume three channels — a
                 // four-channel derivative would be a format the consumer cannot read. A dataset
@@ -1841,7 +1841,7 @@ pub(crate) async fn run_dataset_upscale_job(
             tokio::fs::create_dir_all(parent).await?;
         }
         // Encode off the async runtime thread (sc-8909 / F-107).
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             upscaled
                 .save_with_format(&abs, image::ImageFormat::Png)
                 .map_err(|e| WorkerError::Io(std::io::Error::other(e)))

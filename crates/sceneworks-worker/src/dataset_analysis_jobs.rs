@@ -113,7 +113,7 @@ pub(crate) async fn run_dataset_analysis_job(
             JobStatus::LoadingModel,
             ProgressStage::LoadingModel,
             0.08,
-            "Loading CLIP image embedder.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             backend,
         ),
@@ -127,8 +127,8 @@ pub(crate) async fn run_dataset_analysis_job(
     // async body needs nothing from `items` afterward — matching the face-analysis job (sc-8836).
     let blocking_items = items;
     let job_id = job.id.clone();
-    let blocking =
-        tokio::task::spawn_blocking(move || -> WorkerResult<Vec<AnalysisEmbeddingRecord>> {
+    let blocking = crate::load_progress::spawn_blocking(
+        move || -> WorkerResult<Vec<AnalysisEmbeddingRecord>> {
             emit_event(
                 "dataset_analysis_load_start",
                 json!({ "jobId": job_id, "engine": CLIP_EMBEDDER_ID }),
@@ -203,7 +203,8 @@ pub(crate) async fn run_dataset_analysis_job(
                 }
             }
             Ok(out)
-        });
+        },
+    );
 
     // Hand the spawned blocking task to the shared scaffold (sc-8836, F-034): it owns the
     // `CancelJoinGuard`, the per-item progress select loop (with the sc-8835 cancel/heartbeat

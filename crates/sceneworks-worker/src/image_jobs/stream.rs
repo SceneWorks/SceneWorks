@@ -21,10 +21,6 @@ enum GenEvent {
         index: usize,
         phase: LoadPhase,
     },
-    LoadActivity {
-        index: usize,
-        pending: Arc<std::sync::Mutex<load_progress::PendingLoadActivity>>,
-    },
     /// One latent-resolution preview frame of image `index`'s developing render (epic 16624,
     /// sc-16904). Forwarded from a [`gen_core::PreviewSink`] by [`preview_sink_for`]; engines
     /// that don't emit previews simply never produce this variant.
@@ -160,55 +156,25 @@ fn prompt_enhancement_event_sink_for(
     }
 }
 
-fn observe_image_load_activity(
-    tx: &tokio::sync::mpsc::Sender<GenEvent>,
-    index: usize,
-) -> gen_core::LoadActivityObserver {
-    let tx = tx.clone();
-    load_progress::observe(move |pending| {
-        let _ = tx.blocking_send(GenEvent::LoadActivity { index, pending });
-    })
-}
-
-/// Route preparation can hash a changed checkpoint before a generator exists. Run that
-/// read-only work off the async runtime and report only observed hash work; warm source stamps
-/// remain silent. The existing helper keeps heartbeats alive throughout a large file read.
+/// Source checks can hash multi-GB files. The job-wide observer follows the blocking task;
+/// the shared poster reports the latest I/O state while this helper keeps heartbeats alive.
 async fn prepare_image_route_with_progress<T: Send + 'static>(
     api: &ApiClient,
     settings: &Settings,
     job_id: &str,
     prepare: impl FnOnce() -> WorkerResult<T> + Send + 'static,
 ) -> WorkerResult<T> {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let task = tokio::task::spawn_blocking(move || {
-        let _observer = gen_core::LoadActivityObserver::new(move |activity| {
-            let _ = tx.send(activity);
-        });
-        prepare()
-    });
-    let pending = heartbeat_while_blocking(api, settings, job_id, "image source preparation", task);
-    tokio::pin!(pending);
-    let mut open = true;
-    loop {
-        tokio::select! {
-            // Drain the ordered observations before returning a completed prepared route.
-            biased;
-            activity = rx.recv(), if open => {
-                let Some(activity) = activity else { open = false; continue; };
-                update_job(api, job_id, progress_payload(
-                    JobStatus::LoadingModel, ProgressStage::LoadingModel, 0.0,
-                    &format!("{}.", load_activity_message(activity)),
-                    None, None, None,
-                )).await?;
-            }
-            result = &mut pending => return result,
-        }
-    }
+    let task = crate::load_progress::spawn_blocking(prepare);
+    heartbeat_while_blocking(api, settings, job_id, "image source preparation", task).await
 }
 
 fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, progress: Progress) {
+    crate::load_progress::generator_progress(&progress);
     // Internal resource boundary: never extend the worker wire protocol or synthesize Step 0.
-    if matches!(progress, Progress::ConditioningComplete) {
+    if matches!(
+        progress,
+        Progress::ConditioningComplete | Progress::PromptEncodingComplete
+    ) {
         return;
     }
     // The prompt-upsampling COMPLETION boundary has no consumer on this lane and stays internal
@@ -223,12 +189,18 @@ fn send_gen_progress(tx: &tokio::sync::mpsc::Sender<GenEvent>, index: usize, pro
             current,
             total,
         },
-        Progress::ConditioningComplete | Progress::PromptUpsamplingComplete => {
+        Progress::ConditioningComplete
+        | Progress::PromptEncodingComplete
+        | Progress::PromptUpsamplingComplete => {
             unreachable!("internal boundary filtered above")
         }
         Progress::Decoding => GenEvent::Decoding { index },
         Progress::Loading(phase) => GenEvent::Loading { index, phase },
-        Progress::Upsampling { tokens, max_tokens } => GenEvent::Upsampling { index, tokens, max_tokens },
+        Progress::Upsampling { tokens, max_tokens } => GenEvent::Upsampling {
+            index,
+            tokens,
+            max_tokens,
+        },
     };
     let _ = tx.blocking_send(event);
 }
@@ -284,7 +256,6 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
-        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
@@ -327,7 +298,6 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
-        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
             index,
@@ -379,7 +349,6 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
-        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(index, item, preview_sink_for(&tx, index), &mut on_progress)?
         else {
@@ -413,7 +382,6 @@ where
 {
     for (index, item) in items.into_iter().enumerate() {
         let _cache_release = RequestCacheRelease;
-        let _load_observer = observe_image_load_activity(&tx, index);
         let mut on_progress = |progress| send_gen_progress(&tx, index, progress);
         let Some(image) = generate(
             index,
@@ -457,7 +425,6 @@ where
     ) -> WorkerResult<(Vec<(u32, u32, Vec<u8>)>, Option<JsonObject>)>,
 {
     let _cache_release = RequestCacheRelease;
-    let _load_observer = observe_image_load_activity(&tx, 0);
     let mut on_progress = |progress| send_gen_progress(&tx, 0, progress);
     let (images, facts) = generate(preview_sink_for(&tx, 0), &mut on_progress)?;
     if images.len() != expected {
@@ -483,6 +450,37 @@ where
 fn conditioning_complete_stays_internal_and_preserves_first_positive_step() {
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
     send_gen_progress(&tx, 2, Progress::ConditioningComplete);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    send_gen_progress(
+        &tx,
+        2,
+        Progress::Step {
+            current: 1,
+            total: 4,
+        },
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(GenEvent::Step {
+            index: 2,
+            current: 1,
+            total: 4
+        })
+    ));
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+}
+
+#[cfg(test)]
+#[test]
+fn prompt_encoding_complete_stays_internal_and_preserves_first_positive_step() {
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    send_gen_progress(&tx, 2, Progress::PromptEncodingComplete);
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -618,7 +616,7 @@ where
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
-    let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+    let blocking = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
         emit_load_event(
             "image_pipeline_load_start",
             &job_id,
@@ -723,7 +721,7 @@ where
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
-    let blocking = tokio::spawn(async move {
+    let blocking = crate::load_progress::spawn(async move {
         emit_load_event(
             "image_pipeline_load_start",
             &job_id,
@@ -890,7 +888,7 @@ where
     let cancel = CancelFlag::new();
     let (tx, rx) = tokio::sync::mpsc::channel::<GenEvent>(64);
     let blocking_cancel = cancel.clone();
-    let blocking = tokio::spawn(async move {
+    let blocking = crate::load_progress::spawn(async move {
         emit_load_event(
             "image_pipeline_load_start",
             &job_id,

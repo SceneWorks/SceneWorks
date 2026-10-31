@@ -381,7 +381,9 @@ fn run_on_sam3_thread<T: Send + 'static>(
     job: impl FnOnce() -> WorkerResult<T> + Send + 'static,
 ) -> WorkerResult<T> {
     let (reply_tx, reply_rx) = std::sync::mpsc::channel::<WorkerResult<T>>();
+    let progress_context = crate::load_progress::Context::capture();
     let boxed: Sam3Job = Box::new(move || {
+        let _progress = progress_context.install();
         let outcome =
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)).unwrap_or_else(|_| {
                 Err(WorkerError::Engine(
@@ -1303,7 +1305,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
         let masks = runtime
             .block_on(async move {
-                tokio::task::spawn_blocking(move || {
+                crate::load_progress::spawn_blocking(move || {
                     segment_all_persons_in_memory(
                         &model,
                         &tokenizer,

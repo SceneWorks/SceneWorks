@@ -854,7 +854,7 @@ mod tests {
                         .with_mode(mode)
                         .with_locked_annotations(rows);
                 let (tx, rx) = tokio::sync::mpsc::channel(8);
-                let blocking = tokio::task::spawn_blocking(move || {
+                let blocking = crate::load_progress::spawn_blocking(move || {
                     for event in [
                         GenEvent::Upsampling {
                             index: 0,
@@ -995,7 +995,7 @@ mod tests {
             }
             let expected_prompt = input.prompt.clone();
             let (tx, rx) = tokio::sync::mpsc::channel(4);
-            let blocking = tokio::task::spawn_blocking(move || {
+            let blocking = crate::load_progress::spawn_blocking(move || {
                 tx.blocking_send(GenEvent::PromptEnhancement {
                     index: 0,
                     expected_prompt,
@@ -1073,7 +1073,7 @@ mod tests {
         let cancel = CancelFlag::new();
         let producer_cancel = cancel.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(2);
-        let blocking = tokio::spawn(async move {
+        let blocking = crate::load_progress::spawn(async move {
             tx.send(GenEvent::Upsampling {
                 index: 0,
                 tokens: 0,

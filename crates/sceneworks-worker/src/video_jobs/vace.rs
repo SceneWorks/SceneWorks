@@ -377,7 +377,7 @@ pub(super) async fn load_source_video_frames(
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 async fn select_extracted_frames(work_dir: PathBuf, count: usize) -> WorkerResult<Vec<Image>> {
-    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("png"))
@@ -963,7 +963,7 @@ async fn select_anchor_frames(
     count: usize,
     take: ClipFramePosition,
 ) -> WorkerResult<Vec<Image>> {
-    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|path| path.extension().and_then(|s| s.to_str()) == Some("png"))

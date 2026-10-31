@@ -1422,7 +1422,7 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
 
   assert.match(
     workflow,
-    /options: \[legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact\]/,
+    /options: \[legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact, nax-kernel-guard\]/,
   );
 });
 
@@ -2864,9 +2864,14 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // ...and the skipped test must demonstrably run somewhere. Without this, deleting the
   // self-hosted half would drop the entire NAX verdict while every lane stayed green —
   // the same declared-but-unreachable trap as sc-17026, one job over.
-  const guardedNax = mlx.match(/^\s+run: [>|]-?\n\s+python3\.12 -I scripts\/ci\/metal_execution_lock\.py --wait-seconds ([0-9]+(?:\.[0-9]+)?) --\s+node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard$/m);
-  assert.ok(guardedNax, "self-hosted NAX execution must take the shared Metal lease before the same test argv");
-  assert.ok(Number.isFinite(Number(guardedNax[1])) && Number(guardedNax[1]) > 0, "Metal lease wait must be explicit, finite and positive");
+  assert.match(mlx, /^\s+run: cargo test -p sceneworks-worker --test nax_guard --no-run$/m);
+  assert.doesNotMatch(mlx, /unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard/);
+  const manualNax = await source(".github/workflows/nax-kernel-validation.yml");
+  assert.match(manualNax, /python3\.12 -I scripts\/ci\/metal_execution_lock\.py --wait-seconds 2700 --/);
+  assert.match(manualNax, /node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard/);
+  assert.doesNotMatch(manualNax, /--test nax_guard --no-run/);
+  assert.match(mlx, /inputs\.verification_profile == 'nax-kernel-guard'/);
+  assert.match(mlx, /uses: \.\/\.github\/workflows\/nax-kernel-validation\.yml/);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
   // outside the worker and is NOT under `crates/**`, so without this path entry the

@@ -20614,7 +20614,7 @@ impl SenseNovaPhases {
             }
             Progress::Loading(_) => self.other_loading_boundaries += 1,
             Progress::Step { .. } => {}
-            Progress::PromptUpsamplingComplete => {}
+            Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => {}
             Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
         }
     }

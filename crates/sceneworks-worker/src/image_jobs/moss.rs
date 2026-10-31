@@ -983,34 +983,6 @@ async fn generate_moss_stream_with_runtime(
         ),
     )
     .map_err(WorkerError::InvalidPayload)?;
-    // Pinning blocks this runtime thread, so a spawned task posts the per-file progress.
-    let (pin_progress, mut pin_events) = tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
-    let poster = {
-        let api = api.clone();
-        let job_id = job.id.clone();
-        let backend = backend_label(&settings.gpu_id).to_owned();
-        tokio::spawn(async move {
-            while let Some((done, total)) = pin_events.recv().await {
-                let message = format!("Verifying model files ({}/{total}).", done + 1);
-                let payload = image_progress(
-                    JobStatus::Preparing,
-                    ProgressStage::Preparing,
-                    0.05,
-                    &message,
-                    None,
-                    &backend,
-                );
-                if let Err(error) = update_job(&api, &job_id, payload).await {
-                    tracing::debug!(
-                        event = "moss_pin_progress_post_failed",
-                        jobId = %job_id,
-                        error = %error,
-                        "pin progress post failed; the job's next progress post reports the outcome"
-                    );
-                }
-            }
-        })
-    };
     let prepared = runtime.prepare(
         MossPreparation {
             variant,
@@ -1021,12 +993,8 @@ async fn generate_moss_stream_with_runtime(
             request,
             check: None,
         },
-        &mut |done, total| {
-            let _ = pin_progress.send((done, total));
-        },
+        &mut |_, _| {},
     );
-    drop(pin_progress);
-    let _ = poster.await;
     let spec = prepared?;
     let peak = runtime.cold_peak(MossColdRequest {
         variant,
@@ -3277,7 +3245,10 @@ mod moss_consumer_tests {
                 .route("/api/v1/workers/:id/heartbeat",post(||async{Json(json!({"id":"worker","gpuId":"0","status":"busy","currentJobId":null,"capabilities":[],"loadedModels":[],"registeredAt":"2026-10-18T00:00:00Z","lastSeenAt":"2026-10-18T00:00:00Z"}))})).with_state(recorder);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             settings.api_url = format!("http://{}", listener.local_addr().unwrap());
-            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let server =
+                crate::load_progress::spawn(
+                    async move { axum::serve(listener, app).await.unwrap() },
+                );
             let api = ApiClient::new(&settings);
             let job: JobSnapshot = serde_json::from_value(job_value).unwrap();
             let result = run_image_generate_job(&api, &settings, &job).await;

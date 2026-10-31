@@ -3439,7 +3439,7 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
         Some(objective) => {
             let task_settings = settings.clone();
             let config = plan.config.clone();
-            let resolved = tokio::task::spawn_blocking(move || {
+            let resolved = crate::load_progress::spawn_blocking(move || {
                 crate::iris_task_training::task_load_inputs(&task_settings, objective, &config)
             })
             .await
@@ -3523,7 +3523,7 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
         let fleet_job_id = job.id.clone();
         let fleet_plan = plan.clone();
         let fleet_cancel = cancel.clone();
-        let blocking = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        let blocking = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
             crate::iris_dist::drive_rank_fleet(
                 &fleet_settings,
                 &fleet_job_id,
@@ -3552,7 +3552,7 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
     drop(launcher);
 
     let blocking = {
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
             // Every trainer is lazy: the candle trainers build the frozen base inside `train()`
             // (sc-7817) and the MLX trainers (`mlx_gen::train::lazy::LazyTrainer`, sc-2124) load it
             // on first need — in `train()`, or in `validate()` when custom `lora_target_modules`
@@ -3576,6 +3576,7 @@ pub(crate) async fn run_training_execution_drive_observing_cancel(
                 // `progress_cancel` clone is the same flag threaded into the `TrainingRequest`.
                 let progress_cancel = request.cancel.clone();
                 let mut on_progress = |progress: TrainingProgress| {
+                    crate::load_progress::training_progress(&progress);
                     if tx.blocking_send(TrainEvent::Progress(progress)).is_err() {
                         progress_cancel.cancel();
                     }
@@ -3877,7 +3878,7 @@ impl SamplePersister {
         let stem = self.stem.clone();
         let sample_steps = self.cfg.sample_steps;
         let sample_guidance_scale = self.cfg.sample_guidance_scale;
-        let persisted = tokio::task::spawn_blocking(move || {
+        let persisted = crate::load_progress::spawn_blocking(move || {
             write_training_sample(
                 sample_root.as_deref(),
                 project_root.as_deref(),
@@ -4013,9 +4014,11 @@ async fn verified_moss_resume_step(
     let output_dir =
         resolve_training_output_dir(settings, &plan.output.output_dir, "Training outputDir")?;
     let file_name = plan.output.file_name.clone();
-    tokio::task::spawn_blocking(move || latest_moss_training_resume_step(&output_dir, &file_name))
-        .await
-        .map_err(|error| task_join_error("MOSS checkpoint verification", error))?
+    crate::load_progress::spawn_blocking(move || {
+        latest_moss_training_resume_step(&output_dir, &file_name)
+    })
+    .await
+    .map_err(|error| task_join_error("MOSS checkpoint verification", error))?
 }
 
 /// Consume training events from the blocking thread: stream staged progress, poll
@@ -4353,7 +4356,7 @@ pub(crate) fn map_training_progress(
             JobStatus::Running,
             ProgressStage::LoadingModel,
             0.12,
-            "Loading base model.".to_owned(),
+            crate::load_progress::PREPARING_MODEL.to_owned(),
         ),
         TrainingProgress::Caching { current, total } => {
             let span = if total == 0 {
@@ -5770,7 +5773,7 @@ mod tests {
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         (format!("http://{address}"), state)

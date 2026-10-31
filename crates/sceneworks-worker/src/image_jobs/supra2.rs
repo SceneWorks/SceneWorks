@@ -401,7 +401,7 @@ mod tests {
                 .with_state(api);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
             (format!("http://{address}"), posts)
@@ -810,7 +810,7 @@ mod tests {
                 .with_state(posts.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
             (format!("http://{address}"), posts)
@@ -1024,7 +1024,7 @@ mod tests {
                 .with_state(api);
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
             (format!("http://{address}"), posts)
@@ -1276,7 +1276,7 @@ mod tests {
                 .with_state(posts.clone());
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 axum::serve(listener, app).await.unwrap();
             });
             (format!("http://{address}"), posts)
@@ -2001,7 +2001,7 @@ mod tests {
             let (tx, rx) = tokio::sync::mpsc::channel::<lane::GenEvent>(64);
             let producer_request = request.clone();
             let producer_seen = Arc::clone(&seen);
-            let blocking = tokio::task::spawn_blocking(move || {
+            let blocking = crate::load_progress::spawn_blocking(move || {
                 produce(&producer_request, false, producer_seen, tx)
             });
             let (base_url, posts) = crate::tests::spawn_no_user_cancel_capture_stub().await;

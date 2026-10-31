@@ -727,6 +727,7 @@ fn native_starvector_request(
             WorkerError::InvalidPayload("sampling.repetitionContext does not fit usize".to_owned())
         })?;
     let text_request = TextLlmRequest {
+        progress: Some(crate::load_progress::text_observer()),
         messages: vec![Message {
             role: Role::User,
             content: vec![Content::Image(image)],
@@ -1209,7 +1210,7 @@ pub(crate) async fn run_vector_job_with_provider(
     let blocking_request = request.clone();
     let (progress_tx, progress_rx) = tokio::sync::watch::channel(0);
     let blocking_job_id = job.id.clone();
-    let task = tokio::task::spawn_blocking(move || {
+    let task = crate::load_progress::spawn_blocking(move || {
         collect_svg_source(
             &blocking_job_id,
             blocking_provider.as_ref(),
@@ -5531,7 +5532,7 @@ async fn render_preview_with_size(
 ) -> WorkerResult<()> {
     let svg = svg.to_owned();
     let path = path.to_owned();
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         let tree = usvg::Tree::from_str(&svg, &usvg::Options::default()).map_err(|error| {
             WorkerError::InvalidPayload(format!("provider SVG cannot be rendered: {error}"))
         })?;

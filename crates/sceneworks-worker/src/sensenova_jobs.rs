@@ -706,7 +706,7 @@ pub(crate) async fn run_vqa_job(
             JobStatus::Preparing,
             ProgressStage::LoadingModel,
             0.15,
-            "Loading visual question model.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             &backend,
         ),
@@ -734,7 +734,7 @@ pub(crate) async fn run_vqa_job(
         VQA_CANCEL_MESSAGE,
         "VQA task join",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || -> WorkerResult<String> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
             vqa_generate(
                 &weights_dir,
                 &source,
@@ -850,7 +850,7 @@ fn vqa_generate(
         ..Default::default()
     };
     let answer = runtime
-        .run_vqa(
+        .run_vqa_with_progress(
             &context,
             request,
             question,
@@ -859,6 +859,7 @@ fn vqa_generate(
             Sampler::Greedy,
             T2iOptions::default(),
             Some(cancel),
+            &mut |progress| crate::load_progress::generator_progress(&progress),
         )
         .map_err(|error| {
             map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
@@ -925,7 +926,7 @@ fn vqa_generate(
         ..Default::default()
     };
     let answer = runtime
-        .run_vqa(
+        .run_vqa_with_progress(
             &context,
             request,
             question,
@@ -934,6 +935,7 @@ fn vqa_generate(
             Sampler::Greedy,
             T2iOptions::default(),
             Some(cancel),
+            &mut |progress| crate::load_progress::generator_progress(&progress),
         )
         .map_err(|error| {
             map_sensenova_engine_error(error, "SenseNova VQA failed", VQA_CANCEL_MESSAGE)
@@ -1167,7 +1169,7 @@ pub(crate) async fn run_interleave_job(
     let cancel = gen_core::CancelFlag::new();
     let task_cancel = cancel.clone();
     let interleave_task =
-        tokio::task::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<(String, Vec<Image>)> {
             interleave_generate(
                 &weights_dir,
                 &input_images,
@@ -1218,7 +1220,7 @@ pub(crate) async fn run_interleave_job(
     // than letting the seconds-long write finish.
     let job_owned = job.clone();
     let workflow_source = crate::image_jobs::workflow_source(settings, &job.payload);
-    let write_task = tokio::task::spawn_blocking(move || {
+    let write_task = crate::load_progress::spawn_blocking(move || {
         write_interleaved_document(
             request,
             job_owned,
@@ -1359,7 +1361,7 @@ fn interleave_generate(
             params.max_images,
             None,
             cancel,
-            &mut |_| {},
+            &mut |progress| crate::load_progress::generator_progress(&progress),
         )
         .map_err(|error| {
             map_sensenova_engine_error(
@@ -1453,7 +1455,7 @@ fn interleave_generate(
         ..Default::default()
     };
     let out = runtime
-        .run_interleave(
+        .run_interleave_with_progress(
             &context,
             request,
             prompt,
@@ -1465,6 +1467,7 @@ fn interleave_generate(
             params.max_new_tokens,
             params.max_images,
             cancel,
+            &mut |progress| crate::load_progress::generator_progress(&progress),
         )
         .map_err(|error| {
             map_sensenova_engine_error(
@@ -2254,7 +2257,7 @@ mod tests {
                 4,
                 None,
                 &gen_core::CancelFlag::new(),
-                &mut |_| {},
+                &mut |progress| crate::load_progress::generator_progress(&progress),
             )
             .expect("interleave_gen");
         assert!(!out.images.is_empty(), "expected >= 1 generated image");
@@ -2404,7 +2407,7 @@ mod tests {
                 4,
                 None,
                 &gen_core::CancelFlag::new(),
-                &mut |_| {},
+                &mut |progress| crate::load_progress::generator_progress(&progress),
             )
             .expect("interleave_gen");
         assert!(

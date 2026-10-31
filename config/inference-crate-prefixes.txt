@@ -42,6 +42,7 @@ crates/contracts/gen-core-telemetry
 crates/contracts/gen-core-testkit
 crates/contracts/gen-core-tokenizer
 crates/contracts/gen-core-train
+crates/contracts/load-progress
 crates/kernels/candle-quant-kernels
 crates/llm/candle-llm
 crates/llm/mlx-llm

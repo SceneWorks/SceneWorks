@@ -1887,6 +1887,14 @@
   cursor: default;
 }
 
+.su-job-message {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
 .su-job-error {
   margin: 0;
   font-size: 11.5px;
