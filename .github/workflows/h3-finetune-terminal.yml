@@ -584,7 +584,11 @@ jobs:
       # packet it received are downloaded and re-validated, the decision is recomputed from those
       # anchors, the subset must sit in this lane's allocation and must not have passed there
       # already, and the record — with `git diff --name-only <prior sha>..<this sha>` — is bound into
-      # the plan and retained as evidence. See adoptPriorMatrixDecision.
+      # the plan and retained as evidence. See adoptPriorMatrixDecision. A decision measured at another
+      # inference pin is adopted only when this lane's pin descends from it (merge-base --is-ancestor in
+      # the full-history inference checkout, where every ancestor of the pin is present, so an absent
+      # prior pin is a refusal, not a fetch), with the native evidence SHA unchanged; the change and the
+      # first-parent log between the pins are recorded as inferenceChange.
       - name: Adopt the declared prior measured matrix decision
         if: ${{ fromJSON(inputs.campaign_request).prior_matrix_decision != null }}
         shell: bash
@@ -599,7 +603,7 @@ jobs:
           import {appendFile, mkdtemp, readFile, writeFile} from "node:fs/promises";
           import path from "node:path";
           import {adoptPriorMatrixDecision} from "./scripts/h3-finetune-terminal.mjs";
-          import {loadPriorDecisionEvidence} from "./scripts/lib/h3-prior-decision.mjs";
+          import {inferencePinAncestry, loadPriorDecisionEvidence} from "./scripts/lib/h3-prior-decision.mjs";
           const env = process.env, request = JSON.parse(env.H3_STAGE_REQUEST || "{}"), declared = request.prior_matrix_decision;
           assert.ok(declared && typeof declared === "object", "prior_matrix_decision must be {run_id, attempt}");
           assert.ok(request.case_id === undefined, "a prior-decision lane takes case_ids, not case_id");
@@ -611,13 +615,15 @@ jobs:
             download: async ({runId, name, directory}) => execFileSync("gh", ["run", "download", runId, "--repo", env.GITHUB_REPOSITORY, "--name", name, "--dir", directory], {stdio: "inherit", env})});
           const changedFiles = loaded.decisionPlan.sceneworks === plan.sceneworks ? [] : execFileSync("git", ["diff", "--name-only", `${loaded.decisionPlan.sceneworks}..${plan.sceneworks}`], {encoding: "utf8"}).split("\n").filter(Boolean);
           const caseIds = Array.isArray(request.case_ids) ? request.case_ids.map(String) : null;
-          const record = await adoptPriorMatrixDecision(plan, {backend: env.H3_STAGE_BACKEND, decisionRun: loaded.decisionRun, decisionPlan: loaded.decisionPlan, packets: loaded.packets, priorEvidenceRoot: loaded.priorEvidenceRoot, caseIds, changedFiles});
+          const inferenceRoot = path.join(env.GITHUB_WORKSPACE, "inference"), inferenceGit = args => execFileSync("git", args, {cwd: inferenceRoot, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"]});
+          const inferenceAncestry = ({prior, own}) => { assert.equal(inferenceGit(["rev-parse", "HEAD"]).trim(), own, "the inference checkout is not this lane's pin"); return inferencePinAncestry({git: inferenceGit, prior, own}); };
+          const record = await adoptPriorMatrixDecision(plan, {backend: env.H3_STAGE_BACKEND, decisionRun: loaded.decisionRun, decisionPlan: loaded.decisionPlan, packets: loaded.packets, priorEvidenceRoot: loaded.priorEvidenceRoot, caseIds, changedFiles, inferenceAncestry});
           const adopted = path.join(plan.output, "prior-decision-plan.json");
           await writeFile(adopted, JSON.stringify(plan, null, 2) + "\n", {flag: "wx"});
           const evidence = {...record, evidenceArtifact: loaded.evidenceArtifact, anchorArtifacts: Object.fromEntries(Object.entries(loaded.packets).map(([b, v]) => [b, v.artifact]))};
           for (const target of [path.join(plan.output, "prior-matrix-decision.json"), path.join(env.H3_STAGE_EVIDENCE, "prior-matrix-decision.json")]) await writeFile(target, JSON.stringify(evidence, null, 2) + "\n", {flag: "wx"});
           await appendFile(env.GITHUB_ENV, `H3_PLAN_EFFECTIVE=${adopted}\n`);
-          console.log(JSON.stringify({priorDecision: {run: record.decisionRun, selected: record.decision.selectedBackend, subset: record.subsetCaseIds, priorPassed: record.priorPassedCaseIds.length, sourceShaDifference: {from: record.sourceShaDifference.from, to: record.sourceShaDifference.to, files: record.sourceShaDifference.files.length}}}));
+          console.log(JSON.stringify({priorDecision: {run: record.decisionRun, selected: record.decision.selectedBackend, subset: record.subsetCaseIds, priorPassed: record.priorPassedCaseIds.length, sourceShaDifference: {from: record.sourceShaDifference.from, to: record.sourceShaDifference.to, files: record.sourceShaDifference.files.length}, inferenceChange: record.inferenceChange ?? null}}));
           NODE
       - name: Resolve the reduced operational case set for this backend
         shell: bash

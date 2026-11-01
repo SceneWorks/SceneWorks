@@ -879,8 +879,11 @@ export async function verifyMatrixAdmission(p) {
   // A declared prior decision's anchors were measured at ITS SceneWorks source, recorded with the
   // SHA difference to this plan; everything else about them (pin, receipt hashes, wall time) holds.
   if(p.priorMatrixDecision){assert.equal(p.priorMatrixDecision.kind,PRIOR_DECISION_KIND);sha40(p.priorMatrixDecision.sourceSha);assert.deepEqual(p.priorMatrixDecision.decision,p.matrixDecision,'prior decision record differs from the plan decision');assert.equal(p.priorMatrixDecision.sourceShaDifference?.from,p.priorMatrixDecision.sourceSha);assert.equal(p.priorMatrixDecision.sourceShaDifference?.to,p.sceneworks);assert.ok(Array.isArray(p.priorMatrixDecision.sourceShaDifference.files));}
-  const anchorSha=p.priorMatrixDecision?.sourceSha??p.sceneworks;
-  for(const anchor of anchors){sha64(anchor.receiptInput?.sha256);assert.equal(await hashFile(anchor.receiptInput.path),anchor.receiptInput.sha256);const row=await json(anchor.receiptInput.path);assert.equal(row.status,'passed');assert.equal(row.caseId,anchor.caseId);assert.equal(row.sceneworks,anchorSha);assert.equal(row.inference,p.inference);assert.ok(row.runId&&row.runAttempt&&row.verified?.files?.length);assert.equal(Date.parse(row.completed)-Date.parse(row.started),anchor.wallMs,'anchor must be measured from the actual inline execution, never an estimate');assert.equal(anchor.sourceSha,anchorSha);assert.equal(anchor.pinSha,p.inference);}
+  // A recorded inference pin change: the anchors ran at the prior pin, this plan at a descendant.
+  const inferenceChange=p.priorMatrixDecision?.inferenceChange;
+  if(inferenceChange!==undefined){sha40(inferenceChange?.prior);assert.equal(inferenceChange.own,p.inference,'recorded inference change does not end at this plan\'s pin');assert.notEqual(inferenceChange.prior,inferenceChange.own);assert.equal(inferenceChange.descends,true,'an adopted inference change must descend');assert.ok(Array.isArray(inferenceChange.firstParentLog)&&inferenceChange.firstParentLog.length>0,'recorded inference change carries its first-parent log');}
+  const anchorSha=p.priorMatrixDecision?.sourceSha??p.sceneworks,anchorPin=inferenceChange?.prior??p.inference;
+  for(const anchor of anchors){sha64(anchor.receiptInput?.sha256);assert.equal(await hashFile(anchor.receiptInput.path),anchor.receiptInput.sha256);const row=await json(anchor.receiptInput.path);assert.equal(row.status,'passed');assert.equal(row.caseId,anchor.caseId);assert.equal(row.sceneworks,anchorSha);assert.equal(row.inference,anchorPin);assert.ok(row.runId&&row.runAttempt&&row.verified?.files?.length);assert.equal(Date.parse(row.completed)-Date.parse(row.started),anchor.wallMs,'anchor must be measured from the actual inline execution, never an estimate');assert.equal(anchor.sourceSha,anchorSha);assert.equal(anchor.pinSha,anchorPin);}
 }
 // ---------------------------------------------------------------------------
 // Per-case model storage (sc-26691). Each real case's owned service writes its own import copy, a
@@ -1363,8 +1366,14 @@ async function readRetainedAnchorPacket(directory, { backend, sceneworks, infere
  *   the same backend and are excluded from (never re-run in) the subset.
  * - caseIds: an explicit subset, or null for "the lane's allocation minus what already passed".
  * - changedFiles: `git diff --name-only <prior sha>..<this sha>`.
+ * - inferenceAncestry: ({prior, own}) => {prior, own, descends, firstParentLog}, read from the lane's
+ *   inference checkout (lib/h3-prior-decision.mjs inferencePinAncestry). Needed only when the prior
+ *   decision was measured at another inference pin: the decision is adopted across that change only
+ *   when this lane's pin DESCENDS from the prior pin, with the native evidence SHA unchanged, and the
+ *   retained packets/passed cases are validated against THEIR recorded pin (the prior one). The
+ *   change is recorded as `inferenceChange`, never hidden.
  */
-export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisionPlan, packets, priorEvidenceRoot, caseIds = null, changedFiles }) {
+export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisionPlan, packets, priorEvidenceRoot, caseIds = null, changedFiles, inferenceAncestry = null }) {
   assert.equal(p.inventory, 'reduced-v1', 'a prior matrix decision applies to the reduced inventory only');
   assert.ok(['mlx', 'cuda'].includes(backend));
   assert.ok(p.matrixDecision === undefined && p.matrixAnchors === undefined && p.priorMatrixDecision === undefined, 'a prior decision is adopted once, into a plan without its own decision');
@@ -1373,13 +1382,25 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
   const prior = decisionPlan;
   validateMatrixDecision(prior?.matrixDecision); assert.equal(prior?.matrixDecision?.status, 'selected', 'the declared prior run must carry a measured, selected matrix decision');
   sha40(prior.sceneworks); assert.equal(prior.inventory, 'reduced-v1'); assert.deepEqual(prior.source, p.source);
-  assert.equal(prior.inference, p.inference, 'the prior decision must share this lane\'s inference pin');
   assert.equal(prior.nativeEvidence?.sha, p.nativeEvidence?.sha, 'the prior decision must share this lane\'s native evidence SHA');
+  // The decision run's anchors and passed cases ran at ITS inference pin. A lane at another pin adopts
+  // the decision only when that pin descends from the prior one (and the native evidence SHA above is
+  // identical); the change is recorded plainly, with the first-parent log between the two pins.
+  let inferenceChange = null;
+  if (prior.inference !== p.inference) {
+    sha40(prior.inference); sha40(p.inference);
+    assert.equal(typeof inferenceAncestry, 'function', `the prior decision was measured at inference ${prior.inference}, not this lane's ${p.inference}; adopting it across a pin change needs the lane's inference ancestry`);
+    const ancestry = await inferenceAncestry({ prior: prior.inference, own: p.inference });
+    assert.equal(ancestry?.prior, prior.inference, 'inference ancestry answered for another prior pin'); assert.equal(ancestry?.own, p.inference, 'inference ancestry answered for another lane pin');
+    assert.equal(ancestry.descends, true, `this lane's inference pin ${p.inference} does not descend from the prior decision's pin ${prior.inference}; the decision is not adopted across it`);
+    assert.ok(Array.isArray(ancestry.firstParentLog) && ancestry.firstParentLog.length > 0 && ancestry.firstParentLog.every(line => typeof line === 'string' && line), 'the first-parent inference log between the two pins must be recorded');
+    inferenceChange = { prior: prior.inference, own: p.inference, descends: true, firstParentLog: [...ancestry.firstParentLog] };
+  }
   assert.ok(Array.isArray(changedFiles) && changedFiles.every(file => typeof file === 'string'), 'the git difference between the two SceneWorks SHAs must be recorded');
   assert.equal(String(packets?.[decisionRun.backend]?.runId), String(decisionRun.runId), 'the decision run\'s own anchor packet must come from that run');
   assert.equal(String(packets?.[decisionRun.backend]?.runAttempt), String(decisionRun.attempt), 'the decision run\'s own anchor packet must come from that attempt');
   const loaded = {};
-  for (const b of ['mlx', 'cuda']) { assert.ok(packets?.[b]?.directory, `retained ${b} anchor packet required`); loaded[b] = await readRetainedAnchorPacket(packets[b].directory, { backend: b, sceneworks: prior.sceneworks, inference: p.inference, nativeEvidenceSha: p.nativeEvidence.sha, runId: packets[b].runId, runAttempt: packets[b].runAttempt }); }
+  for (const b of ['mlx', 'cuda']) { assert.ok(packets?.[b]?.directory, `retained ${b} anchor packet required`); loaded[b] = await readRetainedAnchorPacket(packets[b].directory, { backend: b, sceneworks: prior.sceneworks, inference: prior.inference, nativeEvidenceSha: p.nativeEvidence.sha, runId: packets[b].runId, runAttempt: packets[b].runAttempt }); }
   const anchors = [...loaded.mlx.anchors, ...loaded.cuda.anchors];
   const key = anchor => `${anchor.backend}|${anchor.caseId}|${anchor.receiptInput?.sha256}|${anchor.wallMs}`;
   assert.deepEqual(anchors.map(key).sort(), (prior.matrixAnchors ?? []).map(key).sort(), 'the retained anchor packets are not the anchors the prior decision was measured from');
@@ -1444,7 +1465,9 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
     notCovered: allocation.filter(id => !priorPassed.includes(id) && !subset.includes(id)),
     caseDefinitionBasis, caseDefinitionDifferences,
     sourceShaDifference: { from: prior.sceneworks, to: p.sceneworks, files: [...changedFiles] },
-    meaning: 'Matrix allocation adopted from a decision MEASURED in the named prior run (recomputed from its retained anchors). The anchors ran at sourceShaDifference.from; this lane runs at .to. Cases in priorPassedCaseIds are that run\'s evidence and are re-validated separately (verify-split-backend), never re-labelled as this run\'s. reusedNativeWitnesses ran at the same native evidence SHA in the named packet runs; this lane does not re-run them, and their retained receipts/logs are re-hashed by verify-split-backend.',
+    ...(inferenceChange ? { inferenceChange } : {}),
+    meaning: 'Matrix allocation adopted from a decision MEASURED in the named prior run (recomputed from its retained anchors). The anchors ran at sourceShaDifference.from; this lane runs at .to. Cases in priorPassedCaseIds are that run\'s evidence and are re-validated separately (verify-split-backend), never re-labelled as this run\'s. reusedNativeWitnesses ran at the same native evidence SHA in the named packet runs; this lane does not re-run them, and their retained receipts/logs are re-hashed by verify-split-backend.'
+      + (inferenceChange ? ' The anchors, packets and priorPassedCaseIds ran at inference inferenceChange.prior and were validated against that pin; this lane runs at inferenceChange.own, which descends from it (first-parent log recorded). The native evidence SHA is unchanged.' : ''),
   };
   await verifyMatrixAdmission(p);
   return p.priorMatrixDecision;
@@ -1454,7 +1477,9 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
 // different SceneWorks SHAs (a prior run's passed cases plus a prior-decision subset run). Each
 // case is re-validated against the exact plan it ran under (its retained adapter-plan.json, bound
 // by planSha256), every case is attributed to its segment and SHA, the segments must share one
-// measured decision, pin and native evidence, and a gap is reported as a gap. This is NOT the
+// measured decision and native evidence, and one inference pin unless the subset segment's record
+// declares a (descendant) inference change, in which case each segment runs at its recorded pin and
+// the pin is reported per segment and case. A gap is reported as a gap. This is NOT the
 // single-SHA backend readback and is never accepted as one.
 // A reused witness re-verified from the segment's retained files (output-relative paths), bound to
 // the proof the plan actually carried.
@@ -1489,10 +1514,11 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
       const plan = await json(path.join(dir, 'adapter-plan.json'));
       assert.equal(digest(plan), row.planSha256, `${entry.name}: retained adapter plan is not the plan the case ran under`);
       assert.equal(String(row.runId), String(segment.runId), `${entry.name}: executed in run ${row.runId}, not segment ${segment.label}`); assert.equal(String(row.runAttempt), String(segment.attempt));
-      assert.equal(row.sceneworks, plan.sceneworks); const c = plan.cases.find(v => v.id === entry.name); assert.ok(c && c.backend === backend);
+      assert.equal(row.sceneworks, plan.sceneworks); assert.equal(row.inference, plan.inference, `${entry.name}: executed at inference ${row.inference}, but the plan it ran under pins ${plan.inference}`);
+      const c = plan.cases.find(v => v.id === entry.name); assert.ok(c && c.backend === backend);
       const executionSha256 = await hashFile(executionPath);
       await verifyCase(plan, c, dir, { executionSha256, planSha256: row.planSha256, runId: row.runId, runAttempt: row.runAttempt, verified: row.verified });
-      rows.push({ id: c.id, segment: segment.label, runId: String(row.runId), runAttempt: String(row.runAttempt), sceneworks: plan.sceneworks, planSha256: row.planSha256, executionSha256, dir });
+      rows.push({ id: c.id, segment: segment.label, runId: String(row.runId), runAttempt: String(row.runAttempt), sceneworks: plan.sceneworks, inference: plan.inference, planSha256: row.planSha256, executionSha256, dir });
       plans.push({ segment: segment.label, caseId: c.id, plan });
     }
   }
@@ -1515,16 +1541,22 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
     if (row.segment === subsetSegment.label) { assert.ok(record.subsetCaseIds.includes(row.id), `${row.id} ran in the subset segment but is not in its declared subsetCaseIds`); assert.equal(row.sceneworks, record.sourceShaDifference.to, `${row.id} did not run at the subset SHA`); }
     else { assert.ok(record.priorPassedCaseIds.includes(row.id), `${row.id} from the decision run is not among the record's priorPassedCaseIds`); assert.equal(row.sceneworks, record.sourceSha, `${row.id} did not run at the decision run's SHA`); }
   }
+  // One pin across both segments, unless the record declares the change: then the decision-run
+  // segment ran at inferenceChange.prior and the subset segment at inferenceChange.own.
+  const inferenceChange = record.inferenceChange ?? null;
+  if (inferenceChange) { assert.equal(inferenceChange.descends, true, 'the recorded inference change does not descend'); assert.ok(Array.isArray(inferenceChange.firstParentLog) && inferenceChange.firstParentLog.length > 0, 'the recorded inference change carries no first-parent log'); }
+  const expectedPin = segmentLabel => (inferenceChange ? (segmentLabel === subsetSegment.label ? inferenceChange.own : inferenceChange.prior) : subsetPlans[0].plan.inference);
   for (const v of plans) {
     assert.deepEqual(v.plan.matrixDecision, record.decision, `segment ${v.segment} case ${v.caseId} ran under another matrix decision`);
-    assert.equal(v.plan.inference, subsetPlans[0].plan.inference, 'segments use different inference pins'); assert.equal(v.plan.nativeEvidence?.sha, subsetPlans[0].plan.nativeEvidence?.sha, 'segments use different native evidence');
+    assert.equal(v.plan.inference, expectedPin(v.segment), inferenceChange ? `segment ${v.segment} case ${v.caseId} ran at inference ${v.plan.inference}, not the pin the recorded inference change names for that segment (${expectedPin(v.segment)})` : 'segments use different inference pins and the prior-decision record declares no inference change');
+    assert.equal(v.plan.nativeEvidence?.sha, subsetPlans[0].plan.nativeEvidence?.sha, 'segments use different native evidence');
   }
   const reference = subsetPlans[0].plan, allocation = executionCases(reference).filter(c => c.backend === backend).map(c => c.id);
   assert.deepEqual(allocation, record.allocation, 'the subset plan\'s allocation is not the one its prior-decision record adopted');
   for (const row of rows) assert.ok(allocation.includes(row.id), `${row.id} is outside the ${backend} allocation under the shared decision`);
   rows.sort((a, b) => allocation.indexOf(a.id) - allocation.indexOf(b.id));
   const missing = allocation.filter(id => !rows.some(row => row.id === id));
-  const bySegment = [priorSegment, subsetSegment].map((segment, index) => ({ label: segment.label, role: index ? 'prior-decision-subset' : 'decision-run', runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
+  const bySegment = [priorSegment, subsetSegment].map((segment, index) => ({ label: segment.label, role: index ? 'prior-decision-subset' : 'decision-run', runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], inference: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.inference))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
   const reusedNativeWitnesses = [];
   for (const entry of record.reusedNativeWitnesses ?? []) reusedNativeWitnesses.push({ ...await verifyReusedNativeWitness(reference, entry, subsetSegment.caseRoot), segment: subsetSegment.label });
   let crossCaseControls = null;
@@ -1538,10 +1570,10 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
     kind: 'split-backend-content-readback', proof_kind: 'campaign_content_reverified_split', singleShaBackendReadback: false, backend,
     status: missing.length ? 'split-backend-incomplete' : 'split-backend-content-reverified',
     matrixDecision: record.decision, priorMatrixDecision: record,
-    inference: reference.inference, nativeEvidenceSha: reference.nativeEvidence?.sha ?? null,
+    inference: reference.inference, inferenceChange, nativeEvidenceSha: reference.nativeEvidence?.sha ?? null,
     segments: bySegment, allocation, missing, crossCaseControls, reusedNativeWitnesses,
     cases: rows.map(({ dir: _dir, ...row }) => row),
-    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. The decision-run segment must be the run the subset segment\'s prior-decision record names, its cases must be that record\'s priorPassedCaseIds and the subset segment\'s cases its subsetCaseIds; segment roles come from the record, so the result does not depend on manifest order. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. reusedNativeWitnesses are native witnesses the subset segment adopted from its decision\'s anchor packets (same native evidence SHA) instead of running its own; each was re-hashed from the segment\'s retained files. This is not a single-SHA backend readback.',
+    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. The decision-run segment must be the run the subset segment\'s prior-decision record names, its cases must be that record\'s priorPassedCaseIds and the subset segment\'s cases its subsetCaseIds; segment roles come from the record, so the result does not depend on manifest order. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. reusedNativeWitnesses are native witnesses the subset segment adopted from its decision\'s anchor packets (same native evidence SHA) instead of running its own; each was re-hashed from the segment\'s retained files. inference is the subset segment\'s pin; each segment and case lists the pin it actually ran at, and inferenceChange (when not null) is the recorded, descendant pin change between the decision run and the subset run. This is not a single-SHA backend readback.',
   };
 }
 export async function verifyCampaign(p) {

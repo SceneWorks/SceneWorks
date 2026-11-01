@@ -42,6 +42,26 @@ export async function retainedDecisionPlan(evidenceRoot, backend) {
   return plans[0].plan;
 }
 
+/**
+ * Ancestry of an inference pin change, read from the lane's own inference checkout (full history).
+ * `git(args)` runs git in that checkout and returns stdout, throwing an error carrying `.status` on
+ * a non-zero exit. `descends` is true only when `prior` is an ancestor of `own`
+ * (`git merge-base --is-ancestor prior own` exits 0); exit 1 is "not an ancestor", and any other
+ * failure (an unknown commit) is reported as such, never as descent. `firstParentLog` is the
+ * one-line `<sha> <subject>` list of `git log --first-parent prior..own`, recorded verbatim.
+ */
+export function inferencePinAncestry({ git, prior, own }) {
+  for (const [name, sha] of [['prior', prior], ['own', own]]) assert.match(String(sha ?? ''), /^[0-9a-f]{40}$/, `${name} inference pin must be a 40-hex SHA`);
+  assert.notEqual(prior, own, 'an inference pin change needs two different pins');
+  try { git(['merge-base', '--is-ancestor', prior, own]); } catch (error) {
+    if (error.status === 1) return { prior, own, descends: false, firstParentLog: [] };
+    throw new Error(`cannot establish inference ancestry ${prior}..${own} in the lane's inference checkout: ${error.message}`);
+  }
+  const firstParentLog = String(git(['log', '--first-parent', '--format=%H %s', `${prior}..${own}`])).split('\n').map(line => line.trimEnd()).filter(Boolean);
+  assert.ok(firstParentLog.length > 0, `inference ${own} descends from ${prior} but the first-parent log between them is empty`);
+  return { prior, own, descends: true, firstParentLog };
+}
+
 /** The artifact id of the peer packet the decision run received, from its anchors' receipt paths. */
 export function peerPacketArtifactId(decisionPlan, peer) {
   const ids = new Set();

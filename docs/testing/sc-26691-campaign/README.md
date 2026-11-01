@@ -73,7 +73,9 @@ node scripts/h3-finetune-terminal.mjs verify-split-backend split.json
 
 `verify-split-backend` re-validates every passed case against the exact plan it ran under (its
 retained `adapter-plan.json`, bound by `planSha256`), attributes each case to its run and SHA,
-requires one shared measured decision, pin and native evidence, refuses a case that passed in both
+requires one shared measured decision and native evidence and one inference pin (unless the subset
+run's record declares an `inferenceChange`, below; each segment and case reports its own pin),
+refuses a case that passed in both
 segments, reports any allocation gap as `split-backend-incomplete`, and flags cross-case controls
 whose cases come from different segments (`crossSegment: true`, e.g. `real-hybrid-text-repeat`
 against `real-hybrid-text`). Its output is a `split-backend-content-readback` with
@@ -89,6 +91,15 @@ SHA) instead of running its own; the reuse is recorded as `reusedNativeWitnesses
 `verify-split-backend` re-hashes and reports every reused witness. Adoption also compares each
 allocated case's definition with the decision run's (`caseDefinitionDifferences`) and refuses a
 subset case whose workload changed.
+
+A lane at a different inference pin from the decision run (e.g. the MLX lane at `a43724b8` on run
+41213935677's decision, measured at `354b41cc`) adopts it only when its pin descends from the prior
+pin (`git merge-base --is-ancestor` in the lane's inference checkout) and the native evidence SHA is
+identical. The retained packets and passed cases are validated against their own recorded pin, and
+`prior-matrix-decision.json` records `inferenceChange: {prior, own, descends: true, firstParentLog}`
+(the one-line `git log --first-parent prior..own` subjects). `verify-split-backend` then accepts the
+decision-run segment at `inferenceChange.prior` and the subset segment at `.own`. Same-pin adoption
+records no `inferenceChange` and still requires one pin.
 
 ## Dispatch
 
