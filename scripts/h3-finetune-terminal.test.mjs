@@ -940,7 +940,7 @@ async function reclaimFixture(t, { status = 'passed' } = {}) {
     imported: path.join(service, 'models', 'imports', 'imported_sc26691_artifact_0_ref2va_v2_int8', 'diffusion_pytorch_model.safetensors'),
     resolved: path.join(service, 'models', 'resolved', 'entries', 'bundle.safetensors'),
     ref: path.join(service, 'cache', 'minimax-h3-assemblies', '8ddcf6cab3958cccf6dc7d63c1483046', 'transformer_ref', 'diffusion_pytorch_model-00001-of-00014.safetensors'),
-    kept: path.join(service, 'cache', 'minimax-h3-assemblies', '8ddcf6cab3958cccf6dc7d63c1483046', 'transformer', 'config.json'),
+    assembly: path.join(service, 'cache', 'minimax-h3-assemblies', '8ddcf6cab3958cccf6dc7d63c1483046', 'transformer', 'config.json'),
     lora: path.join(service, 'projects', 'h3-reduced-terminal-proof.sceneworks', 'loras', 'imports', 'sc26691_ref2v_turbo_4step_36bbcdc78d8d', 'minimax_h3_ref2v_turbo_4step_v0.1_bf16.safetensors'),
   };
   for (const [name, file] of Object.entries(files)) { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, `unit fake ${name}`); }
@@ -953,20 +953,20 @@ async function reclaimFixture(t, { status = 'passed' } = {}) {
   return { base, output, p, c, dir, files, prepared };
 }
 const exists = file => stat(file).then(() => true, error => { if (error.code === 'ENOENT') return false; throw error; });
-test('a passed case reclaims only its own import, resolved bundle and transformer_ref copies', async t => {
+test('a passed case reclaims only its own import, resolved bundle and assembly transformer/transformer_ref copies', async t => {
   const prev = [process.env.GITHUB_RUN_ID, process.env.GITHUB_RUN_ATTEMPT];
   process.env.GITHUB_RUN_ID = '40855384972'; process.env.GITHUB_RUN_ATTEMPT = '1';
   t.after(() => { if (prev[0] === undefined) delete process.env.GITHUB_RUN_ID; else process.env.GITHUB_RUN_ID = prev[0]; if (prev[1] === undefined) delete process.env.GITHUB_RUN_ATTEMPT; else process.env.GITHUB_RUN_ATTEMPT = prev[1]; });
   const f = await reclaimFixture(t);
   const sibling = path.join(f.base, 'staging', 'model.safetensors'); await mkdir(path.dirname(sibling), { recursive: true }); await writeFile(sibling, 'shared staging');
   const record = await reclaimCaseModelStorage(f.p, f.c, f.dir);
-  assert.equal(record.removed.length, 3);
-  for (const name of ['imported', 'resolved', 'ref']) assert.equal(await exists(f.files[name]), false, `${name} reclaimed`);
-  for (const name of ['kept', 'lora']) assert.equal(await exists(f.files[name]), true, `${name} kept`);
+  assert.equal(record.removed.length, 4);
+  for (const name of ['imported', 'resolved', 'ref', 'assembly']) assert.equal(await exists(f.files[name]), false, `${name} reclaimed`);
+  for (const name of ['lora']) assert.equal(await exists(f.files[name]), true, `${name} kept`);
   assert.equal(await exists(sibling), true, 'nothing outside the case service root is touched');
-  assert.deepEqual(record.preparedFiles.map(v => v.sha256).sort(), f.prepared.filter((_, i) => i < 3).map(v => v.sha256).sort());
+  assert.deepEqual(record.preparedFiles.map(v => v.sha256).sort(), f.prepared.filter((_, i) => i < 4).map(v => v.sha256).sort());
   const retained = await caseStorageReclaim(f.p, f.c, f.dir);
-  for (const [i, input] of f.prepared.entries()) assert.equal(await retained.removedFile(input), i < 3, 'only removed, recorded files are excused from re-hashing');
+  for (const [i, input] of f.prepared.entries()) assert.equal(await retained.removedFile(input), i < 4, 'only removed, recorded files are excused from re-hashing');
   assert.equal(await retained.removedFile({ ...f.prepared[0], sha256: 'f'.repeat(64) }), false, 'a different hash is never excused');
   // Idempotent on resume; a later change to the passed receipt unbinds the record.
   assert.deepEqual(await reclaimCaseModelStorage(f.p, f.c, f.dir), record);
@@ -1113,15 +1113,72 @@ test('macOS assembly symlinks (run 41061562586) reclaim the case copies and leav
   await writeFile(path.join(dir, 'evidence.json'), JSON.stringify({ loadEvent }));
   await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ caseId: c.id, status: 'passed' }));
   const record = await reclaimCaseModelStorage(p, c, dir);
-  assert.deepEqual(record.removed, [path.join(data, 'models', 'imports'), path.join(data, 'models', 'resolved'), path.join(assembly, 'transformer_ref')]);
-  assert.deepEqual(record.links.map(l => [l.path, l.targetInsideServiceRoot]), [[path.join(assembly, 'transformer_ref'), true]]);
-  for (const file of [imported, path.join(bundle, bundleFiles[1]), path.join(assembly, 'transformer_ref')]) assert.equal(await exists(file), false, `${file} reclaimed`);
+  assert.deepEqual(record.removed, [path.join(data, 'models', 'imports'), path.join(data, 'models', 'resolved'), path.join(assembly, 'transformer'), path.join(assembly, 'transformer_ref')]);
+  assert.deepEqual(record.links.map(l => [l.path, l.targetInsideServiceRoot]), [[path.join(assembly, 'transformer'), true], [path.join(assembly, 'transformer_ref'), true]]);
+  for (const file of [imported, path.join(bundle, bundleFiles[1]), path.join(assembly, 'transformer'), path.join(assembly, 'transformer_ref')]) assert.equal(await exists(file), false, `${file} reclaimed`);
   assert.equal(await readFile(staging, 'utf8'), 'staged companion shard', 'staging behind the hub hard link is untouched');
-  for (const file of [path.join(companion, companionFiles[1]), vae, lora, path.join(assembly, 'transformer', 'config.json')]) assert.equal(await exists(file), true, `${file} kept`);
-  assert.deepEqual(record.preparedFiles.map(f => path.basename(f.path)).sort(), [...bundleFiles].sort(), 'exactly the files reached through transformer_ref are recorded');
+  // The transformer symlink is unlinked as itself: the resident hub companion it points at stays.
+  for (const file of [path.join(companion, 'config.json'), path.join(companion, companionFiles[1]), vae, lora]) assert.equal(await exists(file), true, `${file} kept`);
+  assert.deepEqual(record.preparedFiles.map(f => path.basename(f.path)).sort(), [...companionFiles, ...bundleFiles].sort(), 'exactly the files reached through the assembly task paths are recorded');
   const retained = await caseStorageReclaim(p, c, dir);
-  for (const input of prepared) assert.equal(await retained.removedFile(input), input.path.includes('transformer_ref'), `${input.path} excused only when reclaimed`);
+  for (const input of prepared) assert.equal(await retained.removedFile(input), input.path.includes(path.join(assembly, 'transformer')), `${input.path} excused only when reclaimed`);
   assert.deepEqual(await reclaimCaseModelStorage(p, c, dir), record, 'idempotent on resume');
+});
+// sc-26691 (2026-11-01): the CUDA run 41213935677 leak. On Windows each assembly task path is a REAL
+// directory: of per-file hard links for a base partition (into the case's own import and the
+// service hub, which is itself hard links into the run's staging root), but of FULL private copies
+// for hybrid cases (20-40 GB each). The reclaim used to leave `transformer` behind. Now both task
+// paths go, hard links drop only their own name, staging and the hub keep their bytes, and a link
+// pointing outside the case root is unlinked as itself, never followed.
+test('Windows assembly layout: hard-linked and private-copy transformer dirs are reclaimed without touching hub or staging', async t => {
+  withRunEnv(t, '41213935677');
+  const { link } = await import('node:fs/promises');
+  const base = await mkdtemp(path.join(os.tmpdir(), 'sc26691-reclaim-win-'));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const output = path.join(base, '41213935677-1-bootstrap-4c3625898b20859f57ca38986ed80b1c427cdfdb');
+  const c = { id: 'cuda.reduced.real-hybrid-image', evidence: 'evidence.json', inputs: [] }, p = { output };
+  const svc = path.join(output, 'services', c.id), data = path.join(svc, 'data'), assemblies = path.join(data, 'cache', 'minimax-h3-assemblies');
+  const write = async (file, text) => { await mkdir(path.dirname(file), { recursive: true }); await writeFile(file, text); };
+  const staging = path.join(base, '41213935677-1', 'hf', 'hub', 'models--SceneWorks--minimax-h3-mlx', 'snapshots', '137ce668c55a20bc0935fd1cf2a3de8448abb7f4', 'q4', 'transformer', 'diffusion_pytorch_model-00001-of-00014.safetensors');
+  const hub = path.join(svc, 'hf', 'hub', 'models--SceneWorks--minimax-h3-mlx', 'snapshots', '137ce668c55a20bc0935fd1cf2a3de8448abb7f4', 'q4', 'transformer', 'diffusion_pytorch_model-00001-of-00014.safetensors');
+  const imported = path.join(data, 'models', 'imports', 'imported_sc26691_hybrid', 'diffusion_pytorch_model.safetensors');
+  const outside = path.join(base, 'outside-target');
+  await write(staging, 'staged companion shard'); await write(imported, 'imported hybrid checkpoint'); await mkdir(outside, { recursive: true }); await write(path.join(outside, 'keep.txt'), 'outside');
+  await mkdir(path.dirname(hub), { recursive: true }); await link(staging, hub); // the seeded hub: hard links into staging
+  // Base partition (hard links): transformer_ref -> hub companion, transformer -> the case's own import.
+  const linked = path.join(assemblies, '8ddcf6cab3958cccf6dc7d63c1483046');
+  await mkdir(path.join(linked, 'transformer'), { recursive: true }); await mkdir(path.join(linked, 'transformer_ref'), { recursive: true });
+  await link(imported, path.join(linked, 'transformer', 'diffusion_pytorch_model.safetensors'));
+  await link(hub, path.join(linked, 'transformer_ref', 'diffusion_pytorch_model-00001-of-00014.safetensors'));
+  // Hybrid partition: transformer is a FULL private copy (the leak), transformer_ref hard links the hub.
+  const copied = path.join(assemblies, 'fd494f8c65044d371259e5c9a34fe23c');
+  await write(path.join(copied, 'transformer', 'diffusion_pytorch_model.safetensors'), 'private hybrid copy');
+  await write(path.join(copied, 'transformer', 'config.json'), 'hybrid config');
+  await mkdir(path.join(copied, 'transformer_ref'), { recursive: true }); await link(hub, path.join(copied, 'transformer_ref', 'diffusion_pytorch_model-00001-of-00014.safetensors'));
+  await dirLink(outside, path.join(copied, 'transformer', 'escape')); // a link out of the case root
+  const before = (await stat(staging)).nlink;
+  assert.equal(before, 4, 'staging, hub and two assembly names share the companion bytes');
+  const prepared = [
+    { path: path.join(linked, 'transformer', 'diffusion_pytorch_model.safetensors'), sha256: await hashFile(imported) },
+    { path: path.join(copied, 'transformer', 'diffusion_pytorch_model.safetensors'), sha256: await hashFile(path.join(copied, 'transformer', 'diffusion_pytorch_model.safetensors')) },
+    { path: path.join(copied, 'transformer_ref', 'diffusion_pytorch_model-00001-of-00014.safetensors'), sha256: await hashFile(staging) },
+  ];
+  const loadEvent = { message: 'Actual native load', event: 'h3_import_prepared_load', jobId: 'job_1', provider: 'candle', backend: 'cuda', native_backend: 'cuda', seal_validated: true, cache_state: 'Cold', identity: { checkpointId: 'managed/imported_sc26691_hybrid', planId: 'p', semanticDigest: `sha256:${'a'.repeat(64)}`, assembly: { family: 'minimax-h3', partition: 'hybrid', components: {}, componentClosure: [] }, sourceFiles: [] }, prepared_sources: prepared, operation: 'first_last_frame_to_video', seed: 1, steps: 4, scheduler_shift: null, level: 'info', reportedAt: '2026-11-01T00:00:00.000Z' };
+  const dir = path.join(output, c.id); await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, 'evidence.json'), JSON.stringify({ loadEvent }));
+  await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ caseId: c.id, status: 'passed' }));
+  const record = await reclaimCaseModelStorage(p, c, dir);
+  const expected = [path.join(data, 'models', 'imports'), ...[copied, linked].sort().flatMap(key => [path.join(key, 'transformer'), path.join(key, 'transformer_ref')])];
+  assert.deepEqual([...record.removed].sort(), expected.sort());
+  for (const key of [linked, copied]) for (const task of ['transformer', 'transformer_ref']) assert.equal(await exists(path.join(key, task)), false, `${key}/${task} reclaimed`);
+  assert.equal(await readFile(staging, 'utf8'), 'staged companion shard', 'staging bytes untouched');
+  assert.equal(await readFile(hub, 'utf8'), 'staged companion shard', 'the service hub is not a reclaim target');
+  assert.equal((await stat(staging)).nlink, 2, 'only the assembly names were dropped: staging + hub remain');
+  assert.equal(await readFile(path.join(outside, 'keep.txt'), 'utf8'), 'outside', 'a link out of the case root is never followed');
+  assert.deepEqual(record.links.map(l => [path.basename(l.path), l.targetInsideServiceRoot]), [['escape', false]]);
+  const retained = JSON.parse(await readFile(path.join(dir, 'storage-reclaim.json'), 'utf8'));
+  assert.deepEqual(retained.removed, record.removed); assert.match(retained.meaning, /assembly task directories \(transformer, transformer_ref\)/);
+  assert.deepEqual(retained.preparedFiles.map(f => f.sha256).sort(), prepared.map(f => f.sha256).sort());
 });
 test('a reclaim failure after PASS is recorded and does not fail the case', async t => {
   withRunEnv(t);
@@ -1135,8 +1192,8 @@ test('a reclaim failure after PASS is recorded and does not fail the case', asyn
   assert.match(errors.mock.calls[0].arguments[0], /storage reclaim failed after cuda\.reduced\.artifact-0-ordered-mixed-baseline-ref-turbo PASSED.*EBUSY/);
   // The retry (a resume) finishes exactly what the retained record names.
   const done = await reclaimPassedCaseStorage(f.p, f.c, f.dir);
-  assert.equal(done.reclaimed.removed.length, 3);
-  for (const name of ['imported', 'resolved', 'ref']) assert.equal(await exists(f.files[name]), false, `${name} reclaimed on retry`);
+  assert.equal(done.reclaimed.removed.length, 4);
+  for (const name of ['imported', 'resolved', 'ref', 'assembly']) assert.equal(await exists(f.files[name]), false, `${name} reclaimed on retry`);
 });
 test('per-case free-space preflight refuses below 2x checkpoint plus headroom', async () => {
   const c = { id: 'cuda.reduced.artifact-4', inputs: [{ role: 'checkpoint', path: 'E:\\staging\\x.safetensors' }], runtime: { scenario: 'unit_fake' } };

@@ -893,7 +893,10 @@ export async function caseReclaimTargets(p, c, { readdirImpl } = {}) {
   const assemblies = contained(root, 'data/cache/minimax-h3-assemblies');
   let entries = [];
   try { entries = await (readdirImpl ?? readdir)(assemblies, { withFileTypes: true }); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  for (const entry of entries) if (entry.isDirectory()) targets.push(contained(contained(assemblies, entry.name), 'transformer_ref'));
+  // Both assembly task paths: `transformer` (hard links on Windows for a base partition, but a FULL
+  // private copy for hybrid cases, 20-40 GB each) and `transformer_ref`. Each is walked without
+  // following links, so a hard link only drops its own name and a symlink is unlinked as itself.
+  for (const entry of entries) if (entry.isDirectory()) for (const task of ['transformer', 'transformer_ref']) targets.push(contained(contained(assemblies, entry.name), task));
   return { root, targets };
 }
 /** Refuse a case before any work when the run volume cannot hold its copies (2× checkpoint + headroom). */
@@ -1004,7 +1007,7 @@ export async function reclaimCaseModelStorage(p, c, dir, { removeImpl, fsOverrid
   try { for (const binding of (await json(path.join(dir, 'source-job-output.json'))).bindings ?? []) events.push(binding.event); } catch (error) { if (error.code !== 'ENOENT') throw error; }
   const preparedFiles = [];
   for (const event of events.filter(Boolean)) for (const s of normalizeLoadEvent(event).prepared_sources) if (present.some(t => below(t, s.path)) && !preparedFiles.some(f => f.path === s.path)) preparedFiles.push({ path: s.path, sha256: s.sha256 });
-  const record = { kind: 'case-storage-reclaim', caseId: c.id, executionSha256: await hashFile(execution), serviceRoot: root, removed: present, links, preparedFiles, reclaimedAt: new Date().toISOString(), meaning: 'This passed case\'s own import copy, normalized bundle and assembly companion were removed after its evidence and receipt hashes were recorded; re-validation holds each removed prepared file to the hash recorded here. Each link was unlinked as itself; its target was never followed or removed through the link.' };
+  const record = { kind: 'case-storage-reclaim', caseId: c.id, executionSha256: await hashFile(execution), serviceRoot: root, removed: present, links, preparedFiles, reclaimedAt: new Date().toISOString(), meaning: 'This passed case\'s own import copy, normalized bundle and assembly task directories (transformer, transformer_ref) were removed after its evidence and receipt hashes were recorded; re-validation holds each removed prepared file to the hash recorded here. Each link was unlinked as itself; its target was never followed or removed through the link.' };
   await writeFile(path.join(dir, 'storage-reclaim.json'), JSON.stringify(record, null, 2) + '\n', { flag: 'wx' });
   for (const target of present) await remove(target);
   return record;
