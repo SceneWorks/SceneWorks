@@ -1334,10 +1334,17 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
 /// when wrong — the keyframe ANCHOR INDEX and the reference ORDER — are unit-testable without a
 /// GPU, weights, or on-disk assets.
 ///
-/// **Anchor indices.** `frame_idx: 0` is the first frame; the last frame is `-1`, NOT
-/// `frames - 1`. The engine accepts either, but `-1` is independent of the frame count this arm
-/// computed — so a disagreement between our lattice coercion and the engine's can never silently
-/// turn a last-frame anchor into a rejected mid-clip one. `strength: 1.0` fully pins the frame,
+/// **Anchor indices.** `frame_idx: 0` is the first frame; the last frame is the EXPLICIT
+/// `frames - 1`, never the `-1` "from the end" shorthand (sc-26691). Only the MLX engine honours
+/// `-1` (`mlx-gen-minimax-h3/src/model/request.rs`: `frame_idx == -1 || == num_frames - 1`); the
+/// Candle engine's `keyframe_anchors` clamps a negative index to `0`
+/// (`candle-gen-minimax-h3/src/model.rs`: `k.frame_idx.max(0)`), so a last-frame `-1` became a
+/// SECOND first-frame anchor and every CUDA `first_last_frame` job failed with "both keyframes
+/// anchor First" (a last-frame-only job would have silently rendered it as the FIRST frame).
+/// `frames - 1` is the one spelling both engines map to `Last`. It cannot drift from the engine's
+/// own count: `frames` is exactly the value this arm hands the engine as `VideoGenInput::frames`,
+/// which the shared funnel forwards as `GenerationRequest::frames = Some(frames)` and both engines'
+/// `resolve_request_frames` take verbatim. `strength: 1.0` fully pins the frame,
 /// which is the only meaning first/last-frame conditioning has here (the engine pins anchor rows at
 /// its own conditioning timestep and does not read this value).
 ///
@@ -1358,6 +1365,7 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn minimax_h3_conditioning(
+    frames: u32,
     first_frame: Option<Image>,
     last_frame: Option<Image>,
     reference_images: Vec<Image>,
@@ -1375,7 +1383,7 @@ pub(super) fn minimax_h3_conditioning(
     if let Some(image) = last_frame {
         conditioning.push(Conditioning::Keyframe {
             image,
-            frame_idx: -1,
+            frame_idx: minimax_h3_last_frame_index(frames),
             strength: 1.0,
         });
     }
@@ -1388,6 +1396,18 @@ pub(super) fn minimax_h3_conditioning(
     conditioning.extend(reference_clips);
     conditioning.extend(reference_audio);
     conditioning
+}
+
+/// The explicit index of the LAST output frame for a `frames`-long render — see
+/// [`minimax_h3_conditioning`] for why this is never `-1`. Saturates rather than wrapping: a
+/// zero/oversized count is refused by the engine's own geometry check, and must not turn into an
+/// index that silently means something else.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn minimax_h3_last_frame_index(frames: u32) -> i32 {
+    i32::try_from(frames.saturating_sub(1)).unwrap_or(i32::MAX)
 }
 
 /// Resolve a MiniMax-H3 request's supplied media into the engine conditioning.
@@ -1448,6 +1468,7 @@ pub(super) async fn resolve_minimax_h3_conditioning(
         resolve_minimax_h3_clip_conditioning(api, settings, job, request, project_path, frames)
             .await?;
     Ok(minimax_h3_conditioning(
+        frames,
         first_frame,
         last_frame,
         reference_images,

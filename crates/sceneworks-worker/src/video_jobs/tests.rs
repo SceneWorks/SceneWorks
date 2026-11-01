@@ -19268,17 +19268,24 @@ async fn minimax_h3_reference_clip_frames_keep_source_order() {
 
 /// Keyframes anchor the FIRST and LAST frame, and references keep the caller's order (sc-19508).
 ///
-/// Both are invisible in the output when wrong. A keyframe at any index other than `0` or
-/// `-1`/`frames-1` is a hard engine reject; a reference list in the wrong order changes the
-/// `<Picture i>` labels and the shared rotary clock, so the render silently differs.
+/// Both are invisible in the output when wrong. A keyframe at any index other than the two ends is
+/// a hard engine reject; a reference list in the wrong order changes the `<Picture i>` labels and
+/// the shared rotary clock, so the render silently differs.
 ///
-/// The last anchor is `-1` and NOT `frames - 1` on purpose: `-1` is independent of the frame count
-/// this arm computed, so a disagreement between our lattice coercion and the engine's can never turn
-/// a last-frame anchor into a rejected mid-clip one.
-#[cfg(target_os = "macos")]
+/// The last anchor is the EXPLICIT `frames - 1` and NEVER `-1` (sc-26691): the Candle engine's
+/// `keyframe_anchors` clamps a negative `frame_idx` to `0`, so the old `-1` became a second FIRST
+/// anchor and the first CUDA `first_last_frame` campaign case (run 41303430895) failed with "both
+/// keyframes anchor First". Compiled on the Candle lane too — this test was macOS-only, so the one
+/// backend that misread `-1` never ran it.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn minimax_h3_conditioning_anchors_and_reference_order() {
     use crate::video_jobs::minimax_h3::minimax_h3_conditioning;
+    // The real campaign request: 1344x768, 24 fps, duration 5.1667 s -> 124 frames (17n + 5).
+    const FRAMES: u32 = 124;
     let image = |tag: u8| Image {
         width: 2,
         height: 2,
@@ -19294,11 +19301,12 @@ fn minimax_h3_conditioning_anchors_and_reference_order() {
     };
 
     assert!(
-        minimax_h3_conditioning(None, None, Vec::new(), Vec::new(), Vec::new()).is_empty(),
+        minimax_h3_conditioning(FRAMES, None, None, Vec::new(), Vec::new(), Vec::new()).is_empty(),
         "t2va conditions on nothing"
     );
     assert_eq!(
         anchors(&minimax_h3_conditioning(
+            FRAMES,
             Some(image(1)),
             None,
             Vec::new(),
@@ -19310,16 +19318,18 @@ fn minimax_h3_conditioning_anchors_and_reference_order() {
     );
     assert_eq!(
         anchors(&minimax_h3_conditioning(
+            FRAMES,
             None,
             Some(image(2)),
             Vec::new(),
             Vec::new(),
             Vec::new()
         )),
-        vec![-1],
-        "a last frame alone anchors -1, the count-independent end slot"
+        vec![123],
+        "a last frame alone anchors the explicit last index, frames - 1 — never -1, which the          Candle engine clamps to the FIRST frame"
     );
     let both = minimax_h3_conditioning(
+        FRAMES,
         Some(image(1)),
         Some(image(2)),
         Vec::new(),
@@ -19328,7 +19338,7 @@ fn minimax_h3_conditioning_anchors_and_reference_order() {
     );
     assert_eq!(
         anchors(&both),
-        vec![0, -1],
+        vec![0, 123],
         "first_last_frame is TWO anchors, one at each end — the same list at the same index would \
          be refused as two keyframes on one end"
     );
@@ -19361,6 +19371,7 @@ fn minimax_h3_conditioning_anchors_and_reference_order() {
         audio: sound.map(track),
     };
     let refs = minimax_h3_conditioning(
+        FRAMES,
         None,
         None,
         vec![image(7), image(8), image(9)],
@@ -19402,8 +19413,78 @@ fn minimax_h3_conditioning_anchors_and_reference_order() {
     );
 }
 
+/// Every MiniMax-H3 keyframe index must land on an end BOTH engines read the same way (sc-26691).
+///
+/// Mirrors the Candle engine's `keyframe_anchors` resolution (`candle-gen-minimax-h3/src/model.rs`
+/// at the pinned inference rev): `idx = frame_idx.max(0)`, `0` -> First, `num_frames - 1` -> Last.
+/// Under that rule the retired `-1` resolved to First, so `[0, -1]` was the "both keyframes anchor
+/// First" reject the CUDA campaign hit. The MLX engine accepts `0` and `num_frames - 1` as well, so
+/// an index that survives this mirror is honoured on both backends.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+#[test]
+fn minimax_h3_first_last_anchors_resolve_to_distinct_ends_under_the_candle_rule() {
+    use crate::video_jobs::minimax_h3::{minimax_h3_conditioning, minimax_h3_last_frame_index};
+    let candle_end = |frame_idx: i32, num_frames: u32| -> &'static str {
+        let idx = frame_idx.max(0) as u32;
+        if idx == 0 {
+            "first"
+        } else if idx == num_frames.saturating_sub(1) {
+            "last"
+        } else {
+            "interior"
+        }
+    };
+    let image = |tag: u8| Image {
+        width: 2,
+        height: 2,
+        pixels: vec![tag; 12],
+    };
+    // 124 is the campaign's 5.1667 s @ 24 fps request; 22 and 243 are other `17n + 5` counts (a
+    // short clip and a ~10 s one), so the index is not accidentally right for one count only.
+    for frames in [22_u32, 124, 243] {
+        let ends: Vec<&str> = minimax_h3_conditioning(
+            frames,
+            Some(image(1)),
+            Some(image(2)),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .iter()
+        .filter_map(|c| match c {
+            Conditioning::Keyframe { frame_idx, .. } => Some(candle_end(*frame_idx, frames)),
+            _ => None,
+        })
+        .collect();
+        assert_eq!(ends, vec!["first", "last"], "{frames} frames");
+    }
+    assert_eq!(
+        candle_end(-1, 124),
+        "first",
+        "the mirror must reproduce the defect: -1 clamps to the FIRST frame on Candle"
+    );
+    assert_eq!(minimax_h3_last_frame_index(124), 123);
+    assert_eq!(minimax_h3_last_frame_index(1), 0);
+    assert_eq!(
+        minimax_h3_last_frame_index(0),
+        0,
+        "saturates, never wraps to -1"
+    );
+    assert_eq!(
+        minimax_h3_last_frame_index(u32::MAX),
+        i32::MAX,
+        "saturates, never wraps negative"
+    );
+}
+
 /// The recorded task follows the CONDITIONING, which is what the engine derives the partition from.
-#[cfg(target_os = "macos")]
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
 #[test]
 fn minimax_h3_task_is_derived_from_the_conditioning() {
     use crate::video_jobs::minimax_h3::{minimax_h3_conditioning, minimax_h3_task};
@@ -19414,6 +19495,7 @@ fn minimax_h3_task_is_derived_from_the_conditioning() {
     };
     assert_eq!(
         minimax_h3_task(&minimax_h3_conditioning(
+            124,
             None,
             None,
             Vec::new(),
@@ -19424,6 +19506,7 @@ fn minimax_h3_task_is_derived_from_the_conditioning() {
     );
     assert_eq!(
         minimax_h3_task(&minimax_h3_conditioning(
+            124,
             Some(image.clone()),
             None,
             Vec::new(),
@@ -19434,6 +19517,7 @@ fn minimax_h3_task_is_derived_from_the_conditioning() {
     );
     assert_eq!(
         minimax_h3_task(&minimax_h3_conditioning(
+            124,
             None,
             None,
             vec![image.clone()],
@@ -19450,6 +19534,7 @@ fn minimax_h3_task_is_derived_from_the_conditioning() {
     // claim in the one field whose job is to say which checkpoint ran.
     assert_eq!(
         minimax_h3_task(&minimax_h3_conditioning(
+            124,
             None,
             None,
             Vec::new(),
