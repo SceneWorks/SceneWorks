@@ -59,20 +59,23 @@ jobs:
     # CUDA listener carries its own name as a label, so appending the requested runner to the label
     # set lands the job on that one. Without it, the lane's two listeners both match and the job
     # can land on the other one, which the exact-runner assertion then refuses — a coin flip
-    # between two approved machines. The macOS lane needs only the `real-weights` label, which
-    # exactly one macOS listener carries.
-    runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","real-weights"]') || fromJSON(format('["self-hosted","windows","cuda","real-weights","{0}"]', inputs.expected_runner)) }}
+    # between two approved machines. BOTH macOS listeners now carry `real-weights` (sc-26691,
+    # 2026-11-01: nax-macos holds orphaned processes, so the MLX lane moves to nax-macos-2), so the
+    # macOS lane selects its listener by that machine's own label: rw-mage is nax-macos-2,
+    # rw-starvector is nax-macos. Any other expected_runner lands nowhere useful and the
+    # exact-runner assertion refuses it.
+    runs-on: ${{ inputs.backend == 'mlx' && fromJSON(format('["self-hosted","macOS","ARM64","real-weights","{0}"]', inputs.expected_runner == 'nax-macos-2' && 'rw-mage' || 'rw-starvector')) || fromJSON(format('["self-hosted","windows","cuda","real-weights","{0}"]', inputs.expected_runner)) }}
+    # One model job per Mac at a time (the group names the listener, shared with that Mac's other
+    # import-proof jobs); the CUDA lanes share the real-weights GPU group.
     concurrency:
-      group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || 'h3-import-proofs-nax-macos' }}
+      group: ${{ inputs.backend == 'cuda' && 'windows-candle-gpu-real-weights' || format('h3-import-proofs-{0}', inputs.expected_runner) }}
       cancel-in-progress: false
     timeout-minutes: 1440
     env:
-      # The macOS real-weights lane keeps its HF home on the reviewed-weights volume, so the
-      # staging probe reads the SAME hub the reviewed weights are pre-seeded into, and the
-      # lane's private copy of the staged set lands on that volume instead of the runner's
-      # smaller internal disk. The runner service does not carry HF_HOME, and without this the
-      # probe would read a different directory than the one the weights are seeded into.
-      HF_HOME: ${{ inputs.backend == 'mlx' && '/Volumes/Models/huggingface' || '' }}
+      # HF_HOME (macOS: where the weights are READ) and H3_WORK_ROOT (where the campaign WRITES) are
+      # resolved from the request by "Resolve the campaign work root and weights roots" and exported
+      # through GITHUB_ENV; they are deliberately not job-level values.
+      H3_EXPECTED_RUNNER: ${{ inputs.expected_runner }}
       # Native sm_120 for the RTX PRO 6000 hosts, as the shipping Windows CUDA lanes build it.
       CUDA_COMPUTE_CAP: ${{ inputs.backend == 'cuda' && '120' || '' }}
       H3_NATIVE_EVIDENCE_REF: ${{ inputs.native_evidence_ref }}
@@ -143,6 +146,41 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
+      # sc-26691 (2026-11-01): separate where weights are READ from where the campaign WRITES. A CUDA
+      # run wrote ~500 GB of run staging, case services and cargo targets under E:\huggingface (the
+      # static, read-only model volume) and refused its next case for space. Weights are now read
+      # from the HF hub only (E:\huggingface\hub on Windows; request.mlx_hf_home, default
+      # /Volumes/Models/huggingface, on macOS) and every write goes under request.work_root
+      # (default D:\sc26691-campaign on Windows, ~/sc26691-campaign — the main drive — on macOS). The
+      # stage refuses any write path on E: or under the macOS HF home, loudly.
+      - name: Resolve the campaign work root and weights roots
+        shell: bash
+        working-directory: sceneworks
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import {appendFile, mkdir} from "node:fs/promises";
+          import path from "node:path";
+          import {assertExpectedRunner, campaignWorkRoot, expandHomePath, cacheHub} from "./scripts/h3-finetune-terminal-stage.mjs";
+          const env = process.env, request = JSON.parse(env.H3_STAGE_REQUEST || "{}"), backend = env.H3_STAGE_BACKEND;
+          // The listener must be the one the request names before anything is created on it.
+          assertExpectedRunner({backend, env, platform: process.platform});
+          const resolved = {};
+          if (process.platform === "darwin") {
+            resolved.HF_HOME = expandHomePath(request.mlx_hf_home || "/Volumes/Models/huggingface", {platform: "darwin", env});
+            resolved.HF_HUB_CACHE = path.join(resolved.HF_HOME, "hub");
+          } else {
+            // Windows reads E:\huggingface\hub (cacheHub); the services and native witnesses set their own HF homes.
+            if (request.mlx_hf_home !== undefined) throw new Error("mlx_hf_home applies to the macOS lane only");
+            resolved.HF_HOME = "";
+          }
+          const readEnv = {...env, ...resolved};
+          if (request.work_root !== undefined && (typeof request.work_root !== "string" || !request.work_root)) throw new Error("request.work_root must be a non-empty path string");
+          resolved.H3_WORK_ROOT = campaignWorkRoot({platform: process.platform, env: {...readEnv, H3_WORK_ROOT: request.work_root || ""}});
+          await mkdir(resolved.H3_WORK_ROOT, {recursive: true});
+          await appendFile(env.GITHUB_ENV, Object.entries(resolved).map(([k, v]) => `${k}=${v}\n`).join(""));
+          console.log(JSON.stringify({readsWeightsFrom: cacheHub({platform: process.platform, env: readEnv}), writesUnder: resolved.H3_WORK_ROOT, runner: env.RUNNER_NAME}));
+          NODE
       # sc-26691: an adaptive-matrix lane waits, after all its staging and its first two cases, for
       # the OTHER backend's inline anchors for as long as that peer lane is alive, bounded by this
       # lane's work deadline less its remaining cases. When that peer was never dispatched, or
@@ -195,8 +233,10 @@ jobs:
           # two CUDA listeners can share it. This is the same provisioning the StarVector terminal
           # lane uses on these hosts; it does not depend on whatever python happens to be on PATH.
           . (Join-Path $PWD 'scripts\provision-starvector-windows-python.ps1')
-          $pythonRoot = 'E:\huggingface\sc26691-python\cpython-3.12.10-x64-nuget'
-          $lockPath = 'E:\huggingface\sc26691-python\.locks\cpython-3.12.10-x64-nuget.lock'
+          # Under the campaign work root (sc-26691): nothing this lane writes may land on E:.
+          if (-not $env:H3_WORK_ROOT -or $env:H3_WORK_ROOT -like 'E:*') { throw "H3_WRITE_ON_WEIGHTS_VOLUME: the Python root must be under a work root off E: (got '$env:H3_WORK_ROOT')" }
+          $pythonRoot = Join-Path $env:H3_WORK_ROOT 'sc26691-python\cpython-3.12.10-x64-nuget'
+          $lockPath = Join-Path $env:H3_WORK_ROOT 'sc26691-python\.locks\cpython-3.12.10-x64-nuget.lock'
           $executable = Invoke-StarVectorWindowsPythonLock -LockPath $lockPath -ScriptBlock {
             $installed = Install-StarVectorWindowsPythonPackage -DestinationRoot $pythonRoot -AllowedRoot $pythonRoot -RunnerTemp $env:RUNNER_TEMP
             (Select-StarVectorBootstrapPython -CandidatePaths @($installed) -ExpectedVersion @(3, 12, 10)).Executable
@@ -251,9 +291,11 @@ jobs:
       # writes real copies beside them (managed import, normalized bundle, resolved cache), and a
       # failed attempt leaves all of it behind: a few failures filled E: and, on the macOS lane,
       # /Volumes/Models. Clear only this campaign's earlier run roots (and their bootstrap and
-      # cargo-target siblings) under the same parent the stage derives its private root from, and
-      # only for runs GitHub reports as completed, before this run stages anything.
-      - name: Clear this campaign's completed prior-run roots on the weights volume
+      # cargo-target siblings) under the same WORK-root parent the stage derives its private root
+      # from, and only for runs GitHub reports as completed, before this run stages anything. Roots
+      # an older revision left under E:\huggingface\sc26691-private are NOT touched: nothing here
+      # writes to (or deletes from) the weights volume; clearing those is the operator's call.
+      - name: Clear this campaign's completed prior-run roots on the work root
         if: ${{ fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
         shell: bash
         env:
@@ -266,10 +308,10 @@ jobs:
           import path from "node:path";
           import {pathToFileURL} from "node:url";
           const {liveOwnedProcesses, formatLeftovers, RUN_OUTPUT_ROOT} = await import(pathToFileURL(path.join(process.env.GITHUB_WORKSPACE, "sceneworks", "scripts", "lib", "h3-owned-processes.mjs")).href);
-          // The stage's privateRunRoot parent: E:\\huggingface on Windows, $HF_HOME elsewhere.
-          const hfHome = process.platform === "win32" ? "E:\\huggingface" : process.env.HF_HOME;
-          if (!hfHome || !path.isAbsolute(hfHome)) throw new Error("an absolute HF_HOME is required to locate the private run roots");
-          const parent = path.join(hfHome, "sc26691-private"), current = process.env.GITHUB_RUN_ID;
+          const {campaignWorkRoot} = await import(pathToFileURL(path.join(process.env.GITHUB_WORKSPACE, "sceneworks", "scripts", "h3-finetune-terminal-stage.mjs")).href);
+          // The stage's privateRunRoot parent, under the campaign work root (never the weights volume).
+          const workRoot = campaignWorkRoot();
+          const parent = path.join(workRoot, "sc26691-private"), current = process.env.GITHUB_RUN_ID;
           const entries = await readdir(parent, {withFileTypes: true}).catch(e => { if (e.code === "ENOENT") return []; throw e; });
           // An owned API/worker/guardian an earlier run recorded and that is still alive as itself
           // (MLX run 41044021373 hit one holding 127.0.0.1:43210) keeps that run's roots: it may
@@ -297,8 +339,8 @@ jobs:
             await rm(path.join(parent, entry.name), {recursive: true, force: false});
             console.log(`removed ${entry.name}`);
           }
-          const fs = await statfs(hfHome);
-          console.log(`${hfHome} free ${(fs.bavail * fs.bsize / 2 ** 30).toFixed(1)} GiB`);
+          const fs = await statfs(workRoot);
+          console.log(`${workRoot} free ${(fs.bavail * fs.bsize / 2 ** 30).toFixed(1)} GiB`);
           if (leftovers.length) throw new Error(`H3_LEFTOVER_OWNED_PROCESSES: ${leftovers.length} owned process(es) from earlier campaign runs are still alive on this host and were left untouched; stop them, then re-dispatch: ${formatLeftovers(leftovers)}`);
           NODE
       - name: Bootstrap the reduced terminal campaign when requested
@@ -318,7 +360,7 @@ jobs:
           import {appendFile, mkdir, readFile, writeFile} from "node:fs/promises";
           import path from "node:path";
           import {bootstrapTerminal} from "./scripts/h3-finetune-terminal-bootstrap.mjs";
-          import {privateRunRoot} from "./scripts/h3-finetune-terminal-stage.mjs";
+          import {privateRunRoot, assertWritePathOffWeights} from "./scripts/h3-finetune-terminal-stage.mjs";
 
           const env = process.env;
           const request = JSON.parse(env.H3_STAGE_REQUEST || "{}");
@@ -341,12 +383,13 @@ jobs:
             // The output root sits BESIDE the per-run private staging root, on the same volume. The
             // runtime hardlinks the staged model files into each case's data directory so a 34 GB
             // checkpoint costs nothing per case, and a hardlink cannot cross volumes: with the
-            // output root in RUNNER_TEMP (the internal disk on macOS, D: on Windows) and the staged
-            // root on the weights volume (/Volumes/Models, E:), the first case failed with EXDEV. A
-            // sibling — not a child — keeps it out of the stage's own run-root cleanup.
+            // output root in RUNNER_TEMP and the staged root elsewhere, the first case failed with
+            // EXDEV. A sibling — not a child — keeps it out of the stage's own run-root cleanup. Both
+            // live under the campaign WORK root (sc-26691); the stage only COPIES weights out of the
+            // read-only hub, so the hub may be on another volume.
             const stagedRoot = privateRunRoot({ backend: env.H3_STAGE_BACKEND, platform: process.platform, env, runId: env.GITHUB_RUN_ID, attempt: env.GITHUB_RUN_ATTEMPT });
             await mkdir(path.dirname(stagedRoot), { recursive: true });
-            const outputRoot = `${stagedRoot}-bootstrap-${env.GITHUB_SHA}`;
+            const outputRoot = assertWritePathOffWeights(`${stagedRoot}-bootstrap-${env.GITHUB_SHA}`, { what: "bootstrap output root" });
             const result = await bootstrapTerminal({
               request, backend: env.H3_STAGE_BACKEND, swRoot: process.cwd(),
               inferenceRoot: path.join(env.GITHUB_WORKSPACE, "inference"), evidenceRoot, env, outputRoot,

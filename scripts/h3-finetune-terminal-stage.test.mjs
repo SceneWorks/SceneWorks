@@ -7,7 +7,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {
   CLEANUP_ACKNOWLEDGEMENT, CUDA_RUNNERS, FILE_TIMEOUT_MS, HF_HOST, SINGULARITY_SET,
-  assertCliEnvironment, assertStageAuthority, canonicalSingularityFiles, casebookSha256, cacheHub, cleanupPolicy, cleanupPrivateRoot,
+  assertCliEnvironment, assertStageAuthority, assertWritePathOffWeights, expandHomePath, canonicalSingularityFiles, casebookSha256, cacheHub, cleanupPolicy, cleanupPrivateRoot,
   defaultProbe, hashFileSha256, identityControlSourceEntry, inspectManifest, loadCasebook, parseStageRequest, prepareIdentityControls, prepareReferenceFixtures, privateRunRoot, probeCacheFile, runStage, selectStageFiles, sourceUrl, stageOneFile, writeAllBytes,
 } from './h3-finetune-terminal-stage.mjs';
 
@@ -16,8 +16,11 @@ const sourceSha = 'a'.repeat(40);
 async function tempDir(t, label = 'sc26691-stage-unit-') {
   const root = await mkdtemp(path.join(os.tmpdir(), label));
   t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(() => rm(workOf(root), { recursive: true, force: true }));
   return root;
 }
+// The campaign work root is a SIBLING of the unit HF home: writes never land under the weights root.
+const workOf = hfHome => `${hfHome}-work`;
 function tinyBook(bytes, file = 'tiny.bin', repo = 'unit/fake', revision = 'b'.repeat(40)) {
   return {
     source: { repo: 'WarmBloodAban/Minimax-h3_Singularity', revision: 'a56850c870825d6a8ae501a595c4dbbbc77bbc7e' },
@@ -32,7 +35,7 @@ function authorityFor(files, kind = 'unit_fake') {
   return { kind, acknowledged: true, approvedBy: 'unit_fake test only', reference: 'synthetic consent, never real approval', approvedAt: '2026-10-25T00:00:00Z', subjects: files.map(file => ({ role: 'source', sha256: file.expectedSha256, acknowledged: true, licenseId: file.legal?.licenseId })) };
 }
 function stageEnv(hfHome, overrides = {}) {
-  return { GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1', HF_HOME: hfHome, HOME: hfHome, RUNNER_NAME: 'nax-macos', H3_TERMINAL_ROUTE: overrides.RUNNER_NAME?.startsWith('cuda-')?'h3-terminal-cuda':'h3-terminal-mlx', ...overrides };
+  return { GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1', HF_HOME: hfHome, HOME: hfHome, H3_WORK_ROOT: workOf(hfHome), RUNNER_NAME: 'nax-macos', H3_EXPECTED_RUNNER: overrides.RUNNER_NAME ?? 'nax-macos', H3_TERMINAL_ROUTE: overrides.RUNNER_NAME?.startsWith('cuda-')?'h3-terminal-cuda':'h3-terminal-mlx', ...overrides };
 }
 function streamResponse(chunks, { status = 200, headers = {}, onChunk } = {}) {
   return {
@@ -111,6 +114,11 @@ test('CLI guards reject local/wrong-runner execution before any filesystem or ne
   assert.throws(() => assertCliEnvironment({ env: { ...stageEnv('/tmp/hf'), GITHUB_SHA: 'short' }, platform: 'darwin', backend: 'mlx' }), /match/);
   assert.throws(() => assertCliEnvironment({ env: stageEnv('/tmp/hf'), platform: 'linux', backend: 'mlx' }), /macOS-only/);
   assert.throws(() => assertCliEnvironment({ env: stageEnv('/tmp/hf', { RUNNER_NAME: 'mac-studio' }), platform: 'darwin', backend: 'mlx' }), /nax-macos/);
+  // sc-26691: either approved Mac may run the MLX lane, but only the one the request names.
+  assert.equal(assertCliEnvironment({ env: stageEnv('/tmp/hf', { RUNNER_NAME: 'nax-macos-2' }), platform: 'darwin', backend: 'mlx' }).backend, 'mlx');
+  assert.throws(() => assertCliEnvironment({ env: stageEnv('/tmp/hf', { RUNNER_NAME: 'nax-macos-2', H3_EXPECTED_RUNNER: 'nax-macos' }), platform: 'darwin', backend: 'mlx' }), /expected_runner/);
+  assert.throws(() => assertCliEnvironment({ env: stageEnv('/tmp/hf', { H3_EXPECTED_RUNNER: undefined }), platform: 'darwin', backend: 'mlx' }), /expected_runner/);
+  assert.throws(() => assertCliEnvironment({ env: stageEnv('/tmp/hf', { RUNNER_NAME: CUDA_RUNNERS[1], H3_EXPECTED_RUNNER: CUDA_RUNNERS[0] }), platform: 'win32', backend: 'cuda' }), /expected_runner/);
   assert.throws(() => assertCliEnvironment({ env: stageEnv('/tmp/hf'), platform: 'win32', backend: 'cuda' }), /full-weights/);
   assert.throws(() => assertCliEnvironment({ env: stageEnv('/tmp/hf', { RUNNER_NAME: 'cuda-windows-3' }), platform: 'win32', backend: 'cuda' }), /full-weights/);
   assert.equal(assertCliEnvironment({ env: stageEnv('/tmp/hf'), platform: 'darwin', backend: 'mlx' }).codeSha, sourceSha);
@@ -119,9 +127,19 @@ test('CLI guards reject local/wrong-runner execution before any filesystem or ne
   // Wrong backend/platform is refused before any root/evidence path exists.
   const hfHome = await tempDir(t), evidence = path.join(hfHome, 'evidence');
   await assert.rejects(runStage({ request: { asset_sets: [SINGULARITY_SET], license_authority: authorityFor([{ file: 'x', expectedSha256: 'e'.repeat(64) }], 'user-approved') }, backend: 'mlx', env: stageEnv(hfHome, { HF_HOME: hfHome }), platform: 'darwin', evidenceDir: evidence }), /explicit legal.licenseId|missing explicit license authority/);
-  await assert.rejects(lstat(path.join(hfHome, 'sc26691-private')), /ENOENT/);
-  assert.equal(privateRunRoot({ backend: 'cuda', platform: 'win32', env: {}, runId: '42', attempt: '2' }), path.win32.join('E:\\', 'huggingface', 'sc26691-private', '42-2'));
-  assert.equal(privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: '/private/hf' }, runId: '42', attempt: '2' }), path.join('/private/hf', 'sc26691-private', '42-2'));
+  await assert.rejects(lstat(path.join(workOf(hfHome), 'sc26691-private')), /ENOENT/);
+  // sc-26691: run roots live under the WORK root (default D:\sc26691-campaign / ~/sc26691-campaign),
+  // never under the weights root, and a work root on the weights volume is refused loudly.
+  assert.equal(privateRunRoot({ backend: 'cuda', platform: 'win32', env: {}, runId: '42', attempt: '2' }), 'D:\\sc26691-campaign\\sc26691-private\\42-2');
+  assert.equal(privateRunRoot({ backend: 'cuda', platform: 'win32', env: { H3_WORK_ROOT: 'F:\\w' }, runId: '42', attempt: '2' }), 'F:\\w\\sc26691-private\\42-2');
+  const home = path.resolve(os.tmpdir(), 'unit-home'), hf = path.resolve(os.tmpdir(), 'unit-models', 'huggingface');
+  assert.equal(privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: hf, HOME: home }, runId: '42', attempt: '2' }), path.join(home, 'sc26691-campaign', 'sc26691-private', '42-2'));
+  for (const workRoot of ['E:\\scratch', 'e:\\huggingface\\sc26691-private', '\\\\?\\E:\\x']) assert.throws(() => privateRunRoot({ backend: 'cuda', platform: 'win32', env: { H3_WORK_ROOT: workRoot }, runId: '42', attempt: '2' }), /H3_WRITE_ON_WEIGHTS_VOLUME/);
+  assert.throws(() => privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: hf, HOME: home, H3_WORK_ROOT: path.join(hf, 'campaign') }, runId: '42', attempt: '2' }), /H3_WRITE_UNDER_WEIGHTS_ROOT/);
+  assert.throws(() => privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: hf, HOME: hf }, runId: '42', attempt: '2' }), /H3_WRITE_UNDER_WEIGHTS_ROOT/, 'a default ~/ work root under the HF home is refused too');
+  assert.equal(expandHomePath('~/sc26691-hf', { platform: 'darwin', env: { HOME: home } }), path.join(home, 'sc26691-hf'));
+  assert.throws(() => expandHomePath('relative/hf', { platform: 'darwin', env: { HOME: home } }), /absolute path or ~\/ path required/);
+  assert.equal(assertWritePathOffWeights('D:\\sc26691-campaign\\x', { platform: 'win32', env: {} }), 'D:\\sc26691-campaign\\x');
 });
 test('injected byte streams stage four-file-set members with actual size/full SHA and keep weights out of evidence', async t => {
   const bytes = Buffer.from('tiny frozen stream bytes with a deterministic digest');
@@ -216,7 +234,7 @@ test('real runStage entry enforces the hosted manual guard before any filesystem
   await assert.rejects(runStage({ request, backend: 'cuda', book, env: stageEnv(hfHome), platform: 'darwin', fetchImpl: transport, evidenceDir: evidence }), /Windows-only/);
   assert.equal(calls, 0);
   await assert.rejects(lstat(evidence), /ENOENT/);
-  await assert.rejects(lstat(path.join(hfHome, 'sc26691-private')), /ENOENT/);
+  await assert.rejects(lstat(path.join(workOf(hfHome), 'sc26691-private')), /ENOENT/);
 });
 test('nested HF-relative paths stage with per-segment URL encoding and nested owned directories', async t => {
   const bytes = Buffer.from('nested bytes'), relative = 'teacher/model shard-0001.safetensors';
@@ -307,7 +325,7 @@ test('inspect_only reports actual per-file cache presence/hash without downloadi
   assert.deepEqual(present.expectedLegal, { licenseId: 'unit_fake-pair' });
   assert.equal(present.explicitAcknowledgment, undefined);
   assert.equal(missing.presence, 'missing'); assert.equal(missing.matches, false);
-  await assert.rejects(lstat(path.join(hfHome, 'sc26691-private')), /ENOENT/);
+  await assert.rejects(lstat(path.join(workOf(hfHome), 'sc26691-private')), /ENOENT/);
   assert.equal((await readdir(path.join(hfHome, 'evidence'))).filter(name => name.startsWith('inspect-receipt-')).length, 1);
 });
 test('partial handle writes and metadata probes are counted/identified truthfully', async () => {
@@ -371,7 +389,7 @@ test('private roots are never reused and receipts record producer code SHA, pins
   await assert.rejects(runStage(options), /reuse an existing private staging root/);
 });
 async function ownedRoot(hfHome, { runId = '101', attempt = '1', status = 'completed', backend = 'mlx', services = false, symlinkParent = false } = {}) {
-  const base = path.join(hfHome, 'sc26691-private'), root = path.join(base, `${runId}-${attempt}`);
+  const base = path.join(workOf(hfHome), 'sc26691-private'), root = path.join(base, `${runId}-${attempt}`);
   await mkdir(path.dirname(base), { recursive: true });
   if (symlinkParent) await symlink(hfHome, base); else await mkdir(base, { recursive: true });
   await mkdir(root, { recursive: true });
@@ -391,7 +409,7 @@ test('cleanup is gated on the derived run root, terminal receipt, real exit rece
   const hfHome = await tempDir(t, 'sc26691-cleanup-'), base = { acknowledgement: CLEANUP_ACKNOWLEDGEMENT, expectedRunId: '101', expectedRunAttempt: '1', backend: 'mlx', env: stageEnv(hfHome), platform: 'darwin' };
   const running = await ownedRoot(hfHome, { status: 'running' });
   await assert.rejects(cleanupPrivateRoot({ ...base, root: running }), /still running/);
-  const stray = path.join(hfHome, 'sc26691-private', '555-1');
+  const stray = path.join(workOf(hfHome), 'sc26691-private', '555-1');
   await ownedRoot(hfHome, { runId: '555' });
   await assert.rejects(cleanupPrivateRoot({ ...base, root: stray, expectedRunId: '101' }), /derived approved/);
   const servicesMissing = await ownedRoot(hfHome, { runId: '102', services: true });
@@ -402,10 +420,11 @@ test('cleanup is gated on the derived run root, terminal receipt, real exit rece
   assert.equal((await cleanupPrivateRoot({ ...base, root: servicesMissing, expectedRunId: '102', expectedRunAttempt: '1' })).removed, servicesMissing);
   const outside = await tempDir(t, 'sc26691-cleanup-outside-'), linkedHome = await tempDir(t, 'sc26691-cleanup-home-');
   await mkdir(path.join(outside, '103-1'), { recursive: true });
-  await symlink(outside, path.join(linkedHome, 'sc26691-private'));
-  await assert.rejects(cleanupPrivateRoot({ ...base, root: path.join(linkedHome, 'sc26691-private', '103-1'), expectedRunId: '103', expectedRunAttempt: '1', env: stageEnv(linkedHome) }), /symlink/);
+  await mkdir(workOf(linkedHome), { recursive: true });
+  await symlink(outside, path.join(workOf(linkedHome), 'sc26691-private'));
+  await assert.rejects(cleanupPrivateRoot({ ...base, root: path.join(workOf(linkedHome), 'sc26691-private', '103-1'), expectedRunId: '103', expectedRunAttempt: '1', env: stageEnv(linkedHome) }), /symlink/);
   assert.ok((await lstat(path.join(outside, '103-1'))).isDirectory(), 'foreign root untouched');
-  assert.equal((await lstat(path.join(linkedHome, 'sc26691-private'))).isSymbolicLink(), true);
+  assert.equal((await lstat(path.join(workOf(linkedHome), 'sc26691-private'))).isSymbolicLink(), true);
 });
 
 test('unavailable device metadata is recorded truthfully and is never a staging gate', async t => {
@@ -701,7 +720,7 @@ function outputInfoIsPositive(receipt, fixture) {
 test('reference fixtures refuse real injected execution, incomplete stage ownership and existing outputs', async t => {
   const { root, evidence } = await stagedRootFixture(t, 'ref-guard-'), book = await loadCasebook();
   const tools = { ffmpeg: '/unit_fake/ffmpeg', ffprobe: '/unit_fake/ffprobe' };
-  const env = { PATH: '/unit_fake/bin', RUNNER_NAME: 'nax-macos', H3_STAGE_BACKEND: 'mlx', H3_TERMINAL_ROUTE:'h3-terminal-mlx', GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1' };
+  const env = { PATH: '/unit_fake/bin', RUNNER_NAME: 'nax-macos', H3_EXPECTED_RUNNER: 'nax-macos', H3_STAGE_BACKEND: 'mlx', H3_TERMINAL_ROUTE:'h3-terminal-mlx', GITHUB_ACTIONS: 'true', GITHUB_EVENT_NAME: 'workflow_dispatch', GITHUB_SHA: sourceSha, GITHUB_RUN_ID: '101', GITHUB_RUN_ATTEMPT: '1' };
   await assert.rejects(prepareReferenceFixtures({ root, evidenceDir: evidence, execute: referenceExecute(), tools, allowUnitFake: false, env, platform: 'darwin' }), /unit_fake only/);
   await assert.rejects(prepareReferenceFixtures({ root, evidenceDir: evidence, book, allowUnitFake: false, env, platform: 'darwin' }), /cannot inject book data/);
   const running = await stagedRootFixture(t, 'ref-running-');

@@ -19,7 +19,9 @@ export const HF_HOST = 'https://huggingface.co';
 export const FILE_TIMEOUT_MS = 60 * 60 * 1000;   // per-file request bound
 export const JOB_BOUND_MS = 240 * 60 * 1000;     // workflow job bound (set by the parent workflow)
 export const STAGE_BACKENDS = Object.freeze(['mlx', 'cuda']);
-export const MLX_RUNNER = 'nax-macos';
+// Either approved macOS real-weights listener may run the MLX lane; the request's expected_runner
+// (exported as H3_EXPECTED_RUNNER) names the one, and RUNNER_NAME must equal it exactly.
+export const MLX_RUNNERS = Object.freeze(['nax-macos', 'nax-macos-2']);
 export const CUDA_RUNNERS = Object.freeze(['cuda-windows', 'cuda-windows-2']);
 export const CLEANUP_ACKNOWLEDGEMENT = 'archived-verified-av-and-backend-readbacks; all owned services stopped';
 const SINGULARITY_REPO = 'WarmBloodAban/Minimax-h3_Singularity';
@@ -219,15 +221,81 @@ export function fileAcknowledgments(authority, files) {
   }
   return acknowledgments;
 }
+// sc-26691 (2026-11-01): where the campaign READS weights and where it WRITES are separate.
+// Weights are read from the HF hub (E:\huggingface\hub on Windows, $HF_HOME/hub on macOS) and
+// never written: a CUDA run once wrote ~500 GB of run staging, case services and cargo targets
+// under E:\huggingface\sc26691-private and refused its next case for disk space. Every write —
+// run staging, bootstrap/case roots, services, cargo targets, the prior-run cleanup — lives under
+// the WORK root instead (request.work_root, exported as H3_WORK_ROOT), on another volume. The
+// stage only ever COPIES out of the hub (copyFile, never a hard link), so a work root on another
+// volume needs no cross-volume link; the case roots that hard-link staged files sit beside the
+// staging root under the same work root, on the same volume.
+export const WINDOWS_WEIGHTS_DRIVE = 'E:';
+export const DEFAULT_WORK_ROOTS = Object.freeze({ win32: 'D:\\sc26691-campaign', posix: '~/sc26691-campaign' });
+// Host path semantics off Windows (as the HF-home derivation always used), win32 semantics for Windows.
+const pathApi = platform => (platform === 'win32' ? path.win32 : path);
+const stripVerbatimPrefix = value => (typeof value === 'string' && value.startsWith('\\\\?\\') ? value.slice(4) : value);
+/** Expand a leading `~/` against the runner's home; anything else must already be absolute. */
+export function expandHomePath(value, { platform = process.platform, env = process.env } = {}) {
+  assert.ok(typeof value === 'string' && value.length > 0, 'a non-empty path is required');
+  const api = pathApi(platform);
+  if (value === '~' || value.startsWith('~/')) {
+    const home = env.HOME ?? os.homedir();
+    assert.ok(api.isAbsolute(home), 'an absolute HOME is required to expand ~/');
+    return api.join(home, value.slice(2));
+  }
+  assert.ok(api.isAbsolute(value), `absolute path or ~/ path required, got ${value}`);
+  return api.normalize(value);
+}
+/** The read-only weights roots of this platform: never a write target. */
+export function weightsRoots({ platform = process.platform, env = process.env } = {}) {
+  const api = pathApi(platform), roots = [];
+  if (platform === 'win32') roots.push(api.join('E:\\', 'huggingface'));
+  else if (env.HF_HOME) roots.push(env.HF_HOME);
+  roots.push(api.dirname(cacheHub({ platform, env })));
+  return [...new Set(roots.map(root => api.resolve(root)))];
+}
+/**
+ * Refuse, loudly, any campaign write path on the weights volume. On Windows that is the whole E:
+ * drive (static model content); elsewhere the HF home and the hub's parent.
+ */
+export function assertWritePathOffWeights(target, { platform = process.platform, env = process.env, what = 'campaign write path' } = {}) {
+  assert.ok(typeof target === 'string' && target.length > 0, `${what} required`);
+  const api = pathApi(platform), resolved = api.resolve(stripVerbatimPrefix(target));
+  const fold = value => (platform === 'win32' || platform === 'darwin' ? value.toLowerCase() : value);
+  if (platform === 'win32' && fold(resolved).startsWith(fold(WINDOWS_WEIGHTS_DRIVE))) {
+    throw stageError('H3_WRITE_ON_WEIGHTS_VOLUME', `${what} ${resolved} is on ${WINDOWS_WEIGHTS_DRIVE}, the read-only weights volume; set request.work_root to another volume`);
+  }
+  for (const root of weightsRoots({ platform, env })) {
+    const relative = api.relative(fold(root), fold(resolved));
+    if (relative === '' || (!relative.startsWith('..') && !api.isAbsolute(relative))) {
+      throw stageError('H3_WRITE_UNDER_WEIGHTS_ROOT', `${what} ${resolved} is under the read-only weights root ${root}; set request.work_root outside it`);
+    }
+  }
+  return resolved;
+}
+/** The campaign work root: H3_WORK_ROOT, else the per-platform default; never on the weights volume. */
+export function campaignWorkRoot({ platform = process.platform, env = process.env } = {}) {
+  const raw = env.H3_WORK_ROOT || (platform === 'win32' ? DEFAULT_WORK_ROOTS.win32 : DEFAULT_WORK_ROOTS.posix);
+  return assertWritePathOffWeights(expandHomePath(raw, { platform, env }), { platform, env, what: 'work root' });
+}
 export function privateRunRoot({ backend, platform, env = process.env, runId, attempt }) {
   assert.ok(STAGE_BACKENDS.includes(backend), 'backend must be mlx or cuda');
   assert.match(String(runId ?? ''), /^\d+$/, 'GITHUB_RUN_ID required for a per-run private root');
   assert.match(String(attempt ?? ''), /^\d+$/, 'GITHUB_RUN_ATTEMPT required for a per-run private root');
-  const leaf = `${runId}-${attempt}`;
-  if (platform === 'win32') return path.win32.join('E:\\', 'huggingface', 'sc26691-private', leaf);
-  const hfHome = env.HF_HOME ?? path.join(env.HOME ?? os.homedir(), '.cache', 'huggingface');
-  assert.ok(path.isAbsolute(hfHome), 'HF_HOME must be absolute');
-  return path.join(hfHome, 'sc26691-private', leaf);
+  return pathApi(platform).join(campaignWorkRoot({ platform, env }), 'sc26691-private', `${runId}-${attempt}`);
+}
+/** RUNNER_NAME must be an approved listener for the backend AND equal the request's expected_runner. */
+export function assertExpectedRunner({ backend, env = process.env, platform = process.platform } = {}) {
+  if (backend === 'mlx') {
+    assert.equal(platform, 'darwin', 'mlx staging is macOS-only');
+    assert.ok(MLX_RUNNERS.includes(env.RUNNER_NAME), `mlx runs only on an approved macOS listener (${MLX_RUNNERS.join(' or ')}), not ${env.RUNNER_NAME}`);
+    assert.equal(env.RUNNER_NAME, env.H3_EXPECTED_RUNNER, 'RUNNER_NAME must equal the request expected_runner (H3_EXPECTED_RUNNER)');
+  } else {
+    assert.equal(platform, 'win32', 'cuda staging is Windows-only');
+    assert.ok(CUDA_RUNNERS.includes(env.RUNNER_NAME), 'approved full-weights CUDA listener required');
+    if (env.H3_EXPECTED_RUNNER !== undefined) assert.equal(env.RUNNER_NAME, env.H3_EXPECTED_RUNNER, 'RUNNER_NAME must equal the request expected_runner (H3_EXPECTED_RUNNER)');
+  }
 }
 // Production CLI guards, checked BEFORE any filesystem/network action.
 export function assertCliEnvironment({ env = process.env, platform = process.platform, backend } = {}) {
@@ -239,8 +307,7 @@ export function assertCliEnvironment({ env = process.env, platform = process.pla
   if (env.H3_STAGE_SOURCE_SHA !== undefined) assert.equal(env.H3_STAGE_SOURCE_SHA, env.GITHUB_SHA, 'caller must check out the exact GITHUB_SHA source');
   const selected = backend ?? env.H3_STAGE_BACKEND;
   assert.ok(STAGE_BACKENDS.includes(selected), 'backend must be mlx or cuda');
-  if (selected === 'mlx') { assert.equal(platform, 'darwin', 'mlx staging is macOS-only'); assert.equal(env.RUNNER_NAME, MLX_RUNNER, `mlx staging requires ${MLX_RUNNER}`); }
-  else { assert.equal(platform, 'win32', 'cuda staging is Windows-only'); assert.ok(CUDA_RUNNERS.includes(env.RUNNER_NAME), 'approved full-weights CUDA listener required'); }
+  assertExpectedRunner({ backend: selected, env, platform });
   assert.equal(env.H3_TERMINAL_ROUTE,`h3-terminal-${selected}`,'asset ensure is available only inside the existing h3-terminal-mlx/cuda routes');
   return { backend: selected, codeSha: env.GITHUB_SHA };
 }

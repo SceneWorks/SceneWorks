@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { campaignProfileArgs } from './lib/h3-campaign-build-profile.mjs';
 import { stripVerbatim } from './lib/windows-verbatim-path.mjs';
 import { isServicePort } from './lib/h3-owned-processes.mjs';
+import { assertExpectedRunner, assertWritePathOffWeights } from './h3-finetune-terminal-stage.mjs';
 import { createHash } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { mkdir, readFile, realpath, rename, stat, writeFile, copyFile } from 'node:fs/promises';
@@ -102,7 +103,7 @@ export function authorized(p, c) {
   assert.notEqual(p.proof_kind,'unit_fake','unit_fake is not campaign authorization');
   assert.equal(process.env.GITHUB_ACTIONS, 'true', 'real services/native commands are explicit Actions-only');
   assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR, `${p.sceneworks}:${p.inference}`);
-  if (c.backend === 'mlx') { assert.equal(process.platform,'darwin'); assert.equal(process.env.RUNNER_NAME,'nax-macos'); }
+  if (c.backend === 'mlx') assertExpectedRunner({ backend: 'mlx' });
   else assert.equal(process.platform,'win32');
 }
 export async function sourcePair(p, root, inferenceRoot) {
@@ -1038,8 +1039,10 @@ export async function runCase(p, id, root, inferenceRoot) {
   assert.equal(process.env.H3_TERMINAL_AUTHORIZED_PAIR, `${p.sceneworks}:${p.inference}`, 'explicit final pair authorization required');
   validatePlan(p); await sourcePair(p, root, inferenceRoot);
   const c = executionCases(p).find(c => c.id === id); assert.ok(c, 'unknown or intentionally omitted operational case');
-  if (c.backend === 'mlx') { assert.equal(process.platform, 'darwin'); assert.equal(process.env.RUNNER_NAME, 'nax-macos'); }
+  if (c.backend === 'mlx') assertExpectedRunner({ backend: 'mlx' });
   else assert.equal(process.platform, 'win32');
+  // Every case write lands below the output root, which must be on the work root, never the weights volume.
+  assertWritePathOffWeights(p.output, { what: 'case output root' });
   await verifyMatrixAdmission(p);
   const budget=p.inventory==='reduced-v1'?await laneBudget(p,c.backend):null;
   // The soft deadline ends the scenario; the hard one leaves the case process room for its own
@@ -1277,6 +1280,7 @@ export async function ensureInlineNativeWitnesses(p,backend,swRoot,{run=runProce
   assert.ok(['mlx','cuda'].includes(backend));
   const native=p.nativeEvidence;assert.ok(native?.root&&native.sha);sha40(native.sha);
   const sourceCheck=async()=>{assert.equal((await exec('git',['rev-parse','HEAD'],{cwd:native.root})).stdout.trim(),native.sha);assert.equal((await exec('git',['status','--porcelain'],{cwd:native.root})).stdout.trim(),'');};await sourceCheck();
+  assertWritePathOffWeights(p.output,{what:'native witness output root'});
   const dir=contained(p.output,`native-witnesses-${backend}`);await mkdir(dir);
   const receiptPath=path.join(dir,'receipt.json'),log=path.join(dir,'native.log'),selectors=[CONDITIONING_WITNESS_SELECTOR,ADAPTER_WITNESS_SELECTOR];
   const receipt={schema:1,status:'running',sourceSha:native.sha,productPin:p.inference,nativeEvidence:native,backend,runId:process.env.GITHUB_RUN_ID,runAttempt:process.env.GITHUB_RUN_ATTEMPT,configuration:{syntheticOnly:true,encodedSeamOnly:true,downloads:false,...(backend==='mlx'?{mlxTreeCapGiB:8}:{})},cases:[]};await save(receiptPath,receipt);

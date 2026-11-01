@@ -560,9 +560,12 @@ test('the Windows terminal lane selects the exact listener the request names', a
   assert.deepEqual(workflowExpression(runsOn, { backend: 'cuda', expected_runner: 'cuda-windows' }), [
     'self-hosted', 'windows', 'cuda', 'real-weights', 'cuda-windows',
   ]);
-  // The macOS lane needs only the label exactly one macOS listener carries.
+  // Both Macs carry real-weights now (sc-26691, 2026-11-01); each is selected by its own label.
   assert.deepEqual(workflowExpression(runsOn, { backend: 'mlx', expected_runner: 'nax-macos' }), [
-    'self-hosted', 'macOS', 'ARM64', 'real-weights',
+    'self-hosted', 'macOS', 'ARM64', 'real-weights', 'rw-starvector',
+  ]);
+  assert.deepEqual(workflowExpression(runsOn, { backend: 'mlx', expected_runner: 'nax-macos-2' }), [
+    'self-hosted', 'macOS', 'ARM64', 'real-weights', 'rw-mage',
   ]);
 });
 
@@ -573,14 +576,16 @@ test('the bootstrap output root shares a volume with the staged model files', as
   // volume, the first real case failed with EXDEV. The output root is therefore derived from the
   // same per-run private staging root, as a sibling (outside the stage's own run-root cleanup).
   assert.match(workflow, /const stagedRoot = privateRunRoot\(/);
-  assert.match(workflow, /const outputRoot = `\$\{stagedRoot\}-bootstrap-\$\{env\.GITHUB_SHA\}`;/);
+  assert.match(workflow, /const outputRoot = assertWritePathOffWeights\(`\$\{stagedRoot\}-bootstrap-\$\{env\.GITHUB_SHA\}`, \{ what: "bootstrap output root" \}\);/);
   assert.doesNotMatch(workflow, /const outputRoot = path\.join\(env\.RUNNER_TEMP/);
-  // Same device, by construction, on both platforms.
+  // Same device, by construction, on both platforms: both live under the WORK root (sc-26691,
+  // 2026-11-01), which is never the weights volume; the stage COPIES weights out of the hub.
   const { privateRunRoot } = await import('./h3-finetune-terminal-stage.mjs');
-  const mac = privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: '/Volumes/Models/huggingface' }, runId: '7', attempt: '1' });
-  assert.equal(mac, path.join('/Volumes/Models/huggingface', 'sc26691-private', '7-1'));
-  const win = privateRunRoot({ backend: 'cuda', platform: 'win32', env: {}, runId: '7', attempt: '1' });
-  assert.equal(win, 'E:\\huggingface\\sc26691-private\\7-1');
+  const home = path.resolve(os.tmpdir(), 'unit-mac-home');
+  const mac = privateRunRoot({ backend: 'mlx', platform: 'darwin', env: { HF_HOME: path.resolve(os.tmpdir(), 'unit-models', 'huggingface'), HOME: home, H3_WORK_ROOT: '~/sc26691-campaign' }, runId: '7', attempt: '1' });
+  assert.equal(mac, path.join(home, 'sc26691-campaign', 'sc26691-private', '7-1'));
+  const win = privateRunRoot({ backend: 'cuda', platform: 'win32', env: { H3_WORK_ROOT: 'D:\\sc26691-campaign' }, runId: '7', attempt: '1' });
+  assert.equal(win, 'D:\\sc26691-campaign\\sc26691-private\\7-1');
 });
 
 test('the Windows terminal lane activates the MSVC host compiler for nvcc before any build', async () => {
@@ -618,22 +623,28 @@ test('the Windows terminal lane selects Git Bash before its first bash step', as
   assert.ok(job.includes("inputs.backend == 'cuda'"), 'the selection is the Windows lane only');
 });
 
-test('the macOS terminal lane reads and writes its staged set on the reviewed-weights volume', async () => {
-  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
-  // The runner service carries no HF_HOME, so the staging probe would otherwise read a
-  // different hub than the one the reviewed weights are seeded into, and the lane's private
-  // copy of the staged set would land on the runner's smaller internal disk instead of the
-  // volume that holds it.
-  assert.match(workflow, /HF_HOME: \$\{\{ inputs\.backend == 'mlx' && '\/Volumes\/Models\/huggingface' \|\| '' \}\}/);
-  // The macOS lane must still be the one that probes that hub: the Windows lane's paths are
-  // absolute on E: and must not be redirected by the macOS volume.
-  assert.match(workflow, /\["self-hosted","macOS","ARM64","real-weights"\]/);
+test('the terminal lane reads weights from the HF hub and writes only under the work root (sc-26691)', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8'), job = workflowJob(workflow, 'terminal');
+  // The macOS HF home is the request's mlx_hf_home (default the reviewed-weights volume, ~/ allowed),
+  // resolved once and exported; it is a READ root only. No job-level HF_HOME competes with it.
+  assert.match(workflow, /resolved\.HF_HOME = expandHomePath\(request\.mlx_hf_home \|\| "\/Volumes\/Models\/huggingface", \{platform: "darwin", env\}\);/);
+  assert.match(workflow, /resolved\.HF_HUB_CACHE = path\.join\(resolved\.HF_HOME, "hub"\);/);
+  assert.doesNotMatch(job, /^      HF_HOME:/m);
+  // Every write root derives from the work root, which the stage refuses on E: or under the HF home.
+  assert.match(workflow, /resolved\.H3_WORK_ROOT = campaignWorkRoot\(/);
+  assert.match(workflow, /const workRoot = campaignWorkRoot\(\);\n\s+const parent = path\.join\(workRoot, "sc26691-private"\)/);
+  assert.match(workflow, /\$pythonRoot = Join-Path \$env:H3_WORK_ROOT 'sc26691-python\\cpython-3\.12\.10-x64-nuget'/);
+  assert.match(workflow, /if \(-not \$env:H3_WORK_ROOT -or \$env:H3_WORK_ROOT -like 'E:\*'\) \{ throw/);
+  // No code path names a location on the weights volume any more (comments may still explain it).
+  const code = workflow.split('\n').filter(line => !/^\s*(#|\/\/)/.test(line)).join('\n');
+  assert.doesNotMatch(code, /E:\\\\?huggingface/);
+  assert.doesNotMatch(code, /path\.join\(hfHome, "sc26691-private"\)/);
 });
 
 test('manual workflow is execution-only and uses existing runner/token infrastructure without global locks', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
   assert.match(workflow, /workflow_call:/); assert.doesNotMatch(workflow,/^  workflow_dispatch:/m,'only the existing registered terminal routes may call asset ensure'); assert.doesNotMatch(workflow, /^  (push|pull_request|schedule):/m);
-  assert.match(workflow, /\[\"self-hosted\",\"macOS\",\"ARM64\",\"real-weights\"\]/); assert.match(workflow, /real-weights/); assert.match(workflow, /cancel-in-progress: false/);
+  assert.match(workflow, /\[\"self-hosted\",\"macOS\",\"ARM64\",\"real-weights\",\"\{0\}\"\]/); assert.match(workflow, /real-weights/); assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /SCENEWORKS_INFERENCE_READ_TOKEN/); assert.match(workflow, /stationary_pair_authorized/);
   assert.doesNotMatch(workflow, /registration_only|pkill|flock|gpu.token/i);
 });
@@ -687,7 +698,7 @@ test('H3 caller forwards only explicit request fields and the standing read toke
 });
 test('terminal reuses native device queues and binds manual CUDA physical GPU 1 without changing ordinary queues',async()=>{
   const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8'),job=workflowJob(workflow,'terminal');
-  const group=/^      group: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(group,{backend:'cuda'}),'windows-candle-gpu-real-weights');assert.equal(workflowExpression(group,{backend:'mlx'}),'h3-import-proofs-nax-macos');assert.match(job,/cancel-in-progress: false/);
+  const group=/^      group: (.+)$/m.exec(job)[1];assert.equal(workflowExpression(group,{backend:'cuda'}),'windows-candle-gpu-real-weights');assert.equal(workflowExpression(group,{backend:'mlx',expected_runner:'nax-macos'}),'h3-import-proofs-nax-macos');assert.equal(workflowExpression(group,{backend:'mlx',expected_runner:'nax-macos-2'}),'h3-import-proofs-nax-macos-2');assert.match(job,/cancel-in-progress: false/);
   for(const [key,value]of [['CUDA_DEVICE_ORDER','PCI_BUS_ID'],['CUDA_VISIBLE_DEVICES','1'],['SCENEWORKS_GPU_ID','1']]){const expression=new RegExp(`^          ${key}: (.+)$`,'m').exec(job)[1];assert.equal(workflowExpression(expression,{backend:'cuda'}),value);}
 });
 test('actual reusable preflight rejects source-ref drift before product execution without a main activation prerequisite',async t=>{
@@ -905,7 +916,7 @@ test('inline source binding rewrites the actual scenario and input hash together
 test('three individual source mutations are killed by executed assertions, not syntax errors', async t => {
   const { dir } = await fixture(t);
   const original = await readFile(new URL('./h3-finetune-terminal.mjs', import.meta.url), 'utf8');
-  for (const file of ['h3-finetune-terminal-api.mjs', 'h3-finetune-terminal-reduced.mjs', 'h3-finetune-terminal.test.mjs']) await writeFile(path.join(dir, file), await readFile(new URL(file, import.meta.url)));
+  for (const file of ['h3-finetune-terminal-api.mjs', 'h3-finetune-terminal-reduced.mjs', 'h3-finetune-terminal-stage.mjs', 'h3-finetune-terminal.test.mjs']) await writeFile(path.join(dir, file), await readFile(new URL(file, import.meta.url)));
   await mkdir(path.join(dir, 'lib'), { recursive: true });
   await writeFile(path.join(dir, 'lib', 'h3-campaign-build-profile.mjs'), await readFile(new URL('./lib/h3-campaign-build-profile.mjs', import.meta.url)));
   await writeFile(path.join(dir, 'lib', 'windows-verbatim-path.mjs'), await readFile(new URL('./lib/windows-verbatim-path.mjs', import.meta.url)));

@@ -196,14 +196,15 @@ test('Windows product build targets a short run-owned path and a failed build ke
   process.env.GITHUB_RUN_ID='40488447618';process.env.GITHUB_RUN_ATTEMPT='1';let target;
   const deps={...fake.deps,platform:'win32',runProcess:async(argv,options)=>{target=options.env.CARGO_TARGET_DIR;await writeFile(options.logPath,'error: nvcc failed\n',{flag:'wx'});throw new Error('case process failed');}};
   await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,f.dir,deps).build(),/case process failed/);
-  assert.equal(target,'E:\\huggingface\\sc26691-private\\40488447618-1-target');
+  // sc-26691: the target lives under the work root (default D:\sc26691-campaign), never on E:.
+  assert.equal(target,'D:\\sc26691-campaign\\sc26691-private\\40488447618-1-target');
   assert.equal(await readFile(path.join(f.dir,'service-build.log'),'utf8'),'error: nvcc failed\n');
 });
 test('every Windows cargo target is a short run-owned sibling, and only the native one is an accepted binary home',async t=>{
   const saved={id:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT};
   t.after(()=>{for(const [k,v] of [['GITHUB_RUN_ID',saved.id],['GITHUB_RUN_ATTEMPT',saved.attempt]])if(v===undefined)delete process.env[k];else process.env[k]=v;});
   process.env.GITHUB_RUN_ID='7';process.env.GITHUB_RUN_ATTEMPT='2';const c={backend:'cuda'};
-  for(const kind of ['target','native','fixture'])assert.equal(cargoTarget(c,kind,'/deep/path','win32'),`E:\\huggingface\\sc26691-private\\7-2-${kind}`);
+  for(const kind of ['target','native','fixture'])assert.equal(cargoTarget(c,kind,'/deep/path','win32'),`D:\\sc26691-campaign\\sc26691-private\\7-2-${kind}`);
   assert.equal(cargoTarget(c,'native','/deep/path','darwin'),'/deep/path');
   const parent=path.join(os.tmpdir(),'sc26691-private'),output=path.join(parent,'7-2-bootstrap-'+'a'.repeat(40));
   assert.equal(assertOwnedNativeBinary(output,path.join(output,'native-target','x')),path.join(output,'native-target','x'));
@@ -398,7 +399,7 @@ test('Windows release service binary is owned by the short run target it was bui
   const previous={run:process.env.GITHUB_RUN_ID,attempt:process.env.GITHUB_RUN_ATTEMPT};
   process.env.GITHUB_RUN_ID='40855384972';process.env.GITHUB_RUN_ATTEMPT='1';
   try{
-    const w=path.win32,root=w.join('E:\\','huggingface','sc26691-private');
+    const w=path.win32,root=w.join('D:\\','sc26691-campaign','sc26691-private');
     const p={output:w.join(root,'40855384972-1-bootstrap-ae69ef7b2928922370528f832c062c628f1a76b4'),sceneworks:sw,inference:inf},c={backend:'cuda'};
     const layout=serviceBuildLayout(p,c,'win32');
     assert.equal(layout.target,w.join(root,'40855384972-1-target'));
