@@ -6,7 +6,7 @@ import os from 'node:os';
 import { runInNewContext } from 'node:vm';
 import path from 'node:path';
 import { ARTIFACTS, SOURCE, requiredCases, validatePlan, validateDelivery, validatePeakMetrics, hashFile, verifyInputs, compareNumeric, executedTests, decodeAV, decodedDelta, validateEvidence, normalizeLoadEvent, runProcess, runCase, verifyCampaign, reclaimCaseModelStorage, reclaimPassedCaseStorage, removeTreeNoFollow, caseStorageReclaim, assertCaseFreeSpace, CASE_FREE_SPACE_HEADROOM_BYTES } from './h3-finetune-terminal.mjs';
-import { runScenario, pointer, isSettledJobSnapshot, ASSET_SETTLE_GRACE_MS } from './h3-finetune-terminal-api.mjs';
+import { runScenario, pointer, isSettledJobSnapshot, ASSET_SETTLE_GRACE_MS, MUTATING_REQUEST_CAP_MS } from './h3-finetune-terminal-api.mjs';
 import { awaitPeerLane, classifyPeerLane, assertPeerCanDeliver, PEER_APPEARANCE_GRACE_MS, waitForPeerAnchors, peerAnchorCandidates, anchorArtifactBase, anchorArtifactName, anchorArtifactAttempt } from './lib/h3-peer-lane.mjs';
 const sw = 'a'.repeat(40), inf = 'b'.repeat(40);
 const log = 'test result: ok. 1 passed; 0 failed; 0 ignored;';
@@ -504,6 +504,28 @@ test('a timed-out status read is retried before the deadline; a timed-out submis
     if (url.pathname.endsWith('/import')) return response({ id: 'import-job' }, 201);
     time += 6000; throw timeout();
   } }), /timeout/);
+});
+test('a slow mutating request is bounded by the scenario deadline, not 30s, and is never retried', async () => {
+  // Run 41299613206: the 5th multipart conditioning upload outlasted 30s on a healthy service.
+  const s = scenario(); s.steps = s.steps.slice(0, 1);
+  const warnings = []; const realWarn = console.warn; console.warn = line => warnings.push(String(line));
+  try {
+    let time = 0, posts = 0, bound;
+    const result = await runScenario({ ...s, timeoutSeconds: 3600 }, { now: () => time, sleep: async () => {}, fetchImpl: async (url, init) => {
+      posts++; assert.equal(init.method, 'POST');
+      time += 45000; assert.equal(init.signal.aborted, false); return response({ id: 'import-job' }, 201);
+    } });
+    assert.equal(posts, 1); assert.ok(result.transcript.length > 0);
+    assert.ok(warnings.some(w => w.startsWith("H3_SLOW_WRITE: POST /api/v1/") && w.endsWith(" 45000")), warnings.join("|"));
+    // A request that never answers fails at the bound (here the 1s scenario deadline), once.
+    posts = 0; warnings.length = 0;
+    await assert.rejects(runScenario({ ...s, timeoutSeconds: 1 }, { fetchImpl: (url, init) => { posts++; return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason))); } }), /timeout|aborted/i);
+    assert.equal(posts, 1);
+    assert.equal(MUTATING_REQUEST_CAP_MS > 30000 && MUTATING_REQUEST_CAP_MS <= 20 * 60 * 1000, true);
+    // A fast write logs nothing.
+    time = 0; await runScenario({ ...s, timeoutSeconds: 3600 }, { now: () => time, fetchImpl: async () => response({ id: 'import-job' }, 201) });
+    assert.equal(warnings.filter(w => w.startsWith('H3_SLOW_WRITE')).length, 0);
+  } finally { console.warn = realWarn; }
 });
 test('API assertions fail on dropped selected-model propagation and external services', async () => {
   const s = scenario(); s.baseUrl = 'https://unrelated.example'; await assert.rejects(runScenario(s));

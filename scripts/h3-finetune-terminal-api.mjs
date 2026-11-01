@@ -51,6 +51,10 @@ export function isSettledJobSnapshot(job) {
 }
 /** Same bound the product's own film harness gives the terminal-to-persisted window. */
 export const ASSET_SETTLE_GRACE_MS = 30000;
+/** A mutating request running longer than this is logged as H3_SLOW_WRITE evidence. */
+export const SLOW_WRITE_WARN_MS = 30000;
+/** Upper bound for ONE non-retried mutating request (run 41299613206: an upload outlasted 30s). */
+export const MUTATING_REQUEST_CAP_MS = 15 * 60 * 1000;
 // `baseUrl` (a string or a function of no arguments) is the live owned service origin. A scenario
 // planned against an OS-assigned port names `http://127.0.0.1:0` and requires it; the function form
 // follows a restart that bound a new port.
@@ -74,11 +78,21 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
     if(upload){assert.equal(method,'POST');assert.match(route,/^\/api\/v1\/projects\/[^/]+\/assets$/,'only the existing asset upload endpoint accepts files');assert.equal(typeof uploadFile,'function','source-bound upload adapter required');assert.equal(body,undefined,'upload fields are explicit, not arbitrary request bodies');const blob=await uploadFile(upload);assert.ok(blob instanceof Blob&&blob.size>0);const form=new FormData();form.set('file',blob,upload.fileName);wireBody=form;headers={};recordedBody={multipartFile:{path:upload.path,sha256:upload.sha256,mimeType:upload.mimeType,fileName:upload.fileName}};}
     // A read is safe to repeat: under heavy disk I/O (a checkpoint-sized staging copy on the same
     // volume as the jobs database) one status read can outlast 30s while the service is healthy.
-    // Retry a timed-out GET until the scenario deadline; any other method fails on its first timeout.
+    // Retry a timed-out GET until the scenario deadline.
+    // A mutating request is NOT idempotent, so it is never retried, and a fixed 30s abort is the
+    // wrong bound for it too: CUDA campaign run 41299613206 failed case
+    // cuda.reduced.real-hybrid-first-last when the 5th multipart conditioning upload exceeded 30s
+    // while the service was healthy under heavy disk I/O on D: (the previous upload took 5.1s).
+    // Its single attempt is bounded by the remaining scenario deadline, capped at
+    // MUTATING_REQUEST_CAP_MS so a hung service is still caught well before the hard case deadline.
+    const isRead = method === 'GET';
     let response;
     for (;;) {
-      try { response = await fetchImpl(url, { method, headers, body:wireBody, signal: AbortSignal.timeout(Math.max(1, Math.min(30000, deadline - now()))) }); break; }
-      catch (error) { if (method !== 'GET' || error?.name !== 'TimeoutError' || now() >= deadline) throw error; console.warn(`H3_READ_RETRY: ${method} ${route} timed out; retrying before the scenario deadline`); }
+      const started = now(), remaining = Math.max(1, deadline - started);
+      const bound = isRead ? Math.min(30000, remaining) : Math.min(MUTATING_REQUEST_CAP_MS, remaining);
+      try { response = await fetchImpl(url, { method, headers, body:wireBody, signal: AbortSignal.timeout(bound) }); break; }
+      catch (error) { if (!isRead || error?.name !== 'TimeoutError' || now() >= deadline) throw error; console.warn(`H3_READ_RETRY: ${method} ${route} timed out; retrying before the scenario deadline`); }
+      finally { if (!isRead && now() - started > SLOW_WRITE_WARN_MS) console.warn(`H3_SLOW_WRITE: ${method} ${route} ${now() - started}`); }
     }
     const text = await response.text();
     const result = text ? JSON.parse(text) : null;
