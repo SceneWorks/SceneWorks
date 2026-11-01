@@ -8699,7 +8699,9 @@ fn generate_one_with_hires_on_surface(
         // The first decode is an internal hand-off. The user-visible decode is the final one.
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        boundary @ (Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete) => on_progress(boundary),
+        Progress::PostProcessing => on_progress(Progress::PostProcessing),
+        Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
@@ -8765,7 +8767,9 @@ fn generate_one_with_hires_on_surface(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        boundary @ (Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete) => on_progress(boundary),
+        Progress::PostProcessing => on_progress(Progress::PostProcessing),
+        Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
@@ -16329,35 +16333,9 @@ async fn consume_gen_events_with_disclosure(
                 )
                 .await?;
             }
-            GenEvent::LoadActivity { index, pending } => {
-                let activity = load_progress::take(&pending);
-                mark_started(index);
-                tracing::info!(event = "image_load_activity", job_id = %job.id,
-                    image_index = index, activity = ?activity);
-                update_job(
-                    api,
-                    &job.id,
-                    image_progress(
-                        JobStatus::LoadingModel,
-                        ProgressStage::LoadingModel,
-                        step_fraction(index, 0, 1, total_u32),
-                        &progress_with_auto_tier_streaming(
-                            &format!("Image {}/{total} — {}.", index + 1,
-                                load_activity_message(activity)),
-                            auto_tier_streaming,
-                        ),
-                        Some(streaming_result(plan, asset_writes)),
-                        backend,
-                    ),
-                ).await?;
-            }
             GenEvent::Loading { index, phase } => {
                 mark_started(index);
-                let (status, stage, message) = match phase {
-                    LoadPhase::TextEncoder => (JobStatus::LoadingModel, ProgressStage::LoadingModel, "loading text encoder"),
-                    LoadPhase::Renderer => (JobStatus::LoadingModel, ProgressStage::LoadingModel, "loading render components"),
-                    LoadPhase::EncodingPrompt => (JobStatus::Running, ProgressStage::Generating, "encoding prompt"),
-                };
+                let (status, stage) = crate::load_progress::generator_phase_stage(phase);
                 update_job(
                     api,
                     &job.id,
@@ -16366,7 +16344,8 @@ async fn consume_gen_events_with_disclosure(
                         stage,
                         step_fraction(index, 0, 1, total_u32),
                         &progress_with_auto_tier_streaming(
-                            &format!("Image {}/{total} — {message}.", index + 1),
+                            &format!("Image {}/{total} — {}", index + 1,
+                                crate::load_progress::generator_phase(phase)),
                             auto_tier_streaming,
                         ),
                         Some(streaming_result(plan, asset_writes)),
@@ -16380,7 +16359,7 @@ async fn consume_gen_events_with_disclosure(
                 // Encode off the async runtime thread (parity with the asset write, sc-8909).
                 // No POST here: the frame rides the NEXT Step/Decoding update, so preview traffic
                 // adds zero requests to the existing per-step cadence.
-                let encoded = tokio::task::spawn_blocking(move || {
+                let encoded = crate::load_progress::spawn_blocking(move || {
                     let data_url = encode_preview_data_url(&frame)?;
                     Some(PreviewSlot {
                         index,
@@ -16500,7 +16479,7 @@ async fn consume_gen_events_with_disclosure(
                 let plan_for_task = plan.clone();
                 let adapter_for_task = adapter_label.to_owned();
                 let project_path_for_task = project_path.to_owned();
-                let fact = tokio::task::spawn_blocking(move || {
+                let fact = crate::load_progress::spawn_blocking(move || {
                     write_image_asset(
                         &plan_for_task,
                         index,

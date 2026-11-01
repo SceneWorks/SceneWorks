@@ -131,6 +131,48 @@ describe("LogsScreen", () => {
     expect(container.textContent).toContain("claimed");
   });
 
+  it("drops a tail poll that was in flight when the level filter changed", async () => {
+    vi.useFakeTimers();
+    let resolveStalePoll;
+    apiFetch.mockImplementation(async (path) => {
+      if (path.includes("afterSeq=")) {
+        return new Promise((resolve) => {
+          resolveStalePoll = resolve;
+        });
+      }
+      if (path.includes("level=error")) return logRows.filter((r) => r.level === "error");
+      return logRows;
+    });
+    try {
+      await render();
+      // Start the 2s tail poll under "All levels"; it stays pending.
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(resolveStalePoll).toBeTypeOf("function");
+
+      const errorBtn = [...container.querySelectorAll(".segmented-control button")].find(
+        (b) => b.textContent === "error",
+      );
+      await act(async () => {
+        errorBtn.click();
+      });
+      await act(async () => {});
+      expect(container.querySelectorAll(".logs-row").length).toBe(1);
+
+      // The old-filter poll now resolves with an info row; it must not be appended.
+      await act(async () => {
+        resolveStalePoll([row(3, "api", "info", "late unfiltered row")]);
+      });
+      const rows = container.querySelectorAll(".logs-row");
+      expect(rows.length).toBe(1);
+      expect(rows[0].textContent).toContain("image_inference_failed");
+      expect(container.textContent).not.toContain("late unfiltered row");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("shows an empty state when there are no entries", async () => {
     logRows = [];
     await render();

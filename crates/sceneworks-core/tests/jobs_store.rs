@@ -88,6 +88,14 @@ fn store(name: &str) -> TestStore {
     TestStore { store, _db: db }
 }
 
+/// A store whose owning API process "started" at `unix_seconds`.
+fn store_started_at(name: &str, unix_seconds: i64) -> TestStore {
+    let db = temp_db(name);
+    let store = JobsStore::new(db.path()).with_session_started_at(unix_seconds);
+    store.initialize().expect("store initializes");
+    TestStore { store, _db: db }
+}
+
 fn image_job(payload: Map<String, Value>) -> CreateJob {
     CreateJob {
         job_type: JobType::ImageGenerate,
@@ -3760,6 +3768,75 @@ fn stale_sweep_marks_worker_offline_and_job_interrupted() {
         "stale-sweep error must state the ambiguity + timeout, got {error:?}"
     );
     assert_eq!(sweep.jobs[0].message, "Lost contact with the worker.");
+}
+
+/// Claim a job on `worker-1`, then backdate the worker's last heartbeat to 2000-01-01 so the
+/// next sweep finds it stale. Returns the claimed job's id.
+fn claim_and_go_quiet_since_2000(store: &JobsStore) -> String {
+    register_image_worker(store);
+    let created = store
+        .create_job(image_job(Map::new()))
+        .expect("job creates");
+    store
+        .claim_next_job("worker-1")
+        .expect("claim succeeds")
+        .expect("job claimed");
+    let connection = Connection::open(store.db_path()).expect("db opens");
+    connection
+        .execute(
+            "update workers set last_seen_at = '2000-01-01T00:00:00Z' where id = ?1",
+            params!["worker-1"],
+        )
+        .expect("worker timestamp updates");
+    created.id
+}
+
+#[test]
+fn stale_sweep_names_an_app_stop_when_the_worker_predates_this_session() {
+    // The worker's last heartbeat (2000) predates this API process (2001): the whole app or
+    // machine stopped mid-job, so the sweep must not tell the user the worker went quiet
+    // while the app kept running — and it must say when contact was lost.
+    let store = store_started_at("stale-sweep-app-stop", 978_307_200);
+    let job_id = claim_and_go_quiet_since_2000(&store);
+
+    let sweep = store
+        .mark_stale_workers_interrupted(1)
+        .expect("sweep succeeds");
+
+    assert_eq!(sweep.workers[0].status, WorkerStatus::Offline);
+    assert_eq!(sweep.jobs[0].id, job_id);
+    assert_eq!(sweep.jobs[0].status, JobStatus::Interrupted);
+    assert_eq!(sweep.jobs[0].worker_id, None);
+    assert_eq!(
+        sweep.jobs[0].message,
+        "SceneWorks stopped while this job was running."
+    );
+    let error = sweep.jobs[0].error.clone().unwrap_or_default();
+    assert!(
+        error.contains("stopped or restarted while this job was running")
+            && error.contains("last heartbeat was at 2000-01-01T00:00:00Z (UTC)")
+            && !error.contains("No heartbeat from the worker"),
+        "app-stop sweep error must name the stop and the last heartbeat, got {error:?}"
+    );
+}
+
+#[test]
+fn stale_sweep_keeps_lost_contact_wording_for_a_worker_seen_this_session() {
+    // The API started (1999) before the worker's last heartbeat (2000): the worker reported to
+    // this process and then went quiet, which is the generic lost-contact case.
+    let store = store_started_at("stale-sweep-live-quiet", 915_148_800);
+    claim_and_go_quiet_since_2000(&store);
+
+    let sweep = store
+        .mark_stale_workers_interrupted(1)
+        .expect("sweep succeeds");
+
+    assert_eq!(sweep.jobs[0].message, "Lost contact with the worker.");
+    let error = sweep.jobs[0].error.clone().unwrap_or_default();
+    assert!(
+        error.contains("No heartbeat from the worker for 1s"),
+        "live-quiet sweep error must keep the timeout wording, got {error:?}"
+    );
 }
 
 #[test]

@@ -1677,7 +1677,9 @@ fn krea_imported_generate_one(
         }),
         Progress::Decoding => {}
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        boundary @ (Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete) => on_progress(boundary),
+        Progress::PostProcessing => on_progress(Progress::PostProcessing),
+        Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };
@@ -1720,7 +1722,9 @@ fn krea_imported_generate_one(
         }),
         Progress::Decoding => on_progress(Progress::Decoding),
         Progress::Loading(phase) => on_progress(Progress::Loading(phase)),
-        boundary @ (Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete) => on_progress(boundary),
+        Progress::PostProcessing => on_progress(Progress::PostProcessing),
+        Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
+        Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
         Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
     };

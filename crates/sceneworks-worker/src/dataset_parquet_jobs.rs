@@ -116,7 +116,7 @@ pub(crate) async fn run_dataset_parquet_import_job(
     let scan_caption_includes = caption_includes.clone();
     let scan_caption_excludes = caption_excludes.clone();
     let scan_caption_fields = caption_field_columns.clone();
-    let scan_task = tokio::task::spawn_blocking(move || {
+    let scan_task = crate::load_progress::spawn_blocking(move || {
         read_candidates(
             &scan_source,
             &scan_url_column,
@@ -518,7 +518,7 @@ async fn materialize_candidate(
     }
     let bytes = fetch_public_source_url_bytes(&candidate.url, MAX_IMAGE_BYTES).await?;
     let target_for_write = target.clone();
-    let dimensions = tokio::task::spawn_blocking(move || -> WorkerResult<(u32, u32)> {
+    let dimensions = crate::load_progress::spawn_blocking(move || -> WorkerResult<(u32, u32)> {
         let mut reader = image::ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()
             .map_err(|error| {

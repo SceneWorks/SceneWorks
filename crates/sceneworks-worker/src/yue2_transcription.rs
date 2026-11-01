@@ -608,7 +608,7 @@ pub(crate) async fn run<B: TranscriptionBackend>(
     let source_sha = source.sha256.clone();
     let partial_for_cleanup = partial.clone();
     let (tx, mut rx) = tokio::sync::watch::channel::<Option<(f64, String)>>(None);
-    let handle = tokio::task::spawn_blocking(move || {
+    let handle = crate::load_progress::spawn_blocking(move || {
         let _lease = lease;
         let mut progress = |fraction, message| {
             tx.send_replace(Some((fraction, message)));
@@ -632,7 +632,7 @@ pub(crate) async fn run<B: TranscriptionBackend>(
     let pump = {
         let api = api.clone();
         let job_id = job.id.clone();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             let mut last = None::<Instant>;
             while rx.changed().await.is_ok() {
                 if let Some(at) = last {

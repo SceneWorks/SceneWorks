@@ -420,7 +420,9 @@ where
     R: Send + 'static,
 {
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
+        let _progress = progress_context.install();
         // Contain a panic from inside the load/run so it fails THIS job with a clean error instead of
         // unwinding out of the shared cache thread and stopping every subsequent request (sc-6067).
         // The cached model is evicted on panic — post-abort backend state is suspect, so the next
@@ -476,7 +478,9 @@ where
     R: Send + 'static,
 {
     let (reply_tx, reply_rx) = oneshot::channel::<WorkerResult<R>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: CacheJob<K, M> = Box::new(move |cache: &mut CacheThread<K, M>| {
+        let _progress = progress_context.install();
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let request_active = || {
                 // A Tokio task can be aborted/dropped without first tripping its engine cancel

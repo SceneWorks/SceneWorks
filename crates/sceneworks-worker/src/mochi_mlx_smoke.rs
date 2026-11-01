@@ -200,7 +200,9 @@ fn mochi_mlx_gpu_smoke() {
                 }
                 Progress::Decoding => saw_decoding = true,
                 Progress::Loading(_) => {}
-                Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => {}
+                Progress::PromptEncodingComplete
+                | Progress::PromptUpsamplingComplete
+                | Progress::PostProcessing => {}
                 Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
             })
             .expect("mochi generate");

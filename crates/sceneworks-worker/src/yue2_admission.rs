@@ -2508,7 +2508,9 @@ impl Yue2Lease {
                 }
             }
             Progress::Loading(_) => {}
-            Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => {}
+            Progress::PromptEncodingComplete
+            | Progress::PromptUpsamplingComplete
+            | Progress::PostProcessing => {}
             // Image-only prompt enhancement cannot advance an audio resource phase.
             Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
         }

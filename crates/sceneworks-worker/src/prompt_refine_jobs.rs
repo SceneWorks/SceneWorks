@@ -1189,7 +1189,7 @@ pub(crate) async fn run_prompt_refine_job(
             .iter()
             .map(|path| normalize_app_managed_model_path(settings, path, "Vision reference image"))
             .collect::<WorkerResult<Vec<_>>>()?;
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             safe_paths
                 .iter()
                 .map(|path| load_caption_image_ref(path))
@@ -1341,7 +1341,7 @@ pub(crate) async fn run_prompt_refine_job(
             JobStatus::LoadingModel,
             ProgressStage::LoadingModel,
             0.1,
-            "Loading prompt-refinement model.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             backend,
         ),
@@ -1395,7 +1395,7 @@ pub(crate) async fn run_prompt_refine_job(
     if emits_json {
         refine_reqs = refine_reqs.with_constraint(gen_core::core_llm::Constraint::Json);
     }
-    let blocking = tokio::spawn(crate::refine_model_cache::with_cached_refiner(
+    let blocking = crate::load_progress::spawn(crate::refine_model_cache::with_cached_refiner(
         refine_spec,
         refine_reqs,
         "prompt-refine load failed",
@@ -1910,6 +1910,7 @@ fn refine_text_request(
     kv_compression: gen_core::core_llm::KvCompressionPolicy,
 ) -> gen_core::core_llm::TextLlmRequest {
     gen_core::core_llm::TextLlmRequest {
+        progress: Some(crate::load_progress::text_observer()),
         messages,
         sampling,
         max_new_tokens,
@@ -1935,7 +1936,7 @@ fn generate_refined(
     on_event: &mut dyn FnMut(gen_core::core_llm::StreamEvent),
     job_id: &str,
 ) -> WorkerResult<(gen_core::core_llm::TextLlmOutput, Value)> {
-    let generation = refiner.generate(request, on_event);
+    let generation = crate::load_progress::generate_text(refiner, request, on_event);
     let record = crate::llm_kv_cache::KvCacheRecord::of(
         REFINE_BACKEND,
         request.kv_compression,

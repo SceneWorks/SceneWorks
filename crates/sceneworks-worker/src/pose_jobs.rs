@@ -600,7 +600,7 @@ fn build_session(path: &Path, accel: bool) -> WorkerResult<Session> {
                 .map_err(ort_err)?;
         }
     }
-    b.commit_from_file(path).map_err(ort_err)
+    crate::model_io::ort_session(b, path)
 }
 
 fn ort_err<R>(e: ort::Error<R>) -> WorkerError {
@@ -1220,7 +1220,7 @@ async fn run_pose_detect_inner(
             // transfer is happening that cannot occur.
             ProgressStage::Preparing,
             0.1,
-            "Loading DWPose weights.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             None,
             None,
@@ -1261,7 +1261,7 @@ async fn run_pose_detect_inner(
         POSE_CANCEL_MESSAGE,
         "pose detection task",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             detect_batch(det_path, pose_path, image_paths, &detect_cancel)
         }),
     )
@@ -1295,7 +1295,7 @@ async fn run_pose_detect_inner(
         POSE_CANCEL_MESSAGE,
         "pose skeleton render task",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             let mut out_sources: Vec<Value> = Vec::new();
             for (src, raw_src) in resolved.iter().zip(raw) {
                 bail_if_canceled(&render_cancel)?;

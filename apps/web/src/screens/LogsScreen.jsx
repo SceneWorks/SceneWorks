@@ -28,6 +28,9 @@ const POLL_MS = 2000;
 // silently unfindable. So the initial fetch and the in-memory row cap both
 // track the server capacity rather than an arbitrary smaller number. There is
 // no shared constant across the HTTP/FFI boundary, so this is pinned by comment.
+// The server keeps error and warn entries in their own capacity-sized lanes, so
+// "All levels" returns the newest 5000 across lanes while a level filter re-queries
+// and gets that level's full retained history.
 const SESSION_LOG_CAPACITY = 5000; // == sceneworks-core session_log DEFAULT_CAPACITY
 const MAX_ROWS = SESSION_LOG_CAPACITY;
 // Render-window cap (sc-11224 / F-033). The in-memory snapshot mirrors the whole
@@ -131,6 +134,13 @@ export function LogsScreen() {
   const [copied, setCopied] = useState(null);
 
   const lastSeqRef = useRef(undefined);
+  // Bumped by every snapshot load. A response whose generation is no longer
+  // current was requested under the previous source/level filter, so applying it
+  // would mix unfiltered rows into the filtered list. `snapshotPendingRef` holds
+  // the tail poll off until the new snapshot lands, since the poll's `afterSeq`
+  // still belongs to the old filter's rows until then.
+  const filterGenRef = useRef(0);
+  const snapshotPendingRef = useRef(false);
   const bottomRef = useRef(null);
   const copyTimerRef = useRef(null);
   const pausedRef = useRef(paused);
@@ -152,17 +162,23 @@ export function LogsScreen() {
   // Full (re)load: source/level filters changed, or first mount. Text search is
   // deliberately absent from the deps so typing doesn't refetch (sc-8849).
   const loadSnapshot = useCallback(async () => {
+    const generation = ++filterGenRef.current;
+    snapshotPendingRef.current = true;
     try {
       // Fetch the full server buffer (not a 1000-row tail) so the client-side
       // search covers all held history — matches in the oldest ~4000 rows would
       // otherwise be unfindable (sc-8849). Only this initial snapshot is large;
       // the 2s poll below stays incremental (afterSeq) and returns small deltas.
       const rows = await fetchLogs(token, { limit: SESSION_LOG_CAPACITY, source, level });
+      if (generation !== filterGenRef.current) return;
       lastSeqRef.current = rows.length ? rows[rows.length - 1].seq : undefined;
       setEntries(rows);
       setError("");
     } catch (err) {
+      if (generation !== filterGenRef.current) return;
       setError(String(err?.message ?? err));
+    } finally {
+      if (generation === filterGenRef.current) snapshotPendingRef.current = false;
     }
   }, [token, source, level]);
 
@@ -170,7 +186,8 @@ export function LogsScreen() {
   // `true` when the tick is healthy (a successful fetch, or a paused no-op) and
   // `false` when the fetch failed, so the scheduler below can back off (sc-11224).
   const poll = useCallback(async () => {
-    if (pausedRef.current) return true;
+    if (pausedRef.current || snapshotPendingRef.current) return true;
+    const generation = filterGenRef.current;
     try {
       // Incremental: afterSeq means the server only returns rows newer than the
       // ones we hold, so this is a small delta each tick — raising the cap to the
@@ -182,6 +199,8 @@ export function LogsScreen() {
         source,
         level,
       });
+      // The filter changed while this tick was in flight; its rows are for the old one.
+      if (generation !== filterGenRef.current) return true;
       if (!rows.length) {
         setError("");
         return true;
@@ -194,6 +213,7 @@ export function LogsScreen() {
       setError("");
       return true;
     } catch (err) {
+      if (generation !== filterGenRef.current) return true;
       setError(String(err?.message ?? err));
       return false;
     }

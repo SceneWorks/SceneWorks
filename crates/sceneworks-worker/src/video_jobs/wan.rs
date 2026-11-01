@@ -1099,7 +1099,7 @@ async fn extract_clip_boundary_frame(
     let load = async {
         result?;
         let path = out.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<Image> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<Image> {
             let decoded = crate::image_decode::decode_image_any(&path)
                 .map_err(|error| {
                     WorkerError::InvalidPayload(format!(
@@ -2532,7 +2532,7 @@ pub(crate) async fn begin_video_cancel(
     backend: &str,
 ) {
     cancel.cancel();
-    let _ = update_job(
+    let _ = crate::progress::update_job_cancelling(
         api,
         job_id,
         video_progress(
@@ -2759,7 +2759,7 @@ pub(super) async fn generate_video_using(
         let component_settings = settings.clone();
         // Hashing is blocking disk work. Absence/corruption is a soft omission; the provider
         // records its repair/install dense-fallback reason when the enabled request runs.
-        input.veda_predictor = tokio::task::spawn_blocking(move || {
+        input.veda_predictor = crate::load_progress::spawn_blocking(move || {
             super::minimax_h3::resolve_veda_predictor_offline(&component_settings)
         })
         .await
@@ -2886,7 +2886,7 @@ pub(super) async fn generate_video_using(
         );
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
         let host_probe_runtime = tokio::runtime::Handle::current();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
             let cold_load_cancel = cancel.clone();
             let run = move |generator: &dyn Generator,
@@ -3012,6 +3012,7 @@ pub(super) async fn generate_video_using(
                     // A closed channel means the consumer loop returned early (POST failure /
                     // 409); trip the engine flag so the denoise bails instead of running unheard
                     // (sc-8804, F-003 — the swallowed-closed-channel leak).
+                    crate::load_progress::generator_progress(&progress);
                     if tx.blocking_send(progress).is_err() {
                         cancel.cancel();
                     }
@@ -3172,7 +3173,7 @@ pub(super) async fn generate_video_using(
                         }
                         Progress::Decoding => phase_timer.mark_decoding(Instant::now()),
                         Progress::Loading(_) => {}
-                        Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete => {}
+                        Progress::PromptEncodingComplete | Progress::PromptUpsamplingComplete | Progress::PostProcessing => {}
                         // FLUX 3 image enhancement is not a Wan sampling/decode boundary.
                         Progress::ConditioningComplete | Progress::Upsampling { .. } => {}
                     }
@@ -3185,6 +3186,9 @@ pub(super) async fn generate_video_using(
                             0.25 + 0.30 * (current as f64 / total.max(1) as f64),
                             format!("Generating frames — step {current}/{total}."),
                         ),
+                        Progress::PostProcessing => (
+                            JobStatus::Running, ProgressStage::Generating, 0.58, "Finishing output.".to_owned(),
+                        ),
                         Progress::Decoding => (
                             JobStatus::Running,
                             ProgressStage::Generating,
@@ -3192,15 +3196,10 @@ pub(super) async fn generate_video_using(
                             "Decoding frames.".to_owned(),
                         ),
                         Progress::Loading(phase) => (
-                            if phase == LoadPhase::EncodingPrompt { JobStatus::Running } else { JobStatus::LoadingModel },
-                            if phase == LoadPhase::EncodingPrompt { ProgressStage::Generating } else { ProgressStage::LoadingModel },
+                            crate::load_progress::generator_phase_stage(phase).0,
+                            crate::load_progress::generator_phase_stage(phase).1,
                             0.24,
-                            match phase {
-                                LoadPhase::EncodingPrompt => "Encoding prompt.",
-                                LoadPhase::TextEncoder => "Loading text encoder.",
-                                LoadPhase::Renderer => "Loading render components.",
-                            }
-                            .to_owned(),
+                            crate::load_progress::generator_phase(phase).to_owned(),
                         ),
                     };
                     update_job(

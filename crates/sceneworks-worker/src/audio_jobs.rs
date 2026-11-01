@@ -1221,7 +1221,7 @@ async fn run_audio_generate_job_using(
     // canceled before this point leaves nothing behind in the project — and removed again if any
     // write fails, so a half-written set never lingers.
     let genset_dir = plan.media_path.parent().map(Path::to_path_buf);
-    let written = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+    let written = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
         for (path, wav) in &writes {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
@@ -1476,17 +1476,14 @@ impl SynthesisProgress {
                 )
             }
             Progress::Loading(phase) => (
-                if phase == gen_core::LoadPhase::EncodingPrompt {
-                    ProgressStage::Generating
-                } else {
-                    ProgressStage::LoadingModel
-                },
+                crate::load_progress::generator_phase_stage(phase).1,
                 self.fraction,
-                match phase {
-                    gen_core::LoadPhase::EncodingPrompt => "Encoding prompt.".to_owned(),
-                    gen_core::LoadPhase::TextEncoder => "Loading the text encoder.".to_owned(),
-                    gen_core::LoadPhase::Renderer => "Loading model weights.".to_owned(),
-                },
+                crate::load_progress::generator_phase(phase).to_owned(),
+            ),
+            Progress::PostProcessing => (
+                ProgressStage::Generating,
+                self.fraction,
+                "Finishing output.".to_owned(),
             ),
             Progress::Decoding => (
                 ProgressStage::Generating,
@@ -1672,7 +1669,7 @@ async fn run_audio_synthesis_with(
     };
     let quantize = tier.and_then(|tier| tier.quantize);
     let handle = {
-        tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
             let mut spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
                 |spec, (id, source)| spec.with_component(id, source),
@@ -1691,6 +1688,7 @@ async fn run_audio_synthesis_with(
                 update_tx.send_replace(Some(update));
             };
             let mut on_progress = |progress: Progress| {
+                crate::load_progress::generator_progress(&progress);
                 let update = fold.borrow_mut().engine(progress);
                 if let Some(update) = update {
                     publish(update);
@@ -1742,7 +1740,7 @@ async fn run_audio_synthesis_with(
         let job_id = job.id.clone();
         let backend = backend_label(&settings.gpu_id).to_owned();
         let cancel = cancel.clone();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             let mut last_sent: Option<SynthesisUpdate> = None;
             let mut last_post: Option<tokio::time::Instant> = None;
             let mut posts = 0usize;
@@ -1949,7 +1947,7 @@ async fn run_voice_clone_synthesis_using(
     let cancel = CancelFlag::new();
     let handle = {
         let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
             // Call 1 — base TTS: synthesize the script in the requested base voice.
             let base_spec = LoadSpec::new(WeightsSource::Dir(base_model_dir));
             let base_generator = load_base(&base_model, &base_spec).map_err(|error| {
@@ -1966,7 +1964,9 @@ async fn run_voice_clone_synthesis_using(
                 cancel: cancel.clone(),
                 ..Default::default()
             };
-            let mut on_progress = |_progress: Progress| {};
+            let mut on_progress = |progress: Progress| {
+                crate::load_progress::generator_progress(&progress);
+            };
             let base_track = match base_generator
                 .generate(&base_req, &mut on_progress)
                 .map_err(|error| {
@@ -2120,7 +2120,7 @@ async fn run_native_voice_clone_synthesis_using(
     let cancel = CancelFlag::new();
     let handle = {
         let cancel = cancel.clone();
-        tokio::task::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<gen_core::AudioTrack> {
             let spec = components.into_iter().fold(
                 LoadSpec::new(WeightsSource::Dir(model_dir)),
                 |spec, (id, source)| spec.with_component(id, source),
@@ -2143,7 +2143,9 @@ async fn run_native_voice_clone_synthesis_using(
                 cancel,
                 ..Default::default()
             };
-            let mut on_progress = |_progress: Progress| {};
+            let mut on_progress = |progress: Progress| {
+                crate::load_progress::generator_progress(&progress);
+            };
             match generator
                 .generate(&req, &mut on_progress)
                 .map_err(|error| {
@@ -3562,7 +3564,7 @@ mod tests {
             .await
             .expect("listener binds");
         let address = listener.local_addr().expect("listener has address");
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.expect("stub serves");
         });
         (format!("http://{address}"), progress)
@@ -5074,7 +5076,9 @@ mod tests {
                 chunk_lengths.push(chunk.samples.len());
                 reassembled.extend(chunk.samples.iter().copied());
             };
-            let mut on_progress = |_p: Progress| {};
+            let mut on_progress = |progress: Progress| {
+                crate::load_progress::generator_progress(&progress);
+            };
             let output = generator
                 .generate_streaming(&req, &mut on_chunk, &mut on_progress)
                 .expect("real streaming synthesis succeeds");
@@ -5225,7 +5229,9 @@ mod tests {
                     }),
                     ..Default::default()
                 };
-                let mut on_progress = |_p: Progress| {};
+                let mut on_progress = |progress: Progress| {
+                    crate::load_progress::generator_progress(&progress);
+                };
                 match generator
                     .generate(&req, &mut on_progress)
                     .expect("real MOSS-TTSD synthesis succeeds")
@@ -5534,7 +5540,7 @@ mod yue_job_surface_tests {
             .await
             .expect("listener binds");
         let address = listener.local_addr().expect("listener has address");
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.expect("stub serves");
         });
         (format!("http://{address}"), state)
@@ -6251,7 +6257,7 @@ mod yue_job_surface_tests {
             running
                 .iter()
                 .any(|(stage, message)| stage == "loading_model"
-                    && message == "Loading model weights."),
+                    && message == "Preparing generation."),
             "{running:?}"
         );
         for step in 1..=4 {
@@ -6292,7 +6298,7 @@ mod yue_job_surface_tests {
         {
             let started = started.clone();
             let cancel = api_state.cancel.clone();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 while !started.load(Ordering::SeqCst) {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
@@ -6785,6 +6791,9 @@ mod yue_job_surface_tests {
             .expect("step")
             .1,
         );
+        let finishing = fold.engine(Progress::PostProcessing).expect("finishing");
+        assert_eq!(finishing.2, "Finishing output.");
+        fractions.push(finishing.1);
         fractions.push(fold.chunk(1).1);
         fractions.push(
             fold.engine(Progress::Loading(gen_core::LoadPhase::Renderer))

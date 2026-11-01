@@ -5,6 +5,7 @@ budgets/argv/device semantics remain explicit. Metadata probes create no context
 """
 from __future__ import annotations
 import argparse
+import csv
 from contextlib import nullcontext
 import hashlib
 import importlib.util
@@ -24,6 +25,82 @@ ACTIVE_KEY = "SW_CI_CUDA_EXECUTION_ACTIVE"
 PIN = "91ffb4a819aa2990c652db2d881ba0b9b10126ce"
 GUARD_SHA = "301f0d0dd18b55aa9eaf5f3ffebac8122004f7bde59aaac4e7c5103e3451bf3f"
 WINDOWS_SHA = "b50647bb1566df498f8cf4b57fa9288278e8ee1301de37afec3da478783123dd"
+
+
+STRICT_POLICY = "strict-idle"
+FUNCTIONAL_POLICY = "functional-coexistence"
+
+
+class DeviceIdentity:
+    """Only physical index/UUID inventory; never process, utilization or memory census."""
+    def __init__(self, executable, run=subprocess.run):
+        self.executable, self.run = executable, run
+
+    def inventory(self, out, label, deadline):
+        remaining = min(30, deadline - time.monotonic())
+        if remaining <= 0:
+            raise TimeoutError("device identity deadline exhausted")
+        result = self.run([self.executable, "--query-gpu=index,uuid", "--format=csv,noheader,nounits"],
+                          capture_output=True, text=True, check=True, timeout=remaining)
+        devices = []
+        for row in csv.reader(result.stdout.splitlines()):
+            if len(row) != 2 or not re.fullmatch(r"[0-9]+", row[0].strip()) or not re.fullmatch(r"GPU-[A-Za-z0-9-]+", row[1].strip()):
+                raise RuntimeError("invalid physical device identity")
+            devices.append({"index": int(row[0].strip()), "uuid": row[1].strip()})
+        if (not devices or len({d["index"] for d in devices}) != len(devices)
+                or len({d["uuid"].casefold() for d in devices}) != len(devices)):
+            raise RuntimeError("ambiguous physical device identity")
+        return devices, []
+
+
+def require_admission_policy(policy, actor, environment, physical_indices, cuda_ordinals, probe_visible):
+    if policy == STRICT_POLICY:
+        return
+    if policy != FUNCTIONAL_POLICY or actor != "load-progress-acceptance":
+        raise RuntimeError("functional coexistence is restricted to load-progress acceptance")
+    workflows = ("memory-catalog-campaign.yml", "load-progress-acceptance.yml")
+    if (environment.get("GITHUB_EVENT_NAME") != "workflow_dispatch"
+            or not any(environment.get("GITHUB_WORKFLOW_REF", "").startswith(
+                f"SceneWorks/SceneWorks/.github/workflows/{name}@") for name in workflows)):
+        raise RuntimeError("functional coexistence requires the dedicated manual acceptance workflow")
+    if (physical_indices is not None or cuda_ordinals != "0" or probe_visible != "1"
+            or environment.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"
+            or any(environment.get(key) != "1" for key in
+                   ("SCENEWORKS_GPU_ID", "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES"))):
+        raise RuntimeError("functional acceptance requires logical CUDA 0 masked to physical GPU1")
+
+
+def require_functional_binding(binding):
+    devices = binding.get("devices", [])
+    if (binding.get("kind") != "context-free-cuda-ordinal-uuid" or len(devices) != 1
+            or devices[0].get("index") != 1
+            or not isinstance(devices[0].get("uuid"), str)
+            or not re.fullmatch(r"GPU-[A-Za-z0-9-]+", devices[0].get("uuid", ""))
+            or binding.get("mapping") != [{"cuda_ordinal": 0, "uuid": devices[0]["uuid"], "nvml_index": 1}]):
+        raise RuntimeError("functional acceptance physical GPU1/UUID mapping is unavailable")
+
+
+def resource_receipt(actor, command, policy):
+    receipt = {"schema_version": 1, "kind": "cuda-execution-resource-lease-v1", "model_inference_proof": False,
+               "resource_completed": False, "actor": actor, "argv": command,
+               "admission_policy": policy,
+               "guard_source_revision": PIN, "guard_sha256": GUARD_SHA, "windows_job_sha256": WINDOWS_SHA}
+    if policy == FUNCTIONAL_POLICY:
+        receipt.update(shared_device=True, isolated_device=False, vram_measurement=False,
+                       performance_measurement=False, post_child_idle_verified=False)
+    return receipt
+
+
+def complete_resource(receipt, result, devices, guard, out, baselines, policy):
+    if policy == STRICT_POLICY:
+        for device in devices:
+            guard.verify_idle(device, out, f'after-child-{device["index"]}', baselines[device["uuid"]])
+        receipt["post_child_idle_verified"] = True
+    else:
+        receipt["post_child_idle_verified"] = False
+    receipt["resource_completed"] = (result["returncode"] == 0 and not result["timeout"]
+        and (policy == STRICT_POLICY or (result["timeout"] is False and result.get("owned_tree_empty") is True)))
+    return result["returncode"] if result["returncode"] is not None else 124
 
 
 def component(name: str, expected: str):
@@ -100,7 +177,8 @@ def release_all(handles, locker):
 
 
 def claim_uuids(uuids, guard, out, deadline, public, locker,
-                required_indices=None, phase_names=None, clock=time.monotonic, sleep=time.sleep):
+                required_indices=None, phase_names=None, clock=time.monotonic, sleep=time.sleep,
+                admission_policy=STRICT_POLICY):
     expected = sorted(uuids, key=str.casefold)
     if not expected or len({value.casefold() for value in expected}) != len(expected):
         raise RuntimeError("explicit unique CUDA UUID set is required")
@@ -120,7 +198,7 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
             if not re.fullmatch(r"GPU-[A-Za-z0-9-]+", device["uuid"]):
                 raise RuntimeError("unrecognized physical GPU UUID")
             selected.append(device)
-        if not all(guard.idle(device, processes) for device in selected):
+        if admission_policy == STRICT_POLICY and not all(guard.idle(device, processes) for device in selected):
             sleep(min(1, max(0, deadline - clock())))
             continue
         handles = []
@@ -152,6 +230,8 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
             sleep(min(1, max(0, deadline - clock())))
             continue
         try:
+            if admission_policy == FUNCTIONAL_POLICY:
+                return selected, handles, {}, clock() - started
             baselines = {}
             checked = []
             for device in selected:
@@ -166,6 +246,8 @@ def claim_uuids(uuids, guard, out, deadline, public, locker,
         except BaseException:
             release_all(handles, locker)
             raise
+    if admission_policy == FUNCTIONAL_POLICY:
+        raise TimeoutError("exact GPU UUID lock wait exhausted the existing execution budget")
     raise TimeoutError("exact GPU UUID lock/idle wait exhausted the existing execution budget")
 
 
@@ -224,7 +306,7 @@ def resolve_binding(guard, out, deadline, environment, physical_indices=None,
             "key": [(row["cuda_ordinal"], row["uuid"]) for row in mapping]}
 
 
-def prepared_components():
+def prepared_components(policy=STRICT_POLICY):
     guard = component("veda_cuda_guard.py", GUARD_SHA)
     windows = component("media_campaign_windows.py", WINDOWS_SHA)
     trusted = windows.trusted_nvidia_smi()
@@ -234,7 +316,7 @@ def prepared_components():
             raise RuntimeError("unexpected physical inventory command")
         return original([trusted, *args[1:]], deadline)
     guard.command = command
-    return guard, windows
+    return (DeviceIdentity(trusted) if policy == FUNCTIONAL_POLICY else guard), windows
 
 
 def require_outermost(environment):
@@ -302,6 +384,7 @@ def main():
     modes.add_argument("--physical-indices")
     modes.add_argument("--cuda-ordinals", default="0")
     parser.add_argument("--probe-visible")
+    parser.add_argument("--admission-policy", choices=(STRICT_POLICY, FUNCTIONAL_POLICY), default=STRICT_POLICY)
     parser.add_argument("--service-url", help="actual loopback service URL; optional host transaction lock")
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
@@ -310,6 +393,8 @@ def main():
         raise RuntimeError("explicit Windows actor/budget is required")
     environment = os.environ.copy()
     require_outermost(environment)
+    require_admission_policy(args.admission_policy, args.actor, environment,
+                             args.physical_indices, args.cuda_ordinals, args.probe_visible)
     command = args.command[1:] if args.command[:1] == ["--"] else args.command
     if not command:
         raise RuntimeError("original actor argv is required")
@@ -323,9 +408,7 @@ def main():
     out.mkdir(parents=True, exist_ok=False)
     import msvcrt
     deadline = time.monotonic() + args.budget_minutes * 60
-    receipt = {"schema_version": 1, "kind": "cuda-execution-resource-lease-v1", "model_inference_proof": False,
-               "resource_completed": False, "actor": args.actor, "argv": command,
-               "guard_source_revision": PIN, "guard_sha256": GUARD_SHA, "windows_job_sha256": WINDOWS_SHA}
+    receipt = resource_receipt(args.actor, command, args.admission_policy)
     handles = []
     service_handle = None
     code = 1
@@ -333,26 +416,30 @@ def main():
         if args.service_url is not None:
             service_handle, receipt["service_transaction"] = claim_service(
                 args.service_url, Path(os.environ["PUBLIC"]), deadline, msvcrt)
-        guard, windows = prepared_components()
+        guard, windows = prepared_components(args.admission_policy)
         binding = resolve_binding(guard, out, deadline, environment, args.physical_indices,
                                   args.cuda_ordinals, args.probe_visible)
         receipt["binding"] = binding
+        if args.admission_policy == FUNCTIONAL_POLICY:
+            require_functional_binding(binding)
         devices, handles, baselines, waited = claim_uuids([row["uuid"] for row in binding["devices"]],
-            guard, out, deadline, Path(os.environ["PUBLIC"]), msvcrt)
+            guard, out, deadline, Path(os.environ["PUBLIC"]), msvcrt,
+            required_indices={row["uuid"]: row["index"] for row in binding["devices"]}
+                if args.admission_policy == FUNCTIONAL_POLICY else None,
+            admission_policy=args.admission_policy)
         receipt["lock_wait_seconds"] = waited
         rechecked = resolve_binding(guard, out, deadline, environment, args.physical_indices,
                                     args.cuda_ordinals, args.probe_visible)
+        if args.admission_policy == FUNCTIONAL_POLICY:
+            require_functional_binding(rechecked)
+            receipt["binding_rechecked"] = rechecked
         if rechecked["key"] != binding["key"]:
             raise RuntimeError("actual CUDA UUID binding changed before owned launch")
         # Legacy actors retain their original console/evidence streams; only the
         # fixed NVFP4 sealer opts into separate bounded collector-owned logs.
         result = execute_owned(command, out, deadline, windows.WindowsJob, environment, capture=False)
         receipt["child"] = result
-        for device in devices:
-            guard.verify_idle(device, out, f'after-child-{device["index"]}', baselines[device["uuid"]])
-        receipt["post_child_idle_verified"] = True
-        receipt["resource_completed"] = result["returncode"] == 0 and not result["timeout"]
-        code = result["returncode"] if result["returncode"] is not None else 124
+        code = complete_resource(receipt, result, devices, guard, out, baselines, args.admission_policy)
     except BaseException as error:
         receipt["error"] = f"{type(error).__name__}: {error}"
     finally:

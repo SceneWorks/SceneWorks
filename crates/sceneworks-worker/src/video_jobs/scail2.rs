@@ -65,7 +65,7 @@ where
         SCAIL2_SEGMENT_CANCEL_MESSAGE,
         task_label,
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || segment(flag)),
+        crate::load_progress::spawn_blocking(move || segment(flag)),
     )
     .await
 }

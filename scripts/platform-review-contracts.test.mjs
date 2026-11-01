@@ -1170,12 +1170,32 @@ test("windows-candle routes weights dispatches to a real-weights runner, like th
     candleWorker,
     /^\s*runs-on: \[self-hosted, Windows, X64, cuda, real-weights\]/m,
   );
-  assert.ok(
-    candleWorker.includes(
-      "      group: ${{ github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && 'windows-candle-gpu-real-weights' || format('windows-candle-gpu-{0}-{1}', github.run_id, github.run_attempt) }}",
-    ),
-    "pure provisioning retains its compatibility group; guarded GPU execution uses per-run queue keys, not a GHA mutex",
+  const group = workflowExpression(candleWorker, "group");
+  const prior = "github.event_name == 'workflow_dispatch' && inputs.provision_snapshot && !inputs.run_five_rung_reference && 'windows-candle-gpu-real-weights' || format('windows-candle-gpu-{0}-{1}', github.run_id, github.run_attempt)";
+  assert.ok(group.endsWith(` || ${prior}`), "non-pure selections retain the exact previous routing");
+  const evaluateGroup = (expression, event, inputs) => Function("github", "inputs", "format", `return (${expression});`)(
+    {event_name:event,run_id:123,run_attempt:2}, inputs,
+    (pattern,...values)=>pattern.replace(/\{(\d+)\}/g,(_,index)=>values[Number(index)]),
   );
+  const pure = {provision_snapshot:true};
+  assert.equal(evaluateGroup(group,"workflow_dispatch",pure),"windows-candle-cpu-provision");
+  // Every declared boolean besides provisioning can select runtime/model work or a
+  // different profile. New flags fail this exhaustive contract until classified.
+  const dispatch = candle.slice(candle.indexOf("  workflow_dispatch:"),candle.indexOf("\njobs:"));
+  const flags = [...dispatch.matchAll(/^      ([a-z_0-9]+):\n((?:        .*\n|\n)*)/gm)]
+    .filter(match=>match[2].includes("type: boolean") && match[1]!=="provision_snapshot")
+    .map(match=>match[1]);
+  assert.equal(flags.length,12);
+  for(const flag of flags) {
+    assert.equal(evaluateGroup(group,"workflow_dispatch",{...pure,[flag]:true}),
+      evaluateGroup(prior,"workflow_dispatch",{...pure,[flag]:true}),`mixed ${flag} retains GPU routing`);
+  }
+  for(const event of ["pull_request","push","workflow_dispatch"]) {
+    for(const inputs of [{},{run_five_rung_reference:true},{run_iris_worker_smoke:true},
+      {provision_snapshot:true,run_five_rung_reference:true},{quant_kernel_only:true}]) {
+      assert.equal(evaluateGroup(group,event,inputs),evaluateGroup(prior,event,inputs));
+    }
+  }
   assert.match(candleWorker, /^ {6}cancel-in-progress: false$/m);
 });
 
@@ -1458,7 +1478,7 @@ test("macos-mlx browser fixture artifact is hosted, exclusive, and non-gating", 
 
   assert.match(
     workflow,
-    /options: \[legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact\]/,
+    /options: \[legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact, nax-kernel-guard\]/,
   );
 });
 
@@ -2900,9 +2920,14 @@ test("macOS lanes lint every crate they ship, in the configuration they ship it"
   // ...and the skipped test must demonstrably run somewhere. Without this, deleting the
   // self-hosted half would drop the entire NAX verdict while every lane stayed green —
   // the same declared-but-unreachable trap as sc-17026, one job over.
-  const guardedNax = mlx.match(/^\s+run: [>|]-?\n\s+python3\.12 -I scripts\/ci\/metal_execution_lock\.py --wait-seconds ([0-9]+(?:\.[0-9]+)?) --\s+node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard$/m);
-  assert.ok(guardedNax, "self-hosted NAX execution must take the shared Metal lease before the same test argv");
-  assert.ok(Number.isFinite(Number(guardedNax[1])) && Number(guardedNax[1]) > 0, "Metal lease wait must be explicit, finite and positive");
+  assert.match(mlx, /^\s+run: cargo test -p sceneworks-worker --test nax_guard --no-run$/m);
+  assert.doesNotMatch(mlx, /unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard/);
+  const manualNax = await source(".github/workflows/nax-kernel-validation.yml");
+  assert.match(manualNax, /python3\.12 -I scripts\/ci\/metal_execution_lock\.py --wait-seconds 2700 --/);
+  assert.match(manualNax, /node scripts\/unit-hf-sandbox\.mjs -- cargo test -p sceneworks-worker --test nax_guard/);
+  assert.doesNotMatch(manualNax, /--test nax_guard --no-run/);
+  assert.match(mlx, /inputs\.verification_profile == 'nax-kernel-guard'/);
+  assert.match(mlx, /uses: \.\/\.github\/workflows\/nax-kernel-validation\.yml/);
   // Running the command is only half of it — the lane must actually TRIGGER for the
   // crates it now lints. apps/rust-api carries the largest macOS-conditional surface
   // outside the worker and is NOT under `crates/**`, so without this path entry the

@@ -152,6 +152,7 @@ export function SimpleJobCard({ job, onCancel, onDismiss }) {
           </button>
         ) : null}
       </div>
+      {!terminalStatuses.has(job.status) && job.message ? <p className="su-job-message">{job.message}</p> : null}
       {error ? <p className="su-job-error">{error}</p> : null}
       {showBar ? (
         <div

@@ -242,7 +242,7 @@ mod tests {
         let socket = dir.path().join("cred.sock");
         let listener = UnixListener::bind(&socket).expect("bind");
 
-        let server = tokio::spawn(async move {
+        let server = crate::load_progress::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept");
             let mut request = String::new();
             stream
