@@ -100,7 +100,7 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
       - name: Require selected CUDA dispatch before native setup
@@ -183,7 +183,7 @@ jobs:
           if "%BUILD_ONLY%"=="true" (node scripts/load-progress-acceptance.mjs --build-only) else (node scripts/load-progress-acceptance.mjs)
       - name: Retain progress POSTs, output identities and failure evidence
         if: ${{ always() }}
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: load-progress-${{ inputs.backend }}-${{ inputs.case }}-${{ github.run_id }}-${{ github.run_attempt }}
           # Aggregate child evidence is retained without uploading case state or build targets.
