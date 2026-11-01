@@ -47,6 +47,7 @@ test('the CUDA remaining-cases lane adopts run 41213935677\'s measured decision 
   assert.deepEqual(record.decision, w.decisionPlan.matrixDecision, 'recomputed from the retained anchors, equal to the retained decision');
   assert.equal(record.allocation.length, 25); assert.equal(record.priorPassedCaseIds.length, 18);
   assert.deepEqual(record.subsetCaseIds, REMAINING); assert.deepEqual(record.notCovered, []);
+  assert.equal(record.caseDefinitionBasis, 'same-case'); assert.deepEqual(record.caseDefinitionDifferences, [], 'run 41213935677\'s retained definitions match today\'s');
   assert.deepEqual(record.sourceShaDifference, { from: PRIOR_SW, to: NEW_SW, files: ['scripts/h3-finetune-terminal.mjs'] });
   assert.equal(w.plan.matrixAnchors.length, 4);
   assert.deepEqual(w.plan.proofIndex.map(p => p.backend).sort(), ['cuda', 'mlx'], 'both lanes\' retained native witnesses come with their packets');
@@ -60,6 +61,8 @@ test('the MLX lane adopts the same decision for its full displaced allocation; t
   assert.equal(record.allocation.length, 18); assert.deepEqual(record.priorPassedCaseIds, []);
   assert.deepEqual(record.subsetCaseIds, executionCases(w.plan).filter(c => c.backend === 'mlx').map(c => c.id));
   assert.ok(!record.subsetCaseIds.includes('mlx.reduced.real-drop-images'), 'a broad case omitted on the displaced backend stays omitted');
+  // The retained cuda plan defines no mlx case: the mlx lane is compared with each same-slug cuda counterpart.
+  assert.equal(record.caseDefinitionBasis, 'peer-backend-counterpart'); assert.deepEqual(record.caseDefinitionDifferences, []);
 });
 test('a prior-decision subset refuses cases that already passed, cases outside the allocation and drifted evidence', async t => {
   await assert.rejects(adopt(await workspace(t), { caseIds: ['cuda.reduced.real-drop-audio'] }), /already PASSED in run 41213935677/);
@@ -80,6 +83,25 @@ test('a prior-decision subset refuses cases that already passed, cases outside t
   // The admission check keeps holding the plan to the recorded difference.
   const drift = await workspace(t); await adopt(drift); drift.plan.priorMatrixDecision.sourceShaDifference.to = 'd'.repeat(40);
   await assert.rejects(verifyMatrixAdmission(drift.plan), /Expected values to be strictly equal/);
+});
+test('a subset case whose workload changed since the decision run is refused; other definition changes are recorded', async t => {
+  const steps = await workspace(t); steps.plan.cases.find(c => c.id === REMAINING[0]).backendSteps = { cuda: 8, mlx: 8 };
+  await assert.rejects(adopt(steps), /subset case workload changed since run 41213935677.*cuda\.reduced\.real-hybrid-first-last \(backendSteps\)/);
+  const absent = await workspace(t); absent.decisionPlan.cases = absent.decisionPlan.cases.filter(c => c.id !== REMAINING[1]);
+  await assert.rejects(adopt(absent), /real-hybrid-reference \(\(not defined in the prior plan\)\)/);
+  const peer = await workspace(t); peer.plan.cases.find(c => c.id === 'mlx.reduced.real-hybrid-reference').conditioning = 'first-last';
+  await assert.rejects(adopt(peer, { backend: 'mlx', caseIds: null }), /mlx\.reduced\.real-hybrid-reference \(conditioning\)/, 'a cross-backend counterpart is compared too');
+  // A prior-passed case's definition change and a subset case's input bytes are recorded, not refused.
+  const recorded = await workspace(t);
+  recorded.plan.cases.find(c => c.id === 'cuda.reduced.real-drop-audio').acceptance = { ac: ['edited'], e: [] };
+  recorded.plan.cases.find(c => c.id === REMAINING[2]).inputs = [{ role: 'checkpoint', sha256: 'f'.repeat(64), path: '/x' }];
+  const record = await adopt(recorded);
+  assert.deepEqual(record.caseDefinitionDifferences, [
+    { id: 'cuda.reduced.real-drop-audio', subset: false, workloadFields: ['acceptance'], otherFields: [] },
+    { id: REMAINING[2], subset: true, workloadFields: [], otherFields: ['inputIdentities'] },
+  ].sort((a, b) => record.allocation.indexOf(a.id) - record.allocation.indexOf(b.id)));
+  const missing = await workspace(t); delete missing.decisionPlan.cases;
+  await assert.rejects(adopt(missing), /must carry its case definitions/);
 });
 test('the retained evidence is located by the declared run alone: its reduced artifact, its own packet, and the peer packet its anchors name', async t => {
   const w = await workspace(t), work = path.join(w.root, 'fetched'), downloads = [];
@@ -109,7 +131,7 @@ test('the retained evidence is located by the declared run alone: its reduced ar
   await assert.rejects(retainedDecisionPlan(empty, 'cuda'), /no retained cuda case plan carries a measured matrix decision/);
 });
 // Two segments of one backend: the prior run's passed cases at 4c3625898 and the subset run at a new SHA.
-async function splitFixture(t, { duplicate = false, omit = null, retainPackets = true } = {}) {
+async function splitFixture(t, { duplicate = false, omit = null, retainPackets = true, toSubset = null, toPrior = null } = {}) {
   const w = await workspace(t), decided = { ...w.plan, sceneworks: PRIOR_SW, matrixDecision: w.decisionPlan.matrixDecision, matrixAnchors: w.decisionPlan.matrixAnchors };
   const subsetPlan = structuredClone(w.plan); await adopt({ ...w, plan: subsetPlan });
   const segments = [{ label: 'prior', caseRoot: path.join(w.root, 'seg-prior'), runId: RUN, attempt: '1' }, { label: 'subset', caseRoot: path.join(w.root, 'seg-subset'), runId: '99', attempt: '1' }];
@@ -118,8 +140,10 @@ async function splitFixture(t, { duplicate = false, omit = null, retainPackets =
     await writeFile(path.join(dir, 'adapter-plan.json'), JSON.stringify(plan));
     await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ caseId: id, status: 'passed', runId, runAttempt: '1', sceneworks: plan.sceneworks, inference: PIN, planSha256: executionPlanDigest(plan), verified: { files: [] } }));
   };
-  for (const c of executionCases(decided).filter(c => c.backend === 'cuda' && !REMAINING.includes(c.id))) await write(segments[0], decided, c.id, RUN);
-  for (const id of REMAINING) if (id !== omit) await write(segments[1], subsetPlan, id, '99');
+  for (const c of executionCases(decided).filter(c => c.backend === 'cuda' && !REMAINING.includes(c.id))) if (c.id !== toSubset) await write(segments[0], decided, c.id, RUN);
+  for (const id of REMAINING) if (id !== omit && id !== toPrior) await write(segments[1], subsetPlan, id, '99');
+  if (toSubset) await write(segments[1], subsetPlan, toSubset, '99');
+  if (toPrior) await write(segments[0], decided, toPrior, RUN);
   if (duplicate) await write(segments[1], subsetPlan, 'cuda.reduced.real-drop-audio', '99');
   // The subset run retains its prior-decision anchor packets (output-relative) beside its cases.
   if (retainPackets) for (const b of ['cuda', 'mlx']) await cp(path.join(w.root, `anchors-${b}`), path.join(segments[1].caseRoot, `anchors-${b}`), { recursive: true });
@@ -134,6 +158,10 @@ test('a split readback attributes each case to its own run and SHA, flags cross-
   };
   const r = await verifySplitBackendEvidence({ backend: 'cuda', segments: f.segments }, { verifyCase, controls });
   assert.equal(r.status, 'split-backend-content-reverified'); assert.equal(r.singleShaBackendReadback, false);
+  // Roles come from the prior-decision record, so manifest order does not change the result.
+  const reversed = await verifySplitBackendEvidence({ backend: 'cuda', segments: [...f.segments].reverse() }, { verifyCase: async () => {}, controls });
+  assert.deepEqual(reversed, r);
+  assert.deepEqual(r.segments.map(s => s.role), ['decision-run', 'prior-decision-subset']);
   assert.equal(verified.length, 25); assert.deepEqual(r.missing, []);
   assert.deepEqual(r.segments.map(s => [s.label, s.sceneworks, s.cases.length]), [['prior', [PRIOR_SW], 18], ['subset', [NEW_SW], 7]]);
   assert.deepEqual(r.crossCaseControls.map(v => v.crossSegment), [true, false]);
@@ -146,6 +174,24 @@ test('a split readback attributes each case to its own run and SHA, flags cross-
   const gap = await verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { omit: REMAINING[0] })).segments }, { verifyCase: async () => {}, controls });
   assert.equal(gap.status, 'split-backend-incomplete'); assert.deepEqual(gap.missing, [REMAINING[0]]); assert.equal(gap.crossCaseControls, null);
   await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { duplicate: true })).segments }, { verifyCase: async () => {}, controls }), /passed in more than one segment/);
+});
+test('a split readback is tied to the prior-decision record: its decision run, subset and prior-passed cases', async t => {
+  const none = async () => {}, controls = async () => [];
+  const other = await splitFixture(t); other.segments[0].runId = '41213935678';
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: other.segments }, { verifyCase: none, controls }), /executed in run 41213935677, not segment prior/);
+  // A segment whose cases genuinely ran in another run than the record's decision run is refused.
+  const wrongRun = await splitFixture(t);
+  const { readdir } = await import('node:fs/promises');
+  for (const id of await readdir(wrongRun.segments[0].caseRoot)) {
+    const file = path.join(wrongRun.segments[0].caseRoot, id, 'execution.json'), row = JSON.parse(await readFile(file, 'utf8'));
+    await writeFile(file, JSON.stringify({ ...row, runId: '41213935678' }));
+  }
+  wrongRun.segments[0].runId = '41213935678';
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: wrongRun.segments }, { verifyCase: none, controls }), /is run 41213935678, not the decision run 41213935677/);
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { toSubset: 'cuda.reduced.real-drop-audio' })).segments }, { verifyCase: none, controls }), /cuda\.reduced\.real-drop-audio ran in the subset segment but is not in its declared subsetCaseIds/);
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { toPrior: REMAINING[0] })).segments }, { verifyCase: none, controls }), /real-hybrid-first-last from the decision run is not among the record's priorPassedCaseIds/);
+  const three = await splitFixture(t);
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: [...three.segments, { ...three.segments[0], label: 'extra' }] }, { verifyCase: none, controls }), /exactly two run segments/);
 });
 test('the terminal workflow adopts a declared prior decision before resolving cases and then exchanges no anchors', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');

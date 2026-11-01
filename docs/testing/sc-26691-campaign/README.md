@@ -79,6 +79,17 @@ whose cases come from different segments (`crossSegment: true`, e.g. `real-hybri
 against `real-hybrid-text`). Its output is a `split-backend-content-readback` with
 `singleShaBackendReadback: false`; it is not accepted where a single-SHA backend readback is required.
 
+It is tied to the subset run's prior-decision record: exactly two segments, the subset segment is the
+one whose plans carry `priorMatrixDecision`, the other must be that record's `decisionRun` (run and
+attempt), the subset segment's cases must be in `subsetCaseIds` and the decision run's in
+`priorPassedCaseIds`. Roles come from the record, so the output does not depend on the order the
+segments are listed in. The subset run reuses the decision's native witnesses (same native evidence
+SHA) instead of running its own; the reuse is recorded as `reusedNativeWitnesses` in
+`prior-matrix-decision.json`, the anchor packets are retained in the subset run's case artifact, and
+`verify-split-backend` re-hashes and reports every reused witness. Adoption also compares each
+allocated case's definition with the decision run's (`caseDefinitionDifferences`) and refuses a
+subset case whose workload changed.
+
 ## Dispatch
 
 ```bash

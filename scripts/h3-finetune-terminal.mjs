@@ -1337,6 +1337,9 @@ export async function reducedCoverageReport(p,caseRecords,proofs=[]) {
 // subset this lane runs, and the git difference between the two SceneWorks SHAs. It is recorded in
 // the plan (and so in every case's planSha256), never inferred.
 export const PRIOR_DECISION_KIND = 'h3-prior-matrix-decision';
+// The fields of a case definition that decide WHAT it executes (paths, staged copies and service
+// details are per-run and excluded). Input byte identities are compared and recorded separately.
+export const CASE_WORKLOAD_FIELDS = Object.freeze(['backend', 'index', 'slug', 'kind', 'group', 'modelKey', 'assetSet', 'conditioning', 'adapterRecipe', 'backendSteps', 'baseline', 'repeatsOf', 'acceptance']);
 async function readRetainedAnchorPacket(directory, { backend, sceneworks, inference, nativeEvidenceSha, runId, runAttempt }) {
   assert.ok((await stat(contained(directory, 'anchors.json'))).size <= 8 * 1024 * 1024, 'anchor metadata size bound exceeded');
   const packet = await json(contained(directory, 'anchors.json'));
@@ -1411,6 +1414,27 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
     assert.ok(allocation.includes(id), `${id} is not in the ${backend} lane's allocation under the prior decision`);
     assert.ok(!priorPassed.includes(id), `${id} already PASSED in run ${decisionRun.runId}; a prior-decision subset never re-runs it`);
   }
+  // The prior run measured its decision on ITS case definitions. Every allocated case is compared with
+  // this plan's definition: a difference is recorded, and a subset case whose WORKLOAD changed (or
+  // that the prior plan never defined) is refused, since the adopted allocation was not measured on it.
+  // A retained adapter plan defines only its own backend's cases, so a lane of the OTHER backend is
+  // compared with the same-slug counterpart (backend and backend-prefixed case references normalised).
+  assert.ok(Array.isArray(prior.cases), 'the prior decision plan must carry its case definitions');
+  const caseDefinitionBasis = backend === decisionRun.backend ? 'same-case' : 'peer-backend-counterpart';
+  const identities = c => (c?.inputs ?? []).map(input => `${input.role}:${input.sha256}`).sort();
+  const comparable = (c, field) => (['baseline', 'repeatsOf'].includes(field) && typeof c[field] === 'string' ? c[field].replace(/^(mlx|cuda)\./, '<backend>.') : c[field]);
+  const caseDefinitionDifferences = [];
+  for (const id of allocation) {
+    const after = p.cases.find(c => c.id === id);
+    assert.ok(after, `${id} is allocated but not defined in this plan`);
+    const before = caseDefinitionBasis === 'same-case' ? prior.cases.find(c => c.id === id) : prior.cases.find(c => c.slug === after.slug && c.backend === decisionRun.backend);
+    const fields = caseDefinitionBasis === 'same-case' ? CASE_WORKLOAD_FIELDS : CASE_WORKLOAD_FIELDS.filter(field => field !== 'backend');
+    const workloadFields = before ? fields.filter(field => JSON.stringify(comparable(before, field)) !== JSON.stringify(comparable(after, field))) : ['(not defined in the prior plan)'];
+    const otherFields = before ? [...['sensitivity', 'timeoutSeconds'].filter(field => JSON.stringify(before[field]) !== JSON.stringify(after[field])), ...(JSON.stringify(identities(before)) === JSON.stringify(identities(after)) ? [] : ['inputIdentities'])] : [];
+    if (workloadFields.length || otherFields.length) caseDefinitionDifferences.push({ id, subset: subset.includes(id), workloadFields, otherFields });
+  }
+  const changed = caseDefinitionDifferences.filter(d => d.subset && d.workloadFields.length);
+  assert.equal(changed.length, 0, `subset case workload changed since run ${decisionRun.runId}, whose decision this lane would adopt: ${changed.map(d => `${d.id} (${d.workloadFields.join(', ')})`).join('; ')}`);
   p.priorMatrixDecision = {
     kind: PRIOR_DECISION_KIND, laneBackend: backend,
     decisionRun: { runId: String(decisionRun.runId), attempt: String(decisionRun.attempt), backend: decisionRun.backend },
@@ -1418,6 +1442,7 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
     reusedNativeWitnesses,
     sourceSha: prior.sceneworks, decision, allocation, priorPassedCaseIds: priorPassed, subsetCaseIds: subset,
     notCovered: allocation.filter(id => !priorPassed.includes(id) && !subset.includes(id)),
+    caseDefinitionBasis, caseDefinitionDifferences,
     sourceShaDifference: { from: prior.sceneworks, to: p.sceneworks, files: [...changedFiles] },
     meaning: 'Matrix allocation adopted from a decision MEASURED in the named prior run (recomputed from its retained anchors). The anchors ran at sourceShaDifference.from; this lane runs at .to. Cases in priorPassedCaseIds are that run\'s evidence and are re-validated separately (verify-split-backend), never re-labelled as this run\'s. reusedNativeWitnesses ran at the same native evidence SHA in the named packet runs; this lane does not re-run them, and their retained receipts/logs are re-hashed by verify-split-backend.',
   };
@@ -1448,12 +1473,15 @@ async function verifyReusedNativeWitness(plan, entry, caseRoot) {
 export async function verifySplitBackendEvidence({ backend, segments }, { verifyCase = verifyPortableCase, controls } = {}) {
   const { readdir } = await import('node:fs/promises');
   assert.ok(['mlx', 'cuda'].includes(backend));
-  assert.ok(Array.isArray(segments) && segments.length >= 2, 'a split readback names at least two run segments');
+  // A split readback is exactly the declared decision run plus the one subset run that adopted it.
+  assert.ok(Array.isArray(segments) && segments.length === 2, 'a split readback names exactly two run segments: the prior-decision run and its subset run');
+  assert.notEqual(segments[0].label, segments[1].label, 'segment labels must differ');
   const rows = [], plans = [];
   for (const segment of segments) {
     assert.ok(typeof segment.label === 'string' && segment.label, 'segment label required'); assert.ok(absolutePath(segment.caseRoot), 'absolute segment case root required');
     assert.match(String(segment.runId ?? ''), /^\d+$/); assert.match(String(segment.attempt ?? ''), /^\d+$/);
-    for (const entry of await readdir(segment.caseRoot, { withFileTypes: true })) {
+    const entries = (await readdir(segment.caseRoot, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
       if (!entry.isDirectory() || !entry.name.startsWith(`${backend}.`)) continue;
       const dir = contained(segment.caseRoot, entry.name), executionPath = path.join(dir, 'execution.json');
       let row; try { row = await json(executionPath); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
@@ -1465,25 +1493,40 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
       const executionSha256 = await hashFile(executionPath);
       await verifyCase(plan, c, dir, { executionSha256, planSha256: row.planSha256, runId: row.runId, runAttempt: row.runAttempt, verified: row.verified });
       rows.push({ id: c.id, segment: segment.label, runId: String(row.runId), runAttempt: String(row.runAttempt), sceneworks: plan.sceneworks, planSha256: row.planSha256, executionSha256, dir });
-      plans.push({ segment: segment.label, plan });
+      plans.push({ segment: segment.label, caseId: c.id, plan });
     }
   }
   const duplicate = rows.find((row, index) => rows.findIndex(other => other.id === row.id) !== index);
   assert.ok(!duplicate, `case ${duplicate?.id} passed in more than one segment; a split readback attributes each case to exactly one run`);
-  const decided = plans.filter(v => v.plan.matrixDecision);
-  assert.ok(decided.length, 'no segment carries a measured matrix decision');
-  for (const v of decided) assert.deepEqual(v.plan.matrixDecision, decided[0].plan.matrixDecision, `segment ${v.segment} ran under another matrix decision`);
-  for (const v of plans) { assert.equal(v.plan.inference, plans[0].plan.inference, 'segments use different inference pins'); assert.equal(v.plan.nativeEvidence?.sha, plans[0].plan.nativeEvidence?.sha, 'segments use different native evidence'); }
-  const reference = decided[decided.length - 1].plan, allocation = executionCases(reference).filter(c => c.backend === backend).map(c => c.id);
-  for (const row of rows) assert.ok(allocation.includes(row.id), `${row.id} is outside the ${backend} allocation under the shared decision`);
-  const missing = allocation.filter(id => !rows.some(row => row.id === id));
-  const bySegment = segments.map(segment => ({ label: segment.label, runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
-  const reusedNativeWitnesses = [];
-  for (const segment of segments) {
-    const adopted = plans.filter(v => v.segment === segment.label && v.plan.priorMatrixDecision).map(v => v.plan);
-    if (!adopted.length) continue;
-    for (const entry of adopted[0].priorMatrixDecision.reusedNativeWitnesses ?? []) reusedNativeWitnesses.push({ ...await verifyReusedNativeWitness(adopted[0], entry, segment.caseRoot), segment: segment.label });
+  // Tie the readback to the prior-decision record: the subset segment is the one whose plans carry it,
+  // and the other segment must be the decision run that record names. Roles come from the record, not
+  // from the manifest's order, so the result is the same whichever way the segments are listed.
+  const adopting = segments.filter(segment => plans.some(v => v.segment === segment.label && v.plan.priorMatrixDecision));
+  assert.equal(adopting.length, 1, 'exactly one segment must have run under a declared prior matrix decision (the subset run)');
+  const subsetSegment = adopting[0], priorSegment = segments.find(segment => segment !== subsetSegment);
+  const subsetPlans = plans.filter(v => v.segment === subsetSegment.label);
+  for (const v of subsetPlans) { assert.ok(v.plan.priorMatrixDecision, `${v.caseId} in the subset segment did not run under the prior decision`); assert.deepEqual(v.plan.priorMatrixDecision, subsetPlans[0].plan.priorMatrixDecision, `${v.caseId} ran under another prior-decision record`); }
+  const record = subsetPlans[0].plan.priorMatrixDecision;
+  assert.equal(record.kind, PRIOR_DECISION_KIND); assert.equal(record.laneBackend, backend, `the subset segment's prior decision is for the ${record.laneBackend} lane`);
+  assert.equal(record.decisionRun.backend, backend, `the prior decision run ${record.decisionRun.runId} is a ${record.decisionRun.backend} run; its passed cases never count for ${backend}`);
+  assert.equal(String(priorSegment.runId), String(record.decisionRun.runId), `segment ${priorSegment.label} is run ${priorSegment.runId}, not the decision run ${record.decisionRun.runId} the subset segment adopted`);
+  assert.equal(String(priorSegment.attempt), String(record.decisionRun.attempt), `segment ${priorSegment.label} is attempt ${priorSegment.attempt}, not the decision run's attempt ${record.decisionRun.attempt}`);
+  for (const row of rows) {
+    if (row.segment === subsetSegment.label) { assert.ok(record.subsetCaseIds.includes(row.id), `${row.id} ran in the subset segment but is not in its declared subsetCaseIds`); assert.equal(row.sceneworks, record.sourceShaDifference.to, `${row.id} did not run at the subset SHA`); }
+    else { assert.ok(record.priorPassedCaseIds.includes(row.id), `${row.id} from the decision run is not among the record's priorPassedCaseIds`); assert.equal(row.sceneworks, record.sourceSha, `${row.id} did not run at the decision run's SHA`); }
   }
+  for (const v of plans) {
+    assert.deepEqual(v.plan.matrixDecision, record.decision, `segment ${v.segment} case ${v.caseId} ran under another matrix decision`);
+    assert.equal(v.plan.inference, subsetPlans[0].plan.inference, 'segments use different inference pins'); assert.equal(v.plan.nativeEvidence?.sha, subsetPlans[0].plan.nativeEvidence?.sha, 'segments use different native evidence');
+  }
+  const reference = subsetPlans[0].plan, allocation = executionCases(reference).filter(c => c.backend === backend).map(c => c.id);
+  assert.deepEqual(allocation, record.allocation, 'the subset plan\'s allocation is not the one its prior-decision record adopted');
+  for (const row of rows) assert.ok(allocation.includes(row.id), `${row.id} is outside the ${backend} allocation under the shared decision`);
+  rows.sort((a, b) => allocation.indexOf(a.id) - allocation.indexOf(b.id));
+  const missing = allocation.filter(id => !rows.some(row => row.id === id));
+  const bySegment = [priorSegment, subsetSegment].map((segment, index) => ({ label: segment.label, role: index ? 'prior-decision-subset' : 'decision-run', runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
+  const reusedNativeWitnesses = [];
+  for (const entry of record.reusedNativeWitnesses ?? []) reusedNativeWitnesses.push({ ...await verifyReusedNativeWitness(reference, entry, subsetSegment.caseRoot), segment: subsetSegment.label });
   let crossCaseControls = null;
   if (!missing.length) {
     const dirs = new Map(rows.map(row => [row.id, row.dir])), segmentOf = new Map(rows.map(row => [row.id, row.segment]));
@@ -1494,11 +1537,11 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
   return {
     kind: 'split-backend-content-readback', proof_kind: 'campaign_content_reverified_split', singleShaBackendReadback: false, backend,
     status: missing.length ? 'split-backend-incomplete' : 'split-backend-content-reverified',
-    matrixDecision: decided[0].plan.matrixDecision, priorMatrixDecision: reference.priorMatrixDecision ?? null,
-    inference: plans[0].plan.inference, nativeEvidenceSha: plans[0].plan.nativeEvidence?.sha ?? null,
+    matrixDecision: record.decision, priorMatrixDecision: record,
+    inference: reference.inference, nativeEvidenceSha: reference.nativeEvidence?.sha ?? null,
     segments: bySegment, allocation, missing, crossCaseControls, reusedNativeWitnesses,
     cases: rows.map(({ dir: _dir, ...row }) => row),
-    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. reusedNativeWitnesses are native witnesses a prior-decision segment adopted from its decision\'s anchor packets (same native evidence SHA) instead of running its own; each was re-hashed from the segment\'s retained files. This is not a single-SHA backend readback.',
+    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. The decision-run segment must be the run the subset segment\'s prior-decision record names, its cases must be that record\'s priorPassedCaseIds and the subset segment\'s cases its subsetCaseIds; segment roles come from the record, so the result does not depend on manifest order. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. reusedNativeWitnesses are native witnesses the subset segment adopted from its decision\'s anchor packets (same native evidence SHA) instead of running its own; each was re-hashed from the segment\'s retained files. This is not a single-SHA backend readback.',
   };
 }
 export async function verifyCampaign(p) {

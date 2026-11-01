@@ -2205,5 +2205,683 @@
       "measurement": "actual inline execution/build/acquisition/AV-validation elapsed; initial input audit excluded"
     }
   ],
-  "_fixture": "Trimmed from the retained adapter-plan.json of cuda.reduced.real-drop-audio, artifact h3-terminal-cuda-reduced-41213935677-1 (run 41213935677 attempt 1, SceneWorks 4c3625898). Only the fields a prior-decision adoption reads."
+  "_fixture": "Trimmed from the retained adapter-plan.json of cuda.reduced.real-drop-audio, artifact h3-terminal-cuda-reduced-41213935677-1 (run 41213935677 attempt 1, SceneWorks 4c3625898). Only the fields a prior-decision adoption reads. cases: every retained case definition trimmed to its workload fields (CASE_WORKLOAD_FIELDS); paths, inputs and service details dropped.",
+  "cases": [
+    {
+      "id": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "backend": "cuda",
+      "index": 1,
+      "slug": "artifact-0-ordered-mixed-baseline-ref-turbo",
+      "kind": "full-av",
+      "group": "artifact",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "ref-turbo-baseline",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "job.payload.model=artifact.0-ref2va-v2-int8",
+          "ordered image+video+audio references reach the request",
+          "ref-turbo recipe steps/shift/audioShift bound",
+          "decoded AV matches resolved lattice"
+        ],
+        "e": [
+          "jobSnapshot",
+          "apiTranscript",
+          "nativeLoadClosure",
+          "outputAV",
+          "samplingRecipe"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.artifact-1-reference",
+      "backend": "cuda",
+      "index": 2,
+      "slug": "artifact-1-reference",
+      "kind": "full-av",
+      "group": "artifact",
+      "modelKey": "artifact.1-ref2va-v1.3-int8",
+      "assetSet": "singularity",
+      "conditioning": "reference",
+      "adapterRecipe": "none",
+      "backendSteps": {
+        "cuda": 50,
+        "mlx": 8
+      },
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "job.payload.model=artifact.1-ref2va-v1.3-int8",
+          "reference_to_video operation",
+          "decoded AV matches resolved lattice"
+        ],
+        "e": [
+          "jobSnapshot",
+          "nativeLoadClosure",
+          "outputAV"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.artifact-2-lokr-ref-turbo-baseline",
+      "backend": "cuda",
+      "index": 3,
+      "slug": "artifact-2-lokr-ref-turbo-baseline",
+      "kind": "full-av",
+      "group": "artifact",
+      "modelKey": "artifact.2-ref2va-pruned-v1.3-int8",
+      "assetSet": "singularity",
+      "conditioning": "reference",
+      "adapterRecipe": "lokr+ref-turbo-baseline",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "LoKr adapter + ref-turbo recipe bound",
+          "partition pruned",
+          "decoded AV matches resolved lattice"
+        ],
+        "e": [
+          "jobSnapshot",
+          "nativeLoadClosure",
+          "outputAV",
+          "adapterClosure",
+          "samplingRecipe"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.artifact-3-opaque-renamed-linked-source",
+      "backend": "cuda",
+      "index": 4,
+      "slug": "artifact-3-opaque-renamed-linked-source",
+      "kind": "full-av",
+      "group": "artifact",
+      "modelKey": "artifact.3-ref2va-pruned-v1.3-w4a8",
+      "assetSet": "singularity",
+      "conditioning": "reference",
+      "adapterRecipe": "none",
+      "backendSteps": {
+        "cuda": 50,
+        "mlx": 8
+      },
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "opaque renamed linked source resolves to a declared import",
+          "native-single source format preserved",
+          "decoded AV matches resolved lattice"
+        ],
+        "e": [
+          "jobSnapshot",
+          "nativeLoadClosure",
+          "outputAV",
+          "sourceResolution"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-mixed-repeat",
+      "backend": "cuda",
+      "index": 5,
+      "slug": "real-mixed-repeat",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "ref-turbo-baseline",
+      "baseline": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "unchanged repeated baseline of case 1",
+          "same source/seed/recipe/geometry",
+          "decoded AV is a stable repeated baseline"
+        ],
+        "e": [
+          "jobSnapshot",
+          "apiTranscript",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-drop-images",
+      "backend": "cuda",
+      "index": 6,
+      "slug": "real-drop-images",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "ref-turbo-baseline",
+      "baseline": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only image references dropped vs case 1",
+          "causal decoded-media intervention remains observable"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-drop-video",
+      "backend": "cuda",
+      "index": 7,
+      "slug": "real-drop-video",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "ref-turbo-baseline",
+      "baseline": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only video references dropped vs case 1",
+          "causal decoded-media intervention remains observable"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-drop-audio",
+      "backend": "cuda",
+      "index": 8,
+      "slug": "real-drop-audio",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "ref-turbo-baseline",
+      "baseline": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only audio references dropped vs case 1",
+          "actual mixed causal check runs on both backends"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-reverse-images",
+      "backend": "cuda",
+      "index": 9,
+      "slug": "real-reverse-images",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "ref-turbo-baseline",
+      "baseline": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only image reference order reversed vs case 1",
+          "causal decoded-media intervention remains observable"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-reverse-video",
+      "backend": "cuda",
+      "index": 10,
+      "slug": "real-reverse-video",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "ref-turbo-baseline",
+      "baseline": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only video reference order reversed vs case 1",
+          "causal decoded-media intervention remains observable"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-reverse-audio",
+      "backend": "cuda",
+      "index": 11,
+      "slug": "real-reverse-audio",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "ref-turbo-baseline",
+      "baseline": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only audio reference order reversed vs case 1",
+          "causal decoded-media intervention remains observable"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-drop-lora",
+      "backend": "cuda",
+      "index": 12,
+      "slug": "real-drop-lora",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.0-ref2va-v2-int8",
+      "assetSet": "singularity",
+      "conditioning": "ordered-mixed",
+      "adapterRecipe": "drop-lora",
+      "baseline": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only LoRA removed vs case 1",
+          "source/seed/geometry/ref-turbo recipe retained"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-lokr-repeat",
+      "backend": "cuda",
+      "index": 13,
+      "slug": "real-lokr-repeat",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.2-ref2va-pruned-v1.3-int8",
+      "assetSet": "singularity",
+      "conditioning": "reference",
+      "adapterRecipe": "lokr-repeat",
+      "baseline": "cuda.reduced.artifact-2-lokr-ref-turbo-baseline",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "unchanged repeated baseline of case 3",
+          "same LoKr/ref-turbo recipe"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-drop-lokr",
+      "backend": "cuda",
+      "index": 14,
+      "slug": "real-drop-lokr",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "artifact.2-ref2va-pruned-v1.3-int8",
+      "assetSet": "singularity",
+      "conditioning": "reference",
+      "adapterRecipe": "drop-lokr",
+      "baseline": "cuda.reduced.artifact-2-lokr-ref-turbo-baseline",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only LoKr removed vs case 3",
+          "ref-turbo recipe retained"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-hybrid-text",
+      "backend": "cuda",
+      "index": 15,
+      "slug": "real-hybrid-text",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "hybrid-single-checkpoint",
+      "assetSet": "hybrid",
+      "conditioning": "text",
+      "adapterRecipe": "fl-turbo-4v01",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "hybrid text_to_video operation",
+          "declared hybrid source and fl-turbo-4v01 recipe bound"
+        ],
+        "e": [
+          "jobSnapshot",
+          "nativeLoadClosure",
+          "outputAV",
+          "samplingRecipe"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-hybrid-prompt-change",
+      "backend": "cuda",
+      "index": 16,
+      "slug": "real-hybrid-prompt-change",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "hybrid-single-checkpoint",
+      "assetSet": "hybrid",
+      "conditioning": "text",
+      "adapterRecipe": "fl-turbo-4v01",
+      "baseline": "cuda.reduced.real-hybrid-text",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "only prompt changed vs case 15",
+          "decoded-media change attributable to prompt"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-hybrid-image",
+      "backend": "cuda",
+      "index": 17,
+      "slug": "real-hybrid-image",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "hybrid-single-checkpoint",
+      "assetSet": "hybrid",
+      "conditioning": "image",
+      "adapterRecipe": "fl-turbo-8",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "hybrid image_to_video operation",
+          "fl-turbo-8 recipe bound"
+        ],
+        "e": [
+          "jobSnapshot",
+          "nativeLoadClosure",
+          "outputAV",
+          "samplingRecipe"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-hybrid-last-only",
+      "backend": "cuda",
+      "index": 18,
+      "slug": "real-hybrid-last-only",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "hybrid-single-checkpoint",
+      "assetSet": "hybrid",
+      "conditioning": "last-frame-only",
+      "adapterRecipe": "fl-turbo-8",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "last-frame-only image_to_video operation",
+          "no sourceAssetId",
+          "fl-turbo-8 recipe bound"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "samplingRecipe"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-hybrid-first-last",
+      "backend": "cuda",
+      "index": 19,
+      "slug": "real-hybrid-first-last",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "hybrid-single-checkpoint",
+      "assetSet": "hybrid",
+      "conditioning": "first-last-frame",
+      "adapterRecipe": "fl-turbo-4v1.0-768",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "first_last_frame operation with both endpoints",
+          "fl-turbo-4v1.0_768 recipe bound"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "samplingRecipe"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-hybrid-reference",
+      "backend": "cuda",
+      "index": 20,
+      "slug": "real-hybrid-reference",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "hybrid-single-checkpoint",
+      "assetSet": "hybrid",
+      "conditioning": "reference",
+      "adapterRecipe": "compatible-declared-sampling",
+      "backendSteps": {
+        "cuda": 50,
+        "mlx": 8
+      },
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "hybrid reference_to_video operation",
+          "compatible declared source and sampling only"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "samplingRecipe",
+          "sourceResolution"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-independent-fl2va",
+      "backend": "cuda",
+      "index": 21,
+      "slug": "real-independent-fl2va",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "independent-pulpcut-merge-fl2va",
+      "assetSet": "independent",
+      "conditioning": "text",
+      "adapterRecipe": "none",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "independently identified PulpCut MERGE source",
+          "fl2va operation",
+          "decoded AV matches resolved lattice"
+        ],
+        "e": [
+          "jobSnapshot",
+          "nativeLoadClosure",
+          "outputAV",
+          "sourceResolution"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.real-hybrid-text-repeat",
+      "backend": "cuda",
+      "index": 22,
+      "slug": "real-hybrid-text-repeat",
+      "kind": "full-av",
+      "group": "real",
+      "modelKey": "hybrid-single-checkpoint",
+      "assetSet": "hybrid",
+      "conditioning": "text",
+      "adapterRecipe": "fl-turbo-4v01",
+      "baseline": "cuda.reduced.real-hybrid-text",
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "job.status=completed",
+          "unchanged repeated baseline of case 15",
+          "same declared hybrid source/recipe"
+        ],
+        "e": [
+          "jobSnapshot",
+          "outputAV",
+          "baselineComparison"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.numeric-pruned-artifact",
+      "backend": "cuda",
+      "index": 23,
+      "slug": "numeric-pruned-artifact",
+      "kind": "actual-artifact-probe",
+      "group": "numeric",
+      "modelKey": "artifact.2-ref2va-pruned-v1.3-int8",
+      "assetSet": "singularity",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "actual bounded real tensor probe",
+          "no AV output claimed",
+          "pruned interpolation artifact matches the declared fixture"
+        ],
+        "e": [
+          "artifactProbeReceipt",
+          "artifactSha256"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.numeric-w4a8-artifact",
+      "backend": "cuda",
+      "index": 24,
+      "slug": "numeric-w4a8-artifact",
+      "kind": "actual-artifact-probe",
+      "group": "numeric",
+      "modelKey": "artifact.3-ref2va-pruned-v1.3-w4a8",
+      "assetSet": "singularity",
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "actual mixed packed/ConvRot tensor probe",
+          "no AV output claimed"
+        ],
+        "e": [
+          "artifactProbeReceipt",
+          "artifactSha256"
+        ]
+      }
+    },
+    {
+      "id": "cuda.reduced.lifecycle-generation-source-prep-cancel",
+      "backend": "cuda",
+      "index": 25,
+      "slug": "lifecycle-generation-source-prep-cancel",
+      "kind": "source-cancel",
+      "group": "lifecycle",
+      "modelKey": "artifact.3-ref2va-pruned-v1.3-w4a8",
+      "assetSet": "singularity",
+      "conditioning": "reference",
+      "backendSteps": {
+        "cuda": 50,
+        "mlx": 8
+      },
+      "baseline": null,
+      "repeatsOf": null,
+      "acceptance": {
+        "ac": [
+          "actual native cold source-preparation observer",
+          "no AV output claimed",
+          "no Acquired seal / source_prepared / native load for the canceled job"
+        ],
+        "e": [
+          "cancelReceipt",
+          "partialByteEvidence",
+          "joinedTeardownMarker"
+        ]
+      }
+    }
+  ]
 }
