@@ -80,3 +80,11 @@ test('only exact immutable production file identities enter the stat inventory',
   changed.models[0].downloads[0].revision = revision; changed.models[0].downloads[0].files = ['../outside'];
   assert.throws(() => requiredMossTrainingCacheFiles(changed, 'capture'), /literal/);
 });
+
+
+test('bounded Base route requires only Base plus its shared components, never SFT transformer or DMD',t=>{
+ const options=setup(t);const report=materializeFiles(options,'bounded-product');
+ assert.deepEqual(report.requiredFiles.map(row=>[row.repository,row.file]),[['Test/Base','transformer/model.safetensors'],['Test/Sft','vae/model.safetensors']]);
+ assert.equal(inventoryMossTrainingCache({...options,phase:'bounded-product'}).ready,true);
+ assert.equal(inventoryMossTrainingCache({...options,phase:'cross-load'}).ready,false);
+});

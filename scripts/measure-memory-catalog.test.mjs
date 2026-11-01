@@ -1387,7 +1387,8 @@ test("an InstantID cell whose staged identity stack is missing a file is weights
   await stageSdxlTierMainTensors(hub, "SceneWorks/realvisxl-mlx", REVISION, "q4");
   const weights = await mkdtemp(path.join(tmpdir(), "instantid-weights-"));
   const controlnet = await mkdtemp(path.join(tmpdir(), "instantid-controlnet-"));
-  const previous = { ...process.env };
+  const instantIdEnvKeys = ["SCENEWORKS_INSTANTID_WEIGHTS", "SCENEWORKS_INSTANTID_CONTROLNET"];
+  const previous = Object.fromEntries(instantIdEnvKeys.map(key => [key, process.env[key]]));
   process.env.SCENEWORKS_INSTANTID_WEIGHTS = weights;
   process.env.SCENEWORKS_INSTANTID_CONTROLNET = controlnet;
   try {
@@ -1408,7 +1409,11 @@ test("an InstantID cell whose staged identity stack is missing a file is weights
     assert.equal(row.env.SCENEWORKS_INSTANTID_WEIGHTS, weights);
     assert.equal(row.env.SCENEWORKS_INSTANTID_CONTROLNET, controlnet);
   } finally {
-    process.env = previous;
+    // Preserve Windows environment-key semantics; restore only this fixture's overrides.
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   }
 });
 
@@ -7868,7 +7873,7 @@ async function fakeGpuHost({ pmon, apps, pmonAfterReap, appsAfterReap }) {
 }
 
 async function runGpuPreflight(host) {
-  const env = { ...process.env, PATH: `${host.bin}:${process.env.PATH}`, CUDA_VISIBLE_DEVICES: "1" };
+  const env = { ...process.env, PATH: `${host.bin}${path.delimiter}${process.env.PATH}`, CUDA_VISIBLE_DEVICES: "1" };
   try {
     const { stdout } = await execFileAsync("bash", ["scripts/ci/memory-catalog/gpu-preflight.sh"], { cwd: ROOT, env });
     return { code: 0, stdout };
@@ -8013,7 +8018,8 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
   await writeFile(summary, "");
   const env = {
     ...process.env,
-    PATH: `${bin}:${process.env.PATH}`,
+    PATH: `${bin}${path.delimiter}${process.env.PATH}`,
+    CATALOG_TEST_BIN: bin,
     CAMPAIGN: "sc-22738",
     BACKEND: "candle",
     BASE_REF: "feature/sc-22723-memory-anchor-measurability",
@@ -8036,7 +8042,10 @@ async function runResultsPr({ createStdout = "", createStderr = "", createStatus
   let stdout = "";
   let stderr = "";
   try {
-    const result = await execFileAsync("bash", ["scripts/ci/memory-catalog/pr.sh"], { cwd: ROOT, env });
+    // Git Bash's launcher prepends its own Git directory. Reassert the mocks inside
+    // the shell so these tests can never fall through to real git/gh on Windows.
+    const fixtureShell = 'fixture_bin="$CATALOG_TEST_BIN"; if command -v cygpath >/dev/null 2>&1; then fixture_bin="$(cygpath -u "$fixture_bin")"; fi; export PATH="$fixture_bin:$PATH"; [[ "$(command -v git)" == "$fixture_bin/git" && "$(command -v gh)" == "$fixture_bin/gh" ]] || exit 98; source "$0"';
+    const result = await execFileAsync("bash", ["-c", fixtureShell, "scripts/ci/memory-catalog/pr.sh"], { cwd: ROOT, env });
     ({ stdout, stderr } = result);
   } catch (error) {
     code = error.code ?? 1;

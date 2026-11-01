@@ -443,7 +443,10 @@ test("parseArgs validates the backend and keeps output outside the checkout", ()
   assert.throws(() => parseArgs(["--root", "/repo", "--output", "/tmp/out", "--backend", "gpu"]), /mlx or candle/);
 });
 
-test("the external RSS guard bounds only the owned descendant tree", async () => {
+test("the external RSS guard bounds only the owned descendant tree", (t) => {
+  // Timer cadence is controlled: wall-clock sleeps can elapse after only one
+  // interval on Windows and cannot prove the multi-sample peak contract.
+  t.mock.timers.enable({ apis: ["setInterval"] });
   const rows = new Map([[10, { pid: 10, ppid: 1, rssBytes: 1024 }], [11, { pid: 11, ppid: 10, rssBytes: 2048 }], [12, { pid: 12, ppid: 11, rssBytes: 4096 }], [99, { pid: 99, ppid: 1, rssBytes: 1 << 30 }]]);
   assert.equal(sumOwnedRss(rows, 10), 7168);
   assert.equal(sumOwnedRss(rows, 777), null);
@@ -451,7 +454,7 @@ test("the external RSS guard bounds only the owned descendant tree", async () =>
   const child = { pid: 10, exitCode: null };
   const state = { child, cancelled: false };
   const stop = startRssGuard(state, { sample: () => sumOwnedRss(rows, 10), capBytes: 4096, intervalMs: 1 });
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  t.mock.timers.tick(20);
   stop();
   assert.equal(state.cancelled, true);
   assert.equal(state.rssExceededBytes, 7168);
@@ -460,13 +463,13 @@ test("the external RSS guard bounds only the owned descendant tree", async () =>
   // A sampler failure or a missing sample while the case is LIVE fails closed.
   const throwing = { child, cancelled: false };
   const stopThrowing = startRssGuard(throwing, { sample: () => { throw new Error("ps unavailable"); }, capBytes: 1 << 30, intervalMs: 1 });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  t.mock.timers.tick(10);
   stopThrowing();
   assert.equal(throwing.cancelled, true);
   assert.match(throwing.rssSamplingError, /sampler threw: ps unavailable/);
   const missing = { child, cancelled: false };
   const stopMissing = startRssGuard(missing, { sample: () => null, capBytes: 1 << 30, intervalMs: 1 });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  t.mock.timers.tick(10);
   stopMissing();
   assert.equal(missing.cancelled, true);
   assert.match(missing.rssSamplingError, /returned no sample while the case was live/);
@@ -474,14 +477,14 @@ test("the external RSS guard bounds only the owned descendant tree", async () =>
   const observed = { child, cancelled: false };
   const samples = [1, 5, 3];
   const stopObserved = startRssGuard(observed, { sample: () => samples.shift() ?? 3, capBytes: 1 << 30, intervalMs: 1 });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  t.mock.timers.tick(10);
   stopObserved();
   assert.equal(observed.cancelled, false);
   assert.equal(observed.rssFirstBytes, 1);
   assert.equal(observed.rssPeakBytes, 5);
   const calm = { child: { pid: 10, exitCode: 0 }, cancelled: false };
   const stopCalm = startRssGuard(calm, { sample: () => { throw new Error("must not sample an exited child"); }, capBytes: 1, intervalMs: 1 });
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  t.mock.timers.tick(10);
   stopCalm();
   assert.equal(calm.cancelled, false);
   assert.throws(() => startRssGuard({ child, cancelled: false }, { sample: () => 1 }), /aggregate cap/);

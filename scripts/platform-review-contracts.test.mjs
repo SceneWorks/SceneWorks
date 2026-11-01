@@ -675,18 +675,34 @@ test("windows-candle rebuilds the exact Krea snapshot path from the generalized 
 
 // sc-18677/sc-20974/sc-21707: every timeout arm is load-bearing. Pin the whole expression the way
 // the macOS twin above pins its lane's -- otherwise either a revert to the ordinary 45m cap or the
-// terminal campaign's observed 360m cutoff passes every other test here.
+// terminal campaign's observed 360m cutoff passes every other test here. The cold-build
+// allowance was raised to 120m in sc-26850; five-rung-only dispatches share that default.
 test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung timeout budgets", async () => {
   const workflow = await source(".github/workflows/windows-candle.yml");
   const runbook = await source("docs/epic-20738-terminal-cuda.md");
   const timeoutContract =
-    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_five_rung_reference && 120 \|\| 60 \}\}/;
+    /timeout-minutes: \$\{\{ github\.event_name == 'workflow_dispatch' && inputs\.run_ltx_eros_acceptance && 360 \|\| github\.event_name == 'workflow_dispatch' && inputs\.run_epic_20738_terminal_cuda && 720 \|\| github\.event_name == 'workflow_dispatch' && inputs\.provision_snapshot && 240 \|\| 120 \}\}/;
   const validateTimeout = (candidate) => {
     assert.match(candidate, timeoutContract);
     const job = workflowJob(candidate, "candle-worker");
     const declared = job.match(/^ {4}timeout-minutes: ([^\n]+)$/m)?.[1];
     const leaseBudget = job.match(/^ {6}SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES: ([^\n]+)$/m)?.[1];
     assert.equal(leaseBudget, declared, "the physical lease reuses the exact existing job budget");
+    const expression = workflowExpression(job, "timeout-minutes");
+    for (const [event, inputs, expected] of [
+      ["pull_request", {}, 120],
+      ["push", {}, 120],
+      ["workflow_dispatch", {}, 120],
+      ["workflow_dispatch", { run_five_rung_reference: true }, 120],
+      ["workflow_dispatch", { provision_snapshot: true, run_five_rung_reference: true }, 240],
+      ["workflow_dispatch", { provision_snapshot: true }, 240],
+      ["workflow_dispatch", { run_ltx_eros_acceptance: true }, 360],
+      ["workflow_dispatch", { run_epic_20738_terminal_cuda: true, provision_snapshot: true }, 720],
+      ["pull_request", { run_ltx_eros_acceptance: true, run_epic_20738_terminal_cuda: true }, 120],
+    ]) {
+      assert.equal(evaluateWorkflow(expression, event, inputs), expected, `${event}: ${JSON.stringify(inputs)}`);
+      assert.equal(evaluateWorkflow(workflowExpression(job, "SCENEWORKS_CUDA_EXECUTION_BUDGET_MINUTES"), event, inputs), expected);
+    }
   };
   validateTimeout(workflow);
   assert.match(
@@ -697,11 +713,12 @@ test("windows-candle keeps the ordinary, terminal, provisioning, and five-rung t
 
   const terminalArm =
     "github.event_name == 'workflow_dispatch' && inputs.run_epic_20738_terminal_cuda && 720";
-  const ordinaryArm = "inputs.run_five_rung_reference && 120 || 60";
+  const ordinaryArm = "inputs.provision_snapshot && 240 || 120";
   for (const [name, mutated] of [
     ["terminal timeout regressed to 360", workflow.replace(terminalArm, terminalArm.replace("720", "360"))],
     ["terminal timeout arm removed", workflow.replace(` || ${terminalArm}`, "")],
-    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("60", "45"))],
+    ["ordinary timeout regressed to 60", workflow.replace(ordinaryArm, ordinaryArm.replace("|| 120", "|| 60"))],
+    ["ordinary timeout regressed to 45", workflow.replace(ordinaryArm, ordinaryArm.replace("|| 120", "|| 45"))],
   ]) {
     assert.notEqual(mutated, workflow, `${name} mutation must modify the workflow fixture`);
     assert.throws(

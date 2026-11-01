@@ -8699,7 +8699,9 @@ fn retain_sdxl_endpoint_output(request: &Value, output: &Image) -> Result<Value,
     }
     if !output
         .pixels
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .any(|pixel| pixel != &output.pixels[..3])
     {
         return Err("SDXL endpoint output is spatially flat".into());

@@ -157,9 +157,9 @@ all = "warn"
 # (inference sc-25909; see its VENDORED.md). The macOS runtime compiles it through candle-core's
 # Metal backend, so without this patch SceneWorks would build the unfixed upstream kernels.
 [patch."https://github.com/huggingface/candle"]
-candle-core = { git = "https://github.com/SceneWorks/inference", rev = "3c52eef46c902d296ce84d77a65e32fe126b32d5" }
-candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "3c52eef46c902d296ce84d77a65e32fe126b32d5" }
-candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "3c52eef46c902d296ce84d77a65e32fe126b32d5" }
+candle-core = { git = "https://github.com/SceneWorks/inference", rev = "70dbe4f41819fcec206737f5d73b428aaed37b6e" }
+candle-kernels = { git = "https://github.com/SceneWorks/inference", rev = "70dbe4f41819fcec206737f5d73b428aaed37b6e" }
+candle-metal-kernels = { git = "https://github.com/SceneWorks/inference", rev = "70dbe4f41819fcec206737f5d73b428aaed37b6e" }
 
 # Build the SHA-256 stack optimized even in the dev/test profile.
 #

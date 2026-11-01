@@ -32134,6 +32134,26 @@ mod sensenova_tests {
         (phases, closes)
     }
 
+    #[test]
+    fn prompt_encoding_completion_does_not_close_or_invent_memory_phases() {
+        for (_, stream) in pinned_engine_streams() {
+            let with_completions: Vec<_> = std::iter::once(Progress::PromptEncodingComplete)
+                .chain(
+                    stream
+                        .iter()
+                        .flat_map(|event| [*event, Progress::PromptEncodingComplete]),
+                )
+                .collect();
+            let (baseline, baseline_closes) = fold(&stream);
+            let (observed, closes) = fold(&with_completions);
+            assert_eq!(closes, baseline_closes);
+            assert_eq!(
+                sensenova_phase_peaks(SENSENOVA_BASE_ARM, &observed, DECODE),
+                sensenova_phase_peaks(SENSENOVA_BASE_ARM, &baseline, DECODE),
+            );
+        }
+    }
+
     /// sc-22738 — every route's stream at e34d7b46a cuts all three declared phases on an engine
     /// boundary, each phase closes exactly once, and the receipt is the full decomposition the
     /// sibling still arms file.

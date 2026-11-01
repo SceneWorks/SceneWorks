@@ -65,3 +65,6 @@ mod yue2_catalog;
 mod yue2_jobs;
 mod yue2_scores;
 mod yue2_transcriptions;
+
+#[cfg(all(not(target_os = "macos"), feature = "model-inference-proof"))]
+mod moss_training_acceleration;
