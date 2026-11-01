@@ -52,7 +52,10 @@ EXPECTED = {
 }
 PYARROW_VERSION = "19.0.1"
 PYARROW_REQUIRED = f"pyarrow=={PYARROW_VERSION}"
-ALLOWED_MAC_RUNNERS = frozenset({"nax-macos"})
+# Either Mac may run the MLX lane; the request's expected_runner (exported as H3_EXPECTED_RUNNER)
+# names the one, and RUNNER_NAME must equal it exactly — the same rule as
+# h3-finetune-terminal-stage.mjs assertExpectedRunner (sc-26691).
+ALLOWED_MAC_RUNNERS = frozenset({"nax-macos", "nax-macos-2"})
 ALLOWED_WINDOWS_RUNNERS = frozenset({"cuda-windows", "cuda-windows-2"})
 SOURCE_NAME = "source-audio.bin"
 SPEECH_NAME = "speech-32000.wav"
@@ -678,10 +681,18 @@ def require_production_context(env=None) -> dict:
     runner_os = env.get("RUNNER_OS", "")
     if runner_os == "macOS":
         if runner not in ALLOWED_MAC_RUNNERS:
-            _fail("guard", f"approved macOS runner is {sorted(ALLOWED_MAC_RUNNERS)}, got {runner!r}")
+            _fail("guard", f"approved macOS runners are {sorted(ALLOWED_MAC_RUNNERS)}, got {runner!r}")
+        expected = env.get("H3_EXPECTED_RUNNER")
+        if expected not in ALLOWED_MAC_RUNNERS:
+            _fail("guard", f"H3_EXPECTED_RUNNER must name an approved macOS runner {sorted(ALLOWED_MAC_RUNNERS)}, got {expected!r}")
+        if runner != expected:
+            _fail("guard", f"RUNNER_NAME {runner!r} must equal the request expected_runner (H3_EXPECTED_RUNNER) {expected!r}")
     elif runner_os == "Windows":
         if runner not in ALLOWED_WINDOWS_RUNNERS:
             _fail("guard", f"approved Windows runners are {sorted(ALLOWED_WINDOWS_RUNNERS)}, got {runner!r}")
+        expected = env.get("H3_EXPECTED_RUNNER")
+        if expected is not None and runner != expected:
+            _fail("guard", f"RUNNER_NAME {runner!r} must equal the request expected_runner (H3_EXPECTED_RUNNER) {expected!r}")
     else:
         _fail("guard", f"approved runners are macOS/Windows, got {runner_os!r}")
     runner_temp = _require_absolute(env.get("RUNNER_TEMP"), "RUNNER_TEMP")

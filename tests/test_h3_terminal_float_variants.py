@@ -443,14 +443,21 @@ class FloatVariantTests(unittest.TestCase):
     def test_guard_accepts_approved_runners_and_requires_source_sha(self):
         base = {"GITHUB_ACTIONS": "true", "GITHUB_EVENT_NAME": "workflow_dispatch", "RUNNER_TEMP": "/tmp", "GITHUB_SHA": GHA}
         for env in (
-            {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos"},
+            {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos", "H3_EXPECTED_RUNNER": "nax-macos"},
+            {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos-2", "H3_EXPECTED_RUNNER": "nax-macos-2"},
             {"RUNNER_OS": "Windows", "RUNNER_NAME": "cuda-windows"},
             {"RUNNER_OS": "Windows", "RUNNER_NAME": "cuda-windows-2"},
+            {"RUNNER_OS": "Windows", "RUNNER_NAME": "cuda-windows-2", "H3_EXPECTED_RUNNER": "cuda-windows-2"},
         ):
             self.assertEqual(speech.require_production_context(env={**base, **env})["runner"], env["RUNNER_NAME"])
         for env in (
             {"RUNNER_OS": "macOS", "RUNNER_NAME": "michaels-dev-mac"},
+            {"RUNNER_OS": "macOS", "RUNNER_NAME": "michaels-dev-mac", "H3_EXPECTED_RUNNER": "michaels-dev-mac"},
+            # run 41309632747: either Mac is approved, but only as the request's expected_runner.
             {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos-2"},
+            {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos-2", "H3_EXPECTED_RUNNER": "nax-macos"},
+            {"RUNNER_OS": "macOS", "RUNNER_NAME": "nax-macos", "H3_EXPECTED_RUNNER": "nax-macos-2"},
+            {"RUNNER_OS": "Windows", "RUNNER_NAME": "cuda-windows-2", "H3_EXPECTED_RUNNER": "cuda-windows"},
             {"RUNNER_OS": "Windows", "RUNNER_NAME": "cuda-windows-3"},
             {"RUNNER_OS": "Linux", "RUNNER_NAME": "ubuntu-latest"},
             {},
