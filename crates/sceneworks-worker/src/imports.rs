@@ -279,7 +279,7 @@ pub(crate) async fn write_model_download_receipt(
         object.insert("loraFileSha256".to_owned(), Value::String(hash.to_owned()));
     }
     let target_dir = target_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
         let marker_path = target_dir.join(INSTALL_MARKER);
         let _lock = sceneworks_core::download_receipt::lock(&target_dir)?;
         let mut receipts = match std::fs::read(&marker_path) {

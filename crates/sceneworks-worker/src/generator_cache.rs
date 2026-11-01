@@ -948,7 +948,7 @@ pub(crate) fn write_gpu_telemetry(config_dir: &Path) {
 /// worker's lifetime (aborted when the process exits).
 #[cfg(all(target_os = "macos", not(test)))]
 pub(crate) fn spawn_gpu_telemetry(config_dir: PathBuf) {
-    tokio::spawn(async move {
+    crate::load_progress::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(2));
         loop {
             ticker.tick().await;
@@ -1728,7 +1728,9 @@ where
     // One resident engine across the generator and transform caches (sc-25683).
     crate::transform_cache::evict_resident_transform().await?;
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<WorkerResult<R>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             // Free the resident cached generator (if any) before loading the fresh one, so the process
             // has room for the large in-place weights. On CUDA `release_backend_cache_after_evict` is a
@@ -1823,7 +1825,9 @@ pub(crate) async fn evict_cached_generator() -> WorkerResult<bool> {
 ))]
 pub(crate) fn evict_cached_generator_blocking() -> WorkerResult<bool> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let evicted = cache.evict().is_some();
         if evicted {
             cache_thread::release_backend_cache_after_evict();
@@ -1850,7 +1854,9 @@ async fn cached_generator_resident_bytes_on(
     worker: &mpsc::Sender<GeneratorJob>,
 ) -> WorkerResult<Option<u64>> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Option<u64>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let _ = reply_tx.send(
             cache
                 .resident_model()
@@ -1874,7 +1880,9 @@ async fn cached_generator_resident_bytes_on(
 ))]
 async fn evict_cached_generator_on(worker: &mpsc::Sender<GeneratorJob>) -> WorkerResult<bool> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<bool>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let evicted = cache.evict().is_some();
         if evicted {
             // On CUDA a no-op (cudarc has no empty_cache); the evicted generator's drop already
@@ -1943,7 +1951,9 @@ pub(crate) async fn load_stub_into_global_cache(weights: &Path) -> WorkerResult<
 #[cfg(test)]
 pub(crate) async fn global_generator_resident() -> Option<Vec<String>> {
     let (reply_tx, reply_rx) = tokio::sync::oneshot::channel::<Option<Vec<String>>>();
+    let progress_context = crate::load_progress::Context::capture();
     let job: GeneratorJob = Box::new(move |cache: &mut GeneratorCache| {
+        let _progress = progress_context.install();
         let _ = reply_tx.send(cache.resident_key().map(LoadIdentity::component_ids));
     });
     generator_worker()
@@ -4794,7 +4804,7 @@ mod tests {
         let (warm_started_tx, warm_started_rx) = mpsc::channel();
         let (warm_release_tx, warm_release_rx) = mpsc::channel();
         let warm_tx = tx.clone();
-        let warm = tokio::spawn(async move {
+        let warm = crate::load_progress::spawn(async move {
             with_cached_generator_using_cold_admission_on(
                 warm_tx,
                 no_transform_eviction(),
@@ -4820,7 +4830,7 @@ mod tests {
         let gate_called = Arc::new(AtomicBool::new(false));
         let cold_gate_called = gate_called.clone();
         let cold_tx = tx.clone();
-        let cold = tokio::spawn(async move {
+        let cold = crate::load_progress::spawn(async move {
             with_cached_generator_using_cold_admission_on(
                 cold_tx,
                 no_transform_eviction(),

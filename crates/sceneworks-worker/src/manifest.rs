@@ -47,7 +47,7 @@ pub(crate) async fn upsert_manifest_entry(
     let collection_key = collection_key.to_owned();
     // The critical section is blocking (fs2 advisory lock + sync read/write) so it
     // runs on a blocking thread rather than stalling the async runtime.
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         merge_manifest_entry_locked(&path, &collection_key, entry, true).map(|_| ())
     })
     .await
@@ -66,7 +66,7 @@ pub(crate) async fn publish_model_import_manifest(
     let path = path.to_owned();
     let data_dir = data_dir.to_owned();
     let expected = expected.cloned();
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         let id = entry.get("id").and_then(Value::as_str).ok_or_else(|| WorkerError::InvalidPayload("import requires model ID".into()))?;
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
         let _guard = ManifestLock::acquire(&path)?;
@@ -133,7 +133,7 @@ pub(crate) async fn update_manifest_entry_if_present(
     }
     let path = path.to_path_buf();
     let collection_key = collection_key.to_owned();
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         merge_manifest_entry_locked(&path, &collection_key, entry, false)
     })
     .await
@@ -557,7 +557,7 @@ mod tests {
         let mut handles = Vec::with_capacity(WRITERS);
         for index in 0..WRITERS {
             let path = path.clone();
-            handles.push(tokio::spawn(async move {
+            handles.push(crate::load_progress::spawn(async move {
                 upsert_manifest_entry(&path, "loras", entry(&format!("lora-{index}"))).await
             }));
         }

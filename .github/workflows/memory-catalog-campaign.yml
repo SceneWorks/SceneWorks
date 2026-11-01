@@ -73,7 +73,7 @@ on:
   workflow_dispatch:
     inputs:
       moss_options_json:
-        description: 'MOSS only: {"enabled":true,"runner_label":"real-weights","phase":"capture"}; finalize adds inspection with original captureRunId. Empty object disables MOSS.'
+        description: 'MOSS: {"enabled":true,"runner_label":"real-weights","phase":"capture"}. Load-progress profile: {"case":"image_cuda","hf_hub_cache":"E:/huggingface/hub","build_only":true,"mac_go":false}. Empty disables MOSS.'
         required: false
         type: string
         default: "{}"
@@ -83,6 +83,7 @@ on:
         type: choice
         options:
           - catalog
+          - load-progress-acceptance
           - qwen-image-2-1-app-lifecycle
           - flux3-image-klein-app-lifecycle
           - flux3-image-klein-terminal-host
@@ -317,6 +318,8 @@ jobs:
           import { appendFileSync } from 'node:fs';
           const i = JSON.parse(process.env.SELECTORS);
           const emit = (key, value) => appendFileSync(process.env.GITHUB_OUTPUT, key + '=' + value + '\n');
+          // The existing options input is profile-specific; keep all 25 registered inputs.
+          if (i.profile === 'load-progress-acceptance') { emit('enabled','false'); process.exit(0); }
           let m;
           try { m = JSON.parse(i.moss_options_json || '{}'); } catch { throw new Error('moss_options_json must be a JSON object'); }
           if (m === null || typeof m !== 'object' || Array.isArray(m)) throw new Error('moss_options_json must be a JSON object');
@@ -440,6 +443,47 @@ jobs:
       source_sha: ${{ inputs.ref }}
       inference_sha: ${{ inputs.inference_sha }}
       control_sha256: ${{ inputs.flux3_queue_control_sha256 }}
+  load-progress-selector:
+    if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'load-progress-acceptance' }}
+    needs: moss-selector-preflight
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      options: ${{ steps.select.outputs.options }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate the one-case terminal selector without native setup
+        id: select
+        env:
+          SELECTORS: ${{ toJSON(inputs) }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          node --input-type=module <<'JS'
+          import {appendFileSync} from 'node:fs';
+          import {dispatchOptions} from './scripts/load-progress-acceptance.mjs';
+          const options=dispatchOptions(JSON.parse(process.env.SELECTORS),process.env.DISPATCH_SHA);
+          appendFileSync(process.env.GITHUB_OUTPUT,'options='+JSON.stringify(options)+'\n');
+          JS
+  load-progress-acceptance:
+    if: ${{ inputs.profile == 'load-progress-acceptance' }}
+    needs: load-progress-selector
+    permissions:
+      contents: read
+    # Registered manual-only entrypoint; relative call resolves at the dispatched feature SHA.
+    # This profile runs no catalog jobs, MOSS campaign, measurement publication or PR.
+    uses: ./.github/workflows/load-progress-acceptance.yml
+    with:
+      source_sha: ${{ inputs.ref }}
+      inference_sha: ${{ inputs.inference_sha }}
+      case: ${{ fromJSON(needs.load-progress-selector.outputs.options).case }}
+      backend: ${{ fromJSON(needs.load-progress-selector.outputs.options).backend }}
+      hf_hub_cache: ${{ fromJSON(needs.load-progress-selector.outputs.options).hf_hub_cache }}
+      build_only: ${{ fromJSON(needs.load-progress-selector.outputs.options).build_only }}
+      mac_go: ${{ fromJSON(needs.load-progress-selector.outputs.options).mac_go }}
   qwen-app-lifecycle:
     if: ${{ needs.moss-selector-preflight.outputs.enabled != 'true' && inputs.profile == 'qwen-image-2-1-app-lifecycle' }}
     needs: moss-selector-preflight

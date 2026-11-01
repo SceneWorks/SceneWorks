@@ -222,7 +222,7 @@ pub(crate) async fn run_dataset_subject_mask_job(
             JobStatus::LoadingModel,
             ProgressStage::LoadingModel,
             0.08,
-            "Loading SAM3 person segmenter.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             backend,
         ),
@@ -346,7 +346,7 @@ fn spawn_subject_mask_segmentation(
     tx: tokio::sync::mpsc::Sender<usize>,
     job_id: String,
 ) -> tokio::task::JoinHandle<WorkerResult<Vec<SubjectMaskRecord>>> {
-    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<SubjectMaskRecord>> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<SubjectMaskRecord>> {
         emit_event(
             "dataset_subject_mask_start",
             json!({ "jobId": job_id, "space": SUBJECT_MASK_SPACE }),

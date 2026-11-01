@@ -719,7 +719,7 @@ async fn run_yolo11_person_detect(
         "",
         "person detect task",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             crate::person_jobs::detect_people_blocking(weights, frame_path, conf)
         }),
     )
@@ -1146,7 +1146,7 @@ where
         check_cancel(api, &job.id, "Person tracking canceled during sampling.").await?;
         let weights_for_frame = weights.to_path_buf();
         let frame_for_task = frame_path.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = crate::load_progress::spawn_blocking(move || {
             crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, conf)
         })
         .await
@@ -1433,13 +1433,14 @@ where
         })
         .collect();
     let (width, height) = TRACK_FRAME_SIZE;
-    let written =
-        match tokio::task::spawn_blocking(move || write_track_mask_pngs(width, height, pending))
-            .await
-        {
-            Ok(written) => written,
-            Err(_) => return Ok("degraded"),
-        };
+    let written = match crate::load_progress::spawn_blocking(move || {
+        write_track_mask_pngs(width, height, pending)
+    })
+    .await
+    {
+        Ok(written) => written,
+        Err(_) => return Ok("degraded"),
+    };
 
     let mut generated = 0usize;
     for (assembly_idx, rel) in written {
@@ -1500,7 +1501,7 @@ async fn run_macos_segmenter(
                 cancel_message,
                 "person segment task",
                 crate::no_cancel_ack(),
-                tokio::task::spawn_blocking(move || {
+                crate::load_progress::spawn_blocking(move || {
                     crate::person_segment_sam3::segment_track_blocking(
                         model,
                         tokenizer,
@@ -1533,7 +1534,7 @@ async fn run_macos_segmenter(
                 cancel_message,
                 "person segment task",
                 crate::no_cancel_ack(),
-                tokio::task::spawn_blocking(move || {
+                crate::load_progress::spawn_blocking(move || {
                     crate::person_segment::propagate_track_blocking(
                         weights,
                         clip_paths,
@@ -1591,7 +1592,7 @@ async fn run_candle_segmenter(
         "Person tracking canceled during segmentation.",
         "person segment task",
         crate::no_cancel_ack(),
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             crate::person_segment_sam3_candle::segment_track_blocking(
                 model,
                 tokenizer,
@@ -4190,7 +4191,7 @@ async fn run_ffmpeg_capture_stderr_inner(
             .stdin
             .take()
             .expect("piped FFmpeg stdin is available after spawn");
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             for chunk in chunks {
                 stdin.write_all(&chunk).await?;
             }
@@ -4198,7 +4199,7 @@ async fn run_ffmpeg_capture_stderr_inner(
         })
     });
     let mut stderr = child.stderr.take();
-    let mut stderr_task = Some(tokio::spawn(async move {
+    let mut stderr_task = Some(crate::load_progress::spawn(async move {
         let mut bytes = Vec::new();
         if let Some(stderr) = stderr.as_mut() {
             let _ = stderr.read_to_end(&mut bytes).await;
@@ -4574,7 +4575,7 @@ pub(crate) async fn run_ffmpeg_probe_command_with_timeout(
     let mut child = command.spawn()?;
     let mut stdin_task: Option<tokio::task::JoinHandle<std::io::Result<()>>> = None;
     let mut stderr = child.stderr.take();
-    let mut stderr_task = Some(tokio::spawn(async move {
+    let mut stderr_task = Some(crate::load_progress::spawn(async move {
         let mut bytes = Vec::new();
         if let Some(stderr) = stderr.as_mut() {
             let _ = stderr.read_to_end(&mut bytes).await;
@@ -4827,7 +4828,7 @@ mod person_track_e2e_tests {
             .expect("ffmpeg renders the sample frame");
             let weights_for_frame = det_weights.clone();
             let frame_for_task = frame_path.clone();
-            let result = tokio::task::spawn_blocking(move || {
+            let result = crate::load_progress::spawn_blocking(move || {
                 crate::person_jobs::detect_people_blocking(weights_for_frame, frame_for_task, 0.25)
             })
             .await
@@ -4983,7 +4984,7 @@ mod person_track_e2e_tests {
             //    detected span with the video predictor (sc-3715).
             let seg_weights = crate::person_segment::require_segmenter_weights(&settings)
                 .expect("sam2 weights provisioned");
-            let masks = tokio::task::spawn_blocking(move || {
+            let masks = crate::load_progress::spawn_blocking(move || {
                 crate::person_segment::propagate_track_blocking(
                     seg_weights,
                     clip_paths,
@@ -5089,7 +5090,7 @@ mod person_track_e2e_tests {
                 crate::person_segment_sam3::require_segmenter_weights(&settings)
                     .expect("sam3 weights provisioned");
             let (cp3, an3) = (clip_paths.clone(), anchors.clone());
-            let sam3 = tokio::task::spawn_blocking(move || {
+            let sam3 = crate::load_progress::spawn_blocking(move || {
                 crate::person_segment_sam3::segment_track_blocking(
                     sam3_model, sam3_tok, cp3, an3, None, None,
                 )
@@ -5133,7 +5134,7 @@ mod person_track_e2e_tests {
                     }
                 };
             let (cp2, an2) = (clip_paths.clone(), anchors.clone());
-            let sam2 = tokio::task::spawn_blocking(move || {
+            let sam2 = crate::load_progress::spawn_blocking(move || {
                 crate::person_segment::propagate_track_blocking(sam2_weights, cp2, an2, None, None)
             })
             .await
@@ -7039,7 +7040,8 @@ mod timeline_audio_mix_tests {
             );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let server =
+            crate::load_progress::spawn(async move { axum::serve(listener, app).await.unwrap() });
         let mut settings = crate::tests::test_settings("http://127.0.0.1:9".into(), None);
         settings.api_url = format!("http://{address}");
         settings.gpu_id = "cpu".into();

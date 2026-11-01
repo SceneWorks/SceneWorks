@@ -487,7 +487,7 @@ async fn decode_seedvr2_source_to_disk(
     let ctx = FfmpegContext::new(api, settings, job_id, SEEDVR2_CANCEL_MESSAGE);
     run_ffmpeg(seedvr2_source_decode_args(source, frames_dir), Some(ctx)).await?;
     let dir = frames_dir.to_path_buf();
-    let paths = tokio::task::spawn_blocking(move || -> WorkerResult<Vec<PathBuf>> {
+    let paths = crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<PathBuf>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
@@ -1045,7 +1045,7 @@ async fn load_seedvr2_window(
 ) -> WorkerResult<Vec<Image>> {
     let end = start.saturating_add(len).min(paths.len());
     let window: Vec<PathBuf> = paths.get(start..end).unwrap_or(&[]).to_vec();
-    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
         let mut frames = Vec::with_capacity(window.len());
         for path in window {
             let image = crate::image_decode::decode_image_any(&path)
@@ -1077,7 +1077,7 @@ async fn append_seedvr2_frames(
     }
     let dir = frames_dir.to_path_buf();
     let count = frames.len();
-    tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
         for (offset, frame) in frames.into_iter().enumerate() {
             let index = next_index + offset;
             let img = image::RgbImage::from_raw(frame.width, frame.height, frame.pixels)
@@ -1462,7 +1462,7 @@ async fn run_seedvr2_stream(
             .unwrap_or(out_frames_dir)
             .to_path_buf();
         let p = probe;
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             check_seedvr2_scratch_disk(
                 &guard_dir,
                 p.frame_count,
@@ -1800,7 +1800,7 @@ pub(crate) async fn run_video_upscale_job(
             JobStatus::Preparing,
             ProgressStage::Preparing,
             0.1,
-            "Loading SeedVR2 weights.",
+            crate::load_progress::PREPARING_MODEL,
             None,
             backend,
         ),

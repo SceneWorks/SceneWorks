@@ -432,7 +432,10 @@ test('a bound adapter case uses only its own backend training export on the trai
 });
 test('reference cases use a neutral, identity-preserving, setting-only prompt; text-only cases stay person-free', () => {
   const representative = representativePlan(sources);
-  for (const prompt of [REFERENCE_PROMPT]) for (const banned of [/nud|naked|nsfw|undress|lingerie|sexy/i, /(age|younger|older|child|teen|kid)/i, /different (person|face|identity)|swap/i]) assert.doesNotMatch(prompt, banned);
+  const ageTerms = /\b(age|younger|older|child|teen|kid)\b/i;
+  assert.match("child", ageTerms);
+  assert.doesNotMatch("image", ageTerms);
+  for (const prompt of [REFERENCE_PROMPT]) for (const banned of [/nud|naked|nsfw|undress|lingerie|sexy/i, ageTerms, /different (person|face|identity)|swap/i]) assert.doesNotMatch(prompt, banned);
   assert.match(REFERENCE_PROMPT, /unchanged identity/);
   for (const invocation of representative.generationInvocations) {
     const references = invocation.options.references ?? 0;

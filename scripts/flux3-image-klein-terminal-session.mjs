@@ -393,7 +393,7 @@ export async function launchTerminalSession(a, dependencies = {}) {
     if (!dependencies.fixtureOnly || a.artifactCells) {
       assert(a.artifactCells?.length && a.artifactInputs && a.artifactTargets, 'concrete launcher requires exact approved artifact mapping inputs before any service launch');
       assert.equal(planHash(a.artifactInputs), boundInputSpecSha256(a.approvedPlan, a.backend, a.inputSpecAddendum, a.runner));
-      const { stageTerminalArtifacts } = await import('./flux3-image-klein-terminal-artifacts.mjs'); artifactMapping = await stageTerminalArtifacts({ admission: a, identity, inputSpec: a.artifactInputs, cells: a.artifactCells, registry: a.artifactTargets });
+      const { stageTerminalArtifacts } = await import('./flux3-image-klein-terminal-artifacts.mjs'); artifactMapping = await stageTerminalArtifacts({ admission: a, identity, inputSpec: a.artifactInputs, cells: a.artifactCells, registry: a.artifactTargets }, { diskFree: io.diskFree });
     }
     if (a.faultProfile) {
       assert(a.installationFaultAdmission === true && ['missing-install', 'hf403'].includes(a.faultProfile), 'explicit installation fault admission required');

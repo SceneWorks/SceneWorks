@@ -20,6 +20,11 @@ mod film_harness_review;
 mod films;
 mod image_restoration;
 mod jobs;
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+mod load_progress_acceptance;
 mod mcp;
 mod media;
 mod model_cache;

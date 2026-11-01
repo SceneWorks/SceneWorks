@@ -1266,7 +1266,7 @@ async fn minimax_h3_decode_reference_clip(
 pub(super) async fn minimax_h3_load_reference_frames(
     work_dir: PathBuf,
 ) -> WorkerResult<Vec<Image>> {
-    tokio::task::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
+    crate::load_progress::spawn_blocking(move || -> WorkerResult<Vec<Image>> {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&work_dir)?
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("png"))
@@ -2108,7 +2108,7 @@ async fn prepare_imported_minimax_h3_dit(
     let preparation_span = tracing::info_span!("h3_import_preparation", jobId = %job.id,
         checkpointId = imported_minimax_h3_checkpoint_id(request).unwrap_or_default(),
         phase = "source-and-normalization");
-    let task = tokio::task::spawn_blocking(move || {
+    let task = crate::load_progress::spawn_blocking(move || {
         let _entered = preparation_span.enter();
         let checkpoint = || h3_preparation_checkpoint(&task_cancel);
         resolve_imported_minimax_h3_dit_with_check(&source_request, &source_settings, &checkpoint)

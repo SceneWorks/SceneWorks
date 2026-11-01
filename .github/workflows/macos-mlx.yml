@@ -8,8 +8,8 @@ name: macOS MLX worker
 # RUNS ON A SELF-HOSTED macOS 26.2+ RUNNER. GitHub's hosted macOS images top out well
 # below macOS 26.2, so they could only build at a lowered deployment target and could
 # NOT exercise the NAX matrix-unit fast path at all. A self-hosted 26.2+ runner builds
-# at the workspace 26.2 pin (/.cargo/config.toml — no override) and actually RUNS
-# `nax_guard`, the only way CI can guarantee the NAX 16-bit kernels are correct
+# at the workspace 26.2 pin (/.cargo/config.toml — no override) and compile-checks
+# the NAX target; its numerical guard is manual-only in nax-kernel-validation.yml
 # (sc-2772 / sc-3019). It also keeps the heavy MLX-from-source build warm across runs
 # (the runner reuses its target dir), so MLX compiles once, not every run.
 #
@@ -122,7 +122,12 @@ on:
         type: choice
         required: false
         default: legacy
-        options: [legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact]
+        options: [legacy, facts-and-projections, consumer-assertions, browser-fixture-artifact, nax-kernel-guard]
+      mac_go:
+        description: "Michael explicitly approved this manual NAX GPU execution"
+        required: false
+        type: boolean
+        default: false
       run_moss_native_validation:
         description: "Run the four #[ignore]d MOSS native API tests (tests::moss_training_native) once, manually, with receipts. Exclusive with every other dispatch selector: mixed inputs fail before compiler setup"
         required: false
@@ -204,14 +209,13 @@ on:
         type: string
 
 # Cancel superseded PR runs, but never cancel a main-push run — same reasoning as
-# windows-candle.yml (sc-12399). This lane is the only thing in CI that runs
-# `nax_guard`, so a main commit whose run is killed carries no NAX verdict at all
-# and a later kernel break is misattributed to the next commit.
+# windows-candle.yml (sc-12399). This lane retains the native build/link verdict;
+# actual `nax_guard` kernel execution is an explicit, approved manual workflow.
 #
 # Main must key on `github.sha`, not `github.ref`: GitHub keeps at most ONE pending
 # run per group and evicts it when a newer run queues, so a shared main group still
 # drops the middle commit of a 3+ merge burst even with cancel-in-progress off.
-# Per-SHA groups cannot evict each other, so every main commit keeps its own NAX
+# Per-SHA groups cannot evict each other, so every main commit keeps its build
 # verdict; they then spread across the self-hosted nax pool (one group per SHA imposes
 # no ordering between them) and queue only once the pool is saturated. Do NOT collapse
 # this back to `group: ...${{ github.ref }}`.
@@ -879,13 +883,9 @@ jobs:
     # build several speculative groups at once (`max_entries_to_build`), so this would be the
     # heaviest new consumer of the scarcest hardware in the fleet.
     #
-    # What that costs is bounded and specific: `nax_16bit_sdpa_is_correct`, the one test the hosted
-    # job skips. Everything else this lane proves — the whole workspace suite, both clippy scopes,
-    # the MLX-linked build — is `macos-checks` above, which DOES gate the queue. And `nax_guard`
-    # asserts a property of the M5 matrix-unit kernels, not of how two PRs compose, so it is a poor
-    # fit for the class the merge queue exists to catch. It still runs on final integration PRs
-    # targeting `main`, explicit final-head dispatches, and the post-merge main push, which are
-    # the points where authoritative NAX evidence is required.
+    # Ordinary runs retain the worker/native binding build and NAX target link check.
+    # Production SDPA/matmul execution lives in the separate nax-kernel-validation workflow;
+    # final integration PRs and main pushes do not execute the numerical guard.
     #
     # `needs: changes` IS LOAD-BEARING HERE, not just an optimisation. sc-17014 dropped the
     # `paths:` filter from this workflow's pull_request trigger so `macos-checks` could become a
@@ -1010,32 +1010,11 @@ jobs:
           name: nax-native-binding-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/nax-native-binding/native-metallib-binding.json
           if-no-files-found: warn
-      # THE ONLY REASON THIS JOB IS SELF-HOSTED.
-      #
-      # `nax_guard` exercises a 16-bit fused SDPA against an f32 reference and goes red
-      # when the kernels were compiled below the 26.2 floor — the tripwire for a
-      # miscompile that produces right-scale, uncorrelated garbage. It is meaningful only
-      # where the matrix-unit kernels actually dispatch, which is Apple M5 silicon that no
-      # cloud sells and no hosted image provides. Everything else this lane used to do —
-      # the widened sc-17026 clippy over every default member, the memory-adapter lint,
-      # and the rest of the workspace test suite — now runs on `macos-checks` above,
-      # because none of it needs matrix units and all of it was competing with
-      # real-weight jobs for unified memory on a two-Mac pool.
-      #
-      # `--test nax_guard` rather than a bare `cargo test`: the workspace suite is the
-      # hosted job's responsibility now, and running it twice would put the whole point of
-      # the split back on the scarce hardware. The two halves are pinned against each
-      # other in scripts/platform-review-contracts.test.mjs — the hosted job must run the
-      # workspace suite skipping exactly this test, and this job must run exactly this
-      # test — so neither can drift into a hole without failing that contract.
-      #
-      # Deliberately NOT `-p sceneworks-worker` for anything but this test target. The
-      # narrow spelling is what sc-17026 removed, and re-introducing it for the suite
-      # would re-dark every non-worker crate.
-      - name: NAX 16-bit SDPA guard (needs M5 matrix units)
-        run: >-
-          python3.12 -I scripts/ci/metal_execution_lock.py --wait-seconds 2700 --
-          node scripts/unit-hf-sandbox.mjs -- cargo test -p sceneworks-worker --test nax_guard
+      # Ordinary CI links this exact target but never executes production inference kernels.
+      # The unchanged numerical body runs only in nax-kernel-validation.yml, selected by the
+      # explicit nax-kernel-guard dispatch profile below, with approval and the Metal lease.
+      - name: Compile the NAX 16-bit SDPA guard without executing kernels
+        run: cargo test -p sceneworks-worker --test nax_guard --no-run
       - name: Validate Qwen provisioning mode
         if: ${{ github.event_name == 'workflow_dispatch' }}
         env:
@@ -1381,6 +1360,13 @@ jobs:
 
   # No legacy job runs for an explicit verification profile. The receipt is produced by the exact
   # canonical command, not by translating ordinary CI verdicts or skipping NAX on a hosted Mac.
+  nax-kernel-validation:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.repository == 'SceneWorks/SceneWorks' && inputs.verification_profile == 'nax-kernel-guard' && !inputs.run_moss_native_validation && !inputs.hosted_only && !inputs.run_memory_calibration && !inputs.run_five_rung_reference && !inputs.provision_qwen_snapshot && !inputs.provision_z_image_snapshot }}
+    uses: ./.github/workflows/nax-kernel-validation.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      mac_go: ${{ inputs.mac_go }}
+
   manual-verification:
     if: ${{ github.event_name == 'workflow_dispatch' && (inputs.verification_profile == 'facts-and-projections' || inputs.verification_profile == 'consumer-assertions') && github.repository == 'SceneWorks/SceneWorks' && !inputs.run_moss_native_validation }}
     runs-on: [self-hosted, macOS, ARM64, rw-llm]

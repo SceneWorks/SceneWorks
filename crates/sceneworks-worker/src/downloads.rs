@@ -167,7 +167,7 @@ mod download_lock {
         /// the advisory lock is held for the whole transfer.
         pub(crate) async fn acquire_async(target: &Path) -> WorkerResult<Self> {
             let target = target.to_path_buf();
-            tokio::task::spawn_blocking(move || DownloadLock::acquire(&target))
+            crate::load_progress::spawn_blocking(move || DownloadLock::acquire(&target))
                 .await
                 .map_err(|error| task_join_error("download lock", error))?
         }
@@ -707,7 +707,7 @@ async fn sync_parent_directory(path: &Path) -> WorkerResult<()> {
         let parent = path.parent().map(Path::to_path_buf).ok_or_else(|| {
             WorkerError::InvalidPayload(format!("download target {} has no parent", path.display()))
         })?;
-        tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+        crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
             std::fs::File::open(parent)?.sync_all()?;
             Ok(())
         })
@@ -1088,7 +1088,7 @@ pub(crate) async fn sha256_file(
     path: &Path,
 ) -> WorkerResult<String> {
     let path = path.to_path_buf();
-    let handle = tokio::task::spawn_blocking(move || -> WorkerResult<String> {
+    let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
         use std::io::Read;
         let mut file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
         let mut hasher = Sha256::new();
@@ -1426,7 +1426,7 @@ pub(crate) async fn download_snapshot_into_cache(
             // (sc-13856 / GitHub #1690).
             let blob = blobs_dir.join(etag);
             let dest = link.clone();
-            let handle = tokio::task::spawn_blocking(move || -> WorkerResult<()> {
+            let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<()> {
                 std::fs::copy(&blob, &dest)
                     .map(|_| ())
                     .map_err(WorkerError::Io)
@@ -2207,7 +2207,7 @@ mod public_source_url_tests {
             .await
             .expect("bind");
         let address = listener.local_addr().expect("address");
-        let server = tokio::spawn(async move {
+        let server = crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.expect("serve");
         });
         let client = reqwest::Client::new();
@@ -2241,7 +2241,7 @@ mod public_source_url_tests {
             .await
             .expect("bind");
         let address = listener.local_addr().expect("address");
-        let server = tokio::spawn(async move {
+        let server = crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.expect("serve");
         });
         let url = reqwest::Url::parse(&format!(
@@ -2298,7 +2298,7 @@ mod public_source_url_tests {
                     .await
                     .expect("target bind");
                 let target_address = target_listener.local_addr().expect("target address");
-                let target_server = tokio::spawn(async move {
+                let target_server = crate::load_progress::spawn(async move {
                     axum::serve(target_listener, target_app)
                         .await
                         .expect("target serve");
@@ -2319,7 +2319,7 @@ mod public_source_url_tests {
                     .await
                     .expect("proxy bind");
                 let proxy_address = proxy_listener.local_addr().expect("proxy address");
-                let proxy_server = tokio::spawn(async move {
+                let proxy_server = crate::load_progress::spawn(async move {
                     axum::serve(proxy_listener, proxy_app)
                         .await
                         .expect("proxy serve");
@@ -3009,7 +3009,7 @@ mod atomic_cache_publication_tests {
             .await
             .expect("bind fixture server");
         let address = listener.local_addr().expect("fixture address");
-        let task = tokio::spawn(async move {
+        let task = crate::load_progress::spawn(async move {
             axum::serve(listener, app).await.expect("serve fixture");
         });
         (format!("http://{address}/component"), task)
@@ -3276,7 +3276,7 @@ mod http_timeout_tests {
         let addr = listener.local_addr().expect("local addr");
 
         // Accept the connection but never send a byte of response.
-        let server = tokio::spawn(async move {
+        let server = crate::load_progress::spawn(async move {
             if let Ok((stream, _)) = listener.accept().await {
                 // Hold the socket open, silent, well past the client's read timeout.
                 tokio::time::sleep(Duration::from_secs(30)).await;

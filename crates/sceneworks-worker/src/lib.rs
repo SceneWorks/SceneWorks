@@ -1208,6 +1208,9 @@ pub use settings::*;
 
 mod imports;
 pub use imports::*;
+mod load_progress;
+#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+mod model_io;
 mod progress;
 pub(crate) use progress::*;
 mod util;
@@ -1293,7 +1296,7 @@ async fn shutdown_signal() {
     static WATCHER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     WATCHER.get_or_init(|| {
         let latch = shutdown_latch().clone();
-        tokio::spawn(async move {
+        crate::load_progress::spawn(async move {
             wait_for_process_shutdown_source().await;
             latch_shutdown(&latch);
         });
@@ -1370,7 +1373,7 @@ async fn wait_for_parent_stdin_close() {
         let signal = tx.clone();
         // One dedicated blocking reader for the whole process, so repeated turns never
         // each park a fresh thread. Detached: dropping the JoinHandle lets it run on.
-        tokio::task::spawn_blocking(move || {
+        crate::load_progress::spawn_blocking(move || {
             use std::io::Read;
             let mut stdin = std::io::stdin();
             let mut scratch = [0_u8; 64];
@@ -1508,7 +1511,7 @@ pub async fn run() -> WorkerResult<()> {
         {
             let config_dir = settings.config_dir.clone();
             let data_dir = settings.data_dir.clone();
-            tokio::spawn(async move {
+            crate::load_progress::spawn(async move {
                 match checkpoint_catalog_migration::migrate_legacy_checkpoint_catalog(
                     &config_dir,
                     &data_dir,
@@ -1633,7 +1636,7 @@ async fn probe_cuda_health(settings: &Settings) -> GpuHealth {
     if !should_run_cuda_preflight(settings) {
         return GpuHealth::Usable;
     }
-    let probe = tokio::task::spawn_blocking(cuda_preflight).await;
+    let probe = crate::load_progress::spawn_blocking(cuda_preflight).await;
     // A JoinError can only be a panic inside `cuda_preflight`, which already catches its own
     // (see `preflight::cuda_preflight`) — report rather than propagate either way. It is NOT
     // evidence of a driver-class fault, so it is folded into the same `Err` the classifier then
@@ -1755,7 +1758,7 @@ fn spawn_retention_checkpoint(
         RetentionCheckpointOutcome, RetentionHold,
     };
 
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         let Some(retention) = resolved_cache_retention(&data_dir) else {
             return;
         };
@@ -1810,7 +1813,7 @@ fn spawn_retention_checkpoint(
 /// an optimization, and a closure that could not be promoted is simply recorded again the next time
 /// that model loads.
 fn spawn_promotion_drain(settings: Settings) -> tokio::task::JoinHandle<()> {
-    tokio::task::spawn_blocking(move || resolved_cache_promotion::drain_intake(&settings))
+    crate::load_progress::spawn_blocking(move || resolved_cache_promotion::drain_intake(&settings))
 }
 
 /// Re-run the CUDA probe for a worker that is currently unhealthy, and act on any change
@@ -1980,7 +1983,7 @@ pub async fn run_worker_loop(settings: Settings) -> WorkerResult<()> {
     // must not delay the first job claim.
     {
         let data_dir = settings.data_dir.clone();
-        tokio::task::spawn_blocking(move || match reclaim_import_staging(&data_dir) {
+        crate::load_progress::spawn_blocking(move || match reclaim_import_staging(&data_dir) {
             Ok(0) => {}
             Ok(reclaimed) => tracing::info!(
                 event = "import_staging_reclaimed",
@@ -2469,6 +2472,22 @@ async fn run_utility_job(
     job: JobSnapshot,
     shutdown: gen_core::CancelFlag,
 ) {
+    let job_id = job.id.clone();
+    load_progress::with_job(
+        api,
+        &job_id,
+        run_utility_job_inner(api, settings, http_client, job, shutdown),
+    )
+    .await;
+}
+
+async fn run_utility_job_inner(
+    api: &ApiClient,
+    settings: &Settings,
+    http_client: &reqwest::Client,
+    job: JobSnapshot,
+    shutdown: gen_core::CancelFlag,
+) {
     // Bind the process-shutdown flag as a task-local for the whole dispatch (sc-9618, F-043 follow-up)
     // so the per-engine GPU consumer loops awaited below honor it at their per-step cancel checkpoints
     // (via `shutdown_requested()`), stopping a gen/prompt mid-step on quit instead of waiting out the
@@ -2491,7 +2510,7 @@ async fn run_utility_job(
         let guard_job_type = job.job_type.clone();
         let guard_payload = job.payload.clone();
         let guard_settings = settings.clone();
-        let guard_task = tokio::task::spawn_blocking(move || {
+        let guard_task = crate::load_progress::spawn_blocking(move || {
             external_library_runtime::RuntimeSourceGuard::begin(
                 &guard_job_type,
                 &guard_payload,

@@ -1752,7 +1752,7 @@ pub(crate) async fn run_model_convert_job(
             base_dir,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_flux2_klein_diffusers(&source_file, &base_dir, &temp).map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
@@ -1764,7 +1764,7 @@ pub(crate) async fn run_model_convert_job(
             bits,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_ltx_native(&source_file, &upscaler_dir, &temp, bits).map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
@@ -1776,7 +1776,7 @@ pub(crate) async fn run_model_convert_job(
             group_size,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_flux2_dev_prequant(&source_dir, &temp, bits, group_size).map_err(|detail| {
                     WorkerError::Engine(format!("{backend} conversion failed. {detail}"))
                 })
@@ -1789,7 +1789,7 @@ pub(crate) async fn run_model_convert_job(
             group_size,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_sd3_prequant(&source_dir, &temp, variant, bits, group_size).map_err(
                     |detail| WorkerError::Engine(format!("{backend} conversion failed. {detail}")),
                 )
@@ -1803,7 +1803,7 @@ pub(crate) async fn run_model_convert_job(
             group_size,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_anima_prequant(
                     &dit_source,
                     &te_source,
@@ -1823,7 +1823,7 @@ pub(crate) async fn run_model_convert_job(
             vae_dir,
         } => {
             let backend = backend.clone();
-            tokio::task::spawn_blocking(move || {
+            crate::load_progress::spawn_blocking(move || {
                 convert_supra2_bundle(&source_file, &text_encoder_dir, &vae_dir, &temp).map_err(
                     |detail| WorkerError::Engine(format!("{backend} conversion failed. {detail}")),
                 )
@@ -4705,7 +4705,7 @@ where
     let temp_dir = temp_dir.to_path_buf();
     let final_dir = final_dir.to_path_buf();
     let data_dir = data_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    crate::load_progress::spawn_blocking(move || {
         finalize_converted_dir_blocking(&temp_dir, &final_dir, &data_dir, after_aside)
     })
     .await
@@ -5008,9 +5008,11 @@ fn lock_conversion_file(file: std::fs::File, path: &Path, shared: bool) -> Worke
 /// is missing, the newest backup is restored before older copies are removed.
 pub async fn recover_stranded_model_conversions(data_dir: &Path) -> WorkerResult<()> {
     let data_dir = data_dir.to_path_buf();
-    tokio::task::spawn_blocking(move || sweep_stranded_conversion_backups_blocking(&data_dir))
-        .await
-        .map_err(|error| task_join_error("converted model startup sweep", error))?
+    crate::load_progress::spawn_blocking(move || {
+        sweep_stranded_conversion_backups_blocking(&data_dir)
+    })
+    .await
+    .map_err(|error| task_join_error("converted model startup sweep", error))?
 }
 
 fn sweep_stranded_conversion_backups_blocking(data_dir: &Path) -> WorkerResult<()> {
@@ -6003,7 +6005,7 @@ async fn import_plan_context(
     let cancel = gen_core::CancelFlag::new();
     let task_cancel = cancel.clone();
     let span = tracing::info_span!("h3_import_component_acquisition", jobId = %job.id);
-    let task = tokio::task::spawn_blocking(move || {
+    let task = crate::load_progress::spawn_blocking(move || {
         let _span = span.enter();
         let result =
             sceneworks_core::model_artifacts::provenance::capture_h3_component_closure_with_check(
@@ -6236,7 +6238,7 @@ async fn run_linked_checkpoint_import_job(
         let probe_store = store.clone();
         let probe_root = root_id.to_owned();
         let probe_relative = relative_path.to_owned();
-        let task = tokio::task::spawn_blocking(move || {
+        let task = crate::load_progress::spawn_blocking(move || {
             use sceneworks_core::checkpoint_inspector::{
                 discover_checkpoint, discovered_checkpoint_family, CheckpointInspectionRequestV1,
             };
@@ -6321,7 +6323,7 @@ async fn run_linked_checkpoint_import_job(
     let relative_path = relative_path.to_owned();
     // Full-content compile streams every byte through SHA-256, so it runs off the async runtime and
     // under the job's heartbeat: a multi-GB source outlasts the 90s stale-worker sweep.
-    let compile = tokio::task::spawn_blocking(move || {
+    let compile = crate::load_progress::spawn_blocking(move || {
         Ok::<_, WorkerError>(store.compile_linked_with_context(&root_id, &relative_path, context))
     });
     let compiled = match heartbeat_while_blocking(
@@ -6382,11 +6384,11 @@ async fn run_linked_checkpoint_import_job(
         // The SAME header classification the managed branch runs, over the user's own file. Reading
         // a safetensors header is a bounded seek-and-parse, but it is still blocking I/O.
         let classification = match linked_file {
-            Some(path) => {
-                tokio::task::spawn_blocking(move || base_weight_manifest_classification(&path))
-                    .await
-                    .unwrap_or(None)
-            }
+            Some(path) => crate::load_progress::spawn_blocking(move || {
+                base_weight_manifest_classification(&path)
+            })
+            .await
+            .unwrap_or(None),
             None => None,
         };
         // sc-26680: an H3 DiT that is not a complete assembly is refused rather than registered.
@@ -7281,7 +7283,7 @@ pub(crate) async fn run_model_import_job(
     // a runtime thread for minutes with no heartbeat (a ~30 GB MiniMax-H3 checkpoint), so the
     // stale-worker sweep marked the healthy import interrupted; any spawned heartbeat task queued on
     // that thread was stranded with it. Off the async runtime, under the job's heartbeat.
-    let finalize = tokio::task::spawn_blocking(move || {
+    let finalize = crate::load_progress::spawn_blocking(move || {
         Ok::<_, WorkerError>(ingest.finalize_with_context(
             &primary_relative,
             declared_sha256.as_deref(),

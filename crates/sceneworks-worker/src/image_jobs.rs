@@ -36,11 +36,6 @@ use sceneworks_core::workflow_share::{
 };
 use std::sync::Arc;
 
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
-mod load_progress;
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
-use load_progress::message as load_activity_message;
-
 // Backend-neutral contract types come from the canonical inference release. The selected runtime
 // bundle explicitly owns its provider catalog; this product module names only contract types and
 // the few bespoke utility APIs that do not implement the general registry traits.
@@ -1922,7 +1917,7 @@ async fn generate_stub_stream(
         let raw_settings = stub_raw_settings(request);
         let (width, height) = (request.width, request.height);
         let project_path_for_task = project_path.to_owned();
-        let fact = tokio::task::spawn_blocking(move || {
+        let fact = crate::load_progress::spawn_blocking(move || {
             write_image_asset(
                 &plan_for_task,
                 index,
@@ -3325,7 +3320,7 @@ async fn apply_inline_upscale(
         let source_path = project_path.join(media_rel);
         // The base render may carry native transparency (sc-24111). The engine only takes three
         // channels, so the alpha plane is split off here and re-attached at the write below.
-        let (source, source_alpha) = tokio::task::spawn_blocking(move || {
+        let (source, source_alpha) = crate::load_progress::spawn_blocking(move || {
             crate::image_decode::decode_image_any(source_path)
                 .map_err(|error| {
                     WorkerError::InvalidPayload(format!(
@@ -3375,7 +3370,7 @@ async fn apply_inline_upscale(
         let base_fact_for_task = base_fact.clone();
         let engine_for_task = engine_id.to_owned();
         let project_path_for_task = project_path.to_owned();
-        let fact = tokio::task::spawn_blocking(move || {
+        let fact = crate::load_progress::spawn_blocking(move || {
             write_upscaled_asset(
                 &plan_for_task,
                 &base_fact_for_task,
@@ -3441,7 +3436,7 @@ pub(crate) async fn apply_inline_iris_restore(
                 WorkerError::InvalidPayload("restoration source asset missing mediaPath".to_owned())
             })?;
         let source_path = project_path.join(media_rel);
-        let (source, source_alpha) = tokio::task::spawn_blocking(move || {
+        let (source, source_alpha) = crate::load_progress::spawn_blocking(move || {
             crate::iris_restore::decode_oriented(&source_path)
                 .map_err(|error| {
                     WorkerError::InvalidPayload(format!(
@@ -3499,7 +3494,7 @@ pub(crate) async fn apply_inline_iris_restore(
         let base_fact_for_task = base_fact.clone();
         let project_path_for_task = project_path.to_owned();
         let trained_model_for_task = trained_model.clone();
-        let fact = tokio::task::spawn_blocking(move || {
+        let fact = crate::load_progress::spawn_blocking(move || {
             write_upscaled_asset(
                 &plan_for_task,
                 &base_fact_for_task,
@@ -3890,7 +3885,7 @@ pub(crate) async fn begin_image_cancel(
     backend: &str,
 ) {
     cancel.cancel();
-    let _ = update_job(
+    let _ = crate::progress::update_job_cancelling(
         api,
         job_id,
         image_progress(
