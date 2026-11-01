@@ -1,7 +1,7 @@
 {
   "schemaVersion": 11,
   "generatedFrom": {
-    "sceneWorksRevision": "source-tree:cfab999b4ac55a7aa680a39ede91f1fd4e82e5dc54f618d78ec2ead91f047001",
+    "sceneWorksRevision": "source-tree:10c79dcc3493cac7aacea1d8dd4f1e3e2b761153431dc9d5dc42ed359c29c06c",
     "sources": {
       "manifest": {
         "path": "config/manifests/builtin.models.jsonc",
@@ -25,15 +25,15 @@
       },
       "imageRouting": {
         "path": "crates/sceneworks-worker/src/image_jobs/base.rs",
-        "sha256": "4d539626ba74cf3a33bfb166de2527b79511e6b5af5def825dd562669e4ed604"
+        "sha256": "c979959d0f3a56e835763899c0f9e4d1b91eb3c28b93d10ea7572410adf8a682"
       },
       "videoRouteWan": {
         "path": "crates/sceneworks-worker/src/video_jobs/wan.rs",
-        "sha256": "790db7d6de3bc25bead9429b8ea5951c9ff1665a558b06c8402e1648eb3c980e"
+        "sha256": "4a9a8a41df164d5bb6d3af06f4e74e13e75357a94c3a1288a4f6cb0671a10d11"
       },
       "videoRouteLtx": {
         "path": "crates/sceneworks-worker/src/video_jobs/ltx.rs",
-        "sha256": "2622673c14817d151a01444d41dd62db9eb18b1f8a71c0513ff090ff7bde06c1"
+        "sha256": "93e2fcc6dd52a13e73d5c4409da3271a4fceb573f8c5f2c9024373454cb18ee4"
       },
       "videoRouteSvd": {
         "path": "crates/sceneworks-worker/src/video_jobs/svd.rs",
@@ -45,7 +45,7 @@
       },
       "videoRouteScail2": {
         "path": "crates/sceneworks-worker/src/video_jobs/scail2.rs",
-        "sha256": "5890b354f08733d03b76cc30604e715694bbd19881a8beed7675e280635a0fc0"
+        "sha256": "f4a3d45d1418c919290a90f54578d98cff526d2cec85f34a47c18725fb4fef92"
       },
       "videoRouteKreaRealtime": {
         "path": "crates/sceneworks-worker/src/video_jobs/krea_realtime.rs",
@@ -73,7 +73,7 @@
       },
       "anchorLoaderClosures": {
         "path": "config/anchor-loader-closures.json",
-        "sha256": "b89e21bd6d5a4e9c1d4d4c130581715cf431dba15b1c1b2f8c677ce27e1d3599"
+        "sha256": "90449254b36d27afaed1c976aebc7a17f1d12bd796b8ec8542ba87b55b942418"
       },
       "anchorDerivation": {
         "path": "crates/sceneworks-core/src/memory_anchor.rs",
