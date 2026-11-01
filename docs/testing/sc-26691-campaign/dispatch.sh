@@ -28,6 +28,11 @@
 #                     Requires PRIOR_MATRIX_RUN: an adaptive (paired) lane runs its measured allocation
 #                     and would ignore an explicit subset, so the kit refuses rather than drop it.
 #   PRIOR_MATRIX_RUN  <run_id>[/<attempt>] (attempt defaults to 1): stamped as prior_matrix_decision.
+#   PRIOR_LANE_RUN    <run_id>[/<attempt>]: the dispatched lane's OWN earlier run on the same declared
+#                     decision (stamped as prior_lane_run), when the decision run is the other backend's
+#                     (e.g. MLX run 41331644188 on cuda run 41213935677's decision). Its passed cases are
+#                     excluded from, and refused in, the subset. Requires PRIOR_MATRIX_RUN and exactly one
+#                     backend in BACKENDS.
 #   DRY_RUN           non-empty: stamp and print the requests, dispatch nothing.
 #
 # Runner handling: the CUDA lane's `runs-on` names the requested runner as a label, and the
@@ -50,6 +55,17 @@ if [ -n "${PRIOR_MATRIX_RUN:-}" ]; then
   else
     echo "REFUSING: PRIOR_MATRIX_RUN must be <run_id>[/<attempt>], not $PRIOR_MATRIX_RUN" >&2; exit 2
   fi
+fi
+LANE_RUN_ID="" LANE_ATTEMPT=""
+if [ -n "${PRIOR_LANE_RUN:-}" ]; then
+  [ -n "$PRIOR_RUN_ID" ] || { echo "REFUSING: PRIOR_LANE_RUN continues a lane on a declared prior decision; it needs PRIOR_MATRIX_RUN" >&2; exit 2; }
+  case "${BACKENDS:-mlx cuda}" in mlx|cuda) ;; *) echo "REFUSING: PRIOR_LANE_RUN names one lane's own run; set BACKENDS to that one backend, not '${BACKENDS:-mlx cuda}'" >&2; exit 2;; esac
+  if [[ "$PRIOR_LANE_RUN" =~ ^([0-9]+)(/([0-9]+))?$ ]]; then
+    LANE_RUN_ID="${BASH_REMATCH[1]}"; LANE_ATTEMPT="${BASH_REMATCH[3]:-1}"
+  else
+    echo "REFUSING: PRIOR_LANE_RUN must be <run_id>[/<attempt>], not $PRIOR_LANE_RUN" >&2; exit 2
+  fi
+  [ "$LANE_RUN_ID" != "$PRIOR_RUN_ID" ] || { echo "REFUSING: PRIOR_LANE_RUN must differ from PRIOR_MATRIX_RUN" >&2; exit 2; }
 fi
 # Every CASE_IDS entry must belong to a dispatched backend, so no id is silently dropped.
 if [ -n "${CASE_IDS:-}" ] && [ -z "$PRIOR_RUN_ID" ]; then
@@ -91,6 +107,7 @@ if [ -n "$PRIOR_RUN_ID" ]; then
   # (the lane records `git diff --name-only <prior>..<this>` in its evidence).
   prior_sha="$(gh api "repos/$REPO/actions/runs/$PRIOR_RUN_ID" --jq '.head_sha')"
   echo "prior matrix decision: run $PRIOR_RUN_ID attempt $PRIOR_ATTEMPT at sceneworks=$prior_sha"
+  [ -z "$LANE_RUN_ID" ] || echo "prior lane run (its passed cases are not re-run): run $LANE_RUN_ID attempt $LANE_ATTEMPT at sceneworks=$(gh api "repos/$REPO/actions/runs/$LANE_RUN_ID" --jq '.head_sha')"
   if [ "$prior_sha" != "$SW" ]; then
     echo "--- files changed $prior_sha..$SW ---"
     git diff --name-only "$prior_sha..$SW" || echo "(git fetch first to list the difference locally)"
@@ -115,7 +132,7 @@ dispatch() {  # $1=backend $2=expected_runner
   # written file and assert every stamped field, so a write that lost one never dispatches.
   node -e '
     const fs = require("fs");
-    const [req, out, backend, runner, sw, inf, workRoot, hfHome, caseIds, priorRun, priorAttempt] = process.argv.slice(1);
+    const [req, out, backend, runner, sw, inf, workRoot, hfHome, caseIds, priorRun, priorAttempt, laneRun, laneAttempt] = process.argv.slice(1);
     const p = JSON.parse(fs.readFileSync(req, "utf8"));
     p.bootstrap.legalAuthority.acknowledged = true;
     p.expected_runner = runner;
@@ -126,6 +143,7 @@ dispatch() {  # $1=backend $2=expected_runner
     const ids = caseIds ? caseIds.split(",").map(v => v.trim()).filter(id => id.startsWith(backend + ".")) : [];
     if (ids.length) p.case_ids = ids;
     if (priorRun) p.prior_matrix_decision = { run_id: Number(priorRun), attempt: Number(priorAttempt) };
+    if (laneRun) p.prior_lane_run = { run_id: Number(laneRun), attempt: Number(laneAttempt) };
     fs.writeFileSync(out, JSON.stringify(p, null, 2) + "\n");
     const back = JSON.parse(fs.readFileSync(out, "utf8"));
     const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -133,9 +151,10 @@ dispatch() {  # $1=backend $2=expected_runner
         back.sceneworks_sha !== sw || back.inference_sha !== inf ||
         (workRoot && back.work_root !== workRoot) || (backend === "mlx" && hfHome && back.mlx_hf_home !== hfHome) ||
         (ids.length && !same(back.case_ids, ids)) ||
-        (priorRun && !same(back.prior_matrix_decision, { run_id: Number(priorRun), attempt: Number(priorAttempt) }))) {
+        (priorRun && !same(back.prior_matrix_decision, { run_id: Number(priorRun), attempt: Number(priorAttempt) })) ||
+        (laneRun && !same(back.prior_lane_run, { run_id: Number(laneRun), attempt: Number(laneAttempt) }))) {
       console.error("REFUSING: stamped request did not round-trip"); process.exit(1);
-    }' "$req" "$out" "$backend" "$runner" "$SW" "$INF" "$work_root" "${MLX_HF_HOME:-}" "${CASE_IDS:-}" "$PRIOR_RUN_ID" "$PRIOR_ATTEMPT"
+    }' "$req" "$out" "$backend" "$runner" "$SW" "$INF" "$work_root" "${MLX_HF_HOME:-}" "${CASE_IDS:-}" "$PRIOR_RUN_ID" "$PRIOR_ATTEMPT" "$LANE_RUN_ID" "$LANE_ATTEMPT"
   if [ -n "${DRY_RUN:-}" ]; then
     echo "DRY_RUN: would dispatch h3-terminal-$backend (expected_runner=$runner) with $out:"
     cat "$out"

@@ -20,6 +20,14 @@ in the closeout handoff on the epic in Shortcut.
   decision. `nax-macos` keeps two orphaned processes from an ejected-drive run and is not used.
   `/Volumes/Models` on `nax-macos-2` is full: the lane only READS it; every write (including any
   pinned weight it must download) goes to `~/sc26691-campaign` on the main drive.
+- **MLX status (run 41331644188, `nax-macos-2`, at `ae148c29a`, pin `a43724b8`).** 15 of the 18 allocated
+  cases passed (`artifact-0..3`, `real-drop-audio/lokr/lora`, `real-hybrid-first-last/image/last-only/reference/text`,
+  `real-independent-fl2va`, `real-lokr-repeat`, `real-mixed-repeat`). `numeric-pruned-artifact` then failed: both
+  native receipts passed within tolerance, but the harness only accepted a candle-Metal device (`kind: metal`)
+  as MLX device proof, while the MLX probe reports the MLX default device (`kind: mlx-default-gpu`, type and
+  index only, no hardware UUID). `numeric-w4a8-artifact` and `lifecycle-generation-source-prep-cancel` never
+  ran. The harness now proves MLX execution on the basis `mlx-default-gpu-no-fallback` (below); the three
+  remaining cases run as a continuation of run 41331644188 on the same decision.
 - The new SHA differs from `4c3625898`; each lane records `git diff --name-only 4c3625898..<new>` in
   `prior-matrix-decision.json`. No same-SHA re-run is implied or claimed.
 
@@ -33,7 +41,27 @@ BACKENDS=cuda PRIOR_MATRIX_RUN=41213935677/1 \
 # writes (and downloads) under ~/sc26691-campaign on the main drive.
 BACKENDS=mlx MLX_RUNNER=nax-macos-2 PRIOR_MATRIX_RUN=41213935677/1 \
   docs/testing/sc-26691-campaign/dispatch.sh --ack "$SW"
+# MLX continuation: the 3 cases run 41331644188 did not pass, same decision; PRIOR_LANE_RUN names the
+# MLX lane's own run, whose 15 passes are excluded from (and refused in) the subset.
+BACKENDS=mlx MLX_RUNNER=nax-macos-2 PRIOR_MATRIX_RUN=41213935677/1 PRIOR_LANE_RUN=41331644188/1 \
+  CASE_IDS=mlx.reduced.numeric-pruned-artifact,mlx.reduced.numeric-w4a8-artifact,mlx.reduced.lifecycle-generation-source-prep-cancel \
+  docs/testing/sc-26691-campaign/dispatch.sh --ack "$SW"
 ```
+
+### Device proof for the artifact probes
+
+The two numeric cases (`numeric-pruned-artifact`, `numeric-w4a8-artifact`) pass only with device proof,
+recorded per case as `deviceProofBasis`:
+
+- **CUDA, `cuda-device-no-fallback`:** the native receipt's candle CUDA device (`kind: cuda`), no CPU
+  fallback, on the lane's pinned physical GPU 1 (`CUDA_DEVICE_ORDER=PCI_BUS_ID`, `CUDA_VISIBLE_DEVICES=1`,
+  asserted before the probe; the receipt records `visible_devices`). Unchanged; CUDA receipts retained
+  before the field existed still read back.
+- **MLX, `mlx-default-gpu-no-fallback`:** the receipt reports the MLX default device as a GPU
+  (`kind: mlx-default-gpu`, label `mlx device type Gpu index Some(<index>)`), no CPU fallback, and the
+  probe environment did not disable the GPU default (`MLX_USE_GPU` is recorded on the probe receipt as
+  `deviceEnvironment`; `0`/`false`/`no`/`off` fail). MLX exposes no hardware UUID, so none is claimed.
+  An MLX CPU default device (`mlx-default-cpu`) or a missing environment record is never proof.
 
 ### Where the campaign reads and writes
 
@@ -56,7 +84,7 @@ BACKENDS=mlx MLX_RUNNER=nax-macos-2 PRIOR_MATRIX_RUN=41213935677/1 \
 - Per-case reclaim now also removes each assembly's `transformer` directory (full private copies for
   hybrid cases, hard links otherwise; links are never followed), recorded in `storage-reclaim.json`.
 
-### Combining the two CUDA runs (explicit, never a silent merge)
+### Combining a lane's two runs (explicit, never a silent merge)
 
 The CUDA allocation is then split across two runs at two SceneWorks SHAs. Re-validate it as such:
 
@@ -70,6 +98,25 @@ cat > split.json <<EOF
 EOF
 node scripts/h3-finetune-terminal.mjs verify-split-backend split.json
 ```
+
+The MLX lane is combined the same way from its own two runs, each at its own SceneWorks SHA (run
+41331644188 at `ae148c29a`, the continuation at the new head; both at inference `a43724b8`):
+
+```bash
+gh run download 41331644188 --repo SceneWorks/SceneWorks --name h3-terminal-mlx-reduced-41331644188-1 --dir mlx-lane
+gh run download <mlx-continuation-run> --repo SceneWorks/SceneWorks --name h3-terminal-mlx-reduced-<mlx-continuation-run>-1 --dir mlx-subset
+cat > split-mlx.json <<EOF
+{"backend":"mlx","segments":[
+  {"label":"mlx-41331644188","caseRoot":"$PWD/mlx-lane","runId":41331644188,"attempt":1},
+  {"label":"mlx-continuation","caseRoot":"$PWD/mlx-subset","runId":<mlx-continuation-run>,"attempt":1}]}
+EOF
+node scripts/h3-finetune-terminal.mjs verify-split-backend split-mlx.json
+```
+
+There the other segment is not the decision run (a cuda run; its passes never count for MLX) but the
+subset record's `priorLaneRun`: the MLX lane's own earlier run, which must have adopted the same decision
+run and decision for the same lane at the same inference pin and must not itself continue another run.
+Its cases must be the record's `priorLaneRun.passedCaseIds` (role `prior-lane-run`).
 
 `verify-split-backend` re-validates every passed case against the exact plan it ran under (its
 retained `adapter-plan.json`, bound by `planSha256`), attributes each case to its run and SHA,

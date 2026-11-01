@@ -109,3 +109,39 @@ export async function loadPriorDecisionEvidence({ gh, download, repository, runI
   await download({ runId: packets[peer].runId, name: peerArtifact.name, directory: packets[peer].directory });
   return { decisionRun: { runId: String(runId), attempt: String(attempt), backend }, decisionPlan, packets, priorEvidenceRoot, evidenceArtifact: reduced.name };
 }
+
+/**
+ * This lane's own earlier run on the same declared decision (request `prior_lane_run: {run_id,
+ * attempt}`), when the decision run belongs to the OTHER backend: e.g. the MLX lane's run 41331644188
+ * on run 41213935677's cuda decision. Its retained reduced evidence carries the adapter plans its
+ * cases ran under (each with the prior-decision record it adopted) and their execution rows; which of
+ * its cases passed, and whether it adopted the same decision, is adoptPriorMatrixDecision's check.
+ */
+export async function retainedLanePlan(evidenceRoot, backend) {
+  const plans = [];
+  for (const entry of await readdir(evidenceRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith(`${backend}.`)) continue;
+    let plan;
+    try { plan = JSON.parse(await readFile(path.join(evidenceRoot, entry.name, 'adapter-plan.json'), 'utf8')); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+    plans.push({ caseId: entry.name, plan });
+  }
+  assert.ok(plans.length > 0, `no retained ${backend} case plan in the prior lane run`);
+  for (const { caseId, plan } of plans) {
+    assert.ok(plan.priorMatrixDecision, `${caseId} in the prior lane run did not run on a declared prior matrix decision`);
+    assert.deepEqual(plan.priorMatrixDecision, plans[0].plan.priorMatrixDecision, `${caseId} ran under another prior-decision record`);
+  }
+  return plans[0].plan;
+}
+export async function loadPriorLaneEvidence({ gh, download, repository, runId, attempt, backend, workDir }) {
+  assert.match(String(runId ?? ''), /^\d+$/, 'prior_lane_run.run_id must be a numeric run id');
+  assert.match(String(attempt ?? ''), /^\d+$/, 'prior_lane_run.attempt must be a numeric attempt');
+  const run = JSON.parse(gh(['api', `repos/${repository}/actions/runs/${runId}`]));
+  assert.equal(run.repository?.full_name, repository, `run ${runId} is not a run of ${repository}`);
+  assert.equal(run.status, 'completed', `prior lane run ${runId} is ${run.status}; only a completed run's passes are counted`);
+  const artifacts = JSON.parse(gh(['api', `repos/${repository}/actions/runs/${runId}/artifacts?per_page=100`])).artifacts;
+  const { artifact, backend: retained } = reducedEvidenceArtifact(artifacts, runId, attempt);
+  assert.equal(retained, backend, `prior lane run ${runId} retained ${retained} case evidence, not this ${backend} lane's`);
+  const evidenceRoot = path.join(workDir, 'lane-evidence');
+  await download({ runId: String(runId), name: artifact.name, directory: evidenceRoot });
+  return { laneRun: { runId: String(runId), attempt: String(attempt), evidenceRoot, plan: await retainedLanePlan(evidenceRoot, backend) }, evidenceArtifact: artifact.name };
+}

@@ -1372,8 +1372,15 @@ async function readRetainedAnchorPacket(directory, { backend, sceneworks, infere
  *   when this lane's pin DESCENDS from the prior pin, with the native evidence SHA unchanged, and the
  *   retained packets/passed cases are validated against THEIR recorded pin (the prior one). The
  *   change is recorded as `inferenceChange`, never hidden.
+ * - laneRun: {runId, attempt, evidenceRoot, plan} — this lane's OWN earlier run on the same declared
+ *   decision (request `prior_lane_run`), when the decision run is the other backend's and so carries
+ *   none of this lane's passes (the MLX lane on run 41213935677's cuda decision continuing its run
+ *   41331644188). That run must have adopted exactly this decision run and decision, for this lane,
+ *   at this lane's inference pin and native evidence, and must not itself continue another run. Its
+ *   PASSED cases (each bound to the adapter plan it ran under) are excluded from, and refused in, the
+ *   subset, and recorded as `priorLaneRun.passedCaseIds`; verify-split-backend combines the two runs.
  */
-export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisionPlan, packets, priorEvidenceRoot, caseIds = null, changedFiles, inferenceAncestry = null }) {
+export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisionPlan, packets, priorEvidenceRoot, caseIds = null, changedFiles, inferenceAncestry = null, laneRun = null }) {
   assert.equal(p.inventory, 'reduced-v1', 'a prior matrix decision applies to the reduced inventory only');
   assert.ok(['mlx', 'cuda'].includes(backend));
   assert.ok(p.matrixDecision === undefined && p.matrixAnchors === undefined && p.priorMatrixDecision === undefined, 'a prior decision is adopted once, into a plan without its own decision');
@@ -1429,11 +1436,41 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
     assert.equal(String(row.runId), String(decisionRun.runId)); assert.equal(String(row.runAttempt), String(decisionRun.attempt)); assert.equal(row.sceneworks, prior.sceneworks); assert.equal(row.inference, prior.inference);
     priorPassed.push(id);
   }
-  const subset = caseIds ? caseIds.map(String) : allocation.filter(id => !priorPassed.includes(id));
+  // This lane's own earlier run on the same decision: its passes are this lane's evidence, so the
+  // "already passed" rule is evaluated against IT, not against the other backend's decision run.
+  let priorLaneRun = null;
+  if (laneRun) {
+    assert.match(String(laneRun.runId ?? ''), /^\d+$/, 'prior lane run id required'); assert.match(String(laneRun.attempt ?? ''), /^\d+$/, 'prior lane run attempt required');
+    assert.notEqual(decisionRun.backend, backend, `the decision run ${decisionRun.runId} is this ${backend} lane's own run; its passed cases already count, so no separate prior lane run is named`);
+    const lp = laneRun.plan, lr = lp?.priorMatrixDecision;
+    assert.ok(lr && lr.kind === PRIOR_DECISION_KIND, `prior lane run ${laneRun.runId} did not run on a declared prior matrix decision`);
+    assert.equal(lr.laneBackend, backend, `prior lane run ${laneRun.runId} is a ${lr.laneBackend} lane, not ${backend}`);
+    assert.deepEqual(lr.decisionRun, { runId: String(decisionRun.runId), attempt: String(decisionRun.attempt), backend: decisionRun.backend }, `prior lane run ${laneRun.runId} adopted another decision run`);
+    assert.equal(lr.priorLaneRun, undefined, `prior lane run ${laneRun.runId} itself continued another run; lane runs are not chained`);
+    assert.deepEqual(lp.matrixDecision, decision, `prior lane run ${laneRun.runId} ran under another matrix decision`); assert.deepEqual(lr.allocation, allocation, `prior lane run ${laneRun.runId} had another ${backend} allocation`);
+    sha40(lp.sceneworks); assert.deepEqual(lp.source, p.source);
+    assert.equal(lp.inference, p.inference, `prior lane run ${laneRun.runId} ran at inference ${lp.inference}, not this lane's ${p.inference}; a lane continuation keeps its pin`);
+    assert.equal(lp.nativeEvidence?.sha, p.nativeEvidence?.sha, 'the prior lane run must share this lane\'s native evidence SHA');
+    const lanePassed = [];
+    for (const id of allocation) {
+      const dir = contained(laneRun.evidenceRoot, id);
+      let row; try { row = await json(path.join(dir, 'execution.json')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (row?.status !== 'passed') continue;
+      const ran = await json(path.join(dir, 'adapter-plan.json'));
+      assert.equal(digest(ran), row.planSha256, `${id}: prior lane run's retained adapter plan is not the plan the case ran under`); assert.deepEqual(ran.priorMatrixDecision, lr, `${id} ran under another prior-decision record in run ${laneRun.runId}`);
+      assert.equal(String(row.runId), String(laneRun.runId)); assert.equal(String(row.runAttempt), String(laneRun.attempt)); assert.equal(row.sceneworks, lp.sceneworks); assert.equal(row.inference, lp.inference);
+      assert.ok(lr.subsetCaseIds.includes(id), `${id} passed in run ${laneRun.runId} outside its declared subset`);
+      lanePassed.push(id);
+    }
+    priorLaneRun = { runId: String(laneRun.runId), attempt: String(laneRun.attempt), sceneworks: lp.sceneworks, inference: lp.inference, passedCaseIds: lanePassed };
+  }
+  const lanePassed = priorLaneRun?.passedCaseIds ?? [];
+  const subset = caseIds ? caseIds.map(String) : allocation.filter(id => !priorPassed.includes(id) && !lanePassed.includes(id));
   assert.ok(subset.length > 0, 'the prior-decision subset is empty'); assert.equal(new Set(subset).size, subset.length, 'duplicate subset case');
   for (const id of subset) {
     assert.ok(allocation.includes(id), `${id} is not in the ${backend} lane's allocation under the prior decision`);
     assert.ok(!priorPassed.includes(id), `${id} already PASSED in run ${decisionRun.runId}; a prior-decision subset never re-runs it`);
+    assert.ok(!lanePassed.includes(id), `${id} already PASSED in the ${backend} lane's run ${priorLaneRun?.runId}; a prior-decision subset never re-runs it`);
   }
   // The prior run measured its decision on ITS case definitions. Every allocated case is compared with
   // this plan's definition: a difference is recorded, and a subset case whose WORKLOAD changed (or
@@ -1462,12 +1499,14 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
     anchorPackets: Object.fromEntries(['mlx', 'cuda'].map(b => [b, { runId: String(packets[b].runId), runAttempt: String(packets[b].runAttempt), retainedDirectory: retained(packets[b].directory) }])),
     reusedNativeWitnesses,
     sourceSha: prior.sceneworks, decision, allocation, priorPassedCaseIds: priorPassed, subsetCaseIds: subset,
-    notCovered: allocation.filter(id => !priorPassed.includes(id) && !subset.includes(id)),
+    notCovered: allocation.filter(id => !priorPassed.includes(id) && !lanePassed.includes(id) && !subset.includes(id)),
+    ...(priorLaneRun ? { priorLaneRun } : {}),
     caseDefinitionBasis, caseDefinitionDifferences,
     sourceShaDifference: { from: prior.sceneworks, to: p.sceneworks, files: [...changedFiles] },
     ...(inferenceChange ? { inferenceChange } : {}),
     meaning: 'Matrix allocation adopted from a decision MEASURED in the named prior run (recomputed from its retained anchors). The anchors ran at sourceShaDifference.from; this lane runs at .to. Cases in priorPassedCaseIds are that run\'s evidence and are re-validated separately (verify-split-backend), never re-labelled as this run\'s. reusedNativeWitnesses ran at the same native evidence SHA in the named packet runs; this lane does not re-run them, and their retained receipts/logs are re-hashed by verify-split-backend.'
-      + (inferenceChange ? ' The anchors, packets and priorPassedCaseIds ran at inference inferenceChange.prior and were validated against that pin; this lane runs at inferenceChange.own, which descends from it (first-parent log recorded). The native evidence SHA is unchanged.' : ''),
+      + (inferenceChange ? ' The anchors, packets and priorPassedCaseIds ran at inference inferenceChange.prior and were validated against that pin; this lane runs at inferenceChange.own, which descends from it (first-parent log recorded). The native evidence SHA is unchanged.' : '')
+      + (priorLaneRun ? ' priorLaneRun is this lane\'s own earlier run on the same decision (at its recorded SceneWorks SHA, this lane\'s inference pin); its passedCaseIds are that run\'s evidence, excluded from this subset and combined with it by verify-split-backend.' : ''),
   };
   await verifyMatrixAdmission(p);
   return p.priorMatrixDecision;
@@ -1527,25 +1566,56 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
   // Tie the readback to the prior-decision record: the subset segment is the one whose plans carry it,
   // and the other segment must be the decision run that record names. Roles come from the record, not
   // from the manifest's order, so the result is the same whichever way the segments are listed.
-  const adopting = segments.filter(segment => plans.some(v => v.segment === segment.label && v.plan.priorMatrixDecision));
-  assert.equal(adopting.length, 1, 'exactly one segment must have run under a declared prior matrix decision (the subset run)');
-  const subsetSegment = adopting[0], priorSegment = segments.find(segment => segment !== subsetSegment);
+  // The subset segment is the one whose record ties the other segment to it: either the record's
+  // decisionRun (a same-backend decision run, the CUDA lane on run 41213935677) or its priorLaneRun (this
+  // lane's own earlier run on a decision measured by the OTHER backend, the MLX lane's run 41331644188
+  // on run 41213935677's cuda decision). In the second case both segments ran under a prior decision.
+  const recordOf = segment => {
+    const own = plans.filter(v => v.segment === segment.label);
+    if (!own.some(v => v.plan.priorMatrixDecision)) return null;
+    for (const v of own) { assert.ok(v.plan.priorMatrixDecision, `${v.caseId} in segment ${segment.label} did not run under the prior decision its other cases ran under`); assert.deepEqual(v.plan.priorMatrixDecision, own[0].plan.priorMatrixDecision, `${v.caseId} ran under another prior-decision record`); }
+    return own[0].plan.priorMatrixDecision;
+  };
+  const records = new Map(segments.map(segment => [segment.label, recordOf(segment)]));
+  const adopting = segments.filter(segment => records.get(segment.label));
+  const namesLaneRun = (segment, other) => { const r = records.get(segment.label)?.priorLaneRun; return Boolean(r) && String(r.runId) === String(other.runId) && String(r.attempt) === String(other.attempt); };
+  let subsetSegment;
+  if (adopting.length === 2) {
+    const continuing = adopting.filter(segment => namesLaneRun(segment, segments.find(other => other !== segment)));
+    assert.equal(continuing.length, 1, 'both segments ran under a prior decision, so exactly one must continue the other as its recorded priorLaneRun');
+    subsetSegment = continuing[0];
+  } else {
+    assert.equal(adopting.length, 1, 'exactly one segment must have run under a declared prior matrix decision (the subset run)');
+    subsetSegment = adopting[0];
+  }
+  const priorSegment = segments.find(segment => segment !== subsetSegment);
   const subsetPlans = plans.filter(v => v.segment === subsetSegment.label);
-  for (const v of subsetPlans) { assert.ok(v.plan.priorMatrixDecision, `${v.caseId} in the subset segment did not run under the prior decision`); assert.deepEqual(v.plan.priorMatrixDecision, subsetPlans[0].plan.priorMatrixDecision, `${v.caseId} ran under another prior-decision record`); }
-  const record = subsetPlans[0].plan.priorMatrixDecision;
+  const record = records.get(subsetSegment.label), laneRun = record.priorLaneRun ?? null;
   assert.equal(record.kind, PRIOR_DECISION_KIND); assert.equal(record.laneBackend, backend, `the subset segment's prior decision is for the ${record.laneBackend} lane`);
-  assert.equal(record.decisionRun.backend, backend, `the prior decision run ${record.decisionRun.runId} is a ${record.decisionRun.backend} run; its passed cases never count for ${backend}`);
-  assert.equal(String(priorSegment.runId), String(record.decisionRun.runId), `segment ${priorSegment.label} is run ${priorSegment.runId}, not the decision run ${record.decisionRun.runId} the subset segment adopted`);
-  assert.equal(String(priorSegment.attempt), String(record.decisionRun.attempt), `segment ${priorSegment.label} is attempt ${priorSegment.attempt}, not the decision run's attempt ${record.decisionRun.attempt}`);
+  if (laneRun) {
+    // The other segment is this lane's own earlier run on the SAME decision run and decision.
+    assert.ok(namesLaneRun(subsetSegment, priorSegment), `segment ${priorSegment.label} is run ${priorSegment.runId} attempt ${priorSegment.attempt}, not the prior lane run ${laneRun.runId} attempt ${laneRun.attempt} the subset segment continues`);
+    const laneRecord = records.get(priorSegment.label);
+    assert.ok(laneRecord, `segment ${priorSegment.label} (the prior lane run) did not run under a declared prior decision`);
+    assert.equal(laneRecord.kind, PRIOR_DECISION_KIND); assert.equal(laneRecord.laneBackend, backend, `the prior lane run's decision is for the ${laneRecord.laneBackend} lane`);
+    assert.deepEqual(laneRecord.decisionRun, record.decisionRun, 'the prior lane run adopted another decision run than the subset run');
+    assert.equal(laneRecord.priorLaneRun, undefined, 'the prior lane run itself continued another run; lane runs are not chained');
+  } else {
+    assert.equal(record.decisionRun.backend, backend, `the prior decision run ${record.decisionRun.runId} is a ${record.decisionRun.backend} run; its passed cases never count for ${backend} (name this lane's own earlier run as prior_lane_run instead)`);
+    assert.equal(String(priorSegment.runId), String(record.decisionRun.runId), `segment ${priorSegment.label} is run ${priorSegment.runId}, not the decision run ${record.decisionRun.runId} the subset segment adopted`);
+    assert.equal(String(priorSegment.attempt), String(record.decisionRun.attempt), `segment ${priorSegment.label} is attempt ${priorSegment.attempt}, not the decision run's attempt ${record.decisionRun.attempt}`);
+  }
   for (const row of rows) {
     if (row.segment === subsetSegment.label) { assert.ok(record.subsetCaseIds.includes(row.id), `${row.id} ran in the subset segment but is not in its declared subsetCaseIds`); assert.equal(row.sceneworks, record.sourceShaDifference.to, `${row.id} did not run at the subset SHA`); }
+    else if (laneRun) { assert.ok(laneRun.passedCaseIds.includes(row.id), `${row.id} from the prior lane run is not among the record's priorLaneRun.passedCaseIds`); assert.equal(row.sceneworks, laneRun.sceneworks, `${row.id} did not run at the prior lane run's SHA`); }
     else { assert.ok(record.priorPassedCaseIds.includes(row.id), `${row.id} from the decision run is not among the record's priorPassedCaseIds`); assert.equal(row.sceneworks, record.sourceSha, `${row.id} did not run at the decision run's SHA`); }
   }
   // One pin across both segments, unless the record declares the change: then the decision-run
   // segment ran at inferenceChange.prior and the subset segment at inferenceChange.own.
   const inferenceChange = record.inferenceChange ?? null;
   if (inferenceChange) { assert.equal(inferenceChange.descends, true, 'the recorded inference change does not descend'); assert.ok(Array.isArray(inferenceChange.firstParentLog) && inferenceChange.firstParentLog.length > 0, 'the recorded inference change carries no first-parent log'); }
-  const expectedPin = segmentLabel => (inferenceChange ? (segmentLabel === subsetSegment.label ? inferenceChange.own : inferenceChange.prior) : subsetPlans[0].plan.inference);
+  // A prior lane run ran at this lane's own pin (adoption refuses otherwise), recorded as priorLaneRun.inference.
+  const expectedPin = segmentLabel => (segmentLabel === subsetSegment.label ? (inferenceChange ? inferenceChange.own : subsetPlans[0].plan.inference) : laneRun ? laneRun.inference : inferenceChange ? inferenceChange.prior : subsetPlans[0].plan.inference);
   for (const v of plans) {
     assert.deepEqual(v.plan.matrixDecision, record.decision, `segment ${v.segment} case ${v.caseId} ran under another matrix decision`);
     assert.equal(v.plan.inference, expectedPin(v.segment), inferenceChange ? `segment ${v.segment} case ${v.caseId} ran at inference ${v.plan.inference}, not the pin the recorded inference change names for that segment (${expectedPin(v.segment)})` : 'segments use different inference pins and the prior-decision record declares no inference change');
@@ -1556,7 +1626,7 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
   for (const row of rows) assert.ok(allocation.includes(row.id), `${row.id} is outside the ${backend} allocation under the shared decision`);
   rows.sort((a, b) => allocation.indexOf(a.id) - allocation.indexOf(b.id));
   const missing = allocation.filter(id => !rows.some(row => row.id === id));
-  const bySegment = [priorSegment, subsetSegment].map((segment, index) => ({ label: segment.label, role: index ? 'prior-decision-subset' : 'decision-run', runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], inference: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.inference))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
+  const bySegment = [priorSegment, subsetSegment].map((segment, index) => ({ label: segment.label, role: index ? 'prior-decision-subset' : laneRun ? 'prior-lane-run' : 'decision-run', runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], inference: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.inference))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
   const reusedNativeWitnesses = [];
   for (const entry of record.reusedNativeWitnesses ?? []) reusedNativeWitnesses.push({ ...await verifyReusedNativeWitness(reference, entry, subsetSegment.caseRoot), segment: subsetSegment.label });
   let crossCaseControls = null;

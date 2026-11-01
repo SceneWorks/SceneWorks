@@ -10,7 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SOURCE, adoptPriorMatrixDecision, executionCases, executionPlanDigest, verifyMatrixAdmission, verifySplitBackendEvidence, PRIOR_DECISION_KIND } from './h3-finetune-terminal.mjs';
 import { operationalCases } from './h3-finetune-terminal-reduced.mjs';
-import { inferencePinAncestry, loadPriorDecisionEvidence, peerPacketArtifactId, reducedEvidenceArtifact, retainedDecisionPlan } from './lib/h3-prior-decision.mjs';
+import { inferencePinAncestry, loadPriorDecisionEvidence, loadPriorLaneEvidence, peerPacketArtifactId, reducedEvidenceArtifact, retainedDecisionPlan, retainedLanePlan } from './lib/h3-prior-decision.mjs';
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/sc26691-prior-decision/', import.meta.url));
 const PRIOR_SW = '4c3625898b20859f57ca38986ed80b1c427cdfdb', PIN = '354b41ccaccdc14afccff0d0fb1ae1b0be04836e', EVIDENCE = '0bada8f7287f414c30f77eb1d29ef4a544eb8ffc';
@@ -293,7 +293,7 @@ test('the terminal workflow adopts a declared prior decision before resolving ca
   assert.match(workflow, /reusedFromPriorDecision:witnesses\.reuse\?\?null/, 'the lane logs a reused witness as reused');
   assert.match(workflow, /inferencePinAncestry\(\{git: inferenceGit, prior, own\}\)/, 'pin-change ancestry is read from the lane\'s own inference checkout');
   assert.match(workflow, /inferenceRoot = path\.join\(env\.GITHUB_WORKSPACE, "inference"\)/);
-  assert.match(workflow, /changedFiles, inferenceAncestry\}\)/);
+  assert.match(workflow, /changedFiles, inferenceAncestry, laneRun: lane\?\.laneRun \?\? null\}\)/);
 });
 test('explicit case ids are authoritative: refused without a prior decision instead of silently dropped', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
@@ -303,4 +303,127 @@ test('explicit case ids are authoritative: refused without a prior decision inst
   const script = fileURLToPath(new URL('../docs/testing/sc-26691-campaign/dispatch.sh', import.meta.url));
   const r = spawnSync('bash', [script, '--ack', 'a'.repeat(40)], { encoding: 'utf8', env: { ...process.env, CASE_IDS: 'cuda.reduced.real-hybrid-reference', PRIOR_MATRIX_RUN: '', DRY_RUN: '1' } });
   assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /REFUSING: CASE_IDS needs PRIOR_MATRIX_RUN/);
+});
+
+// sc-26691 (2026-11-01): the MLX lane continues ITS OWN run. Run 41331644188 (nax-macos-2, at ae148c29a,
+// inference a43724b8, on cuda run 41213935677's decision) passed 15 of its 18 allocated cases, then
+// refused numeric-pruned-artifact (device proof); numeric-w4a8-artifact and the lifecycle case never ran.
+// The decision run is the cuda lane's, so the "already passed" rule must read the MLX lane's own run.
+const LANE_RUN = '41331644188', LANE_SW = 'ae148c29ad533079cc5bdfde78c8d2ddd220ab83';
+const MLX_PASSED = ['artifact-0-ordered-mixed-baseline-ref-turbo', 'artifact-1-reference', 'artifact-2-lokr-ref-turbo-baseline', 'artifact-3-opaque-renamed-linked-source', 'real-drop-audio', 'real-drop-lokr', 'real-drop-lora', 'real-hybrid-first-last', 'real-hybrid-image', 'real-hybrid-last-only', 'real-hybrid-reference', 'real-hybrid-text', 'real-independent-fl2va', 'real-lokr-repeat', 'real-mixed-repeat'].map(slug => `mlx.reduced.${slug}`);
+const MLX_REMAINING = ['numeric-pruned-artifact', 'numeric-w4a8-artifact', 'lifecycle-generation-source-prep-cancel'].map(slug => `mlx.reduced.${slug}`);
+async function laneFixture(t) {
+  const w = await repinned(t), lanePlan = structuredClone(w.plan); lanePlan.sceneworks = LANE_SW;
+  await adopt({ ...w, plan: lanePlan }, { backend: 'mlx', caseIds: null, inferenceAncestry: descends });
+  const laneRoot = path.join(w.root, 'lane-evidence');
+  const write = async (id, status, plan = lanePlan) => {
+    const dir = path.join(laneRoot, id); await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'adapter-plan.json'), JSON.stringify(plan));
+    await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ caseId: id, status, runId: LANE_RUN, runAttempt: '1', sceneworks: LANE_SW, inference: NEW_PIN, planSha256: executionPlanDigest(plan), verified: { files: [] } }));
+  };
+  for (const id of MLX_PASSED) await write(id, 'passed');
+  await write('mlx.reduced.numeric-pruned-artifact', 'failed');
+  const laneRun = { runId: LANE_RUN, attempt: '1', evidenceRoot: laneRoot, plan: lanePlan };
+  const continueLane = async (overrides = {}) => { const plan = structuredClone(w.plan); const record = await adopt({ ...w, plan }, { backend: 'mlx', caseIds: null, inferenceAncestry: descends, laneRun, ...overrides }); return { record, plan }; };
+  return { w, lanePlan, laneRoot, laneRun, write, continueLane };
+}
+const withLaneRecord = (f, patch) => ({ laneRun: { ...f.laneRun, plan: { ...f.lanePlan, priorMatrixDecision: patch === undefined ? undefined : { ...f.lanePlan.priorMatrixDecision, ...patch } } } });
+test('the MLX lane continues its own run 41331644188 on run 41213935677\'s decision: exactly the 3 cases it never passed', async t => {
+  const f = await laneFixture(t), { record, plan } = await f.continueLane();
+  assert.equal(executionCases(plan).filter(c => c.backend === 'mlx').length, 18, 'the MLX allocation on the prior decision is 18 cases');
+  assert.deepEqual(record.subsetCaseIds, MLX_REMAINING);
+  assert.deepEqual(record.priorPassedCaseIds, [], 'the cuda decision run carries none of the mlx lane\'s passes');
+  assert.deepEqual(record.priorLaneRun, { runId: LANE_RUN, attempt: '1', sceneworks: LANE_SW, inference: NEW_PIN, passedCaseIds: record.allocation.filter(id => MLX_PASSED.includes(id)) });
+  assert.equal(record.priorLaneRun.passedCaseIds.length, 15); assert.deepEqual(record.notCovered, []);
+  assert.deepEqual(record.decisionRun, { runId: RUN, attempt: '1', backend: 'cuda' }); assert.equal(record.laneBackend, 'mlx');
+  assert.match(record.meaning, /priorLaneRun is this lane's own earlier run/);
+  await verifyMatrixAdmission(plan);
+  // An explicit subset is the same three (the dispatch kit's CASE_IDS).
+  assert.deepEqual((await f.continueLane({ caseIds: MLX_REMAINING })).record.subsetCaseIds, MLX_REMAINING);
+});
+test('a lane continuation refuses re-running its own passes and a lane run that is not this lane\'s run on this decision', async t => {
+  const f = await laneFixture(t);
+  await assert.rejects(f.continueLane({ caseIds: [...MLX_REMAINING, 'mlx.reduced.real-drop-audio'] }), /mlx\.reduced\.real-drop-audio already PASSED in the mlx lane's run 41331644188/);
+  // Without naming its own run the lane cannot see those passes (the cuda decision run has none for it).
+  const blind = structuredClone(f.w.plan);
+  assert.equal((await adopt({ ...f.w, plan: blind }, { backend: 'mlx', caseIds: null, inferenceAncestry: descends })).subsetCaseIds.length, 18);
+  await assert.rejects(f.continueLane({ laneRun: { ...f.laneRun, plan: { ...f.lanePlan, inference: PIN } } }), /prior lane run 41331644188 ran at inference 354b41cc\w+, not this lane's a43724b8\w+/);
+  await assert.rejects(f.continueLane(withLaneRecord(f, { decisionRun: { runId: '1', attempt: '1', backend: 'cuda' } })), /adopted another decision run/);
+  await assert.rejects(f.continueLane(withLaneRecord(f, { laneBackend: 'cuda' })), /is a cuda lane, not mlx/);
+  await assert.rejects(f.continueLane(withLaneRecord(f, { priorLaneRun: { runId: '7' } })), /lane runs are not chained/);
+  await assert.rejects(f.continueLane(withLaneRecord(f, undefined)), /did not run on a declared prior matrix decision/);
+  // A same-backend decision run already carries the lane's passes: no separate lane run is named.
+  await assert.rejects(adopt(await workspace(t), { laneRun: f.laneRun }), /is this cuda lane's own run/);
+  // Each counted pass is bound to the plan it ran under.
+  const tampered = await laneFixture(t); await tampered.write('mlx.reduced.real-drop-lora', 'passed', { ...tampered.lanePlan, cases: [] });
+  const file = path.join(tampered.laneRoot, 'mlx.reduced.real-drop-lora', 'execution.json'), row = JSON.parse(await readFile(file, 'utf8'));
+  await writeFile(file, JSON.stringify({ ...row, planSha256: executionPlanDigest(tampered.lanePlan) }));
+  await assert.rejects(tampered.continueLane(), /real-drop-lora: prior lane run's retained adapter plan is not the plan the case ran under/);
+});
+async function laneSplit(t, { toLane = null } = {}) {
+  const f = await laneFixture(t), { plan } = await f.continueLane();
+  const segments = [{ label: 'mlx-41331644188', caseRoot: f.laneRoot, runId: LANE_RUN, attempt: '1' }, { label: 'mlx-subset', caseRoot: path.join(f.w.root, 'seg-subset'), runId: '99', attempt: '1' }];
+  for (const id of MLX_REMAINING) {
+    const dir = path.join(segments[1].caseRoot, id); await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'adapter-plan.json'), JSON.stringify(plan));
+    await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ caseId: id, status: 'passed', runId: '99', runAttempt: '1', sceneworks: plan.sceneworks, inference: plan.inference, planSha256: executionPlanDigest(plan), verified: { files: [] } }));
+  }
+  for (const b of ['cuda', 'mlx']) await cp(path.join(f.w.root, `anchors-${b}`), path.join(segments[1].caseRoot, `anchors-${b}`), { recursive: true });
+  if (toLane) await f.write(toLane, 'passed');
+  return { f, segments };
+}
+test('verify-split-backend combines the MLX lane\'s two runs: 41331644188\'s 15 passes and the continuation\'s 3, each at its own SHA', async t => {
+  const { segments } = await laneSplit(t), seen = [], controls = async () => [];
+  const r = await verifySplitBackendEvidence({ backend: 'mlx', segments }, { verifyCase: async (plan, c) => { seen.push([c.id, plan.sceneworks]); }, controls });
+  assert.equal(r.status, 'split-backend-content-reverified'); assert.deepEqual(r.missing, []); assert.equal(r.singleShaBackendReadback, false);
+  assert.deepEqual(r.segments.map(s => [s.label, s.role, s.runId, s.sceneworks, s.inference, s.cases.length]), [['mlx-41331644188', 'prior-lane-run', LANE_RUN, [LANE_SW], [NEW_PIN], 15], ['mlx-subset', 'prior-decision-subset', '99', [NEW_SW], [NEW_PIN], 3]]);
+  assert.equal(seen.length, 18); assert.equal(r.priorMatrixDecision.priorLaneRun.runId, LANE_RUN); assert.equal(r.priorMatrixDecision.decisionRun.runId, RUN);
+  assert.deepEqual(r.inferenceChange, { prior: PIN, own: NEW_PIN, descends: true, firstParentLog: FIRST_PARENT_LOG }, 'the decision\'s pin change is still reported; both MLX runs ran at the own pin');
+  assert.deepEqual(await verifySplitBackendEvidence({ backend: 'mlx', segments: [...segments].reverse() }, { verifyCase: async () => {}, controls }), r, 'roles come from the records, not manifest order');
+  // The lane-run segment must be the run the continuation names, with only the passes it recorded.
+  const other = await laneSplit(t); other.segments[0].runId = '41331644189';
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'mlx', segments: other.segments }, { verifyCase: async () => {}, controls }), /executed in run 41331644188, not segment mlx-41331644188/);
+  const late = await laneSplit(t, { toLane: 'mlx.reduced.numeric-pruned-artifact' });
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'mlx', segments: late.segments }, { verifyCase: async () => {}, controls }), /passed in more than one segment/);
+  // Without a recorded lane run, two prior-decision segments are not combined.
+  const { segments: plain } = await laneSplit(t);
+  for (const id of MLX_REMAINING) {
+    const file = path.join(plain[1].caseRoot, id, 'adapter-plan.json'), p = JSON.parse(await readFile(file, 'utf8')); delete p.priorMatrixDecision.priorLaneRun; await writeFile(file, JSON.stringify(p));
+    const ex = path.join(plain[1].caseRoot, id, 'execution.json'), row = JSON.parse(await readFile(ex, 'utf8')); await writeFile(ex, JSON.stringify({ ...row, planSha256: executionPlanDigest(p) }));
+  }
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'mlx', segments: plain }, { verifyCase: async () => {}, controls }), /exactly one must continue the other as its recorded priorLaneRun/);
+});
+test('the lane loader fetches the named run\'s own-backend evidence and the plans its cases ran under', async t => {
+  const f = await laneFixture(t), work = path.join(f.w.root, 'fetched-lane'), downloads = [];
+  const gh = args => {
+    const route = args[1];
+    if (route === `repos/SceneWorks/SceneWorks/actions/runs/${LANE_RUN}`) return JSON.stringify({ status: 'completed', repository: { full_name: 'SceneWorks/SceneWorks' } });
+    if (route.startsWith(`repos/SceneWorks/SceneWorks/actions/runs/${LANE_RUN}/artifacts`)) return JSON.stringify({ artifacts: [{ name: `h3-terminal-mlx-reduced-${LANE_RUN}-1`, expired: false }, { name: `h3-terminal-stage-mlx-${LANE_SW}-${LANE_RUN}-1` }] });
+    throw new Error(`unexpected gh ${args.join(' ')}`);
+  };
+  const download = async ({ runId, name, directory }) => { downloads.push([runId, name]); await cp(f.laneRoot, directory, { recursive: true }); };
+  const loaded = await loadPriorLaneEvidence({ gh, download, repository: 'SceneWorks/SceneWorks', runId: LANE_RUN, attempt: '1', backend: 'mlx', workDir: work });
+  assert.deepEqual(downloads, [[LANE_RUN, `h3-terminal-mlx-reduced-${LANE_RUN}-1`]]); assert.equal(loaded.evidenceArtifact, `h3-terminal-mlx-reduced-${LANE_RUN}-1`);
+  assert.deepEqual(loaded.laneRun.plan.priorMatrixDecision, f.lanePlan.priorMatrixDecision);
+  const plan = structuredClone(f.w.plan);
+  assert.deepEqual((await adopt({ ...f.w, plan }, { backend: 'mlx', caseIds: null, inferenceAncestry: descends, laneRun: loaded.laneRun })).subsetCaseIds, MLX_REMAINING);
+  await assert.rejects(loadPriorLaneEvidence({ gh, download, repository: 'SceneWorks/SceneWorks', runId: LANE_RUN, attempt: '1', backend: 'cuda', workDir: path.join(f.w.root, 'x') }), /retained mlx case evidence, not this cuda lane's/);
+  const mixed = path.join(f.w.root, 'mixed'); await cp(f.laneRoot, mixed, { recursive: true });
+  await writeFile(path.join(mixed, 'mlx.reduced.real-drop-lora', 'adapter-plan.json'), JSON.stringify({ ...f.lanePlan, priorMatrixDecision: undefined }));
+  await assert.rejects(retainedLanePlan(mixed, 'mlx'), /did not run on a declared prior matrix decision/);
+});
+test('the dispatch kit stamps prior_lane_run only for one lane on a declared prior decision', async () => {
+  const { spawnSync } = await import('node:child_process');
+  const script = fileURLToPath(new URL('../docs/testing/sc-26691-campaign/dispatch.sh', import.meta.url));
+  const run = env => spawnSync('bash', [script, '--ack', 'a'.repeat(40)], { encoding: 'utf8', env: { ...process.env, DRY_RUN: '1', CASE_IDS: '', ...env } });
+  let r = run({ PRIOR_LANE_RUN: LANE_RUN, PRIOR_MATRIX_RUN: '', BACKENDS: 'mlx' }); assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /PRIOR_LANE_RUN continues a lane on a declared prior decision; it needs PRIOR_MATRIX_RUN/);
+  r = run({ PRIOR_LANE_RUN: LANE_RUN, PRIOR_MATRIX_RUN: `${RUN}/1`, BACKENDS: 'mlx cuda' }); assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /set BACKENDS to that one backend/);
+  r = run({ PRIOR_LANE_RUN: 'x', PRIOR_MATRIX_RUN: `${RUN}/1`, BACKENDS: 'mlx' }); assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /PRIOR_LANE_RUN must be <run_id>\[\/<attempt>\]/);
+  const kit = await readFile(script, 'utf8');
+  assert.match(kit, /if \(laneRun\) p\.prior_lane_run = \{ run_id: Number\(laneRun\), attempt: Number\(laneAttempt\) \};/);
+  assert.match(kit, /\(laneRun && !same\(back\.prior_lane_run, \{ run_id: Number\(laneRun\), attempt: Number\(laneAttempt\) \}\)\)/, 'the stamped lane run round-trips');
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /await loadPriorLaneEvidence\(\{gh, download, repository: env\.GITHUB_REPOSITORY, runId: String\(declaredLane\.run_id\), attempt: String\(declaredLane\.attempt\), backend: env\.H3_STAGE_BACKEND, workDir\}\)/);
+  assert.match(workflow, /laneRun: lane\?\.laneRun \?\? null\}\);/);
+  assert.match(workflow, /if\(request\.prior_lane_run!=null\)throw new Error\("prior_lane_run continues a lane on a declared prior decision; it needs prior_matrix_decision"\);/);
 });
