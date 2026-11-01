@@ -237,8 +237,14 @@ jobs:
           # two CUDA listeners can share it. This is the same provisioning the StarVector terminal
           # lane uses on these hosts; it does not depend on whatever python happens to be on PATH.
           . (Join-Path $PWD 'scripts\provision-starvector-windows-python.ps1')
-          # Under the campaign work root (sc-26691): nothing this lane writes may land on E:.
-          if (-not $env:H3_WORK_ROOT -or $env:H3_WORK_ROOT -like 'E:*') { throw "H3_WRITE_ON_WEIGHTS_VOLUME: the Python root must be under a work root off E: (got '$env:H3_WORK_ROOT')" }
+          # Under the campaign work root (sc-26691): nothing this lane writes may land on E:. A text
+          # prefix match on E: misses \\.\E:, \\localhost\E$, \\?\UNC\... and a junction, symlink or
+          # subst drive onto E:, so the shared guard decides: plain drive paths only, and the nearest
+          # existing ancestor resolved with the native realpath (assertWritePathOffWeights).
+          if (-not $env:H3_WORK_ROOT) { throw "H3_WRITE_ON_WEIGHTS_VOLUME: the Python root needs a work root off E: (H3_WORK_ROOT is unset)" }
+          $guard = 'import {assertWritePathOffWeights} from ''./scripts/h3-finetune-terminal-stage.mjs''; assertWritePathOffWeights(process.env.H3_WORK_ROOT, {what: ''Python work root''});'
+          node --input-type=module -e $guard
+          if ($LASTEXITCODE -ne 0) { throw "H3_WRITE_ON_WEIGHTS_VOLUME: the Python root must be under a work root off E: (got '$env:H3_WORK_ROOT')" }
           $pythonRoot = Join-Path $env:H3_WORK_ROOT 'sc26691-python\cpython-3.12.10-x64-nuget'
           $lockPath = Join-Path $env:H3_WORK_ROOT 'sc26691-python\.locks\cpython-3.12.10-x64-nuget.lock'
           $executable = Invoke-StarVectorWindowsPythonLock -LockPath $lockPath -ScriptBlock {

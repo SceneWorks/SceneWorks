@@ -737,3 +737,26 @@ test('reference fixture failure retains failure metadata in evidence and never c
   assert.equal(receipt.status, 'failed'); assert.equal(receipt.campaign_proof, false); assert.equal(receipt.proof_kind, 'unit_fake');
   assert.ok(receipt.fixtureCount < 5); assert.ok(receipt.error?.message);
 });
+test('the weights guard refuses device, UNC and verbatim aliases of E: and links onto a weights root', async t => {
+  const win = { platform: 'win32', env: {}, resolveLinks: false };
+  // Text: every other namespace that can name E: is refused; a plain or \\?\X:\ drive path is normalised.
+  for (const value of ['\\\\.\\E:\\x', '\\\\localhost\\E$\\x', '\\\\?\\UNC\\host\\E$\\x', '//localhost/E$/x', '//./E:/x', '\\\\?\\Volume{00000000-0000-0000-0000-000000000000}\\x', '\\\\??\\E:\\x', 'E:x', 'relative\\x']) {
+    assert.throws(() => assertWritePathOffWeights(value, win), /H3_WRITE_PATH_NOT_PLAIN/, value);
+  }
+  for (const value of ['//?/E:/x', 'e:/x', '\\\\?\\E:\\x', 'E:/huggingface/sc26691-private']) assert.throws(() => assertWritePathOffWeights(value, win), /H3_WRITE_ON_WEIGHTS_VOLUME/, value);
+  assert.equal(assertWritePathOffWeights('\\\\?\\D:\\w', win), 'D:\\w');
+  assert.equal(assertWritePathOffWeights('D:/w/x', win), 'D:\\w\\x');
+  // Links, on the host's own path semantics: a junction/symlink in OS temp onto a temp "weights" root
+  // (never the real E:). Nothing is written through the link.
+  const root = await mkdtemp(path.join(os.tmpdir(), 'sc26691-weights-guard-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const weights = path.join(root, 'weights'), link = path.join(root, 'innocent');
+  await mkdir(path.join(weights, 'hub'), { recursive: true });
+  await symlink(weights, link, process.platform === 'win32' ? 'junction' : 'dir');
+  const envFor = hfRoot => (process.platform === 'win32' ? { HF_HUB_CACHE: path.join(hfRoot, 'hub') } : { HF_HOME: hfRoot, HOME: root });
+  assert.throws(() => assertWritePathOffWeights(path.join(link, 'campaign', 'not-yet-created'), { env: envFor(weights) }), /H3_WRITE_UNDER_WEIGHTS_ROOT.*resolves to/, 'nearest existing ancestor is resolved through the link');
+  assert.throws(() => assertWritePathOffWeights(link, { env: envFor(weights) }), /H3_WRITE_UNDER_WEIGHTS_ROOT/);
+  assert.throws(() => assertWritePathOffWeights(path.join(weights, 'x'), { env: envFor(link) }), /H3_WRITE_UNDER_WEIGHTS_ROOT/, 'a weights root named through a link is compared as resolved');
+  assert.equal(assertWritePathOffWeights(path.join(root, 'work', 'x'), { env: envFor(weights) }), path.join(root, 'work', 'x'));
+  assert.doesNotThrow(() => assertWritePathOffWeights(path.join(link, 'x'), { env: envFor(weights), resolveLinks: false }), 'text alone cannot see the link: resolution is what catches it');
+});

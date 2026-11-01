@@ -3,7 +3,7 @@
 // No model execution, no GPU initialization, no downloaded-code execution, no shared-cache mutation.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, createReadStream } from 'node:fs';
+import { constants as fsConstants, createReadStream, realpathSync } from 'node:fs';
 import { access, appendFile, copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -234,7 +234,6 @@ export const WINDOWS_WEIGHTS_DRIVE = 'E:';
 export const DEFAULT_WORK_ROOTS = Object.freeze({ win32: 'D:\\sc26691-campaign', posix: '~/sc26691-campaign' });
 // Host path semantics off Windows (as the HF-home derivation always used), win32 semantics for Windows.
 const pathApi = platform => (platform === 'win32' ? path.win32 : path);
-const stripVerbatimPrefix = value => (typeof value === 'string' && value.startsWith('\\\\?\\') ? value.slice(4) : value);
 /** Expand a leading `~/` against the runner's home; anything else must already be absolute. */
 export function expandHomePath(value, { platform = process.platform, env = process.env } = {}) {
   assert.ok(typeof value === 'string' && value.length > 0, 'a non-empty path is required');
@@ -259,18 +258,57 @@ export function weightsRoots({ platform = process.platform, env = process.env } 
  * Refuse, loudly, any campaign write path on the weights volume. On Windows that is the whole E:
  * drive (static model content); elsewhere the HF home and the hub's parent.
  */
-export function assertWritePathOffWeights(target, { platform = process.platform, env = process.env, what = 'campaign write path' } = {}) {
-  assert.ok(typeof target === 'string' && target.length > 0, `${what} required`);
-  const api = pathApi(platform), resolved = api.resolve(stripVerbatimPrefix(target));
-  const fold = value => (platform === 'win32' || platform === 'darwin' ? value.toLowerCase() : value);
-  if (platform === 'win32' && fold(resolved).startsWith(fold(WINDOWS_WEIGHTS_DRIVE))) {
-    throw stageError('H3_WRITE_ON_WEIGHTS_VOLUME', `${what} ${resolved} is on ${WINDOWS_WEIGHTS_DRIVE}, the read-only weights volume; set request.work_root to another volume`);
-  }
-  for (const root of weightsRoots({ platform, env })) {
-    const relative = api.relative(fold(root), fold(resolved));
-    if (relative === '' || (!relative.startsWith('..') && !api.isAbsolute(relative))) {
-      throw stageError('H3_WRITE_UNDER_WEIGHTS_ROOT', `${what} ${resolved} is under the read-only weights root ${root}; set request.work_root outside it`);
+//
+// Text alone is not enough: on Windows the device (\\.\E:), UNC (\\localhost\E$), and verbatim UNC
+// (\\?\UNC\host\E$) namespaces all reach E:, and a junction, symlink or subst drive can put a
+// harmless-looking path onto it (or, on macOS, under the HF home). So: forward slashes are
+// normalised first; on Windows only a plain drive path (optionally \\?\X:\) is accepted; and on the
+// host platform the nearest EXISTING ancestor is resolved with the native realpath and the resolved
+// path is checked again, against the weights roots both as written and as resolved.
+const plainWindowsWritePath = (target, what) => {
+  let value = target.replace(/\//g, '\\');
+  if (/^\\\\\?\\[A-Za-z]:\\/.test(value)) value = value.slice(4);
+  if (value.startsWith('\\\\')) throw stageError('H3_WRITE_PATH_NOT_PLAIN', `${what} ${target} uses a device, UNC or verbatim namespace; only a plain local drive path (X:\\...) is accepted, so E: cannot be reached by another name`);
+  if (!/^[A-Za-z]:\\/.test(value)) throw stageError('H3_WRITE_PATH_NOT_PLAIN', `${what} ${target} is not an absolute local drive path`);
+  return value;
+};
+// The native realpath of `target`: its nearest existing ancestor resolved (links, junctions, subst),
+// with the not-yet-existing remainder re-appended. Only meaningful on the host's own path semantics.
+function realWritePath(api, target) {
+  let existing = target;
+  for (;;) {
+    try { return api.join(realpathSync.native(existing), api.relative(existing, target)); }
+    catch (error) {
+      if (!['ENOENT', 'ENOTDIR'].includes(error.code)) throw error;
+      const parent = api.dirname(existing);
+      if (parent === existing) return target;
+      existing = parent;
     }
+  }
+}
+export function assertWritePathOffWeights(target, { platform = process.platform, env = process.env, what = 'campaign write path', resolveLinks = platform === process.platform } = {}) {
+  assert.ok(typeof target === 'string' && target.length > 0, `${what} required`);
+  const api = pathApi(platform), resolved = api.resolve(platform === 'win32' ? plainWindowsWritePath(target, what) : target);
+  const fold = value => (platform === 'win32' || platform === 'darwin' ? value.toLowerCase() : value);
+  const roots = weightsRoots({ platform, env });
+  const check = (candidate, via) => {
+    if (platform === 'win32') {
+      const plain = plainWindowsWritePath(candidate, `${what} ${via}`);
+      if (fold(plain).startsWith(fold(WINDOWS_WEIGHTS_DRIVE))) throw stageError('H3_WRITE_ON_WEIGHTS_VOLUME', `${what} ${target}${via} is on ${WINDOWS_WEIGHTS_DRIVE}, the read-only weights volume; set request.work_root to another volume`);
+    }
+    for (const root of roots) {
+      const relative = api.relative(fold(root), fold(candidate));
+      if (relative === '' || (!relative.startsWith('..') && !api.isAbsolute(relative))) {
+        throw stageError('H3_WRITE_UNDER_WEIGHTS_ROOT', `${what} ${target}${via} is under the read-only weights root ${root}; set request.work_root outside it`);
+      }
+    }
+  };
+  check(resolved, '');
+  if (resolveLinks) {
+    const real = realWritePath(api, resolved);
+    // A weights root reached through a link is compared as resolved too.
+    for (const root of [...roots]) { const realRoot = realWritePath(api, root); if (!roots.includes(realRoot)) roots.push(realRoot); }
+    check(real, real === resolved ? '' : ` (resolves to ${real})`);
   }
   return resolved;
 }

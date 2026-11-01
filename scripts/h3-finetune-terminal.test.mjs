@@ -634,7 +634,9 @@ test('the terminal lane reads weights from the HF hub and writes only under the 
   assert.match(workflow, /resolved\.H3_WORK_ROOT = campaignWorkRoot\(/);
   assert.match(workflow, /const workRoot = campaignWorkRoot\(\);\n\s+const parent = path\.join\(workRoot, "sc26691-private"\)/);
   assert.match(workflow, /\$pythonRoot = Join-Path \$env:H3_WORK_ROOT 'sc26691-python\\cpython-3\.12\.10-x64-nuget'/);
-  assert.match(workflow, /if \(-not \$env:H3_WORK_ROOT -or \$env:H3_WORK_ROOT -like 'E:\*'\) \{ throw/);
+  // The Python root uses the shared link-resolving guard, never a text match that \\.\E: or a junction evades.
+  assert.doesNotMatch(workflow, /-like 'E:\*'/);
+  assert.match(workflow, /\$guard = 'import \{assertWritePathOffWeights\} from ''\.\/scripts\/h3-finetune-terminal-stage\.mjs''; assertWritePathOffWeights\(process\.env\.H3_WORK_ROOT, \{what: ''Python work root''\}\);'\n\s+node --input-type=module -e \$guard\n\s+if \(\$LASTEXITCODE -ne 0\) \{ throw "H3_WRITE_ON_WEIGHTS_VOLUME/);
   // No code path names a location on the weights volume any more (comments may still explain it).
   const code = workflow.split('\n').filter(line => !/^\s*(#|\/\/)/.test(line)).join('\n');
   assert.doesNotMatch(code, /E:\\\\?huggingface/);
