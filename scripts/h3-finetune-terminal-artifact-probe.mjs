@@ -165,8 +165,30 @@ function provenance(actual,expected){
   for(const item of records)if(item.source_revision_sha256!==undefined)assert.equal(item.source_revision_sha256,item.sha256);
   const core=list=>list.map(({script,sha256})=>({script,sha256})).sort((a,b)=>a.script.localeCompare(b.script));assert.equal(records.length,expected.length);assert.deepEqual(core(records),core(expected),'frozen producer provenance mismatch');
 }
+// Device proof per backend (sc-26691). The native receipt says device_proof, but the harness owns the
+// rule and states its basis, so evidence claims exactly what was proven:
+// - cuda: the receipt's candle CUDA device (kind "cuda"), no CPU fallback. The lane pins physical GPU 1
+//   (CUDA_DEVICE_ORDER=PCI_BUS_ID, CUDA_VISIBLE_DEVICES=1, asserted before the probe; the receipt
+//   records visible_devices verbatim).
+// - mlx: MLX exposes the default device's type and index, never a hardware UUID. Proof is the receipt
+//   reporting the MLX default device as a GPU (kind "mlx-default-gpu", label "mlx device type Gpu index
+//   Some(<index>)"), no CPU fallback, AND the probe environment not disabling the GPU default
+//   (MLX_USE_GPU, recorded on the receipt as deviceEnvironment). No hardware identity is claimed.
+export const DEVICE_PROOF_BASIS=Object.freeze({cuda:'cuda-device-no-fallback',mlx:'mlx-default-gpu-no-fallback'});
+const MLX_GPU_DISABLED=/^\s*(0|false|no|off)\s*$/i;
+export const mlxDeviceEnvironment=env=>({MLX_USE_GPU:typeof env?.MLX_USE_GPU==='string'?env.MLX_USE_GPU:null});
+export function deviceProof(backend,native,deviceEnvironment){
+  const device=native?.device;if(native?.device_proof!==true||device?.cpu_fallback!==false)return {proof:false,basis:null};
+  if(backend==='cuda')return device.kind==='cuda'?{proof:true,basis:DEVICE_PROOF_BASIS.cuda}:{proof:false,basis:null};
+  assert.equal(backend,'mlx');
+  const label=/^mlx device type Gpu index Some\((\d+)\)$/.exec(device.label??'');
+  const gpu=device.kind==='mlx-default-gpu'&&label!==null&&Number.isInteger(device.index)&&device.index===Number(label[1]);
+  // The environment must be recorded (null = unset); an unrecorded or GPU-disabling MLX_USE_GPU is no proof.
+  const recorded=deviceEnvironment!==null&&typeof deviceEnvironment==='object'&&Object.hasOwn(deviceEnvironment,'MLX_USE_GPU')&&(deviceEnvironment.MLX_USE_GPU===null||typeof deviceEnvironment.MLX_USE_GPU==='string');
+  return gpu&&recorded&&!MLX_GPU_DISABLED.test(deviceEnvironment.MLX_USE_GPU??'')?{proof:true,basis:DEVICE_PROOF_BASIS.mlx}:{proof:false,basis:null};
+}
 const selectedCore=items=>items.map(({name,dtype,shape,bytes,sha256})=>({name,dtype,shape,bytes,sha256})).sort((a,b)=>a.name.localeCompare(b.name));
-export function mergeProbeReceipts(m,producer,oracle,native,selection,expectedProvenance) {
+export function mergeProbeReceipts(m,producer,oracle,native,selection,expectedProvenance,{deviceEnvironment}={}) {
   assert.equal(producer.schema,'sceneworks.h3.actual_checkpoint_oracle_producer_receipt');assert.equal(producer.schema_version,1);assert.equal(producer.status,'ok');assert.equal(producer.device,'cpu');assert.equal(producer.gpu_used,false);assert.equal(producer.network_used,false);provenance(producer.producer_provenance,expectedProvenance);
   assert.equal(oracle.schema,'sceneworks.h3.actual_checkpoint_oracle');assert.equal(oracle.schema_version,1);assert.equal(oracle.producer,'h3-actual-checkpoint-oracle-bridge/1');assert.equal(oracle.producer_version,1);assert.equal(oracle.artifact_sha256,m.artifact.sha256);assert.equal(oracle.device,'cpu');provenance(oracle.producer_provenance,expectedProvenance);
   for(const key of ['path','sha256','bytes'])assert.equal(producer.artifact?.[key],m.artifact[key]);assert.equal(producer.artifact.whole_file_digest_recomputed,false);
@@ -183,9 +205,9 @@ export function mergeProbeReceipts(m,producer,oracle,native,selection,expectedPr
     // produced F32 vectors exactly as the native receipt did. Never generate expected values.
     const observed=values.reduce((maximum,value,index)=>Math.max(maximum,Math.abs(Math.fround(value-n.oracle.values[index]))),0);assert.equal(n.comparison.max_abs,observed,'reported max_abs differs from retained native/oracle values');
     for(const output of [n.native,n.oracle]){const bytes=Buffer.alloc(output.values.length*4);output.values.forEach((value,index)=>bytes.writeFloatLE(value,index*4));assert.equal(output.values_sha256,digest(bytes),'output vector sha256 mismatch');}
-    const device=n.native.device;assert.ok(device&&typeof device.label==='string'&&device.label.length,'device identity missing');const deviceProof=n.native.device_proof===true&&device.cpu_fallback===false&&device.kind===(m.backend==='mlx'?'metal':'cuda');
-    const pass=n.status==='pass'&&n.pass===true&&deviceProof&&n.comparison.max_abs<=Math.fround(c.tolerance.max_abs);
-    result.push({case_id:c.id,kind:c.kind,status:pass?'PASS':'FAIL',pass,artifact:m.artifact,selected,native:n.native,oracle:n.oracle,max_abs:n.comparison.max_abs,tolerance:n.tolerance,device,cpu_fallback:device.cpu_fallback,device_proof:deviceProof,standalone_dense_fidelity_claimed:false,qkv_ffn_tensor_mapping_evidence:false,scope:'Selected packed-projection/pruned-curve comparison only; never full QKV/FFN tensor mapping or standalone dense fidelity'});
+    const device=n.native.device;assert.ok(device&&typeof device.label==='string'&&device.label.length,'device identity missing');const {proof,basis}=deviceProof(m.backend==='mlx'?'mlx':'cuda',n.native,deviceEnvironment); // manifest backend: mlx | candle (CUDA)
+    const pass=n.status==='pass'&&n.pass===true&&proof&&n.comparison.max_abs<=Math.fround(c.tolerance.max_abs);
+    result.push({case_id:c.id,kind:c.kind,status:pass?'PASS':'FAIL',pass,artifact:m.artifact,selected,native:n.native,oracle:n.oracle,max_abs:n.comparison.max_abs,tolerance:n.tolerance,device,cpu_fallback:device.cpu_fallback,device_proof:proof,deviceProofBasis:basis,standalone_dense_fidelity_claimed:false,qkv_ffn_tensor_mapping_evidence:false,scope:'Selected packed-projection/pruned-curve comparison only; never full QKV/FFN tensor mapping or standalone dense fidelity'});
   }
   return result;
 }
@@ -234,10 +256,12 @@ export async function executeActualArtifactProbe(p,c,swRoot,inferenceRoot,dir,de
     assert.equal(producer.status,'ok','producer did not succeed');provenance(producer.producer_provenance,expected);assert.equal(producer.selected_tensors_sha256,await hashFile(mini),'producer did not bind exact selected mini');
     manifest.oracle={path:oraclePath,sha256:digest(oracleBytes),producer:oracle.producer,producer_version:oracle.producer_version,artifact_sha256:oracle.artifact_sha256,producer_provenance:oracle.producer_provenance};await writeFile(working,JSON.stringify(manifest,null,2)+'\n');
     const command=['cargo','test','--locked',...campaignProfileArgs(),'--manifest-path',path.join(inferenceRoot,'Cargo.toml'),'-p',c.backend==='mlx'?'mlx-gen-minimax-h3':'candle-gen-minimax-h3',...(c.backend==='cuda'?['--features','cuda']:[]),'--test','integration',ACTUAL_SELECTOR,'--','--exact','--ignored','--nocapture','--test-threads=1'];
+    // The native probe inherits this env; record what it saw (MLX_USE_GPU decides the MLX default device).
+    const deviceEnvironment=c.backend==='mlx'?mlxDeviceEnvironment(env):undefined;
     let nativeError;try{await runner(command,{cwd:inferenceRoot,env:{...env,H3_ACTUAL_PROBE_MANIFEST:working,H3_ACTUAL_PROBE_RECEIPT_DIR:receiptDir},logPath:path.join(dir,'native.log'),timeoutSeconds:remaining()});}catch(error){nativeError=error;}
     const native=await Promise.all(manifest.cases.map(k=>json(path.join(receiptDir,nativeReceiptName(manifest.backend,k.id)),256*1024*1024)));
     for(const n of native){assert.ok(await sameFile(n.manifest_path,working),'native probe read a different manifest');assert.equal(n.manifest_sha256,digest(await bounded(working,8*1024*1024)));}
-    const cases=mergeProbeReceipts(manifest,producer,oracle,native,selection,expected).map(value=>campaignCase(p,value,authority));receipt={...receipt,manifest,manifestPath:working,producerCommand,nativeCommand:command,cases,status:cases.every(r=>r.pass)&&!nativeError?'PASS':'FAIL',pass:cases.every(r=>r.pass)&&!nativeError};
+    const cases=mergeProbeReceipts(manifest,producer,oracle,native,selection,expected,{deviceEnvironment}).map(value=>campaignCase(p,value,authority));receipt={...receipt,...(deviceEnvironment?{deviceEnvironment}:{}),manifest,manifestPath:working,producerCommand,nativeCommand:command,cases,status:cases.every(r=>r.pass)&&!nativeError?'PASS':'FAIL',pass:cases.every(r=>r.pass)&&!nativeError};
     const log=await readFile(path.join(dir,'native.log'),'utf8');assert.equal(executedTests(log),1,'ignored native selector must actually pass exactly once');assert.ok(!/\bSKIP\b/.test(log));if(nativeError)throw nativeError;assert.equal(receipt.pass,true,'actual probe failed or CPU fallback is not device proof');remaining();
     if(!fake)await verifyEvidenceSource(p,swRoot,inferenceRoot);
   }catch(error){receipt.status='FAIL';receipt.pass=false;receipt.refusal={code:'actual_artifact_probe_refused',detail:error.message};if(!receipt.cases.length)receipt.cases=(manifest?.cases??[{id:c.id}]).map(k=>({case_id:k.id,kind:k.kind,status:'FAIL',pass:false,device_proof:false,productPin:p.inference,nativeEvidence:structuredClone(p.nativeEvidence),refusal:receipt.refusal}));await save(path.join(dir,receiptName),receipt);throw error;}
@@ -258,7 +282,12 @@ export async function verifyActualArtifactProbe(p,c,dir,{allowUnitFake=false,con
   for(const n of native){assert.ok(await sameFile(n.manifest_path,receipt.manifestPath),'native probe read a different manifest');assert.equal(n.manifest_sha256,digest(await bounded(path.join(dir,'probe-manifest.json'),8*1024*1024)));}
   if(contentReadback)assert.deepEqual(await extractSelectedRanges(manifest,validateProbeManifest(manifest,c.backend)),selection,'selected source bytes changed since native proof');
   const authority=await readOracleAuthority(dir,{retained:true,unitFake:e.proof_kind==='unit_fake'&&allowUnitFake});
-  const merged=mergeProbeReceipts(manifest,producer,oracle,native,selection,FROZEN_PROVENANCE).map(value=>campaignCase(p,value,authority));assert.ok(merged.every(r=>r.pass),'not all native probes passed on device');assert.deepEqual(receipt.cases,JSON.parse(JSON.stringify(merged)),'retained receipt differs from the recomputed merge'); // The receipt went through JSON, which writes -0 as 0; strict deepEqual would refuse a native -0.0.
+  if(c.backend==='mlx')assert.ok(receipt.deviceEnvironment&&Object.hasOwn(receipt.deviceEnvironment,'MLX_USE_GPU'),'MLX device proof needs the recorded probe environment');else assert.equal(receipt.deviceEnvironment,undefined);
+  const merged=mergeProbeReceipts(manifest,producer,oracle,native,selection,FROZEN_PROVENANCE,{deviceEnvironment:receipt.deviceEnvironment}).map(value=>campaignCase(p,value,authority));assert.ok(merged.every(r=>r.pass),'not all native probes passed on device');
+  // CUDA receipts retained before deviceProofBasis existed (runs at 4c3625898 and the CUDA subset runs) carry
+  // no basis; their rule is unchanged, so the recomputed basis is compared only when the receipt records one.
+  const legacy=c.backend==='cuda'&&receipt.cases.every(r=>!Object.hasOwn(r,'deviceProofBasis'));if(legacy)for(const r of merged)delete r.deviceProofBasis;
+  assert.deepEqual(receipt.cases,JSON.parse(JSON.stringify(merged)),'retained receipt differs from the recomputed merge'); // The receipt went through JSON, which writes -0 as 0; strict deepEqual would refuse a native -0.0.
   assert.deepEqual(e.files,receiptFiles(manifest,c.actualArtifactProbe.receipt),'missing or extra proof files');
   const files=[];for(const name of e.files){assert.ok(typeof name==='string'&&!path.isAbsolute(name)&&below(path.resolve(dir),path.resolve(dir,name)),'receipt file escapes case');const canonical=await realpath(path.join(dir,name));assert.ok(below(await realpath(dir),canonical),'receipt symlink escapes case');files.push({path:name,sha256:digest(await bounded(canonical,256*1024*1024))});}
   assert.equal(executedTests(await readFile(path.join(dir,'native.log'),'utf8')),1);

@@ -1,0 +1,173 @@
+{
+  "schema": "sceneworks.h3.actual_checkpoint_probe_receipt",
+  "schema_version": 1,
+  "backend": "mlx",
+  "case_id": "pruned-timestep-interpolation",
+  "kind": "pruned_timestep_interpolation",
+  "evidence_scope": "selected_pruned_table_or_reduced_projection_only",
+  "qkv_ffn_tensor_mapping_evidence": false,
+  "av_generation_evidence": false,
+  "kind_coverage": null,
+  "input_dtype": "F32",
+  "status": "pass",
+  "pass": true,
+  "refusal": null,
+  "manifest_path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1-bootstrap-ae148c29ad533079cc5bdfde78c8d2ddd220ab83/mlx.reduced.numeric-pruned-artifact/probe-manifest.json",
+  "manifest_sha256": "01b47dd7462997f6476b096777c7744e237ef3d102b2c78f27e1d9bd403ec948",
+  "oracle_path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1-bootstrap-ae148c29ad533079cc5bdfde78c8d2ddd220ab83/mlx.reduced.numeric-pruned-artifact/cpu-oracle.json",
+  "oracle_sha256": "d5e96f9cbd93add2c609785f865ae30d049aa4fc7e319bd64cb230a770381b77",
+  "oracle_producer": "h3-actual-checkpoint-oracle-bridge/1",
+  "oracle_producer_version": 1,
+  "oracle_producer_provenance": {
+    "scripts/ci/generate_minimax_h3_w4a8_fixture.py": "14c05c1dea46dfec0447d97b575a0c6f525e2d41bcc703ad16e1610828ea9676",
+    "scripts/h3_convrot_int8_oracle.py": "25682137344a8d94bc134585603dd51e22a2edac7a148d5363c48ce0a38dbd82",
+    "scripts/h3_pruned_adaln_oracle.py": "f9de6f19c29e9ce4858f74b930f0e9a641fe106333608587d7ce4d8630b16b5b"
+  },
+  "receipt_dir": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1-bootstrap-ae148c29ad533079cc5bdfde78c8d2ddd220ab83/mlx.reduced.numeric-pruned-artifact/native-receipts",
+  "payload_reads": 1,
+  "artifact": {
+    "path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1/hf/hub/models--WarmBloodAban--Minimax-h3_Singularity/snapshots/a56850c870825d6a8ae501a595c4dbbbc77bbc7e/Minimax-h3_Singularity_ref2va_Pruned_v1.3_int8.safetensors",
+    "sha256": "412a7b126595a958964193f3b42513d7cf2df4196ef04223a0f05e3622949cce",
+    "bytes": 20967647456,
+    "header_bytes_read": 115776,
+    "digest_trust": "staging_verified_digest_bound_by_sha256_receipt",
+    "whole_file_digest_recomputed": false,
+    "staging_receipt_path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1-bootstrap-ae148c29ad533079cc5bdfde78c8d2ddd220ab83/mlx.reduced.numeric-pruned-artifact/staging-projection.json",
+    "staging_receipt_sha256": "47b344ead4375fe594c8ada68f7c7d0dafdf332d8f45fafdd123a118402f8ef7",
+    "staging_producer": "scripts/h3-finetune-terminal-artifact-probe.mjs metadata bootstrap",
+    "staging_parent_receipt_path": "/Users/MTrefry/sc26691-campaign/sc26691-private/41331644188-1/h3-stage-receipt.json",
+    "staging_parent_receipt_sha256": "3ceb3f98db0fcaf6052f6c51a13a7a01f60cc6bb949060f34b4d5e789bd2edf7",
+    "scope_note": "artifact and receipts must also live outside the SceneWorks checkout; this consumer enforces outside the Inference workspace"
+  },
+  "selected": [
+    {
+      "name": "model.diffusion_model.adaln_t_table",
+      "canonical": "adaln_t_table",
+      "sha256": "ac8727cdec52137c73878d004de5bd2a0e19227e8311e29ab3b68f328310e34e",
+      "dtype": "F32",
+      "shape": [
+        1025,
+        8
+      ],
+      "bytes": 32800
+    }
+  ],
+  "selection_topology_requested": false,
+  "declared_dit_geometry": {
+    "explicit": true,
+    "hidden_size": 5376,
+    "num_layers": 50,
+    "time_embed_dim": 2688
+  },
+  "bounds": {
+    "selected_tensors": 1,
+    "selected_bytes": 32800,
+    "hard_max_selected_tensors": 8192,
+    "hard_max_selected_bytes": 536870912,
+    "hard_max_cases": 64,
+    "materialization_note": "native materialization is bounded by selected_bytes and at most a 4x f32 widening of the widest stored element width"
+  },
+  "native": {
+    "shape": [
+      4,
+      8
+    ],
+    "values": [
+      0.46788281202316284,
+      0.248228520154953,
+      -0.09162993729114532,
+      0.034378983080387115,
+      0.007069366052746773,
+      -0.0013603972038254142,
+      -0.0005915956571698189,
+      0.0003798087127506733,
+      0.2645280659198761,
+      0.021730661392211914,
+      0.035040393471717834,
+      -0.014105110429227352,
+      -0.001391516881994903,
+      -0.00019435856665950269,
+      -0.00011102167627541348,
+      0.00010177646618103608,
+      -0.20560280978679657,
+      0.012990541756153107,
+      0.018200092017650604,
+      0.013847325928509235,
+      0.0001843177160480991,
+      -0.00040833684033714235,
+      -0.000046939210733398795,
+      -0.000055998872994678095,
+      -0.4022071659564972,
+      0.08635282516479492,
+      -0.08268877863883972,
+      -0.0685991644859314,
+      -0.0027126166969537735,
+      -0.0014523779973387718,
+      -0.0008571464568376541,
+      -0.00027278531342744827
+    ],
+    "max_abs": 0.46788281202316284,
+    "values_sha256": "80422cb95d6165d891d74c3803f3bb47102c5924cf52eb33e32fad77369ca25b",
+    "route": "pruned-table",
+    "detail": "PrunedTable grid=1025 rank=8 timesteps=4",
+    "device": {
+      "kind": "mlx-default-gpu",
+      "label": "mlx device type Gpu index Some(0)",
+      "index": 0,
+      "cpu_fallback": false,
+      "visible_devices": null,
+      "note": "MLX exposes device type/index, not a hardware UUID; MLX_USE_GPU controls the default"
+    },
+    "device_proof": true
+  },
+  "oracle": {
+    "shape": [
+      4,
+      8
+    ],
+    "values": [
+      0.46788281202316284,
+      0.248228520154953,
+      -0.09162993729114532,
+      0.034378983080387115,
+      0.007069366052746773,
+      -0.0013603972038254142,
+      -0.0005915956571698189,
+      0.0003798087127506733,
+      0.2645280659198761,
+      0.021730661392211914,
+      0.035040393471717834,
+      -0.014105110429227352,
+      -0.001391516881994903,
+      -0.00019435856665950269,
+      -0.00011102167627541348,
+      0.00010177646618103608,
+      -0.20560280978679657,
+      0.012990541756153107,
+      0.018200092017650604,
+      0.013847325928509235,
+      0.0001843177160480991,
+      -0.00040833684033714235,
+      -0.000046939210733398795,
+      -0.000055998872994678095,
+      -0.4022071659564972,
+      0.08635282516479492,
+      -0.08268877863883972,
+      -0.0685991644859314,
+      -0.0027126166969537735,
+      -0.0014523779973387718,
+      -0.0008571464568376541,
+      -0.00027278531342744827
+    ],
+    "max_abs": 0.46788281202316284,
+    "values_sha256": "80422cb95d6165d891d74c3803f3bb47102c5924cf52eb33e32fad77369ca25b"
+  },
+  "tolerance": {
+    "max_abs": 1.9999999949504854e-6
+  },
+  "comparison": {
+    "code": "within_tolerance",
+    "tolerance": 1.9999999949504854e-6,
+    "max_abs": 0.0
+  }
+}
