@@ -4,7 +4,7 @@
   "inference_sha": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
   "native_evidence_ref": "main",
   "native_evidence_sha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
-  "expected_runner": "nax-macos",
+  "expected_runner": "nax-macos-2",
   "adaptive_matrix": true,
   "bootstrap": {
     "casebook": "sc-26691-h3-cases-v1",

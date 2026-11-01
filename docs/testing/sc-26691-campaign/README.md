@@ -5,6 +5,80 @@ sc-26691) was run with. The full procedure and evidence rules are in
 [`../sc-26691-h3-terminal.md`](../sc-26691-h3-terminal.md); the current state and open findings are
 in the closeout handoff on the epic in Shortcut.
 
+## Today's plan (user-approved 2026-11-01)
+
+- **CUDA, 18 passed cases at `4c3625898` stand.** CUDA run 41213935677 (attempt 1, `cuda-windows-2`)
+  passed 18 of its 25 allocated cases (retained in `h3-terminal-cuda-reduced-41213935677-1`), then
+  refused `real-hybrid-first-last` for disk space: it had written ~500 GB under
+  `E:\huggingface\sc26691-private`. That evidence is not re-run.
+- **CUDA, the 7 remaining cases at the new SHA**: `real-hybrid-first-last`, `real-hybrid-reference`,
+  `real-independent-fl2va`, `real-hybrid-text-repeat`, `numeric-pruned-artifact`,
+  `numeric-w4a8-artifact`, `lifecycle-generation-source-prep-cancel`. The lane adopts run
+  41213935677's measured matrix decision (cuda selected, mlx displaced; recomputed from the retained
+  anchors of runs 41213935677 and 41213914294) instead of a new anchor exchange.
+- **MLX, the full displaced lane (18 cases) on `nax-macos-2` at the new SHA**, on the same declared
+  decision. `nax-macos` keeps two orphaned processes from an ejected-drive run and is not used.
+  `/Volumes/Models` on `nax-macos-2` is full: the lane only READS it; every write (including any
+  pinned weight it must download) goes to `~/sc26691-campaign` on the main drive.
+- The new SHA differs from `4c3625898`; each lane records `git diff --name-only 4c3625898..<new>` in
+  `prior-matrix-decision.json`. No same-SHA re-run is implied or claimed.
+
+```bash
+SW="$(git rev-parse origin/feature/sc-26679-h3-finetune-import)"   # the pushed new head
+# CUDA: the 7 remaining cases on run 41213935677's decision (work root D:\sc26691-campaign by default).
+BACKENDS=cuda PRIOR_MATRIX_RUN=41213935677/1 \
+  CASE_IDS=cuda.reduced.real-hybrid-first-last,cuda.reduced.real-hybrid-reference,cuda.reduced.real-independent-fl2va,cuda.reduced.real-hybrid-text-repeat,cuda.reduced.numeric-pruned-artifact,cuda.reduced.numeric-w4a8-artifact,cuda.reduced.lifecycle-generation-source-prep-cancel \
+  docs/testing/sc-26691-campaign/dispatch.sh --ack "$SW"
+# MLX: the full displaced lane on nax-macos-2, same decision, weights read from /Volumes/Models,
+# writes (and downloads) under ~/sc26691-campaign on the main drive.
+BACKENDS=mlx MLX_RUNNER=nax-macos-2 PRIOR_MATRIX_RUN=41213935677/1 \
+  docs/testing/sc-26691-campaign/dispatch.sh --ack "$SW"
+```
+
+### Where the campaign reads and writes
+
+- **Reads weights** only from the HF hub: `E:\huggingface\hub` on Windows; `mlx_hf_home` (default
+  `/Volumes/Models/huggingface`, `~/` allowed) on macOS. The stage copies a present, SHA-verified file
+  into the run's private staging (`copyFile`, never a hard link), so the hub may sit on another volume.
+- **Writes** only under `work_root` (default `D:\sc26691-campaign` on Windows, `~/sc26691-campaign` on
+  macOS): `sc26691-private/<run>-<attempt>` (staging), `...-bootstrap-<sha>` (case roots and
+  `services/<case>`), `...-target`/`-native`/`-fixture` (cargo targets), `sc26691-python` (Windows
+  portable CPython), the prior-run cleanup and the leftover-process scan. The lane refuses, loudly,
+  a work root on `E:` or under the macOS HF home (`H3_WRITE_ON_WEIGHTS_VOLUME` /
+  `H3_WRITE_UNDER_WEIGHTS_ROOT`).
+- **Downloads**: every pinned file the bootstrap needs (singularity, hybrid, pulpcut, turbo, speech
+  and the catalog components) that is absent from the hub is downloaded automatically, SHA-verified,
+  into the run's private staging under the work root; nothing is written into the hub. The raw
+  builtin/community shard sets stay cache-probe-only (`allow_fresh_builtin_download`), and the
+  bootstrap does not use them.
+- Old roots under `E:\huggingface\sc26691-private` (and `E:\huggingface\sc26691-python`) are left
+  untouched by the lanes; nothing writes to or deletes from `E:`. Clearing them is the operator's call.
+- Per-case reclaim now also removes each assembly's `transformer` directory (full private copies for
+  hybrid cases, hard links otherwise; links are never followed), recorded in `storage-reclaim.json`.
+
+### Combining the two CUDA runs (explicit, never a silent merge)
+
+The CUDA allocation is then split across two runs at two SceneWorks SHAs. Re-validate it as such:
+
+```bash
+gh run download 41213935677 --repo SceneWorks/SceneWorks --name h3-terminal-cuda-reduced-41213935677-1 --dir prior
+gh run download <new-run> --repo SceneWorks/SceneWorks --name h3-terminal-cuda-reduced-<new-run>-1 --dir subset
+cat > split.json <<EOF
+{"backend":"cuda","segments":[
+  {"label":"prior-4c3625898","caseRoot":"$PWD/prior","runId":41213935677,"attempt":1},
+  {"label":"subset-new-sha","caseRoot":"$PWD/subset","runId":<new-run>,"attempt":1}]}
+EOF
+node scripts/h3-finetune-terminal.mjs verify-split-backend split.json
+```
+
+`verify-split-backend` re-validates every passed case against the exact plan it ran under (its
+retained `adapter-plan.json`, bound by `planSha256`), attributes each case to its run and SHA,
+requires one shared measured decision, pin and native evidence, refuses a case that passed in both
+segments, reports any allocation gap as `split-backend-incomplete`, and flags cross-case controls
+whose cases come from different segments (`crossSegment: true`, e.g. `real-hybrid-text-repeat`
+against `real-hybrid-text`). Its output is a `split-backend-content-readback` with
+`singleShaBackendReadback: false`; it is not accepted where a single-SHA backend readback is required.
+
 ## Dispatch
 
 ```bash
@@ -37,8 +111,12 @@ BACKENDS=cuda docs/testing/sc-26691-campaign/dispatch.sh --ack <sceneworks-sha>
 
 - `bootstrap.operator.width` / `height` (1088x544) set the canvas of the turbo/ref cases;
   `timeoutSeconds` (7200) is the per-case bound. See the epic handoff for why these are under review.
-- `expected_runner`: `cuda-windows` / `cuda-windows-2` (the job is pinned by the runner-name label),
-  `nax-macos` for MLX.
+- `expected_runner`: `cuda-windows` / `cuda-windows-2` (the job is pinned by the runner-name label);
+  `nax-macos-2` (label `rw-mage`, the default `MLX_RUNNER`) or `nax-macos` (`rw-starvector`) for MLX.
+  Both Macs carry `real-weights`; the lane asserts `RUNNER_NAME` equals the request's runner.
+- `work_root`, `mlx_hf_home`, `case_ids`, `prior_matrix_decision`: stamped by `dispatch.sh` from
+  `WORK_ROOT` (or `CUDA_WORK_ROOT` / `MLX_WORK_ROOT`), `MLX_HF_HOME`, `CASE_IDS` and
+  `PRIOR_MATRIX_RUN=<run>[/<attempt>]`; see the header of `dispatch.sh`.
 - CUDA uses `gpuId`/`requestedGpu` `1` (physical GPU 1 in PCI-bus order: `CUDA_DEVICE_ORDER=PCI_BUS_ID`,
   `CUDA_VISIBLE_DEVICES=1`, `SCENEWORKS_GPU_ID=1`; device evidence is the GPU-1 UUID). GPU 0 is the
   owner's display/work GPU and is never used. MLX uses `mlx`.
