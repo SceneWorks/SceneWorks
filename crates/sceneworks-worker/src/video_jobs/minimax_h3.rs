@@ -1335,14 +1335,14 @@ pub(super) fn minimax_h3_task(conditioning: &[Conditioning]) -> &'static str {
 /// GPU, weights, or on-disk assets.
 ///
 /// **Anchor indices.** `frame_idx: 0` is the first frame; the last frame is the EXPLICIT
-/// `frames - 1`, never the `-1` "from the end" shorthand (sc-26691). Only the MLX engine honours
-/// `-1` (`mlx-gen-minimax-h3/src/model/request.rs`: `frame_idx == -1 || == num_frames - 1`); the
-/// Candle engine's `keyframe_anchors` clamps a negative index to `0`
-/// (`candle-gen-minimax-h3/src/model.rs`: `k.frame_idx.max(0)`), so a last-frame `-1` became a
-/// SECOND first-frame anchor and every CUDA `first_last_frame` job failed with "both keyframes
-/// anchor First" (a last-frame-only job would have silently rendered it as the FIRST frame).
-/// `frames - 1` is the one spelling both engines map to `Last`. It cannot drift from the engine's
-/// own count: `frames` is exactly the value this arm hands the engine as `VideoGenInput::frames`,
+/// `frames - 1` (sc-26691). Both engines now resolve indices through ONE shared contract,
+/// `gen_core_h3::h3_keyframe::resolve_keyframe_slots` (inference #1405): `0` is First,
+/// `num_frames - 1` or `-1` is Last, and anything else is a typed `KeyframeIndexError`. Before
+/// that the Candle engine clamped `-1` to the FIRST frame (`frame_idx.max(0)`) and every CUDA
+/// `first_last_frame` job failed with "both keyframes anchor First". `frames - 1` is kept anyway: it
+/// is the spelling every engine revision has read as Last, and [`validate_minimax_h3_keyframes`]
+/// checks it against the shared contract before the job loads anything. It cannot drift from the
+/// engine's own count: `frames` is exactly the value this arm hands the engine as `VideoGenInput::frames`,
 /// which the shared funnel forwards as `GenerationRequest::frames = Some(frames)` and both engines'
 /// `resolve_request_frames` take verbatim. `strength: 1.0` fully pins the frame,
 /// which is the only meaning first/last-frame conditioning has here (the engine pins anchor rows at
@@ -1410,6 +1410,27 @@ pub(super) fn minimax_h3_last_frame_index(frames: u32) -> i32 {
     i32::try_from(frames.saturating_sub(1)).unwrap_or(i32::MAX)
 }
 
+/// Check the keyframe anchors in `conditioning` against the SAME contract both engines resolve them
+/// with (`gen_core_h3::h3_keyframe::resolve_keyframe_slots`), so an index the engine would refuse
+/// is a typed payload error before any model load rather than a mid-load engine failure.
+/// Non-keyframe conditioning is ignored.
+#[cfg(any(
+    target_os = "macos",
+    all(not(target_os = "macos"), feature = "backend-candle")
+))]
+pub(super) fn validate_minimax_h3_keyframes(
+    conditioning: &[Conditioning],
+    frames: u32,
+) -> Result<gen_core_h3::h3_keyframe::KeyframeSlots, String> {
+    let frame_idxs = conditioning.iter().filter_map(|c| match c {
+        Conditioning::Keyframe { frame_idx, .. } => Some(*frame_idx),
+        _ => None,
+    });
+    let num_frames = usize::try_from(frames).unwrap_or(usize::MAX);
+    gen_core_h3::h3_keyframe::resolve_keyframe_slots(frame_idxs, num_frames)
+        .map_err(|error| format!("MiniMax-H3 keyframe: {error}"))
+}
+
 /// Resolve a MiniMax-H3 request's supplied media into the engine conditioning.
 ///
 /// `sourceAssetId` → the FIRST keyframe, `lastFrameAssetId` → the LAST — fl2va takes 0, 1 or 2 of
@@ -1467,14 +1488,16 @@ pub(super) async fn resolve_minimax_h3_conditioning(
     let reference_clips =
         resolve_minimax_h3_clip_conditioning(api, settings, job, request, project_path, frames)
             .await?;
-    Ok(minimax_h3_conditioning(
+    let conditioning = minimax_h3_conditioning(
         frames,
         first_frame,
         last_frame,
         reference_images,
         reference_clips,
         reference_audio,
-    ))
+    );
+    validate_minimax_h3_keyframes(&conditioning, frames).map_err(WorkerError::InvalidPayload)?;
+    Ok(conditioning)
 }
 
 /// Real MLX MiniMax-H3 generation (epic 17137 / sc-19508): build the [`VideoGenInput`] and run the

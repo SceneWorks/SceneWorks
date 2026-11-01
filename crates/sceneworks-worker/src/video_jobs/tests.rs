@@ -19274,10 +19274,10 @@ async fn minimax_h3_reference_clip_frames_keep_source_order() {
 /// a hard engine reject; a reference list in the wrong order changes the `<Picture i>` labels and
 /// the shared rotary clock, so the render silently differs.
 ///
-/// The last anchor is the EXPLICIT `frames - 1` and NEVER `-1` (sc-26691): the Candle engine's
-/// `keyframe_anchors` clamps a negative `frame_idx` to `0`, so the old `-1` became a second FIRST
-/// anchor and the first CUDA `first_last_frame` campaign case (run 41303430895) failed with "both
-/// keyframes anchor First". Compiled on the Candle lane too — this test was macOS-only, so the one
+/// The last anchor is the EXPLICIT `frames - 1` (sc-26691): before the shared keyframe contract
+/// (inference #1405) the Candle engine clamped a negative `frame_idx` to `0`, so the old `-1`
+/// became a second FIRST anchor and the first CUDA `first_last_frame` campaign case (run
+/// 41303430895) failed with "both keyframes anchor First". Compiled on the Candle lane too — this test was macOS-only, so the one
 /// backend that misread `-1` never ran it.
 #[cfg(any(
     target_os = "macos",
@@ -19328,7 +19328,7 @@ fn minimax_h3_conditioning_anchors_and_reference_order() {
             Vec::new()
         )),
         vec![123],
-        "a last frame alone anchors the explicit last index, frames - 1 — never -1, which the          Candle engine clamps to the FIRST frame"
+        "a last frame alone anchors the explicit last index, frames - 1"
     );
     let both = minimax_h3_conditioning(
         FRAMES,
@@ -19417,56 +19417,90 @@ fn minimax_h3_conditioning_anchors_and_reference_order() {
 
 /// Every MiniMax-H3 keyframe index must land on an end BOTH engines read the same way (sc-26691).
 ///
-/// Mirrors the Candle engine's `keyframe_anchors` resolution (`candle-gen-minimax-h3/src/model.rs`
-/// at the pinned inference rev): `idx = frame_idx.max(0)`, `0` -> First, `num_frames - 1` -> Last.
-/// Under that rule the retired `-1` resolved to First, so `[0, -1]` was the "both keyframes anchor
-/// First" reject the CUDA campaign hit. The MLX engine accepts `0` and `num_frames - 1` as well, so
-/// an index that survives this mirror is honoured on both backends.
+/// Since inference #1405 both engines resolve keyframes through ONE shared contract,
+/// `gen_core_h3::h3_keyframe::resolve_keyframe_slots` — so this checks the worker's indices against
+/// that very function (via `validate_minimax_h3_keyframes`) instead of a hand-written mirror of one
+/// engine's rule: an index it accepts is honoured identically on Candle and MLX.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 #[test]
-fn minimax_h3_first_last_anchors_resolve_to_distinct_ends_under_the_candle_rule() {
-    use crate::video_jobs::minimax_h3::{minimax_h3_conditioning, minimax_h3_last_frame_index};
-    let candle_end = |frame_idx: i32, num_frames: u32| -> &'static str {
-        let idx = frame_idx.max(0) as u32;
-        if idx == 0 {
-            "first"
-        } else if idx == num_frames.saturating_sub(1) {
-            "last"
-        } else {
-            "interior"
-        }
+fn minimax_h3_first_last_anchors_resolve_to_distinct_ends_under_the_shared_contract() {
+    use crate::video_jobs::minimax_h3::{
+        minimax_h3_conditioning, minimax_h3_last_frame_index, validate_minimax_h3_keyframes,
     };
+    use gen_core_h3::h3_keyframe::{KeyframeAnchor, KeyframeSlots};
     let image = |tag: u8| Image {
         width: 2,
         height: 2,
         pixels: vec![tag; 12],
     };
+    let keyframe = |frame_idx: i32| Conditioning::Keyframe {
+        image: image(1),
+        frame_idx,
+        strength: 1.0,
+    };
     // 124 is the campaign's 5.1667 s @ 24 fps request; 22 and 243 are other `17n + 5` counts (a
     // short clip and a ~10 s one), so the index is not accidentally right for one count only.
     for frames in [22_u32, 124, 243] {
-        let ends: Vec<&str> = minimax_h3_conditioning(
+        let both = minimax_h3_conditioning(
             frames,
             Some(image(1)),
             Some(image(2)),
             Vec::new(),
             Vec::new(),
             Vec::new(),
-        )
-        .iter()
-        .filter_map(|c| match c {
-            Conditioning::Keyframe { frame_idx, .. } => Some(candle_end(*frame_idx, frames)),
-            _ => None,
-        })
-        .collect();
-        assert_eq!(ends, vec!["first", "last"], "{frames} frames");
+        );
+        assert_eq!(
+            validate_minimax_h3_keyframes(&both, frames).expect("first+last resolves"),
+            KeyframeSlots {
+                first: Some(0),
+                last: Some(1)
+            },
+            "{frames} frames"
+        );
+        let last_only = minimax_h3_conditioning(
+            frames,
+            None,
+            Some(image(2)),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            validate_minimax_h3_keyframes(&last_only, frames)
+                .expect("last-only resolves")
+                .anchors(),
+            vec![KeyframeAnchor::Last],
+            "a last-frame-only request anchors the LAST frame, never the first ({frames} frames)"
+        );
     }
+    // Under the shared contract -1 is the LAST frame too (the old Candle clamp read it as FIRST).
     assert_eq!(
-        candle_end(-1, 124),
-        "first",
-        "the mirror must reproduce the defect: -1 clamps to the FIRST frame on Candle"
+        validate_minimax_h3_keyframes(&[keyframe(0), keyframe(-1)], 124)
+            .unwrap()
+            .anchors(),
+        vec![KeyframeAnchor::First, KeyframeAnchor::Last]
+    );
+    // Interior, out-of-range, other negative and duplicate anchors are refused, never clamped.
+    for (idxs, needle) in [
+        (vec![0, 60], "interior"),
+        (vec![0, 124], "out of range"),
+        (vec![-2], "negative"),
+        (vec![0, 0], "same end"),
+        (vec![123, -1], "same end"),
+    ] {
+        let conditioning: Vec<Conditioning> = idxs.iter().map(|&i| keyframe(i)).collect();
+        let error = validate_minimax_h3_keyframes(&conditioning, 124).unwrap_err();
+        assert!(
+            error.starts_with("MiniMax-H3 keyframe: ") && error.contains(needle),
+            "{idxs:?}: {error}"
+        );
+    }
+    assert!(
+        validate_minimax_h3_keyframes(&[], 124).unwrap().is_empty(),
+        "no keyframes is t2va/ref2va, not an error"
     );
     assert_eq!(minimax_h3_last_frame_index(124), 123);
     assert_eq!(minimax_h3_last_frame_index(1), 0);
