@@ -77,7 +77,7 @@ jq -n --arg sw "$PUBLISHED_FINAL_SHA" --argjson ack "$ACTUAL_SCOPE_ACKNOWLEDGED"
   --argjson shift "$OPERATOR_PULPCUT_SHIFT" --argjson audioShift "$OPERATOR_PULPCUT_AUDIO_SHIFT" '
 {
   stationary_pair_authorized: true, sceneworks_sha: $sw,
-  inference_sha: "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+  inference_sha: "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
   native_evidence_ref: "main",
   native_evidence_sha: "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
   expected_runner: $runner, adaptive_matrix: true,

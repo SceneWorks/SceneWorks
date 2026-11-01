@@ -105,7 +105,7 @@ BACKENDS=cuda docs/testing/sc-26691-campaign/dispatch.sh --ack <sceneworks-sha>
   activity 27075) and must name the branch's current head; the script refuses a moved head.
 - `inference_sha` must be reachable from inference `origin/main` — the bootstrap refuses an interim
   feature pin. `dispatch.sh` stamps it from the reviewed head's `crates/sceneworks-worker/Cargo.toml`
-  pin (`354b41cc` today: inference main, which carries SceneWorks/inference#1389); the checked-in requests carry the
+  pin (`a43724b8` today: inference main, which carries SceneWorks/inference#1389 and #1405, the shared H3 keyframe contract); the checked-in requests carry the
   same value.
 - `native_evidence_sha` (the separate `inference-evidence` checkout that builds the native probes and
   runs the CPU oracle bridge) is inference main `0bada8f7` (SceneWorks/inference#1385: the bridge binds
@@ -145,7 +145,7 @@ quadratic in it:
   `maxPixels` 1,032,192; 1536x768 was silently fitted to 1408x704). Not reducible.
 - **Image references** (`imageA`/`imageB`, 576x320 plates): the request sets no
   `referenceImageShortEdge` or `referenceImageResizeMode`, so the engine defaults apply. At the
-  current inference pin (`354b41cc`, which carries the sc-26691 engine change) the default resize
+  current inference pin (`a43724b8`, which carries the sc-26691 engine change) the default resize
   mode is `match` (`min(1, sqrt(targetArea / refArea))`, sides on the 32 lattice): a 576x320 plate
   against the 1088x544 canvas stays 576x320 (180 + 180), where the pre-sc-26691 pin (`232f3f24`)
   upscaled every plate to the 2048 short edge (3680x2048, 7,360 latent rows + 7,360 vision tokens
