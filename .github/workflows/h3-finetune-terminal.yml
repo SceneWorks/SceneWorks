@@ -205,6 +205,9 @@ jobs:
           // Only the inline reduced-v1 bootstrap is known to be adaptive this early; an external plan
           // is classified by the wait loop's own liveness check once the plan is read.
           if(request.adaptive_matrix===false||request.bootstrap?.cohort!=="reduced-v1"){console.log("no adaptive peer pairing requested");process.exit(0);}
+          // Explicit case ids would be ignored by the adaptive matrix (the Execute step refuses them);
+          // fail here, before staging, instead of after hours of bootstrap.
+          if(Array.isArray(request.case_ids)&&request.case_ids.length>2)throw new Error("explicit case_ids cannot run under the adaptive matrix; declare prior_matrix_decision (or adaptive_matrix:false) to run an explicit subset");
           const backend=env.H3_STAGE_BACKEND,peer=backend==="mlx"?"cuda":"mlx";
           const gh=args=>execFileSync("gh",args,{encoding:"utf8",maxBuffer:16*1024*1024,env});
           const result=await awaitPeerLane({gh,repository:env.GITHUB_REPOSITORY,headSha:env.H3_SCENEWORKS_SHA,selfRunId:env.GITHUB_RUN_ID,peerBackend:peer,anchorName:`h3-anchors-${peer}-${env.H3_SCENEWORKS_SHA}-${env.H3_ANCHOR_INFERENCE_SHA}-${env.H3_ANCHOR_EVIDENCE_SHA}`,startedAt:Date.parse(env.H3_TERMINAL_JOB_STARTED_AT)});
@@ -728,6 +731,10 @@ jobs:
           const request=JSON.parse(env.H3_STAGE_REQUEST||"{}");
           // A declared prior decision is already in the plan: no anchors are published or awaited.
           const adaptive=plan.inventory==="reduced-v1"&&ids.length>2&&request.adaptive_matrix!==false&&!plan.priorMatrixDecision;
+          // Explicit case ids are authoritative: the adaptive matrix runs anchors 1/15 and then its
+          // measured allocation, never a requested subset, so refuse rather than silently drop them.
+          const explicitSubset=Array.isArray(request.case_ids)||(typeof request.case_id==="string"&&request.case_id!=="");
+          if(adaptive&&explicitSubset)throw new Error(`explicit case_ids (${ids.join(",")}) cannot run under the adaptive matrix, which would ignore them; declare prior_matrix_decision (or adaptive_matrix:false) to run an explicit subset`);
           const selected=adaptive?plan.cases.filter(c=>c.backend===env.H3_STAGE_BACKEND&&[1,15].includes(c.index)).map(c=>c.id):ids;
           for(const id of selected)execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
           if(adaptive){const directory=await writeInlineAnchorBundle(plan,env.H3_STAGE_BACKEND);await appendFile(env.GITHUB_ENV,`H3_INLINE_ANCHORS=${directory}\nH3_MATRIX_PENDING=1\n`);}

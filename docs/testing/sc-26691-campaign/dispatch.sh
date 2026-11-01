@@ -25,6 +25,8 @@
 #                     A work root on E: or under the macOS HF home is refused by the lane.
 #   CASE_IDS          comma-separated case ids; each id must start with "<backend>." and is stamped
 #                     only into that backend's request (a lane with no listed id gets no case_ids).
+#                     Requires PRIOR_MATRIX_RUN: an adaptive (paired) lane runs its measured allocation
+#                     and would ignore an explicit subset, so the kit refuses rather than drop it.
 #   PRIOR_MATRIX_RUN  <run_id>[/<attempt>] (attempt defaults to 1): stamped as prior_matrix_decision.
 #   DRY_RUN           non-empty: stamp and print the requests, dispatch nothing.
 #
@@ -50,6 +52,9 @@ if [ -n "${PRIOR_MATRIX_RUN:-}" ]; then
   fi
 fi
 # Every CASE_IDS entry must belong to a dispatched backend, so no id is silently dropped.
+if [ -n "${CASE_IDS:-}" ] && [ -z "$PRIOR_RUN_ID" ]; then
+  echo "REFUSING: CASE_IDS needs PRIOR_MATRIX_RUN; the paired adaptive matrix runs its measured allocation and would ignore an explicit subset" >&2; exit 2
+fi
 if [ -n "${CASE_IDS:-}" ]; then
   IFS=',' read -r -a _ids <<<"$CASE_IDS"
   for id in "${_ids[@]}"; do

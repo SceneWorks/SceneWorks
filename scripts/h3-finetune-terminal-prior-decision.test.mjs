@@ -161,3 +161,12 @@ test('the terminal workflow adopts a declared prior decision before resolving ca
   assert.match(workflow, /\.\.\.Object\.values\(plan\.priorMatrixDecision\.anchorPackets\)\.map\(v=>path\.join\(plan\.output,v\.retainedDirectory\)\)/, 'the reused witnesses\' packets are retained with the case evidence');
   assert.match(workflow, /reusedFromPriorDecision:witnesses\.reuse\?\?null/, 'the lane logs a reused witness as reused');
 });
+test('explicit case ids are authoritative: refused without a prior decision instead of silently dropped', async () => {
+  const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /if\(adaptive&&explicitSubset\)throw new Error\(/, 'the Execute step refuses an explicit subset the adaptive matrix would ignore');
+  assert.match(workflow, /if\(Array\.isArray\(request\.case_ids\)&&request\.case_ids\.length>2\)throw new Error\("explicit case_ids cannot run under the adaptive matrix/, 'the peer preflight fails fast before staging');
+  const { spawnSync } = await import('node:child_process');
+  const script = fileURLToPath(new URL('../docs/testing/sc-26691-campaign/dispatch.sh', import.meta.url));
+  const r = spawnSync('bash', [script, '--ack', 'a'.repeat(40)], { encoding: 'utf8', env: { ...process.env, CASE_IDS: 'cuda.reduced.real-hybrid-reference', PRIOR_MATRIX_RUN: '', DRY_RUN: '1' } });
+  assert.equal(r.status, 2, r.stderr); assert.match(r.stderr, /REFUSING: CASE_IDS needs PRIOR_MATRIX_RUN/);
+});
