@@ -188,7 +188,8 @@ jobs:
       # before any staging or model work and fail within minutes (a bounded grace covers a peer
       # dispatched seconds after this one); the wait loop re-checks it while waiting.
       - name: Fail fast when the adaptive matrix has no live peer lane
-        if: ${{ inputs.case_id == '' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
+        # A lane running on a declared prior measured decision exchanges no anchors, so it has no peer.
+        if: ${{ inputs.case_id == '' && fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true && fromJSON(inputs.campaign_request).prior_matrix_decision == null }}
         shell: bash
         working-directory: sceneworks
         env:
@@ -562,6 +563,48 @@ jobs:
           finally { try { await copyFile(path.join(root,"conditioning","speech-1272-128104-0000","speech-receipt.json"),path.join(env.H3_STAGE_EVIDENCE,"speech-receipt.json")); } catch(error) { if(!failure)throw error; } }
           if(failure)throw failure;
           NODE
+      # sc-26691 (2026-11-01): a lane may run an explicit case subset at a NEW SceneWorks SHA on a
+      # matrix decision a named earlier run already MEASURED, instead of a fresh peer anchor
+      # exchange. request.prior_matrix_decision = {run_id, attempt} names that run; its retained
+      # reduced evidence (adapter plans carrying the decision), its own anchor packet and the peer
+      # packet it received are downloaded and re-validated, the decision is recomputed from those
+      # anchors, the subset must sit in this lane's allocation and must not have passed there
+      # already, and the record — with `git diff --name-only <prior sha>..<this sha>` — is bound into
+      # the plan and retained as evidence. See adoptPriorMatrixDecision.
+      - name: Adopt the declared prior measured matrix decision
+        if: ${{ fromJSON(inputs.campaign_request).prior_matrix_decision != null }}
+        shell: bash
+        working-directory: sceneworks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import {execFileSync} from "node:child_process";
+          import {appendFile, mkdtemp, readFile, writeFile} from "node:fs/promises";
+          import path from "node:path";
+          import {adoptPriorMatrixDecision} from "./scripts/h3-finetune-terminal.mjs";
+          import {loadPriorDecisionEvidence} from "./scripts/lib/h3-prior-decision.mjs";
+          const env = process.env, request = JSON.parse(env.H3_STAGE_REQUEST || "{}"), declared = request.prior_matrix_decision;
+          assert.ok(declared && typeof declared === "object", "prior_matrix_decision must be {run_id, attempt}");
+          assert.ok(request.case_id === undefined, "a prior-decision lane takes case_ids, not case_id");
+          const planPath = env.H3_PLAN_EFFECTIVE, plan = JSON.parse(await readFile(planPath, "utf8"));
+          assert.equal(plan.sceneworks, env.H3_SCENEWORKS_SHA);
+          const gh = args => execFileSync("gh", args, {encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env});
+          const workDir = await mkdtemp(path.join(plan.output, "prior-decision-"));
+          const loaded = await loadPriorDecisionEvidence({gh, repository: env.GITHUB_REPOSITORY, runId: String(declared.run_id), attempt: String(declared.attempt), workDir,
+            download: async ({runId, name, directory}) => execFileSync("gh", ["run", "download", runId, "--repo", env.GITHUB_REPOSITORY, "--name", name, "--dir", directory], {stdio: "inherit", env})});
+          const changedFiles = loaded.decisionPlan.sceneworks === plan.sceneworks ? [] : execFileSync("git", ["diff", "--name-only", `${loaded.decisionPlan.sceneworks}..${plan.sceneworks}`], {encoding: "utf8"}).split("\n").filter(Boolean);
+          const caseIds = Array.isArray(request.case_ids) ? request.case_ids.map(String) : null;
+          const record = await adoptPriorMatrixDecision(plan, {backend: env.H3_STAGE_BACKEND, decisionRun: loaded.decisionRun, decisionPlan: loaded.decisionPlan, packets: loaded.packets, priorEvidenceRoot: loaded.priorEvidenceRoot, caseIds, changedFiles});
+          const adopted = path.join(plan.output, "prior-decision-plan.json");
+          await writeFile(adopted, JSON.stringify(plan, null, 2) + "\n", {flag: "wx"});
+          const evidence = {...record, evidenceArtifact: loaded.evidenceArtifact, anchorArtifacts: Object.fromEntries(Object.entries(loaded.packets).map(([b, v]) => [b, v.artifact]))};
+          for (const target of [path.join(plan.output, "prior-matrix-decision.json"), path.join(env.H3_STAGE_EVIDENCE, "prior-matrix-decision.json")]) await writeFile(target, JSON.stringify(evidence, null, 2) + "\n", {flag: "wx"});
+          await appendFile(env.GITHUB_ENV, `H3_PLAN_EFFECTIVE=${adopted}\n`);
+          console.log(JSON.stringify({priorDecision: {run: record.decisionRun, selected: record.decision.selectedBackend, subset: record.subsetCaseIds, priorPassed: record.priorPassedCaseIds.length, sourceShaDifference: {from: record.sourceShaDifference.from, to: record.sourceShaDifference.to, files: record.sourceShaDifference.files.length}}}));
+          NODE
       - name: Resolve the reduced operational case set for this backend
         shell: bash
         working-directory: sceneworks
@@ -584,7 +627,9 @@ jobs:
           const planIds = new Set((plan.cases ?? []).map(item => item.id));
           const explicit = Array.isArray(request.case_ids) ? request.case_ids.map(String) : (typeof request.case_id === "string" && request.case_id ? [request.case_id] : null);
           let ids;
-          if (explicit) { for (const id of explicit) assert.ok(planIds.has(id), `explicit case ${id} is not in the plan`); ids = explicit; }
+          // A declared prior decision already admitted (and validated) exactly this lane's subset.
+          if (plan.priorMatrixDecision) { ids = plan.priorMatrixDecision.subsetCaseIds; if (explicit) assert.deepEqual(ids, explicit, "the adopted subset must be the requested case_ids"); }
+          else if (explicit) { for (const id of explicit) assert.ok(planIds.has(id), `explicit case ${id} is not in the plan`); ids = explicit; }
           else {
             validatePlan(plan);
             assert.equal(plan.inventory,"reduced-v1","terminal execution defaults to the reduced operational inventory");
@@ -594,7 +639,7 @@ jobs:
             assert.ok(ids.length===25||ids.length===18,"reduced inventory is 25 maximum or 18 on the measured displaced backend");
           }
           await writeFile(path.join(output, "case-ids.json"), JSON.stringify(ids, null, 2) + "\n");
-          const evidencePaths=[...ids.map(id=>path.join(output,id)),path.join(output,`backend-readback-${env.H3_STAGE_BACKEND}.json`),path.join(output,`native-witnesses-${env.H3_STAGE_BACKEND}`)];
+          const evidencePaths=[...ids.map(id=>path.join(output,id)),path.join(output,`backend-readback-${env.H3_STAGE_BACKEND}.json`),path.join(output,`native-witnesses-${env.H3_STAGE_BACKEND}`),...(plan.priorMatrixDecision?[path.join(output,"prior-matrix-decision.json"),path.join(output,"prior-decision-plan.json")]:[])];
           await appendFile(env.GITHUB_ENV,`H3_CASE_ARTIFACT_PATHS<<H3_CASE_PATHS_END\n${evidencePaths.join("\n")}\nH3_CASE_PATHS_END\n`);
           await appendFile(env.GITHUB_ENV, `H3_TERMINAL_CASES=${ids.join(",")}\nH3_PLAN_EFFECTIVE=${planPath}\n`);
           console.log(JSON.stringify({ backend: env.H3_STAGE_BACKEND, cases: ids.length, plan: planPath }));
@@ -677,7 +722,8 @@ jobs:
           const env=process.env,ids=(env.H3_TERMINAL_CASES??env.CASE_ID??"").split(",").map(v=>v.trim()).filter(Boolean);
           assert.ok(ids.length>0,"resolved operational cases required");
           const request=JSON.parse(env.H3_STAGE_REQUEST||"{}");
-          const adaptive=plan.inventory==="reduced-v1"&&ids.length>2&&request.adaptive_matrix!==false;
+          // A declared prior decision is already in the plan: no anchors are published or awaited.
+          const adaptive=plan.inventory==="reduced-v1"&&ids.length>2&&request.adaptive_matrix!==false&&!plan.priorMatrixDecision;
           const selected=adaptive?plan.cases.filter(c=>c.backend===env.H3_STAGE_BACKEND&&[1,15].includes(c.index)).map(c=>c.id):ids;
           for(const id of selected)execFileSync(process.execPath,["scripts/h3-finetune-terminal.mjs","run-case",env.PLAN,id,`${env.GITHUB_WORKSPACE}/sceneworks`,`${env.GITHUB_WORKSPACE}/inference`],{stdio:"inherit",env});
           if(adaptive){const directory=await writeInlineAnchorBundle(plan,env.H3_STAGE_BACKEND);await appendFile(env.GITHUB_ENV,`H3_INLINE_ANCHORS=${directory}\nH3_MATRIX_PENDING=1\n`);}

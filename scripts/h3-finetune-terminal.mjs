@@ -876,7 +876,11 @@ export async function verifyMatrixAdmission(p) {
   executionCases(p);
   const proofs=await loadRetainedProofIndex(p);for(const backend of ['mlx','cuda'])assert.ok(proofs.some(proof=>proof.kind==='cheap-causal-witness'&&proof.backend===backend&&proof.surfaceEvidence),'cannot omit real matrix cases before both actual encoded-native witnesses have passed');
   const anchors=Array.isArray(p.matrixAnchors)?p.matrixAnchors:Object.values(p.matrixAnchors).flat();
-  for(const anchor of anchors){sha64(anchor.receiptInput?.sha256);assert.equal(await hashFile(anchor.receiptInput.path),anchor.receiptInput.sha256);const row=await json(anchor.receiptInput.path);assert.equal(row.status,'passed');assert.equal(row.caseId,anchor.caseId);assert.equal(row.sceneworks,p.sceneworks);assert.equal(row.inference,p.inference);assert.ok(row.runId&&row.runAttempt&&row.verified?.files?.length);assert.equal(Date.parse(row.completed)-Date.parse(row.started),anchor.wallMs,'anchor must be measured from the actual inline execution, never an estimate');assert.equal(anchor.sourceSha,p.sceneworks);assert.equal(anchor.pinSha,p.inference);}
+  // A declared prior decision's anchors were measured at ITS SceneWorks source, recorded with the
+  // SHA difference to this plan; everything else about them (pin, receipt hashes, wall time) holds.
+  if(p.priorMatrixDecision){assert.equal(p.priorMatrixDecision.kind,PRIOR_DECISION_KIND);sha40(p.priorMatrixDecision.sourceSha);assert.deepEqual(p.priorMatrixDecision.decision,p.matrixDecision,'prior decision record differs from the plan decision');assert.equal(p.priorMatrixDecision.sourceShaDifference?.from,p.priorMatrixDecision.sourceSha);assert.equal(p.priorMatrixDecision.sourceShaDifference?.to,p.sceneworks);assert.ok(Array.isArray(p.priorMatrixDecision.sourceShaDifference.files));}
+  const anchorSha=p.priorMatrixDecision?.sourceSha??p.sceneworks;
+  for(const anchor of anchors){sha64(anchor.receiptInput?.sha256);assert.equal(await hashFile(anchor.receiptInput.path),anchor.receiptInput.sha256);const row=await json(anchor.receiptInput.path);assert.equal(row.status,'passed');assert.equal(row.caseId,anchor.caseId);assert.equal(row.sceneworks,anchorSha);assert.equal(row.inference,p.inference);assert.ok(row.runId&&row.runAttempt&&row.verified?.files?.length);assert.equal(Date.parse(row.completed)-Date.parse(row.started),anchor.wallMs,'anchor must be measured from the actual inline execution, never an estimate');assert.equal(anchor.sourceSha,anchorSha);assert.equal(anchor.pinSha,p.inference);}
 }
 // ---------------------------------------------------------------------------
 // Per-case model storage (sc-26691). Each real case's owned service writes its own import copy, a
@@ -1043,6 +1047,8 @@ export async function runCase(p, id, root, inferenceRoot) {
   else assert.equal(process.platform, 'win32');
   // Every case write lands below the output root, which must be on the work root, never the weights volume.
   assertWritePathOffWeights(p.output, { what: 'case output root' });
+  // A lane running on a declared prior decision runs only the subset that decision admitted.
+  if (p.priorMatrixDecision) assert.ok(p.priorMatrixDecision.subsetCaseIds.includes(id), `${id} is not in the declared prior-decision subset`);
   await verifyMatrixAdmission(p);
   const budget=p.inventory==='reduced-v1'?await laneBudget(p,c.backend):null;
   // The soft deadline ends the scenario; the hard one leaves the case process room for its own
@@ -1315,6 +1321,145 @@ export async function reducedCoverageReport(p,caseRecords,proofs=[]) {
   const unproven=mapping.unproven.map(item=>({...item,surfaceEvidence:item.cellId.includes('.capability.')?'Native encoded conditioning witnesses and a real mixed render, when individually passed, exercise the surface; an omitted end-to-end render cell is NOT thereby proven on this backend.':null}));
   return {inventory:'reduced-v1',catalogCells:mapping.coverage.length,operationalCases:caseRecords.length,manifestCases:p.cases.length,counts:catalogCoverageCounts(mapping.coverage),coverage:mapping.coverage,unproven,uniqueJobs,matrixDecision:p.matrixDecision??{status:'unresolved',reason:'No measured inline anchors yet; no backend assumed faster.'},retainedSurfaceEvidence:proofs.filter(v=>v.kind==='cheap-causal-witness').map(v=>({id:v.id,backend:v.backend,sourceSha:v.sourceSha,scope:v.surfaceEvidence})),nativeEvidence:p.nativeEvidence??null,productPin:p.inference,scope:'Actual-artifact probes prove selected projections, not full QKV/FFN mapping. Cold cancellation completes no native load and claims no peak. Native encoded witnesses do not prove raw preprocessing or omitted AV contrasts.'};
 }
+// ---------------------------------------------------------------------------
+// Declared prior measured matrix decision (sc-26691, 2026-11-01). A lane may run an explicit case
+// subset at a NEW SceneWorks SHA without a fresh peer anchor exchange by adopting the matrix
+// decision a named earlier run already MEASURED: that run's retained adapter plan (its decision and
+// the anchor receipt hashes it was computed from) and both lanes' retained anchor packets are
+// re-validated, the decision is recomputed from those anchors and must equal the retained one, and
+// the record names the run, both packets, the lane's allocation, what already passed there, the
+// subset this lane runs, and the git difference between the two SceneWorks SHAs. It is recorded in
+// the plan (and so in every case's planSha256), never inferred.
+export const PRIOR_DECISION_KIND = 'h3-prior-matrix-decision';
+async function readRetainedAnchorPacket(directory, { backend, sceneworks, inference, nativeEvidenceSha, runId, runAttempt }) {
+  assert.ok((await stat(contained(directory, 'anchors.json'))).size <= 8 * 1024 * 1024, 'anchor metadata size bound exceeded');
+  const packet = await json(contained(directory, 'anchors.json'));
+  assert.equal(packet.version, 1); assert.equal(packet.backend, backend, `retained ${backend} anchor packet names ${packet.backend}`);
+  assert.equal(packet.sceneworks, sceneworks, `retained ${backend} anchors were not measured at the prior decision's source`);
+  assert.equal(packet.productPin, inference, `retained ${backend} anchors use another inference pin`);
+  assert.equal(packet.nativeEvidenceSha, nativeEvidenceSha, `retained ${backend} anchors use another native evidence SHA`);
+  assert.equal(String(packet.runId), String(runId), `retained ${backend} anchor packet run id differs from its artifact's run`);
+  assert.equal(String(packet.runAttempt), String(runAttempt), `retained ${backend} anchor packet attempt differs from its artifact`);
+  assert.equal(packet.anchors?.length, 2); assert.ok(Array.isArray(packet.files) && packet.files.length <= 32);
+  for (const file of packet.files) { const actual = await realpath(contained(directory, file.path)); contained(await realpath(directory), actual); assert.ok((await stat(actual)).size <= 64 * 1024 * 1024, 'anchor exchange contains metadata only'); assert.equal(await hashFile(actual), file.sha256, `retained ${backend} anchor file ${file.path} changed`); }
+  const rebase = input => { assert.ok(packet.files.some(f => f.path === input.path && f.sha256 === input.sha256), 'anchor packet omitted a referenced receipt/log'); return { ...input, path: contained(directory, input.path) }; };
+  return { anchors: packet.anchors.map(anchor => ({ ...anchor, receiptInput: rebase(anchor.receiptInput) })), proofs: (packet.proofs ?? []).map(proof => ({ ...proof, receiptInput: rebase(proof.receiptInput), logInputs: proof.logInputs.map(rebase) })) };
+}
+/**
+ * Adopt a declared prior decision into a fresh reduced plan for `backend`.
+ * - decisionRun: {runId, attempt, backend} of the run whose retained evidence carries the decision.
+ * - decisionPlan: that run's retained post-decision adapter plan (any case's adapter-plan.json).
+ * - packets: {mlx:{directory, runId, runAttempt}, cuda:{...}} — both lanes' retained anchor packets.
+ * - priorEvidenceRoot: the decision run's retained case evidence; its PASSED cases count only for
+ *   the same backend and are excluded from (never re-run in) the subset.
+ * - caseIds: an explicit subset, or null for "the lane's allocation minus what already passed".
+ * - changedFiles: `git diff --name-only <prior sha>..<this sha>`.
+ */
+export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisionPlan, packets, priorEvidenceRoot, caseIds = null, changedFiles }) {
+  assert.equal(p.inventory, 'reduced-v1', 'a prior matrix decision applies to the reduced inventory only');
+  assert.ok(['mlx', 'cuda'].includes(backend));
+  assert.ok(p.matrixDecision === undefined && p.matrixAnchors === undefined && p.priorMatrixDecision === undefined, 'a prior decision is adopted once, into a plan without its own decision');
+  assert.match(String(decisionRun?.runId ?? ''), /^\d+$/, 'prior decision run id required'); assert.match(String(decisionRun?.attempt ?? ''), /^\d+$/, 'prior decision run attempt required');
+  assert.ok(['mlx', 'cuda'].includes(decisionRun.backend), 'prior decision run backend required');
+  const prior = decisionPlan;
+  validateMatrixDecision(prior?.matrixDecision); assert.equal(prior?.matrixDecision?.status, 'selected', 'the declared prior run must carry a measured, selected matrix decision');
+  sha40(prior.sceneworks); assert.equal(prior.inventory, 'reduced-v1'); assert.deepEqual(prior.source, p.source);
+  assert.equal(prior.inference, p.inference, 'the prior decision must share this lane\'s inference pin');
+  assert.equal(prior.nativeEvidence?.sha, p.nativeEvidence?.sha, 'the prior decision must share this lane\'s native evidence SHA');
+  assert.ok(Array.isArray(changedFiles) && changedFiles.every(file => typeof file === 'string'), 'the git difference between the two SceneWorks SHAs must be recorded');
+  assert.equal(String(packets?.[decisionRun.backend]?.runId), String(decisionRun.runId), 'the decision run\'s own anchor packet must come from that run');
+  assert.equal(String(packets?.[decisionRun.backend]?.runAttempt), String(decisionRun.attempt), 'the decision run\'s own anchor packet must come from that attempt');
+  const loaded = {};
+  for (const b of ['mlx', 'cuda']) { assert.ok(packets?.[b]?.directory, `retained ${b} anchor packet required`); loaded[b] = await readRetainedAnchorPacket(packets[b].directory, { backend: b, sceneworks: prior.sceneworks, inference: p.inference, nativeEvidenceSha: p.nativeEvidence.sha, runId: packets[b].runId, runAttempt: packets[b].runAttempt }); }
+  const anchors = [...loaded.mlx.anchors, ...loaded.cuda.anchors];
+  const key = anchor => `${anchor.backend}|${anchor.caseId}|${anchor.receiptInput?.sha256}|${anchor.wallMs}`;
+  assert.deepEqual(anchors.map(key).sort(), (prior.matrixAnchors ?? []).map(key).sort(), 'the retained anchor packets are not the anchors the prior decision was measured from');
+  const decision = chooseMatrixBackend({ anchors });
+  assert.deepEqual(decision, prior.matrixDecision, 'the matrix decision recomputed from the retained anchors differs from the retained decision');
+  p.matrixAnchors = anchors; p.matrixDecision = decision;
+  for (const proof of [...loaded.mlx.proofs, ...loaded.cuda.proofs]) if (!(p.proofIndex ?? []).some(v => v.id === proof.id)) p.proofIndex = [...(p.proofIndex ?? []), proof];
+  const allocation = executionCases(p).filter(c => c.backend === backend).map(c => c.id), priorPassed = [];
+  if (backend === decisionRun.backend) for (const id of allocation) {
+    let row; try { row = await json(path.join(contained(priorEvidenceRoot, id), 'execution.json')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (row?.status !== 'passed') continue;
+    assert.equal(String(row.runId), String(decisionRun.runId)); assert.equal(String(row.runAttempt), String(decisionRun.attempt)); assert.equal(row.sceneworks, prior.sceneworks); assert.equal(row.inference, prior.inference);
+    priorPassed.push(id);
+  }
+  const subset = caseIds ? caseIds.map(String) : allocation.filter(id => !priorPassed.includes(id));
+  assert.ok(subset.length > 0, 'the prior-decision subset is empty'); assert.equal(new Set(subset).size, subset.length, 'duplicate subset case');
+  for (const id of subset) {
+    assert.ok(allocation.includes(id), `${id} is not in the ${backend} lane's allocation under the prior decision`);
+    assert.ok(!priorPassed.includes(id), `${id} already PASSED in run ${decisionRun.runId}; a prior-decision subset never re-runs it`);
+  }
+  p.priorMatrixDecision = {
+    kind: PRIOR_DECISION_KIND, laneBackend: backend,
+    decisionRun: { runId: String(decisionRun.runId), attempt: String(decisionRun.attempt), backend: decisionRun.backend },
+    anchorPackets: Object.fromEntries(['mlx', 'cuda'].map(b => [b, { runId: String(packets[b].runId), runAttempt: String(packets[b].runAttempt) }])),
+    sourceSha: prior.sceneworks, decision, allocation, priorPassedCaseIds: priorPassed, subsetCaseIds: subset,
+    notCovered: allocation.filter(id => !priorPassed.includes(id) && !subset.includes(id)),
+    sourceShaDifference: { from: prior.sceneworks, to: p.sceneworks, files: [...changedFiles] },
+    meaning: 'Matrix allocation adopted from a decision MEASURED in the named prior run (recomputed from its retained anchors). The anchors ran at sourceShaDifference.from; this lane runs at .to. Cases in priorPassedCaseIds are that run\'s evidence and are re-validated separately (verify-split-backend), never re-labelled as this run\'s.',
+  };
+  await verifyMatrixAdmission(p);
+  return p.priorMatrixDecision;
+}
+// ---------------------------------------------------------------------------
+// Split-backend content readback (sc-26691). One backend's allocation executed across TWO runs at
+// different SceneWorks SHAs (a prior run's passed cases plus a prior-decision subset run). Each
+// case is re-validated against the exact plan it ran under (its retained adapter-plan.json, bound
+// by planSha256), every case is attributed to its segment and SHA, the segments must share one
+// measured decision, pin and native evidence, and a gap is reported as a gap. This is NOT the
+// single-SHA backend readback and is never accepted as one.
+export async function verifySplitBackendEvidence({ backend, segments }, { verifyCase = verifyPortableCase, controls } = {}) {
+  const { readdir } = await import('node:fs/promises');
+  assert.ok(['mlx', 'cuda'].includes(backend));
+  assert.ok(Array.isArray(segments) && segments.length >= 2, 'a split readback names at least two run segments');
+  const rows = [], plans = [];
+  for (const segment of segments) {
+    assert.ok(typeof segment.label === 'string' && segment.label, 'segment label required'); assert.ok(absolutePath(segment.caseRoot), 'absolute segment case root required');
+    assert.match(String(segment.runId ?? ''), /^\d+$/); assert.match(String(segment.attempt ?? ''), /^\d+$/);
+    for (const entry of await readdir(segment.caseRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !entry.name.startsWith(`${backend}.`)) continue;
+      const dir = contained(segment.caseRoot, entry.name), executionPath = path.join(dir, 'execution.json');
+      let row; try { row = await json(executionPath); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
+      if (row.status !== 'passed') continue;
+      const plan = await json(path.join(dir, 'adapter-plan.json'));
+      assert.equal(digest(plan), row.planSha256, `${entry.name}: retained adapter plan is not the plan the case ran under`);
+      assert.equal(String(row.runId), String(segment.runId), `${entry.name}: executed in run ${row.runId}, not segment ${segment.label}`); assert.equal(String(row.runAttempt), String(segment.attempt));
+      assert.equal(row.sceneworks, plan.sceneworks); const c = plan.cases.find(v => v.id === entry.name); assert.ok(c && c.backend === backend);
+      const executionSha256 = await hashFile(executionPath);
+      await verifyCase(plan, c, dir, { executionSha256, planSha256: row.planSha256, runId: row.runId, runAttempt: row.runAttempt, verified: row.verified });
+      rows.push({ id: c.id, segment: segment.label, runId: String(row.runId), runAttempt: String(row.runAttempt), sceneworks: plan.sceneworks, planSha256: row.planSha256, executionSha256, dir });
+      plans.push({ segment: segment.label, plan });
+    }
+  }
+  const duplicate = rows.find((row, index) => rows.findIndex(other => other.id === row.id) !== index);
+  assert.ok(!duplicate, `case ${duplicate?.id} passed in more than one segment; a split readback attributes each case to exactly one run`);
+  const decided = plans.filter(v => v.plan.matrixDecision);
+  assert.ok(decided.length, 'no segment carries a measured matrix decision');
+  for (const v of decided) assert.deepEqual(v.plan.matrixDecision, decided[0].plan.matrixDecision, `segment ${v.segment} ran under another matrix decision`);
+  for (const v of plans) { assert.equal(v.plan.inference, plans[0].plan.inference, 'segments use different inference pins'); assert.equal(v.plan.nativeEvidence?.sha, plans[0].plan.nativeEvidence?.sha, 'segments use different native evidence'); }
+  const reference = decided[decided.length - 1].plan, allocation = executionCases(reference).filter(c => c.backend === backend).map(c => c.id);
+  for (const row of rows) assert.ok(allocation.includes(row.id), `${row.id} is outside the ${backend} allocation under the shared decision`);
+  const missing = allocation.filter(id => !rows.some(row => row.id === id));
+  const bySegment = segments.map(segment => ({ label: segment.label, runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
+  let crossCaseControls = null;
+  if (!missing.length) {
+    const dirs = new Map(rows.map(row => [row.id, row.dir])), segmentOf = new Map(rows.map(row => [row.id, row.segment]));
+    const { verifyReducedControls } = await import('./h3-finetune-terminal-runtime.mjs');
+    const results = await (controls ?? verifyReducedControls)(reference, backend, { caseDir: c => dirs.get(c.id) });
+    crossCaseControls = results.map(result => ({ ...result, crossSegment: new Set([result.caseId, result.baselineCaseId, result.repeatedCaseId].filter(Boolean).map(id => segmentOf.get(id))).size > 1 }));
+  }
+  return {
+    kind: 'split-backend-content-readback', proof_kind: 'campaign_content_reverified_split', singleShaBackendReadback: false, backend,
+    status: missing.length ? 'split-backend-incomplete' : 'split-backend-content-reverified',
+    matrixDecision: decided[0].plan.matrixDecision, priorMatrixDecision: reference.priorMatrixDecision ?? null,
+    inference: plans[0].plan.inference, nativeEvidenceSha: plans[0].plan.nativeEvidence?.sha ?? null,
+    segments: bySegment, allocation, missing, crossCaseControls,
+    cases: rows.map(({ dir: _dir, ...row }) => row),
+    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. This is not a single-SHA backend readback.',
+  };
+}
 export async function verifyCampaign(p) {
   validatePlan(p);
   if (p.backendReadbacks) {
@@ -1363,6 +1508,8 @@ async function terminalCLI() {
     } else if (mode === 'bind-plan') {
       const { finalizeCampaignPlan } = await import('./h3-finetune-terminal-cases.mjs');
       console.log(JSON.stringify(await finalizeCampaignPlan(await json(planFile), args[0]), null, 2));
+    } else if (mode === 'verify-split-backend') {
+      console.log(JSON.stringify(await verifySplitBackendEvidence(await json(planFile)), null, 2));
     } else {
       const p = validatePlan(await json(planFile));
       if (mode === 'run-case') {
@@ -1377,7 +1524,7 @@ async function terminalCLI() {
       } else if (mode === 'verify-backend') console.log(JSON.stringify(await verifyBackend(p, args[0], args[1], args[2])));
       else if (mode === 'verify') console.log(JSON.stringify(await verifyCampaign(p)));
       else if (mode === 'check-plan') console.log(`complete inventory: ${p.cases.length} cases; no execution claimed`);
-      else throw new Error('usage: h3-finetune-terminal.mjs list | case-plan SW_ROOT INFERENCE_ROOT STAGE_ROOT | prepare-cases PARAMETERS NEW_STAGE_ROOT | bind-plan PARAMETERS PREPARED_ROOT | prepare-lokr SPEC NEW_DIRECTORY | compare-control BASE REPEAT INTERVENTION video|audio MIN_DELTA MAX_BASELINE_DELTA | check-plan PLAN | run-case PLAN CASE SW_ROOT INFERENCE_ROOT | verify-backend PLAN mlx|cuda SW_ROOT INFERENCE_ROOT | verify PLAN');
+      else throw new Error('usage: h3-finetune-terminal.mjs list | case-plan SW_ROOT INFERENCE_ROOT STAGE_ROOT | prepare-cases PARAMETERS NEW_STAGE_ROOT | bind-plan PARAMETERS PREPARED_ROOT | prepare-lokr SPEC NEW_DIRECTORY | compare-control BASE REPEAT INTERVENTION video|audio MIN_DELTA MAX_BASELINE_DELTA | check-plan PLAN | run-case PLAN CASE SW_ROOT INFERENCE_ROOT | verify-backend PLAN mlx|cuda SW_ROOT INFERENCE_ROOT | verify PLAN | verify-split-backend MANIFEST');
     }
   } catch (e) { console.error(e.message); process.exitCode = 1; }
 }

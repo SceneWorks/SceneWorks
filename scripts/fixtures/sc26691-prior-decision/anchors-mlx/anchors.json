@@ -1,0 +1,1304 @@
+{
+  "version": 1,
+  "backend": "mlx",
+  "sceneworks": "4c3625898b20859f57ca38986ed80b1c427cdfdb",
+  "productPin": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+  "nativeEvidenceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+  "runId": "41213914294",
+  "runAttempt": "1",
+  "anchors": [
+    {
+      "backend": "mlx",
+      "caseId": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "role": "reference",
+      "wallMs": 3885104,
+      "recipe": {
+        "model": {
+          "checkpointSha256": "db3ec568863db6f5ec1840210d41653afef73d4df7b0cb489c52ad458b6f8a7f",
+          "topology": {
+            "kind": "no-pruning-binding-in-observed-assembly"
+          },
+          "quantization": {
+            "sourceEncoding": "convrot_int8",
+            "observedAssembly": {
+              "schemaVersion": 1,
+              "family": "minimax-h3",
+              "partition": "ref2va",
+              "components": {
+                "audio_vae": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "shared"
+                },
+                "text_encoder": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "shared"
+                },
+                "tokenizer": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "shared"
+                },
+                "vae": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "shared"
+                },
+                "transformer_ref": {
+                  "source": "plan",
+                  "layerId": "artifact:Minimax-h3_Singularity_ref2va_v2_int8.safetensors",
+                  "layerIds": [
+                    "artifact:Minimax-h3_Singularity_ref2va_v2_int8.safetensors"
+                  ],
+                  "directory": "",
+                  "descriptorLayerIds": []
+                },
+                "transformer": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "load_only"
+                }
+              },
+              "componentClosure": [
+                {
+                  "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "audio_vae",
+                    "estimatedSizeBytes": 605431611,
+                    "files": [
+                      "audio_vae/*"
+                    ],
+                    "platforms": [
+                      "macos"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                    "subdir": "audio_vae"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "audio_vae/config.json",
+                      "sha256": "sha256:9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+                      "sizeBytes": 2271
+                    },
+                    {
+                      "relativePath": "audio_vae/diffusion_pytorch_model.safetensors",
+                      "sha256": "sha256:52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+                      "sizeBytes": 605429340
+                    }
+                  ]
+                },
+                {
+                  "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "fl2va_audio_vae_config",
+                    "estimatedSizeBytes": 2504,
+                    "files": [
+                      "FL2VA/audio_vae/config.json",
+                      "FL2VA/audio_vae/config.yaml",
+                      "FL2VA/audio_vae/metadata.json"
+                    ],
+                    "platforms": [
+                      "macos"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                    "subdir": "FL2VA/audio_vae"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "FL2VA/audio_vae/config.json",
+                      "sha256": "sha256:d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771",
+                      "sizeBytes": 1973
+                    },
+                    {
+                      "relativePath": "FL2VA/audio_vae/config.yaml",
+                      "sha256": "sha256:259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e",
+                      "sizeBytes": 91
+                    },
+                    {
+                      "relativePath": "FL2VA/audio_vae/metadata.json",
+                      "sha256": "sha256:755d0529d43b2b5c83590f6f44ca659bc68e6a21b01d5669c93e8b2965749bff",
+                      "sizeBytes": 440
+                    }
+                  ]
+                },
+                {
+                  "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "text_encoder",
+                    "estimatedSizeBytes": 18722713964,
+                    "files": [
+                      "q4/text_encoder/*"
+                    ],
+                    "platforms": [
+                      "macos",
+                      "windows",
+                      "linux"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "SceneWorks/minimax-h3-mlx",
+                    "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+                    "subdir": "q4/text_encoder",
+                    "variant": "q4"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "q4/text_encoder/chat_template.json",
+                      "sha256": "sha256:5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+                      "sizeBytes": 5499
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/config.json",
+                      "sha256": "sha256:de4a0698c7bbd69501e6a9d33db628a7efbfb2494e6ef3fa620775fc1898daa3",
+                      "sizeBytes": 1533
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/merges.txt",
+                      "sha256": "sha256:599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+                      "sizeBytes": 1671839
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00001-of-00014.safetensors",
+                      "sha256": "sha256:c559e8d35a308cee213ad6bafb64ac0d122e137592aba00a212484627aa5b6a7",
+                      "sizeBytes": 1387288599
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00002-of-00014.safetensors",
+                      "sha256": "sha256:e9fcd69cb2face5254040ab97262f5af77fdf849482ffa3872b5758d80214c05",
+                      "sizeBytes": 1371461650
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00003-of-00014.safetensors",
+                      "sha256": "sha256:91b3758bb16937db2724cbf12975159281f7cdb20c106532c4f05a1a18d082e4",
+                      "sizeBytes": 1371461784
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00004-of-00014.safetensors",
+                      "sha256": "sha256:409800b9a40d3dc31ef5dba6a83768e8bb6c4083c2a9d7261697f4a768270c61",
+                      "sizeBytes": 1371461807
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00005-of-00014.safetensors",
+                      "sha256": "sha256:ae9e6aa4a32f15d2b1968fb5dc2720ec6b6034b8287705b377f3e9ada560acd5",
+                      "sizeBytes": 1371461807
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00006-of-00014.safetensors",
+                      "sha256": "sha256:cfc65313e11a6f15b4054341bd99529b99072628797a9ebd7b55f34ab5fb7e34",
+                      "sizeBytes": 1371461773
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00007-of-00014.safetensors",
+                      "sha256": "sha256:7ad216929f6202d5acb9f43f5dfbbc689884b111091601f2696267f10c28bf73",
+                      "sizeBytes": 1371461749
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00008-of-00014.safetensors",
+                      "sha256": "sha256:87d6f7be840e2351bcad0178b545f17da56c470a2098e5fdbf76ae175d431f0d",
+                      "sizeBytes": 1371461783
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00009-of-00014.safetensors",
+                      "sha256": "sha256:beb4a89fec21e42cb0e38c5e43fcf7d53ce12e7b37fe3cf35e4463bd56e05900",
+                      "sizeBytes": 1371461791
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00010-of-00014.safetensors",
+                      "sha256": "sha256:0cb90e23220629cf6e143d110fa0af40a7b6337935fd5fad42ce6fc9bc8ea8eb",
+                      "sizeBytes": 1371461753
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00011-of-00014.safetensors",
+                      "sha256": "sha256:03c4d31a65a13aa10ef36c9119869a041da3fb4a22897159126789087b9851ee",
+                      "sizeBytes": 1371461793
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00012-of-00014.safetensors",
+                      "sha256": "sha256:41e834d49b8a25640280fe743580845be5c04e5f464f817ca95e30dc297c0b9d",
+                      "sizeBytes": 1371461795
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00014-of-00014.safetensors",
+                      "sha256": "sha256:16ac1bb814c35022f223c4233575d3b7d129b36f017bc503302f083f5181ef3f",
+                      "sizeBytes": 2237658755
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model.safetensors.index.json",
+                      "sha256": "sha256:c0ebdb88ae2619daf0cfb59c49e5ac222cc861bbb1cfe989250d647d85fcabb3",
+                      "sizeBytes": 187240
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/preprocessor_config.json",
+                      "sha256": "sha256:27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+                      "sizeBytes": 390
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/tokenizer.json",
+                      "sha256": "sha256:a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+                      "sizeBytes": 7032403
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/tokenizer_config.json",
+                      "sha256": "sha256:a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+                      "sizeBytes": 11003
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/video_preprocessor_config.json",
+                      "sha256": "sha256:7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+                      "sizeBytes": 385
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/vocab.json",
+                      "sha256": "sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+                      "sizeBytes": 2776833
+                    }
+                  ]
+                },
+                {
+                  "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "tokenizer",
+                    "estimatedSizeBytes": 11492078,
+                    "files": [
+                      "tokenizer/*"
+                    ],
+                    "platforms": [
+                      "macos",
+                      "windows",
+                      "linux"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                    "subdir": "tokenizer"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "tokenizer/merges.txt",
+                      "sha256": "sha256:599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+                      "sizeBytes": 1671839
+                    },
+                    {
+                      "relativePath": "tokenizer/tokenizer.json",
+                      "sha256": "sha256:a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+                      "sizeBytes": 7032403
+                    },
+                    {
+                      "relativePath": "tokenizer/tokenizer_config.json",
+                      "sha256": "sha256:a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+                      "sizeBytes": 11003
+                    },
+                    {
+                      "relativePath": "tokenizer/vocab.json",
+                      "sha256": "sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+                      "sizeBytes": 2776833
+                    }
+                  ]
+                },
+                {
+                  "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "video_vae",
+                    "estimatedSizeBytes": 10415635127,
+                    "files": [
+                      "vae/*"
+                    ],
+                    "platforms": [
+                      "macos"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                    "subdir": "vae"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "vae/config.json",
+                      "sha256": "sha256:78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+                      "sizeBytes": 2011
+                    },
+                    {
+                      "relativePath": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+                      "sha256": "sha256:72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+                      "sizeBytes": 5061033024
+                    },
+                    {
+                      "relativePath": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+                      "sha256": "sha256:2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+                      "sizeBytes": 4955986528
+                    },
+                    {
+                      "relativePath": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+                      "sha256": "sha256:c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
+                      "sizeBytes": 398539336
+                    },
+                    {
+                      "relativePath": "vae/diffusion_pytorch_model.safetensors.index.json",
+                      "sha256": "sha256:15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+                      "sizeBytes": 74228
+                    }
+                  ]
+                },
+                {
+                  "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+                  "download": {
+                    "coRequisite": true,
+                    "estimatedSizeBytes": 18780109783,
+                    "files": [
+                      "q4/transformer/*"
+                    ],
+                    "platforms": [
+                      "macos",
+                      "windows",
+                      "linux"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "SceneWorks/minimax-h3-mlx",
+                    "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+                    "variant": "q4"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "q4/transformer/config.json",
+                      "sha256": "sha256:9208a8892c74a15dcac6828039a528ba13ba2eac0b708ee7d26caef59237ee8d",
+                      "sizeBytes": 613
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00001-of-00014.safetensors",
+                      "sha256": "sha256:6d5ba9b4acfc9246cd1df7b3e157a9b101c4458b7ef788ff0e1ec76321831a71",
+                      "sizeBytes": 1488457995
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00002-of-00014.safetensors",
+                      "sha256": "sha256:95321756ababc90fb758cd39fcd2d0366d326b45022cda5cd310236a3344da9b",
+                      "sizeBytes": 1323111315
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00003-of-00014.safetensors",
+                      "sha256": "sha256:f5e70d6d8bc871455944e8f9da7f4d9dd3a0574b124c39226d153edebb2c0797",
+                      "sizeBytes": 1388138401
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00004-of-00014.safetensors",
+                      "sha256": "sha256:5e16bc143946dd2a3a7d6aac4a3277e9ac34431f149f80aee51e88c8b6df05f0",
+                      "sizeBytes": 1284962984
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00005-of-00014.safetensors",
+                      "sha256": "sha256:601fef51b7e0538a425b441f77c38be8b18952442a19324ce03d0d28574f5c8f",
+                      "sizeBytes": 1323111403
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00006-of-00014.safetensors",
+                      "sha256": "sha256:d12865ea0ffd48cfc7d311f8fa8953ec832daf9048f27b8564f22a691bd2f7ad",
+                      "sizeBytes": 1388138485
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00007-of-00014.safetensors",
+                      "sha256": "sha256:a3d7a8aee94ecdd06bb072b635a7c56b53aba7fbb7dd19a87f0c96dcedf1907f",
+                      "sizeBytes": 1284962964
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00008-of-00014.safetensors",
+                      "sha256": "sha256:62ba99fc9679e154a328aaa6170cf74d0c47bdd12dfe6407a92367feb6d16960",
+                      "sizeBytes": 1323111415
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00009-of-00014.safetensors",
+                      "sha256": "sha256:e3fe77de684132940effbfc2479d6e123e40702606b11637366512b2d0a104f1",
+                      "sizeBytes": 1388138421
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00010-of-00014.safetensors",
+                      "sha256": "sha256:580fe2760e245184c6a14c3f842da4aa8e08be2cad88ad352f5bd17f7b52a374",
+                      "sizeBytes": 1284962958
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00011-of-00014.safetensors",
+                      "sha256": "sha256:186000b10654fdbf6c4edb0bdfa406b1847e5d0bf691879d8fe507fe6a37f2b8",
+                      "sizeBytes": 1323111395
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00012-of-00014.safetensors",
+                      "sha256": "sha256:bce82195aaae6c4984f51f1adf2ab32d81da0f41ec228b014c6327d79a533611",
+                      "sizeBytes": 1388138445
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00013-of-00014.safetensors",
+                      "sha256": "sha256:d15dcbc77a87acf2ee3a140a1b259c0255a99a4cdff544dfcd702f32aee1f5e3",
+                      "sizeBytes": 1284963008
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model-00014-of-00014.safetensors",
+                      "sha256": "sha256:bbbdefdbafe5feb98d48841f9601772df0e1eeefd0a6d26b2cd4b214de21bd71",
+                      "sizeBytes": 1306661489
+                    },
+                    {
+                      "relativePath": "q4/transformer/diffusion_pytorch_model.safetensors.index.json",
+                      "sha256": "sha256:542bc4173b101061381a489ece8580bc8ce41205f419c1ec5ead980ae7ba3ee9",
+                      "sizeBytes": 138492
+                    }
+                  ]
+                }
+              ],
+              "sourceEncoding": "convrot_int8"
+            }
+          },
+          "components": [
+            "9208a8892c74a15dcac6828039a528ba13ba2eac0b708ee7d26caef59237ee8d",
+            "6d5ba9b4acfc9246cd1df7b3e157a9b101c4458b7ef788ff0e1ec76321831a71",
+            "95321756ababc90fb758cd39fcd2d0366d326b45022cda5cd310236a3344da9b",
+            "f5e70d6d8bc871455944e8f9da7f4d9dd3a0574b124c39226d153edebb2c0797",
+            "5e16bc143946dd2a3a7d6aac4a3277e9ac34431f149f80aee51e88c8b6df05f0",
+            "601fef51b7e0538a425b441f77c38be8b18952442a19324ce03d0d28574f5c8f",
+            "d12865ea0ffd48cfc7d311f8fa8953ec832daf9048f27b8564f22a691bd2f7ad",
+            "a3d7a8aee94ecdd06bb072b635a7c56b53aba7fbb7dd19a87f0c96dcedf1907f",
+            "62ba99fc9679e154a328aaa6170cf74d0c47bdd12dfe6407a92367feb6d16960",
+            "e3fe77de684132940effbfc2479d6e123e40702606b11637366512b2d0a104f1",
+            "580fe2760e245184c6a14c3f842da4aa8e08be2cad88ad352f5bd17f7b52a374",
+            "186000b10654fdbf6c4edb0bdfa406b1847e5d0bf691879d8fe507fe6a37f2b8",
+            "bce82195aaae6c4984f51f1adf2ab32d81da0f41ec228b014c6327d79a533611",
+            "d15dcbc77a87acf2ee3a140a1b259c0255a99a4cdff544dfcd702f32aee1f5e3",
+            "bbbdefdbafe5feb98d48841f9601772df0e1eeefd0a6d26b2cd4b214de21bd71",
+            "542bc4173b101061381a489ece8580bc8ce41205f419c1ec5ead980ae7ba3ee9",
+            "d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771",
+            "259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e",
+            "755d0529d43b2b5c83590f6f44ca659bc68e6a21b01d5669c93e8b2965749bff",
+            "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+            "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+            "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+            "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+            "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+            "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+            "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+            "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+            "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+            "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
+            "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+            "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+            "de4a0698c7bbd69501e6a9d33db628a7efbfb2494e6ef3fa620775fc1898daa3",
+            "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+            "c559e8d35a308cee213ad6bafb64ac0d122e137592aba00a212484627aa5b6a7",
+            "e9fcd69cb2face5254040ab97262f5af77fdf849482ffa3872b5758d80214c05",
+            "91b3758bb16937db2724cbf12975159281f7cdb20c106532c4f05a1a18d082e4",
+            "409800b9a40d3dc31ef5dba6a83768e8bb6c4083c2a9d7261697f4a768270c61",
+            "ae9e6aa4a32f15d2b1968fb5dc2720ec6b6034b8287705b377f3e9ada560acd5",
+            "cfc65313e11a6f15b4054341bd99529b99072628797a9ebd7b55f34ab5fb7e34",
+            "7ad216929f6202d5acb9f43f5dfbbc689884b111091601f2696267f10c28bf73",
+            "87d6f7be840e2351bcad0178b545f17da56c470a2098e5fdbf76ae175d431f0d",
+            "beb4a89fec21e42cb0e38c5e43fcf7d53ce12e7b37fe3cf35e4463bd56e05900",
+            "0cb90e23220629cf6e143d110fa0af40a7b6337935fd5fad42ce6fc9bc8ea8eb",
+            "03c4d31a65a13aa10ef36c9119869a041da3fb4a22897159126789087b9851ee",
+            "41e834d49b8a25640280fe743580845be5c04e5f464f817ca95e30dc297c0b9d",
+            "16ac1bb814c35022f223c4233575d3b7d129b36f017bc503302f083f5181ef3f",
+            "c0ebdb88ae2619daf0cfb59c49e5ac222cc861bbb1cfe989250d647d85fcabb3",
+            "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+            "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+            "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+            "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+            "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          ]
+        },
+        "mode": "reference_to_video",
+        "prompt": "A person faces the camera and says, \"We are glad to welcome you today and share a clear account of the work we have finished.\" Natural continuous speech, steady camera, synchronized voice audio.",
+        "seed": 314159,
+        "advanced": {
+          "mlxQuantize": 4,
+          "steps": 4,
+          "schedulerShift": 12,
+          "audioSchedulerShift": 3
+        },
+        "loras": [
+          {
+            "weight": 1,
+            "sha256": "9e642fc8749c74f8da5e2382877ab5c7aa37b9a73b7fd0d6d457bd1b3cb1ae99"
+          }
+        ],
+        "referenceAssetIds": [
+          {
+            "sha256": "29b76d94adde1282a6341c2051ce2f0e18748fcf7a390d2ece76fcc720b53e94",
+            "metadata": {
+              "type": "image",
+              "mimeType": "image/png",
+              "width": null,
+              "height": null,
+              "duration": null,
+              "fps": null
+            },
+            "source": {
+              "kind": "casebook-ffmpeg-recipe",
+              "assetKey": "imageA",
+              "recipeSha256": "89ee8c74442e4ae4e71d142254bcdd297b3ee305928f228af8588955559a4ac9"
+            }
+          },
+          {
+            "sha256": "233f4a34a23277b50e57b121c099960a44f94c6270b44c7f033a9021afd43a9c",
+            "metadata": {
+              "type": "image",
+              "mimeType": "image/png",
+              "width": null,
+              "height": null,
+              "duration": null,
+              "fps": null
+            },
+            "source": {
+              "kind": "casebook-ffmpeg-recipe",
+              "assetKey": "imageB",
+              "recipeSha256": "0219b819d85d70dd93a8a32b103f8d568b342d5cabecc98ce5c6a68e56114afd"
+            }
+          }
+        ],
+        "sourceClipAssetIds": [
+          {
+            "sha256": "932e4b0e380ebf6cf752aa86642c0aec35fe816aaa633435a6d7b4989cf9578a",
+            "metadata": {
+              "type": "video",
+              "mimeType": "video/mp4",
+              "width": null,
+              "height": null,
+              "duration": null,
+              "fps": null
+            },
+            "source": {
+              "kind": "casebook-ffmpeg-recipe",
+              "assetKey": "clipA",
+              "recipeSha256": "c757d26817289054b1e68f1973b74d88d081cbfadc1145df7df1a9a19933ba01"
+            }
+          },
+          {
+            "sha256": "e26178d2ee957f4ffe495e1d01a28bb998627ac2a8a95f0bec3e2962aea684b6",
+            "metadata": {
+              "type": "video",
+              "mimeType": "video/mp4",
+              "width": null,
+              "height": null,
+              "duration": null,
+              "fps": null
+            },
+            "source": {
+              "kind": "casebook-ffmpeg-recipe",
+              "assetKey": "clipB",
+              "recipeSha256": "5b96f1feec95e645838d88a123f9b81066bf6a70087dfc1e8e9caf2f916ccf4b"
+            }
+          }
+        ],
+        "referenceAudioAssetIds": [
+          {
+            "sha256": "995113d2d2872de48f5a1827a850535e320a289f749f88676e73db2fb8e170de",
+            "metadata": {
+              "type": "audio",
+              "mimeType": "audio/wav",
+              "width": null,
+              "height": null,
+              "duration": 5.855,
+              "fps": null
+            },
+            "source": {
+              "kind": "pinned-dataset-speech",
+              "assetKey": "voiceA",
+              "output": "speech-source",
+              "parquetSha256": "4e69a06fa5edc90921e5e7e39a7084881f8b3ed9c805c574f4f39c6fde27c603",
+              "row": "1272-128104-0000",
+              "sourceAudioSha256": "4e25e22555cd16e90edb0a3b49fdcf1fe652b2a1250ab643634db33895c75b41"
+            }
+          },
+          {
+            "sha256": "2d4ad4759fa544f9dc6cfc978da6e7415b0f103ca1a7af0f797d7672dbeb6d12",
+            "metadata": {
+              "type": "audio",
+              "mimeType": "audio/wav",
+              "width": null,
+              "height": null,
+              "duration": 5.855,
+              "fps": null
+            },
+            "source": {
+              "kind": "pinned-dataset-speech",
+              "assetKey": "voiceB",
+              "output": "diagnostic-reversed-not-speaker",
+              "parquetSha256": "4e69a06fa5edc90921e5e7e39a7084881f8b3ed9c805c574f4f39c6fde27c603",
+              "row": "1272-128104-0000",
+              "sourceAudioSha256": "4e25e22555cd16e90edb0a3b49fdcf1fe652b2a1250ab643634db33895c75b41"
+            }
+          }
+        ]
+      },
+      "geometry": {
+        "width": 1088,
+        "height": 544,
+        "duration": 5.166666666666667,
+        "fps": 24
+      },
+      "sourceSha": "4c3625898b20859f57ca38986ed80b1c427cdfdb",
+      "pinSha": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+      "hardware": "{\"device\":\"Apple M5 Max\",\"driver\":\"Apple Metal driver bundled with macOS 27.0.1\"}",
+      "receiptInput": {
+        "path": "1.execution.json",
+        "sha256": "9c46c2680cb9a0562604501bc3dbece6ac04ac2863e5eb9d0b921baee745bf7d"
+      },
+      "measurement": "actual inline execution/build/acquisition/AV-validation elapsed; initial input audit excluded"
+    },
+    {
+      "backend": "mlx",
+      "caseId": "mlx.reduced.real-hybrid-text",
+      "role": "prompt",
+      "wallMs": 1662638,
+      "recipe": {
+        "model": {
+          "checkpointSha256": "a629cfea8d89a071b140c6e1935dc9a23e72de6badc18975a2bb9e6d1423d76d",
+          "topology": {
+            "topologyId": "h3-centered-adaln-curve-v1",
+            "identity": "13aa87119fe525ac6b7b91c7358afd839e0a4b0bd0434593d313da5cc778f2f6",
+            "grid": 1025,
+            "rank": 8,
+            "sourceBytes": 87317536,
+            "computeBytes": 174602272
+          },
+          "quantization": {
+            "sourceEncoding": "convrot_int8",
+            "observedAssembly": {
+              "schemaVersion": 1,
+              "family": "minimax-h3",
+              "partition": "hybrid",
+              "components": {
+                "transformer": {
+                  "source": "plan",
+                  "layerId": "artifact:minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+                  "layerIds": [
+                    "artifact:minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors"
+                  ],
+                  "directory": "",
+                  "descriptorLayerIds": []
+                },
+                "text_encoder": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "shared"
+                },
+                "tokenizer": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "shared"
+                },
+                "vae": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "shared"
+                },
+                "audio_vae": {
+                  "source": "resident",
+                  "model": "minimax_h3",
+                  "purpose": "shared"
+                },
+                "transformer_ref": {
+                  "source": "plan",
+                  "layerId": "artifact:minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors",
+                  "layerIds": [
+                    "artifact:minimax_h3_hybrid_fl2va_ref2va_b25-49-int8.safetensors"
+                  ],
+                  "directory": "",
+                  "descriptorLayerIds": []
+                }
+              },
+              "componentClosure": [
+                {
+                  "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "audio_vae",
+                    "estimatedSizeBytes": 605431611,
+                    "files": [
+                      "audio_vae/*"
+                    ],
+                    "platforms": [
+                      "macos"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                    "subdir": "audio_vae"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "audio_vae/config.json",
+                      "sha256": "sha256:9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+                      "sizeBytes": 2271
+                    },
+                    {
+                      "relativePath": "audio_vae/diffusion_pytorch_model.safetensors",
+                      "sha256": "sha256:52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+                      "sizeBytes": 605429340
+                    }
+                  ]
+                },
+                {
+                  "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "fl2va_audio_vae_config",
+                    "estimatedSizeBytes": 2504,
+                    "files": [
+                      "FL2VA/audio_vae/config.json",
+                      "FL2VA/audio_vae/config.yaml",
+                      "FL2VA/audio_vae/metadata.json"
+                    ],
+                    "platforms": [
+                      "macos"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                    "subdir": "FL2VA/audio_vae"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "FL2VA/audio_vae/config.json",
+                      "sha256": "sha256:d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771",
+                      "sizeBytes": 1973
+                    },
+                    {
+                      "relativePath": "FL2VA/audio_vae/config.yaml",
+                      "sha256": "sha256:259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e",
+                      "sizeBytes": 91
+                    },
+                    {
+                      "relativePath": "FL2VA/audio_vae/metadata.json",
+                      "sha256": "sha256:755d0529d43b2b5c83590f6f44ca659bc68e6a21b01d5669c93e8b2965749bff",
+                      "sizeBytes": 440
+                    }
+                  ]
+                },
+                {
+                  "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "text_encoder",
+                    "estimatedSizeBytes": 18722713964,
+                    "files": [
+                      "q4/text_encoder/*"
+                    ],
+                    "platforms": [
+                      "macos",
+                      "windows",
+                      "linux"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "SceneWorks/minimax-h3-mlx",
+                    "revision": "137ce668c55a20bc0935fd1cf2a3de8448abb7f4",
+                    "subdir": "q4/text_encoder",
+                    "variant": "q4"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "q4/text_encoder/chat_template.json",
+                      "sha256": "sha256:5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+                      "sizeBytes": 5499
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/config.json",
+                      "sha256": "sha256:de4a0698c7bbd69501e6a9d33db628a7efbfb2494e6ef3fa620775fc1898daa3",
+                      "sizeBytes": 1533
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/merges.txt",
+                      "sha256": "sha256:599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+                      "sizeBytes": 1671839
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00001-of-00014.safetensors",
+                      "sha256": "sha256:c559e8d35a308cee213ad6bafb64ac0d122e137592aba00a212484627aa5b6a7",
+                      "sizeBytes": 1387288599
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00002-of-00014.safetensors",
+                      "sha256": "sha256:e9fcd69cb2face5254040ab97262f5af77fdf849482ffa3872b5758d80214c05",
+                      "sizeBytes": 1371461650
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00003-of-00014.safetensors",
+                      "sha256": "sha256:91b3758bb16937db2724cbf12975159281f7cdb20c106532c4f05a1a18d082e4",
+                      "sizeBytes": 1371461784
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00004-of-00014.safetensors",
+                      "sha256": "sha256:409800b9a40d3dc31ef5dba6a83768e8bb6c4083c2a9d7261697f4a768270c61",
+                      "sizeBytes": 1371461807
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00005-of-00014.safetensors",
+                      "sha256": "sha256:ae9e6aa4a32f15d2b1968fb5dc2720ec6b6034b8287705b377f3e9ada560acd5",
+                      "sizeBytes": 1371461807
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00006-of-00014.safetensors",
+                      "sha256": "sha256:cfc65313e11a6f15b4054341bd99529b99072628797a9ebd7b55f34ab5fb7e34",
+                      "sizeBytes": 1371461773
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00007-of-00014.safetensors",
+                      "sha256": "sha256:7ad216929f6202d5acb9f43f5dfbbc689884b111091601f2696267f10c28bf73",
+                      "sizeBytes": 1371461749
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00008-of-00014.safetensors",
+                      "sha256": "sha256:87d6f7be840e2351bcad0178b545f17da56c470a2098e5fdbf76ae175d431f0d",
+                      "sizeBytes": 1371461783
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00009-of-00014.safetensors",
+                      "sha256": "sha256:beb4a89fec21e42cb0e38c5e43fcf7d53ce12e7b37fe3cf35e4463bd56e05900",
+                      "sizeBytes": 1371461791
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00010-of-00014.safetensors",
+                      "sha256": "sha256:0cb90e23220629cf6e143d110fa0af40a7b6337935fd5fad42ce6fc9bc8ea8eb",
+                      "sizeBytes": 1371461753
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00011-of-00014.safetensors",
+                      "sha256": "sha256:03c4d31a65a13aa10ef36c9119869a041da3fb4a22897159126789087b9851ee",
+                      "sizeBytes": 1371461793
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00012-of-00014.safetensors",
+                      "sha256": "sha256:41e834d49b8a25640280fe743580845be5c04e5f464f817ca95e30dc297c0b9d",
+                      "sizeBytes": 1371461795
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model-00014-of-00014.safetensors",
+                      "sha256": "sha256:16ac1bb814c35022f223c4233575d3b7d129b36f017bc503302f083f5181ef3f",
+                      "sizeBytes": 2237658755
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/model.safetensors.index.json",
+                      "sha256": "sha256:c0ebdb88ae2619daf0cfb59c49e5ac222cc861bbb1cfe989250d647d85fcabb3",
+                      "sizeBytes": 187240
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/preprocessor_config.json",
+                      "sha256": "sha256:27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+                      "sizeBytes": 390
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/tokenizer.json",
+                      "sha256": "sha256:a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+                      "sizeBytes": 7032403
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/tokenizer_config.json",
+                      "sha256": "sha256:a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+                      "sizeBytes": 11003
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/video_preprocessor_config.json",
+                      "sha256": "sha256:7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+                      "sizeBytes": 385
+                    },
+                    {
+                      "relativePath": "q4/text_encoder/vocab.json",
+                      "sha256": "sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+                      "sizeBytes": 2776833
+                    }
+                  ]
+                },
+                {
+                  "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "tokenizer",
+                    "estimatedSizeBytes": 11492078,
+                    "files": [
+                      "tokenizer/*"
+                    ],
+                    "platforms": [
+                      "macos",
+                      "windows",
+                      "linux"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                    "subdir": "tokenizer"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "tokenizer/merges.txt",
+                      "sha256": "sha256:599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+                      "sizeBytes": 1671839
+                    },
+                    {
+                      "relativePath": "tokenizer/tokenizer.json",
+                      "sha256": "sha256:a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+                      "sizeBytes": 7032403
+                    },
+                    {
+                      "relativePath": "tokenizer/tokenizer_config.json",
+                      "sha256": "sha256:a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+                      "sizeBytes": 11003
+                    },
+                    {
+                      "relativePath": "tokenizer/vocab.json",
+                      "sha256": "sha256:ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+                      "sizeBytes": 2776833
+                    }
+                  ]
+                },
+                {
+                  "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                  "download": {
+                    "coRequisite": true,
+                    "componentId": "video_vae",
+                    "estimatedSizeBytes": 10415635127,
+                    "files": [
+                      "vae/*"
+                    ],
+                    "platforms": [
+                      "macos"
+                    ],
+                    "provider": "huggingface",
+                    "repo": "MiniMaxAI/MiniMax-H3",
+                    "revision": "939557dc319dd91227e30195a763f272ba7f8765",
+                    "subdir": "vae"
+                  },
+                  "files": [
+                    {
+                      "relativePath": "vae/config.json",
+                      "sha256": "sha256:78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+                      "sizeBytes": 2011
+                    },
+                    {
+                      "relativePath": "vae/diffusion_pytorch_model-00001-of-00003.safetensors",
+                      "sha256": "sha256:72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+                      "sizeBytes": 5061033024
+                    },
+                    {
+                      "relativePath": "vae/diffusion_pytorch_model-00002-of-00003.safetensors",
+                      "sha256": "sha256:2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+                      "sizeBytes": 4955986528
+                    },
+                    {
+                      "relativePath": "vae/diffusion_pytorch_model-00003-of-00003.safetensors",
+                      "sha256": "sha256:c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
+                      "sizeBytes": 398539336
+                    },
+                    {
+                      "relativePath": "vae/diffusion_pytorch_model.safetensors.index.json",
+                      "sha256": "sha256:15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+                      "sizeBytes": 74228
+                    }
+                  ]
+                }
+              ],
+              "sourceEncoding": "convrot_int8",
+              "adalnPruning": {
+                "topologyId": "h3-centered-adaln-curve-v1",
+                "identity": "13aa87119fe525ac6b7b91c7358afd839e0a4b0bd0434593d313da5cc778f2f6",
+                "grid": 1025,
+                "rank": 8,
+                "sourceBytes": 87317536,
+                "computeBytes": 174602272
+              }
+            }
+          },
+          "components": [
+            "d8f3bcc62e23c7e9806970fa63cca6139c06faa3797cf9c94034f60db8512771",
+            "259f675c9f71eedc24ca4f23965cd32a1b3878fc894f56664c40328d99831a5e",
+            "755d0529d43b2b5c83590f6f44ca659bc68e6a21b01d5669c93e8b2965749bff",
+            "9a3c645ff892b376c6f5f4c8685964cd75474731af594ff058492a0000caabb6",
+            "52c59e67ba8de5477c81bfbced0327aabf500f1bfdeefd5ee754529241cb26cb",
+            "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+            "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+            "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+            "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910",
+            "78f67deec3d63aae807f2bfe7154bc1e26f6372cb20b63265fcbae1b62bb5745",
+            "72f4c6be84ac0674f27398cde991dd9d719762f3952c4921aa66b2ce542f6374",
+            "2e05e8bc23fa4071043e17fd242be8acd0685e781a43987432b2eae925be4198",
+            "c05d6ac4b1a33de372799d708531da6320f6a3ce6d1ce6d895e770988e004a39",
+            "15f6d44553c3c616b0dc999920aa784f92ecee7e4201f1f99ac405cfbf3061ca",
+            "5c72a170d2a4a1a3bc5adad2e689ae28138a9700e5b8c96c0266331e86c0acce",
+            "de4a0698c7bbd69501e6a9d33db628a7efbfb2494e6ef3fa620775fc1898daa3",
+            "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3",
+            "c559e8d35a308cee213ad6bafb64ac0d122e137592aba00a212484627aa5b6a7",
+            "e9fcd69cb2face5254040ab97262f5af77fdf849482ffa3872b5758d80214c05",
+            "91b3758bb16937db2724cbf12975159281f7cdb20c106532c4f05a1a18d082e4",
+            "409800b9a40d3dc31ef5dba6a83768e8bb6c4083c2a9d7261697f4a768270c61",
+            "ae9e6aa4a32f15d2b1968fb5dc2720ec6b6034b8287705b377f3e9ada560acd5",
+            "cfc65313e11a6f15b4054341bd99529b99072628797a9ebd7b55f34ab5fb7e34",
+            "7ad216929f6202d5acb9f43f5dfbbc689884b111091601f2696267f10c28bf73",
+            "87d6f7be840e2351bcad0178b545f17da56c470a2098e5fdbf76ae175d431f0d",
+            "beb4a89fec21e42cb0e38c5e43fcf7d53ce12e7b37fe3cf35e4463bd56e05900",
+            "0cb90e23220629cf6e143d110fa0af40a7b6337935fd5fad42ce6fc9bc8ea8eb",
+            "03c4d31a65a13aa10ef36c9119869a041da3fb4a22897159126789087b9851ee",
+            "41e834d49b8a25640280fe743580845be5c04e5f464f817ca95e30dc297c0b9d",
+            "16ac1bb814c35022f223c4233575d3b7d129b36f017bc503302f083f5181ef3f",
+            "c0ebdb88ae2619daf0cfb59c49e5ac222cc861bbb1cfe989250d647d85fcabb3",
+            "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+            "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7",
+            "a07e942ac874baa13758de8d1fbdb186683cc03416b5589e1b6671c6b3057c68",
+            "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+            "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+          ]
+        },
+        "mode": "text_to_video",
+        "prompt": "A red cube slides right across a white table, synchronized soft impacts.",
+        "seed": 314159,
+        "advanced": {
+          "mlxQuantize": 4,
+          "steps": 4,
+          "schedulerShift": 12,
+          "audioSchedulerShift": 3
+        },
+        "loras": [
+          {
+            "weight": 1,
+            "sha256": "5ff4a12c8b4599fec716e1b15a45e504e0d1129111896bdcde5ac4a15e395b29"
+          }
+        ]
+      },
+      "geometry": {
+        "width": 1088,
+        "height": 544,
+        "duration": 5.166666666666667,
+        "fps": 24
+      },
+      "sourceSha": "4c3625898b20859f57ca38986ed80b1c427cdfdb",
+      "pinSha": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+      "hardware": "{\"device\":\"Apple M5 Max\",\"driver\":\"Apple Metal driver bundled with macOS 27.0.1\"}",
+      "receiptInput": {
+        "path": "15.execution.json",
+        "sha256": "b31e93c0ad4a6cc02cf6e57668ae3d8a1d460b3f961958ca0e428da3f870a76e"
+      },
+      "measurement": "actual inline execution/build/acquisition/AV-validation elapsed; initial input audit excluded"
+    }
+  ],
+  "proofs": [
+    {
+      "id": "native-encoded-surface-mlx-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+      "kind": "cheap-causal-witness",
+      "status": "passed",
+      "repository": "inference",
+      "sourceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+      "backend": "mlx",
+      "adapterStack": true,
+      "catalogIds": [
+        "mlx.capability.text",
+        "mlx.capability.image",
+        "mlx.capability.first-last-frame",
+        "mlx.capability.last-frame-only",
+        "mlx.capability.video",
+        "mlx.capability.ordered-multimodal",
+        "mlx.capability.audio-reference",
+        "mlx.capability.hybrid",
+        "mlx.capability.turbo",
+        "mlx.capability.lora",
+        "mlx.capability.lokr"
+      ],
+      "config": {
+        "syntheticOnly": true,
+        "encodedSeamOnly": true,
+        "downloads": false,
+        "mlxTreeCapGiB": 8
+      },
+      "runRef": "actions:41213914294/1",
+      "testSelectors": [
+        "pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control",
+        "adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta"
+      ],
+      "claim": "Actual native encoded conditioning and adapter-stack causal witnesses; no raw preprocessing or end-to-end AV claim.",
+      "limitations": [
+        "Encoded DiT seam only; omitted AV contrasts remain NOT proven."
+      ],
+      "receiptInput": {
+        "path": "witness-0.json",
+        "sha256": "d72595380d922796905dbad68718cdea90c510b1c93924af5e081f6ece265e95"
+      },
+      "logInputs": [
+        {
+          "path": "witness-0-0.log",
+          "sha256": "46c098c99cac2303a64122869b7ea62f6b41934d5c62db3e054ea9f14acf18cd"
+        }
+      ],
+      "surfaceEvidence": {
+        "backend": "mlx",
+        "conditioning": [
+          {
+            "property": "context_values",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "context_vs_zero_same_shape",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "first_only_values",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "first_only_vs_zero_same_shape",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "last_only_values",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "first_vs_last_placement",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "first_only_vs_drop",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "last_only_vs_drop",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "first_last_swap_values",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "first_last_drop_first",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "first_last_drop_last",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "reference_image_values",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "fl2va_vs_ref2va_positioning",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "ordered_reference_values",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "reference_video_only_values",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "reference_audio_only_CONDITIONING_ROWS",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "reference_audio_values_visual_fixed",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "hybrid_checkpoint_FL_portion_vs_wrong_REF_portion",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "hybrid_checkpoint_REF_portion_vs_wrong_FL_portion",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "reference_image_drop_same_layout",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "reference_video_drop_same_layout",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "reference_audio_only_drop_same_layout_CONDITIONING_ROWS",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "ordered_video_references_AB_vs_BA",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "ordered_audio_references_AB_vs_BA_visual_fixed",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "mixed_image_video_soundtrack_audio_reference_order",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "mixed_image_drop_same_layout",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "mixed_video_carrier_drop_same_layout",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "mixed_standalone_audio_drop_same_layout",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          },
+          {
+            "property": "mixed_video_soundtrack_drop_same_layout",
+            "status": "passed",
+            "scope": "encoded-generated-rows-only"
+          }
+        ],
+        "adapterStack": true,
+        "rawPreprocessing": false,
+        "endToEndAV": false,
+        "omittedAVContrasts": "NOT proven by encoded witnesses"
+      }
+    }
+  ],
+  "files": [
+    {
+      "path": "1.execution.json",
+      "sha256": "9c46c2680cb9a0562604501bc3dbece6ac04ac2863e5eb9d0b921baee745bf7d"
+    },
+    {
+      "path": "15.execution.json",
+      "sha256": "b31e93c0ad4a6cc02cf6e57668ae3d8a1d460b3f961958ca0e428da3f870a76e"
+    },
+    {
+      "path": "witness-0.json",
+      "sha256": "d72595380d922796905dbad68718cdea90c510b1c93924af5e081f6ece265e95"
+    },
+    {
+      "path": "witness-0-0.log",
+      "sha256": "46c098c99cac2303a64122869b7ea62f6b41934d5c62db3e054ea9f14acf18cd"
+    }
+  ]
+}

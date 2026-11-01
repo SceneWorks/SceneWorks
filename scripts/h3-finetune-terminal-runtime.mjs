@@ -1189,10 +1189,11 @@ export function normalizedControlRequest(request,{conditioningBindings,runtimeId
   return result;
 }
 // Shared baselines refer to actual retained case jobs. No extra generation or copied execution.
-export async function verifyReducedControls(p,backend,{decode=decodeAV,delta=decodedDelta,caseRoot=p.output}={}) {
+export async function verifyReducedControls(p,backend,{decode=decodeAV,delta=decodedDelta,caseRoot=p.output,caseDir}={}) {
+  // caseDir: a split readback (cases from two runs) names each case's own retained directory.
   const rows=new Map();
   for(const c of executionCases(p).filter(c=>c.backend===backend&&c.kind==='full-av')){
-    const dir=inside(caseRoot,c.id),bundle=await json(inside(dir,'source-job-output.json'));
+    const dir=caseDir?caseDir(c):inside(caseRoot,c.id),bundle=await json(inside(dir,'source-job-output.json'));
     assert.equal(bundle.bindings.length,1,'reduced AV receipt must identify one actual native job');
     const binding=bundle.bindings[0];assert.equal(binding.job.status,'completed');
     for(const source of bundle.conditioningBindings??[]){assert.equal(await hashFile(await confined(dir,inside(dir,source.file))),source.sha256);assert.ok(c.inputs?.some(i=>i.sha256===source.sha256),'retained conditioning must match a declared source input');}
