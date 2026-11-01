@@ -166,6 +166,27 @@ export async function campaignRunRoots(output) {
   return roots.includes(resolved) ? roots : [...roots, resolved];
 }
 
+/**
+ * Run parents an older revision wrote on the WEIGHTS volume (E:\huggingface\sc26691-private on
+ * Windows; <HF_HOME>/sc26691-private on macOS) before campaign writes moved to the work root. A
+ * service those runs spawned can still be alive, so the leftover check reads their ownership
+ * records too. READ-ONLY: these parents are only listed and read, never created, written or cleared.
+ */
+export function legacyWeightsRunParents({ platform = process.platform, env = process.env } = {}) {
+  if (platform === 'win32') return [path.win32.join('E:\\', 'huggingface', PRIVATE_PARENT)];
+  if (platform === 'darwin' && env.HF_HOME && path.isAbsolute(env.HF_HOME)) return [path.join(env.HF_HOME, PRIVATE_PARENT)];
+  return [];
+}
+/** The bootstrap run roots under the legacy parents, by listing only (a missing parent is none). */
+export async function legacyWeightsRunRoots({ parents = legacyWeightsRunParents(), exclude = [] } = {}) {
+  const skip = new Set(exclude.map(value => path.resolve(value))), roots = [];
+  for (const parent of parents) {
+    const entries = await readdir(parent, { withFileTypes: true }).catch(error => { if (['ENOENT', 'ENOTDIR'].includes(error.code)) return []; throw error; });
+    for (const entry of entries) if (entry.isDirectory() && RUN_OUTPUT_ROOT.test(entry.name) && !skip.has(path.resolve(parent, entry.name))) roots.push(path.join(parent, entry.name));
+  }
+  return roots;
+}
+
 /** Every `<root>/<case>/ownership-<epoch>.json` under the given run roots. */
 export async function ownershipRecords(roots, { exclude = [] } = {}) {
   const skip = new Set(exclude.map(value => path.resolve(value))), records = [];

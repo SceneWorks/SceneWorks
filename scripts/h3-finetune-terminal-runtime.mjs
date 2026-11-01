@@ -16,7 +16,7 @@ import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
 import { cudaDeviceEvidence, MANUAL_CUDA_PHYSICAL_GPU } from './ci/h3-import-native-proof.mjs';
 import { privateRunRoot } from './h3-finetune-terminal-stage.mjs';
-import { OS_ASSIGNED_PORT, isServicePort, boundApiPort, portHolder, formatPortHolder, isBindFailure, liveOwnedProcesses, campaignRunRoots, formatLeftovers } from './lib/h3-owned-processes.mjs';
+import { OS_ASSIGNED_PORT, isServicePort, boundApiPort, portHolder, formatPortHolder, isBindFailure, liveOwnedProcesses, campaignRunRoots, formatLeftovers, legacyWeightsRunParents, legacyWeightsRunRoots } from './lib/h3-owned-processes.mjs';
 export { OS_ASSIGNED_PORT, boundApiPort };
 // Windows: the bootstrap output root is ~95 characters deep and cargo/nvcc nest candle's kernel
 // build ~50 more below CARGO_TARGET_DIR, so a target under the output root overruns MAX_PATH.
@@ -408,7 +408,9 @@ export class OwnedService {
   async refuseLeftoverOwnedProcesses() {
     const platform=this.deps.platform??process.platform;
     const info=this.deps.processInfo??(this.fake?async()=>null:undefined); // unit_fake never inspects host processes
-    const found=await (this.deps.liveOwnedProcesses??liveOwnedProcesses)({roots:await campaignRunRoots(this.p.output),exclude:[this.dir],platform,...(info?{info}:{})});
+    // Legacy run roots on the weights volume (older revisions) are listed and read only, never written.
+    const legacy=await legacyWeightsRunRoots({parents:this.deps.legacyRunParents??(this.fake?[]:legacyWeightsRunParents({platform}))});
+    const found=await (this.deps.liveOwnedProcesses??liveOwnedProcesses)({roots:[...await campaignRunRoots(this.p.output),...legacy],exclude:[this.dir],platform,...(info?{info}:{})});
     if(!found.length)return;
     await save(path.join(this.dir,'leftover-processes.json'),{caseId:this.c.id,found,meaning:'Owned processes recorded by an earlier campaign run/case are still alive as themselves (PID, command and start time match). No case process was started and nothing was signalled; stop them, then re-dispatch.'});
     throw new Error(`H3_LEFTOVER_OWNED_PROCESSES: refusing ${this.c.id}; ${found.length} owned process(es) from earlier campaign runs are still alive and were left untouched: ${formatLeftovers(found)}`);

@@ -7,7 +7,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat, rea
 import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyIdentificationCoverage,bindsStagedFixture,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,advertisedStallBudget,cancelDrainBoundMs,postDrainShutdownMs,STALL_BUDGET_EVENT,WORKER_VIDEO_STALL_GRACE_SECONDS,DEFAULT_CANCEL_DRAIN_SECONDS,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
 import { CASE_SHUTDOWN_BOUND_FILE,assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
-import { liveOwnedProcesses,processInfo,portHolder,formatPortHolder,parseLsofListen,parseNetstatListen,parseEtimeSeconds,boundApiPort,recordedProcesses,sameProcess,campaignRunRoots,isServicePort,isBindFailure } from './lib/h3-owned-processes.mjs';
+import { liveOwnedProcesses,processInfo,portHolder,formatPortHolder,parseLsofListen,parseNetstatListen,parseEtimeSeconds,boundApiPort,recordedProcesses,sameProcess,campaignRunRoots,legacyWeightsRunParents,legacyWeightsRunRoots,isServicePort,isBindFailure } from './lib/h3-owned-processes.mjs';
 import { runScenario } from './h3-finetune-terminal-api.mjs';
 const pause=()=>new Promise(resolve=>setTimeout(resolve,1));
 // Tests must never write under a real HF cache: neither the Windows campaign root nor the HF_HOME
@@ -795,6 +795,33 @@ test('a live owned process from an older run root refuses the case with run, cas
   await assert.rejects(new OwnedService(f.p,f.c,f.root,f.native,dir,fake.deps).initialize(),/H3_LEFTOVER_OWNED_PROCESSES: refusing .*run 40903116430-1 case mlx\.reduced\.artifact-0-ordered-mixed-baseline-ref-turbo epoch 1 api pid 5101 \(\/Users\/michael\/actions-runner-sceneworks\/_work\/target\/release\/sceneworks-rust-api/);
   const record=JSON.parse(await readFile(path.join(dir,'leftover-processes.json'),'utf8'));assert.equal(record.found[0].pid,5101);assert.match(record.meaning,/nothing was signalled/);
   assert.equal(fake.children.length,0);assert.equal(fake.calls.filter(c=>c[0]==='build'||c[0]==='signal').length,0);
+});
+test('legacy weights-volume run roots are scanned read-only: a live service there refuses, and nothing is written there',async t=>{
+  // The legacy parents by platform; the scan itself runs on a temp stand-in, never the real E:.
+  assert.deepEqual(legacyWeightsRunParents({platform:'win32',env:{}}),['E:\\huggingface\\sc26691-private']);
+  assert.deepEqual(legacyWeightsRunParents({platform:'darwin',env:{HF_HOME:'/Volumes/Models/huggingface'}}),[path.join('/Volumes/Models/huggingface','sc26691-private')]);
+  assert.deepEqual(legacyWeightsRunParents({platform:'linux',env:{HF_HOME:'/hf'}}),[]);
+  const temp=await mkdtemp(path.join(os.tmpdir(),'sc26691-legacy-weights-'));t.after(()=>rm(temp,{recursive:true,force:true}));
+  const legacyParent=path.join(temp,'weights','sc26691-private'),legacy=path.join(legacyParent,'40000000001-1-bootstrap-'+'e'.repeat(40));
+  const started='2026-10-20T10:00:00.000Z';await writeOwnership(legacy,'cuda.reduced.real-drop-audio',{epoch:1,started,apiPid:8101});
+  await mkdir(path.join(legacyParent,'40000000001-1-target'));
+  assert.deepEqual(await legacyWeightsRunRoots({parents:[path.join(temp,'absent'),legacyParent]}),[legacy],'a missing parent is none; only bootstrap run roots are inspected');
+  const snapshot=async()=>{const out=[];const walk=async dir=>{for(const name of (await (await import('node:fs/promises')).readdir(dir)).sort()){const p=path.join(dir,name),st=await stat(p);out.push([path.relative(temp,p),st.isDirectory()?'d':(await readFile(p,'utf8')),st.mtimeMs]);if(st.isDirectory())await walk(p);}};await walk(path.join(temp,'weights'));return out;};
+  const before=await snapshot();
+  const live=new Map([[8101,{pid:8101,command:'D:\\actions-runner-2\\_work\\target\\release\\sceneworks-rust-api.exe',startedAt:Date.parse(started)+100}]]),info=async pid=>live.get(pid)??null;
+  const found=await liveOwnedProcesses({roots:await legacyWeightsRunRoots({parents:[legacyParent]}),info});
+  assert.deepEqual(found.map(v=>[v.runId,v.caseId,v.role,v.pid]),[['40000000001','cuda.reduced.real-drop-audio','api',8101]]);
+  // The per-case check reads the legacy parents too, refuses, and writes its finding only beside its own case.
+  const parent=await campaignParent(t),current=path.join(parent,'41300000000-1-bootstrap-'+'f'.repeat(40));
+  const fx=await fixture(t);fx.p.output=current;const dir=path.join(current,fx.c.id);await mkdir(dir,{recursive:true});const fake=fakeRuntime(fx);fake.deps.processInfo=info;fake.deps.legacyRunParents=[legacyParent];
+  await assert.rejects(new OwnedService(fx.p,fx.c,fx.root,fx.native,dir,fake.deps).initialize(),/H3_LEFTOVER_OWNED_PROCESSES: refusing .*run 40000000001-1 case cuda\.reduced\.real-drop-audio epoch 1 api pid 8101/);
+  assert.equal(JSON.parse(await readFile(path.join(dir,'leftover-processes.json'),'utf8')).found[0].pid,8101);
+  assert.deepEqual(await snapshot(),before,'the legacy parent is listed and read, never written');
+  // The workflow's pre-staging check scans them read-only and never feeds them to its removal loop.
+  const workflow=await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml',import.meta.url),'utf8');
+  assert.match(workflow,/const legacyRoots = await legacyWeightsRunRoots\(\);/);
+  assert.match(workflow,/const leftovers = await liveOwnedProcesses\(\{roots: \[\.\.\.outputRoots, \.\.\.legacyRoots\]\}\);/);
+  assert.match(workflow,/await rm\(path\.join\(parent, entry\.name\), \{recursive: true, force: false\}\);/,'removal stays under the work-root parent');
 });
 test('dead PIDs, reused PIDs and this case\'s own records never refuse',async t=>{
   const parent=await campaignParent(t),old=path.join(parent,'40797515762-1-bootstrap-'+'c'.repeat(40)),current=path.join(parent,'41044021373-2-bootstrap-'+'d'.repeat(40));

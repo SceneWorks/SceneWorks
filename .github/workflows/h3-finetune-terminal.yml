@@ -304,7 +304,9 @@ jobs:
       # cargo-target siblings) under the same WORK-root parent the stage derives its private root
       # from, and only for runs GitHub reports as completed, before this run stages anything. Roots
       # an older revision left under E:\huggingface\sc26691-private are NOT touched: nothing here
-      # writes to (or deletes from) the weights volume; clearing those is the operator's call.
+      # writes to (or deletes from) the weights volume; clearing those is the operator's call. Their
+      # ownership records ARE read (listing and reading only) by the leftover-process check, since a
+      # service one of those runs spawned can still be alive and hold the GPU.
       - name: Clear this campaign's completed prior-run roots on the work root
         if: ${{ fromJSON(inputs.campaign_request).inspect_only != true && fromJSON(inputs.campaign_request).inspectOnly != true }}
         shell: bash
@@ -317,7 +319,7 @@ jobs:
           import {readdir, rm, statfs} from "node:fs/promises";
           import path from "node:path";
           import {pathToFileURL} from "node:url";
-          const {liveOwnedProcesses, formatLeftovers, RUN_OUTPUT_ROOT} = await import(pathToFileURL(path.join(process.env.GITHUB_WORKSPACE, "sceneworks", "scripts", "lib", "h3-owned-processes.mjs")).href);
+          const {liveOwnedProcesses, formatLeftovers, RUN_OUTPUT_ROOT, legacyWeightsRunRoots} = await import(pathToFileURL(path.join(process.env.GITHUB_WORKSPACE, "sceneworks", "scripts", "lib", "h3-owned-processes.mjs")).href);
           const {campaignWorkRoot} = await import(pathToFileURL(path.join(process.env.GITHUB_WORKSPACE, "sceneworks", "scripts", "h3-finetune-terminal-stage.mjs")).href);
           // The stage's privateRunRoot parent, under the campaign work root (never the weights volume).
           const workRoot = campaignWorkRoot();
@@ -328,7 +330,10 @@ jobs:
           // still read them and hold Metal/CUDA memory. It is never signalled - stopping it is the
           // operator's decision - and the lane fails here, before staging, instead of at its first case.
           const outputRoots = entries.filter(e => e.isDirectory() && RUN_OUTPUT_ROOT.test(e.name) && !e.name.startsWith(`${current}-`)).map(e => path.join(parent, e.name));
-          const leftovers = await liveOwnedProcesses({roots: outputRoots});
+          // Legacy E:-era (and macOS HF-home) run roots: read-only, never in the removal loop below.
+          const legacyRoots = await legacyWeightsRunRoots();
+          if (legacyRoots.length) console.log(`read-only leftover scan of ${legacyRoots.length} legacy run root(s) on the weights volume`);
+          const leftovers = await liveOwnedProcesses({roots: [...outputRoots, ...legacyRoots]});
           const heldRuns = new Set(leftovers.map(p => p.runId));
           for (const entry of entries) {
             const match = /^(\d+)-\d+(?:-bootstrap-[0-9a-f]{40}|-target|-native|-fixture)?$/.exec(entry.name);
