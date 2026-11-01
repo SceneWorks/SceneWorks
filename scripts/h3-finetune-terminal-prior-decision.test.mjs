@@ -38,7 +38,11 @@ test('the CUDA remaining-cases lane adopts run 41213935677\'s measured decision 
   const w = await workspace(t), record = await adopt(w);
   assert.equal(record.kind, PRIOR_DECISION_KIND);
   assert.deepEqual(record.decisionRun, { runId: RUN, attempt: '1', backend: 'cuda' });
-  assert.deepEqual(record.anchorPackets, { mlx: { runId: PEER_RUN, runAttempt: '1' }, cuda: { runId: RUN, runAttempt: '1' } });
+  assert.deepEqual(record.anchorPackets, { mlx: { runId: PEER_RUN, runAttempt: '1', retainedDirectory: 'anchors-mlx' }, cuda: { runId: RUN, runAttempt: '1', retainedDirectory: 'anchors-cuda' } });
+  // The packets' native witnesses are REUSED (same native evidence SHA), and that reuse is recorded.
+  assert.deepEqual(record.reusedNativeWitnesses.map(v => [v.backend, v.nativeEvidenceSha, v.runRef, v.packet.runId, v.receipt.path, v.logs.map(l => l.path)]),
+    [['mlx', EVIDENCE, `actions:${PEER_RUN}/1`, PEER_RUN, 'anchors-mlx/witness-0.json', ['anchors-mlx/witness-0-0.log']], ['cuda', EVIDENCE, `actions:${RUN}/1`, RUN, 'anchors-cuda/witness-0.json', ['anchors-cuda/witness-0-0.log']]]);
+  for (const v of record.reusedNativeWitnesses) assert.match(v.receipt.sha256, /^[0-9a-f]{64}$/);
   assert.equal(record.decision.selectedBackend, 'cuda'); assert.equal(record.decision.displacedBackend, 'mlx');
   assert.deepEqual(record.decision, w.decisionPlan.matrixDecision, 'recomputed from the retained anchors, equal to the retained decision');
   assert.equal(record.allocation.length, 25); assert.equal(record.priorPassedCaseIds.length, 18);
@@ -105,7 +109,7 @@ test('the retained evidence is located by the declared run alone: its reduced ar
   await assert.rejects(retainedDecisionPlan(empty, 'cuda'), /no retained cuda case plan carries a measured matrix decision/);
 });
 // Two segments of one backend: the prior run's passed cases at 4c3625898 and the subset run at a new SHA.
-async function splitFixture(t, { duplicate = false, omit = null } = {}) {
+async function splitFixture(t, { duplicate = false, omit = null, retainPackets = true } = {}) {
   const w = await workspace(t), decided = { ...w.plan, sceneworks: PRIOR_SW, matrixDecision: w.decisionPlan.matrixDecision, matrixAnchors: w.decisionPlan.matrixAnchors };
   const subsetPlan = structuredClone(w.plan); await adopt({ ...w, plan: subsetPlan });
   const segments = [{ label: 'prior', caseRoot: path.join(w.root, 'seg-prior'), runId: RUN, attempt: '1' }, { label: 'subset', caseRoot: path.join(w.root, 'seg-subset'), runId: '99', attempt: '1' }];
@@ -117,6 +121,8 @@ async function splitFixture(t, { duplicate = false, omit = null } = {}) {
   for (const c of executionCases(decided).filter(c => c.backend === 'cuda' && !REMAINING.includes(c.id))) await write(segments[0], decided, c.id, RUN);
   for (const id of REMAINING) if (id !== omit) await write(segments[1], subsetPlan, id, '99');
   if (duplicate) await write(segments[1], subsetPlan, 'cuda.reduced.real-drop-audio', '99');
+  // The subset run retains its prior-decision anchor packets (output-relative) beside its cases.
+  if (retainPackets) for (const b of ['cuda', 'mlx']) await cp(path.join(w.root, `anchors-${b}`), path.join(segments[1].caseRoot, `anchors-${b}`), { recursive: true });
   return { segments, verified: [] };
 }
 test('a split readback attributes each case to its own run and SHA, flags cross-segment controls, and reports a gap as a gap', async t => {
@@ -132,6 +138,11 @@ test('a split readback attributes each case to its own run and SHA, flags cross-
   assert.deepEqual(r.segments.map(s => [s.label, s.sceneworks, s.cases.length]), [['prior', [PRIOR_SW], 18], ['subset', [NEW_SW], 7]]);
   assert.deepEqual(r.crossCaseControls.map(v => v.crossSegment), [true, false]);
   assert.equal(r.priorMatrixDecision.decisionRun.runId, RUN);
+  // The subset segment ran no native witnesses of its own: the reuse is reported and re-hashed.
+  assert.deepEqual(r.reusedNativeWitnesses.map(v => [v.segment, v.backend, v.nativeEvidenceSha, v.reverifiedFromRetainedFiles]), [['subset', 'mlx', EVIDENCE, true], ['subset', 'cuda', EVIDENCE, true]]);
+  const tampered = await splitFixture(t); await appendFile(path.join(tampered.segments[1].caseRoot, 'anchors-cuda', 'witness-0-0.log'), 'x');
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: tampered.segments }, { verifyCase: async () => {}, controls }), /reused witness native-encoded-surface-cuda-\w+ retained file anchors-cuda\/witness-0-0\.log changed or is missing/);
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { retainPackets: false })).segments }, { verifyCase: async () => {}, controls }), /ENOENT/);
   const gap = await verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { omit: REMAINING[0] })).segments }, { verifyCase: async () => {}, controls });
   assert.equal(gap.status, 'split-backend-incomplete'); assert.deepEqual(gap.missing, [REMAINING[0]]); assert.equal(gap.crossCaseControls, null);
   await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { duplicate: true })).segments }, { verifyCase: async () => {}, controls }), /passed in more than one segment/);
@@ -147,4 +158,6 @@ test('the terminal workflow adopts a declared prior decision before resolving ca
   assert.match(workflow, /if \(plan\.priorMatrixDecision\) \{ ids = plan\.priorMatrixDecision\.subsetCaseIds;/);
   assert.match(workflow, /request\.adaptive_matrix!==false&&!plan\.priorMatrixDecision;/);
   assert.match(workflow, /path\.join\(env\.H3_STAGE_EVIDENCE, "prior-matrix-decision\.json"\)/, 'the record is retained with the always-uploaded stage evidence');
+  assert.match(workflow, /\.\.\.Object\.values\(plan\.priorMatrixDecision\.anchorPackets\)\.map\(v=>path\.join\(plan\.output,v\.retainedDirectory\)\)/, 'the reused witnesses\' packets are retained with the case evidence');
+  assert.match(workflow, /reusedFromPriorDecision:witnesses\.reuse\?\?null/, 'the lane logs a reused witness as reused');
 });

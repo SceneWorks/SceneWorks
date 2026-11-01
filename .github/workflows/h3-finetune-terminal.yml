@@ -639,7 +639,10 @@ jobs:
             assert.ok(ids.length===25||ids.length===18,"reduced inventory is 25 maximum or 18 on the measured displaced backend");
           }
           await writeFile(path.join(output, "case-ids.json"), JSON.stringify(ids, null, 2) + "\n");
-          const evidencePaths=[...ids.map(id=>path.join(output,id)),path.join(output,`backend-readback-${env.H3_STAGE_BACKEND}.json`),path.join(output,`native-witnesses-${env.H3_STAGE_BACKEND}`),...(plan.priorMatrixDecision?[path.join(output,"prior-matrix-decision.json"),path.join(output,"prior-decision-plan.json")]:[])];
+          const evidencePaths=[...ids.map(id=>path.join(output,id)),path.join(output,`backend-readback-${env.H3_STAGE_BACKEND}.json`),path.join(output,`native-witnesses-${env.H3_STAGE_BACKEND}`),...(plan.priorMatrixDecision?[path.join(output,"prior-matrix-decision.json"),path.join(output,"prior-decision-plan.json"),...Object.values(plan.priorMatrixDecision.anchorPackets).map(v=>path.join(plan.output,v.retainedDirectory))]:[])];
+          // The prior decision's anchor packets carry the anchors AND the native witnesses this lane reuses
+          // (priorMatrixDecision.reusedNativeWitnesses); they are retained so both re-hash from evidence.
+          if(plan.priorMatrixDecision)assert.equal(path.resolve(output),path.resolve(plan.output),"retained prior-decision packets are output-relative");
           await appendFile(env.GITHUB_ENV,`H3_CASE_ARTIFACT_PATHS<<H3_CASE_PATHS_END\n${evidencePaths.join("\n")}\nH3_CASE_PATHS_END\n`);
           await appendFile(env.GITHUB_ENV, `H3_TERMINAL_CASES=${ids.join(",")}\nH3_PLAN_EFFECTIVE=${planPath}\n`);
           console.log(JSON.stringify({ backend: env.H3_STAGE_BACKEND, cases: ids.length, plan: planPath }));
@@ -716,7 +719,8 @@ jobs:
           import {ensureInlineNativeWitnesses,writeInlineAnchorBundle} from "./scripts/h3-finetune-terminal.mjs";
           const plan=JSON.parse(await readFile(process.env.PLAN,"utf8"));
           if(plan.inventory==="reduced-v1"){
-            await ensureInlineNativeWitnesses(plan,process.env.H3_STAGE_BACKEND,`${process.env.GITHUB_WORKSPACE}/sceneworks`,{productRoot:`${process.env.GITHUB_WORKSPACE}/inference`});
+            const witnesses=await ensureInlineNativeWitnesses(plan,process.env.H3_STAGE_BACKEND,`${process.env.GITHUB_WORKSPACE}/sceneworks`,{productRoot:`${process.env.GITHUB_WORKSPACE}/inference`});
+            console.log(JSON.stringify({nativeWitnesses:{status:witnesses.status,id:witnesses.proof.id,runRef:witnesses.proof.runRef??null,reusedFromPriorDecision:witnesses.reuse??null}}));
             await writeFile(process.env.PLAN,JSON.stringify(plan,null,2)+"\n");
           }
           const env=process.env,ids=(env.H3_TERMINAL_CASES??env.CASE_ID??"").split(",").map(v=>v.trim()).filter(Boolean);

@@ -1282,7 +1282,13 @@ export async function ensureInlineNativeWitnesses(p,backend,swRoot,{run=runProce
   authorized(p,{backend});assert.equal(process.env.GITHUB_EVENT_NAME,'workflow_dispatch');
   assert.ok(productRoot,'separate product checkout is required');await sourcePair(p,swRoot,productRoot);await laneBudget(p,backend);
   const retained=await loadRetainedProofIndex(p),existing=retained.find(v=>v.kind==='cheap-causal-witness'&&v.backend===backend&&v.adapterStack===true&&v.surfaceEvidence);
-  if(existing)return {status:'reused-passed-receipt',proof:existing};
+  if(existing){
+    // A witness adopted with a declared prior decision is keyed to the same native evidence SHA; the
+    // reuse is recorded (priorMatrixDecision.reusedNativeWitnesses) and its files retained, never silent.
+    const reuse=p.priorMatrixDecision?.reusedNativeWitnesses?.find(v=>v.id===existing.id);
+    if(reuse){assert.equal(existing.sourceSha,p.nativeEvidence?.sha,'a reused native witness must be keyed to this lane\'s native evidence SHA');return {status:'reused-prior-decision-witness',proof:existing,reuse};}
+    return {status:'reused-passed-receipt',proof:existing};
+  }
   assert.ok(['mlx','cuda'].includes(backend));
   const native=p.nativeEvidence;assert.ok(native?.root&&native.sha);sha40(native.sha);
   const sourceCheck=async()=>{assert.equal((await exec('git',['rev-parse','HEAD'],{cwd:native.root})).stdout.trim(),native.sha);assert.equal((await exec('git',['status','--porcelain'],{cwd:native.root})).stdout.trim(),'');};await sourceCheck();
@@ -1377,7 +1383,21 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
   const decision = chooseMatrixBackend({ anchors });
   assert.deepEqual(decision, prior.matrixDecision, 'the matrix decision recomputed from the retained anchors differs from the retained decision');
   p.matrixAnchors = anchors; p.matrixDecision = decision;
-  for (const proof of [...loaded.mlx.proofs, ...loaded.cuda.proofs]) if (!(p.proofIndex ?? []).some(v => v.id === proof.id)) p.proofIndex = [...(p.proofIndex ?? []), proof];
+  // The packets' native witnesses ran at the SAME native evidence SHA (checked per packet above), so
+  // they are reused rather than re-run, and the reuse is explicit: each one is recorded with its run,
+  // receipt/log hashes and output-relative retained paths, and the workflow retains those packet
+  // directories with the case evidence, so verify-split-backend re-hashes them from retained files.
+  const retained = abs => { const rel = path.relative(p.output, abs); assert.ok(rel && !rel.startsWith('..') && !path.isAbsolute(rel), `${abs} is not under the lane output root; reused evidence must be retained with the lane`); return rel.split(path.sep).join('/'); };
+  const reusedNativeWitnesses = [];
+  for (const b of ['mlx', 'cuda']) for (const proof of loaded[b].proofs) {
+    assert.equal(proof.kind, 'cheap-causal-witness', `retained ${b} anchor packet carries a non-witness proof ${proof.id}`);
+    assert.equal(proof.backend, b, `retained ${b} anchor packet carries a ${proof.backend} witness`);
+    assert.equal(proof.sourceSha, p.nativeEvidence.sha, `reused ${b} native witness ${proof.id} is not keyed to this lane's native evidence SHA`);
+    reusedNativeWitnesses.push({ id: proof.id, backend: b, nativeEvidenceSha: proof.sourceSha, runRef: proof.runRef ?? null,
+      packet: { runId: String(packets[b].runId), runAttempt: String(packets[b].runAttempt) }, testSelectors: [...proof.testSelectors],
+      receipt: { path: retained(proof.receiptInput.path), sha256: proof.receiptInput.sha256 }, logs: proof.logInputs.map(input => ({ path: retained(input.path), sha256: input.sha256 })) });
+    if (!(p.proofIndex ?? []).some(v => v.id === proof.id)) p.proofIndex = [...(p.proofIndex ?? []), proof];
+  }
   const allocation = executionCases(p).filter(c => c.backend === backend).map(c => c.id), priorPassed = [];
   if (backend === decisionRun.backend) for (const id of allocation) {
     let row; try { row = await json(path.join(contained(priorEvidenceRoot, id), 'execution.json')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
@@ -1394,11 +1414,12 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
   p.priorMatrixDecision = {
     kind: PRIOR_DECISION_KIND, laneBackend: backend,
     decisionRun: { runId: String(decisionRun.runId), attempt: String(decisionRun.attempt), backend: decisionRun.backend },
-    anchorPackets: Object.fromEntries(['mlx', 'cuda'].map(b => [b, { runId: String(packets[b].runId), runAttempt: String(packets[b].runAttempt) }])),
+    anchorPackets: Object.fromEntries(['mlx', 'cuda'].map(b => [b, { runId: String(packets[b].runId), runAttempt: String(packets[b].runAttempt), retainedDirectory: retained(packets[b].directory) }])),
+    reusedNativeWitnesses,
     sourceSha: prior.sceneworks, decision, allocation, priorPassedCaseIds: priorPassed, subsetCaseIds: subset,
     notCovered: allocation.filter(id => !priorPassed.includes(id) && !subset.includes(id)),
     sourceShaDifference: { from: prior.sceneworks, to: p.sceneworks, files: [...changedFiles] },
-    meaning: 'Matrix allocation adopted from a decision MEASURED in the named prior run (recomputed from its retained anchors). The anchors ran at sourceShaDifference.from; this lane runs at .to. Cases in priorPassedCaseIds are that run\'s evidence and are re-validated separately (verify-split-backend), never re-labelled as this run\'s.',
+    meaning: 'Matrix allocation adopted from a decision MEASURED in the named prior run (recomputed from its retained anchors). The anchors ran at sourceShaDifference.from; this lane runs at .to. Cases in priorPassedCaseIds are that run\'s evidence and are re-validated separately (verify-split-backend), never re-labelled as this run\'s. reusedNativeWitnesses ran at the same native evidence SHA in the named packet runs; this lane does not re-run them, and their retained receipts/logs are re-hashed by verify-split-backend.',
   };
   await verifyMatrixAdmission(p);
   return p.priorMatrixDecision;
@@ -1410,6 +1431,20 @@ export async function adoptPriorMatrixDecision(p, { backend, decisionRun, decisi
 // by planSha256), every case is attributed to its segment and SHA, the segments must share one
 // measured decision, pin and native evidence, and a gap is reported as a gap. This is NOT the
 // single-SHA backend readback and is never accepted as one.
+// A reused witness re-verified from the segment's retained files (output-relative paths), bound to
+// the proof the plan actually carried.
+async function verifyReusedNativeWitness(plan, entry, caseRoot) {
+  assert.equal(entry.nativeEvidenceSha, plan.nativeEvidence?.sha, `reused witness ${entry.id} is not keyed to the segment's native evidence SHA`);
+  const proof = (plan.proofIndex ?? []).find(v => v.id === entry.id);
+  assert.ok(proof && proof.kind === 'cheap-causal-witness' && proof.backend === entry.backend, `reused witness ${entry.id} is not in the plan's proof index`);
+  assert.equal(proof.receiptInput.sha256, entry.receipt.sha256, `reused witness ${entry.id} receipt differs from the plan's proof`);
+  assert.deepEqual(proof.logInputs.map(v => v.sha256), entry.logs.map(v => v.sha256), `reused witness ${entry.id} logs differ from the plan's proof`);
+  for (const input of [entry.receipt, ...entry.logs]) assert.equal(await hashFile(contained(caseRoot, input.path)), input.sha256, `reused witness ${entry.id} retained file ${input.path} changed or is missing`);
+  const receipt = await json(contained(caseRoot, entry.receipt.path));
+  assert.equal(receipt.status, 'passed', `reused witness ${entry.id} receipt did not pass`);
+  assert.equal(receipt.sourceSha, entry.nativeEvidenceSha, `reused witness ${entry.id} receipt names another native SHA`);
+  return { ...entry, reverifiedFromRetainedFiles: true };
+}
 export async function verifySplitBackendEvidence({ backend, segments }, { verifyCase = verifyPortableCase, controls } = {}) {
   const { readdir } = await import('node:fs/promises');
   assert.ok(['mlx', 'cuda'].includes(backend));
@@ -1443,6 +1478,12 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
   for (const row of rows) assert.ok(allocation.includes(row.id), `${row.id} is outside the ${backend} allocation under the shared decision`);
   const missing = allocation.filter(id => !rows.some(row => row.id === id));
   const bySegment = segments.map(segment => ({ label: segment.label, runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
+  const reusedNativeWitnesses = [];
+  for (const segment of segments) {
+    const adopted = plans.filter(v => v.segment === segment.label && v.plan.priorMatrixDecision).map(v => v.plan);
+    if (!adopted.length) continue;
+    for (const entry of adopted[0].priorMatrixDecision.reusedNativeWitnesses ?? []) reusedNativeWitnesses.push({ ...await verifyReusedNativeWitness(adopted[0], entry, segment.caseRoot), segment: segment.label });
+  }
   let crossCaseControls = null;
   if (!missing.length) {
     const dirs = new Map(rows.map(row => [row.id, row.dir])), segmentOf = new Map(rows.map(row => [row.id, row.segment]));
@@ -1455,9 +1496,9 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
     status: missing.length ? 'split-backend-incomplete' : 'split-backend-content-reverified',
     matrixDecision: decided[0].plan.matrixDecision, priorMatrixDecision: reference.priorMatrixDecision ?? null,
     inference: plans[0].plan.inference, nativeEvidenceSha: plans[0].plan.nativeEvidence?.sha ?? null,
-    segments: bySegment, allocation, missing, crossCaseControls,
+    segments: bySegment, allocation, missing, crossCaseControls, reusedNativeWitnesses,
     cases: rows.map(({ dir: _dir, ...row }) => row),
-    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. This is not a single-SHA backend readback.',
+    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. reusedNativeWitnesses are native witnesses a prior-decision segment adopted from its decision\'s anchor packets (same native evidence SHA) instead of running its own; each was re-hashed from the segment\'s retained files. This is not a single-SHA backend readback.',
   };
 }
 export async function verifyCampaign(p) {
