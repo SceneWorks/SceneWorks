@@ -1787,6 +1787,8 @@ impl ResolvedCacheStore {
             match FileLock::try_exclusive(file) {
                 Ok(lock) => return Ok(lock),
                 Err(error) if is_lock_contended(&error) => {
+                    #[cfg(test)]
+                    run_contended_metadata_wait_hook();
                     check()?;
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
@@ -2804,6 +2806,24 @@ impl ResolvedCacheReservation {
 thread_local! {
     static FINAL_PUBLICATION_LOCK_ACQUIRED_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+// Fires on this thread the first time a checked metadata-lock acquisition finds the lock
+// CONTENDED, before that iteration's cancellation check: tests land a flip exactly inside the
+// contended wait instead of racing a sleep against it.
+#[cfg(test)]
+thread_local! {
+    static CONTENDED_METADATA_WAIT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn run_contended_metadata_wait_hook() {
+    CONTENDED_METADATA_WAIT_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
 }
 
 #[cfg(test)]

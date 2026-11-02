@@ -2114,9 +2114,10 @@ fn only_a_derived_journal_declares_the_widened_document_version() {
 }
 
 /// Late-delta review finding 2: a CONTENDED lock wait must observe cancellation, not block until
-/// the holder finishes. The holder below keeps the metadata lock across a window far longer than
-/// the whole test; the checked lookup must surface its own cancellation while the lock is still
-/// held — a blocking acquisition would instead queue behind the holder and return the entry.
+/// the holder finishes. The holder below keeps the metadata lock until the test has inspected the
+/// outcome (a long backstop turns a regressed blocking acquisition into a failure, not a hang); the
+/// checked lookup must surface its own cancellation while the lock is still held — a blocking
+/// acquisition would instead queue behind the holder and return the entry.
 #[test]
 fn a_canceled_lookup_waiting_on_a_contended_metadata_lock_returns_before_the_holder_releases() {
     let scratch = TempDir::new().unwrap();
@@ -2137,10 +2138,11 @@ fn a_canceled_lookup_waiting_on_a_contended_metadata_lock_returns_before_the_hol
     let holder = store.lock_metadata(&digest).unwrap();
     let released = Arc::new(AtomicBool::new(false));
     let flag = released.clone();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let holder_thread = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(1200));
-        drop(holder);
+        let _ = release_rx.recv_timeout(Duration::from_secs(30));
         flag.store(true, Ordering::SeqCst);
+        drop(holder);
     });
 
     // The pre-lock checkpoint passes; the CONTENDED wait must observe the flip and return the
@@ -2166,13 +2168,10 @@ fn a_canceled_lookup_waiting_on_a_contended_metadata_lock_returns_before_the_hol
     );
     assert!(
         !released.load(Ordering::SeqCst),
-        "the canceled wait returned while the lock was still held (after {:?})",
+        "the canceled wait must return while the lock is still held, not queue behind the          holder (returned after {:?})",
         started.elapsed()
     );
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "the wait must not queue behind the holder's full window"
-    );
+    release_tx.send(()).unwrap();
     holder_thread.join().unwrap();
     // The entry is untouched by the canceled read.
     assert!(store.lookup_complete(&key).unwrap().is_some());
@@ -2204,21 +2203,26 @@ fn a_cancellation_observed_while_waiting_for_the_publication_lock_publishes_noth
     std::fs::write(bundle.join("index.json"), b"{}").unwrap();
     let artifact = plan.artifact_at(&bundle, ArtifactState::Published);
 
-    // The holder keeps the final publication lock contended; the flip lands well after the
-    // in-place validation (a one-file fixture finishes in microseconds) and while this
-    // transaction is still waiting, then the lock is released so a blocking acquisition would
-    // proceed straight to publishing.
+    // The holder keeps the final publication lock contended until the test has inspected the
+    // canceled outcome (or a long backstop expires, so a regressed blocking acquisition fails
+    // instead of hanging). The flip is landed by the contended-wait hook, i.e. strictly after the
+    // in-place validation and while this transaction is waiting for the lock — no wall-clock
+    // window decides whether the flip arrives "in time" or the waiter returns "fast enough".
+    // Under the pre-lock-only shape the hook never fires, the backstop releases the lock, and
+    // the blocking acquisition proceeds straight to publishing: unwrap_err goes red.
     let flip = Arc::new(AtomicBool::new(false));
     let released = Arc::new(AtomicBool::new(false));
     let holder = store.lock_metadata(&digest).unwrap();
     let trip = flip.clone();
+    CONTENDED_METADATA_WAIT_HOOK.with(|slot| {
+        *slot.borrow_mut() = Some(Box::new(move || trip.store(true, Ordering::SeqCst)));
+    });
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
     let released_by_holder = released.clone();
     let holder_thread = thread::spawn(move || {
-        thread::sleep(Duration::from_millis(400));
-        trip.store(true, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(300));
-        drop(holder);
+        let _ = release_rx.recv_timeout(Duration::from_secs(30));
         released_by_holder.store(true, Ordering::SeqCst);
+        drop(holder);
     });
 
     let error = reservation
@@ -2242,6 +2246,10 @@ fn a_cancellation_observed_while_waiting_for_the_publication_lock_publishes_noth
         error.to_string().contains("h3-preparation-canceled"),
         "the cancellation observed while waiting for the publication lock must surface, \
          not publish: {error}"
+    );
+    assert!(
+        flip.load(Ordering::SeqCst),
+        "the cancellation must have been landed inside the contended publication-lock wait"
     );
     assert!(
         !released.load(Ordering::SeqCst),
@@ -2272,6 +2280,7 @@ fn a_cancellation_observed_while_waiting_for_the_publication_lock_publishes_noth
     std::fs::write(input.join("outside.bin"), b"unowned source bytes").unwrap();
     let hidden_source = scratch.path().join("source-still-owned-by-user");
     std::fs::rename(&input, &hidden_source).unwrap();
+    release_tx.send(()).unwrap();
     holder_thread.join().unwrap();
     store.join_canceled_cleanups().unwrap();
     assert_eq!(
