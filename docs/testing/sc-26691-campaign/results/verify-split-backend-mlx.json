@@ -1,0 +1,889 @@
+{
+  "kind": "split-backend-content-readback",
+  "backend": "mlx",
+  "status": "failed",
+  "verifierCommand": "node scripts/h3-finetune-terminal.mjs verify-split-backend <manifest>",
+  "verifierError": "conditioning/adapters ignored or below baseline noise floor",
+  "meaning": "verify-split-backend exits 1 with verifierError. Every passed case was re-validated against its own plan and run, attribution, decision, pins, native evidence, reused witnesses and pre-decision anchors all verified (the fields below are the verifier output with its cross-case control step instrumented); the run then FAILS at the reduced cross-case controls, whose decoded-media RMSE (16x16 @1fps video, 8 kHz mono audio) are listed in controlMeasurements. This is NOT a passing split readback.",
+  "manifest": {
+    "backend": "mlx",
+    "segments": [
+      {
+        "label": "mlx-41331644188",
+        "caseRoot": "mlx-lane",
+        "runId": 41331644188,
+        "attempt": 1
+      },
+      {
+        "label": "mlx-continuation-41364105218",
+        "caseRoot": "mlx-subset",
+        "runId": 41364105218,
+        "attempt": 1
+      }
+    ]
+  },
+  "proof_kind": "campaign_content_reverified_split",
+  "singleShaBackendReadback": false,
+  "matrixDecision": {
+    "status": "selected",
+    "selectedBackend": "cuda",
+    "displacedBackend": "mlx",
+    "anchorIds": {
+      "reference": {
+        "mlx": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+        "cuda": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo"
+      },
+      "prompt": {
+        "mlx": "mlx.reduced.real-hybrid-text",
+        "cuda": "cuda.reduced.real-hybrid-text"
+      }
+    },
+    "numbers": {
+      "mlx": {
+        "referenceWallMs": 3885104,
+        "promptWallMs": 1662638,
+        "weightedCost": 22750796
+      },
+      "cuda": {
+        "referenceWallMs": 2949054,
+        "promptWallMs": 941600,
+        "weightedCost": 16628470
+      }
+    },
+    "weights": {
+      "reference": 5,
+      "prompt": 2
+    },
+    "reason": "cuda has the lower measured incremental cost (16628470 < 22750796)"
+  },
+  "priorMatrixDecision": {
+    "kind": "h3-prior-matrix-decision",
+    "laneBackend": "mlx",
+    "decisionRun": {
+      "runId": "41213935677",
+      "attempt": "1",
+      "backend": "cuda"
+    },
+    "anchorPackets": {
+      "mlx": {
+        "runId": "41213914294",
+        "runAttempt": "1",
+        "retainedDirectory": "prior-decision-5lFM8n/anchors-mlx"
+      },
+      "cuda": {
+        "runId": "41213935677",
+        "runAttempt": "1",
+        "retainedDirectory": "prior-decision-5lFM8n/anchors-cuda"
+      }
+    },
+    "reusedNativeWitnesses": [
+      {
+        "id": "native-encoded-surface-mlx-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+        "backend": "mlx",
+        "nativeEvidenceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+        "runRef": "actions:41213914294/1",
+        "packet": {
+          "runId": "41213914294",
+          "runAttempt": "1"
+        },
+        "testSelectors": [
+          "pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control",
+          "adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta"
+        ],
+        "receipt": {
+          "path": "prior-decision-5lFM8n/anchors-mlx/witness-0.json",
+          "sha256": "d72595380d922796905dbad68718cdea90c510b1c93924af5e081f6ece265e95"
+        },
+        "logs": [
+          {
+            "path": "prior-decision-5lFM8n/anchors-mlx/witness-0-0.log",
+            "sha256": "46c098c99cac2303a64122869b7ea62f6b41934d5c62db3e054ea9f14acf18cd"
+          }
+        ]
+      },
+      {
+        "id": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+        "backend": "cuda",
+        "nativeEvidenceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+        "runRef": "actions:41213935677/1",
+        "packet": {
+          "runId": "41213935677",
+          "runAttempt": "1"
+        },
+        "testSelectors": [
+          "pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control",
+          "adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta"
+        ],
+        "receipt": {
+          "path": "prior-decision-5lFM8n/anchors-cuda/witness-0.json",
+          "sha256": "6fdb624ce08e8d62a093e646c112299a53a8e1e7e82341499fcc88bd2deac856"
+        },
+        "logs": [
+          {
+            "path": "prior-decision-5lFM8n/anchors-cuda/witness-0-0.log",
+            "sha256": "af0e15f04c7c291fbb7116bcf8f9ec1c76131a588b3a65f928b79068c9fe6dc3"
+          }
+        ]
+      }
+    ],
+    "sourceSha": "4c3625898b20859f57ca38986ed80b1c427cdfdb",
+    "decision": {
+      "status": "selected",
+      "selectedBackend": "cuda",
+      "displacedBackend": "mlx",
+      "anchorIds": {
+        "reference": {
+          "mlx": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "cuda": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo"
+        },
+        "prompt": {
+          "mlx": "mlx.reduced.real-hybrid-text",
+          "cuda": "cuda.reduced.real-hybrid-text"
+        }
+      },
+      "numbers": {
+        "mlx": {
+          "referenceWallMs": 3885104,
+          "promptWallMs": 1662638,
+          "weightedCost": 22750796
+        },
+        "cuda": {
+          "referenceWallMs": 2949054,
+          "promptWallMs": 941600,
+          "weightedCost": 16628470
+        }
+      },
+      "weights": {
+        "reference": 5,
+        "prompt": 2
+      },
+      "reason": "cuda has the lower measured incremental cost (16628470 < 22750796)"
+    },
+    "allocation": [
+      "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "mlx.reduced.artifact-1-reference",
+      "mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+      "mlx.reduced.artifact-3-opaque-renamed-linked-source",
+      "mlx.reduced.real-mixed-repeat",
+      "mlx.reduced.real-drop-audio",
+      "mlx.reduced.real-drop-lora",
+      "mlx.reduced.real-lokr-repeat",
+      "mlx.reduced.real-drop-lokr",
+      "mlx.reduced.real-hybrid-text",
+      "mlx.reduced.real-hybrid-image",
+      "mlx.reduced.real-hybrid-last-only",
+      "mlx.reduced.real-hybrid-first-last",
+      "mlx.reduced.real-hybrid-reference",
+      "mlx.reduced.real-independent-fl2va",
+      "mlx.reduced.numeric-pruned-artifact",
+      "mlx.reduced.numeric-w4a8-artifact",
+      "mlx.reduced.lifecycle-generation-source-prep-cancel"
+    ],
+    "priorPassedCaseIds": [],
+    "subsetCaseIds": [
+      "mlx.reduced.numeric-pruned-artifact",
+      "mlx.reduced.numeric-w4a8-artifact",
+      "mlx.reduced.lifecycle-generation-source-prep-cancel"
+    ],
+    "notCovered": [],
+    "priorLaneRun": {
+      "runId": "41331644188",
+      "attempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "passedCaseIds": [
+        "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+        "mlx.reduced.artifact-1-reference",
+        "mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+        "mlx.reduced.artifact-3-opaque-renamed-linked-source",
+        "mlx.reduced.real-mixed-repeat",
+        "mlx.reduced.real-drop-audio",
+        "mlx.reduced.real-drop-lora",
+        "mlx.reduced.real-lokr-repeat",
+        "mlx.reduced.real-drop-lokr",
+        "mlx.reduced.real-hybrid-text",
+        "mlx.reduced.real-hybrid-image",
+        "mlx.reduced.real-hybrid-last-only",
+        "mlx.reduced.real-hybrid-first-last",
+        "mlx.reduced.real-hybrid-reference",
+        "mlx.reduced.real-independent-fl2va"
+      ]
+    },
+    "caseDefinitionBasis": "peer-backend-counterpart",
+    "caseDefinitionDifferences": [
+      {
+        "id": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.artifact-1-reference",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.artifact-3-opaque-renamed-linked-source",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-mixed-repeat",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-drop-audio",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-drop-lora",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-lokr-repeat",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-drop-lokr",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-hybrid-text",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-hybrid-image",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-hybrid-last-only",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-hybrid-first-last",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-hybrid-reference",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.real-independent-fl2va",
+        "subset": false,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.numeric-pruned-artifact",
+        "subset": true,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.numeric-w4a8-artifact",
+        "subset": true,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      },
+      {
+        "id": "mlx.reduced.lifecycle-generation-source-prep-cancel",
+        "subset": true,
+        "workloadFields": [],
+        "otherFields": [
+          "inputIdentities"
+        ]
+      }
+    ],
+    "sourceShaDifference": {
+      "from": "4c3625898b20859f57ca38986ed80b1c427cdfdb",
+      "to": "d8101a715d880082cbf253e92e753a814305fd60",
+      "files": [
+        ".github/workflows/h3-finetune-terminal.yml",
+        ".github/workflows/load-progress-acceptance.yml",
+        ".github/workflows/macos-mlx.yml",
+        ".github/workflows/memory-catalog-campaign.yml",
+        ".github/workflows/nax-kernel-validation.yml",
+        ".github/workflows/windows-candle.yml",
+        "Cargo.lock",
+        "Cargo.toml",
+        "apps/rust-api/src/tests/load_progress_acceptance.rs",
+        "apps/rust-api/src/tests/mod.rs",
+        "apps/web/src/simple/SimpleJobCard.jsx",
+        "apps/web/src/simple/SimpleJobCard.test.jsx",
+        "apps/web/src/simple/simple.css",
+        "config/anchor-loader-closures.json",
+        "config/inference-crate-prefixes.txt",
+        "config/inference-provenance-candidates.tsv",
+        "config/inference-provider-closures.json",
+        "config/inference-third-party-source.json",
+        "crates/sceneworks-core/Cargo.toml",
+        "crates/sceneworks-core/src/checkpoint_plan_store.rs",
+        "crates/sceneworks-memory-adapter/Cargo.toml",
+        "crates/sceneworks-memory-adapter/src/bin/mlx.rs",
+        "crates/sceneworks-memory-adapter/src/lib.rs",
+        "crates/sceneworks-worker/Cargo.toml",
+        "crates/sceneworks-worker/src/audio_jobs.rs",
+        "crates/sceneworks-worker/src/cache_thread.rs",
+        "crates/sceneworks-worker/src/caption_jobs.rs",
+        "crates/sceneworks-worker/src/catalog_semantic_jobs.rs",
+        "crates/sceneworks-worker/src/checkpoint_catalog_migration.rs",
+        "crates/sceneworks-worker/src/control_training_jobs.rs",
+        "crates/sceneworks-worker/src/converted_install.rs",
+        "crates/sceneworks-worker/src/credentials_ipc.rs",
+        "crates/sceneworks-worker/src/dataset_analysis_jobs.rs",
+        "crates/sceneworks-worker/src/dataset_parquet_jobs.rs",
+        "crates/sceneworks-worker/src/depth_jobs.rs",
+        "crates/sceneworks-worker/src/downloads.rs",
+        "crates/sceneworks-worker/src/face_analysis_jobs.rs",
+        "crates/sceneworks-worker/src/face_likeness_compare_jobs.rs",
+        "crates/sceneworks-worker/src/generator_cache.rs",
+        "crates/sceneworks-worker/src/image_jobs.rs",
+        "crates/sceneworks-worker/src/image_jobs/base.rs",
+        "crates/sceneworks-worker/src/image_jobs/checkpoint_plan.rs",
+        "crates/sceneworks-worker/src/image_jobs/detail.rs",
+        "crates/sceneworks-worker/src/image_jobs/iris.rs",
+        "crates/sceneworks-worker/src/image_jobs/krea_imported.rs",
+        "crates/sceneworks-worker/src/image_jobs/load_progress.rs",
+        "crates/sceneworks-worker/src/image_jobs/moss.rs",
+        "crates/sceneworks-worker/src/image_jobs/prompt_upsampling.rs",
+        "crates/sceneworks-worker/src/image_jobs/stream.rs",
+        "crates/sceneworks-worker/src/image_jobs/supra2.rs",
+        "crates/sceneworks-worker/src/image_jobs/tests.rs",
+        "crates/sceneworks-worker/src/imports.rs",
+        "crates/sceneworks-worker/src/iris_dist.rs",
+        "crates/sceneworks-worker/src/iris_training.rs",
+        "crates/sceneworks-worker/src/job_metrics.rs",
+        "crates/sceneworks-worker/src/kps_jobs.rs",
+        "crates/sceneworks-worker/src/lib.rs",
+        "crates/sceneworks-worker/src/load_progress.rs",
+        "crates/sceneworks-worker/src/local_derivation.rs",
+        "crates/sceneworks-worker/src/ltx_eros_gpu_smoke.rs",
+        "crates/sceneworks-worker/src/manifest.rs",
+        "crates/sceneworks-worker/src/media_jobs.rs",
+        "crates/sceneworks-worker/src/mochi_mlx_smoke.rs",
+        "crates/sceneworks-worker/src/model_io.rs",
+        "crates/sceneworks-worker/src/model_jobs.rs",
+        "crates/sceneworks-worker/src/model_jobs/receipt_verification.rs",
+        "crates/sceneworks-worker/src/person_jobs.rs",
+        "crates/sceneworks-worker/src/person_segment_sam3.rs",
+        "crates/sceneworks-worker/src/pose_jobs.rs",
+        "crates/sceneworks-worker/src/progress.rs",
+        "crates/sceneworks-worker/src/prompt_refine_jobs.rs",
+        "crates/sceneworks-worker/src/segment_jobs.rs",
+        "crates/sceneworks-worker/src/sensenova_jobs.rs",
+        "crates/sceneworks-worker/src/single_child_asset.rs",
+        "crates/sceneworks-worker/src/subject_mask_jobs.rs",
+        "crates/sceneworks-worker/src/training_jobs.rs",
+        "crates/sceneworks-worker/src/upscale_jobs.rs",
+        "crates/sceneworks-worker/src/vector_jobs.rs",
+        "crates/sceneworks-worker/src/video_jobs/ltx.rs",
+        "crates/sceneworks-worker/src/video_jobs/minimax_h3.rs",
+        "crates/sceneworks-worker/src/video_jobs/scail2.rs",
+        "crates/sceneworks-worker/src/video_jobs/seedvr2.rs",
+        "crates/sceneworks-worker/src/video_jobs/tests.rs",
+        "crates/sceneworks-worker/src/video_jobs/vace.rs",
+        "crates/sceneworks-worker/src/video_jobs/wan.rs",
+        "crates/sceneworks-worker/src/yue2_admission.rs",
+        "crates/sceneworks-worker/src/yue2_jobs.rs",
+        "crates/sceneworks-worker/src/yue2_transcription.rs",
+        "docs/generated/memory-matrix.json",
+        "docs/generated/memory-matrix.md",
+        "docs/testing/sc-26691-campaign/README.md",
+        "docs/testing/sc-26691-campaign/dispatch.sh",
+        "docs/testing/sc-26691-campaign/h3-terminal-cuda.json",
+        "docs/testing/sc-26691-campaign/h3-terminal-mlx.json",
+        "docs/testing/sc-26691-h3-terminal.md",
+        "package.json",
+        "scripts/apple-metal-workflows.test.mjs",
+        "scripts/ci/cuda_quant_kernel_validation.py",
+        "scripts/ci/test_windows_cuda_execution.py",
+        "scripts/ci/windows_cuda_execution.py",
+        "scripts/fixtures/sc26691-mlx-artifact-probe/cpu-oracle.json",
+        "scripts/fixtures/sc26691-mlx-artifact-probe/mlx.pruned-timestep-interpolation.fae77294.json",
+        "scripts/fixtures/sc26691-mlx-artifact-probe/probe-manifest.json",
+        "scripts/fixtures/sc26691-mlx-artifact-probe/producer-receipt.json",
+        "scripts/fixtures/sc26691-mlx-artifact-probe/selected-ranges.json",
+        "scripts/fixtures/sc26691-prior-decision/anchors-cuda/1.execution.json",
+        "scripts/fixtures/sc26691-prior-decision/anchors-cuda/15.execution.json",
+        "scripts/fixtures/sc26691-prior-decision/anchors-cuda/anchors.json",
+        "scripts/fixtures/sc26691-prior-decision/anchors-cuda/witness-0-0.log",
+        "scripts/fixtures/sc26691-prior-decision/anchors-cuda/witness-0.json",
+        "scripts/fixtures/sc26691-prior-decision/anchors-mlx/1.execution.json",
+        "scripts/fixtures/sc26691-prior-decision/anchors-mlx/15.execution.json",
+        "scripts/fixtures/sc26691-prior-decision/anchors-mlx/anchors.json",
+        "scripts/fixtures/sc26691-prior-decision/anchors-mlx/witness-0-0.log",
+        "scripts/fixtures/sc26691-prior-decision/anchors-mlx/witness-0.json",
+        "scripts/fixtures/sc26691-prior-decision/decision-plan.json",
+        "scripts/flux3-image-klein-terminal-review-fixes.test.mjs",
+        "scripts/flux3-image-klein-terminal-session.mjs",
+        "scripts/flux3-image-klein-terminal.test.mjs",
+        "scripts/flux3-terminal-host.test.mjs",
+        "scripts/h3-finetune-terminal-api.mjs",
+        "scripts/h3-finetune-terminal-artifact-probe.mjs",
+        "scripts/h3-finetune-terminal-artifact-probe.test.mjs",
+        "scripts/h3-finetune-terminal-float-variants.py",
+        "scripts/h3-finetune-terminal-prior-decision.test.mjs",
+        "scripts/h3-finetune-terminal-runtime.mjs",
+        "scripts/h3-finetune-terminal-runtime.test.mjs",
+        "scripts/h3-finetune-terminal-speech.py",
+        "scripts/h3-finetune-terminal-stage.mjs",
+        "scripts/h3-finetune-terminal-stage.test.mjs",
+        "scripts/h3-finetune-terminal.mjs",
+        "scripts/h3-finetune-terminal.test.mjs",
+        "scripts/lib/h3-owned-processes.mjs",
+        "scripts/lib/h3-prior-decision.mjs",
+        "scripts/load-progress-acceptance.mjs",
+        "scripts/load-progress-acceptance.test.mjs",
+        "scripts/platform-review-contracts.test.mjs",
+        "scripts/qwen-image-2-1-app-lifecycle.test.mjs",
+        "scripts/unit-hf-sandbox.test.mjs",
+        "tests/test_h3_terminal_float_variants.py",
+        "tests/test_h3_terminal_speech.py"
+      ]
+    },
+    "inferenceChange": {
+      "prior": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+      "own": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "descends": true,
+      "firstParentLog": [
+        "a43724b82fbae35c9227cef4bcdabba6dd1da12c Merge pull request #1405 from SceneWorks/sc-26691-keyframe-contract",
+        "70dbe4f41819fcec206737f5d73b428aaed37b6e Merge pull request #1402 from SceneWorks/codex/sc-26850-krea-paired-comparison",
+        "3c52eef46c902d296ce84d77a65e32fe126b32d5 Merge pull request #1404 from SceneWorks/feature/sc-27980-generic-load-progress",
+        "4c137be754ed38d4c5a2195327a515725d4b31d3 Merge pull request #1403 from SceneWorks/feature/sc-27980-generic-load-progress",
+        "fb8948a629dee07211c3ae9333d8dd885a68039a Merge pull request #1401 from SceneWorks/feature/sc-26850-cuda-training-acceleration",
+        "35159482adf6c29649c6d97daac3dea51c637411 Merge pull request #1400 from SceneWorks/feature/sc-27980-generic-load-progress",
+        "39219b9e6550bc33f340ca2533c2d3422a5579a6 Merge pull request #1399 from SceneWorks/feature/sc-26850-cuda-training-acceleration",
+        "69c25a1d87f761464cb200802dfbb04125e9f54c Merge pull request #1398 from SceneWorks/feature/sc-26850-cuda-training-acceleration",
+        "54ad274dd4fd28b02faece88f268aa2a2ddaf86b Merge pull request #1396 from SceneWorks/feature/sc-26850-cuda-training-acceleration",
+        "932ddff6ece44c5a4ba80c17307815785cf3af0e Merge pull request #1395 from SceneWorks/claude/ep27252-test-helpers",
+        "7e0a34e4e774750cc2a2eee098a5d7ae2347bebb Merge pull request #1394 from SceneWorks/feature/sc-26850-cuda-training-acceleration"
+      ]
+    },
+    "meaning": "Matrix allocation adopted from a decision MEASURED in the named prior run (recomputed from its retained anchors). The anchors ran at sourceShaDifference.from; this lane runs at .to. Cases in priorPassedCaseIds are that run's evidence and are re-validated separately (verify-split-backend), never re-labelled as this run's. reusedNativeWitnesses ran at the same native evidence SHA in the named packet runs; this lane does not re-run them, and their retained receipts/logs are re-hashed by verify-split-backend. The anchors, packets and priorPassedCaseIds ran at inference inferenceChange.prior and were validated against that pin; this lane runs at inferenceChange.own, which descends from it (first-parent log recorded). The native evidence SHA is unchanged. priorLaneRun is this lane's own earlier run on the same decision (at its recorded SceneWorks SHA, this lane's inference pin); its passedCaseIds are that run's evidence, excluded from this subset and combined with it by verify-split-backend."
+  },
+  "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+  "inferenceChange": {
+    "prior": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+    "own": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+    "descends": true,
+    "firstParentLog": [
+      "a43724b82fbae35c9227cef4bcdabba6dd1da12c Merge pull request #1405 from SceneWorks/sc-26691-keyframe-contract",
+      "70dbe4f41819fcec206737f5d73b428aaed37b6e Merge pull request #1402 from SceneWorks/codex/sc-26850-krea-paired-comparison",
+      "3c52eef46c902d296ce84d77a65e32fe126b32d5 Merge pull request #1404 from SceneWorks/feature/sc-27980-generic-load-progress",
+      "4c137be754ed38d4c5a2195327a515725d4b31d3 Merge pull request #1403 from SceneWorks/feature/sc-27980-generic-load-progress",
+      "fb8948a629dee07211c3ae9333d8dd885a68039a Merge pull request #1401 from SceneWorks/feature/sc-26850-cuda-training-acceleration",
+      "35159482adf6c29649c6d97daac3dea51c637411 Merge pull request #1400 from SceneWorks/feature/sc-27980-generic-load-progress",
+      "39219b9e6550bc33f340ca2533c2d3422a5579a6 Merge pull request #1399 from SceneWorks/feature/sc-26850-cuda-training-acceleration",
+      "69c25a1d87f761464cb200802dfbb04125e9f54c Merge pull request #1398 from SceneWorks/feature/sc-26850-cuda-training-acceleration",
+      "54ad274dd4fd28b02faece88f268aa2a2ddaf86b Merge pull request #1396 from SceneWorks/feature/sc-26850-cuda-training-acceleration",
+      "932ddff6ece44c5a4ba80c17307815785cf3af0e Merge pull request #1395 from SceneWorks/claude/ep27252-test-helpers",
+      "7e0a34e4e774750cc2a2eee098a5d7ae2347bebb Merge pull request #1394 from SceneWorks/feature/sc-26850-cuda-training-acceleration"
+    ]
+  },
+  "nativeEvidenceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+  "segments": [
+    {
+      "label": "mlx-41331644188",
+      "role": "prior-lane-run",
+      "runId": "41331644188",
+      "attempt": "1",
+      "sceneworks": [
+        "ae148c29ad533079cc5bdfde78c8d2ddd220ab83"
+      ],
+      "inference": [
+        "a43724b82fbae35c9227cef4bcdabba6dd1da12c"
+      ],
+      "cases": [
+        "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+        "mlx.reduced.artifact-1-reference",
+        "mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+        "mlx.reduced.artifact-3-opaque-renamed-linked-source",
+        "mlx.reduced.real-mixed-repeat",
+        "mlx.reduced.real-drop-audio",
+        "mlx.reduced.real-drop-lora",
+        "mlx.reduced.real-lokr-repeat",
+        "mlx.reduced.real-drop-lokr",
+        "mlx.reduced.real-hybrid-text",
+        "mlx.reduced.real-hybrid-image",
+        "mlx.reduced.real-hybrid-last-only",
+        "mlx.reduced.real-hybrid-first-last",
+        "mlx.reduced.real-hybrid-reference",
+        "mlx.reduced.real-independent-fl2va"
+      ]
+    },
+    {
+      "label": "mlx-continuation-41364105218",
+      "role": "prior-decision-subset",
+      "runId": "41364105218",
+      "attempt": "1",
+      "sceneworks": [
+        "d8101a715d880082cbf253e92e753a814305fd60"
+      ],
+      "inference": [
+        "a43724b82fbae35c9227cef4bcdabba6dd1da12c"
+      ],
+      "cases": [
+        "mlx.reduced.numeric-pruned-artifact",
+        "mlx.reduced.numeric-w4a8-artifact",
+        "mlx.reduced.lifecycle-generation-source-prep-cancel"
+      ]
+    }
+  ],
+  "allocation": [
+    "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+    "mlx.reduced.artifact-1-reference",
+    "mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+    "mlx.reduced.artifact-3-opaque-renamed-linked-source",
+    "mlx.reduced.real-mixed-repeat",
+    "mlx.reduced.real-drop-audio",
+    "mlx.reduced.real-drop-lora",
+    "mlx.reduced.real-lokr-repeat",
+    "mlx.reduced.real-drop-lokr",
+    "mlx.reduced.real-hybrid-text",
+    "mlx.reduced.real-hybrid-image",
+    "mlx.reduced.real-hybrid-last-only",
+    "mlx.reduced.real-hybrid-first-last",
+    "mlx.reduced.real-hybrid-reference",
+    "mlx.reduced.real-independent-fl2va",
+    "mlx.reduced.numeric-pruned-artifact",
+    "mlx.reduced.numeric-w4a8-artifact",
+    "mlx.reduced.lifecycle-generation-source-prep-cancel"
+  ],
+  "missing": [],
+  "reusedNativeWitnesses": [
+    {
+      "id": "native-encoded-surface-mlx-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+      "backend": "mlx",
+      "nativeEvidenceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+      "runRef": "actions:41213914294/1",
+      "packet": {
+        "runId": "41213914294",
+        "runAttempt": "1"
+      },
+      "testSelectors": [
+        "pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control",
+        "adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta"
+      ],
+      "receipt": {
+        "path": "prior-decision-5lFM8n/anchors-mlx/witness-0.json",
+        "sha256": "d72595380d922796905dbad68718cdea90c510b1c93924af5e081f6ece265e95"
+      },
+      "logs": [
+        {
+          "path": "prior-decision-5lFM8n/anchors-mlx/witness-0-0.log",
+          "sha256": "46c098c99cac2303a64122869b7ea62f6b41934d5c62db3e054ea9f14acf18cd"
+        }
+      ],
+      "reverifiedFromRetainedFiles": true,
+      "segment": "mlx-continuation-41364105218"
+    },
+    {
+      "id": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+      "backend": "cuda",
+      "nativeEvidenceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+      "runRef": "actions:41213935677/1",
+      "packet": {
+        "runId": "41213935677",
+        "runAttempt": "1"
+      },
+      "testSelectors": [
+        "pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control",
+        "adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta"
+      ],
+      "receipt": {
+        "path": "prior-decision-5lFM8n/anchors-cuda/witness-0.json",
+        "sha256": "6fdb624ce08e8d62a093e646c112299a53a8e1e7e82341499fcc88bd2deac856"
+      },
+      "logs": [
+        {
+          "path": "prior-decision-5lFM8n/anchors-cuda/witness-0-0.log",
+          "sha256": "af0e15f04c7c291fbb7116bcf8f9ec1c76131a588b3a65f928b79068c9fe6dc3"
+        }
+      ],
+      "reverifiedFromRetainedFiles": true,
+      "segment": "mlx-continuation-41364105218"
+    }
+  ],
+  "preDecisionAnchorCases": [],
+  "cases": [
+    {
+      "id": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "ca2896090e726e3b95a79490bf4cbf780bd5868558a0c56f7ea7ca1ea5e5d0bb"
+    },
+    {
+      "id": "mlx.reduced.artifact-1-reference",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "b33d08c3751407a292b9875d8a322a8bb98e09c549ae23c1e00f08ab7758cb58"
+    },
+    {
+      "id": "mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "3d6f3b62456a89b03bb9adc5f7635aa2465faa77eefb43d6a9a1900a5b7e26e8"
+    },
+    {
+      "id": "mlx.reduced.artifact-3-opaque-renamed-linked-source",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "d108d123e43f5b6d5d3e7e220b44fb93602530ab99c193439df7a93172aba62d"
+    },
+    {
+      "id": "mlx.reduced.real-mixed-repeat",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "b613a6334719270459159e901ff8dd973fff0fd68ff22908c5286c28e2f18d02"
+    },
+    {
+      "id": "mlx.reduced.real-drop-audio",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "f741dbf751646f6f937e6be473269b49be6788459d491199cc2038be6cc7e5d9"
+    },
+    {
+      "id": "mlx.reduced.real-drop-lora",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "71bf9561c662f9896a604dbdc0f2ead323518e752c9b282d3068a9c1d3dac939"
+    },
+    {
+      "id": "mlx.reduced.real-lokr-repeat",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "a817d5206ac30c55d562d1e49e28fbba54bbecd5c52a4c576f9a8ea73c0f48fd"
+    },
+    {
+      "id": "mlx.reduced.real-drop-lokr",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "8f1af47a90d02f5a0f424970574394df9d9f5933dd5de0dbdd0e3331d01f7fed"
+    },
+    {
+      "id": "mlx.reduced.real-hybrid-text",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "c1a04b076085331bec938c3322d95b179ad6fef3c3c4b9837edc26ceb20028b1"
+    },
+    {
+      "id": "mlx.reduced.real-hybrid-image",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "c4975a62ab4112b681c9899f257e8371a7daa191e0a200fcfb49d382e4267914"
+    },
+    {
+      "id": "mlx.reduced.real-hybrid-last-only",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "0f51195ca2a9429161be6ebf995970d2fc64c509eab274f15eed6d26aee197e8"
+    },
+    {
+      "id": "mlx.reduced.real-hybrid-first-last",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "a88bf4fad6701e35614b3c26390cd789b562ac195da65589ec87205af76bc48a"
+    },
+    {
+      "id": "mlx.reduced.real-hybrid-reference",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "9a69a0ac6c1d8f1462f2691d852a267fed7ee76c8343e7ae49013298e756c139"
+    },
+    {
+      "id": "mlx.reduced.real-independent-fl2va",
+      "segment": "mlx-41331644188",
+      "runId": "41331644188",
+      "runAttempt": "1",
+      "sceneworks": "ae148c29ad533079cc5bdfde78c8d2ddd220ab83",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "0c55c647341220bc64008a4491d492563159ffa57d7bdfe0594edf0f7d0c4ad2",
+      "executionSha256": "07b69614e87a227ade6fa6e24c8297268f65c422a0fc9859a38ab8ffb6bd4a62"
+    },
+    {
+      "id": "mlx.reduced.numeric-pruned-artifact",
+      "segment": "mlx-continuation-41364105218",
+      "runId": "41364105218",
+      "runAttempt": "1",
+      "sceneworks": "d8101a715d880082cbf253e92e753a814305fd60",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "9a1fbe9e63d3719f4525b6f3f800bd1719d69f9edbcc4459b1fb4646913837c4",
+      "executionSha256": "83d4eb9a08d421d7f5025bd0f513bea81d3be5b51aa385149208b1e94fcd7b92"
+    },
+    {
+      "id": "mlx.reduced.numeric-w4a8-artifact",
+      "segment": "mlx-continuation-41364105218",
+      "runId": "41364105218",
+      "runAttempt": "1",
+      "sceneworks": "d8101a715d880082cbf253e92e753a814305fd60",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "9a1fbe9e63d3719f4525b6f3f800bd1719d69f9edbcc4459b1fb4646913837c4",
+      "executionSha256": "a5bf8ffea51c4390f35d989029505b1e403598a531c2e2c6fa98a17292e1ac8b"
+    },
+    {
+      "id": "mlx.reduced.lifecycle-generation-source-prep-cancel",
+      "segment": "mlx-continuation-41364105218",
+      "runId": "41364105218",
+      "runAttempt": "1",
+      "sceneworks": "d8101a715d880082cbf253e92e753a814305fd60",
+      "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+      "planSha256": "9a1fbe9e63d3719f4525b6f3f800bd1719d69f9edbcc4459b1fb4646913837c4",
+      "executionSha256": "2f4e7f8467fe34045947ef425c45392d46965169b085dd4ff0576fc49c1a8e20"
+    }
+  ],
+  "contentStatusBeforeControls": "all-allocated-cases-reverified",
+  "controlTable": [
+    {
+      "caseId": "mlx.reduced.real-drop-audio",
+      "baseline": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeat": "mlx.reduced.real-mixed-repeat",
+      "field": "referenceAudioAssetIds",
+      "stream": "audio",
+      "interventionDelta": 0.19665564694083137,
+      "repeatedBaselineDelta": 0,
+      "threshold": 0.01,
+      "pass": true
+    },
+    {
+      "caseId": "mlx.reduced.real-drop-lora",
+      "baseline": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "repeat": "mlx.reduced.real-mixed-repeat",
+      "field": "loras",
+      "stream": "video",
+      "interventionDelta": 0.0092205956190706,
+      "repeatedBaselineDelta": 0,
+      "threshold": 0.01,
+      "pass": false
+    },
+    {
+      "caseId": "mlx.reduced.real-drop-lokr",
+      "baseline": "mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+      "repeat": "mlx.reduced.real-lokr-repeat",
+      "field": "loras",
+      "stream": "video",
+      "interventionDelta": 0.0029924720792683336,
+      "repeatedBaselineDelta": 0,
+      "threshold": 0.01,
+      "pass": false
+    }
+  ],
+  "controlTableMeaning": "Every reduced cross-case control allocated to this lane, each measured with the verifier decodedDelta and its predeclared thresholds (pass = interventionDelta > max(minimumControlDelta, 3 x repeatedBaselineDelta)), evaluated independently instead of stopping at the first failure."
+}
