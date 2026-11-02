@@ -134,13 +134,7 @@ fn mixed_raw_normalization_preserves_packing_dtypes_and_row_bindings() {
             let data = tempfile::tempdir().unwrap();
             let library = tempfile::tempdir().unwrap();
             let source = library.path().join("renamed.safetensors");
-            write_file(
-                &source,
-                &raw,
-                Some(
-                    json!({"h3_config":cfg.0.to_string(),"h3_qkv_layout":if layout==H3QkvLayout::Interleaved {"interleaved"} else {"contiguous"}}),
-                ),
-            );
+            write_file(&source, &raw, Some(super::source_meta(&cfg, layout)));
             let plans = CheckpointPlanStore::open(data.path());
             let root = plans.approve_root(library.path()).unwrap();
             let compiled = plans
@@ -217,7 +211,7 @@ fn mixed_raw_normalization_preserves_packing_dtypes_and_row_bindings() {
 
 #[test]
 fn cross_shard_managed_and_linked_imports_keep_native_format_and_source_identity() {
-    let (cfg, raw) = w4a8_fixture(H3QkvLayout::Interleaved, true);
+    let (cfg, raw) = w4a8_fixture(H3QkvLayout::Contiguous, true);
     let data = tempfile::tempdir().unwrap();
     let library = tempfile::tempdir().unwrap();
     let raw_path = library.path().join("unrelated-name.safetensors");
@@ -359,7 +353,7 @@ fn published_depth_mixed_inventory_uses_every_trunk_and_refiner_projection() {
     // Match the source's 50 trunk / 2 refiner mechanism at bounded channel width: 200 packed
     // raw projections and eight ConvRot projections. Canonical QKV splits add two per block.
     let (layers, refiners) = (50, 2);
-    let (cfg, raw) = w4a8_fixture_depth(H3QkvLayout::Interleaved, true, layers, refiners);
+    let (cfg, raw) = w4a8_fixture_depth(H3QkvLayout::Contiguous, true, layers, refiners);
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("not-a-model-name.safetensors");
     write_file(&file, &raw, Some(json!({"h3_config":cfg.0.to_string()})));
@@ -394,7 +388,7 @@ fn published_depth_mixed_inventory_uses_every_trunk_and_refiner_projection() {
 
 #[test]
 fn malformed_or_future_operands_refuse_before_publication() {
-    let (cfg, original) = w4a8_fixture(H3QkvLayout::Interleaved, true);
+    let (cfg, original) = w4a8_fixture(H3QkvLayout::Contiguous, true);
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("anything.safetensors");
     let base = "model.diffusion_model.blocks.0.attn.qkv_proj";

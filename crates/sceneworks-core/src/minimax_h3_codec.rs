@@ -1,16 +1,17 @@
 //! Task-neutral H3 tensor adapter and bounded source normalization (sc-26681).
 //!
 //! Canonical names/shapes follow inference `81cff07c13137fea520cec0b1dc9b8f083514601`,
-//! `mlx-gen-minimax-h3/src/dit/{heads,layers,block,refiner}.rs`. Native raw QKV is
-//! **per-head interleaved**; reference `state_dict()` QKV is already reordered. They must not
-//! be confused (`src/layout.rs` rule 2 and `src/dit/qkv.rs`). Native SwiGLU is gate-first;
+//! `mlx-gen-minimax-h3/src/dit/{heads,layers,block,refiner}.rs`. Two `blocks.*` spellings carry
+//! the SAME key set but DIFFERENT fused-QKV row orders, so they must not be confused (inference
+//! `src/layout.rs` rule 2 and `src/dit/qkv.rs`); see [`H3QkvLayout`] for the measured rule.
+//! Native SwiGLU is gate-first;
 //! canonical SwiGLU is value-first. Normalization copies byte ranges, never casts precision,
 //! never materializes a dense tensor/model, and publishes through the shared derivative cache.
 //!
 //! Executable raw-to-Diffusers reference pinned at
 //! <https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py>
-//! Runtime state_dict exports must explicitly declare `__metadata__.h3_qkv_layout=contiguous`;
-//! raw checkpoints default to the reference's interleaved source layout.
+//! Single-file native sources default to the contiguous ComfyUI layout; a per-head interleaved
+//! file must explicitly declare `__metadata__.h3_qkv_layout=interleaved` (sc-26691).
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -296,10 +297,50 @@ impl H3Config {
     }
 }
 
+/// Row order of a native fused `attn.qkv_proj.weight` (`[3·heads·head_dim, hidden]`).
+///
+/// The rule is measured, not assumed (sc-26691; whole-matrix cosine against the official Diffusers
+/// `transformer/` `to_q`/`to_k`/`to_v` of `MiniMaxAI/MiniMax-H3@6818f6c3`, blocks 0/25 and
+/// token-refiner blocks 0/1):
+///
+/// | source | spelling | QKV rows | contiguous | interleaved |
+/// |---|---|---|---|---|
+/// | `MiniMaxAI/MiniMax-H3` `FL2VA/transformer` raw shards (`model-0000N-of-00013`, `model.safetensors.index.json`, metadata `{format: pt}`) | `blocks.*` | per-head interleaved | 0.00–0.03 | 1.0000 |
+/// | `Comfy-Org/MiniMax-H3` `minimax_h3_fl2va_bf16.safetensors` (single file, identical 535-key set) | `blocks.*` | contiguous `[q; k; v]` | 1.0000 | 0.00–0.04 |
+/// | ComfyUI-ecosystem finetunes/quants: smhfacct hybrid b25-49 INT8, Singularity v1.3 INT8 ×3 and W4A8, PulpCut Turbo INT8 (ConvRot undone; finetunes vs the stock base, blocks 0/25/49) | `blocks.*` / `model.diffusion_model.blocks.*` | contiguous | 0.994–0.996 | 0.00–0.03 |
+///
+/// The interleaved default this codec originally shipped (sc-26681) followed the upstream
+/// `convert_minimax_h3_to_diffusers.py` raw-shard input, where `_reorder_grouped_qkv_to_qkv` runs
+/// at load. ComfyUI's model holds the post-reorder reference `state_dict` order, so every
+/// single-file checkpoint of that ecosystem is contiguous, and the interleaved split rendered
+/// every imported finetune as grey noise on CUDA and MLX. The official raw release is sharded
+/// under a `model.safetensors.index.json`, which this codec never accepted as a native source.
+///
+/// No data-only signal decides the order robustly: the key sets are identical and per-head
+/// row-norm structure separates the two layouts only weakly (between-group R² as low as 0.016 on
+/// a real block). So the rule is provenance plus metadata: an explicit
+/// `__metadata__.h3_qkv_layout` wins, conflicting declarations are refused, the official raw shard
+/// spelling without a declaration is refused, and every other single-file native source is the
+/// contiguous ComfyUI layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum H3QkvLayout {
     Interleaved,
     Contiguous,
+}
+
+/// `model-00001-of-00013.safetensors`: the official MiniMax raw-shard spelling, whose fused QKV
+/// is per-head interleaved. Only consulted when no layout is declared.
+fn is_official_raw_shard_name(name: &str) -> bool {
+    let file = Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let digits = |s: &str| s.len() == 5 && s.bytes().all(|b| b.is_ascii_digit());
+    file.strip_prefix("model-")
+        .and_then(|stem| stem.strip_suffix(".safetensors"))
+        .and_then(|stem| stem.split_once("-of-"))
+        .is_some_and(|(index, total)| digits(index) && digits(total))
 }
 
 /// Exact consumer binding between an H3 source's reduced centered-curve AdaLN topology and the
@@ -699,7 +740,7 @@ impl H3SourceInventory {
                 h.as_object()
                     .is_some_and(|h| h.keys().any(|k| strip_prefix(k) != k))
             });
-        let mut qkv_layout = H3QkvLayout::Interleaved;
+        let mut declared_layout = None;
         for header in &headers {
             if let Some(meta) = header.get("__metadata__") {
                 if let Some(embedded) = meta.get("h3_config").and_then(Value::as_str) {
@@ -720,15 +761,33 @@ impl H3SourceInventory {
                     }
                     config = Some(embedded);
                 }
-                if let Some(layout) = meta.get("h3_qkv_layout").and_then(Value::as_str) {
-                    qkv_layout = match layout {
-                        "interleaved" => H3QkvLayout::Interleaved,
-                        "contiguous" => H3QkvLayout::Contiguous,
-                        _ => return Err(format!("unsupported H3 QKV layout {layout:?}; expected interleaved raw or contiguous reference state_dict")),
+                if let Some(layout) = meta.get("h3_qkv_layout") {
+                    let layout = match layout.as_str() {
+                        Some("interleaved") => H3QkvLayout::Interleaved,
+                        Some("contiguous") => H3QkvLayout::Contiguous,
+                        _ => return Err(format!("unsupported H3 QKV layout {layout}; expected interleaved raw or contiguous reference state_dict")),
                     };
+                    if declared_layout.is_some_and(|declared| declared != layout) {
+                        return Err(
+                            "conflicting MiniMax-H3 h3_qkv_layout metadata across source files"
+                                .into(),
+                        );
+                    }
+                    declared_layout = Some(layout);
                 }
             }
         }
+        // See `H3QkvLayout`: declared metadata wins; the official raw-shard spelling must declare;
+        // every other single-file native source is the contiguous ComfyUI layout.
+        if native
+            && declared_layout.is_none()
+            && weights
+                .iter()
+                .any(|(name, _)| is_official_raw_shard_name(name))
+        {
+            return Err("MiniMax-H3 official raw shards store per-head interleaved QKV; import the official Diffusers transformer instead, or declare __metadata__.h3_qkv_layout".into());
+        }
+        let qkv_layout = declared_layout.unwrap_or(H3QkvLayout::Contiguous);
         if native && weights.len() != 1 {
             return Err("native H3 import expects one safetensors file; export sharded sources in canonical Diffusers layout".into());
         }
@@ -958,7 +1017,9 @@ impl H3SourceInventory {
         CheckpointDerivativeRequestV1 {
             kind: CheckpointDerivativeKindV1::NormalizedLayout,
             adapter_id: H3_MAPPING_ID.into(),
-            adapter_version: "1".into(),
+            // 2: native fused QKV defaults to the contiguous ComfyUI layout (sc-26691). Version 1
+            // derivatives split it per-head interleaved and must never be served again.
+            adapter_version: "2".into(),
             codec_id: if self.w4a8_int8 {
                 crate::checkpoint_weight_facts::W4A8_INT8_CODEC_ID
             } else if self.convrot_int8 {

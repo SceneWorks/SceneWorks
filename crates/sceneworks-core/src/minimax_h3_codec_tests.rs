@@ -139,6 +139,16 @@ fn native(canonical: &Entries, layout: H3QkvLayout) -> Entries {
     entries
 }
 
+/// Source metadata as real checkpoints carry it: ComfyUI-ecosystem files (contiguous) never declare
+/// a QKV layout, so only an interleaved source names one (sc-26691).
+fn source_meta(config: &H3Config, layout: H3QkvLayout) -> Value {
+    let mut meta = json!({"h3_config": config.0.to_string()});
+    if layout == H3QkvLayout::Interleaved {
+        meta["h3_qkv_layout"] = json!("interleaved");
+    }
+    meta
+}
+
 fn write_file(path: &Path, entries: &Entries, meta: Option<Value>) {
     let mut header = Map::new();
     if let Some(meta) = meta {
@@ -193,9 +203,7 @@ fn native_source(dir: &Path, dtype: &str, layout: H3QkvLayout) -> (PathBuf, Entr
     write_file(
         &file,
         &native(&canonical, layout),
-        Some(
-            json!({"h3_config":config().0.to_string(),"h3_qkv_layout":if layout == H3QkvLayout::Interleaved {"interleaved"} else {"contiguous"}}),
-        ),
+        Some(source_meta(&config(), layout)),
     );
     (file, canonical)
 }
@@ -344,12 +352,12 @@ fn renamed_shards_assemble_exact_inventory_through_plan_store() {
 #[test]
 fn incomplete_duplicate_conflicting_and_unconsumed_tensors_name_exact_faults() {
     let dir = tempfile::tempdir().unwrap();
-    let (path, expected) = native_source(dir.path(), "F32", H3QkvLayout::Interleaved);
+    let (path, expected) = native_source(dir.path(), "F32", H3QkvLayout::Contiguous);
     let files = vec![(
         path.file_name().unwrap().to_string_lossy().into_owned(),
         path.clone(),
     )];
-    let mut entries = native(&expected, H3QkvLayout::Interleaved);
+    let mut entries = native(&expected, H3QkvLayout::Contiguous);
     let missing = "model.diffusion_model.blocks.0.norm1.weight";
     let restore = entries.remove(missing).unwrap();
     let meta = Some(json!({"h3_config":config().0.to_string()}));
@@ -423,7 +431,7 @@ fn shard_index_mismatch_duplicate_and_missing_are_precise() {
 #[test]
 fn config_conflicts_future_formats_and_wrong_shapes_fail_closed() {
     let dir = tempfile::tempdir().unwrap();
-    let (file, _) = native_source(dir.path(), "BF16", H3QkvLayout::Interleaved);
+    let (file, _) = native_source(dir.path(), "BF16", H3QkvLayout::Contiguous);
     let mut alternate = config().0;
     alternate["rope_theta"] = json!(20000.0);
     std::fs::write(dir.path().join(H3_CONFIG_FILE), alternate.to_string()).unwrap();
@@ -451,8 +459,8 @@ fn config_conflicts_future_formats_and_wrong_shapes_fail_closed() {
 #[test]
 fn native_rope_buffer_must_match_bound_config() {
     let dir = tempfile::tempdir().unwrap();
-    let (file, expected) = native_source(dir.path(), "F32", H3QkvLayout::Interleaved);
-    let mut entries = native(&expected, H3QkvLayout::Interleaved);
+    let (file, expected) = native_source(dir.path(), "F32", H3QkvLayout::Contiguous);
+    let mut entries = native(&expected, H3QkvLayout::Contiguous);
     entries
         .get_mut("model.diffusion_model.rope.inv_freq")
         .unwrap()
@@ -483,7 +491,7 @@ fn arbitrary_sidecar_and_incomplete_shards_keep_admission_diagnostics() {
     for (_, path) in files {
         let _ = std::fs::remove_file(path);
     }
-    let (file, _) = native_source(dir.path(), "F32", H3QkvLayout::Interleaved);
+    let (file, _) = native_source(dir.path(), "F32", H3QkvLayout::Contiguous);
     std::fs::write(dir.path().join(H3_CONFIG_FILE), config().0.to_string()).unwrap();
     assert_eq!(
         crate::base_weights::minimax_h3_import_primary(dir.path()),
@@ -793,13 +801,7 @@ fn convrot_groups64_and256_preserve_codes_scales_and_descriptors_through_real_ca
         let data = tempfile::tempdir().unwrap();
         let library = tempfile::tempdir().unwrap();
         let file = library.path().join("user-checkpoint.safetensors");
-        write_file(
-            &file,
-            &raw,
-            Some(
-                json!({"h3_config":cfg.0.to_string(),"h3_qkv_layout":if layout == H3QkvLayout::Interleaved { "interleaved" } else { "contiguous" }}),
-            ),
-        );
+        write_file(&file, &raw, Some(source_meta(&cfg, layout)));
         let plans = CheckpointPlanStore::open(data.path());
         let root = plans.approve_root(library.path()).unwrap();
         let compiled = plans
@@ -838,7 +840,7 @@ fn convrot_groups64_and256_preserve_codes_scales_and_descriptors_through_real_ca
 
 #[test]
 fn convrot_malformed_descriptors_scales_and_signed_storage_refuse_before_copy() {
-    let (cfg, original, _) = convrot_fixture(H3QkvLayout::Interleaved);
+    let (cfg, original, _) = convrot_fixture(H3QkvLayout::Contiguous);
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("arbitrary.safetensors");
     let descriptor = "model.diffusion_model.blocks.0.attn.qkv_proj.comfy_quant";
@@ -897,13 +899,13 @@ fn convrot_malformed_descriptors_scales_and_signed_storage_refuse_before_copy() 
 #[test]
 fn weight_only_requires_explicit_config_and_owned_source_configuration_wins() {
     let dir = tempfile::tempdir().unwrap();
-    let (file, expected) = native_source(dir.path(), "BF16", H3QkvLayout::Interleaved);
+    let (file, expected) = native_source(dir.path(), "BF16", H3QkvLayout::Contiguous);
     let files = vec![("user.safetensors".into(), file.clone())];
     let mut fallback = config();
     fallback.0["rope_theta"] = json!(20000.0);
     let owned = H3SourceInventory::from_files_with_config(&files, Some(fallback)).unwrap();
     assert_eq!(owned.config.0, config().0);
-    write_file(&file, &native(&expected, H3QkvLayout::Interleaved), None);
+    write_file(&file, &native(&expected, H3QkvLayout::Contiguous), None);
     assert!(H3SourceInventory::from_files(&files)
         .unwrap_err()
         .contains("no config.json or embedded h3_config"));
@@ -917,7 +919,7 @@ fn weight_only_requires_explicit_config_and_owned_source_configuration_wins() {
 
 #[test]
 fn convrot_codes_scales_and_descriptors_can_live_in_separate_sealed_shards() {
-    let (cfg, _, expected) = convrot_fixture(H3QkvLayout::Interleaved);
+    let (cfg, _, expected) = convrot_fixture(H3QkvLayout::Contiguous);
     let data = tempfile::tempdir().unwrap();
     let library = tempfile::tempdir().unwrap();
     let source = library.path().join("user-shards");
@@ -1154,10 +1156,7 @@ fn native_pruned_source(
     write_file(
         &file,
         &native(entries, layout),
-        Some(json!({
-            "h3_config":config().0.to_string(),
-            "h3_qkv_layout": if layout == H3QkvLayout::Interleaved {"interleaved"} else {"contiguous"},
-        })),
+        Some(source_meta(&config(), layout)),
     );
     let inventory =
         H3SourceInventory::from_files(&[("arbitrary-community-merge.safetensors".into(), file)])
@@ -1268,7 +1267,7 @@ fn pruned_native_source_normalizes_to_identical_stored_bytes_and_dtype() {
         let file = library.path().join("community-merge.safetensors");
         write_file(
             &file,
-            &native(&entries, H3QkvLayout::Interleaved),
+            &native(&entries, H3QkvLayout::Contiguous),
             Some(json!({"h3_config":config().0.to_string()})),
         );
         let plans = CheckpointPlanStore::open(data.path());
@@ -1559,4 +1558,343 @@ fn stale_declared_pruning_binding_is_replaced_by_the_actual_source() {
         compiled.plan.context["transformerConfig"]["provenance"]["kind"],
         "source"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// sc-26691: fused-QKV row order. See `H3QkvLayout` for the measured provenance table.
+
+fn qkv_ranges(inventory: &H3SourceInventory, leaf: &str) -> Vec<(u64, u64)> {
+    inventory.tensors[&format!("transformer_blocks.0.attn.{leaf}.weight")]
+        .ranges
+        .clone()
+}
+
+#[test]
+fn undeclared_native_qkv_is_the_contiguous_comfyui_layout() {
+    // Real ComfyUI-ecosystem checkpoints (Comfy-Org repack, hybrid, Singularity, PulpCut) carry no
+    // `h3_qkv_layout`; their rows are contiguous `[q; k; v]`. The pre-sc-26691 default split them
+    // per-head interleaved, which this fixture discriminates: two heads, distinct values per row.
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = canonical("F32");
+    let raw = native(&canonical, H3QkvLayout::Contiguous);
+    let fused = &raw["model.diffusion_model.blocks.0.attn.qkv_proj.weight"].2;
+    let q = &canonical["transformer_blocks.0.attn.to_q.weight"].2;
+    // Explicit layout assertion on the fixture itself: contiguous thirds reproduce `to_q`, the
+    // per-head interleaved gather does not.
+    assert_eq!(&fused[..q.len()], q.as_slice());
+    let head = q.len() / 2;
+    let interleaved_q = [&fused[..head], &fused[3 * head..4 * head]].concat();
+    assert_ne!(&interleaved_q, q);
+    let file = dir.path().join("community-finetune.safetensors");
+    write_file(
+        &file,
+        &raw,
+        Some(json!({"h3_config": config().0.to_string()})),
+    );
+    let inventory =
+        H3SourceInventory::from_files(&[("community-finetune.safetensors".into(), file)]).unwrap();
+    let row = config().dim("hidden_size").unwrap() as u64 * 4;
+    let rows = (config().dim("num_attention_heads").unwrap()
+        * config().dim("attention_head_dim").unwrap()) as u64;
+    for (j, leaf) in ["to_q", "to_k", "to_v"].into_iter().enumerate() {
+        assert_eq!(
+            qkv_ranges(&inventory, leaf),
+            vec![(j as u64 * rows * row, rows * row)],
+            "{leaf} must be the contiguous third"
+        );
+    }
+}
+
+#[test]
+fn declared_interleaved_layout_still_splits_per_head() {
+    let dir = tempfile::tempdir().unwrap();
+    let (file, _) = native_source(dir.path(), "F32", H3QkvLayout::Interleaved);
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+    let inventory = H3SourceInventory::from_files(&[(name, file)]).unwrap();
+    let head = config().dim("attention_head_dim").unwrap() as u64;
+    let row = config().dim("hidden_size").unwrap() as u64 * 4;
+    assert_eq!(
+        qkv_ranges(&inventory, "to_k"),
+        vec![(head * row, head * row), (4 * head * row, head * row)]
+    );
+}
+
+#[test]
+fn conflicting_or_unknown_qkv_layout_declarations_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = canonical("F32");
+    let raw = native(&canonical, H3QkvLayout::Contiguous);
+    let mut files = Vec::new();
+    for (name, layout) in [
+        ("a.safetensors", "interleaved"),
+        ("b.safetensors", "contiguous"),
+    ] {
+        let file = dir.path().join(name);
+        write_file(
+            &file,
+            &raw,
+            Some(json!({"h3_config": config().0.to_string(), "h3_qkv_layout": layout})),
+        );
+        files.push((name.to_owned(), file));
+    }
+    assert!(H3SourceInventory::from_files(&files)
+        .unwrap_err()
+        .contains("conflicting MiniMax-H3 h3_qkv_layout"));
+    let file = dir.path().join("c.safetensors");
+    write_file(
+        &file,
+        &raw,
+        Some(json!({"h3_config": config().0.to_string(), "h3_qkv_layout": "rows"})),
+    );
+    assert!(
+        H3SourceInventory::from_files(&[("c.safetensors".into(), file)])
+            .unwrap_err()
+            .contains("unsupported H3 QKV layout")
+    );
+}
+
+#[test]
+fn official_raw_shard_spelling_must_declare_its_interleaved_layout() {
+    assert!(is_official_raw_shard_name(
+        "FL2VA/transformer/model-00001-of-00013.safetensors"
+    ));
+    assert!(is_official_raw_shard_name(
+        "MODEL-00002-OF-00013.SAFETENSORS"
+    ));
+    for name in [
+        "model.safetensors",
+        "model-1-of-13.safetensors",
+        "minimax_h3_fl2va_bf16.safetensors",
+        "diffusion_pytorch_model-00001-of-00014.safetensors",
+    ] {
+        assert!(!is_official_raw_shard_name(name), "{name}");
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = canonical("F32");
+    let name = "model-00001-of-00001.safetensors";
+    let file = dir.path().join(name);
+    write_file(
+        &file,
+        &native(&canonical, H3QkvLayout::Interleaved),
+        Some(json!({"h3_config": config().0.to_string()})),
+    );
+    assert!(
+        H3SourceInventory::from_files(&[(name.into(), file.clone())])
+            .unwrap_err()
+            .contains("official raw shards store per-head interleaved QKV")
+    );
+    write_file(
+        &file,
+        &native(&canonical, H3QkvLayout::Interleaved),
+        Some(source_meta(&config(), H3QkvLayout::Interleaved)),
+    );
+    let inventory = H3SourceInventory::from_files(&[(name.into(), file)]).unwrap();
+    assert_eq!(qkv_ranges(&inventory, "to_q").len(), 2);
+}
+
+#[test]
+fn normalized_derivatives_from_the_interleaved_default_era_are_never_reused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (file, _) = native_source(dir.path(), "F32", H3QkvLayout::Contiguous);
+    let name = file.file_name().unwrap().to_string_lossy().into_owned();
+    let request = H3SourceInventory::from_files(&[(name, file)])
+        .unwrap()
+        .derivative_request();
+    // Version 1 cached per-head interleaved splits of contiguous sources; the version is part of
+    // the derivative cache key, so bumping it regenerates every H3 normalization on next load.
+    assert_eq!(request.adapter_id, H3_MAPPING_ID);
+    assert_eq!(request.adapter_version, "2");
+}
+
+/// Opt-in real-artifact check (never runs in CI, never touches the HF cache on its own):
+/// `SCENEWORKS_H3_REAL_QKV_SOURCES` lists single-file native H3 checkpoints (dense or ConvRot
+/// INT8; `std::env::split_paths` syntax) and `SCENEWORKS_H3_REAL_QKV_REFERENCE` names a dense
+/// Diffusers `transformer/` directory. Planned `to_q`/`to_k`/`to_v` rows are read through the
+/// codec's own byte ranges, ConvRot-unrotated, and compared to the reference rows. MiniMax H3
+/// weight bytes are licence-restricted, so no real slice is checked in; the always-on tests above
+/// use synthetic sources in the measured contiguous layout instead.
+///
+/// Measured 2026-11-01, block 0, reference `SceneWorks/minimax-h3-mlx@137ce668` `bf16/transformer`:
+/// Comfy-Org fl2va bf16 1.0000 / Comfy-Org fl2va INT8 ConvRot, smhfacct hybrid b25-49 INT8,
+/// Singularity ref2va v1.3 INT8 (full and pruned), PulpCut pruned Turbo INT8 0.9999 through the
+/// codec plan; the pre-sc-26691 interleaved gather of the same rows ≤ 0.033 for all six (and
+/// the codec plan itself fell to -0.03 with the old default restored).
+#[test]
+fn real_checkpoint_qkv_rows_match_the_reference_split_when_provided() {
+    let (Some(sources), Some(reference)) = (
+        std::env::var_os("SCENEWORKS_H3_REAL_QKV_SOURCES"),
+        std::env::var_os("SCENEWORKS_H3_REAL_QKV_REFERENCE"),
+    ) else {
+        return;
+    };
+    let reference = PathBuf::from(reference);
+    let index: Value =
+        serde_json::from_reader(File::open(reference.join(H3_INDEX_FILE)).unwrap()).unwrap();
+    let config = H3Config::published();
+    let hidden = config.dim("hidden_size").unwrap();
+    let head_dim = config.dim("attention_head_dim").unwrap();
+    let projected = config.dim("num_attention_heads").unwrap() * head_dim;
+    let read_at = |path: &Path, offset: u64, len: usize| {
+        let mut file = File::open(path).unwrap();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        let mut bytes = vec![0u8; len];
+        file.read_exact(&mut bytes).unwrap();
+        bytes
+    };
+    let body = |path: &Path| 8 + u64::from_le_bytes(read_at(path, 0, 8).try_into().unwrap());
+    let decode = |dtype: &str, bytes: &[u8]| -> Vec<f64> {
+        match dtype {
+            "BF16" => bytes
+                .chunks_exact(2)
+                .map(|b| f32::from_bits((u16::from_le_bytes([b[0], b[1]]) as u32) << 16) as f64)
+                .collect(),
+            "F32" => bytes
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()) as f64)
+                .collect(),
+            "I8" => bytes.iter().map(|&b| b as i8 as f64).collect(),
+            other => panic!("unsupported real-check dtype {other}"),
+        }
+    };
+    let cosine = |a: &[f64], b: &[f64]| {
+        let dot: f64 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let norm = |v: &[f64]| v.iter().map(|x| x * x).sum::<f64>().sqrt();
+        dot / (norm(a) * norm(b))
+    };
+    // ConvRot stores W·Rᵀ per input group with the regular (H4-Kronecker) Hadamard; undo per row.
+    let hadamard = |group: usize| {
+        let h4 = [
+            [1., 1., 1., -1.],
+            [1., 1., -1., 1.],
+            [1., -1., 1., 1.],
+            [-1., 1., 1., 1.],
+        ];
+        let mut matrix = vec![vec![1.0f64]];
+        while matrix.len() < group {
+            let n = matrix.len();
+            let mut next = vec![vec![0.0; 4 * n]; 4 * n];
+            for (a, h4_row) in h4.iter().enumerate() {
+                for (b, &sign) in h4_row.iter().enumerate() {
+                    for (i, row) in matrix.iter().enumerate() {
+                        for (k, &value) in row.iter().enumerate() {
+                            next[a * n + i][b * n + k] = sign * value;
+                        }
+                    }
+                }
+            }
+            matrix = next;
+        }
+        matrix
+    };
+    let reference_row = |leaf: &str, row: usize| {
+        let key = format!("transformer_blocks.0.attn.{leaf}.weight");
+        let shard = reference.join(index["weight_map"][&key].as_str().unwrap());
+        let header = read_safetensors_header(&shard).unwrap();
+        let entry = &header[&key];
+        let dtype = entry["dtype"].as_str().unwrap();
+        let width = if dtype == "F32" { 4 } else { 2 };
+        let start = entry["data_offsets"][0].as_u64().unwrap();
+        let bytes = read_at(
+            &shard,
+            body(&shard) + start + (row * hidden * width) as u64,
+            hidden * width,
+        );
+        decode(dtype, &bytes)
+    };
+    for source in std::env::split_paths(&sources) {
+        let name = source.file_name().unwrap().to_string_lossy().into_owned();
+        let inventory = H3SourceInventory::from_files_with_config(
+            &[(name.clone(), source.clone())],
+            Some(config.clone()),
+        )
+        .unwrap();
+        let header = read_safetensors_header(&source).unwrap();
+        let qkv = header
+            .as_object()
+            .unwrap()
+            .keys()
+            .find(|k| k.ends_with("blocks.0.attn.qkv_proj.weight") && !k.contains("refiner"))
+            .unwrap()
+            .clone();
+        let base = qkv.strip_suffix(".weight").unwrap();
+        let rotation = header.get(format!("{base}.comfy_quant")).map(|entry| {
+            let start = entry["data_offsets"][0].as_u64().unwrap();
+            let end = entry["data_offsets"][1].as_u64().unwrap();
+            let descriptor: Value = serde_json::from_slice(&read_at(
+                &source,
+                body(&source) + start,
+                (end - start) as usize,
+            ))
+            .unwrap();
+            hadamard(descriptor["convrot_groupsize"].as_u64().unwrap() as usize)
+        });
+        let row_of = |bytes: Vec<u8>, dtype: &str| {
+            let row = decode(dtype, &bytes);
+            let Some(rotation) = &rotation else {
+                return row;
+            };
+            let group = rotation.len();
+            let scale = (group as f64).sqrt();
+            row.chunks(group)
+                .flat_map(|chunk| {
+                    (0..group).map(move |k| {
+                        (0..group).map(|i| chunk[i] * rotation[i][k]).sum::<f64>() / scale
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        let qkv_entry = &header[&qkv];
+        let qkv_dtype = qkv_entry["dtype"].as_str().unwrap().to_owned();
+        let qkv_start = body(&source) + qkv_entry["data_offsets"][0].as_u64().unwrap();
+        let (mut planned, mut interleaved) = (f64::INFINITY, f64::NEG_INFINITY);
+        for (j, leaf) in ["to_q", "to_k", "to_v"].into_iter().enumerate() {
+            let tensor = &inventory.tensors[&format!("transformer_blocks.0.attn.{leaf}.weight")];
+            let width =
+                tensor.ranges.iter().map(|r| r.1).sum::<u64>() / (projected * hidden) as u64;
+            // to_q head 0 and to_v's last head are the same rows in both layouts; sample others.
+            for row in [
+                head_dim,
+                head_dim + 1,
+                2 * head_dim - 1,
+                projected / 2 + 3,
+                projected - head_dim - 1,
+            ] {
+                // Map the logical row through the codec's ordered source ranges.
+                let mut logical = (row * hidden) as u64 * width;
+                let at = tensor
+                    .ranges
+                    .iter()
+                    .find_map(|&(start, len)| {
+                        if logical < len {
+                            Some(start + logical)
+                        } else {
+                            logical -= len;
+                            None
+                        }
+                    })
+                    .unwrap();
+                let bytes = read_at(&source, tensor.offset + at, hidden * width as usize);
+                let stock = reference_row(leaf, row);
+                planned = planned.min(cosine(&row_of(bytes, &tensor.dtype), &stock));
+                let old = (row / head_dim * 3 + j) * head_dim + row % head_dim;
+                let bytes = read_at(
+                    &source,
+                    qkv_start + (old * hidden) as u64 * width,
+                    hidden * width as usize,
+                );
+                interleaved = interleaved.max(cosine(&row_of(bytes, &qkv_dtype), &stock).abs());
+            }
+        }
+        eprintln!(
+            "{name}: planned min cosine {planned:.4}, interleaved max |cosine| {interleaved:.4}"
+        );
+        assert!(
+            planned > 0.98,
+            "{name}: codec QKV rows do not match the reference ({planned})"
+        );
+        assert!(
+            interleaved < 0.2,
+            "{name}: interleaved gather unexpectedly matches ({interleaved})"
+        );
+    }
 }

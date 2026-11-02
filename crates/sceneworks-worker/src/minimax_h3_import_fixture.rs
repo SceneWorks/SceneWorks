@@ -177,7 +177,8 @@ pub fn stage_managed_minimax_h3_import_source_with_tier(
         let mut header = Map::new();
         header.insert(
             "__metadata__".into(),
-            json!({"h3_config":config.to_string(),"h3_qkv_layout":"interleaved"}),
+            // Real ComfyUI-ecosystem sources never declare their (contiguous) QKV layout.
+            json!({"h3_config":config.to_string()}),
         );
         let mut payload = Vec::new();
         for (canonical, mut shape) in shapes {
