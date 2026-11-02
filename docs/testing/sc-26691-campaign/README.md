@@ -7,6 +7,11 @@ in the closeout handoff on the epic in Shortcut.
 
 ## Today's plan (user-approved 2026-11-01)
 
+> **Superseded (2026-11-02).** The split-run plan below produced only degenerate video (the QKV-layout
+> bug, fixed in `ec6d66ce2`). The final result is the fresh paired campaign at `1e23ef16e` (MLX run
+> 41379525090, CUDA run 41379549283), each lane in one run with normal anchor pairing; see
+> [`results/README.md`](results/README.md). The plan and split-run tooling stay documented for reference.
+
 - **CUDA, 18 passed cases at `4c3625898` stand.** CUDA run 41213935677 (attempt 1, `cuda-windows-2`)
   passed 18 of its 25 allocated cases (retained in `h3-terminal-cuda-reduced-41213935677-1`), then
   refused `real-hybrid-first-last` for disk space: it had written ~500 GB under
