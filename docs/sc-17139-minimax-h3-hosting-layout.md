@@ -104,14 +104,19 @@ share the inspector's 16 MiB limit before parsing, including API/managed admissi
 
 Native mapping follows the executable converter at
 [`604306cab8694584e6096b32a1c1731bee22c43e`](https://github.com/mrbizarro/minimax-h3-mlx/blob/604306cab8694584e6096b32a1c1731bee22c43e/reference/diffusers/convert_minimax_h3_to_diffusers.py),
-cross-checked against inference `81cff07c13137fea520cec0b1dc9b8f083514601`. Raw QKV is per-head
-interleaved; each canonical projection gathers its head rows separately. Native gate-first
-`mlp.fc1` row halves become canonical value-first SwiGLU. Reference-runtime state-dict exports
-whose QKV is already reordered explicitly declare `h3_qkv_layout=contiguous`; raw files default
-to `interleaved`. Source-owned `config.json` or string metadata `h3_config` is authoritative;
+cross-checked against inference `81cff07c13137fea520cec0b1dc9b8f083514601`. Native gate-first
+`mlp.fc1` row halves become canonical value-first SwiGLU. Fused QKV row order is measured, not
+assumed (sc-26691): the official MiniMax raw shards (`FL2VA/transformer/model-0000N-of-00013`) are
+per-head interleaved, while the Comfy-Org single-file repack (identical key set) and every
+ComfyUI-ecosystem finetune/quant are contiguous `[q; k; v]`. A single-file native source therefore
+defaults to `contiguous`; `h3_qkv_layout=interleaved|contiguous` overrides it, conflicting
+declarations are refused, and the undeclared official raw-shard spelling is refused. The original
+interleaved default rendered every imported finetune as grey noise; the derivative adapter version
+moved to 2 so those normalizations regenerate. See `H3QkvLayout` in
+`crates/sceneworks-core/src/minimax_h3_codec.rs` for the measured table. Source-owned `config.json` or string metadata `h3_config` is authoritative;
 multiple source claims must agree. Weight-only files instead bind the explicitly selected compatible
 base's exact primary configuration, never a published architecture default.
-The task-neutral codec never derives the explicit partition declaration from names or shapes.
+The task-neutral codec never derives the partition from names or shapes; only provenance and metadata select it.
 
 ### Reduced centered-curve AdaLN imports (sc-26684)
 
