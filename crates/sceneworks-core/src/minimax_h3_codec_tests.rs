@@ -1745,12 +1745,16 @@ fn real_checkpoint_qkv_rows_match_the_reference_split_when_provided() {
     let decode = |dtype: &str, bytes: &[u8]| -> Vec<f64> {
         match dtype {
             "BF16" => bytes
-                .chunks_exact(2)
-                .map(|b| f32::from_bits((u16::from_le_bytes([b[0], b[1]]) as u32) << 16) as f64)
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|&b| f32::from_bits((u16::from_le_bytes(b) as u32) << 16) as f64)
                 .collect(),
             "F32" => bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()) as f64)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&b| f32::from_le_bytes(b) as f64)
                 .collect(),
             "I8" => bytes.iter().map(|&b| b as i8 as f64).collect(),
             other => panic!("unsupported real-check dtype {other}"),
