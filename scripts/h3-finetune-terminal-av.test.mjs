@@ -3,6 +3,7 @@
 // exercised with an injected command and a synthetic file, exactly as `decodeAV` allows.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +12,7 @@ import {
   rawFrameCount, minimaxH3FrameCount, ltxFrameCount, wanFrameCount, mochiFrameCount,
   videoFrameCount, isLegalFrameCount, audioFrameSamples,
   decodeAV, validateAVAgainstRequest, decodeAndValidateAV,
+  RENDERED_CONTENT, frameSpatialStd, keyframeResemblance, assertRenderedContent, decodeContentFrames, verifyRenderedContent,
 } from './h3-finetune-terminal.mjs';
 
 const H3_PICTURE = 124 / 24;
@@ -154,4 +156,90 @@ test('unbound decodeAV still decodes both streams with an injected command; the 
   const bound = await decodeAndValidateAV(file, h3Request(), h3Contract(), command);
   assert.equal(bound.verification.frameCount, 124);
   assert.equal(calls.filter(c => c.bin === 'ffmpeg').length, 2);
+});
+
+// ---------------------------------------------------------------------------
+// sc-26691: non-degenerate rendered content. Fixtures are real 32x32 area-downsampled frames:
+// the worst (highest-detail) frames of the grey-noise campaign renders on CUDA and MLX, the
+// degenerate first-last case's first/last frames, known-good stock H3 frames, and the actual
+// grid keyframes (provenance inside the JSON).
+const contentFixture = JSON.parse(readFileSync(new URL('./fixtures/h3-rendered-content-frames.json', import.meta.url), 'utf8'));
+const fixtureFrame = name => {
+  const entry = contentFixture.frames[name];
+  assert.ok(entry, `missing fixture frame ${name}`);
+  return Buffer.from(entry.rgb, 'base64');
+};
+const clip = (...names) => names.map(fixtureFrame);
+
+test('rendered-content fixtures are the declared 32x32 real frames', () => {
+  assert.equal(contentFixture.size, RENDERED_CONTENT.size);
+  for (const name of Object.keys(contentFixture.frames)) assert.equal(fixtureFrame(name).length, 32 * 32 * 3, name);
+  assert.match(contentFixture.provenance.degenerate, /41310045937/);
+  assert.match(contentFixture.provenance.good, /38651288414/);
+});
+
+test('real degenerate campaign frames sit far below the content floor and real good frames far above it', () => {
+  for (const name of ['degenerateCudaWorst', 'degenerateMlxWorst', 'degenerateFirstLastFirst', 'degenerateFirstLastLast']) {
+    const std = frameSpatialStd(fixtureFrame(name));
+    assert.ok(std < 0.03, `${name} ${std}`);
+    assert.ok(std * 2.4 < RENDERED_CONTENT.spatialStdFloor, `${name}: floor keeps a 2.4x margin above the worst degenerate frame`);
+    assert.throws(() => assertRenderedContent(clip(name, name, name)), /degenerate: median frame spatial std/);
+  }
+  for (const name of ['goodVedaOffFirst', 'goodVedaOffMid', 'goodVedaOnLast']) {
+    const std = frameSpatialStd(fixtureFrame(name));
+    assert.ok(std > 0.18, `${name} ${std}`);
+    assert.ok(std > 2.5 * RENDERED_CONTENT.spatialStdFloor, `${name}: floor keeps a 2.5x margin below the worst good frame`);
+  }
+  const report = assertRenderedContent(clip('goodVedaOffFirst', 'goodVedaOffMid', 'goodVedaOnLast'));
+  assert.equal(report.frames, 3);
+  assert.ok(report.spatialStd.median > 0.18);
+});
+
+test('the content floor reads the median frame: a fade passes, a mostly-grey clip does not', () => {
+  assert.doesNotThrow(() => assertRenderedContent(clip('degenerateCudaWorst', 'goodVedaOffFirst', 'goodVedaOffMid', 'goodVedaOnLast', 'degenerateMlxWorst')));
+  assert.throws(() => assertRenderedContent(clip('degenerateCudaWorst', 'goodVedaOffFirst', 'degenerateMlxWorst', 'degenerateFirstLastFirst', 'goodVedaOnLast')), /degenerate/);
+  assert.throws(() => assertRenderedContent([]), /decoded rendered frames required/);
+  assert.throws(() => assertRenderedContent([Buffer.alloc(16)]), /32x32 rgb24/);
+});
+
+test('keyframe resemblance refuses degenerate and unrelated renders against the real grid keyframes', () => {
+  const red = fixtureFrame('keyframeRedGrid'), blue = fixtureFrame('keyframeBlueGrid');
+  // A faithfully conditioned render reproduces its keyframes at the bound positions.
+  const faithful = assertRenderedContent([red, ...clip('goodVedaOffFirst', 'goodVedaOffMid', 'goodVedaOnLast'), blue], [{ position: 'first', frame: red, assetId: 'a' }, { position: 'last', frame: blue, assetId: 'b' }]);
+  assert.deepEqual(faithful.keyframes.map(k => [k.position, k.assetId]), [['first', 'a'], ['last', 'b']]);
+  for (const k of faithful.keyframes) { assert.ok(k.correlation > 0.99); assert.ok(k.greyRatio < 0.01); }
+  // The degenerate first-last render's own first/last frames against its own keyframes.
+  for (const [name, key] of [['degenerateFirstLastFirst', red], ['degenerateFirstLastLast', blue]]) {
+    const measured = keyframeResemblance(fixtureFrame(name), key);
+    assert.ok(measured.correlation < 0.15 && measured.greyRatio > 0.9, `${name} ${JSON.stringify(measured)}`);
+  }
+  // Real content that ignored the keyframe (good stock frames vs the grids) is refused too, and
+  // the keyframe is judged at its bound position only.
+  const goodClip = clip('goodVedaOffFirst', 'goodVedaOffMid', 'goodVedaOnLast');
+  assert.throws(() => assertRenderedContent(goodClip, [{ position: 'first', frame: red }]), /first frame does not resemble its keyframe/);
+  assert.throws(() => assertRenderedContent([red, ...goodClip], [{ position: 'last', frame: red }]), /last frame does not resemble its keyframe/);
+  assert.throws(() => assertRenderedContent([red, ...goodClip], [{ position: 'middle', frame: red }]), /first or last/);
+  const unrelated = keyframeResemblance(fixtureFrame('goodVedaOffFirst'), red);
+  assert.ok(unrelated.correlation < RENDERED_CONTENT.keyframeMinCorrelation && unrelated.greyRatio > 1, JSON.stringify(unrelated));
+});
+
+test('content decode area-downsamples the bound output and keyframes to 32x32 rgb24 through ffmpeg', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'h3-content-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const red = fixtureFrame('keyframeRedGrid'), calls = [];
+  const command = async (bin, args, options) => {
+    calls.push({ bin, args, options });
+    assert.equal(bin, 'ffmpeg');
+    assert.equal(options.encoding, 'buffer');
+    assert.ok(args.includes('scale=32:32:flags=area') && args.includes('rgb24') && args.includes('-xerror'));
+    if (args.includes('key.png')) { assert.ok(args.includes('-frames:v')); return { stdout: red }; }
+    return { stdout: Buffer.concat([red, ...clip('goodVedaOffFirst', 'goodVedaOffMid', 'goodVedaOnLast')]) };
+  };
+  const report = await verifyRenderedContent(path.join(dir, 'out.mp4'), [{ position: 'first', file: path.join(dir, 'key.png'), assetId: 'asset' }], command);
+  assert.equal(report.frames, 4);
+  assert.equal(report.keyframes[0].assetId, 'asset');
+  assert.equal(calls.length, 2);
+  const degenerate = async () => ({ stdout: Buffer.concat(clip('degenerateCudaWorst', 'degenerateMlxWorst', 'degenerateFirstLastFirst')) });
+  await assert.rejects(verifyRenderedContent(path.join(dir, 'out.mp4'), [], degenerate), /degenerate/);
+  await assert.rejects(decodeContentFrames(path.join(dir, 'out.mp4'), async () => ({ stdout: Buffer.alloc(100) })), /no whole frames/);
 });

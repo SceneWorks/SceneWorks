@@ -11,7 +11,7 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, open, readFile, writeFile, realpath, stat, copyFile, rename, link } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { CASE_SHUTDOWN_BOUND_FILE, hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
+import { CASE_SHUTDOWN_BOUND_FILE, hashFile, sourcePair, verifyInputs, runProcess, executedTests, normalizeLoadEvent, decodeAV, decodedDelta, validateAVAgainstRequest, verifyRenderedContent, compareControlMedia, isSourceCancelCase, allowedInputRoots, verifiedStagingRoot, authorized, executionCases } from './h3-finetune-terminal.mjs';
 import { runScenario, expand } from './h3-finetune-terminal-api.mjs';
 import { caseBook,assertLicenseAuthority } from './h3-finetune-terminal-cases.mjs';
 import { cudaDeviceEvidence, MANUAL_CUDA_PHYSICAL_GPU } from './ci/h3-import-native-proof.mjs';
@@ -824,6 +824,19 @@ export function resolvedMediaContract(c,job){
   if(selected.family==='ltx')assert.ok([24000,48000].includes(audio.sampleRate),'LTX core/BWE output sample rate must be source-resolved, not guessed');
   return {model,fps:job.payload.fps,width:job.payload.width,height:job.payload.height,audio};
 }
+// First/last-frame keyframes a rendered output must resemble (sc-26691). Only H3 binds them: the
+// keyframe IS the conditioned frame there. Reference images are identity cues, never frames.
+export function renderedKeyframes(c,job,conditioningBindings,dir){
+  const selected=c.declaredSourceBindings?.find(v=>v.model.modelId===job.payload?.model);
+  if(!selected||selected.family==='ltx')return [];
+  const projectId=job.payload.projectId??job.projectId,keyframes=[];
+  for(const [field,position] of [['sourceAssetId','first'],['lastFrameAssetId','last']]){
+    const id=job.payload[field];if(!id)continue;
+    const binding=conditioningBindings?.find(v=>v.assetId===id&&v.projectId===projectId);assert.ok(binding,`${field} keyframe has no retained conditioning binding`);
+    keyframes.push({position,assetId:id,file:inside(dir,binding.file)});
+  }
+  return keyframes;
+}
 export async function bindCompletedMedia(service,job,dir,name,decode=decodeAV) {
   assert.equal(job.status,'completed');const ids=job.result?.assetIds??job.result?.assets?.map(a=>a.id);assert.ok(ids?.length,'completed actual result asset IDs required');
   const bound=[];
@@ -1018,7 +1031,7 @@ export async function verifyGenerationSourcePrepCancel(p,c,dir,{allowUnitFake=fa
   assert.deepEqual(receipt.plannedImportRef,queuedRef,'planned commitment differs from actual API submission receipt');
   return {jobId,modelId,partialBytes,sourceBytes,elapsedMs:terminal.elapsedMs,checkpointSha256:audit.sha256,removalId:modelId};
 }
-export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUnitFake=false,contentReadback=false}={}) {
+export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUnitFake=false,contentReadback=false,content=verifyRenderedContent}={}) {
   const bundle=await json(inside(dir,'source-job-output.json'));
   if(c.kind==='full-av'){assert.equal(bundle.bindings.length,1,'one actual native binding per reduced AV case');assert.equal(bundle.media.length,1,'one actual AV output per reduced AV case');assert.equal(bundle.requests.filter(r=>r.route==='/api/v1/video/jobs').length,1,'no hidden render fan-out');}
   if(isSourceCancelCase(c)){assert.equal(bundle.bindings.length,0,'cold cancellation completes no load');assert.equal(bundle.media.length,0,'cold cancellation produces no AV');assert.equal(bundle.metrics,undefined,'cold cancellation claims no completed-load peak');}
@@ -1072,6 +1085,9 @@ export async function verifyAPIBindings(p,c,dir,decode=decodeAV,delta, {allowUni
     assert.equal(await hashFile(inside(dir,media.av)),media.sha256);const decoded=await decode(inside(dir,media.av)),job=bundle.jobs.find(v=>v.id===media.jobId);assert.ok(job?.status==='completed');
     validateAVAgainstRequest(decoded,job.payload,resolvedMediaContract(c,job));
     const video=decoded.streams?.find(s=>s.codec_type==='video');assert.ok(video);for(const axis of ['width','height'])if(job.payload?.[axis]!==undefined)assert.equal(video[axis],job.payload[axis]);
+    // Re-measure rather than trust the recorded receipt: evidence from before the content gate
+    // (or from a degenerate render) must not pass readback either (sc-26691).
+    if(decoded.proof_kind!=='unit_fake')await content(inside(dir,media.av),c.kind==='full-av'?renderedKeyframes(c,job,bundle.conditioningBindings,dir):[]);
   }
   const comparisons=await json(inside(dir,'comparisons.json'));
   for(const comparison of comparisons) {
@@ -1121,6 +1137,10 @@ export async function executeAPICase(p,c,swRoot,inferenceRoot,dir,deps={}) {
     else {observations.done=true;await observations.loop;assert.ok(!observations.budgetExceeded,'observed campaign bound exceeded');}
     await save(path.join(dir,'raw-observations.json'),{samples:observations.samples,gaps:observations.gaps,epochs:service.epochs,meaning:measured?'Whole case/load-inclusive observations':'Observed only; no successful model load or peak is invented for a refusal/cancel or multi-process restart'});
     for(const [i,job] of jobs.entries())bound.push(...await bindCompletedMedia(service,job,dir,`output-${i}`,deps.decode??decodeAV));
+    // A complete, decodable, correctly timed AV file can still be grey noise (sc-26691); every
+    // actual render must carry real spatial content and resemble its bound keyframes.
+    const content=deps.content??(service.fake?null:verifyRenderedContent);
+    if(content)for(const media of bound){const job=jobs.find(j=>j.id===media.jobId);media.content=await content(inside(dir,media.av),c.kind==='full-av'?renderedKeyframes(c,job,conditioningBindings,dir):[]);}
     // Collect actual JSON tracing after the completed jobs; no synthetic load event is created.
     const traceLogs=[service.api.log(),service.worker.log()];
     for(const epoch of service.epochs.slice(0,-1))for(const kind of ['api','worker'])traceLogs.push(await readFile(path.join(dir,`${kind}-${epoch.epoch}.log`),'utf8'));

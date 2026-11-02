@@ -441,6 +441,96 @@ export async function decodedDelta(a, b, stream, command = exec) {
   x.forEach((v, i) => { assert.ok(Number.isFinite(v) && Number.isFinite(y[i])); squared += (v - y[i]) ** 2; });
   return Math.sqrt(squared / x.length);
 }
+// ---------------------------------------------------------------------------
+// Non-degenerate rendered content (sc-26691).
+//
+// Every decode, lattice and sensitivity check above passed on renders that were grey
+// structured noise: the importer split native fused QKV with the wrong row order, the
+// model still produced a complete, correctly timed, decodable AV file, and the controls
+// still differed from each other. These are pure post-render pixel checks on the bound
+// output (no inference compute), on 32x32 area-downsampled RGB (`scale=32:32:flags=area`):
+//
+// * Spatial detail: per frame, the mean over R/G/B of the per-channel population standard
+//   deviation. The clip's MEDIAN frame must reach `spatialStdFloor` (a median tolerates
+//   legitimate fades/flashes). Measured (fixtures/h3-rendered-content-frames.json):
+//   37 degenerate campaign renders (CUDA run 41310045937 reduced cases, 2,728 frames, and
+//   the MLX verification lane, 1,860 frames) never exceed 0.0281 on ANY frame, clip medians
+//   <= 0.0225; known-good stock H3 ref2va renders (inference run 38651288414, Veda off/on,
+//   246 frames) never fall below 0.182 on any frame. The 0.07 floor is 2.5x the worst
+//   degenerate frame and 2.6x below the worst good frame.
+// * Keyframe resemblance (first/last-frame conditioning only): the conditioned output frame
+//   (first for `sourceAssetId`, last for `lastFrameAssetId`) against the keyframe image must
+//   reach luma Pearson correlation >= 0.4 AND RMSE <= 0.6 x the RMSE of a flat mid-grey
+//   frame against the same keyframe. The grey baseline is what a content-free render scores,
+//   so this is relative to an unrelated baseline rather than an absolute pixel budget.
+//   Measured: degenerate first/last frames vs their keyframes correlate -0.077..0.131 with
+//   grey ratio 0.928..0.994 (88 pairs); real but unrelated content (the good Veda frames vs
+//   the same grid keyframes) correlates -0.124..0.035 with ratio 1.068..1.133. No real
+//   conditioned-good H3 render existed when this was calibrated (every campaign render was
+//   degenerate), so both bounds sit far on the permissive side of a faithful keyframe
+//   (correlation ~1, ratio ~0.1 after a VAE round trip) and should be re-read against the
+//   first good GPU render.
+export const RENDERED_CONTENT = Object.freeze({ size: 32, spatialStdFloor: 0.07, keyframeMinCorrelation: 0.4, keyframeMaxGreyRatio: 0.6 });
+const contentPixels = RENDERED_CONTENT.size * RENDERED_CONTENT.size;
+const contentFrame = frame => {
+  assert.ok(frame && frame.length === contentPixels * 3, `rendered-content frame must be ${RENDERED_CONTENT.size}x${RENDERED_CONTENT.size} rgb24`);
+  return frame;
+};
+export function frameSpatialStd(frame) {
+  contentFrame(frame);
+  let total = 0;
+  for (let channel = 0; channel < 3; channel++) {
+    let sum = 0, squared = 0;
+    for (let i = channel; i < frame.length; i += 3) { const v = frame[i] / 255; sum += v; squared += v * v; }
+    const mean = sum / contentPixels;
+    total += Math.sqrt(Math.max(0, squared / contentPixels - mean * mean));
+  }
+  return total / 3;
+}
+export function keyframeResemblance(frame, keyframe) {
+  contentFrame(frame); contentFrame(keyframe);
+  const luma = f => Array.from({ length: contentPixels }, (_, i) => (f[3 * i] + f[3 * i + 1] + f[3 * i + 2]) / 765);
+  const a = luma(frame), b = luma(keyframe), ma = a.reduce((s, v) => s + v, 0) / contentPixels, mb = b.reduce((s, v) => s + v, 0) / contentPixels;
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < contentPixels; i++) { const x = a[i] - ma, y = b[i] - mb; dot += x * y; na += x * x; nb += y * y; }
+  const correlation = na > 0 && nb > 0 ? dot / Math.sqrt(na * nb) : 0;
+  let error = 0, grey = 0;
+  for (let i = 0; i < frame.length; i++) { const k = keyframe[i] / 255; error += (frame[i] / 255 - k) ** 2; grey += (0.5 - k) ** 2; }
+  assert.ok(grey > 0, 'keyframe must not be flat mid-grey');
+  return { correlation, greyRatio: Math.sqrt(error / grey) };
+}
+/**
+ * frames: decoded 32x32 rgb24 frames in presentation order.
+ * keyframes: [{ position: 'first' | 'last', frame, assetId? }].
+ * Throws on a degenerate render; returns the measured receipt.
+ */
+export function assertRenderedContent(frames, keyframes = []) {
+  assert.ok(Array.isArray(frames) && frames.length > 0, 'decoded rendered frames required');
+  const stds = frames.map(frameSpatialStd), sorted = [...stds].sort((x, y) => x - y);
+  const median = sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+  assert.ok(median >= RENDERED_CONTENT.spatialStdFloor, `rendered video is degenerate: median frame spatial std ${median.toFixed(4)} is below the ${RENDERED_CONTENT.spatialStdFloor} content floor (grey/structured-noise output)`);
+  const report = { size: RENDERED_CONTENT.size, frames: frames.length, spatialStd: { median, min: sorted[0], max: sorted[sorted.length - 1], floor: RENDERED_CONTENT.spatialStdFloor }, keyframes: [] };
+  for (const keyframe of keyframes) {
+    assert.ok(['first', 'last'].includes(keyframe?.position), 'keyframe position must be first or last');
+    const measured = keyframeResemblance(keyframe.position === 'first' ? frames[0] : frames[frames.length - 1], keyframe.frame);
+    assert.ok(measured.correlation >= RENDERED_CONTENT.keyframeMinCorrelation && measured.greyRatio <= RENDERED_CONTENT.keyframeMaxGreyRatio, `rendered ${keyframe.position} frame does not resemble its keyframe: correlation ${measured.correlation.toFixed(3)} (min ${RENDERED_CONTENT.keyframeMinCorrelation}), grey-relative RMSE ${measured.greyRatio.toFixed(3)} (max ${RENDERED_CONTENT.keyframeMaxGreyRatio})`);
+    report.keyframes.push({ position: keyframe.position, assetId: keyframe.assetId ?? null, ...measured });
+  }
+  return report;
+}
+export async function decodeContentFrames(file, command = exec, { single = false } = {}) {
+  const size = RENDERED_CONTENT.size, bytes = contentPixels * 3;
+  const { stdout } = await command('ffmpeg', ['-v', 'error', '-xerror', '-i', file, '-an', ...(single ? ['-frames:v', '1'] : []), '-vf', `scale=${size}:${size}:flags=area`, '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'pipe:1'], { encoding: 'buffer', timeout: 300000, maxBuffer: 64 * 1048576 });
+  assert.ok(stdout.length > 0 && stdout.length % bytes === 0, 'rendered-content decode produced no whole frames');
+  return Array.from({ length: stdout.length / bytes }, (_, i) => stdout.subarray(i * bytes, (i + 1) * bytes));
+}
+// keyframes: [{ position, file, assetId? }] naming the bound conditioning image files.
+export async function verifyRenderedContent(file, keyframes = [], command = exec) {
+  const frames = await decodeContentFrames(file, command);
+  const decoded = [];
+  for (const keyframe of keyframes) decoded.push({ position: keyframe.position, assetId: keyframe.assetId, frame: (await decodeContentFrames(keyframe.file, command, { single: true }))[0] });
+  return assertRenderedContent(frames, decoded);
+}
 // The native comparison binary lives under the run's output root, or — on Windows, where that root
 // is too deep for cargo/nvcc — in the run root's short `<run>-<attempt>-native` sibling (cargoTarget).
 export function assertOwnedNativeBinary(output, binary) {

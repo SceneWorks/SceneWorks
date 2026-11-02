@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import os from 'node:os';
 import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, cp, access, stat, realpath } from 'node:fs/promises';
-import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyIdentificationCoverage,bindsStagedFixture,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,advertisedStallBudget,cancelDrainBoundMs,postDrainShutdownMs,STALL_BUDGET_EVENT,WORKER_VIDEO_STALL_GRACE_SECONDS,DEFAULT_CANCEL_DRAIN_SECONDS,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
+import { spawnOwned,cargoTarget,executeNativeComparison,executeFixture,validateComparisonProof,OwnedService,ProcessObservations,loadIdentity,bindCompletedMedia,renderedKeyframes,executeAPICase,verifyAPIBindings,privateEnvironment,authorized,hardware,verifyGenerationSourcePrepCancel,SOURCE_PREP_CHUNK_BYTES,verifyOwnershipEquivalence,verifyIdentificationCoverage,bindsStagedFixture,verifyCacheCoverage,observedSourceBytes,verifyDenseSourceDtypes,assertControlledConfiguration,requestedAdapterBindings,ownedExitBoundMs,advertisedStallBudget,cancelDrainBoundMs,postDrainShutdownMs,STALL_BUDGET_EVENT,WORKER_VIDEO_STALL_GRACE_SECONDS,DEFAULT_CANCEL_DRAIN_SECONDS,serviceBuildLayout,assertOwnedServiceBinary,SERVICE_SHUTDOWN_GRACE_SECONDS,API_CONNECTION_DRAIN_SECONDS,stripVerbatim,canonicalWindowsPath,productComponentClosureDigests,tracedJobId } from './h3-finetune-terminal-runtime.mjs';
 import { CASE_SHUTDOWN_BOUND_FILE,assertOwnedNativeBinary,hashFile,verifyInputs,validateEvidence,validatePeakMetrics,requiredCases,SOURCE,validateBackendReadback,executionPlanDigest } from './h3-finetune-terminal.mjs';
 import { buildScenario,caseBook } from './h3-finetune-terminal-cases.mjs';
 import { liveOwnedProcesses,processInfo,portHolder,formatPortHolder,parseLsofListen,parseNetstatListen,parseEtimeSeconds,boundApiPort,recordedProcesses,sameProcess,campaignRunRoots,legacyWeightsRunParents,legacyWeightsRunRoots,isServicePort,isBindFailure } from './lib/h3-owned-processes.mjs';
@@ -146,6 +146,26 @@ test('owned API pipeline binds real-shaped jobs/assets/load events, compares med
   await assert.rejects(verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta),/unit_fake/);
   assert.equal((await verifyAPIBindings(f.p,f.c,f.dir,fake.deps.decode,fake.deps.delta,{allowUnitFake:true})).comparisons,1);
   await assert.rejects(validateEvidence(f.p,f.c,f.dir,'H3_API_ASSERTIONS_EXECUTED=1'),/unit_fake/);
+});
+test('every actual render passes the rendered-content gate before its case can pass (sc-26691)',async t=>{
+  const f=await fixture(t),fake=fakeRuntime(f),seen=[];
+  fake.deps.content=async(file,keyframes)=>{seen.push({file,keyframes});await readFile(file);return {size:32,frames:124,spatialStd:{median:0.19},keyframes:[]};};
+  await executeAPICase(f.p,f.c,f.root,f.native,f.dir,fake.deps);
+  const recorded=JSON.parse(await readFile(path.join(f.dir,'source-job-output.json'),'utf8'));
+  assert.ok(seen.length>0&&seen.length===recorded.media.length,'each bound output is measured');
+  for(const media of recorded.media)assert.equal(media.content.spatialStd.median,0.19);
+  const g=await fixture(t),degenerate=fakeRuntime(g);degenerate.deps.content=async()=>{throw new Error('rendered video is degenerate: median frame spatial std 0.0065');};
+  await assert.rejects(executeAPICase(g.p,g.c,g.root,g.native,g.dir,degenerate.deps),/rendered video is degenerate/);
+});
+test('rendered keyframes bind first/last conditioning to the conditioned frame, H3 only',()=>{
+  const c={declaredSourceBindings:[{family:'minimax-h3',model:{modelId:'imported_h3'}},{family:'ltx',model:{modelId:'imported_ltx'}}]};
+  const bindings=[{projectId:'p',assetId:'a',file:'conditioning-0.png'},{projectId:'p',assetId:'b',file:'conditioning-1.png'},{projectId:'p',assetId:'r',file:'conditioning-2.png'}];
+  const dir=path.resolve('case-dir');
+  assert.deepEqual(renderedKeyframes(c,{payload:{model:'imported_h3',projectId:'p',sourceAssetId:'a',lastFrameAssetId:'b',referenceAssetIds:['r']}},bindings,dir),[{position:'first',assetId:'a',file:path.join(dir,'conditioning-0.png')},{position:'last',assetId:'b',file:path.join(dir,'conditioning-1.png')}]);
+  assert.deepEqual(renderedKeyframes(c,{payload:{model:'imported_h3',projectId:'p',lastFrameAssetId:'b'}},bindings,dir).map(k=>k.position),['last']);
+  assert.deepEqual(renderedKeyframes(c,{payload:{model:'imported_h3',projectId:'p',referenceAssetIds:['r']}},bindings,dir),[],'reference images are identity cues, not frames');
+  assert.deepEqual(renderedKeyframes(c,{payload:{model:'imported_ltx',projectId:'p',sourceAssetId:'a'}},bindings,dir),[]);
+  assert.throws(()=>renderedKeyframes(c,{payload:{model:'imported_h3',projectId:'other',sourceAssetId:'a'}},bindings,dir),/sourceAssetId keyframe has no retained conditioning binding/);
 });
 // sc-26691 (2026-10-30): the readback binds the queued NFE to the case's declared per-backend
 // recipe (MLX 8 / CUDA 50 for the compatible-base cases), so a render at another step count fails.
