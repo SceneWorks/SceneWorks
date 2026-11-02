@@ -1684,77 +1684,85 @@ test("packaged matrix provenance rejects source-revision and markdown mutations"
   assert.throws(() => assertPackagedMatrixPair(matrix, changedMarkdown), { code: "ERR_ASSERTION" });
 });
 
-test("an Anchored rollup carries (stale) exactly when every anchor behind it is stale (sc-22513)", async () => {
-  const matrix = await buildMatrix();
-  const row = (markdown, id, backend) =>
-    markdown
-      .split("\n")
-      .find((line) => line.startsWith(`| \`${id}\` |`) && line.includes(`| ${backend} |`));
-  const anchored = matrix.models.flatMap((model) =>
-    model.backends
-      .filter((backend) =>
-        matrix.anchors.some((anchor) => anchor.modelId === model.id && anchor.backend === backend),
-      )
-      .map((backend) => [model.id, backend]),
+test("an Anchored rollup carries (stale) exactly when every anchor behind it is stale (sc-22513)", () => {
+  // Currency is advisory, not a requirement to regenerate packaged measurements after source
+  // changes. Exercise the consumer-visible rollup with controlled lanes and anchor currency;
+  // neither today's source revision nor the checked-in matrix's measurement population is a gate.
+  const models = ["Anchored", "Anchored/underived", "Implemented"].map((state, index) => ({
+    id: `fixture_${index}`,
+    modality: "image",
+    backends: ["mlx", "candle"],
+    resolvedRoutes: { mlx: "fixture", candle: "fixture" },
+    routeKind: "registry",
+    owningFamilyStories: { mlx: 22513, candle: 22513 },
+    owningModelStories: { mlx: null, candle: null },
+    state,
+  }));
+  const coverage = models.flatMap((model) => model.backends.map((backend) => ({
+    modelId: model.id,
+    backend,
+    rung: "staged_residency",
+    coordinates: 1,
+    implemented: 1,
+    states: { [model.state]: 1 },
+  })));
+  const anchors = models.filter((model) => model.state.startsWith("Anchored")).flatMap((model) =>
+    model.backends.flatMap((backend) => ["q4", "q8"].map((tier) => ({
+      id: `${model.id}:${backend}:${tier}`,
+      modelId: model.id,
+      backend,
+      tier,
+      geometry: { width: 64, height: 64, frames: 1 },
+      cells: 1,
+      current: false,
+      currencyAttestation: null,
+    }))),
   );
-  assert.ok(anchored.length > 0, "no anchored lane — the fixture would be vacuous");
-  const anchoredRollups = anchored.filter(([id, backend]) =>
-    /\| Anchored/.test(row(renderMarkdown(matrix), id, backend)),
-  );
-  assert.ok(anchoredRollups.length > 0, "no lane rolls up as Anchored — the marker is unreachable");
-
-  const withCurrency = (current) => ({
-    ...matrix,
-    anchors: matrix.anchors.map((anchor) => ({ ...anchor, current })),
-  });
-  // Every anchor stale -> every Anchored rollup marked. Every anchor current -> none marked. The
-  // marker is therefore driven by currency and by nothing else about the lane.
-  const allStale = renderMarkdown(withCurrency(false));
-  const allCurrent = renderMarkdown(withCurrency(true));
-  for (const [id, backend] of anchoredRollups) {
-    assert.match(row(allStale, id, backend), /Anchored[^|]*\(stale\)/, `${id}:${backend} stale`);
-    assert.doesNotMatch(row(allCurrent, id, backend), /\(stale\)/, `${id}:${backend} current`);
+  const matrix = {
+    generatedFrom: { sceneWorksRevision: "fixture-revision" },
+    summary: {
+      catalogEntries: models.length,
+      catalogEntriesByModality: { image: models.length },
+      unroutedEntries: [], outOfMatrixEntries: [], taskRouteEntries: [],
+      cells: coverage.length, publishedCells: coverage.length, elidedCells: 0, elidedByState: {},
+      mlxStagedStaticCoverage: models.length, mlxStagedStaticCoverageDenominator: models.length,
+      videoMlxStagedStaticCoverage: 0, videoMlxStagedStaticCoverageDenominator: 0,
+      anchors: anchors.length, anchoredCells: anchors.length, staleAnchors: anchors.length,
+      attestedAnchors: 0, analyticOnlyCells: 0, publicationPredicate: "Fixture coordinates.",
+    },
+    models, coverage, anchors,
+    modelSlices: Object.fromEntries(models.map((model) => [model.id, []])),
+  };
+  const row = (markdown, id, backend) => {
+    const found = markdown.split("\n").find((line) =>
+      line.startsWith(`| \`${id}\` |`) && line.includes(`| ${backend} |`));
+    assert.ok(found, `${id}:${backend} must be rendered`);
+    return found;
+  };
+  for (const current of [[false, false], [true, true], [false, true], [true, false]]) {
+    const markdown = renderMarkdown({
+      ...matrix,
+      anchors: anchors.map((anchor) => ({ ...anchor, current: current[anchor.tier === "q4" ? 0 : 1] })),
+    });
+    for (const model of models) {
+      for (const backend of model.backends) {
+        const rendered = row(markdown, model.id, backend);
+        assert.equal(rendered.includes("(stale)"), model.state.startsWith("Anchored") && !current.some(Boolean),
+          `${model.id}:${backend} with currency ${current}`);
+        assert.ok(rendered.endsWith(`| ${model.state}${rendered.includes("(stale)") ? " (stale)" : ""} |`),
+          "currency must not change the lane's implementation state");
+      }
+    }
   }
-  // ONE current anchor on a lane is enough to clear its marker — the claim is "every anchor behind
-  // it", not "any".
-  const [id, backend] = anchoredRollups[0];
-  const firstOfLane = matrix.anchors.find(
-    (anchor) => anchor.modelId === id && anchor.backend === backend,
-  );
-  const mixed = renderMarkdown({
+  // A current anchor on another backend must not clear this lane's advisory marker.
+  const split = renderMarkdown({
     ...matrix,
-    anchors: matrix.anchors.map((anchor) => ({
-      ...anchor,
-      current: anchor.id === firstOfLane.id,
-    })),
+    anchors: anchors.map((anchor) => ({ ...anchor, current: anchor.backend === "mlx" })),
   });
-  assert.doesNotMatch(row(mixed, id, backend), /\(stale\)/);
-  // A lane the marker must never reach: no anchor behind it at all.
-  const unanchored = matrix.models
-    .flatMap((model) => model.backends.map((backend) => [model.id, backend]))
-    .find(
-      ([candidateId, candidateBackend]) =>
-        !matrix.anchors.some(
-          (anchor) => anchor.modelId === candidateId && anchor.backend === candidateBackend,
-        ),
-    );
-  assert.doesNotMatch(row(allStale, unanchored[0], unanchored[1]), /\(stale\)/);
-  // Packaged artifacts must agree with each other, not with the live source-tree revision:
-  // later code/pin changes may leave historical matrix provenance stale without demanding a
-  // measurement refresh. The controlled currency cases above exercise the live renderer.
-  const shippedMatrix = JSON.parse(
-    await readFile(new URL("../docs/generated/memory-matrix.json", import.meta.url), "utf8"),
-  );
-  const shipped = await readFile(new URL("../docs/generated/memory-matrix.md", import.meta.url), "utf8");
-  assertPackagedMatrixPair(shippedMatrix, shipped);
-  // Currency changes labels, never the lane's state. Historical published artifacts retain
-  // their captured source/currency metadata; they need not equal today's live renderer.
-  const laneRows = (markdown) => markdown.split("## Measured anchors")[0].split("\n")
-    .filter((line) => line.startsWith("| `"))
-    .map((line) => line.replaceAll(" (stale)", ""));
-  assert.deepEqual(laneRows(allStale), laneRows(allCurrent));
-  // Rendering identical captured input stays deterministic without demanding a new capture.
-  assert.equal(renderMarkdown(structuredClone(matrix)), renderMarkdown(matrix));
+  for (const model of models.filter((model) => model.state.startsWith("Anchored"))) {
+    assert.doesNotMatch(row(split, model.id, "mlx"), /\(stale\)/);
+    assert.match(row(split, model.id, "candle"), /\(stale\)/);
+  }
 });
 
 // ── sc-22513: the collapse ─────────────────────────────────────────────────────────────────────

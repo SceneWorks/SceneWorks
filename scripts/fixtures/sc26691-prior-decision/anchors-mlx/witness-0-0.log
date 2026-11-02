@@ -1,0 +1,73 @@
+
+running 2 tests
+test adapter_topology::a_genuine_lokr_installs_on_the_pruned_curve_with_the_same_delta ... H3_ADAPTER_STACK_CAUSAL backend=metal topology=full property=lora_vs_base max_abs=2.146280408e-1 floor=1.167072924e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=full property=lokr_vs_base max_abs=4.179193974e-1 floor=1.183411086e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=full property=stack_vs_base max_abs=6.080410480e-1 floor=1.369532356e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=full property=stack_drop_lora max_abs=2.146280259e-1 floor=1.369532356e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=full property=stack_drop_lokr max_abs=4.179193974e-1 floor=1.369532356e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=full property=component_differentials additive_max_abs=5.960464478e-8 order_max_abs=1.192092896e-7 bound=1.095625885e-5
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=pruned property=lora_vs_base max_abs=2.146280408e-1 floor=1.167072924e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=pruned property=lokr_vs_base max_abs=4.179193974e-1 floor=1.183411086e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=pruned property=stack_vs_base max_abs=6.080410480e-1 floor=1.369532356e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=pruned property=stack_drop_lora max_abs=2.146280259e-1 floor=1.369532356e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=pruned property=stack_drop_lokr max_abs=4.179193974e-1 floor=1.369532356e-6 seam=adaptable_projection
+H3_ADAPTER_STACK_CAUSAL backend=metal topology=pruned property=component_differentials additive_max_abs=5.960464478e-8 order_max_abs=1.192092896e-7 bound=1.095625885e-5
+ok
+test pruned_adaln::manual_unit_patch_and_mixed_reference_full_forward_matches_resident_control ... H3 geometry/audio device=Device(gpu, 0); backend=metal
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_PRUNED_ORACLE unit-patch conditioned full-model cached/resident control: max_abs=0.000000000e0 tolerance=1.999999949e-5
+H3_GEOMETRY_AUDIO_FULL_FORWARD backend=metal cases=11
+H3_CONDITIONING_CAUSAL backend=metal property=context_values max_abs=1.230239868e-2 floor=2.465894795e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=context_vs_zero_same_shape max_abs=5.067348480e-3 floor=2.438428055e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=first_only_values max_abs=6.217956543e-3 floor=2.383494575e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=first_only_vs_zero_same_shape max_abs=6.374359131e-3 floor=2.395136107e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=last_only_values max_abs=5.348205566e-3 floor=2.363303793e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=first_vs_last_placement max_abs=2.407073975e-3 floor=2.378692443e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=first_only_vs_drop max_abs=9.765625000e-3 floor=2.438428055e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=last_only_vs_drop max_abs=1.331710815e-2 floor=2.438428055e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=first_last_swap_values max_abs=1.066446304e-3 floor=2.324195520e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=first_last_drop_first max_abs=5.033493042e-3 floor=2.333508746e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=first_last_drop_last max_abs=6.385803223e-3 floor=2.331616997e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=reference_image_values max_abs=7.257819176e-3 floor=2.397609933e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=fl2va_vs_ref2va_positioning max_abs=5.514144897e-3 floor=2.391025191e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=ordered_reference_values max_abs=3.643035889e-3 floor=2.406159183e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=reference_video_only_values max_abs=8.342266083e-3 floor=2.396700438e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=reference_audio_only_CONDITIONING_ROWS max_abs=1.111888885e-2 floor=2.520901035e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=reference_audio_values_visual_fixed max_abs=1.077723503e-2 floor=2.450833563e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=reference_image_drop_same_layout max_abs=7.080554962e-3 floor=2.391279850e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=reference_video_drop_same_layout max_abs=7.343292236e-3 floor=2.396700438e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=reference_audio_only_drop_same_layout_CONDITIONING_ROWS max_abs=1.088714600e-2 floor=2.487504389e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=ordered_video_references_AB_vs_BA max_abs=4.360198975e-3 floor=2.345223038e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=ordered_audio_references_AB_vs_BA_visual_fixed max_abs=9.632110596e-3 floor=2.480555850e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=mixed_image_video_soundtrack_audio_reference_order max_abs=1.322555542e-2 floor=2.417909855e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=mixed_image_drop_same_layout max_abs=2.717971802e-3 floor=2.358283382e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=mixed_video_carrier_drop_same_layout max_abs=1.147270203e-2 floor=2.342785592e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=mixed_standalone_audio_drop_same_layout max_abs=6.462097168e-3 floor=2.342785592e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=mixed_video_soundtrack_drop_same_layout max_abs=9.456634521e-3 floor=2.342785592e-7 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=hybrid_checkpoint_FL_portion_vs_wrong_REF_portion max_abs=4.400000572e0 floor=4.237509984e-6 generated_only=true
+H3_CONDITIONING_CAUSAL backend=metal property=hybrid_checkpoint_REF_portion_vs_wrong_FL_portion max_abs=4.400000572e0 floor=4.237509984e-6 generated_only=true
+H3_CONDITIONING_CAUSAL_BOUNDARY backend=metal hybrid_checkpoint=two_distinct_portions selected_by=native_task_partition audio_only_generator=refused prompt_seam=context_embedding
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 313 filtered out; finished in 1.24s
+

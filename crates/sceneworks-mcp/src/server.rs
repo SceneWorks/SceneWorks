@@ -2100,6 +2100,18 @@ pub(crate) fn compact_models(models: &Value) -> Value {
                 "commercialUse",
                 "licenseUrl",
                 "requiresLicenseAcknowledgment",
+                // The imported-checkpoint product surface (sc-26687). An agent that can only see
+                // `capabilities` cannot tell an imported fine-tune from a builtin, cannot see which
+                // native backend will claim it, and has no way to know the assembly is incomplete
+                // before submitting a job that will never run. `supportedOperations` is the
+                // EXPLICIT task contract (for MiniMax-H3 it is derived from the declared
+                // fl2va/ref2va/hybrid partition), which is why it travels beside `capabilities`
+                // rather than being folded into it.
+                "importedSource",
+                "supportedOperations",
+                "supportedBackends",
+                "componentReadiness",
+                "repairActions",
             ],
             &mut out,
         );

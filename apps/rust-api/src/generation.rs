@@ -2510,6 +2510,7 @@ pub(crate) async fn create_video_job(
         .unwrap_or(payload.model.as_str())
         .to_owned();
     let model_manifest_entry = resolve_model_manifest_entry(&state, &model_id).await?;
+    ensure_expected_imported_model_reference(&state, &job_payload, &model_manifest_entry)?;
     let auto_duration_active =
         normalize_ltx25_generation_controls(&model_id, &mut job_payload, &model_manifest_entry)?;
     // Do not advertise or enqueue the paired source layout until the pinned inference descriptor
@@ -2681,6 +2682,16 @@ pub(crate) async fn create_video_job(
         }
     }
     job_payload.insert("modelManifestEntry".to_owned(), model_manifest_entry);
+    // sc-26691. A fresh request takes the engine's own `match` when it names no resize mode, and
+    // the persisted job SAYS so: the only job payload that may then lack the key is one written
+    // before it existed, which is how a replay recognises a `diffusers`-rendered record. Stamped
+    // after the manifest entry lands so an imported H3 checkpoint (no `minimax_h3` id prefix) is
+    // recognised by its resolved family.
+    sceneworks_core::video_request::stamp_reference_image_resize_mode(
+        &mut job_payload,
+        sceneworks_core::video_request::REFERENCE_IMAGE_RESIZE_MODE_DEFAULT,
+    )
+    .map_err(ApiError::bad_request)?;
     validate_job_lora_compatibility_with(
         &state,
         Some(&payload.project_id),
@@ -3123,6 +3134,29 @@ mod plan_backed_video_enqueue_tests {
     /// An app whose catalog holds ONE imported `wan-video` model. `import_plan` is spliced in
     /// verbatim so the control case can drop it and change nothing else.
     fn app_with_imported_wan(temp_dir: &tempfile::TempDir, import_plan: &str) -> axum::Router {
+        if !import_plan.is_empty() {
+            use sceneworks_core::checkpoint_import::{
+                CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+            };
+            let plan = ImportPlanV1::new(
+                format!("checkpoint-plan-{}", "3".repeat(64)),
+                "wan-video",
+                vec![ImportLayerV1 {
+                    layer_id: "dit".into(),
+                    role: "transformer".into(),
+                    target_path: "model.safetensors".into(),
+                    container: CheckpointContainerV1::Safetensors,
+                    source: SourceLocatorV1::linked(
+                        "root-wan-fixture",
+                        "model.safetensors",
+                        "a".repeat(64),
+                    )
+                    .unwrap(),
+                }],
+            )
+            .unwrap();
+            persist_checkpoint_plan_fixture(&test_settings(temp_dir), "ckpt_wan_abc123", &plan);
+        }
         write_manifests(
             &temp_dir.path().join("config/manifests"),
             &format!(
@@ -3246,5 +3280,214 @@ mod plan_backed_video_enqueue_tests {
         let (status, queue) = request(app, "GET", "/api/v1/queue", Value::Null).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(queue["counts"]["queued"], 0);
+    }
+}
+
+/// sc-26680 (epic 26679): an imported dense MiniMax-H3 DiT entry — exactly the shape the worker's
+/// model-import job stamps — is selectable in the catalog and enqueues through the PUBLIC video
+/// route under its OWN id, with the validated binding riding the payload to the worker. Each
+/// positive has a control that differs only in the binding, so the tests are about the plan.
+#[cfg(test)]
+mod imported_minimax_h3_video_tests {
+    use crate::tests::support::*;
+    use sceneworks_worker::minimax_h3_import_fixture::{
+        stage_managed_minimax_h3_import, ManagedMiniMaxH3Import,
+    };
+
+    const IMPORTED_ID: &str = "minimax_h3_custom";
+
+    /// E6/E8/E9: a fresh import captures real component contents BEFORE committing its plan.
+    /// Retain the fixture's scoped source-library guard for the entire API request lifetime.
+    fn imported_entry(temp_dir: &tempfile::TempDir, with_assembly: bool) -> ManagedMiniMaxH3Import {
+        let mut imported =
+            stage_managed_minimax_h3_import(&test_settings(temp_dir).data_dir, IMPORTED_ID);
+        assert_h3_component_authority_required(&test_settings(temp_dir).data_dir, &imported.entry);
+        if !with_assembly {
+            imported.entry["importPlan"]
+                .as_object_mut()
+                .expect("importPlan object")
+                .remove("assembly");
+        }
+        imported
+    }
+
+    fn app_with(temp_dir: &tempfile::TempDir, entry: Value) -> axum::Router {
+        let config_dir = temp_dir.path().join("config/manifests");
+        std::fs::create_dir_all(&config_dir).expect("manifest dir creates");
+        let user_models = json!({ "schemaVersion": 1, "models": [entry] }).to_string();
+        for (name, body) in [
+            (
+                "builtin.models.jsonc",
+                r#"{ "schemaVersion": 1, "models": [] }"#,
+            ),
+            ("user.models.jsonc", user_models.as_str()),
+            (
+                "builtin.loras.jsonc",
+                r#"{ "schemaVersion": 1, "loras": [] }"#,
+            ),
+            ("user.loras.jsonc", r#"{ "schemaVersion": 1, "loras": [] }"#),
+            (
+                "builtin.recipe-presets.jsonc",
+                r#"{ "schemaVersion": 1, "presets": [] }"#,
+            ),
+            (
+                "user.recipe-presets.jsonc",
+                r#"{ "schemaVersion": 1, "presets": [] }"#,
+            ),
+        ] {
+            std::fs::write(config_dir.join(name), body).expect("manifest writes");
+        }
+        // This success fixture represents consent already recorded by the import workflow.
+        let settings = test_settings(temp_dir);
+        let ack_path =
+            sceneworks_core::license_acknowledgments::acknowledgments_file(&settings.config_dir);
+        for component in sceneworks_core::minimax_h3_import::inherited_component_entries(
+            entry.as_object().unwrap(),
+        ) {
+            sceneworks_core::license_acknowledgments::record_acknowledgment(
+                &ack_path,
+                &component,
+                "test",
+                "2026-10-24T00:00:00Z",
+            )
+            .unwrap();
+        }
+        create_app(test_settings(temp_dir)).expect("app creates")
+    }
+
+    async fn create_project(app: &axum::Router) {
+        let (status, project) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/projects",
+            json!({ "name": "Imported H3" }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "project create: {project}");
+    }
+
+    async fn catalog_row(app: &axum::Router) -> Value {
+        let (status, models) = request(app.clone(), "GET", "/api/v1/models", Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{models}");
+        models
+            .as_array()
+            .expect("model list")
+            .iter()
+            .find(|model| model["id"] == IMPORTED_ID)
+            .cloned()
+            .expect("the imported entry is listed")
+    }
+
+    async fn enqueue_t2v(app: &axum::Router) -> (StatusCode, Value) {
+        request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            json!({
+                "projectId": "project-1",
+                "model": IMPORTED_ID,
+                "mode": "text_to_video",
+                "prompt": "a courier crosses a rain-lit square"
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn the_imported_h3_entry_is_a_selectable_video_model_on_both_lanes() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let imported = imported_entry(&temp_dir, true);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
+        let row = catalog_row(&app).await;
+
+        assert_eq!(row["type"], "video");
+        assert_eq!(row["catalogScope"], "user");
+        assert_eq!(
+            row["capabilities"],
+            json!(["text_to_video", "image_to_video", "first_last_frame"])
+        );
+        assert_eq!(
+            row["importPlan"]["assembly"]["components"]["transformer"]["source"],
+            "plan"
+        );
+        for block in ["macSupport", "candleSupport"] {
+            assert_eq!(row[block]["supported"], true, "{block}: {row}");
+            for mode in ["text_to_video", "image_to_video", "first_last_frame"] {
+                assert_eq!(
+                    row[block]["features"]["videoModes"][mode], true,
+                    "{block} {mode}"
+                );
+            }
+            assert_eq!(
+                row[block]["features"]["videoModes"]["reference_to_video"], false,
+                "{block}: the bound partition is the base one"
+            );
+        }
+        // E5/S9: compatible imported H3 checkpoints retain their adapter surface.
+        assert_eq!(row["loraCompatibility"]["supported"], true, "{row}");
+        assert_eq!(
+            row["loraCompatibility"]["families"],
+            json!(["minimax-h3"]),
+            "{row}"
+        );
+        assert!(!row["importPlan"]["assembly"]["componentClosure"]
+            .as_array()
+            .expect("fresh import component closure")
+            .is_empty());
+
+        // Control: the identical row without its validated binding is an incomplete assembly, and
+        // must not read as a usable model on either lane.
+        let unbound_dir = tempfile::tempdir().expect("temp dir creates");
+        let unbound_import = imported_entry(&unbound_dir, false);
+        let unbound = catalog_row(&app_with(
+            &unbound_dir,
+            Value::Object(unbound_import.entry.clone()),
+        ))
+        .await;
+        assert_eq!(unbound["macSupport"]["supported"], false, "{unbound}");
+        assert_eq!(unbound["candleSupport"]["supported"], false, "{unbound}");
+    }
+
+    #[tokio::test]
+    async fn a_public_request_for_the_imported_h3_entry_enqueues_with_its_binding() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let imported = imported_entry(&temp_dir, true);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
+        create_project(&app).await;
+
+        let (status, job) = enqueue_t2v(&app).await;
+        assert_eq!(status, StatusCode::CREATED, "enqueue answered: {job}");
+        assert_eq!(job["type"], "video_generate");
+        assert_eq!(job["status"], "queued", "{job}");
+        // The request names the IMPORTED id — no builtin id anywhere — and the worker receives the
+        // plan identity and binding it resolves through.
+        assert_eq!(job["payload"]["model"], IMPORTED_ID);
+        let entry = &job["payload"]["modelManifestEntry"];
+        assert_eq!(
+            entry["importPlan"]["checkpointId"],
+            format!("managed/{IMPORTED_ID}")
+        );
+        assert_eq!(
+            entry["importPlan"]["assembly"]["partition"], "fl2va",
+            "{entry}"
+        );
+        // The base partition's surface resolved the request: its 24 fps and its default canvas.
+        assert_eq!(job["payload"]["fps"], 24);
+        assert_eq!(job["payload"]["width"], 1344);
+    }
+
+    #[tokio::test]
+    async fn the_imported_h3_entry_without_its_binding_is_refused_by_the_no_lane_gate() {
+        let temp_dir = tempfile::tempdir().expect("temp dir creates");
+        let imported = imported_entry(&temp_dir, false);
+        let app = app_with(&temp_dir, Value::Object(imported.entry.clone()));
+        create_project(&app).await;
+
+        let (status, error) = enqueue_t2v(&app).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "answered: {error}");
+        assert!(
+            error.to_string().contains("no backend implements it"),
+            "the no-lane gate must be what refused it: {error}"
+        );
     }
 }

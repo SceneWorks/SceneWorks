@@ -2103,16 +2103,30 @@ export function ImageStudio() {
     }
     setCharacterId(settings.characterId ?? "");
     setCharacterLookId(settings.characterLookId ?? "");
-    setReferenceAssetId(rawSettings.referenceAssetId ?? recordedReferences?.assetIds[0] ?? launchRequest.referenceAssetId ?? "");
-    // Explicit workflow input picks and trusted worker bindings replace the picker sequence.
-    // Only a recipe with neither recorded input shape keeps the user's existing selection.
+    setReferenceAssetId(settings.referenceAssetId ?? rawSettings.referenceAssetId ?? recordedReferences?.assetIds[0] ?? launchRequest.referenceAssetId ?? "");
+    // sc-15952 / sc-26687: the ordered reference images. Guarded on the KEY rather than assigned
+    // unconditionally — a recipe that records neither spelling must not clear a selection the user
+    // had already made, while an explicit empty list is authoritative and does clear it.
+    //
+    // `referenceAssetIds` is a TOP-LEVEL request key, not part of `advanced`, so it never reached
+    // `rawAdapterSettings` and this reader could never see it: "Use this recipe" silently rebuilt an
+    // edit with the ordered multi-reference conditioning dropped. The recipe now records the list in
+    // `normalizedSettings` — the replay record — and that spelling is authoritative. The `advanced`
+    // spelling is kept as the fallback for a shared-workflow envelope that carries it there.
+    const recordedReferenceIds =
+      Array.isArray(settings.referenceAssetIds)
+        ? settings.referenceAssetIds
+        : Array.isArray(rawSettings.referenceAssetIds)
+          ? rawSettings.referenceAssetIds
+          : null;
+    // FLUX.3 layout recipes restore their recorded layout references (main, sc-26233).
     if (isFlux3LayoutModel(recipe.model)) {
       setReferenceAssetIds(restoredReferenceAssets.filter(Boolean));
     } else if (isMossEdit(recipe.model ?? model, nextMode)) {
       // Missing identities stay visible and block submission; never drop a slot or use the output.
-      setReferenceAssetIds(Array.isArray(rawSettings.referenceAssetIds) ? rawSettings.referenceAssetIds : []);
-    } else if (Array.isArray(rawSettings.referenceAssetIds) && rawSettings.referenceAssetIds.length) {
-      setReferenceAssetIds(rawSettings.referenceAssetIds.filter(Boolean));
+      setReferenceAssetIds(recordedReferenceIds ?? []);
+    } else if (recordedReferenceIds) {
+      setReferenceAssetIds(recordedReferenceIds.filter(Boolean));
     }
     setIpAdapterScale(rawSettings.ipAdapterScale ?? settings.ipAdapterScale ?? ipAdapterScale);
     setControlnetScale(rawSettings.controlnetConditioningScale ?? rawSettings.controlnetScale ?? settings.controlnetScale ?? controlnetScale);

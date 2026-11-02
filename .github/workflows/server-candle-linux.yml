@@ -23,11 +23,11 @@ on:
   workflow_dispatch:
     inputs:
       starvector_terminal_operation:
-        description: Run the ordinary Linux build or bridge one terminal operation from this existing default-branch workflow.
+        description: Run the ordinary Linux build, a terminal operation, or explicit H3 model/admission proofs.
         required: true
         default: standard
         type: choice
-        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b]
+        options: [standard, source, provision, readiness, campaign, diagnostic-candle-1b, h3-import-mlx, h3-import-cuda, h3-import-both, h3-admission-proof, h3-ui-proof, h3-terminal-mlx, h3-terminal-cuda]
       inference_revision:
         description: Exact merged inference commit for terminal provisioning.
         required: false
@@ -65,7 +65,7 @@ on:
         default: 0b084cbf46b5b4f4f561305ef116268b57eecf7f
         type: string
       campaign_run_id:
-        description: Unique terminal campaign identity.
+        description: StarVector campaign identity, or explicit H3 terminal/staging request JSON (keeps the ten standing dispatch keys; staging needs explicit asset/license inputs, not a stationary pair).
         required: false
         type: string
 
@@ -74,13 +74,286 @@ permissions:
   actions: read
 
 concurrency:
-  # Every terminal phase shares one non-canceling bridge queue. An unrelated
-  # ordinary Linux compile must not cancel a source/provision/readiness/campaign
-  # caller, and a later terminal phase must wait for its predecessor to finish.
-  group: ${{ (inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref) || 'starvector-terminal-bridge' }}
+  # Preserve StarVector's non-canceling bridge and ordinary ref-keyed builds.
+  # Explicit CPU, import and terminal runs have separate per-run caller groups,
+  # distinct from reusable callees and the unchanged native-device queues below.
+  group: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' && format('h3-ui-hosted-{0}-{1}', github.run_id, github.run_attempt) || (github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' && format('h3-admission-cpu-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') && format('h3-import-native-{0}', github.run_id)) || (github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') && format('h3-terminal-bridge-{0}-{1}', github.run_id, github.run_attempt)) || ((inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '') && format('server-candle-linux-{0}', github.ref)) || 'starvector-terminal-bridge' }}
   cancel-in-progress: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
 
 jobs:
+  # Asset staging is folded into the registered h3-terminal-mlx/cuda reusable execution, which
+  # ensure-assets and conditioning inside the SAME terminal route before the reduced 25/backend
+  # operational cases are run. There is no separate staging phase or route.
+
+  # Source UI proof is independent of the permanent model pin and hardware campaign.
+  h3-ui-proof:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-ui-proof' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      CI: "true"
+      SC26687_ARTIFACT_DIR: ${{ github.workspace }}/browser-artifacts/sc26687
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Initialize hosted UI evidence and require exact source
+        run: |
+          set -euo pipefail
+          mkdir -p "$SC26687_ARTIFACT_DIR"
+          test "$CI" = true
+          test "$GITHUB_ACTIONS" = true
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          git rev-parse HEAD > "$SC26687_ARTIFACT_DIR/source-sha.txt"
+          test "$(cat "$SC26687_ARTIFACT_DIR/source-sha.txt")" = "$GITHUB_SHA"
+          git rev-parse HEAD:apps/web > "$SC26687_ARTIFACT_DIR/web-tree.txt"
+          sha256sum apps/web/package-lock.json config/manifests/builtin.models.jsonc apps/web/verify/hosted-browser/*.mjs apps/web/verify-fixtures.mjs apps/web/vite.verify.config.mjs > "$SC26687_ARTIFACT_DIR/source-inputs.sha256"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Install source UI and isolated per-run browser tooling
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        run: |
+          set -euo pipefail
+          npm ci --prefix apps/web 2>&1 | tee "$SC26687_ARTIFACT_DIR/npm-ci.log"
+          tools="$RUNNER_TEMP/sc26687-playwright-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          test ! -e "$tools"
+          mkdir -p "$tools"
+          printf '{"name":"sc26687-playwright-tools","private":true}\n' > "$tools/package.json"
+          npm install --prefix "$tools" --no-audit --no-fund playwright@1.59.1 2>&1 | tee "$SC26687_ARTIFACT_DIR/playwright-install.log"
+          node --input-type=module -e '
+            import {resolvePlaywrightEntry,resolveBrowsersPath,assertPlaywrightVersion} from "./apps/web/verify/hosted-browser/guard.mjs";
+            const root=process.env.RUNNER_TEMP+"/sc26687-playwright-"+process.env.GITHUB_RUN_ID+"-"+process.env.GITHUB_RUN_ATTEMPT;
+            const tools=resolvePlaywrightEntry({root});
+            assertPlaywrightVersion(tools.version);
+            const browsers=resolveBrowsersPath({PLAYWRIGHT_BROWSERS_PATH:root+"/browsers"},{root});
+            console.log(JSON.stringify({root:tools.root,entry:tools.entry,version:tools.version,browsers}));
+          ' 2>&1 | tee "$SC26687_ARTIFACT_DIR/playwright-resolution.log"
+          echo "SC26687_PLAYWRIGHT_ROOT=$tools" >> "$GITHUB_ENV"
+          echo "PLAYWRIGHT_BROWSERS_PATH=$tools/browsers" >> "$GITHUB_ENV"
+      - name: Install hosted Chromium from the private tools root
+        run: |
+          set -euo pipefail
+          test -x "$SC26687_PLAYWRIGHT_ROOT/node_modules/.bin/playwright"
+          "$SC26687_PLAYWRIGHT_ROOT/node_modules/.bin/playwright" install --with-deps chromium 2>&1 | tee "$SC26687_ARTIFACT_DIR/chromium-install.log"
+      - name: Prove all S8 UI cases in real hosted Chromium
+        env:
+          SC26687_HOSTED_BROWSER_PROOF: "1"
+          SC26687_EXPECTED_HEAD: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          node apps/web/verify/hosted-browser/run-hosted-browser.mjs 2>&1 | tee "$SC26687_ARTIFACT_DIR/browser-proof.log"
+      - name: Keep source UI browser evidence including failures
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: h3-ui-proof-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.SC26687_ARTIFACT_DIR }}
+          if-no-files-found: error
+          retention-days: 30
+
+  # Explicit hosted CPU proof only: no recurring PR/main mutation job and no GPU queue/token.
+  h3-admission-proof:
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.starvector_terminal_operation == 'h3-admission-proof' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_NET_OFFLINE: "true"
+      CARGO_BUILD_JOBS: "2"
+      RUSTC_WRAPPER: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Read checkout Rust toolchain
+        id: h3_admission_toolchain
+        run: |
+          python3 - <<'PY'
+          import os, re, tomllib
+          from pathlib import Path
+          channel = tomllib.loads(Path("rust-toolchain.toml").read_text())["toolchain"]["channel"]
+          if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", channel):
+              raise SystemExit("checkout Rust channel must be an exact version")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              print(f"channel={channel}", file=output)
+          PY
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: ${{ steps.h3_admission_toolchain.outputs.channel }}
+          components: clippy,rustfmt
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Initialize CPU proof evidence before dependency setup
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/h3-admission-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir "$evidence"
+          echo "H3_ADMISSION_EVIDENCE=$evidence" >> "$GITHUB_ENV"
+          git rev-parse HEAD > "$evidence/source-sha.txt"
+          cp Cargo.lock "$evidence/Cargo.lock"
+          sha256sum Cargo.lock crates/sceneworks-worker/src/video_admission.rs > "$evidence/source-inputs.sha256"
+          printf '%s\n' 'cfg=default; Linux parity worker/lib; CPU-only; no model execution' > "$evidence/configuration.txt"
+          mkdir -p "$HOME/.cache/huggingface" "$HOME/.cache/torch" "$HOME/SceneWorks/data"
+      - name: Fetch the pinned inference source, never model weights
+        env:
+          CARGO_NET_OFFLINE: "false"
+        run: |
+          set -euo pipefail
+          cargo fetch --locked 2>&1 | tee "$H3_ADMISSION_EVIDENCE/dependency-fetch.log"
+      - name: Install CPU isolation tooling
+        run: |
+          set -euo pipefail
+          sudo apt-get update 2>&1 | tee "$H3_ADMISSION_EVIDENCE/isolation-setup.log"
+          sudo apt-get install -y --no-install-recommends bubblewrap 2>&1 | tee -a "$H3_ADMISSION_EVIDENCE/isolation-setup.log"
+      - name: Prove H3 admission baseline, assertion reds and restored greens on CPU
+        run: |
+          set -euo pipefail
+          # Drop back to the runner user inside a network-less namespace. The read-only host
+          # tree exposes no physical GPU devices; only this checkout, Cargo sources and owned
+          # temp evidence are writable. Mask real HF/Torch/app-data caches at the OS boundary.
+          sudo -E bwrap --unshare-net --unshare-pid --die-with-parent \
+            --ro-bind / / \
+            --bind "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE" \
+            --bind "$RUNNER_TEMP" "$RUNNER_TEMP" \
+            --bind "${CARGO_HOME:-$HOME/.cargo}" "${CARGO_HOME:-$HOME/.cargo}" \
+            --tmpfs "$HOME/.cache/huggingface" --tmpfs "$HOME/.cache/torch" \
+            --tmpfs "$HOME/SceneWorks/data" --proc /proc --dev /dev \
+            --setenv HOME "$HOME" --setenv PATH "$PATH" --chdir "$GITHUB_WORKSPACE" \
+            -- /usr/sbin/runuser --user "$USER" --preserve-environment -- \
+            python3 scripts/ci/h3_admission_mutation_proof.py \
+              --output-dir "$H3_ADMISSION_EVIDENCE/proof" --cfg default \
+            2>&1 | tee "$H3_ADMISSION_EVIDENCE/proof-driver.log"
+      - name: Keep actual H3 CPU source, pin, assertions and restoration evidence
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: h3-admission-cpu-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.H3_ADMISSION_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 30
+
+  # This file is already registered on main, so --ref <published story branch> executes that
+  # branch's positively selected proof jobs without activating the H3/Veda registration stubs.
+  h3-import-mlx:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-mlx' || inputs.starvector_terminal_operation == 'h3-import-both') }}
+    runs-on: [self-hosted, macOS, ARM64, rw-llm]
+    concurrency:
+      group: h3-import-proofs-nax-macos-2
+      cancel-in-progress: false
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    env:
+      H3_IMPORT_BACKEND: ${{ inputs.starvector_terminal_operation == 'h3-import-both' && 'both' || 'mlx' }}
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_DEV_STRIP: "false"
+      CARGO_PROFILE_TEST_STRIP: "false"
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_STRIP: "none"
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_STRIP: "none"
+      MACOSX_DEPLOYMENT_TARGET: "26.2"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Require Mac2 before building or executing models
+        run: |
+          test "$RUNNER_NAME" = nax-macos-2
+          echo "H3_PROOF_EVIDENCE=$RUNNER_TEMP/h3-import-mlx-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/h3-import-mlx-target-${{ github.run_id }}" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30
+        with:
+          toolchain: "1.98.0"
+      - name: Fetch source dependencies only, never model weights
+        run: cargo fetch --locked
+      - name: Explicit guarded H3 model proofs (pruned and W4A8)
+        run: node scripts/ci/h3-import-native-proof.mjs mlx "$H3_PROOF_EVIDENCE"
+      - name: Keep H3 Metal source identities, configuration, duration and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: h3-import-mlx-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.H3_PROOF_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 30
+
+  h3-import-cuda:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-import-cuda' || inputs.starvector_terminal_operation == 'h3-import-both') }}
+    runs-on: [self-hosted, Windows, X64, cuda]
+    concurrency:
+      # Physical GPU 1 (PCI-bus order) is the runner card; GPU 0 is the owner's display GPU.
+      group: windows-candle-gpu-real-weights
+      cancel-in-progress: false
+    timeout-minutes: 60
+    env:
+      H3_IMPORT_BACKEND: ${{ inputs.starvector_terminal_operation == 'h3-import-both' && 'both' || 'cuda' }}
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CUDA_COMPUTE_CAP: "120"
+      CUDA_DEVICE_ORDER: PCI_BUS_ID
+      CUDA_VISIBLE_DEVICES: "1"
+      SCENEWORKS_GPU_ID: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize disposable proof paths
+        shell: powershell
+        run: |
+          "H3_PROOF_EVIDENCE=$env:RUNNER_TEMP\h3-import-cuda-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CARGO_TARGET_DIR=$env:RUNNER_TEMP\h3-import-cuda-target-${{ github.run_id }}" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: ./.github/actions/prepare-rust-runner
+      - name: Disable sccache for the heavy Candle proof build
+        shell: powershell
+        run: |
+          $env:RUSTC_WRAPPER = ''
+          'RUSTC_WRAPPER=' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Select the existing listener-isolated Cargo dependency cache
+        shell: powershell
+        run: |
+          node scripts/select-windows-cargo-cache.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'isolated Cargo cache selection failed' }
+      - name: Fetch source dependencies only, never model weights
+        shell: cmd
+        run: cargo fetch --locked
+      - name: Explicit H3 model proofs (pruned and W4A8)
+        shell: cmd
+        run: |
+          call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 exit /b 1
+          set NVCC_CCBIN=%VCToolsInstallDir%bin\Hostx64\x64
+          node scripts/ci/h3-import-native-proof.mjs cuda "%H3_PROOF_EVIDENCE%"
+      - name: Keep H3 CUDA source identities, configuration, duration and logs
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: h3-import-cuda-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.H3_PROOF_EVIDENCE }}
+          if-no-files-found: error
+          retention-days: 30
+
   build-candle:
     if: ${{ inputs.starvector_terminal_operation == 'standard' || inputs.starvector_terminal_operation == '' }}
     runs-on: ubuntu-22.04
@@ -164,6 +437,27 @@ jobs:
           name: sceneworks-api-candle-linux
           path: target/release/sceneworks-rust-api
           if-no-files-found: error
+
+  # Already registered on main; local reusable calls resolve at THIS caller commit,
+  # so no incomplete feature->main activation merge is needed. Unknown/ordinary
+  # selections cannot reach H3, and authorization must be JSON boolean true.
+  h3-terminal:
+    if: ${{ github.event_name == 'workflow_dispatch' && (inputs.starvector_terminal_operation == 'h3-terminal-mlx' || inputs.starvector_terminal_operation == 'h3-terminal-cuda') }}
+    uses: ./.github/workflows/h3-finetune-terminal.yml
+    with:
+      stationary_pair_authorized: ${{ toJSON(fromJSON(inputs.campaign_run_id).stationary_pair_authorized) == 'true' }}
+      sceneworks_sha: ${{ fromJSON(inputs.campaign_run_id).sceneworks_sha }}
+      inference_sha: ${{ fromJSON(inputs.campaign_run_id).inference_sha }}
+      native_evidence_ref: ${{ fromJSON(inputs.campaign_run_id).native_evidence_ref }}
+      native_evidence_sha: ${{ fromJSON(inputs.campaign_run_id).native_evidence_sha }}
+      backend: ${{ inputs.starvector_terminal_operation == 'h3-terminal-mlx' && 'mlx' || 'cuda' }}
+      expected_runner: ${{ fromJSON(inputs.campaign_run_id).expected_runner }}
+      plan_path: ${{ fromJSON(inputs.campaign_run_id).plan_path || '' }}
+      output_path: ${{ fromJSON(inputs.campaign_run_id).output_path || '' }}
+      case_id: ${{ fromJSON(inputs.campaign_run_id).case_id || '' }}
+      campaign_request: ${{ inputs.campaign_run_id }}
+    secrets:
+      SCENEWORKS_INFERENCE_READ_TOKEN: ${{ secrets.SCENEWORKS_INFERENCE_READ_TOKEN || secrets.INFERENCE_READ_TOKEN }}
 
   # GitHub exposes workflow_dispatch only for files that already exist on the
   # default branch. This standing manual workflow is therefore the narrow

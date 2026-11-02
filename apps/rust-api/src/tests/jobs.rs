@@ -2733,10 +2733,10 @@ async fn image_create_retry_and_duplicate_resolve_text_encoder_fresh_and_fail_cl
     }
 }
 
-/// SC-18314: server resolution is worker-private. Exercise the raw queue primitive with the exact
-/// typed-image metadata shape so every generic job projection is covered without depending on a
-/// platform provider fixture. The raw store and `/jobs/claim` must retain the resolution; every
-/// browser-visible HTTP/SSE shape must retain only the authored opaque id.
+/// SC-18314: server resolution is worker-private. Seed the store with the exact trusted typed-image
+/// metadata shape, then exercise the normal public projection/events and HTTP surfaces. Public raw
+/// callers cannot author this private carrier; their canonicalization is tested independently.
+/// The raw store and `/jobs/claim` retain the resolution; browser state retains only the opaque id.
 #[tokio::test]
 async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_retains_it() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
@@ -2768,6 +2768,58 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
         "payload": job_payload,
         "requestedGpu": "auto"
     });
+    async fn create_trusted_job(state: &crate::AppState, request: &Value) -> Value {
+        use sceneworks_core::checkpoint_import::{
+            CheckpointContainerV1, ImportLayerV1, ImportPlanV1, SourceLocatorV1,
+        };
+        let plan = ImportPlanV1::new(
+            "checkpoint-plan-private-boundary",
+            "sdxl",
+            vec![ImportLayerV1 {
+                layer_id: "checkpoint".into(),
+                role: "checkpoint".into(),
+                target_path: "model.safetensors".into(),
+                container: CheckpointContainerV1::Safetensors,
+                source: SourceLocatorV1::linked(
+                    "root-approved",
+                    "model.safetensors",
+                    "b".repeat(64),
+                )
+                .unwrap(),
+            }],
+        )
+        .unwrap();
+        let provenance = sceneworks_core::model_artifacts::provenance::checkpoint_model_provenance(
+            &plan,
+            "private-boundary-model",
+        )
+        .unwrap();
+        let job = state
+            .jobs_store
+            .create_job_with_model_provenance(
+                crate::CreateJob {
+                    job_type: crate::JobType::ImageDetail,
+                    project_id: Some("project-1".into()),
+                    project_name: Some("Project 1".into()),
+                    payload: request["payload"].as_object().unwrap().clone(),
+                    requested_gpu: "auto".into(),
+                    source_job_id: None,
+                    duplicate_of_job_id: None,
+                    attempts: 1,
+                    initial_status: None,
+                },
+                Some(&provenance),
+            )
+            .unwrap();
+        assert_eq!(
+            state.jobs_store.model_provenance(&job.id).unwrap(),
+            Some(provenance.clone())
+        );
+        assert_eq!(job.extra["modelProvenance"], provenance);
+        crate::publish(state, "job.updated", &job);
+        crate::publish_queue(state).await.unwrap();
+        serde_json::to_value(crate::public_job_snapshot(job)).unwrap()
+    }
     let assert_public = |surface: &str, value: &Value| {
         let encoded = value.to_string();
         assert!(
@@ -2793,9 +2845,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     };
 
     let mut events = state.events.subscribe();
-    let (status, created) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
-    assert_eq!(status, StatusCode::CREATED, "{created}");
+    let created = create_trusted_job(&state, &create_request).await;
     assert_public("create response", &created);
     assert_eq!(
         created["payload"]["advanced"]["textEncoderModel"],
@@ -2917,9 +2967,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
 
     // Seed a fresh row for the one private boundary: a compatible worker claim. The raw payload
     // must survive public projection intact so the worker can validate and prepare its receipt.
-    let (status, worker_job) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request.clone()).await;
-    assert_eq!(status, StatusCode::CREATED, "{worker_job}");
+    create_trusted_job(&state, &create_request).await;
     let (status, _) = request(
         app.clone(),
         "POST",
@@ -3079,9 +3127,7 @@ async fn public_job_boundaries_hide_selected_text_encoder_path_but_worker_claim_
     // The supervisor crash report wraps its snapshot in `Option<JobSnapshot>` rather than using
     // the ordinary progress response. Claim one final raw row so that container boundary is also
     // proven public while the persisted worker payload remains exact.
-    let (status, termination_job) =
-        request(app.clone(), "POST", "/api/v1/jobs", create_request).await;
-    assert_eq!(status, StatusCode::CREATED, "{termination_job}");
+    let termination_job = create_trusted_job(&state, &create_request).await;
     let termination_job_id = termination_job["id"]
         .as_str()
         .expect("termination job id")
@@ -5392,6 +5438,95 @@ async fn legacy_over_limit_pose_job_is_readable_but_cannot_be_replayed() {
 
     let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
     assert_eq!(jobs.as_array().map(Vec::len), Some(1));
+}
+
+#[tokio::test]
+async fn imported_video_replay_refuses_same_catalog_id_rebound_before_enqueue() {
+    use sceneworks_worker::minimax_h3_import_fixture as fixture;
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let settings = test_settings(&temp);
+    // E8/E9: use actual source bytes and capture the complete component closure BEFORE compile.
+    // Retain the staging fixture's private source-library guard, including during API admission.
+    let imported = fixture::stage_managed_minimax_h3_import(&settings.data_dir, "same-import-id");
+    let store =
+        sceneworks_core::checkpoint_plan_store::CheckpointPlanStore::open(&settings.data_dir);
+    let root = store
+        .approve_root(&settings.data_dir.join("models/incoming"))
+        .unwrap();
+    let context = fixture::captured_component_context(&settings.data_dir, &imported.entry);
+    let compiled = store
+        .compile_linked_with_context(&root.root_id, "same-import-id", context)
+        .unwrap();
+    let checkpoint_id = &compiled.checkpoint_id;
+    let current_plan = &compiled.plan;
+    let mut model = imported.entry.clone();
+    model.remove("paths");
+    model.insert(
+        "source".into(),
+        json!({"provider":"linked-library",
+        "rootId":root.root_id,"relativePath":"same-import-id"}),
+    );
+    model.insert(
+        "importPlan".into(),
+        json!({"checkpointId":checkpoint_id,
+        "planId":current_plan.plan_id,"semanticDigest":compiled.record.plan.semantic_digest}),
+    );
+    let assembly = sceneworks_core::minimax_h3_import::MiniMaxH3ImportAssembly::from_declared_plan(
+        current_plan,
+        &model,
+    )
+    .unwrap();
+    sceneworks_core::minimax_h3_import::stamp_imported_minimax_h3_entry(&mut model, &assembly);
+    assert_h3_component_authority_required(&settings.data_dir, &model);
+    let config = settings.config_dir.join("manifests");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        json!({"schemaVersion":1,"models":[]}).to_string(),
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&config);
+    std::fs::write(
+        config.join("user.models.jsonc"),
+        json!({"schemaVersion":1,"models":[model]}).to_string(),
+    )
+    .unwrap();
+    let (app, state) = create_app_with_state(settings).unwrap();
+    // Exercise the same canonical catalog and S11 provenance resolver as admission. An absent
+    // fixture entry must not turn this plan-rebind test into an unrelated missing-checkpoint test.
+    let entry = crate::resolve_model_manifest_entry(&state, "same-import-id")
+        .await
+        .unwrap();
+    let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir,
+        entry.as_object().unwrap(),
+    )
+    .unwrap();
+    let actual =
+        crate::imported_reference_from_provenance(entry.as_object().unwrap(), provenance.as_ref())
+            .expect("canonical imported fixture has a validated replay identity");
+    assert_eq!(actual["checkpointId"], checkpoint_id.as_str());
+    assert_eq!(actual["planId"], current_plan.plan_id);
+    let mut expected = actual;
+    expected["planId"] = json!(format!("checkpoint-plan-{}", "b".repeat(64)));
+    let (status,error) = request(app.clone(),"POST","/api/v1/video/jobs",json!({
+        "projectId":"p", "model":"same-import-id", "mode":"text_to_video", "prompt":"original weights only",
+        "expectedImportedModelRef":expected
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");
+    assert!(
+        error["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("planId") && detail.contains("Reimport")),
+        "{error}"
+    );
+    let (_, jobs) = request(app, "GET", "/api/v1/jobs", Value::Null).await;
+    assert_eq!(
+        jobs.as_array().map(Vec::len),
+        Some(0),
+        "identity mismatch must not enqueue substituted weights"
+    );
 }
 
 #[tokio::test]
@@ -15191,6 +15326,107 @@ async fn shipped_manifest_app_on_os(
     (app, project_id)
 }
 
+/// sc-26691. The video route validates `advanced.referenceImageResizeMode` and STAMPS a fresh
+/// MiniMax-H3 job with its resolved mode (`match` when the caller named none), so the persisted job
+/// is self-describing; a duplicate keeps the recorded mode or takes an explicit change; a misspelt
+/// mode, or the key on another family, is refused. (A record that predates the key — the legacy
+/// `diffusers` replay — is covered by `legacy_h3_records_replay_as_diffusers_and_new_records_keep_their_mode`
+/// in sceneworks-core, since this route can no longer write one.)
+#[tokio::test]
+async fn video_route_stamps_and_replays_the_h3_reference_resize_mode() {
+    let temp_dir = tempfile::tempdir().expect("temp dir creates");
+    let (app, project_id) = shipped_manifest_app(&temp_dir).await;
+    let submit = |model: &str, advanced: Value| {
+        json!({
+            "projectId": project_id,
+            "model": model,
+            "mode": "text_to_video",
+            "prompt": "a lighthouse keeper hums while the storm rolls in",
+            "advanced": advanced,
+        })
+    };
+
+    let (status, fresh) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        submit("minimax_h3", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{fresh}");
+    assert_eq!(
+        fresh["payload"]["advanced"]["referenceImageResizeMode"], "match",
+        "a fresh request records the engine default it resolves to"
+    );
+
+    let (status, named) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/video/jobs",
+        submit("minimax_h3", json!({ "referenceImageResizeMode": "max" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{named}");
+    assert_eq!(
+        named["payload"]["advanced"]["referenceImageResizeMode"],
+        "max"
+    );
+
+    let fresh_id = fresh["id"].as_str().expect("job id");
+    let (status, duplicate) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{fresh_id}/duplicate"),
+        json!({ "payloadChanges": {} }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{duplicate}");
+    assert_eq!(
+        duplicate["payload"]["advanced"]["referenceImageResizeMode"], "match",
+        "a record written since the key existed replays its own mode"
+    );
+    let (status, changed) = request(
+        app.clone(),
+        "POST",
+        &format!("/api/v1/jobs/{fresh_id}/duplicate"),
+        json!({ "payloadChanges": { "advanced": { "referenceImageResizeMode": "diffusers" } } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{changed}");
+    assert_eq!(
+        changed["payload"]["advanced"]["referenceImageResizeMode"],
+        "diffusers"
+    );
+
+    for (model, advanced, needle) in [
+        (
+            "minimax_h3",
+            json!({ "referenceImageResizeMode": "crop" }),
+            "advanced.referenceImageResizeMode must be one of",
+        ),
+        (
+            "wan_i2v",
+            json!({ "referenceImageResizeMode": "match" }),
+            "is not supported by wan_i2v",
+        ),
+    ] {
+        let (status, error) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/video/jobs",
+            submit(model, advanced),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{model}: {error}");
+        assert!(
+            error["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains(needle)),
+            "{model}: {error}"
+        );
+    }
+}
+
 /// sc-17159 (epic 17137) — every mode MiniMax-H3 DECLARES is submittable end to end against the
 /// SHIPPED manifest, and the enqueued payload carries what the worker needs.
 ///
@@ -17187,16 +17423,64 @@ fn h3_last_only_typed_video_request_is_valid_and_other_families_still_need_a_sou
         ("minimax_h3_ref", true, false),
         ("ltx_2_3", true, false),
     ] {
-        let payload: crate::dto::VideoJobRequest = serde_json::from_value(serde_json::json!({
+        let value = serde_json::json!({
             "projectId":"owned", "model":model, "mode":"image_to_video", "prompt":"A cyclist rides",
             "lastFrameAssetId": if has_last { Some("last") } else { None },
-        }))
-        .unwrap();
+        });
+        let payload: crate::dto::VideoJobRequest = serde_json::from_value(value.clone()).unwrap();
+        // Shape-only admission defers last-only task compatibility until the catalog resolves.
+        assert_eq!(crate::validate_video_job(&payload).is_ok(), has_last);
         assert_eq!(
-            crate::validate_video_job(&payload).is_ok(),
+            crate::validate_video_reference_asset_ids_payload(
+                value.as_object().unwrap(),
+                &serde_json::json!({"id":model}),
+            )
+            .is_ok(),
             accepted,
             "{model}/{has_last}"
         );
+    }
+}
+
+#[test]
+fn h3_resolved_last_only_import_requires_a_verified_base_partition() {
+    let payload = serde_json::json!({"model":"user-choice", "mode":"image_to_video", "lastFrameAssetId":"last"});
+    for (partition, accepted) in [
+        ("fl2va", true),
+        ("hybrid", true),
+        ("ref2va", false),
+        ("unknown", false),
+    ] {
+        let base = if partition == "ref2va" {
+            "minimax_h3_ref"
+        } else {
+            "minimax_h3"
+        };
+        let entry = serde_json::json!({
+            "id":"user-choice", "family":"minimax-h3", "baseModel":base,
+            "minimaxH3Partition":partition, "importSourceShape":"transformer_directory",
+            "importPlan":{"checkpointId":"checkpoint", "assembly":{"schemaVersion":1, "partition":partition}}
+        });
+        assert_eq!(
+            crate::validate_video_reference_asset_ids_payload(payload.as_object().unwrap(), &entry)
+                .is_ok(),
+            accepted,
+            "{partition}"
+        );
+        let mut unbound = entry.clone();
+        unbound.as_object_mut().unwrap().remove("importPlan");
+        assert!(crate::validate_video_reference_asset_ids_payload(
+            payload.as_object().unwrap(),
+            &unbound
+        )
+        .is_err());
+        let mut spoofed = payload.clone();
+        spoofed["model"] = serde_json::json!("minimax_h3");
+        assert!(crate::validate_video_reference_asset_ids_payload(
+            spoofed.as_object().unwrap(),
+            &serde_json::json!({"id":"other"})
+        )
+        .is_err());
     }
 }
 

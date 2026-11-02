@@ -578,6 +578,21 @@ impl Drop for HeartbeatPump {
     }
 }
 
+/// Await one region of job work under a [`HeartbeatPump`]. A managed model import copies the whole
+/// checkpoint into staging before it hashes anything; that copy emits no progress, and a multi-GB
+/// copy outlasts the 90s stale-worker sweep (`jobs_store::mark_stale_workers_interrupted`). The
+/// H3 terminal campaign's import copy took about two minutes and the healthy job was swept to
+/// `interrupted` with "No heartbeat from the worker for 90s" (run 40560917627).
+pub(crate) async fn with_job_heartbeat<T>(
+    api: &ApiClient,
+    settings: &Settings,
+    job_id: &str,
+    work: impl std::future::Future<Output = WorkerResult<T>>,
+) -> WorkerResult<T> {
+    let _heartbeat = HeartbeatPump::start(api, settings, job_id);
+    work.await
+}
+
 /// Check-only cancel poll (sc-5515): returns `true` when the user requested
 /// cancellation, WITHOUT posting any status. Unlike [`check_cancel`] this never
 /// writes the terminal `Canceled`. In-loop generation/training pollers that sit in

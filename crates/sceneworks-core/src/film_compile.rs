@@ -25,7 +25,10 @@ use crate::film_plan::{
     ReferencePack, Shot, AUDIO_PROMPT_PREFIX,
 };
 use crate::minimax_h3_turbo::resolve_turbo_recipe;
-use crate::video_request::effective_reference_image_short_edge;
+use crate::video_request::{
+    effective_reference_image_resize_mode, effective_reference_image_short_edge,
+    ReferenceImageResizeMode, REFERENCE_IMAGE_RESIZE_MODE_KEY,
+};
 use crate::MAX_PROMPT_CHARS;
 
 /// Schema version of [`CompiledPlan`] documents this module reads and writes.
@@ -770,6 +773,12 @@ pub struct CompiledRequest {
     /// [`CompiledRequest::effective_reference_image_short_edge`] resolves for the record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reference_image_short_edge: Option<u32>,
+    /// The image-reference resize mode the plan asked for (`model.advanced.referenceImageResizeMode`,
+    /// sc-26691), written under exactly the rule [`CompiledRequest::reference_image_short_edge`]
+    /// is. Absent means the engine's own default (`match`), which
+    /// [`CompiledRequest::effective_reference_image_resize_mode`] resolves for the record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_image_resize_mode: Option<ReferenceImageResizeMode>,
     /// The catalog LoRA ids this request dispatches with, resolved PER PARTITION from the plan's
     /// one `model.loras` list (sc-23406).
     ///
@@ -1182,12 +1191,26 @@ fn compile_shot(
     // A reference-only knob reaches a reference-only request (sc-23402). The plan declares it once
     // on the family; the shots that resolve to the base partition encode no reference, so the field
     // is not written onto them and never reaches their job body or their attempt record.
+    let imported_reference = shot.conditioning.mode == "reference_to_video"
+        && crate::minimax_h3_import::entry_is_imported_minimax_h3(partition_entry);
     let reference_image_short_edge = plan
         .model
         .advanced
         .as_ref()
         .and_then(|advanced| advanced.reference_image_short_edge)
-        .filter(|_| is_reference_partition_id(&partition.model_id));
+        .filter(|_| is_reference_partition_id(&partition.model_id) || imported_reference)
+        // Imported ids carry no resident-partition token. Resolve the provider default explicitly
+        // into this persisted request so replay and the attempt recorder share the same contract.
+        .or_else(|| imported_reference.then(|| effective_reference_image_short_edge(None)));
+    // sc-26691. The resize policy rides the same shots the short edge does; omitted, the engine's
+    // own default governs and the recorder resolves it (no stamp here, so a compiled document
+    // written before the key existed still reproduces).
+    let reference_image_resize_mode = plan
+        .model
+        .advanced
+        .as_ref()
+        .and_then(|advanced| advanced.reference_image_resize_mode)
+        .filter(|_| is_reference_partition_id(&partition.model_id) || imported_reference);
     // The plan's one LoRA list, resolved against the partition this shot ACTUALLY dispatches as
     // (sc-23406). A shot whose partition has no compatible entry gets none — the empty list is the
     // record of that, and `effective_steps` below then resolves to the model's own default.
@@ -1223,6 +1246,7 @@ fn compile_shot(
         mode: shot.conditioning.mode.clone(),
         model: partition.model_id,
         reference_image_short_edge,
+        reference_image_resize_mode,
         loras,
         steps,
         effective_steps,
@@ -1288,8 +1312,18 @@ impl CompiledRequest {
     /// `effective_reference_image_short_edge` (this crate has no gen-core dependency), so the
     /// recorded value cannot drift from the value the engine resolved.
     pub fn effective_reference_image_short_edge(&self) -> Option<u32> {
-        is_reference_partition_id(&self.model)
+        (is_reference_partition_id(&self.model) || self.reference_image_short_edge.is_some())
             .then(|| effective_reference_image_short_edge(self.reference_image_short_edge))
+    }
+
+    /// The EFFECTIVE image-reference resize mode this request dispatches with (sc-26691), or `None`
+    /// for a request that encodes no reference — present exactly when
+    /// [`CompiledRequest::effective_reference_image_short_edge`] is, because the two size the same
+    /// reference. Resolved through [`effective_reference_image_resize_mode`], gen-core's local
+    /// twin, so the recorded mode cannot drift from the rendered one.
+    pub fn effective_reference_image_resize_mode(&self) -> Option<ReferenceImageResizeMode> {
+        self.effective_reference_image_short_edge()
+            .map(|_| effective_reference_image_resize_mode(self.reference_image_resize_mode))
     }
 
     /// Resolve this request's reference roles against the imported assets. A role with no asset is
@@ -1371,6 +1405,14 @@ impl CompiledRequest {
             // off the job, not a document axis. Only ever present on a reference-partition request,
             // because `compile_shot` is the only thing that writes the field.
             advanced.insert("referenceImageShortEdge".to_owned(), json!(edge));
+        }
+        if let Some(mode) = self.reference_image_resize_mode {
+            // sc-26691, same convention and same reach as the short edge above. Omitted, the
+            // video route stamps the engine default onto the persisted job.
+            advanced.insert(
+                REFERENCE_IMAGE_RESIZE_MODE_KEY.to_owned(),
+                json!(mode.as_str()),
+            );
         }
         let mut provenance = json!({
             "runId": context.run_id,
@@ -1828,6 +1870,7 @@ fn request_differences(
         mode,
         model,
         reference_image_short_edge,
+        reference_image_resize_mode,
         loras,
         steps,
         effective_steps,
@@ -1873,6 +1916,11 @@ fn request_differences(
         "compiled.referenceImageShortEdge",
         format!("{:?}", actual.reference_image_short_edge),
         format!("{reference_image_short_edge:?}"),
+    );
+    differ(
+        "compiled.referenceImageResizeMode",
+        format!("{:?}", actual.reference_image_resize_mode),
+        format!("{reference_image_resize_mode:?}"),
     );
     differ(
         "compiled.loras",
@@ -2901,6 +2949,94 @@ mod tests {
         );
     }
 
+    /// sc-26691. `model.advanced.referenceImageResizeMode` reaches exactly the shots the short edge
+    /// reaches; omitted, nothing is dispatched and the reference attempt records the engine's
+    /// `match`; a base-partition request records no mode at all; a misspelling is refused when the
+    /// plan is read; and a hand-edited compiled value is caught by name.
+    #[test]
+    fn the_reference_resize_mode_reaches_only_the_reference_partitions_request() {
+        let compile = |advanced: Option<Value>| {
+            let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+            if let Some(advanced) = advanced {
+                document["model"]["advanced"] = advanced;
+            }
+            let plan = parse_plan(&document.to_string()).unwrap();
+            let base = entry();
+            let reference = reference_entry();
+            let entries = ModelEntries::with_reference_partition(
+                "minimax_h3",
+                &base,
+                Some(("minimax_h3_ref", &reference)),
+            );
+            let compiled = compile_plan(
+                &plan,
+                &pack(),
+                &CompileInputs {
+                    entries: &entries,
+                    lane: "mlx",
+                    plan_sha256: "abc",
+                    compiled_at: "now",
+                    refined_prompts: &BTreeMap::new(),
+                },
+            )
+            .expect("the mixed plan compiles");
+            let findings = compiled.conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx);
+            assert!(findings.is_empty(), "{findings:?}");
+            let mut tampered = compiled.clone();
+            tampered.requests[0].reference_image_resize_mode = Some(ReferenceImageResizeMode::Max);
+            let fields: Vec<String> = tampered
+                .conformance_findings(&plan, &pack(), &entries, ModelLane::Mlx)
+                .into_iter()
+                .map(|finding| finding.field)
+                .collect();
+            (compiled, fields)
+        };
+        let assets = role_assets();
+        let context = short_edge_context(&assets);
+
+        let (compiled, tampered) =
+            compile(Some(json!({ "referenceImageResizeMode": "diffusers" })));
+        assert_eq!(
+            tampered,
+            vec!["compiled.referenceImageResizeMode".to_owned()]
+        );
+        let referenced = compiled.request("SH010").unwrap();
+        let plain = compiled.request("SH020").unwrap();
+        assert_eq!(
+            referenced.reference_image_resize_mode,
+            Some(ReferenceImageResizeMode::Diffusers)
+        );
+        assert_eq!(
+            referenced.effective_reference_image_resize_mode(),
+            Some(ReferenceImageResizeMode::Diffusers)
+        );
+        assert_eq!(
+            referenced.to_job_body(&context).unwrap()["advanced"]["referenceImageResizeMode"],
+            json!("diffusers")
+        );
+        assert_eq!(plain.reference_image_resize_mode, None);
+        assert_eq!(plain.effective_reference_image_resize_mode(), None);
+        assert!(plain.to_job_body(&context).unwrap()["advanced"]
+            .get("referenceImageResizeMode")
+            .is_none());
+
+        let (compiled, _) = compile(None);
+        let referenced = compiled.request("SH010").unwrap();
+        assert_eq!(referenced.reference_image_resize_mode, None);
+        assert_eq!(
+            referenced.effective_reference_image_resize_mode(),
+            Some(ReferenceImageResizeMode::Match),
+            "an omitted mode records the engine default"
+        );
+        assert!(referenced.to_job_body(&context).unwrap()["advanced"]
+            .get("referenceImageResizeMode")
+            .is_none());
+
+        let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+        document["model"]["advanced"] = json!({ "referenceImageResizeMode": "crop" });
+        assert!(parse_plan(&document.to_string()).is_err());
+    }
+
     /// A plan that names no short edge compiles and dispatches exactly what it did before sc-23402,
     /// and the EFFECTIVE value a reference attempt records is the engine's own default — 2048, the
     /// same number `sceneworks_gen_core::effective_reference_image_short_edge` resolves (this crate
@@ -2950,6 +3086,58 @@ mod tests {
                 .effective_reference_image_short_edge(),
             None
         );
+    }
+
+    #[test]
+    fn imported_hybrid_compilation_retains_identity_and_reference_controls() {
+        for edge in [None, Some(1536)] {
+            let mut document: Value = serde_json::from_str(&mixed_plan_text()).unwrap();
+            document["model"]["id"] = json!("minimax_h3_custom");
+            if let Some(edge) = edge {
+                document["model"]["advanced"] = json!({"referenceImageShortEdge":edge});
+            }
+            let plan = parse_plan(&document.to_string()).unwrap();
+            let mut imported = entry();
+            imported.extend(json!({"id":"minimax_h3_custom","family":"minimax-h3","baseModel":"minimax_h3","minimaxH3Partition":"hybrid","importSourceShape":"transformer_directory","importPlan":{"checkpointId":"managed/custom","assembly":{"schemaVersion":1,"partition":"hybrid"}}}).as_object().unwrap().clone());
+            crate::minimax_h3_import::apply_minimax_h3_studio_surface_defaults(&mut imported);
+            let reference = reference_entry();
+            let entries = ModelEntries::with_reference_partition(
+                "minimax_h3_custom",
+                &imported,
+                Some(("minimax_h3_ref", &reference)),
+            );
+            let compiled = compile_plan(
+                &plan,
+                &pack(),
+                &CompileInputs {
+                    entries: &entries,
+                    lane: "mlx",
+                    plan_sha256: "abc",
+                    compiled_at: "now",
+                    refined_prompts: &BTreeMap::new(),
+                },
+            )
+            .expect("explicit hybrid compiles");
+            let referenced = compiled.request("SH010").unwrap();
+            let plain = compiled.request("SH020").unwrap();
+            assert_eq!(referenced.model, "minimax_h3_custom");
+            assert_eq!(plain.model, "minimax_h3_custom");
+            assert_eq!(
+                referenced.effective_reference_image_short_edge(),
+                Some(edge.unwrap_or(2048))
+            );
+            assert_eq!(plain.reference_image_short_edge, None);
+            assert_eq!(plain.effective_reference_image_short_edge(), None);
+            let replay: CompiledPlan =
+                serde_json::from_value(serde_json::to_value(&compiled).unwrap()).unwrap();
+            assert_eq!(
+                replay
+                    .request("SH010")
+                    .unwrap()
+                    .effective_reference_image_short_edge(),
+                referenced.effective_reference_image_short_edge()
+            );
+        }
     }
 
     #[test]

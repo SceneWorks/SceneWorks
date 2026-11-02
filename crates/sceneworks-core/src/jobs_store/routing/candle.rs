@@ -863,6 +863,20 @@ pub(crate) fn video_request_is_candle_eligible(
         // `mlxQuantize`; accepting this field would silently discard the user's explicit choice.
         return false;
     }
+    // A plan-backed entry is decided HERE, by the only two candle video lanes that load a plan's
+    // bytes — the same order `resolve_candle_video_route` decides it in on the worker. Falling
+    // through to the id-keyed arms below would let a plan forwarded under a BUILTIN id
+    // (`minimax_h3`, `wan_2_2`, …) be claimed by a lane that loads the shipped weights, and the
+    // worker would then refuse the job it was handed (sc-26680; the MLX twin is sc-20651's guard).
+    if crate::jobs_store::routing::catalog::checkpoint_plan_checkpoint_id_of_payload_entry(payload)
+        .is_some()
+    {
+        return *job_type == JobType::VideoGenerate
+            && (plan_backed_wan_video_candle_eligible(payload)
+                || crate::jobs_store::routing::catalog::plan_backed_minimax_h3_video_eligible(
+                    model, payload,
+                ));
+    }
     match job_type {
         // The base txt2video / image→video lane (sc-5097 / sc-5175 / sc-5493), plus SCAIL-2 standalone
         // character animation (`animate_character`, sc-6837 — a distinct candle engine, not VACE).
@@ -872,10 +886,8 @@ pub(crate) fn video_request_is_candle_eligible(
                 // Bernini (sc-10997, epic 6562): t2v + the editing/reference/multi-source modes on the
                 // distinct candle `bernini` engine — its own gate (not the generic txt2video path).
                 || bernini_video_candle_eligible(model, payload)
-                // An imported plan-backed Wan checkpoint (epic 20398): its model id is in no static
-                // routed list, so every predicate above answers `false` and the job would be
-                // refused at enqueue even though the candle ComfyUI Wan T2V lane serves it.
-                || plan_backed_wan_video_candle_eligible(payload)
+            // Plan-backed entries (epic 20398's Wan T2V lane, sc-26680's imported H3 DiT) were
+            // decided above, before any id-keyed arm.
         }
         // replace_person → candle Wan-VACE (sc-5494) OR candle SCAIL-2 (sc-6837, routed by model id).
         JobType::PersonReplace => {
@@ -929,6 +941,34 @@ pub(crate) fn plan_backed_wan_video_candle_eligible(payload: &Map<String, Value>
         && !has_nonempty_string(payload, "lastFrameAssetId")
         && !has_nonempty_string(payload, "sourceClipAssetId")
         && !has_nonempty_string(payload, "bridgeRightClipAssetId")
+}
+
+/// The exact request shape MiniMax-H3's BASE partition (`transformer/`: t2va + fl2va) serves:
+/// `text_to_video` with no keyframe, `image_to_video` with exactly ONE keyframe — the first frame
+/// or, last-frame-only, the last (FL2VA conditions on 0, 1 or 2 keyframes; the API admits the
+/// last-only shape through `h3_keyframes`, and the worker's `resolve_minimax_h3_conditioning`
+/// places it) — `first_last_frame` with both, and never a reference, clip, mask or bridge. One predicate for the builtin `minimax_h3`
+/// candle arm and the imported-DiT claim (sc-26680) on both lanes, so the partition an imported
+/// checkpoint is bound to cannot serve a shape the builtin partition refuses.
+pub(crate) fn minimax_h3_base_partition_shape(payload: &Map<String, Value>) -> bool {
+    let has_source = has_nonempty_string(payload, "sourceAssetId");
+    let has_last = has_nonempty_string(payload, "lastFrameAssetId");
+    let mode_matches = match payload.get("mode").and_then(Value::as_str) {
+        Some("text_to_video") => !has_source && !has_last,
+        // sc-26691: last-only was admitted by the API and served by the worker but claimed by no
+        // lane, so the no-lane gate refused it at submit ("no backend implements it").
+        Some("image_to_video") => has_source != has_last,
+        Some("first_last_frame") => has_source && has_last,
+        _ => false,
+    };
+    mode_matches
+        && !has_nonempty_string(payload, "sourceClipAssetId")
+        && !has_nonempty_string(payload, "bridgeRightClipAssetId")
+        && !has_nonempty_string(payload, "referenceAssetId")
+        && !has_nonempty_string(payload, "maskAssetId")
+        && !has_nonempty_or_malformed_array(payload, "referenceAssetIds")
+        && !has_nonempty_or_malformed_array(payload, "sourceClipAssetIds")
+        && !has_nonempty_or_malformed_array(payload, "referenceAudioAssetIds")
 }
 
 /// Which `video_generate` modes the candle (Windows/Linux/CUDA) lane claims for `model` — the
@@ -1053,37 +1093,9 @@ pub(crate) fn video_request_candle_eligible(model: &str, payload: &Map<String, V
     } else if model == "minimax_h3" {
         // MiniMax-H3 base partition (sc-20755): t2va with no anchors, or fl2va with one/two
         // keyframes. Keep this explicit like the MLX twin: the reference partition is a different
-        // catalog entry with its own exact Ref2VA arm below.
-        match payload.get("mode").and_then(Value::as_str) {
-            Some("text_to_video") => {
-                if has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("image_to_video") => {
-                if !has_nonempty_string(payload, "sourceAssetId")
-                    || has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            Some("first_last_frame") => {
-                if !has_nonempty_string(payload, "sourceAssetId")
-                    || !has_nonempty_string(payload, "lastFrameAssetId")
-                {
-                    return false;
-                }
-            }
-            _ => return false,
-        }
-        if has_nonempty_string(payload, "sourceClipAssetId")
-            || has_nonempty_string(payload, "bridgeRightClipAssetId")
-            || has_nonempty_or_malformed_array(payload, "referenceAssetIds")
-            || has_nonempty_or_malformed_array(payload, "sourceClipAssetIds")
-            || has_nonempty_or_malformed_array(payload, "referenceAudioAssetIds")
-        {
+        // catalog entry with its own exact Ref2VA arm below. Shared with the imported-DiT claim
+        // (sc-26680), which serves exactly this partition.
+        if !minimax_h3_base_partition_shape(payload) {
             return false;
         }
     } else if model == "minimax_h3_ref" {

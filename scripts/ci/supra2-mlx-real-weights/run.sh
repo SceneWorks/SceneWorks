@@ -41,7 +41,7 @@ fi
 
 # ---- 2. the weights (fetched here, offline at test time) ------------------------------------------
 # The box's task-owned real-weight hub. Exactly the pinned files the engine reads
-# (gen_core::supra2::{SUPRA2_SOURCE, FLAN_T5_BASE, SD_VAE}); the tests re-verify sizes + SHA-256.
+# (gen_core_checkpoint::supra2::{SUPRA2_SOURCE, FLAN_T5_BASE, SD_VAE}); the tests re-verify sizes + SHA-256.
 hub="$HOME/sceneworks-rw-weights/hub"
 mkdir -p "$hub"
 python3.12 --version | grep -E '^Python 3\.12\.'

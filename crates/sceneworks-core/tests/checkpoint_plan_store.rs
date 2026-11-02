@@ -123,6 +123,278 @@ fn fixture(label: &str) -> Fixture {
 }
 
 #[test]
+fn duplicate_equivalence_ignores_only_declaration_and_preserves_plan_commitments() {
+    use sceneworks_core::model_artifacts::provenance::{
+        import_declaration_context, MODEL_DECLARATION_KEY,
+    };
+    let fx = fixture("declaration-duplicates");
+    for relative in ["original/model.safetensors", "declared/model.safetensors"] {
+        write_krea_native_file(&fx.library_dir.join(relative), 0x5a);
+    }
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let original = fx
+        .store
+        .compile_linked(&root.root_id, "original/model.safetensors")
+        .unwrap();
+    let original_reference = original.plan.plan_reference().unwrap();
+    let original_json = original.plan.canonical_json().unwrap();
+    let declaration = import_declaration_context(
+        json!({
+            "family":"krea_2", "baseModel":"krea_2", "importQuantFormat":"native",
+        })
+        .as_object()
+        .unwrap(),
+    )
+    .unwrap();
+    let declared = fx
+        .store
+        .compile_linked_with_context(
+            &root.root_id,
+            "declared/model.safetensors",
+            declaration.clone(),
+        )
+        .unwrap();
+    assert_eq!(
+        declared.duplicate_checkpoint_ids,
+        std::slice::from_ref(&original.checkpoint_id)
+    );
+    assert_eq!(
+        fx.store
+            .duplicates_of_plan(&original.plan, &original.checkpoint_id)
+            .unwrap(),
+        std::slice::from_ref(&declared.checkpoint_id)
+    );
+    assert_ne!(
+        original.plan.semantic_digest().unwrap(),
+        declared.plan.semantic_digest().unwrap()
+    );
+    assert_eq!(
+        declared.plan.context.get(MODEL_DECLARATION_KEY),
+        declaration.get(MODEL_DECLARATION_KEY)
+    );
+    assert_eq!(
+        fx.store
+            .resolve(&original.checkpoint_id)
+            .unwrap()
+            .plan
+            .canonical_json()
+            .unwrap(),
+        original_json
+    );
+    assert_eq!(
+        fx.store.record(&original.checkpoint_id).unwrap().plan,
+        original_reference
+    );
+    let mut changed = declared.plan.clone();
+    changed.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["baseLineage"]["baseModel"] =
+        json!("another-base");
+    assert_ne!(
+        changed.semantic_digest().unwrap(),
+        declared.plan.semantic_digest().unwrap()
+    );
+    assert_ne!(
+        changed.source_binding_identity().unwrap(),
+        declared.plan.source_binding_identity().unwrap()
+    );
+    assert_eq!(
+        changed.duplicate_equivalence_digest().unwrap(),
+        declared.plan.duplicate_equivalence_digest().unwrap()
+    );
+    let baseline = declared.plan.duplicate_equivalence_digest().unwrap();
+    for key in [
+        "sourceEncoding",
+        "transformerConfig",
+        "configurationAuthority",
+        "futureExecutionOption",
+    ] {
+        let mut configured = declared.plan.clone();
+        configured
+            .context
+            .insert(key.into(), json!({"fixture":"different"}));
+        assert_ne!(
+            configured.duplicate_equivalence_digest().unwrap(),
+            baseline,
+            "{key} is execution context, not provenance"
+        );
+        assert!(fx
+            .store
+            .duplicates_of_plan(&configured, "not-persisted")
+            .unwrap()
+            .is_empty());
+    }
+    let mut routed = declared.plan.clone();
+    routed.layers[0].role = "vae".into();
+    assert_ne!(routed.duplicate_equivalence_digest().unwrap(), baseline);
+    assert!(fx
+        .store
+        .duplicates_of_plan(&routed, "not-persisted")
+        .unwrap()
+        .is_empty());
+    let mut bytes = declared.plan.clone();
+    match &mut bytes.layers[0].source {
+        SourceLocatorV1::Linked { fingerprint, .. } => *fingerprint = "f".repeat(64),
+        _ => unreachable!(),
+    }
+    assert_ne!(bytes.duplicate_equivalence_digest().unwrap(), baseline);
+
+    // The original regression is a managed import next to a historical linked twin.
+    write_krea_native_file(
+        &fx.data_dir.join("models/imports/managed/model.safetensors"),
+        0x5a,
+    );
+    let managed = fx
+        .store
+        .compile_managed_with_context(
+            "managed",
+            "model.safetensors",
+            ManagedProvenanceV1 {
+                source: "local-copy".into(),
+                reference: Some("community-model".into()),
+                ..Default::default()
+            },
+            declaration,
+        )
+        .unwrap();
+    assert_eq!(
+        managed.duplicate_checkpoint_ids,
+        [
+            declared.checkpoint_id.clone(),
+            original.checkpoint_id.clone()
+        ]
+    );
+    assert_eq!(managed.plan.context, declared.plan.context);
+    assert_ne!(
+        managed.plan.source_binding_identity().unwrap(),
+        declared.plan.source_binding_identity().unwrap()
+    );
+    assert!(fx.store.resolve(&managed.checkpoint_id).is_ok());
+
+    // Advisory discovery must not turn an unrelated missing/tampered plan into an import gate.
+    fs::remove_file(
+        fx.data_dir
+            .join(CHECKPOINTS_DIR)
+            .join(PLANS_DIR)
+            .join(format!("{}.json", managed.plan.plan_id)),
+    )
+    .unwrap();
+    let declared_path = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{}.json", declared.plan.plan_id));
+    let mut tampered = declared.plan.clone();
+    tampered
+        .context
+        .insert("sampling".into(), json!({"shift":9}));
+    fs::write(&declared_path, tampered.canonical_json().unwrap()).unwrap();
+    assert!(fx
+        .store
+        .duplicates_of_plan(&original.plan, &original.checkpoint_id)
+        .unwrap()
+        .is_empty());
+    write_krea_native_file(&fx.library_dir.join("unrelated.safetensors"), 0x7b);
+    assert!(fx
+        .store
+        .compile_linked(&root.root_id, "unrelated.safetensors")
+        .unwrap()
+        .duplicate_checkpoint_ids
+        .is_empty());
+}
+
+#[test]
+fn h3_duplicate_equivalence_preserves_declared_routing_and_unknown_history() {
+    use sceneworks_core::checkpoint_import::{CheckpointContainerV1, ImportLayerV1, ImportPlanV1};
+    use sceneworks_core::model_artifacts::provenance::{
+        import_declaration_context, MODEL_DECLARATION_KEY,
+    };
+    let mut plan = ImportPlanV1::new(
+        "h3-equivalence-fixture",
+        "minimax-h3",
+        vec![ImportLayerV1 {
+            layer_id: "transformer".into(),
+            role: "transformer".into(),
+            target_path: "model.safetensors".into(),
+            container: CheckpointContainerV1::Safetensors,
+            source: SourceLocatorV1::linked("root-fixture", "model.safetensors", "a".repeat(64))
+                .unwrap(),
+        }],
+    )
+    .unwrap();
+    let unknown = plan.duplicate_equivalence_digest().unwrap();
+    plan.context = import_declaration_context(
+        json!({
+            "family":"minimax-h3", "baseModel":"minimax_h3", "minimaxH3Partition":"fl2va",
+            "importQuantFormat":"native", "importComponentTier":"bf16",
+            "downloads":[{"repo":"fixture/components","revision":"1".repeat(40),"files":["tokenizer/tokenizer.json"]}],
+        })
+        .as_object()
+        .unwrap(),
+    )
+    .unwrap();
+    let download = plan.context[MODEL_DECLARATION_KEY]["componentDownloads"][0].clone();
+    plan.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["componentClosure"] = json!([{
+        "download":download,"revision":"1".repeat(40),"files":[{"relativePath":"tokenizer/tokenizer.json","sizeBytes":2,"sha256":format!("sha256:{}","b".repeat(64))}]
+    }]);
+    let reference = plan.plan_reference().unwrap();
+    let original_json = plan.canonical_json().unwrap();
+    let baseline = plan.duplicate_equivalence_digest().unwrap();
+    assert_ne!(
+        unknown, baseline,
+        "unknown historical partition must not be inferred"
+    );
+    let mut provenance_only = plan.clone();
+    provenance_only
+        .context
+        .get_mut(MODEL_DECLARATION_KEY)
+        .unwrap()["baseLineage"]["baseModel"] = json!("different-license-ancestry");
+    provenance_only
+        .context
+        .get_mut(MODEL_DECLARATION_KEY)
+        .unwrap()["inheritedLicenseAcknowledgments"] = json!([]);
+    assert_eq!(
+        provenance_only.duplicate_equivalence_digest().unwrap(),
+        baseline
+    );
+    assert_ne!(provenance_only.plan_reference().unwrap(), reference);
+    for (key, value) in [
+        ("minimaxH3Partition", "ref2va"),
+        ("importQuantFormat", "convrot_int8"),
+        ("importComponentTier", "q4"),
+    ] {
+        let mut routed = plan.clone();
+        routed.context.get_mut(MODEL_DECLARATION_KEY).unwrap()["declaredSemantics"][key] =
+            json!(value);
+        assert_ne!(
+            routed.duplicate_equivalence_digest().unwrap(),
+            baseline,
+            "{key} changes actual H3 semantics"
+        );
+    }
+    for (key, value) in [
+        ("transformerConfig", json!({"config":{"hidden_size":1234}})),
+        ("sourceEncoding", json!("convrot_int8")),
+        (
+            "components",
+            json!({"transformer_ref":{"source":"plan","layerId":"transformer"}}),
+        ),
+        ("sampling", json!({"shift":7})),
+    ] {
+        let mut configured = plan.clone();
+        configured.context.insert(key.into(), value);
+        assert_ne!(
+            configured.duplicate_equivalence_digest().unwrap(),
+            baseline,
+            "{key} cannot be discarded"
+        );
+    }
+    let mut routed = plan.clone();
+    routed.layers[0].role = "transformer_ref".into();
+    assert_ne!(routed.duplicate_equivalence_digest().unwrap(), baseline);
+    assert_eq!(plan.plan_reference().unwrap(), reference);
+    assert_eq!(plan.canonical_json().unwrap(), original_json);
+}
+
+#[test]
 fn approve_root_is_idempotent_and_derives_an_opaque_stable_id() {
     let fx = fixture("roots");
     let first = fx.store.approve_root(&fx.library_dir).unwrap();
@@ -931,6 +1203,28 @@ fn resolve_refuses_tampered_or_missing_plan_documents() {
         other => panic!("an edited plan must refuse as tampered, got {other:?}"),
     }
 
+    assert_eq!(
+        fx.store
+            .checkpoint_status(&compiled.checkpoint_id)
+            .unwrap()
+            .state,
+        LinkedCheckpointStateV1::NeedsRescan
+    );
+    assert!(
+        plan_path.is_file(),
+        "repair must handle the still-present edited document"
+    );
+    let repaired = fx.store.rescan_checkpoint(&compiled.checkpoint_id).unwrap();
+    assert_eq!(repaired, compiled);
+    assert_eq!(fs::read_to_string(&plan_path).unwrap(), original);
+    assert_eq!(
+        fx.store
+            .checkpoint_status(&compiled.checkpoint_id)
+            .unwrap()
+            .state,
+        LinkedCheckpointStateV1::Ready
+    );
+
     // A plan document that is not valid v1 JSON is corrupt, not silently re-derived.
     fs::write(&plan_path, "{not json").unwrap();
     assert!(matches!(
@@ -951,6 +1245,141 @@ fn resolve_refuses_tampered_or_missing_plan_documents() {
         .unwrap();
     assert_eq!(recompiled, compiled);
     assert!(fx.store.resolve(&compiled.checkpoint_id).is_ok());
+}
+
+#[test]
+fn missing_plan_context_cannot_be_discarded_by_source_only_recompilation() {
+    let fx = fixture("missing-bound-context");
+    write_krea_native_file(&fx.library_dir.join("checkpoint.safetensors"), 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let context = std::collections::BTreeMap::from([(
+        "configurationAuthority".into(),
+        json!({"revision":"1111111111111111111111111111111111111111","settings":{"precision":"preserve"}}),
+    )]);
+    let compiled = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context.clone())
+        .unwrap();
+    let plan_path = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{}.json", compiled.plan.plan_id));
+    fs::remove_file(&plan_path).unwrap();
+    assert!(matches!(
+        fx.store
+            .compile_linked(&root.root_id, "checkpoint.safetensors"),
+        Err(CheckpointPlanError::MissingPlan { .. })
+    ));
+    assert!(
+        !plan_path.exists(),
+        "a missing authority cannot publish a different context-free plan"
+    );
+    assert_eq!(
+        fx.store.record(&compiled.checkpoint_id).unwrap(),
+        compiled.record
+    );
+    let restored = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context)
+        .unwrap();
+    assert_eq!(restored, compiled);
+    assert!(fx.store.resolve(&compiled.checkpoint_id).is_ok());
+}
+
+#[test]
+fn tampered_plan_context_requires_explicit_reassertion_without_publishing_defaults() {
+    let fx = fixture("tampered-bound-context");
+    write_krea_native_file(&fx.library_dir.join("checkpoint.safetensors"), 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let context = BTreeMap::from([(
+        "configurationAuthority".into(),
+        json!({"revision":"1111111111111111111111111111111111111111","settings":{"precision":"preserve"}}),
+    )]);
+    let compiled = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context.clone())
+        .unwrap();
+    let plan_path = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{}.json", compiled.plan.plan_id));
+    let mut edited = serde_json::to_value(&compiled.plan).unwrap();
+    edited["layers"][0]["role"] = json!("vae");
+    edited["context"]["configurationAuthority"] = json!({
+        "revision":"2222222222222222222222222222222222222222",
+        "foreignFile":"/untrusted-context-must-not-be-opened/config.json"
+    });
+    fs::write(&plan_path, serde_json::to_vec(&edited).unwrap()).unwrap();
+    let store_before = tree_snapshot(&fx.data_dir);
+    let source_before = tree_snapshot(&fx.library_dir);
+
+    assert_eq!(
+        fx.store
+            .checkpoint_status(&compiled.checkpoint_id)
+            .unwrap()
+            .state,
+        LinkedCheckpointStateV1::NeedsRescan
+    );
+    let error = fx
+        .store
+        .rescan_checkpoint(&compiled.checkpoint_id)
+        .unwrap_err();
+    assert!(matches!(error, CheckpointPlanError::PlanTampered { .. }));
+    assert!(error
+        .to_string()
+        .contains("explicitly reimport with the original bound context"));
+    assert_eq!(
+        tree_snapshot(&fx.data_dir),
+        store_before,
+        "unrecoverable context must not publish a replacement plan, binding or record"
+    );
+    assert_eq!(tree_snapshot(&fx.library_dir), source_before);
+
+    let restored = fx
+        .store
+        .compile_linked_with_context(&root.root_id, "checkpoint.safetensors", context)
+        .unwrap();
+    assert_eq!(restored, compiled);
+    assert_eq!(
+        fx.store.resolve(&compiled.checkpoint_id).unwrap().plan,
+        compiled.plan
+    );
+}
+
+#[test]
+fn tampered_plan_with_changed_source_cannot_replace_the_old_semantic_commitment() {
+    let fx = fixture("tampered-source-drift");
+    let source = fx.library_dir.join("checkpoint.safetensors");
+    write_krea_native_file(&source, 0x5a);
+    let root = fx.store.approve_root(&fx.library_dir).unwrap();
+    let compiled = fx
+        .store
+        .compile_linked(&root.root_id, "checkpoint.safetensors")
+        .unwrap();
+    let plan_path = fx
+        .data_dir
+        .join(CHECKPOINTS_DIR)
+        .join(PLANS_DIR)
+        .join(format!("{}.json", compiled.plan.plan_id));
+    let original = fs::read_to_string(&plan_path).unwrap();
+    let edited = original.replace("\"role\":\"transformer\"", "\"role\":\"vae\"");
+    assert_ne!(edited, original);
+    fs::write(&plan_path, edited).unwrap();
+    write_krea_native_file(&source, 0x6b);
+    let store_before = tree_snapshot(&fx.data_dir);
+    let source_before = tree_snapshot(&fx.library_dir);
+    assert!(matches!(
+        fx.store.rescan_checkpoint(&compiled.checkpoint_id),
+        Err(CheckpointPlanError::PlanTampered { .. })
+    ));
+    assert_eq!(tree_snapshot(&fx.data_dir), store_before);
+    assert_eq!(tree_snapshot(&fx.library_dir), source_before);
+    assert_eq!(
+        fx.store.record(&compiled.checkpoint_id).unwrap(),
+        compiled.record
+    );
 }
 
 #[test]

@@ -243,8 +243,9 @@ mod models;
 use models::{
     create_conditional_components_download_jobs, create_model_convert_job,
     create_model_download_job, create_model_import_job, delete_model, delete_model_variant,
-    list_models, model_catalog, model_is_installed, resolve_model_manifest_entry,
-    resolve_selected_image_text_encoder, ModelCatalogCache, ModelSizeCache,
+    list_models, model_catalog, model_is_installed, repair_model_import_job,
+    resolve_model_manifest_entry, resolve_selected_image_text_encoder, ModelCatalogCache,
+    ModelSizeCache,
 };
 #[cfg(test)]
 use models::{
@@ -635,6 +636,20 @@ pub(crate) fn json_decode_error_response(detail: String) -> Response {
         .into_response()
 }
 
+/// The HTTP API's Tokio runtime.
+///
+/// With `SCENEWORKS_RUN_UTILITY_INPROCESS` (the desktop default) the API's runtime threads poll the
+/// in-process utility workers' complete dispatch future, the same future the standalone worker
+/// gives an explicitly sized thread ([`sceneworks_worker::WORKER_ENTRY_STACK_BYTES`]). Tokio's
+/// default worker stack is 2 MiB, and a claimed MiniMax-H3 model import overflowed it, aborting
+/// the whole API. Size every runtime thread the same as the worker entry thread.
+pub fn api_runtime() -> std::io::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(sceneworks_worker::WORKER_ENTRY_STACK_BYTES)
+        .build()
+}
+
 /// Run this binary as a standalone worker process instead of the HTTP API.
 /// One-shot GPU preflight (sc-8411 Metal, sc-16247 CUDA). Dispatched from `main` when
 /// `SCENEWORKS_GPU_CHECK=1`: a probe that the desktop spawns at startup. Reuses this
@@ -780,9 +795,11 @@ impl InProcessUtilityWorker {
         let InProcessUtilityWorker { handles, grace } = self;
         // The loops observe the shared shutdown signal concurrently, so awaiting them
         // in sequence just collects results — each is already stopping (or stopped) by
-        // the time we reach it. The per-handle timeout bounds a stuck loop.
+        // the time we reach it. ONE deadline bounds the whole pool (sc-26691): a
+        // per-handle timeout let N stuck loops hold shutdown for N × grace.
+        let deadline = tokio::time::Instant::now() + grace;
         for handle in handles {
-            match tokio::time::timeout(grace, handle).await {
+            match tokio::time::timeout_at(deadline, handle).await {
                 Ok(Ok(Ok(()))) => {}
                 Ok(Ok(Err(error))) => tracing::error!(
                     event = "in_process_worker_exited_error",
@@ -907,6 +924,11 @@ async fn shutdown_signal(
     // therefore exit as soon as the listener closes; their lease Drop must already distinguish
     // process shutdown from an ordinary handled controller error.
     film_controller_shutdown.request();
+    // sc-26691: the in-process utility loops call `run_worker_loop` directly and only hear OS
+    // signals on their own. Whatever stopped THIS process — Ctrl-C, SIGTERM or the parent dying
+    // (the campaign harness closing the guardian's stdin) — must stop them too, or
+    // `InProcessUtilityWorker::shutdown` waits out its whole grace for loops never told to stop.
+    sceneworks_worker::request_shutdown();
     // Axum stops accepting connections when this future returns, but waits for existing
     // connections indefinitely. End app-owned long-lived streams immediately and wake the
     // server's finite drain deadline before returning control to Axum.
@@ -992,6 +1014,50 @@ pub(crate) fn sweep_stale_uploads_cancellable(
     cutoff: SystemTime,
     should_continue: impl Fn() -> bool,
 ) -> std::io::Result<usize> {
+    sweep_stale_uploads_retaining(data_dir, subdir, cutoff, should_continue, &[])
+}
+
+pub(crate) fn sweep_stale_model_uploads(
+    data_dir: &FsPath,
+    jobs: &JobsStore,
+    cutoff: SystemTime,
+    should_continue: impl Fn() -> bool,
+) -> std::io::Result<usize> {
+    // A database failure must never turn an owned retry input into abandoned cache data.
+    let root = data_dir.join("cache/model-uploads");
+    let canonical_root = match root.canonicalize() {
+        Ok(root) => root,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut retained = Vec::new();
+    for source in jobs
+        .model_upload_sources_for_recovery()
+        .map_err(|error| std::io::Error::other(error.to_string()))?
+    {
+        match PathBuf::from(source).canonicalize() {
+            Ok(source) if source.starts_with(&canonical_root) => retained.push(source),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    sweep_stale_uploads_retaining(
+        data_dir,
+        "model-uploads",
+        cutoff,
+        should_continue,
+        &retained,
+    )
+}
+
+fn sweep_stale_uploads_retaining(
+    data_dir: &FsPath,
+    subdir: &str,
+    cutoff: SystemTime,
+    should_continue: impl Fn() -> bool,
+    retained: &[PathBuf],
+) -> std::io::Result<usize> {
     let upload_root = data_dir.join("cache").join(subdir);
     let entries = match std::fs::read_dir(upload_root) {
         Ok(entries) => entries,
@@ -1016,6 +1082,13 @@ pub(crate) fn sweep_stale_uploads_cancellable(
             }
         };
         if !entry.file_name().to_string_lossy().starts_with("upload-") {
+            continue;
+        }
+        if entry
+            .path()
+            .canonicalize()
+            .is_ok_and(|path| retained.iter().any(|source| source.starts_with(&path)))
+        {
             continue;
         }
         if !should_continue() {
@@ -1272,9 +1345,11 @@ pub(crate) fn create_app_with_deferred_startup_maintenance(
     timeout: Duration,
 ) -> Result<(Router, AppState), JobsStoreError> {
     let (router, state) = create_app_with_pending_startup_maintenance(settings)?;
-    state
-        .startup_maintenance
-        .start(state.settings.data_dir.clone(), timeout);
+    state.startup_maintenance.start(
+        state.settings.data_dir.clone(),
+        state.jobs_store.clone(),
+        timeout,
+    );
     Ok((router, state))
 }
 
@@ -1362,6 +1437,17 @@ fn create_app_with_state_mode(
         let interrupted_jobs_on_startup = jobs_store.mark_interrupted_on_startup()?.len();
         (jobs_store, interrupted_jobs_on_startup)
     };
+    if !defer_upload_sweeps {
+        warn_on_sweep_err(
+            "model",
+            sweep_stale_model_uploads(
+                &settings.data_dir,
+                &jobs_store,
+                SystemTime::now() - Duration::from_secs(STALE_UPLOAD_SECONDS),
+                || true,
+            ),
+        );
+    }
     let project_store = Arc::new(ProjectStore::new(
         settings.data_dir.clone(),
         settings.app_version.clone(),
@@ -2168,6 +2254,11 @@ fn create_app_with_state_mode(
         .route(
             "/api/v1/models/import",
             post(create_model_import_job)
+                .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
+        )
+        .route(
+            "/api/v1/models/:model_id/repair",
+            post(repair_model_import_job)
                 .layer(DefaultBodyLimit::max(MAX_MODEL_MULTIPART_BODY_BYTES)),
         )
         // Resolved-model hot cache (sc-19711). The GET is UI-polled, so it is deliberately one
@@ -4013,6 +4104,72 @@ async fn create_generation_job(
     .await
 }
 
+/// Compact replay handle projected ONLY from S11's validated immutable plan provenance. The
+/// checkpoint id selects its persisted record; a display/catalog model id alone is not identity.
+fn imported_reference_from_provenance(
+    entry: &JsonObject,
+    provenance: Option<&Value>,
+) -> Option<Value> {
+    let checkpoint_id = sceneworks_core::jobs_store::checkpoint_plan_checkpoint_id(entry)?;
+    let provenance = provenance?;
+    let mut reference = json!({
+        "modelId": provenance.get("modelId")?,
+        "checkpointId": checkpoint_id,
+        "planId": provenance.pointer("/plan/planId")?,
+        "semanticDigest": provenance.pointer("/plan/semanticDigest")?,
+        "sourceBindingIdentity": provenance.pointer("/plan/sourceBindingIdentity")?,
+    });
+    for (key, path) in [
+        ("family", "/family"),
+        ("baseModel", "/baseLineage/baseModel"),
+        ("declaredPartition", "/declaredSemantics/minimaxH3Partition"),
+    ] {
+        if let Some(value) = provenance.pointer(path) {
+            reference[key] = value.clone();
+        }
+    }
+    Some(reference)
+}
+
+fn validate_expected_imported_model_reference(
+    payload: &JsonObject,
+    entry: &JsonObject,
+    provenance: Option<&Value>,
+) -> Result<(), ApiError> {
+    let Some(expected) = payload
+        .get("expectedImportedModelRef")
+        .filter(|value| !value.is_null())
+    else {
+        return Ok(());
+    };
+    let actual = imported_reference_from_provenance(entry, provenance);
+    sceneworks_core::checkpoint_import::validate_replay_import_reference(expected, actual.as_ref())
+        .map_err(ApiError::bad_request)
+}
+
+/// Called immediately after canonical model resolution as well as at atomic enqueue. Never
+/// resolve a caller's modelManifestEntry or silently replay using today's different checkpoint.
+pub(crate) fn ensure_expected_imported_model_reference(
+    state: &AppState,
+    payload: &JsonObject,
+    entry: &Value,
+) -> Result<(), ApiError> {
+    if payload
+        .get("expectedImportedModelRef")
+        .is_none_or(Value::is_null)
+    {
+        return Ok(());
+    }
+    let empty = JsonObject::new();
+    let entry = entry.as_object().unwrap_or(&empty);
+    let provenance = sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+        &state.settings.data_dir, entry,
+    ).map_err(|error| ApiError::bad_request(format!(
+        "Cannot verify imported replay identity: {error}. Reimport or relink the original checkpoint; no replacement weights were queued."
+    )))?;
+    validate_expected_imported_model_reference(payload, entry, provenance.as_ref())
+}
+
 /// Like [`create_generation_job`], but creates the job in an explicit initial status.
 /// `None` is the default `queued` (immediately claimable); `Some(JobStatus::PendingCaption)`
 /// creates the job NON-claimable so an API-side async pre-step can rewrite its payload and
@@ -4029,18 +4186,62 @@ async fn create_generation_job_with_status(
     initial_status: Option<JobStatus>,
 ) -> Result<JobSnapshot, ApiError> {
     model_sources::ensure_runtime_model_sources(&state, &job_type, &mut payload).await?;
+    // sc-26687 / sc-26690: freeze the server-trusted provenance of the checkpoint this job
+    // admitted, in the SAME transaction that enqueues it, so a later re-import or rescan cannot
+    // change the identity the generated asset will report.
+    //
+    // Typed handlers mint the primary with their own canonical resolver. The source seam fills
+    // runtime companions and canonicalizes the utility roles; mere presence of a primary in an
+    // arbitrary incoming payload is not authority. Unbound/builtin entries honestly get None.
+    let model_provenance = match payload.get("modelManifestEntry").and_then(Value::as_object) {
+        Some(entry) => {
+            // Imported component terms are independent of the author's terms. Covered here are
+            // typed generation jobs with a server-resolved primary; queue_model_import_job owns
+            // the component-download gate. Raw POST /jobs admission is gated separately in
+            // jobs.rs::create_job on its actual canonical selection, before atomic enqueue.
+            crate::models::ensure_inherited_component_licenses_acknowledged(
+                &state,
+                entry,
+                payload
+                    .get(crate::models::LICENSE_ACKNOWLEDGED_PAYLOAD_KEY)
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            )
+            .await?;
+            sceneworks_core::model_artifacts::provenance::resolved_model_provenance(
+                &state.settings.data_dir,
+                entry,
+            )
+            .map_err(|error| ApiError::internal(format!("resolve model provenance: {error}")))?
+        }
+        None => None,
+    };
+    let empty = JsonObject::new();
+    let entry = payload
+        .get("modelManifestEntry")
+        .and_then(Value::as_object)
+        .unwrap_or(&empty);
+    validate_expected_imported_model_reference(&payload, entry, model_provenance.as_ref())?;
+    // Freeze the admitted selection for retry/duplicate too, including requests that were not
+    // themselves replays. A later same-id catalog rebind must not change their weights.
+    if let Some(reference) = imported_reference_from_provenance(entry, model_provenance.as_ref()) {
+        payload.insert("expectedImportedModelRef".to_owned(), reference);
+    }
     let job = store_call(state.clone(), move |store, _timeout| {
-        store.create_job(CreateJob {
-            job_type,
-            project_id,
-            project_name,
-            payload,
-            requested_gpu,
-            source_job_id: None,
-            duplicate_of_job_id: None,
-            attempts: 1,
-            initial_status,
-        })
+        store.create_job_with_model_provenance(
+            CreateJob {
+                job_type,
+                project_id,
+                project_name,
+                payload,
+                requested_gpu,
+                source_job_id: None,
+                duplicate_of_job_id: None,
+                attempts: 1,
+                initial_status,
+            },
+            model_provenance.as_ref(),
+        )
     })
     .await?;
     publish(&state, "job.updated", &job);
@@ -5517,14 +5718,12 @@ fn validate_video_job(payload: &VideoJobRequest) -> Result<(), ApiError> {
     match payload.mode.as_str() {
         "image_to_video"
             if payload.source_asset_id.is_none()
-                && !sceneworks_core::h3_keyframes::accepts_last_only_image_to_video(
-                    &payload.model,
-                    &payload.mode,
-                    payload
-                        .last_frame_asset_id
-                        .as_deref()
-                        .is_some_and(|id| !id.trim().is_empty()),
-                ) =>
+                // Shape validation cannot identify an arbitrary imported model id. Defer
+                // last-only compatibility to the resolved-entry validator shared with replay.
+                && !payload
+                    .last_frame_asset_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()) =>
         {
             Err(ApiError::bad_request(
                 "Image to Video requires a source image.",
@@ -6183,6 +6382,36 @@ pub(crate) fn validate_video_reference_asset_ids_payload(
     payload: &JsonObject,
     model_manifest_entry: &Value,
 ) -> Result<(), ApiError> {
+    if payload.get("mode").and_then(Value::as_str) == Some("image_to_video")
+        && !payload
+            .get("sourceAssetId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        use sceneworks_core::minimax_h3_import::{
+            entry_is_imported_minimax_h3, MiniMaxH3Partition,
+        };
+        let imported_partition = model_manifest_entry
+            .as_object()
+            .filter(|entry| entry_is_imported_minimax_h3(entry))
+            .and_then(|entry| MiniMaxH3Partition::from_entry(entry).ok());
+        if !sceneworks_core::h3_keyframes::accepts_last_only_resolved_image_to_video(
+            model_manifest_entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            "image_to_video",
+            payload
+                .get("lastFrameAssetId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty()),
+            imported_partition.map(|partition| partition.as_str()),
+        ) {
+            return Err(ApiError::bad_request(
+                "Image to Video requires a source image.",
+            ));
+        }
+    }
     let reference_asset_ids = match payload.get("referenceAssetIds") {
         None => &[][..],
         Some(Value::Array(values)) => values.as_slice(),

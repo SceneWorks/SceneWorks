@@ -1085,6 +1085,10 @@ pub(crate) struct VideoJobRequest {
     pub(crate) negative_prompt: String,
     #[serde(default = "default_video_model")]
     pub(crate) model: String,
+    /// Original immutable import identity when replaying a recipe. Never a replacement catalog
+    /// entry: the server resolves today's plan and refuses if it no longer matches this identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) expected_imported_model_ref: Option<Value>,
     /// Clip length in seconds, or `None` when the caller named none — which the MCP server does
     /// whenever *its* caller does (`server.rs` omits the key rather than sending a default).
     ///
@@ -1393,6 +1397,10 @@ pub(crate) struct ModelDownloadRequest {
     /// else the first supported entry) — the back-compat single-variant behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) variant: Option<String>,
+    /// Repair one missing resident row of a plan-backed imported H3 assembly. The server binds
+    /// this identifier to its persisted component closure; it never accepts a repo or file path.
+    #[serde(default)]
+    pub(crate) component_id: Option<String>,
     /// The caller asserts the user has accepted the license of the weights this request FETCHES
     /// (sc-17227). Read by `create_model_download_job` and `create_lora_download_job`, which share
     /// this body. Consulted when the catalog entry the path id names carries
@@ -1531,6 +1539,11 @@ pub(crate) struct ModelImportRequest {
     pub(crate) files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) family: Option<String>,
+    /// Explicit MiniMax-H3 compatibility: tensor architecture cannot identify its operation partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) base_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) minimax_h3_partition: Option<String>,
     /// Optional caller-supplied SHA-256 of the imported file. When present, the worker
     /// verifies the downloaded file against it and fails on a mismatch (sc-6137). HF
     /// repo imports are verified automatically from HF's own per-file digests.

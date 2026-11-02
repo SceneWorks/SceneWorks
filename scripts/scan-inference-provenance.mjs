@@ -127,6 +127,9 @@ const SPECIAL_AREAS = new Map([
   ["crates/media/candle-gen/candle-gen-kolors/src/unet.rs", "candle-transformers-source"],
   ["crates/media/candle-gen/candle-gen-instantid/src/kps.rs", "opencv-source"],
   ["crates/media/mlx-gen/mlx-gen-instantid/src/kps.rs", "opencv-source"],
+  // sc-27256 hoisted both kps.rs copies into the backend-neutral gen-core-family crate; the two
+  // engine modules above are now re-export shims and the OpenCV port lives here.
+  ["crates/contracts/gen-core-family/src/instantid_kps.rs", "opencv-source"],
   ["crates/audio/candle-audio-acestep/src/vae.rs", "diffusers-source"],
   ["crates/contracts/gen-core/src/sampling/solvers.rs", "comfy-kdiffusion-solvers"],
   ["crates/contracts/gen-core/src/sampling/cfgpp.rs", "cfgpp-formula"],
@@ -134,7 +137,8 @@ const SPECIAL_AREAS = new Map([
   // partial-sort notices — distinct third-party source obligations disclosed by the
   // `veda-sparse-source` area, not folded into the gen-core / mlx-gen-minimax-h3 architecture
   // prefixes. Only the marker-bearing files reach the inventory; the area lists the rest too.
-  ["crates/contracts/gen-core/src/veda/topk.rs", "veda-sparse-source"],
+  // inference sc-27252 moved the Veda predictor/selection out of gen-core into gen-core-h3.
+  ["crates/contracts/gen-core-h3/src/veda/topk.rs", "veda-sparse-source"],
   ["crates/media/mlx-gen/mlx-gen-minimax-h3/src/veda/mod.rs", "veda-sparse-source"],
   // The Mage latent module transcribes Cephes (ndtri/erf/erfc) under BSD-3 — a distinct third-party
   // source obligation from the surrounding architecture port (sc-14432). Route it to its own

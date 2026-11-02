@@ -126,6 +126,7 @@ fn install_with_file(file: Option<std::fs::File>, buffer: Option<&'static Sessio
                 });
                 let _ = tracing_subscriber::registry()
                     .with(filter)
+                    .with(SpanFieldsLayer)
                     .with(
                         fmt::layer()
                             .with_ansi(false)
@@ -143,6 +144,7 @@ fn install_with_file(file: Option<std::fs::File>, buffer: Option<&'static Sessio
                 });
                 let _ = tracing_subscriber::registry()
                     .with(filter)
+                    .with(SpanFieldsLayer)
                     .with(fmt::layer())
                     .with(session_layer)
                     .with(file_layer)
@@ -271,10 +273,24 @@ impl Visit for JsonVisitor {
 /// Render an event into the SceneWorks `{ event, level, reportedAt, ... }` envelope
 /// (a single JSON object). Shared by the stdout JSON formatter and the session-log
 /// layer so both surfaces produce byte-identical lines.
-fn render_envelope(event: &Event<'_>) -> Map<String, Value> {
+fn render_envelope(event: &Event<'_>, spans: Vec<Map<String, Value>>) -> Map<String, Value> {
     let mut visitor = JsonVisitor::default();
     event.record(&mut visitor);
     let mut fields = visitor.fields;
+
+    // The event's span scope, root to leaf (sc-26691). Work the product scopes on a span — the H3
+    // import preparation declares `jobId`, `checkpointId` and `phase` once on its span — used to
+    // reach the log with none of that context, so an event emitted inside it could not be
+    // attributed to its job. Mirrors tracing-subscriber's JSON shape: `spans` is the whole scope,
+    // `span` the innermost. A real event field of either name wins.
+    if let Some(leaf) = spans.last().cloned() {
+        fields
+            .entry("span".to_owned())
+            .or_insert(Value::Object(leaf));
+        fields
+            .entry("spans".to_owned())
+            .or_insert(Value::Array(spans.into_iter().map(Value::Object).collect()));
+    }
 
     // Flatten a pre-built structured payload up to the top level (legacy
     // `json!` events routed through `emit_event`). Existing real fields win.
@@ -301,6 +317,76 @@ fn render_envelope(event: &Event<'_>) -> Map<String, Value> {
 /// stays the one `session_log` parses and `docs/observability.md` documents.
 struct SceneworksJsonFormat;
 
+/// A span's own fields, recorded once into its extensions by [`SpanFieldsLayer`] so the event
+/// formatters can render the scope without re-parsing tracing's text-formatted fields.
+struct SpanFields(Map<String, Value>);
+
+/// Records every span's fields (as [`SpanFields`], with its `name`) when it is created and as it
+/// is recorded into, for [`span_scope`].
+struct SpanFieldsLayer;
+
+impl<S> Layer<S> for SpanFieldsLayer
+where
+    S: Subscriber + for<'a> LookupSpan<'a>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::span::Id,
+        ctx: Context<'_, S>,
+    ) {
+        let Some(span) = ctx.span(id) else { return };
+        let mut visitor = JsonVisitor::default();
+        attrs.record(&mut visitor);
+        let mut fields = Map::new();
+        fields.insert("name".to_owned(), Value::String(span.name().to_owned()));
+        fields.extend(visitor.fields);
+        span.extensions_mut().insert(SpanFields(fields));
+    }
+
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, S>,
+    ) {
+        let Some(span) = ctx.span(id) else { return };
+        let mut extensions = span.extensions_mut();
+        if let Some(SpanFields(fields)) = extensions.get_mut::<SpanFields>() {
+            let mut visitor = JsonVisitor {
+                fields: std::mem::take(fields),
+            };
+            values.record(&mut visitor);
+            *fields = visitor.fields;
+        }
+    }
+}
+
+/// The recorded fields of every span in `scope`, root to leaf.
+fn span_scope<'a, R>(
+    scope: Option<tracing_subscriber::registry::Scope<'a, R>>,
+) -> Vec<Map<String, Value>>
+where
+    R: LookupSpan<'a>,
+{
+    let Some(scope) = scope else {
+        return Vec::new();
+    };
+    scope
+        .from_root()
+        .map(|span| {
+            span.extensions()
+                .get::<SpanFields>()
+                .map(|SpanFields(fields)| fields.clone())
+                .unwrap_or_else(|| {
+                    let mut fields = Map::new();
+                    fields.insert("name".to_owned(), Value::String(span.name().to_owned()));
+                    fields
+                })
+        })
+        .collect()
+}
+
 impl<S, N> FormatEvent<S, N> for SceneworksJsonFormat
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -308,11 +394,11 @@ where
 {
     fn format_event(
         &self,
-        _ctx: &FmtContext<'_, S, N>,
+        ctx: &FmtContext<'_, S, N>,
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> std::fmt::Result {
-        let envelope = Value::Object(render_envelope(event));
+        let envelope = Value::Object(render_envelope(event, span_scope(ctx.event_scope())));
         writeln!(writer, "{envelope}")
     }
 }
@@ -328,8 +414,8 @@ impl<S> Layer<S> for SessionLogLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let envelope = Value::Object(render_envelope(event));
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        let envelope = Value::Object(render_envelope(event, span_scope(ctx.event_scope(event))));
         // `push_line` runs the existing secret redaction + classification; with a
         // declared `level` field present, `infer_level` now trusts it verbatim.
         self.buffer.push_line("api", &envelope.to_string());
@@ -426,5 +512,108 @@ mod tests {
             Some(3)
         );
         assert!(event.get("reportedAt").is_some(), "reportedAt stamped");
+    }
+    /// sc-26691: an event emitted inside a span carries that span's scope. The H3 import
+    /// preparation declares `jobId` / `checkpointId` / `phase` once on its span and emits flat
+    /// `artifact_seal_hash_progress` events inside it (the real line shape from CUDA run
+    /// 40855384972's worker log); without the scope those events were unattributable to their job.
+    #[test]
+    fn events_inside_a_span_carry_the_span_scope_on_both_surfaces() {
+        install_tracing_interest_floor();
+        let buffer: &'static SessionLog = Box::leak(Box::new(SessionLog::default()));
+        let stdout = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = {
+            let stdout = stdout.clone();
+            move || SharedWriter(stdout.clone())
+        };
+        let subscriber = tracing_subscriber::registry()
+            .with(SpanFieldsLayer)
+            .with(
+                fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(writer)
+                    .event_format(SceneworksJsonFormat),
+            )
+            .with(SessionLogLayer { buffer });
+        tracing::subscriber::with_default(subscriber, || {
+            let outer = tracing::info_span!("job", jobId = "job_outer");
+            let _outer = outer.enter();
+            let preparation = tracing::info_span!(
+                "h3_import_preparation",
+                jobId = %"job_81cbc014f0cc7171e185068d2e5888e3",
+                checkpointId = "managed/imported_sc26691_artifact_0_ref2va_v2_int8",
+                phase = "source-and-normalization"
+            );
+            let _entered = preparation.enter();
+            tracing::info!(
+                event = "artifact_seal_hash_progress",
+                path = r"\\?\E:\huggingface\x.safetensors",
+                acquisition = "ColdContentRead",
+                state = "Reading",
+                hashed_bytes = 8_388_608_u64,
+                source_bytes = 34_004_507_622_u64,
+                "Actual native artifact-seal acquisition work"
+            );
+        });
+        tracing::subscriber::with_default(
+            tracing_subscriber::registry()
+                .with(SpanFieldsLayer)
+                .with(SessionLogLayer { buffer }),
+            || tracing::info!(event = "outside_any_span"),
+        );
+
+        let line = String::from_utf8(stdout.lock().unwrap().clone()).unwrap();
+        let stdout_event: Value = serde_json::from_str(line.trim()).expect("one JSON line");
+        let entries = buffer.query(&LogQuery::default());
+        let session_event = entries
+            .iter()
+            .find_map(|entry| {
+                entry
+                    .event
+                    .clone()
+                    .filter(|e| e["event"] == "artifact_seal_hash_progress")
+            })
+            .expect("session event");
+        for event in [&stdout_event, &session_event] {
+            assert_eq!(event["event"], "artifact_seal_hash_progress");
+            assert_eq!(
+                event["hashed_bytes"], 8_388_608_u64,
+                "flat fields unchanged"
+            );
+            assert_eq!(event["span"]["name"], "h3_import_preparation");
+            assert_eq!(
+                event["span"]["jobId"],
+                "job_81cbc014f0cc7171e185068d2e5888e3"
+            );
+            assert_eq!(event["span"]["phase"], "source-and-normalization");
+            assert_eq!(
+                event["span"]["checkpointId"],
+                "managed/imported_sc26691_artifact_0_ref2va_v2_int8"
+            );
+            let spans = event["spans"].as_array().expect("whole scope");
+            assert_eq!(spans.len(), 2);
+            assert_eq!(spans[0]["jobId"], "job_outer", "root first");
+        }
+        let outside = entries
+            .iter()
+            .find_map(|entry| {
+                entry
+                    .event
+                    .clone()
+                    .filter(|e| e["event"] == "outside_any_span")
+            })
+            .expect("unscoped event");
+        assert!(outside.get("span").is_none() && outside.get("spans").is_none());
+    }
+
+    struct SharedWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for SharedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

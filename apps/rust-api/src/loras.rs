@@ -45,6 +45,11 @@ pub(crate) async fn create_lora_download_job(
 ) -> Result<(StatusCode, Json<JobSnapshot>), ApiError> {
     // The body is shared with model downloads; a LoRA has no co-requisite choice groups, so a
     // requested choice is refused rather than silently ignored (sc-22998).
+    if payload.component_id.is_some() {
+        return Err(ApiError::bad_request(
+            "LoRA downloads take no imported resident component",
+        ));
+    }
     if !payload.choices.is_empty() {
         return Err(ApiError::bad_request(
             "LoRA downloads take no co-requisite choices",

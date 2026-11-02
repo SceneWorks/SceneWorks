@@ -345,6 +345,57 @@ fn plan(source: SourceLocatorV1) -> ImportPlanV1 {
 }
 
 #[test]
+fn replay_import_reference_refuses_same_id_rebound_to_another_plan() {
+    use sceneworks_core::checkpoint_import::validate_replay_import_reference;
+    let original = plan(linked("external-models", "flux/model.safetensors"));
+    let reference = original.plan_reference().unwrap();
+    let expected = json!({
+        "modelId":"my-import", "checkpointId":"managed/install-a", "planId":reference.plan_id,
+        "semanticDigest":reference.semantic_digest, "sourceBindingIdentity":reference.source_binding_identity,
+        "family":"flux", "baseModel":"flux-base", "declaredPartition":"fl2va"
+    });
+    assert!(validate_replay_import_reference(&expected, Some(&expected)).is_ok());
+    for key in [
+        "modelId",
+        "checkpointId",
+        "planId",
+        "semanticDigest",
+        "sourceBindingIdentity",
+        "family",
+        "baseModel",
+        "declaredPartition",
+    ] {
+        let mut rebound = expected.clone();
+        rebound[key] = json!("different");
+        let error = validate_replay_import_reference(&expected, Some(&rebound))
+            .expect_err(&format!("same selection must refuse a changed {key}"));
+        assert!(error.contains("Reimport") && error.contains(key), "{error}");
+    }
+    assert!(
+        validate_replay_import_reference(&expected, None).is_err(),
+        "stock is not the original import"
+    );
+}
+
+#[test]
+fn replay_import_reference_legacy_optional_fields_do_not_invent_identity() {
+    use sceneworks_core::checkpoint_import::validate_replay_import_reference;
+    let actual = json!({"modelId":"custom", "checkpointId":"managed/original", "planId":"original", "semanticDigest":"sha256:original"});
+    let legacy =
+        json!({"modelId":"custom", "checkpointId":"managed/original", "planId":"original"});
+    assert!(validate_replay_import_reference(&legacy, Some(&actual)).is_ok());
+    for key in ["modelId", "checkpointId", "planId"] {
+        let mut incomplete = legacy.clone();
+        incomplete.as_object_mut().unwrap().remove(key);
+        assert!(
+            validate_replay_import_reference(&incomplete, Some(&actual)).is_err(),
+            "missing {key} cannot establish the original selection"
+        );
+    }
+    assert!(validate_replay_import_reference(&Value::Null, Some(&actual)).is_err());
+}
+
+#[test]
 fn linked_and_managed_copies_have_the_same_semantic_plan_but_different_bindings() {
     let linked_plan = plan(linked("external-models", "flux/model.safetensors"));
     let managed_plan = plan(managed("installed-flux", "weights/model.safetensors"));
@@ -2755,4 +2806,52 @@ fn deterministic_publication_round_trips_and_identity_domains_cover_manual_value
         composed.source_binding_identity().unwrap(),
         decomposed.source_binding_identity().unwrap()
     );
+}
+
+#[test]
+fn immutable_context_round_trips_and_binds_semantics_without_changing_legacy_plans() {
+    let original = plan(linked("root", "model.safetensors"));
+    let legacy = original.canonical_json().unwrap();
+    assert!(!legacy.contains("context"));
+    assert!(serde_json::from_str::<ImportPlanV1>(&legacy)
+        .unwrap()
+        .context
+        .is_empty());
+    let mut bound = original.clone();
+    bound.context.insert(
+        "configuration".into(),
+        json!({"schemaVersion":42,"unknown_provider_field":[0.125,{"schedule":"trained"}]}),
+    );
+    let encoded = bound.canonical_json().unwrap();
+    let decoded: ImportPlanV1 = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded, bound);
+    assert_ne!(
+        original.semantic_digest().unwrap(),
+        bound.semantic_digest().unwrap()
+    );
+    assert_ne!(
+        original.source_binding_identity().unwrap(),
+        bound.source_binding_identity().unwrap()
+    );
+    let mut managed = plan(managed("owned", "different/model.safetensors"));
+    managed.context = bound.context.clone();
+    assert_eq!(
+        managed.semantic_digest().unwrap(),
+        bound.semantic_digest().unwrap()
+    );
+    let duplicate = encoded.replace(
+        "\"schedule\":\"trained\"",
+        "\"schedule\":\"trained\",\"schedule\":\"other\"",
+    );
+    assert!(serde_json::from_str::<ImportPlanV1>(&duplicate)
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate"));
+    let schema: Value = serde_json::from_str(include_str!(
+        "../../../packages/schemas/checkpoint-import.schema.json"
+    ))
+    .unwrap();
+    assert!(jsonschema::validator_for(&schema)
+        .unwrap()
+        .is_valid(&serde_json::to_value(&bound).unwrap()));
 }

@@ -907,6 +907,10 @@ struct JobView {
     peak_gpu_memory_pct: Option<f64>,
     backend: Option<String>,
     result: Value,
+    /// The resize mode the PERSISTED job names (sc-26691): stamped at creation or, for a job queued
+    /// before the key existed, at the claim — so it is what the job rendered (or will render) with.
+    /// `None` on a job that has not been claimed since the upgrade.
+    reference_image_resize_mode: Option<sceneworks_core::video_request::ReferenceImageResizeMode>,
 }
 
 impl JobView {
@@ -933,6 +937,15 @@ impl JobView {
                 .and_then(Value::as_str)
                 .map(str::to_owned),
             result: snapshot.get("result").cloned().unwrap_or(Value::Null),
+            reference_image_resize_mode: snapshot
+                .get("payload")
+                .and_then(|payload| payload.get("advanced"))
+                .and_then(Value::as_object)
+                .and_then(|advanced| {
+                    sceneworks_core::video_request::requested_reference_image_resize_mode(advanced)
+                        .ok()
+                        .flatten()
+                }),
         })
     }
 
@@ -2348,6 +2361,18 @@ fn reference_payload_findings(
         let mut payload = JsonObject::new();
         payload.insert("model".to_owned(), json!(partition.model_id));
         payload.insert("mode".to_owned(), json!(shot.conditioning.mode));
+        // Match CompiledRequest::job_body's keyframe carriers too. This gate now checks source
+        // presence as well as reference counts; omitting a declared first frame would reject a
+        // valid image-to-video plan before its assets can be imported.
+        if shot.conditioning.first_frame_role.is_some() {
+            payload.insert("sourceAssetId".to_owned(), json!("placeholder_first_frame"));
+        }
+        if shot.conditioning.last_frame_role.is_some() {
+            payload.insert(
+                "lastFrameAssetId".to_owned(),
+                json!("placeholder_last_frame"),
+            );
+        }
         // One placeholder per PICTURE, not per role (sc-24024): roles sharing a pack file are
         // supplied as one image, so a shot binding ten roles across nine files posts nine ids. The
         // count comes from `shot_reference_pictures` — the same function the dispatch builds the
@@ -2677,6 +2702,18 @@ impl Session<'_> {
             .and_then(CompiledRequest::effective_reference_image_short_edge)
     }
 
+    /// The EFFECTIVE reference-image resize mode one shot dispatches with, or `None` for a shot
+    /// that encodes no reference (sc-26691) — the companion of
+    /// [`Session::resolved_reference_short_edge`], read off the same compiled request.
+    fn resolved_reference_resize_mode(
+        &self,
+        shot_id: &str,
+    ) -> Option<sceneworks_core::video_request::ReferenceImageResizeMode> {
+        self.compiled
+            .request(shot_id)
+            .and_then(CompiledRequest::effective_reference_image_resize_mode)
+    }
+
     /// The LoRAs one shot dispatches with, the step count it renders at, and the turbo video shift
     /// that governs it (sc-23406) — all three read off the compiled request for the same reason
     /// [`Session::resolved_partition`] is, so the payload the route receives and the numbers the
@@ -2700,16 +2737,25 @@ impl Session<'_> {
     /// An empty value falls back to this shot's resolved partition, which is exactly what the
     /// first controller would have written, and the attempt row is BACKFILLED so the record
     /// self-heals on the resume that touched it rather than staying blank forever.
+    ///
+    /// `job` is the attempt's job as the API reports it now; it settles the attempt's resize mode
+    /// (sc-26691) from what the job itself records — see
+    /// [`AttemptRecord::settle_reference_image_resize_mode`].
     fn dispatched_model_for(
         &mut self,
         shot_id: &str,
         shot_index: usize,
         attempt_index: usize,
+        job: &JobView,
     ) -> String {
+        let job_mode = job.reference_image_resize_mode;
+        let job_rendered = job.status == "completed";
         let recorded = self.record.shots[shot_index].attempts[attempt_index]
             .resolved_model_id
             .clone();
         if !recorded.is_empty() {
+            self.record.shots[shot_index].attempts[attempt_index]
+                .settle_reference_image_resize_mode(job_mode, job_rendered);
             return recorded;
         }
         let (model, reason) = self.resolved_partition(shot_id);
@@ -2737,6 +2783,10 @@ impl Session<'_> {
             attempt.effective_steps = steps;
             attempt.turbo_scheduler_shift = shift;
         }
+        // NOT the same rule for the resize mode (sc-26691): what this shot resolves to TODAY is not
+        // what a pre-story attempt rendered. The job's own record decides — after the short edge
+        // above says whether this was a reference attempt at all.
+        attempt.settle_reference_image_resize_mode(job_mode, job_rendered);
         model
     }
 
@@ -4121,6 +4171,7 @@ impl Session<'_> {
                     let key = idempotency_key(&self.record.run_id, &shot.id, number);
                     let (resolved_model_id, partition_reason) = self.resolved_partition(&shot.id);
                     let reference_image_short_edge = self.resolved_reference_short_edge(&shot.id);
+                    let reference_image_resize_mode = self.resolved_reference_resize_mode(&shot.id);
                     let (loras, effective_steps, turbo_scheduler_shift) =
                         self.resolved_sampling(&shot.id);
                     self.record.shots[index].attempts.push(AttemptRecord {
@@ -4129,6 +4180,7 @@ impl Session<'_> {
                         resolved_model_id,
                         partition_reason,
                         reference_image_short_edge,
+                        reference_image_resize_mode,
                         loras,
                         effective_steps,
                         turbo_scheduler_shift,
@@ -4329,7 +4381,8 @@ impl Session<'_> {
         let cancel_grace = CANCEL_GRACE.min(self.shot_budget());
         // The take names the partition that actually rendered it, not the plan's declared family
         // model (sc-23402).
-        let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
+        let dispatched_model =
+            self.dispatched_model_for(&shot.id, shot_index, attempt_index, &view);
         let take = (poll_stop == PollStop::Terminal && view.status == "completed")
             .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
             .flatten();
@@ -4525,7 +4578,8 @@ impl Session<'_> {
             };
             let view = self.client.get_job(&job_id).await?;
             let terminal = view.is_terminal() && view.is_settled();
-            let dispatched_model = self.dispatched_model_for(&shot.id, shot_index, attempt_index);
+            let dispatched_model =
+                self.dispatched_model_for(&shot.id, shot_index, attempt_index, &view);
             let take = (terminal && view.status == "completed")
                 .then(|| take_from_result(&view.result, &dispatched_model, view.backend.as_deref()))
                 .flatten();
@@ -6336,6 +6390,7 @@ async fn replace_take_operation(
     let key = idempotency_key(&session.record.run_id, shot_id, number);
     let (resolved_model_id, partition_reason) = session.resolved_partition(shot_id);
     let reference_image_short_edge = session.resolved_reference_short_edge(shot_id);
+    let reference_image_resize_mode = session.resolved_reference_resize_mode(shot_id);
     let (loras, effective_steps, turbo_scheduler_shift) = session.resolved_sampling(shot_id);
     session.record.shots[index].attempts.push(AttemptRecord {
         attempt: number,
@@ -6343,6 +6398,7 @@ async fn replace_take_operation(
         resolved_model_id,
         partition_reason,
         reference_image_short_edge,
+        reference_image_resize_mode,
         loras,
         effective_steps,
         turbo_scheduler_shift,
@@ -7171,6 +7227,37 @@ mod unit_tests {
         .is_empty());
     }
 
+    #[test]
+    fn the_reference_payload_gate_preserves_declared_keyframes_without_inventing_them() {
+        let mut plan: ProductionPlan = serde_json::from_value(json!({
+            "schemaVersion": 1,
+            "id": "p", "version": 1, "title": "t",
+            "model": { "id": "some_model" },
+            "limits": { "maxRunSeconds": 10, "maxShotSeconds": 5, "maxAttemptsPerShot": 1, "maxMemoryGb": 8 },
+            "shots": [{
+                "id": "SH010", "beat": "b", "framing": "f", "prompt": "p",
+                "targetDurationSeconds": 5.0, "startState": "s", "endState": "e", "audio": "Room tone, no music.",
+                "conditioning": { "mode": "image_to_video", "firstFrameRole": "plate" }
+            }]
+        }))
+        .unwrap();
+        let entry = json!({ "id": "some_model", "type": "video" })
+            .as_object()
+            .unwrap()
+            .clone();
+        let pack = empty_pack();
+        let entries = ModelEntries::single("some_model", &entry);
+        assert!(reference_payload_findings(&plan, &pack, &entries).is_empty());
+
+        // A missing source must still be rejected, even when a last frame was declared. Only
+        // trusted FL2VA/hybrid entries have the route's last-frame-only exception.
+        plan.shots[0].conditioning.first_frame_role = None;
+        plan.shots[0].conditioning.last_frame_role = Some("end_plate".into());
+        let findings = reference_payload_findings(&plan, &pack, &entries);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].message.contains("requires a source image"));
+    }
+
     /// A pack declaring nothing, for the gates whose plans name roles no pack ever approved.
     fn empty_pack() -> film_plan::ReferencePack {
         serde_json::from_value(json!({
@@ -7211,6 +7298,7 @@ mod unit_tests {
             peak_gpu_memory_pct: pct,
             backend: None,
             result: Value::Null,
+            reference_image_resize_mode: None,
         };
         let bytes = json!({ "peakMemoryBytes": 115.2 * BYTES_PER_GB, "peakMemoryPct": 90.0 });
         let observed = memory_observation(Some(&bytes), &view(Some(10.0)), Some(128.0));
@@ -7250,6 +7338,7 @@ mod unit_tests {
             peak_gpu_memory_pct: None,
             backend: None,
             result,
+            reference_image_resize_mode: None,
         };
         assert!(!with_result(json!({ "assetWrites": [{ "type": "video" }] })).is_settled());
         assert!(
@@ -7671,6 +7760,7 @@ mod unit_tests {
             resolved_model_id: "minimax_h3".to_owned(),
             partition_reason: String::new(),
             reference_image_short_edge: None,
+            reference_image_resize_mode: None,
             loras: Vec::new(),
             effective_steps: None,
             turbo_scheduler_shift: None,

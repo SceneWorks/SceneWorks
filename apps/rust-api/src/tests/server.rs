@@ -235,6 +235,55 @@ fn inprocess_worker_defaults_to_cpu_utility() {
     assert_eq!(inprocess_worker_gpu_id(Some("0".to_owned())), "0");
 }
 
+/// sc-26691: the in-process utility pool's shutdown is bounded by ONE deadline across every
+/// handle. With a per-handle timeout, three loops that never stop held the API for 3 × grace —
+/// the campaign harness's teardown bound was exactly one grace, so it timed out.
+#[tokio::test(start_paused = true)]
+async fn inprocess_utility_pool_shutdown_shares_one_deadline() {
+    let grace = std::time::Duration::from_secs(120);
+    let handles = (0..3)
+        .map(|_| {
+            tokio::spawn(async {
+                std::future::pending::<()>().await;
+                Ok(())
+            })
+        })
+        .collect();
+    let started = tokio::time::Instant::now();
+    crate::InProcessUtilityWorker { handles, grace }
+        .shutdown()
+        .await;
+    let waited = started.elapsed();
+    assert!(
+        waited >= grace,
+        "a stuck pool is still given its grace: {waited:?}"
+    );
+    assert!(
+        waited < grace + std::time::Duration::from_secs(1),
+        "three stuck loops share one deadline, not 3 x grace: {waited:?}"
+    );
+}
+
+/// sc-26691: a pool whose loops all stop promptly releases shutdown at once rather than waiting
+/// out the grace.
+#[tokio::test(start_paused = true)]
+async fn inprocess_utility_pool_shutdown_returns_when_loops_stop() {
+    let grace = std::time::Duration::from_secs(120);
+    let handles = (0..3)
+        .map(|index| {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(10 * index)).await;
+                Ok(())
+            })
+        })
+        .collect();
+    let started = tokio::time::Instant::now();
+    crate::InProcessUtilityWorker { handles, grace }
+        .shutdown()
+        .await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+}
+
 #[test]
 fn inprocess_utility_worker_count_defaults_to_two() {
     // Unset / blank / unparseable → 2 so desktop downloads run two-at-a-time
@@ -530,4 +579,26 @@ async fn upload_route_accepts_body_larger_than_json_cap() {
         StatusCode::CREATED,
         "large upload should be staged successfully (got {status}: {upload})"
     );
+}
+
+/// Stack an in-process utility worker's dispatch needs beyond Tokio's 2 MiB default. Held in a
+/// plain function frame so only the polling runtime thread carries it, never the test thread.
+#[inline(never)]
+fn use_three_mib_of_stack() -> usize {
+    let frame = [1_u8; 3 * 1024 * 1024];
+    std::hint::black_box(&frame)
+        .iter()
+        .map(|&byte| usize::from(byte))
+        .sum()
+}
+
+#[test]
+fn api_runtime_threads_carry_the_worker_entry_stack() {
+    // A claimed H3 import in the in-process utility worker overflowed the default runtime stack
+    // and aborted the API; its threads must carry the worker entry thread's stack.
+    let runtime = crate::api_runtime().expect("api runtime");
+    let used = runtime
+        .block_on(async { tokio::spawn(async { use_three_mib_of_stack() }).await })
+        .expect("task on a runtime thread");
+    assert_eq!(used, 3 * 1024 * 1024);
 }

@@ -170,8 +170,8 @@ pub(crate) fn validated_request(
 
 /// Lossless authored layout and the exact locked rows resolved before either native lane loads.
 pub(crate) struct ResolvedLayout {
-    layout: gen_core::flux3::layouts::Layout,
-    bindings: Vec<gen_core::flux3::layouts::ReferenceBinding>,
+    layout: gen_core_flux3::layouts::Layout,
+    bindings: Vec<gen_core_flux3::layouts::ReferenceBinding>,
     fact: serde_json::Value,
 }
 
@@ -196,13 +196,13 @@ pub(crate) fn resolve_owned_layout(
         return Ok(None);
     };
     let invalid = |error: gen_core::Error| WorkerError::InvalidPayload(error.to_string());
-    let layout = gen_core::flux3::layouts::Layout::from_json(document.clone()).map_err(invalid)?;
+    let layout = gen_core_flux3::layouts::Layout::from_json(document.clone()).map_err(invalid)?;
     let bindings = references
         .map(|refs| {
             refs.bindings
                 .iter()
                 .map(|binding| {
-                    gen_core::flux3::layouts::ReferenceBinding::oriented(
+                    gen_core_flux3::layouts::ReferenceBinding::oriented(
                         authored
                             .reference_ids
                             .as_ref()

@@ -1524,3 +1524,29 @@ async fn heartbeat_while_blocking_keeps_worker_live_through_a_long_pass() {
         beats.load(Ordering::SeqCst)
     );
 }
+
+/// A managed model import's staging copy is one checkpoint-sized await with no progress of its own.
+/// Run under `with_job_heartbeat`, a region that outlasts one heartbeat interval must still beat:
+/// the H3 terminal campaign's ~2 minute copy was swept to `interrupted` without it.
+#[tokio::test]
+async fn with_job_heartbeat_keeps_worker_live_through_a_long_staging_copy() {
+    let (base_url, beats) = spawn_heartbeat_counting_stub().await;
+    let mut settings = test_settings(base_url.clone(), None);
+    settings.api_url = base_url;
+    settings.heartbeat_seconds = 5; // progress_report_interval floor
+    let api = ApiClient::new(&settings);
+
+    let copied = with_job_heartbeat(&api, &settings, "job-1", async {
+        tokio::time::sleep(Duration::from_millis(5_400)).await;
+        Ok::<_, WorkerError>("staged")
+    })
+    .await
+    .expect("the region's result is returned once it finishes");
+
+    assert_eq!(copied, "staged");
+    assert!(
+        beats.load(Ordering::SeqCst) >= 1,
+        "at least one heartbeat must fire while a >interval region runs (got {})",
+        beats.load(Ordering::SeqCst)
+    );
+}

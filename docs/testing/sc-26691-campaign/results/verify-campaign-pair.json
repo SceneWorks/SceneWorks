@@ -1,0 +1,1902 @@
+{
+  "kind": "sc26691-single-sha-pair-verification",
+  "status": "evidence-reverified-delivery-pending",
+  "sceneworks": "1e23ef16e70327087a52504be374a1e8164262e8",
+  "inference": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+  "nativeEvidence": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+  "matrixDecision": {
+    "status": "selected",
+    "selectedBackend": "mlx",
+    "displacedBackend": "cuda",
+    "anchorIds": {
+      "reference": {
+        "mlx": "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+        "cuda": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo"
+      },
+      "prompt": {
+        "mlx": "mlx.reduced.real-hybrid-text",
+        "cuda": "cuda.reduced.real-hybrid-text"
+      }
+    },
+    "numbers": {
+      "mlx": {
+        "referenceWallMs": 2008028,
+        "promptWallMs": 658822,
+        "weightedCost": 11357784
+      },
+      "cuda": {
+        "referenceWallMs": 3161060,
+        "promptWallMs": 978762,
+        "weightedCost": 17762824
+      }
+    },
+    "weights": {
+      "reference": 5,
+      "prompt": 2
+    },
+    "reason": "mlx has the lower measured incremental cost (11357784 < 17762824)"
+  },
+  "priorMatrixDecision": null,
+  "runs": {
+    "mlx": {
+      "run": 41379525090,
+      "cases": 25,
+      "passed": 25,
+      "planSha256": "ffb028fc262a91d2864a1a0e6897ebd14399d006a56cc1031d33c91a76bd1bb6"
+    },
+    "cuda": {
+      "run": 41379549283,
+      "cases": 18,
+      "passed": 18,
+      "planSha256": "230fe03e7deee61371d6b32172d6b68b32b38d4e10f6a87b345e480bfa429a17"
+    }
+  },
+  "steps": [
+    {
+      "name": "verifyMatrixAdmission",
+      "ok": true
+    },
+    {
+      "name": "validateBackendReadback:mlx",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.artifact-1-reference",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.artifact-3-opaque-renamed-linked-source",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-mixed-repeat",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-drop-images",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-drop-video",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-drop-audio",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-reverse-images",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-reverse-video",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-reverse-audio",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-drop-lora",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-lokr-repeat",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-drop-lokr",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-hybrid-text",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-hybrid-prompt-change",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-hybrid-image",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-hybrid-last-only",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-hybrid-first-last",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-hybrid-reference",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-independent-fl2va",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.real-hybrid-text-repeat",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.numeric-pruned-artifact",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.numeric-w4a8-artifact",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:mlx.reduced.lifecycle-generation-source-prep-cancel",
+      "ok": true
+    },
+    {
+      "name": "verifyReducedControls:mlx",
+      "ok": true
+    },
+    {
+      "name": "validateBackendReadback:cuda",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.artifact-1-reference",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.artifact-2-lokr-ref-turbo-baseline",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.artifact-3-opaque-renamed-linked-source",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-mixed-repeat",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-drop-audio",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-drop-lora",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-lokr-repeat",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-drop-lokr",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-hybrid-text",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-hybrid-image",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-hybrid-last-only",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-hybrid-first-last",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-hybrid-reference",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.real-independent-fl2va",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.numeric-pruned-artifact",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.numeric-w4a8-artifact",
+      "ok": true
+    },
+    {
+      "name": "verifyPortableCase:cuda.reduced.lifecycle-generation-source-prep-cancel",
+      "ok": true
+    },
+    {
+      "name": "verifyReducedControls:cuda",
+      "ok": true
+    },
+    {
+      "name": "reducedCoverageReport",
+      "ok": true
+    }
+  ],
+  "coverage": {
+    "inventory": "reduced-v1",
+    "catalogCells": 84,
+    "operationalCases": 43,
+    "manifestCases": 25,
+    "counts": {
+      "real-weight": 40,
+      "executed-proof": 0,
+      "unproven": 44
+    },
+    "coverage": [
+      {
+        "cellId": "mlx.artifact.0",
+        "backend": "mlx",
+        "group": "artifact",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.artifact.1",
+        "backend": "mlx",
+        "group": "artifact",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-1-reference"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.artifact.2",
+        "backend": "mlx",
+        "group": "artifact",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-2-lokr-ref-turbo-baseline"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.artifact.3",
+        "backend": "mlx",
+        "group": "artifact",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-3-opaque-renamed-linked-source"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.numeric.tensor-mapping",
+        "backend": "mlx",
+        "group": "numeric",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.numeric.convrot",
+        "backend": "mlx",
+        "group": "numeric",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.numeric-w4a8-artifact"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.numeric.pruned-interpolation",
+        "backend": "mlx",
+        "group": "numeric",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.numeric-pruned-artifact"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.numeric.w4a8",
+        "backend": "mlx",
+        "group": "numeric",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.numeric-w4a8-artifact"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.text",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.real-hybrid-text",
+          "mlx.reduced.real-hybrid-prompt-change",
+          "mlx.reduced.real-hybrid-text-repeat"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.image",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.real-hybrid-image"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.first-last-frame",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.real-hybrid-first-last"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.last-frame-only",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.real-hybrid-last-only"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.video",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "mlx.reduced.artifact-3-opaque-renamed-linked-source",
+          "mlx.reduced.real-drop-video",
+          "mlx.reduced.real-reverse-video"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.ordered-multimodal",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "mlx.reduced.real-mixed-repeat",
+          "mlx.reduced.real-drop-images",
+          "mlx.reduced.real-drop-video",
+          "mlx.reduced.real-drop-audio",
+          "mlx.reduced.real-reverse-images",
+          "mlx.reduced.real-reverse-video",
+          "mlx.reduced.real-reverse-audio"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.audio-reference",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "mlx.reduced.real-drop-audio",
+          "mlx.reduced.real-reverse-audio"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.hybrid",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.real-hybrid-text",
+          "mlx.reduced.real-hybrid-image",
+          "mlx.reduced.real-hybrid-reference"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.turbo",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "mlx.reduced.real-hybrid-text",
+          "mlx.reduced.real-hybrid-image",
+          "mlx.reduced.real-hybrid-first-last"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.lora",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "mlx.reduced.real-mixed-repeat",
+          "mlx.reduced.real-drop-lora"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.capability.lokr",
+        "backend": "mlx",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-2-lokr-ref-turbo-baseline",
+          "mlx.reduced.real-lokr-repeat",
+          "mlx.reduced.real-drop-lokr"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.generalization.renamed",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-3-opaque-renamed-linked-source"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.generalization.independent-finetune",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.real-independent-fl2va"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.generalization.native-single",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.artifact-3-opaque-renamed-linked-source"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.generalization.sharded-diffusers",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.generalization.dense-f16",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.generalization.dense-bf16",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.generalization.dense-f32",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.generalization.existing-families",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.generalization.ltx-add-select-generate",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.generalization.compatible-base",
+        "backend": "mlx",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.managed-linked-equivalence",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.restart-replay",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.source-drift",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.interruption-retry",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.removal",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.cancel",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.generation-source-prep-cancel",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "mlx.reduced.lifecycle-generation-source-prep-cancel"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "mlx.lifecycle.relink-rescan",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.leases",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.duplicate",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.bounded-loading",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.cold-warm-staged",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "mlx.lifecycle.provenance-license",
+        "backend": "mlx",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.artifact.0",
+        "backend": "cuda",
+        "group": "artifact",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.artifact.1",
+        "backend": "cuda",
+        "group": "artifact",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-1-reference"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.artifact.2",
+        "backend": "cuda",
+        "group": "artifact",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-2-lokr-ref-turbo-baseline"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.artifact.3",
+        "backend": "cuda",
+        "group": "artifact",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-3-opaque-renamed-linked-source"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.numeric.tensor-mapping",
+        "backend": "cuda",
+        "group": "numeric",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.numeric.convrot",
+        "backend": "cuda",
+        "group": "numeric",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.numeric-w4a8-artifact"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.numeric.pruned-interpolation",
+        "backend": "cuda",
+        "group": "numeric",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.numeric-pruned-artifact"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.numeric.w4a8",
+        "backend": "cuda",
+        "group": "numeric",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.numeric-w4a8-artifact"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.capability.text",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "unproven",
+        "reducedCaseIds": [
+          "cuda.reduced.real-hybrid-text"
+        ],
+        "omittedCaseIds": [
+          "cuda.reduced.real-hybrid-prompt-change",
+          "cuda.reduced.real-hybrid-text-repeat"
+        ],
+        "surfaceWitnesses": [
+          {
+            "caseId": "cuda.reduced.real-hybrid-prompt-change",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-hybrid-prompt-change",
+            "ok": true
+          },
+          {
+            "caseId": "cuda.reduced.real-hybrid-text-repeat",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-hybrid-text-repeat",
+            "ok": true
+          }
+        ],
+        "proofs": [],
+        "reason": "Surface exercised via passed native encoded witnesses and an actual mixed render where retained; this omitted end-to-end render cell is NOT proven on this backend."
+      },
+      {
+        "cellId": "cuda.capability.image",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.real-hybrid-image"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.capability.first-last-frame",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.real-hybrid-first-last"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.capability.last-frame-only",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.real-hybrid-last-only"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.capability.video",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "unproven",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "cuda.reduced.artifact-3-opaque-renamed-linked-source"
+        ],
+        "omittedCaseIds": [
+          "cuda.reduced.real-drop-video",
+          "cuda.reduced.real-reverse-video"
+        ],
+        "surfaceWitnesses": [
+          {
+            "caseId": "cuda.reduced.real-drop-video",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-drop-video",
+            "ok": true
+          },
+          {
+            "caseId": "cuda.reduced.real-reverse-video",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-reverse-video",
+            "ok": true
+          }
+        ],
+        "proofs": [],
+        "reason": "Surface exercised via passed native encoded witnesses and an actual mixed render where retained; this omitted end-to-end render cell is NOT proven on this backend."
+      },
+      {
+        "cellId": "cuda.capability.ordered-multimodal",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "unproven",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "cuda.reduced.real-mixed-repeat",
+          "cuda.reduced.real-drop-audio"
+        ],
+        "omittedCaseIds": [
+          "cuda.reduced.real-drop-images",
+          "cuda.reduced.real-drop-video",
+          "cuda.reduced.real-reverse-images",
+          "cuda.reduced.real-reverse-video",
+          "cuda.reduced.real-reverse-audio"
+        ],
+        "surfaceWitnesses": [
+          {
+            "caseId": "cuda.reduced.real-drop-images",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-drop-images",
+            "ok": true
+          },
+          {
+            "caseId": "cuda.reduced.real-drop-video",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-drop-video",
+            "ok": true
+          },
+          {
+            "caseId": "cuda.reduced.real-reverse-images",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-reverse-images",
+            "ok": true
+          },
+          {
+            "caseId": "cuda.reduced.real-reverse-video",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-reverse-video",
+            "ok": true
+          },
+          {
+            "caseId": "cuda.reduced.real-reverse-audio",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-reverse-audio",
+            "ok": true
+          }
+        ],
+        "proofs": [],
+        "reason": "Surface exercised via passed native encoded witnesses and an actual mixed render where retained; this omitted end-to-end render cell is NOT proven on this backend."
+      },
+      {
+        "cellId": "cuda.capability.audio-reference",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "unproven",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "cuda.reduced.real-drop-audio"
+        ],
+        "omittedCaseIds": [
+          "cuda.reduced.real-reverse-audio"
+        ],
+        "surfaceWitnesses": [
+          {
+            "caseId": "cuda.reduced.real-reverse-audio",
+            "witnessId": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+            "witnessScope": "encoded-native-surface-only",
+            "endToEndAVProven": false,
+            "ownMixedCaseId": "cuda.reduced.real-drop-audio",
+            "peerCaseId": "mlx.reduced.real-reverse-audio",
+            "ok": true
+          }
+        ],
+        "proofs": [],
+        "reason": "Surface exercised via passed native encoded witnesses and an actual mixed render where retained; this omitted end-to-end render cell is NOT proven on this backend."
+      },
+      {
+        "cellId": "cuda.capability.hybrid",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.real-hybrid-text",
+          "cuda.reduced.real-hybrid-image",
+          "cuda.reduced.real-hybrid-reference"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.capability.turbo",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "cuda.reduced.real-hybrid-text",
+          "cuda.reduced.real-hybrid-image",
+          "cuda.reduced.real-hybrid-first-last"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.capability.lora",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+          "cuda.reduced.real-mixed-repeat",
+          "cuda.reduced.real-drop-lora"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.capability.lokr",
+        "backend": "cuda",
+        "group": "capability",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-2-lokr-ref-turbo-baseline",
+          "cuda.reduced.real-lokr-repeat",
+          "cuda.reduced.real-drop-lokr"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.generalization.renamed",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-3-opaque-renamed-linked-source"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.generalization.independent-finetune",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.real-independent-fl2va"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.generalization.native-single",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.artifact-3-opaque-renamed-linked-source"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.generalization.sharded-diffusers",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.generalization.dense-f16",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.generalization.dense-bf16",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.generalization.dense-f32",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.generalization.existing-families",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.generalization.ltx-add-select-generate",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.generalization.compatible-base",
+        "backend": "cuda",
+        "group": "generalization",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.managed-linked-equivalence",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.restart-replay",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.source-drift",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.interruption-retry",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.removal",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.cancel",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.generation-source-prep-cancel",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "real-weight",
+        "reducedCaseIds": [
+          "cuda.reduced.lifecycle-generation-source-prep-cancel"
+        ],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": null
+      },
+      {
+        "cellId": "cuda.lifecycle.relink-rescan",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.leases",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.duplicate",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.bounded-loading",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.cold-warm-staged",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      },
+      {
+        "cellId": "cuda.lifecycle.provenance-license",
+        "backend": "cuda",
+        "group": "lifecycle",
+        "category": "unproven",
+        "reducedCaseIds": [],
+        "omittedCaseIds": [],
+        "proofs": [],
+        "reason": "no real-weight case and no explicit executed-proof receipt provided"
+      }
+    ],
+    "unproven": [
+      {
+        "cellId": "mlx.numeric.tensor-mapping",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.generalization.sharded-diffusers",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.generalization.dense-f16",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.generalization.dense-bf16",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.generalization.dense-f32",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.generalization.existing-families",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.generalization.ltx-add-select-generate",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.generalization.compatible-base",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.managed-linked-equivalence",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.restart-replay",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.source-drift",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.interruption-retry",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.removal",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.cancel",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.relink-rescan",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.leases",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.duplicate",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.bounded-loading",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.cold-warm-staged",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "mlx.lifecycle.provenance-license",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.numeric.tensor-mapping",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.capability.text",
+        "reason": "Surface exercised via passed native encoded witnesses and an actual mixed render where retained; this omitted end-to-end render cell is NOT proven on this backend.",
+        "surfaceEvidence": "Native encoded conditioning witnesses and a real mixed render, when individually passed, exercise the surface; an omitted end-to-end render cell is NOT thereby proven on this backend."
+      },
+      {
+        "cellId": "cuda.capability.video",
+        "reason": "Surface exercised via passed native encoded witnesses and an actual mixed render where retained; this omitted end-to-end render cell is NOT proven on this backend.",
+        "surfaceEvidence": "Native encoded conditioning witnesses and a real mixed render, when individually passed, exercise the surface; an omitted end-to-end render cell is NOT thereby proven on this backend."
+      },
+      {
+        "cellId": "cuda.capability.ordered-multimodal",
+        "reason": "Surface exercised via passed native encoded witnesses and an actual mixed render where retained; this omitted end-to-end render cell is NOT proven on this backend.",
+        "surfaceEvidence": "Native encoded conditioning witnesses and a real mixed render, when individually passed, exercise the surface; an omitted end-to-end render cell is NOT thereby proven on this backend."
+      },
+      {
+        "cellId": "cuda.capability.audio-reference",
+        "reason": "Surface exercised via passed native encoded witnesses and an actual mixed render where retained; this omitted end-to-end render cell is NOT proven on this backend.",
+        "surfaceEvidence": "Native encoded conditioning witnesses and a real mixed render, when individually passed, exercise the surface; an omitted end-to-end render cell is NOT thereby proven on this backend."
+      },
+      {
+        "cellId": "cuda.generalization.sharded-diffusers",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.generalization.dense-f16",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.generalization.dense-bf16",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.generalization.dense-f32",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.generalization.existing-families",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.generalization.ltx-add-select-generate",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.generalization.compatible-base",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.managed-linked-equivalence",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.restart-replay",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.source-drift",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.interruption-retry",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.removal",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.cancel",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.relink-rescan",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.leases",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.duplicate",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.bounded-loading",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.cold-warm-staged",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      },
+      {
+        "cellId": "cuda.lifecycle.provenance-license",
+        "reason": "no real-weight case and no explicit executed-proof receipt provided",
+        "surfaceEvidence": null
+      }
+    ],
+    "uniqueJobs": {
+      "uniqueExecutions": 37,
+      "shared": [],
+      "conflicts": [],
+      "unidentified": []
+    },
+    "retainedSurfaceEvidence": [
+      {
+        "id": "native-encoded-surface-mlx-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+        "backend": "mlx",
+        "sourceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+        "scope": {
+          "backend": "mlx",
+          "conditioning": [
+            {
+              "property": "context_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "context_vs_zero_same_shape",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_only_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_only_vs_zero_same_shape",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "last_only_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_vs_last_placement",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_only_vs_drop",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "last_only_vs_drop",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_last_swap_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_last_drop_first",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_last_drop_last",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_image_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "fl2va_vs_ref2va_positioning",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "ordered_reference_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_video_only_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_audio_only_CONDITIONING_ROWS",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_audio_values_visual_fixed",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "hybrid_checkpoint_FL_portion_vs_wrong_REF_portion",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "hybrid_checkpoint_REF_portion_vs_wrong_FL_portion",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_image_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_video_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_audio_only_drop_same_layout_CONDITIONING_ROWS",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "ordered_video_references_AB_vs_BA",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "ordered_audio_references_AB_vs_BA_visual_fixed",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_image_video_soundtrack_audio_reference_order",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_image_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_video_carrier_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_standalone_audio_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_video_soundtrack_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            }
+          ],
+          "adapterStack": true,
+          "rawPreprocessing": false,
+          "endToEndAV": false,
+          "omittedAVContrasts": "NOT proven by encoded witnesses"
+        }
+      },
+      {
+        "id": "native-encoded-surface-cuda-0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+        "backend": "cuda",
+        "sourceSha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+        "scope": {
+          "backend": "cuda",
+          "conditioning": [
+            {
+              "property": "context_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "context_vs_zero_same_shape",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_only_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_only_vs_zero_same_shape",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "last_only_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_vs_last_placement",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_only_vs_drop",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "last_only_vs_drop",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_last_swap_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_last_drop_first",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "first_last_drop_last",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_image_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "fl2va_vs_ref2va_positioning",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "ordered_reference_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_video_only_values",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_audio_only_CONDITIONING_ROWS",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_audio_values_visual_fixed",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "hybrid_checkpoint_FL_portion_vs_wrong_REF_portion",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "hybrid_checkpoint_REF_portion_vs_wrong_FL_portion",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_image_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_video_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "reference_audio_only_drop_same_layout_CONDITIONING_ROWS",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "ordered_video_references_AB_vs_BA",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "ordered_audio_references_AB_vs_BA_visual_fixed",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_image_video_soundtrack_audio_reference_order",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_image_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_video_carrier_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_standalone_audio_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            },
+            {
+              "property": "mixed_video_soundtrack_drop_same_layout",
+              "status": "passed",
+              "scope": "encoded-generated-rows-only"
+            }
+          ],
+          "adapterStack": true,
+          "rawPreprocessing": false,
+          "endToEndAV": false,
+          "omittedAVContrasts": "NOT proven by encoded witnesses"
+        }
+      }
+    ],
+    "nativeEvidence": {
+      "ref": "main",
+      "sha": "0bada8f7287f414c30f77eb1d29ef4a544eb8ffc",
+      "root": "/Users/MTrefry/actions-runner-nax/_work/SceneWorks/SceneWorks/inference-evidence",
+      "productPin": "a43724b82fbae35c9227cef4bcdabba6dd1da12c"
+    },
+    "productPin": "a43724b82fbae35c9227cef4bcdabba6dd1da12c",
+    "scope": "Actual-artifact probes prove selected projections, not full QKV/FFN mapping. Cold cancellation completes no native load and claims no peak. Native encoded witnesses do not prove raw preprocessing or omitted AV contrasts."
+  },
+  "delivery": {
+    "recorded": false,
+    "error": "missing integrated delivery records",
+    "meaning": "validateDelivery needs post-merge records (final CI, inference/SceneWorks main merge, Shortcut readbacks); evidence verification above is complete without it."
+  }
+}

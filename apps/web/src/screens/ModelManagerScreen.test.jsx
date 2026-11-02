@@ -1217,6 +1217,16 @@ describe("ModelManagerScreen type-grouped layout", () => {
     expect(container.textContent).toContain("Download");
   });
 
+  it("exposes the same Add model workflow on image and video tabs, not the LoRA tab", async () => {
+    await render({ models: [...MODELS, LICENSE_ACK_ONLY_MODEL] });
+    expect(container.querySelectorAll(".checkpoint-import")).toHaveLength(1);
+    await selectTab(container, "Video Models");
+    expect(container.querySelectorAll(".checkpoint-import")).toHaveLength(1);
+    expect(container.querySelector(".checkpoint-import-heading").textContent).toBe("Add a model");
+    await selectTab(container, "LoRAs");
+    expect(container.querySelector(".checkpoint-import")).toBeNull();
+  });
+
   it("always shows all six tabs, with a zero count and empty state for an unpopulated type", async () => {
     await render({ models: [MODELS[0]] });
     expect(tabLabels()).toEqual(["Image Models1", "Video Models0", "Audio Models0", "Vector Models0", "Utility Models0", "LoRAs0"]);

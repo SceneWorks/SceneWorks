@@ -13,6 +13,34 @@ async fn process_shutdown_latch_survives_a_gap_without_waiters() {
     .expect("a late waiter observes the already-latched shutdown");
 }
 
+/// sc-26691: an embedding process (the API's in-process utility loops) stops the worker loops
+/// through the SAME latch the OS shutdown sources set. A waiter already parked on the latch is
+/// woken, and a request made with nobody waiting is still seen by the next wait — the property
+/// that keeps the API from waiting out its whole grace on loops that never heard it stop. Driven
+/// on a local channel: the process-global latch is sticky and would stop every other test's
+/// worker loop in this binary.
+#[tokio::test]
+async fn an_embedder_shutdown_request_wakes_parked_and_late_waiters() {
+    let (sender, _receiver) = tokio::sync::watch::channel(false);
+    let mut parked = sender.subscribe();
+    let waiter = tokio::spawn(async move { wait_for_shutdown_latch(&mut parked).await });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished(), "nothing has requested shutdown yet");
+
+    latch_shutdown(&sender);
+    tokio::time::timeout(Duration::from_millis(500), waiter)
+        .await
+        .expect("a parked waiter wakes on the embedder's request")
+        .unwrap();
+    let mut late = sender.subscribe();
+    tokio::time::timeout(Duration::from_millis(100), wait_for_shutdown_latch(&mut late))
+        .await
+        .expect("a waiter arriving after the request resolves at once");
+    // Idempotent.
+    latch_shutdown(&sender);
+    assert!(*sender.borrow());
+}
+
 /// sc-3513: the worker's `JobType::ImageEdit` dispatch arm delegates to
 /// `run_image_generate_job` — the engine keys edits on payload model+mode, not job
 /// type. Feeding an `image_edit`-typed job into the handler proves it reaches the image

@@ -483,6 +483,46 @@ describe("MiniMax-H3 turbo control (sc-18726 / sc-18727)", () => {
     await generate(); expect(lastJob(context).advanced).not.toHaveProperty("veda");
   });
 
+  // sc-26691: the studio has no reference-resize control, so "Use this recipe" must carry the
+  // recorded H3 asset's resolved mode (and short edge) into the job itself — and read a recorded H3
+  // asset WITHOUT the key as the pre-sc-26691 render it was (`diffusers`), not today's `match`.
+  it("replays a recorded H3 asset's reference resize mode into the job", async () => {
+    const recipe = (rawAdapterSettings) => ({
+      model: MINIMAX.id,
+      mode: "text_to_video",
+      prompt: "a lighthouse",
+      normalizedSettings: {},
+      rawAdapterSettings: { minimaxH3Tier: "bf16", ...rawAdapterSettings },
+    });
+    const context = baseContext({
+      videoModels: [MINIMAX, BERNINI],
+      studioLaunch: {
+        view: "Video",
+        id: "resize-replay",
+        recipe: recipe({ referenceImageResizeMode: "max", referenceImageShortEdge: 1536 }),
+      },
+    });
+    await render(context); await generate();
+    expect(lastJob(context).advanced.referenceImageResizeMode).toBe("max");
+    expect(lastJob(context).advanced.referenceImageShortEdge).toBe(1536);
+
+    await render({ ...context, studioLaunch: { view: "Video", id: "legacy-replay", recipe: recipe({}) } });
+    await generate();
+    expect(lastJob(context).advanced.referenceImageResizeMode).toBe("diffusers");
+    expect(lastJob(context).advanced).not.toHaveProperty("referenceImageShortEdge");
+
+    // A fresh launch is a new request: the engine default applies, nothing is carried.
+    await render({ ...context, studioLaunch: { view: "Video", id: "fresh", mode: "text_to_video" } });
+    await generate();
+    expect(lastJob(context).advanced).not.toHaveProperty("referenceImageResizeMode");
+
+    // Picking another family retires the replay-only knobs (that family refuses the key).
+    await render({ ...context, studioLaunch: { view: "Video", id: "switch", recipe: recipe({}) } });
+    await act(async () => setSelect(container.querySelector(".settings-field-model select"), BERNINI.id));
+    await generate();
+    expect(lastJob(context).advanced).not.toHaveProperty("referenceImageResizeMode");
+  });
+
   it("Veda remains answerable after an incompatible model change", async () => {
     const context = baseContext({ videoModels: [MINIMAX, BERNINI] });
     await render(context); await openAdvanced(); await click(vedaToggle());

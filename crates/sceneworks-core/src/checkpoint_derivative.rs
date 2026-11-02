@@ -62,8 +62,9 @@ use crate::checkpoint_plan_store::{
     CheckpointPlanError, CheckpointPlanStore, ResolvedCheckpointV1, RootRemovalV1,
 };
 use crate::model_artifacts::resolved_cache::{
-    DerivedArtifactPlan, ManualRemovalOutcome, ReservationOutcome, ResolvedCacheError,
-    ResolvedCacheLease, ResolvedCacheMetadata, ResolvedCacheStore,
+    DerivedArtifactPlan, ManualRemovalOutcome, ProducedAttestations, ProducedFile,
+    ReservationOutcome, ResolvedCacheError, ResolvedCacheLease, ResolvedCacheMetadata,
+    ResolvedCacheStore,
 };
 use crate::model_artifacts::{
     ArtifactFile, ArtifactIdentity, ArtifactMemberRole, ModelArtifactResolver, ResolvedBundleMember,
@@ -110,7 +111,8 @@ impl CheckpointDerivativeKindV1 {
 }
 
 /// Everything a derivative is keyed on beyond the checkpoint's own content and semantic plan.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CheckpointDerivativeRequestV1 {
     pub kind: CheckpointDerivativeKindV1,
     /// The family adapter that produces this derivative, and the version of its output format.
@@ -263,6 +265,7 @@ pub struct CheckpointDerivativeOutputs<'a> {
     resolved: &'a ResolvedCheckpointV1,
     staging: &'a Path,
     declared: BTreeSet<PathBuf>,
+    attested: ProducedAttestations,
 }
 
 impl<'a> CheckpointDerivativeOutputs<'a> {
@@ -273,7 +276,13 @@ impl<'a> CheckpointDerivativeOutputs<'a> {
     }
 
     /// Create one declared output file inside the staging directory.
-    pub fn create(&self, output: &str) -> Result<fs::File, CheckpointDerivativeError> {
+    ///
+    /// The returned writer hashes every byte as it is written (sc-26691). When it is dropped or
+    /// [`ProducedFile::finish`]ed, that digest and the file's identity stamp become the authority
+    /// publication carries through measure, validation, completion and the first load — so the
+    /// store never re-reads an output the producer just wrote unless the file changed after it
+    /// was closed.
+    pub fn create(&self, output: &str) -> Result<ProducedFile, CheckpointDerivativeError> {
         let relative = validate_output_path(output)?;
         if !self.declared.contains(&relative) {
             return Err(CheckpointDerivativeError::InvalidRequest {
@@ -287,10 +296,8 @@ impl<'a> CheckpointDerivativeOutputs<'a> {
                 message: format!("create {}: {error}", parent.display()),
             })?;
         }
-        fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
+        self.attested
+            .create(self.staging, &relative)
             .map_err(|error| CheckpointDerivativeError::Producer {
                 checkpoint_id: self.resolved.checkpoint_id.clone(),
                 message: format!("create {}: {error}", path.display()),
@@ -345,28 +352,7 @@ impl CheckpointDerivativeStore {
         resolved: &ResolvedCheckpointV1,
         request: &CheckpointDerivativeRequestV1,
     ) -> Result<DerivedArtifactPlan, CheckpointDerivativeError> {
-        let identity = self.identity(resolved, request)?;
-        let mut files = Vec::with_capacity(request.outputs.len());
-        for output in &request.outputs {
-            let relative = validate_output_path(output)?;
-            files.push(ArtifactFile::new(relative).map_err(|error| {
-                CheckpointDerivativeError::InvalidRequest {
-                    reason: error.to_string(),
-                }
-            })?);
-        }
-        let member = ResolvedBundleMember {
-            role: ArtifactMemberRole::Primary,
-            // The derivative kind, again: `component_id` is key material, and naming the kind
-            // here rather than the checkpoint keeps the key content-addressed.
-            component_id: Some(request.kind.as_str().to_owned()),
-            source: identity.clone(),
-            tier: None,
-            source_subpath: PathBuf::new(),
-            destination: PathBuf::new(),
-            files,
-        };
-        Ok(DerivedArtifactPlan::new(identity, vec![member])?)
+        derivative_plan(self.identity(resolved, request)?, request)
     }
 
     pub fn cache_key(
@@ -397,14 +383,124 @@ impl CheckpointDerivativeStore {
         resolved: &ResolvedCheckpointV1,
         request: &CheckpointDerivativeRequestV1,
     ) -> Result<Option<ResolvedCacheLease>, CheckpointDerivativeError> {
+        self.acquire_with_check(resolved, request, &|| Ok(()))
+    }
+
+    pub fn acquire_with_check(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+    ) -> Result<Option<ResolvedCacheLease>, CheckpointDerivativeError> {
         let cache_key = self.cache_key(resolved, request)?;
         let resolver =
             ModelArtifactResolver::new(crate::hf_home::model_source_library(&self.data_dir));
-        Ok(self.cache.acquire_complete(
+        let lease = self.cache.acquire_complete_with_check(
             &cache_key,
             &resolver,
             &derivative_owner(&resolved.checkpoint_id),
-        )?)
+            check,
+        )?;
+        check().map_err(ResolvedCacheError::from)?;
+        if lease.is_some() {
+            // An additive sidecar, not a journal-format change: old builds must still be able to
+            // read both metadata slots after rollback. Written only while the exact artifact is leased.
+            let receipt = serde_json::json!({"schemaVersion":1,"cacheKey":cache_key,
+                "semanticDigest":resolved.record.plan.semantic_digest,"request":request});
+            let path = self
+                .cache
+                .entry_path(&cache_key)?
+                .join("checkpoint-conversion.receipt.json");
+            crate::store_util::atomic_write(
+                &path,
+                &serde_json::to_vec(&receipt).map_err(|e| {
+                    CheckpointDerivativeError::InvalidRequest {
+                        reason: e.to_string(),
+                    }
+                })?,
+            )
+            .map_err(|e| CheckpointDerivativeError::InvalidRequest {
+                reason: e.to_string(),
+            })?;
+        }
+        Ok(lease)
+    }
+
+    /// Redeem a reported conversion only for this immutable model commitment. The shared key
+    /// derivation binds source content, declared semantics, codec/version, backend and output shape;
+    /// a valid receipt belonging to another checkpoint can never be attached to these assets.
+    pub fn verified_provenance_receipt(
+        &self,
+        cache_key: &str,
+        provenance: &serde_json::Value,
+    ) -> Result<serde_json::Value, CheckpointDerivativeError> {
+        let invalid = |reason: String| CheckpointDerivativeError::InvalidRequest { reason };
+        let path = self
+            .cache
+            .entry_path(cache_key)?
+            .join("checkpoint-conversion.receipt.json");
+        let bytes = std::fs::read(path).map_err(|e| invalid(e.to_string()))?;
+        let receipt: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+        if receipt["schemaVersion"] != 1
+            || receipt["cacheKey"] != cache_key
+            || receipt["semanticDigest"] != provenance["plan"]["semanticDigest"]
+        {
+            return Err(invalid(
+                "conversion receipt does not match the immutable model plan".into(),
+            ));
+        }
+        let request: CheckpointDerivativeRequestV1 =
+            serde_json::from_value(receipt["request"].clone())
+                .map_err(|e| invalid(e.to_string()))?;
+        request.validate()?;
+        let text = |value: &serde_json::Value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| invalid("invalid model provenance identity".into()))
+        };
+        let semantic = text(&provenance["plan"]["semanticDigest"])?;
+        let family = text(&provenance["family"])?;
+        let sources = provenance["sources"]
+            .as_array()
+            .ok_or_else(|| invalid("model provenance has no sources".into()))?;
+        let layers = sources
+            .iter()
+            .map(|source| {
+                Ok((
+                    text(&source["layerId"])?,
+                    text(&source["role"])?,
+                    text(&source["sha256"])?,
+                ))
+            })
+            .collect::<Result<Vec<_>, CheckpointDerivativeError>>()?;
+        let revision = derivative_revision_for_sources(
+            &semantic,
+            &family,
+            layers
+                .iter()
+                .map(|(id, role, hash)| (id.as_str(), role.as_str(), hash.as_str())),
+            &request,
+        );
+        let identity = ArtifactIdentity::pinned(DERIVATIVE_REPOSITORY, revision, request.variant())
+            .map_err(|e| invalid(e.to_string()))?;
+        let expected = derivative_plan(identity.clone(), &request)?.cache_key()?;
+        if expected != cache_key {
+            return Err(invalid(
+                "conversion belongs to another source, declaration, or codec".into(),
+            ));
+        }
+        let resolver =
+            ModelArtifactResolver::new(crate::hf_home::model_source_library(&self.data_dir));
+        let lease = self
+            .cache
+            .acquire_complete(cache_key, &resolver, "checkpoint-provenance")?
+            .ok_or_else(|| invalid("conversion is not a complete verified artifact".into()))?;
+        let result = serde_json::json!({"kind":"checkpoint_derivative","cacheKey":cache_key,
+            "identity":identity,"request":request,"semanticDigest":semantic});
+        drop(lease);
+        Ok(result)
     }
 
     /// Produce the derivative if the cache does not already hold it.
@@ -419,10 +515,64 @@ impl CheckpointDerivativeStore {
         request: &CheckpointDerivativeRequestV1,
         produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
     ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
-        let resolved = self.plans.resolve(checkpoint_id)?;
-        let plan = self.plan_for(&resolved, request)?;
+        self.ensure_with_check(checkpoint_id, request, &|| Ok(()), produce)
+    }
+
+    pub fn ensure_with_check(
+        &self,
+        checkpoint_id: &str,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+        produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
+    ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
+        let resolved = self.plans.resolve_with_check(checkpoint_id, check)?;
+        self.ensure_resolved_with_check(&resolved, request, check, produce)
+    }
+
+    /// Reuse a caller's already verified acquisition instead of hashing a racy source twice.
+    /// The caller retains its source lease and seals across this producer transaction.
+    pub fn ensure_resolved_with_check(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+        produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
+    ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
+        self.ensure_resolved_attested_with_check(resolved, request, check, produce)
+            .map(|(outcome, _)| outcome)
+    }
+
+    /// [`Self::ensure_resolved_with_check`], also returning the write-stream attestations of a
+    /// derivative this call produced (empty on a cache hit). Keyed by bundle-relative path; each
+    /// carries the gen-core attestation the native load seal redeems instead of re-reading the
+    /// freshly written file (sc-26691).
+    pub fn ensure_resolved_attested_with_check(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+        produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
+    ) -> Result<(CheckpointDerivativeOutcomeV1, ProducedAttestations), CheckpointDerivativeError>
+    {
+        let attested = ProducedAttestations::default();
+        let outcome =
+            self.ensure_resolved_into_with_check(resolved, request, check, produce, &attested)?;
+        Ok((outcome, attested))
+    }
+
+    fn ensure_resolved_into_with_check(
+        &self,
+        resolved: &ResolvedCheckpointV1,
+        request: &CheckpointDerivativeRequestV1,
+        check: &dyn Fn() -> std::io::Result<()>,
+        produce: impl FnOnce(&CheckpointDerivativeOutputs<'_>) -> Result<(), String>,
+        attested: &ProducedAttestations,
+    ) -> Result<CheckpointDerivativeOutcomeV1, CheckpointDerivativeError> {
+        check().map_err(ResolvedCacheError::from)?;
+        let checkpoint_id = &resolved.checkpoint_id;
+        let plan = self.plan_for(resolved, request)?;
         let cache_key = plan.cache_key()?;
-        if let Some(metadata) = self.cache.lookup_complete(&cache_key)? {
+        if let Some(metadata) = self.cache.lookup_complete_with_check(&cache_key, check)? {
             return Ok(CheckpointDerivativeOutcomeV1::AlreadyPresent(Box::new(
                 metadata,
             )));
@@ -446,17 +596,23 @@ impl CheckpointDerivativeStore {
             };
         reservation.prepare_for_materialization()?;
         let outputs = CheckpointDerivativeOutputs {
-            resolved: &resolved,
+            resolved,
             staging: reservation.staging_path(),
             declared: request
                 .outputs
                 .iter()
                 .map(|output| validate_output_path(output))
                 .collect::<Result<BTreeSet<_>, _>>()?,
+            attested: attested.clone(),
         };
-        if let Err(message) = produce(&outputs) {
+        let produced = check()
+            .map_err(|error| error.to_string())
+            .and_then(|_| produce(&outputs))
+            .and_then(|_| check().map_err(|error| error.to_string()));
+        if let Err(message) = produced {
             // Nothing partial survives: the staging tree is removed and the entry is recorded
             // interrupted, so the next attempt starts empty and no reader can ever see it.
+            drop(outputs);
             reservation.discard()?;
             return Err(CheckpointDerivativeError::Producer {
                 checkpoint_id: checkpoint_id.to_owned(),
@@ -464,7 +620,7 @@ impl CheckpointDerivativeStore {
             });
         }
         drop(outputs);
-        match reservation.publish_produced(&plan) {
+        match reservation.publish_produced_attested_with_check(&plan, attested, check) {
             Ok(metadata) => Ok(CheckpointDerivativeOutcomeV1::Produced(Box::new(metadata))),
             Err(error) => Err(CheckpointDerivativeError::Cache(error)),
         }
@@ -591,6 +747,33 @@ impl CheckpointDerivativeStore {
     }
 }
 
+fn derivative_plan(
+    identity: ArtifactIdentity,
+    request: &CheckpointDerivativeRequestV1,
+) -> Result<DerivedArtifactPlan, CheckpointDerivativeError> {
+    let files = request
+        .outputs
+        .iter()
+        .map(|output| {
+            ArtifactFile::new(validate_output_path(output)?).map_err(|e| {
+                CheckpointDerivativeError::InvalidRequest {
+                    reason: e.to_string(),
+                }
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let member = ResolvedBundleMember {
+        role: ArtifactMemberRole::Primary,
+        component_id: Some(request.kind.as_str().to_owned()),
+        source: identity.clone(),
+        tier: None,
+        source_subpath: PathBuf::new(),
+        destination: PathBuf::new(),
+        files,
+    };
+    Ok(DerivedArtifactPlan::new(identity, vec![member])?)
+}
+
 /// The logical model owner recorded on the cache's session records and pins for a derivative.
 fn derivative_owner(checkpoint_id: &str) -> String {
     format!("checkpoint-derivative:{checkpoint_id}")
@@ -607,6 +790,29 @@ fn derivative_revision(
     resolved: &ResolvedCheckpointV1,
     request: &CheckpointDerivativeRequestV1,
 ) -> String {
+    derivative_revision_for_sources(
+        &resolved.record.plan.semantic_digest,
+        &resolved.plan.family,
+        resolved.plan.layers.iter().map(|layer| {
+            (
+                layer.layer_id.as_str(),
+                layer.role.as_str(),
+                match &layer.source {
+                    SourceLocatorV1::Linked { fingerprint, .. } => fingerprint.as_str(),
+                    SourceLocatorV1::Managed { sha256, .. } => sha256.as_str(),
+                },
+            )
+        }),
+        request,
+    )
+}
+
+fn derivative_revision_for_sources<'a>(
+    semantic_digest: &str,
+    family: &str,
+    layers: impl ExactSizeIterator<Item = (&'a str, &'a str, &'a str)>,
+    request: &CheckpointDerivativeRequestV1,
+) -> String {
     let mut hasher = Sha256::new();
     let mut field = |value: &[u8]| {
         hasher.update((value.len() as u64).to_le_bytes());
@@ -614,20 +820,13 @@ fn derivative_revision(
     };
     field(b"sceneworks.checkpoint.derivative.v1");
     field(&CHECKPOINT_DERIVATIVE_FORMAT_VERSION.to_le_bytes());
-    // Semantic plan. The plan's SEMANTIC digest, deliberately, not its `plan_id`: the plan id is
-    // derived from the checkpoint's locator, so folding it in would key one checkpoint's
-    // derivative differently in two libraries holding the same bytes.
-    field(resolved.record.plan.semantic_digest.as_bytes());
-    field(resolved.plan.family.as_bytes());
-    // Content: every layer's role and the exact bytes the plan was compiled from.
-    field(&(resolved.plan.layers.len() as u64).to_le_bytes());
-    for layer in &resolved.plan.layers {
-        field(layer.layer_id.as_bytes());
-        field(layer.role.as_bytes());
-        match &layer.source {
-            SourceLocatorV1::Linked { fingerprint, .. } => field(fingerprint.as_bytes()),
-            SourceLocatorV1::Managed { sha256, .. } => field(sha256.as_bytes()),
-        }
+    field(semantic_digest.as_bytes());
+    field(family.as_bytes());
+    field(&(layers.len() as u64).to_le_bytes());
+    for (id, role, hash) in layers {
+        field(id.as_bytes());
+        field(role.as_bytes());
+        field(hash.as_bytes());
     }
     // Adapter, codec and backend representation.
     field(request.kind.as_str().as_bytes());

@@ -1022,6 +1022,16 @@ describe("a derivation-pending tier is installable (sc-22999)", () => {
   });
 });
 
+describe("bound H3 imported component precision (sc-26686 review)", () => {
+  it.each(["bf16", "q4", "q8"])("keeps %s as the only valid default regardless of stale or global preferences", (tier) => {
+    const model = { id: "community_h3", family: "minimax-h3", importComponentTier: tier, runtimeQuantTiers: [tier], installState: "installed" };
+    expect(installedTiers(model)).toEqual([tier]);
+    expect(defaultTierSelection(model, "q8", { defaultQuality: "q4" })).toBe(tier);
+    expect(tierPickerOptions(model)).toEqual([{ tier, label: tierLabel(tier), disabled: false }]);
+    expect(shouldShowTierPicker(model)).toBe(false);
+    expect(tierQuantize(tier)).toBe(tier === "bf16" ? 0 : tier === "q8" ? 8 : 4);
+  });
+});
 
 describe("FLUX 3 native format capability and installed artifacts", () => {
   const worker = (capabilities, status = "online") => ({ capabilities, status });

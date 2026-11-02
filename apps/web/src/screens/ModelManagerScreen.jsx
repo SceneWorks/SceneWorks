@@ -4,6 +4,7 @@ import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
 import { ModelLicenseSummary } from "../components/ModelLicenseSummary.jsx";
 import { ModelComponentDetails } from "../components/ModelComponentDetails.jsx";
+import { ImportedCheckpointSurface } from "../components/ImportedCheckpointSurface.jsx";
 import { licenseComponentForModel } from "../data/bundledLicenses.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { WAN_MOE_PAIRED_LORA_MODEL_IDS, terminalStatuses } from "../constants.js";
@@ -703,6 +704,7 @@ export function ModelManagerScreen() {
   // card, so the old per-row expand state is gone. Tabs: image | video | utility | lora,
   // plus a transient "search" tab that only exists while `search` is non-empty.
   const [activeTab, setActiveTab] = useState("image");
+  const [checkpointRepairRequest, setCheckpointRepairRequest] = useState(null);
   const [prevTab, setPrevTab] = useState("image");
   const [search, setSearch] = useState("");
   // Typing into search auto-switches to the transient Search Results tab (remembering the
@@ -1548,6 +1550,39 @@ export function ModelManagerScreen() {
         {/* Per-component installation details + supported limits (sc-24216). Collapsed by default;
             renders only for an entry that declares per-download licences or a prompt limit. */}
         {!cleanupOnly ? <ModelComponentDetails model={model} totalSizeText={model.downloadSizeLabel ? downloadSize : null} /> : null}
+        {/* The imported-checkpoint product surface (sc-26687): source variant, supported
+            operations/backends, component readiness and the repair steps that would complete the
+            assembly. Values come from the server's single derivation, so a repair offered here is
+            the repair the API describes. Collapsed by default, like the component table above. */}
+        {!cleanupOnly ? (
+          <ImportedCheckpointSurface
+            model={model}
+            onRepair={(repair) => {
+              if (repair.kind === "download") {
+                // An imported DiT is not downloadable. The server binds this resident component
+                // to the import's compatible base and tier; never retry an unrelated old job.
+                createModelDownloadJob(model, { componentId: repair.componentId });
+                return;
+              }
+              if (repair.kind === "reimport") {
+                if (model.importedSource?.ownershipMode === "managed") {
+                  setCheckpointRepairRequest({ model });
+                  setActiveTab(model.type === "video" ? "video" : "image");
+                }
+                return;
+              }
+              // relink / rescan: the linked-repair affordance above, which is the seam that decides
+              // which of the two the library root index calls for.
+              if (linkedStatus && linkedFix) {
+                if (linkedFix.action === "relink") {
+                  relinkLinkedModel(linkedStatus);
+                } else {
+                  rescanLinkedModel(linkedStatus);
+                }
+              }
+            }}
+          />
+        ) : null}
         {incomplete ? (
           <p className="inline-warning">
             Cached files are incomplete
@@ -2128,13 +2163,8 @@ export function ModelManagerScreen() {
     );
   }
 
-  // Base-checkpoint import affordance (epic 14015, sc-14020). Surfaced on the Image Models
-  // tab (sc-14069) rather than the LoRAs tab where the sc-7080 scaffold first placed it — a
-  // base checkpoint IS an image model (a Krea 2 DiT today), so this is where a user looks for
-  // it. Gated on MODEL_IMPORT_ENABLED (mirrors the backend kill-switch S0d opened); the
-  // section also surfaces any in-flight model-import progress. Factored out of the tab body so
-  // it can mount under any relevant model-type tab once more base-checkpoint types become
-  // importable — image is the only relevant tab today (the Type selector is image-locked).
+  // The existing Add workflow serves both image checkpoints and explicitly declared H3 video
+  // fine-tunes. Both tabs share its source, compatibility, refusal, and progress surfaces.
   function renderModelImportPanel() {
     if (!MODEL_IMPORT_ENABLED && pendingModelImportJobs.length === 0) {
       return null;
@@ -2157,6 +2187,7 @@ export function ModelManagerScreen() {
           onRefreshCatalog={refreshLinkedStatuses}
           onRetryJob={(job, payload) => onResumeDownloadJob(job, payload)}
           pendingJobs={pendingModelImportJobs}
+          repairRequest={checkpointRepairRequest}
           token={token}
         />
       </section>
@@ -2169,7 +2200,7 @@ export function ModelManagerScreen() {
     const { recommended, others, othersHeading } = modelGroupsByType[type];
     return (
       <div className="models-tab-panel">
-        {type === "image" ? renderModelImportPanel() : null}
+        {["image", "video"].includes(type) ? renderModelImportPanel() : null}
         {others.length ? (
           <div className="models-section">
             <div className="models-section-heading">

@@ -92,6 +92,12 @@ shape minus the declared `level`). `LogEntry` reads the declared `level` when pr
 (`error`/`warn`/`info`/`debug`), falling back to a heuristic otherwise, and derives a
 compact `message` summary from each line.
 
+An event emitted inside one or more `tracing` spans also carries that scope (sc-26691):
+`spans` lists each span root-to-leaf as `{ name, ...fields }` and `span` repeats the
+innermost one, mirroring tracing-subscriber's own JSON shape. Work a span scopes — e.g.
+the H3 import preparation's `jobId` / `checkpointId` / `phase` — is therefore
+attributable from every line inside it. An event field named `span` or `spans` wins.
+
 ### Routing — `gpu_route_decision` (API, sc-3449)
 
 Emitted at claim time whenever a claim is routing-relevant. **This is the line that

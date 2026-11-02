@@ -1,0 +1,112 @@
+{
+ "schema": "sceneworks.h3.actual_checkpoint_oracle",
+ "schema_version": 1,
+ "producer": "h3-actual-checkpoint-oracle-bridge/1",
+ "producer_version": 1,
+ "artifact_sha256": "412a7b126595a958964193f3b42513d7cf2df4196ef04223a0f05e3622949cce",
+ "producer_provenance": [
+  {
+   "script": "scripts/ci/generate_minimax_h3_w4a8_fixture.py",
+   "sha256": "14c05c1dea46dfec0447d97b575a0c6f525e2d41bcc703ad16e1610828ea9676",
+   "source_revision_sha256": "14c05c1dea46dfec0447d97b575a0c6f525e2d41bcc703ad16e1610828ea9676",
+   "upstream_revisions": {
+    "LOADER_REVISION": "ad1d4e072bd2ed5eec1d30d07ec390f327a3af52",
+    "KITCHEN_MAIN": "78b7fe78552944ffc5763d680ba57f023e7ab5f4",
+    "KITCHEN_PR_HEAD": "d908d589fbda44595f6d78d9c47ef42ba4aa8fad",
+    "KITCHEN_MERGED_TREE": "06a261f8917d2e0486eee14fe665b545a4419ca6",
+    "FROZEN_ARTIFACT_TREE": "a56850c870825d6a8ae501a595c4dbbbc77bbc7e"
+   }
+  },
+  {
+   "script": "scripts/h3_convrot_int8_oracle.py",
+   "sha256": "25682137344a8d94bc134585603dd51e22a2edac7a148d5363c48ce0a38dbd82",
+   "source_revision_sha256": "25682137344a8d94bc134585603dd51e22a2edac7a148d5363c48ce0a38dbd82",
+   "upstream_revisions": {
+    "KITCHEN": "f8b7e97a1418d2e529bd5405fbf86312be198ae6",
+    "PRODUCER": "d6797787e6bdb1a1fb0094d588a26f8e71a1c757",
+    "LOADER": "ad1d4e072bd2ed5eec1d30d07ec390f327a3af52",
+    "HF": "a56850c870825d6a8ae501a595c4dbbbc77bbc7e"
+   }
+  },
+  {
+   "script": "scripts/h3_pruned_adaln_oracle.py",
+   "sha256": "f9de6f19c29e9ce4858f74b930f0e9a641fe106333608587d7ce4d8630b16b5b",
+   "source_revision_sha256": "f9de6f19c29e9ce4858f74b930f0e9a641fe106333608587d7ce4d8630b16b5b",
+   "upstream_revisions": {
+    "REVISION": "47b06ff920c16b4b7b36de068367a5de0e0968e9"
+   }
+  }
+ ],
+ "device": "cpu",
+ "activation_dtype": {
+  "packed": "BF16",
+  "pruned": "F32"
+ },
+ "cases": [
+  {
+   "id": "pruned-timestep-interpolation",
+   "selected": [
+    {
+     "name": "model.diffusion_model.adaln_t_table",
+     "sha256": "ac8727cdec52137c73878d004de5bd2a0e19227e8311e29ab3b68f328310e34e",
+     "dtype": "F32",
+     "shape": [
+      1025,
+      8
+     ],
+     "bytes": 32800
+    }
+   ],
+   "input": {
+    "dtype": "TIMESTEPS",
+    "shape": [
+     4
+    ],
+    "values_sha256": "552a4e647414bb0ceefa46ba5148337c8053838208a2af6ee46347d39e6ea16f"
+   },
+   "tolerance": {
+    "max_abs": 0.000002
+   },
+   "output": {
+    "shape": [
+     4,
+     8
+    ],
+    "values": [
+     0.46788281202316284,
+     0.248228520154953,
+     -0.09162993729114532,
+     0.034378983080387115,
+     0.007069366052746773,
+     -0.0013603972038254142,
+     -0.0005915956571698189,
+     0.0003798087127506733,
+     0.2645280659198761,
+     0.021730661392211914,
+     0.035040393471717834,
+     -0.014105110429227352,
+     -0.001391516881994903,
+     -0.00019435856665950269,
+     -0.00011102167627541348,
+     0.00010177646618103608,
+     -0.20560280978679657,
+     0.012990541756153107,
+     0.018200092017650604,
+     0.013847325928509235,
+     0.0001843177160480991,
+     -0.00040833684033714235,
+     -0.000046939210733398795,
+     -0.000055998872994678095,
+     -0.4022071659564972,
+     0.08635282516479492,
+     -0.08268877863883972,
+     -0.0685991644859314,
+     -0.0027126166969537735,
+     -0.0014523779973387718,
+     -0.0008571464568376541,
+     -0.00027278531342744827
+    ]
+   }
+  }
+ ]
+}

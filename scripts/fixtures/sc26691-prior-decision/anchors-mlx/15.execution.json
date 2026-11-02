@@ -1,0 +1,330 @@
+{
+  "planSha256": "d46aef63253c19dd049b4d4c242ca55976aefa5c7038d91b8022c02a5e36eb6d",
+  "caseId": "mlx.reduced.real-hybrid-text",
+  "command": [
+    "node",
+    "/Users/michael/actions-runner-sceneworks/_work/SceneWorks/SceneWorks/sceneworks/scripts/h3-finetune-terminal-runtime.mjs",
+    "api",
+    "/Volumes/Models/huggingface/sc26691-private/41213914294-1-bootstrap-4c3625898b20859f57ca38986ed80b1c427cdfdb/prepared/campaign-plan.json",
+    "mlx.reduced.real-hybrid-text",
+    "/Users/michael/actions-runner-sceneworks/_work/SceneWorks/SceneWorks/sceneworks",
+    "/Users/michael/actions-runner-sceneworks/_work/SceneWorks/SceneWorks/inference"
+  ],
+  "sceneworks": "4c3625898b20859f57ca38986ed80b1c427cdfdb",
+  "inference": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+  "runId": "41213914294",
+  "runAttempt": "1",
+  "responsibleTask": "sc-26691",
+  "timeoutSeconds": 7200,
+  "laneBudget": {
+    "startedAt": "2026-10-31T15:14:47.000Z",
+    "deadline": "2026-11-01T15:14:47.000Z",
+    "totalSeconds": 86400
+  },
+  "nextAuthorizedAction": "Run only the explicit stationary-pair reduced terminal cases in this owned manual lane; no implicit approval or publication",
+  "started": "2026-10-31T17:17:39.067Z",
+  "status": "passed",
+  "completed": "2026-10-31T17:45:21.705Z",
+  "verified": {
+    "evidenceSha256": "6da81ca05e0d551a9718038c7077d4a6ec69fff3fc491a7a7aa087a08fd90533",
+    "processLogSha256": "6ec2d09616ad8ad36065ced9f7468b5807b71499b6481d5f1982439610f8560a",
+    "files": [
+      {
+        "path": "output-0-0.mp4",
+        "sha256": "43fc9d834bffd1ca0051f48427c45fe9dd2559236273888fdc0cd81ccfdd9d5d"
+      },
+      {
+        "path": "api-transcript.json",
+        "sha256": "9a562a6c024dba37531457a878395a7fefc975e0e7e3196f89f035689b313860"
+      },
+      {
+        "path": "source-job-output.json",
+        "sha256": "c56e9a15318fff5ef3a1bb0be46f265e110eb8ae589265149e172ad1b884863d"
+      },
+      {
+        "path": "comparisons.json",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      },
+      {
+        "path": "service-build.json",
+        "sha256": "9e3d021a5c81d7f063e69baf815e3d66c0729c414c8714d149abe5643d738f14"
+      },
+      {
+        "path": "service-build.log",
+        "sha256": "48684494d9640846ada33eedcfea95df86800485ba88ef60e0d45c36030df7f1"
+      },
+      {
+        "path": "raw-observations.json",
+        "sha256": "04af9f56128068b296500e7ba6c3e127135cf091c60734e779fb55964158fd84"
+      },
+      {
+        "path": "service-lifecycle.json",
+        "sha256": "a92a91f8d6242fb3ef0f5389cf328483f94ef2ca2691a37e5c432a16d45de734"
+      },
+      {
+        "path": "source-cancel-actions.json",
+        "sha256": "3e34564f32d80e45115d026bc906e6693918483217065d8c60a9d43a508de1f4"
+      },
+      {
+        "path": "api-1.log",
+        "sha256": "aa5624def6f9bc39447dbe005b19da3ac21d70da345c948e47fc48036fe51c2d"
+      },
+      {
+        "path": "worker-1.log",
+        "sha256": "2dbfacc53ce9a868c39f09e631a05a1b995bb7c3b53eb6355cc3baa279a684f5"
+      },
+      {
+        "path": "guardian-1.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "ownership-1.json",
+        "sha256": "0d8df9ffa70a130b33dc743b36e070f8f559e9eb32e6c8fcbc78ea6f1fc1eba9"
+      },
+      {
+        "path": "exits-1.json",
+        "sha256": "ee09928363c20755befbb08cd1059db43e60db0b69452b898229d211c9514221"
+      }
+    ],
+    "av": {
+      "sha256": "43fc9d834bffd1ca0051f48427c45fe9dd2559236273888fdc0cd81ccfdd9d5d",
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "h264",
+          "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+          "profile": "High",
+          "codec_type": "video",
+          "codec_tag_string": "avc1",
+          "codec_tag": "0x31637661",
+          "mime_codec_string": "avc1.64001f",
+          "width": 1088,
+          "height": 544,
+          "coded_width": 1088,
+          "coded_height": 544,
+          "has_b_frames": 2,
+          "pix_fmt": "yuv420p",
+          "level": 31,
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "refs": 4,
+          "is_avc": "true",
+          "nal_length_size": "4",
+          "id": "0x1",
+          "r_frame_rate": "24/1",
+          "avg_frame_rate": "24/1",
+          "time_base": "1/12288",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 63488,
+          "duration": "5.166667",
+          "bit_rate": "2177676",
+          "bits_per_raw_sample": "8",
+          "nb_frames": "124",
+          "nb_read_frames": "124",
+          "extradata_size": 46,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "encoder": "Lavc63.1.101 libx264"
+          }
+        },
+        {
+          "index": 1,
+          "codec_name": "aac",
+          "codec_long_name": "AAC (Advanced Audio Coding)",
+          "profile": "LC",
+          "codec_type": "audio",
+          "codec_tag_string": "mp4a",
+          "codec_tag": "0x6134706d",
+          "mime_codec_string": "mp4a.40.2",
+          "sample_fmt": "fltp",
+          "sample_rate": "32000",
+          "channels": 2,
+          "channel_layout": "stereo",
+          "bits_per_sample": 0,
+          "initial_padding": 1024,
+          "id": "0x2",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/32000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 165333,
+          "duration": "5.166656",
+          "bit_rate": "127519",
+          "nb_frames": "163",
+          "nb_read_frames": "162",
+          "extradata_size": 5,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "SoundHandler"
+          }
+        }
+      ],
+      "video": {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "profile": "High",
+        "codec_type": "video",
+        "codec_tag_string": "avc1",
+        "codec_tag": "0x31637661",
+        "mime_codec_string": "avc1.64001f",
+        "width": 1088,
+        "height": 544,
+        "coded_width": 1088,
+        "coded_height": 544,
+        "has_b_frames": 2,
+        "pix_fmt": "yuv420p",
+        "level": 31,
+        "chroma_location": "left",
+        "field_order": "progressive",
+        "refs": 4,
+        "is_avc": "true",
+        "nal_length_size": "4",
+        "id": "0x1",
+        "r_frame_rate": "24/1",
+        "avg_frame_rate": "24/1",
+        "time_base": "1/12288",
+        "start_pts": 0,
+        "start_time": "0.000000",
+        "duration_ts": 63488,
+        "duration": "5.166667",
+        "bit_rate": "2177676",
+        "bits_per_raw_sample": "8",
+        "nb_frames": "124",
+        "nb_read_frames": "124",
+        "extradata_size": 46,
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "VideoHandler",
+          "encoder": "Lavc63.1.101 libx264"
+        }
+      },
+      "audio": {
+        "index": 1,
+        "codec_name": "aac",
+        "codec_long_name": "AAC (Advanced Audio Coding)",
+        "profile": "LC",
+        "codec_type": "audio",
+        "codec_tag_string": "mp4a",
+        "codec_tag": "0x6134706d",
+        "mime_codec_string": "mp4a.40.2",
+        "sample_fmt": "fltp",
+        "sample_rate": "32000",
+        "channels": 2,
+        "channel_layout": "stereo",
+        "bits_per_sample": 0,
+        "initial_padding": 1024,
+        "id": "0x2",
+        "r_frame_rate": "0/0",
+        "avg_frame_rate": "0/0",
+        "time_base": "1/32000",
+        "start_pts": 0,
+        "start_time": "0.000000",
+        "duration_ts": 165333,
+        "duration": "5.166656",
+        "bit_rate": "127519",
+        "nb_frames": "163",
+        "nb_read_frames": "162",
+        "extradata_size": 5,
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "SoundHandler"
+        }
+      }
+    },
+    "runtime": {
+      "jobs": [
+        "job_2c32af526551485683c8dc4d2f6bbe65"
+      ],
+      "nativeClosures": 1,
+      "comparisons": 0
+    }
+  }
+}

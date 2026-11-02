@@ -256,8 +256,36 @@ function lockHasStaleInferenceRevision(sha, lockText = readFileSync(LOCKFILE, "u
     );
 }
 
+/**
+ * Every inference package a manifest names directly (`<name> = { git = INFERENCE_GIT, ... }`).
+ * sc-26691: inference sc-27252 split gen-core into sibling crates (`sceneworks-gen-core-iris`,
+ * `-checkpoint`, `-h3`, ...) that SceneWorks crates now depend on directly. Each must have its lock
+ * entry refreshed with the pin, and the hand-written INFERENCE_CRATES list would rot the moment the
+ * next sibling is taken. Pure over manifest texts so the self-test drives it.
+ */
+export function directInferenceCrates(manifestTexts) {
+  const names = new Set();
+  const dep = /^\s*([A-Za-z0-9_-]+)\s*=\s*\{[^}]*\bgit\s*=\s*"([^"]+)"/;
+  for (const text of manifestTexts) {
+    for (const line of text.split("\n")) {
+      const match = dep.exec(line);
+      if (match && match[2] === INFERENCE_GIT && !PATCHED_CRATES.includes(match[1])) {
+        names.add(match[1]);
+      }
+    }
+  }
+  return [...names].sort();
+}
+
+function inferenceUpdateCrates() {
+  const discovered = directInferenceCrates(
+    inferenceManifests().map((path) => readFileSync(path, "utf8")),
+  );
+  return [...new Set([...INFERENCE_CRATES, ...discovered])];
+}
+
 function cargoUpdate(sha) {
-  const packages = [...new Set([...INFERENCE_CRATES, ...PATCHED_CRATES])];
+  const packages = [...new Set([...inferenceUpdateCrates(), ...PATCHED_CRATES])];
   const spec = packages.flatMap((crate) =>
     packageSpecsForUpdate(crate, sha).flatMap((packageSpec) => ["-p", packageSpec]),
   );
@@ -1762,7 +1790,7 @@ function main() {
     );
   }
   console.log(
-    `bump-inference: pinning inference (${[...INFERENCE_CRATES, ...PATCHED_CRATES].join(", ")}) -> ${sha}`,
+    `bump-inference: pinning inference (${[...inferenceUpdateCrates(), ...PATCHED_CRATES].join(", ")}) -> ${sha}`,
   );
   // BEFORE anything is written, unlike every other verifier in this script — and that placement is
   // the difference between a guard and a formality. The sibling guards run post-write and still

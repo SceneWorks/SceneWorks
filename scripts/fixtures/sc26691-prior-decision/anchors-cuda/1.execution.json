@@ -1,0 +1,358 @@
+{
+  "planSha256": "a69b422e3fe32b80c02f325ece524d6dddfd0fd10a3c9cc15d5a5ef31a8304f8",
+  "caseId": "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+  "command": [
+    "node",
+    "D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks\\sceneworks\\scripts\\h3-finetune-terminal-runtime.mjs",
+    "api",
+    "E:\\huggingface\\sc26691-private\\41213935677-1-bootstrap-4c3625898b20859f57ca38986ed80b1c427cdfdb\\prepared\\campaign-plan.json",
+    "cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo",
+    "D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks\\sceneworks",
+    "D:\\actions-runner-2\\_work\\SceneWorks\\SceneWorks\\inference"
+  ],
+  "sceneworks": "4c3625898b20859f57ca38986ed80b1c427cdfdb",
+  "inference": "354b41ccaccdc14afccff0d0fb1ae1b0be04836e",
+  "runId": "41213935677",
+  "runAttempt": "1",
+  "responsibleTask": "sc-26691",
+  "timeoutSeconds": 7200,
+  "laneBudget": {
+    "startedAt": "2026-10-31T15:15:14.000Z",
+    "deadline": "2026-11-01T15:15:14.000Z",
+    "totalSeconds": 86400
+  },
+  "nextAuthorizedAction": "Run only the explicit stationary-pair reduced terminal cases in this owned manual lane; no implicit approval or publication",
+  "started": "2026-10-31T15:40:36.619Z",
+  "status": "passed",
+  "completed": "2026-10-31T16:29:45.673Z",
+  "verified": {
+    "evidenceSha256": "18e272a5ea10bd57516403ad984998caba1e2b3db62d07398c0ac81b7e3575f1",
+    "processLogSha256": "6ec2d09616ad8ad36065ced9f7468b5807b71499b6481d5f1982439610f8560a",
+    "files": [
+      {
+        "path": "output-0-0.mp4",
+        "sha256": "d344ecfc40e8405b87ea463b2770c7a2f8da07e5c6bc3127cd98ed1c5caba6b7"
+      },
+      {
+        "path": "conditioning-0.png",
+        "sha256": "9cbcee33102a23c8b88e2942ea0939899bd6982da9cf4d3e332177e9f7c106de"
+      },
+      {
+        "path": "conditioning-1.png",
+        "sha256": "9a9a0be7701b1c64b188c9bcc0a9dd1b9f9bf286a7ec52fc9da8e59d08374a7d"
+      },
+      {
+        "path": "conditioning-2.mp4",
+        "sha256": "35efa871a1c6ce20660aa12b2b7be4eb39eafdc5fde52553c717ddceeaa606b8"
+      },
+      {
+        "path": "conditioning-3.mp4",
+        "sha256": "5213481c37a85329145540a7ccc8a508663c94087796e9ee25f11d5879c24dca"
+      },
+      {
+        "path": "conditioning-4.wav",
+        "sha256": "83cd539a928fe81b4a09a0010aa062f62d850b9d4183fa9cead00d6896685507"
+      },
+      {
+        "path": "conditioning-5.wav",
+        "sha256": "ed5c433656c7b3a5008797c19479993f7ad67219768d77ac52e62c3a5da9c61d"
+      },
+      {
+        "path": "api-transcript.json",
+        "sha256": "993aca33e38e933037b1b174e58030fbe935aee2b427c9831b48c8ca4b42772e"
+      },
+      {
+        "path": "source-job-output.json",
+        "sha256": "0c1777ba26380bf3d1d357edb3a533fd2dfa365d6a7a7e7bdc7a66c32eade20a"
+      },
+      {
+        "path": "comparisons.json",
+        "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+      },
+      {
+        "path": "service-build.json",
+        "sha256": "c5455a47de27960bd5d6f1b22bee3d9c461840b0ff17ecef3901aa35e9b603cf"
+      },
+      {
+        "path": "service-build.log",
+        "sha256": "1be9ed89f7114b298a676c9eb285ddf341b2a0b7da0997d0f8b8769b0e8eb0bb"
+      },
+      {
+        "path": "raw-observations.json",
+        "sha256": "bad790faec41e397fde4de06423d6a707e8f86be4a274cfdb9ebeacec25e421a"
+      },
+      {
+        "path": "service-lifecycle.json",
+        "sha256": "87ff085d6f833901d89060e480d3c3538a81dfa08343b5e3085e064dbd397004"
+      },
+      {
+        "path": "source-cancel-actions.json",
+        "sha256": "3e34564f32d80e45115d026bc906e6693918483217065d8c60a9d43a508de1f4"
+      },
+      {
+        "path": "api-1.log",
+        "sha256": "60d5b792c2c32f55f833130dd2e8f17eb0a937bb0fdb4dba2ebf57fef0db5e18"
+      },
+      {
+        "path": "worker-1.log",
+        "sha256": "db830107ee3983c1ae105d526662b077f0529e03320d3c7acd3f736e0d68166e"
+      },
+      {
+        "path": "guardian-1.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      {
+        "path": "ownership-1.json",
+        "sha256": "30f1361b8d469dbd0bf1cdef7a38a117c4e99638345121dc6e65d6411529485d"
+      },
+      {
+        "path": "exits-1.json",
+        "sha256": "30a610ca70b880406124f207abe2701676b513ee66026ac876cf10757763331f"
+      },
+      {
+        "path": "source-catalog.json",
+        "sha256": "7024a27d2aeca1c130c3f880fc2cadf61e9b65cf6eb249064460cd38ca892a0a"
+      }
+    ],
+    "av": {
+      "sha256": "d344ecfc40e8405b87ea463b2770c7a2f8da07e5c6bc3127cd98ed1c5caba6b7",
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "h264",
+          "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+          "profile": "High",
+          "codec_type": "video",
+          "codec_tag_string": "avc1",
+          "codec_tag": "0x31637661",
+          "mime_codec_string": "avc1.64001f",
+          "width": 1088,
+          "height": 544,
+          "coded_width": 1088,
+          "coded_height": 544,
+          "has_b_frames": 2,
+          "pix_fmt": "yuv420p",
+          "level": 31,
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "refs": 4,
+          "is_avc": "true",
+          "nal_length_size": "4",
+          "id": "0x1",
+          "r_frame_rate": "24/1",
+          "avg_frame_rate": "24/1",
+          "time_base": "1/12288",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 63488,
+          "duration": "5.166667",
+          "bit_rate": "4195131",
+          "bits_per_raw_sample": "8",
+          "nb_frames": "124",
+          "nb_read_frames": "124",
+          "extradata_size": 46,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "encoder": "Lavc62.28.101 libx264"
+          }
+        },
+        {
+          "index": 1,
+          "codec_name": "aac",
+          "codec_long_name": "AAC (Advanced Audio Coding)",
+          "profile": "LC",
+          "codec_type": "audio",
+          "codec_tag_string": "mp4a",
+          "codec_tag": "0x6134706d",
+          "mime_codec_string": "mp4a.40.2",
+          "sample_fmt": "fltp",
+          "sample_rate": "32000",
+          "channels": 2,
+          "channel_layout": "stereo",
+          "bits_per_sample": 0,
+          "initial_padding": 0,
+          "id": "0x2",
+          "r_frame_rate": "0/0",
+          "avg_frame_rate": "0/0",
+          "time_base": "1/32000",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 165344,
+          "duration": "5.167000",
+          "bit_rate": "127440",
+          "nb_frames": "163",
+          "nb_read_frames": "162",
+          "extradata_size": 5,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "SoundHandler"
+          }
+        }
+      ],
+      "video": {
+        "index": 0,
+        "codec_name": "h264",
+        "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+        "profile": "High",
+        "codec_type": "video",
+        "codec_tag_string": "avc1",
+        "codec_tag": "0x31637661",
+        "mime_codec_string": "avc1.64001f",
+        "width": 1088,
+        "height": 544,
+        "coded_width": 1088,
+        "coded_height": 544,
+        "has_b_frames": 2,
+        "pix_fmt": "yuv420p",
+        "level": 31,
+        "chroma_location": "left",
+        "field_order": "progressive",
+        "refs": 4,
+        "is_avc": "true",
+        "nal_length_size": "4",
+        "id": "0x1",
+        "r_frame_rate": "24/1",
+        "avg_frame_rate": "24/1",
+        "time_base": "1/12288",
+        "start_pts": 0,
+        "start_time": "0.000000",
+        "duration_ts": 63488,
+        "duration": "5.166667",
+        "bit_rate": "4195131",
+        "bits_per_raw_sample": "8",
+        "nb_frames": "124",
+        "nb_read_frames": "124",
+        "extradata_size": 46,
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "VideoHandler",
+          "encoder": "Lavc62.28.101 libx264"
+        }
+      },
+      "audio": {
+        "index": 1,
+        "codec_name": "aac",
+        "codec_long_name": "AAC (Advanced Audio Coding)",
+        "profile": "LC",
+        "codec_type": "audio",
+        "codec_tag_string": "mp4a",
+        "codec_tag": "0x6134706d",
+        "mime_codec_string": "mp4a.40.2",
+        "sample_fmt": "fltp",
+        "sample_rate": "32000",
+        "channels": 2,
+        "channel_layout": "stereo",
+        "bits_per_sample": 0,
+        "initial_padding": 0,
+        "id": "0x2",
+        "r_frame_rate": "0/0",
+        "avg_frame_rate": "0/0",
+        "time_base": "1/32000",
+        "start_pts": 0,
+        "start_time": "0.000000",
+        "duration_ts": 165344,
+        "duration": "5.167000",
+        "bit_rate": "127440",
+        "nb_frames": "163",
+        "nb_read_frames": "162",
+        "extradata_size": 5,
+        "disposition": {
+          "default": 1,
+          "dub": 0,
+          "original": 0,
+          "comment": 0,
+          "lyrics": 0,
+          "karaoke": 0,
+          "forced": 0,
+          "hearing_impaired": 0,
+          "visual_impaired": 0,
+          "clean_effects": 0,
+          "attached_pic": 0,
+          "timed_thumbnails": 0,
+          "non_diegetic": 0,
+          "captions": 0,
+          "descriptions": 0,
+          "metadata": 0,
+          "dependent": 0,
+          "still_image": 0,
+          "multilayer": 0
+        },
+        "tags": {
+          "language": "und",
+          "handler_name": "SoundHandler"
+        }
+      }
+    },
+    "runtime": {
+      "jobs": [
+        "job_136012a20a2319d2d409d627ee7b85a5"
+      ],
+      "nativeClosures": 1,
+      "comparisons": 0
+    }
+  }
+}
