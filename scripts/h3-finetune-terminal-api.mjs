@@ -90,9 +90,13 @@ export async function runScenario(s, { fetchImpl = fetch, now = Date.now, sleep 
     for (;;) {
       const started = now(), remaining = Math.max(1, deadline - started);
       const bound = isRead ? Math.min(30000, remaining) : Math.min(MUTATING_REQUEST_CAP_MS, remaining);
-      try { response = await fetchImpl(url, { method, headers, body:wireBody, signal: AbortSignal.timeout(bound) }); break; }
+      // A ref'd timer, not AbortSignal.timeout(): that one is unref'd, so a hung request with no other
+      // live handle lets the event loop drain and the process exit with the promise still pending.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError')), bound);
+      try { response = await fetchImpl(url, { method, headers, body:wireBody, signal: controller.signal }); break; }
       catch (error) { if (!isRead || error?.name !== 'TimeoutError' || now() >= deadline) throw error; console.warn(`H3_READ_RETRY: ${method} ${route} timed out; retrying before the scenario deadline`); }
-      finally { if (!isRead && now() - started > SLOW_WRITE_WARN_MS) console.warn(`H3_SLOW_WRITE: ${method} ${route} ${now() - started}`); }
+      finally { clearTimeout(timer); if (!isRead && now() - started > SLOW_WRITE_WARN_MS) console.warn(`H3_SLOW_WRITE: ${method} ${route} ${now() - started}`); }
     }
     const text = await response.text();
     const result = text ? JSON.parse(text) : null;
