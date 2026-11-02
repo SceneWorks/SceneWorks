@@ -16,9 +16,9 @@ export function mossTrainingHubRoot({ root, env = process.env, home = homedir() 
 }
 
 export function requiredMossTrainingCacheFiles(catalog, phase) {
-  if (!['capture', 'cross-load'].includes(phase)) throw new Error('MOSS cache inventory: unknown execution phase');
+  if (!['capture', 'cross-load', 'bounded-product'].includes(phase)) throw new Error('MOSS cache inventory: unknown execution phase');
   const selected = new Map();
-  for (const id of ['moss_image_base', 'moss_image_sft']) {
+  for (const id of (phase === 'bounded-product' ? ['moss_image_base'] : ['moss_image_base', 'moss_image_sft'])) {
     const entry = catalog.models?.find(model => model.id === id);
     if (!entry || !Array.isArray(entry.downloads)) throw new Error(`MOSS cache inventory: missing production entry ${id}`);
     // Match selected_components' ordinary download rows. Capture also exercises

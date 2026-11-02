@@ -202,7 +202,7 @@ for (const relative of ['src/bin/ignored.rs', 'build.rs', 'src/optional.rs', 'op
       const before = await verifySecuritySources(value, directory, revision);
       const pkg = value.packages.find((item) => item.source);
       const file = path.join(path.dirname(pkg.manifest_path), relative);
-      await fs.appendFile(path.join(checkout, '.git/info/exclude'), `\n${path.relative(checkout, file)}\n`);
+      await fs.appendFile(path.join(checkout, '.git/info/exclude'), `\n${path.relative(checkout, file).split(path.sep).join("/")}\n`);
       await fs.mkdir(path.dirname(file), { recursive: true });
       await fs.writeFile(file, '// ignored source, never executed\n');
       assert.equal(git(['status', '--porcelain', '--untracked-files=no']), '');

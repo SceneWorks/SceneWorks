@@ -73,7 +73,7 @@ on:
   workflow_dispatch:
     inputs:
       moss_options_json:
-        description: 'MOSS: {"enabled":true,"runner_label":"real-weights","phase":"capture"}. Load-progress profile: {"case":"image_cuda","hf_hub_cache":"E:/huggingface/hub","build_only":true,"mac_go":false}. Empty disables MOSS.'
+        description: 'MOSS: {"enabled":true,"runner_label":"real-weights","phase":"capture"}; finalize adds original captureRunId/inspection, bounded-product selects one four-update CUDA API round trip. Load-progress: {"case":"image_cuda","hf_hub_cache":"E:/huggingface/hub","build_only":true,"mac_go":false}. Empty disables MOSS.'
         required: false
         type: string
         default: "{}"
@@ -336,11 +336,12 @@ jobs:
           if (i.download_missing || i.qwen_persistent_weights) bad.push('disable download_missing and qwen_persistent_weights; MOSS is cached/offline only');
           if (i.inference_sha && !/^[0-9a-f]{40}$/.test(i.inference_sha)) bad.push('inference_sha must be empty or exact 40-hex permanent lock pin');
           const phase = m.phase === undefined ? 'capture' : m.phase;
-          if (!['capture','finalize'].includes(phase)) bad.push('phase must be capture or finalize');
+          if (!['capture','finalize','bounded-product'].includes(phase)) bad.push('phase must be capture, finalize or bounded-product');
+          if (phase === 'bounded-product' && m.runner_label !== 'real-weights') bad.push('bounded-product requires the real-weights CUDA route');
           const inspection = m.inspection === undefined ? {} : m.inspection;
           if (inspection === null || typeof inspection !== 'object' || Array.isArray(inspection)) bad.push('inspection must be a JSON object');
           let captureRunId = '';
-          if (phase === 'capture' && Object.keys(inspection || {}).length) bad.push('capture must not consume prior evidence or pre-written inspections');
+          if (phase !== 'finalize' && Object.keys(inspection || {}).length) bad.push('capture must not consume prior evidence or pre-written inspections');
           if (phase === 'finalize') {
             if (!inspection || typeof inspection.captureRunId !== 'string' || !/^[1-9][0-9]*$/.test(inspection.captureRunId)) bad.push('finalize requires actual inspection with its original positive captureRunId');
             else captureRunId = inspection.captureRunId;
@@ -375,10 +376,10 @@ jobs:
           console.log('Actual selected-source inference pin: ' + pin);
           JS
       - name: Prepare the one fixed image dataset without loading models
-        if: ${{ steps.select.outputs.enabled == 'true' && steps.select.outputs.phase == 'capture' }}
+        if: ${{ steps.select.outputs.enabled == 'true' && (steps.select.outputs.phase == 'capture' || steps.select.outputs.phase == 'bounded-product') }}
         run: python3 -I scripts/ci/moss-training-acceptance/prepare_dataset.py --manifest scripts/ci/moss-training-acceptance/campaign.json --output "${{ runner.temp }}/moss-${{ github.run_id }}-${{ github.run_attempt }}/dataset"
       - name: Preserve fixed dataset bytes shared by all eight cells
-        if: ${{ always() && steps.select.outputs.enabled == 'true' && steps.select.outputs.phase == 'capture' }}
+        if: ${{ always() && steps.select.outputs.enabled == 'true' && (steps.select.outputs.phase == 'capture' || steps.select.outputs.phase == 'bounded-product') }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: moss-dataset
