@@ -1616,8 +1616,24 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
   if (inferenceChange) { assert.equal(inferenceChange.descends, true, 'the recorded inference change does not descend'); assert.ok(Array.isArray(inferenceChange.firstParentLog) && inferenceChange.firstParentLog.length > 0, 'the recorded inference change carries no first-parent log'); }
   // A prior lane run ran at this lane's own pin (adoption refuses otherwise), recorded as priorLaneRun.inference.
   const expectedPin = segmentLabel => (segmentLabel === subsetSegment.label ? (inferenceChange ? inferenceChange.own : subsetPlans[0].plan.inference) : laneRun ? laneRun.inference : inferenceChange ? inferenceChange.prior : subsetPlans[0].plan.inference);
+  // The decision run measured its decision from its own first reference and prompt cases (the
+  // anchors), so those two cases ran BEFORE the decision existed: their retained plans carry no
+  // matrixDecision/matrixAnchors (both outside the plan digest, so planSha256 names the same plan as
+  // the run's later cases). Such a case is accepted only in the decision-run segment, only as this
+  // backend's anchor the decision names, and only when its execution receipt is byte-identical to the
+  // anchor receipt in the decision run's retained packet (re-hashed below) that the subset plan's
+  // matrixAnchors were adopted from. Every other case must have run under the decision itself.
+  const decisionAnchorIds = laneRun ? [] : Object.values(record.decision.anchorIds ?? {}).map(ids => ids?.[backend]).filter(Boolean);
+  const preDecisionAnchorCases = [];
   for (const v of plans) {
-    assert.deepEqual(v.plan.matrixDecision, record.decision, `segment ${v.segment} case ${v.caseId} ran under another matrix decision`);
+    if (v.plan.matrixDecision === undefined) {
+      assert.ok(v.segment === priorSegment.label && !laneRun && decisionAnchorIds.includes(v.caseId), `segment ${v.segment} case ${v.caseId} ran under no matrix decision; only the decision run's own ${backend} anchors ran before the decision was measured`);
+      assert.ok(v.plan.matrixAnchors === undefined && v.plan.priorMatrixDecision === undefined, `${v.caseId} carries anchors or a prior decision but no matrix decision`);
+      const row = rows.find(r => r.id === v.caseId && r.segment === v.segment);
+      const decided = rows.find(r => r.segment === v.segment && plans.some(o => o.segment === v.segment && o.caseId === r.id && o.plan.matrixDecision !== undefined));
+      if (decided) assert.equal(row.planSha256, decided.planSha256, `${v.caseId} ran under another plan than the decision run's later cases`);
+      preDecisionAnchorCases.push(v.caseId);
+    } else assert.deepEqual(v.plan.matrixDecision, record.decision, `segment ${v.segment} case ${v.caseId} ran under another matrix decision`);
     assert.equal(v.plan.inference, expectedPin(v.segment), inferenceChange ? `segment ${v.segment} case ${v.caseId} ran at inference ${v.plan.inference}, not the pin the recorded inference change names for that segment (${expectedPin(v.segment)})` : 'segments use different inference pins and the prior-decision record declares no inference change');
     assert.equal(v.plan.nativeEvidence?.sha, subsetPlans[0].plan.nativeEvidence?.sha, 'segments use different native evidence');
   }
@@ -1629,6 +1645,18 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
   const bySegment = [priorSegment, subsetSegment].map((segment, index) => ({ label: segment.label, role: index ? 'prior-decision-subset' : laneRun ? 'prior-lane-run' : 'decision-run', runId: String(segment.runId), attempt: String(segment.attempt), sceneworks: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.sceneworks))], inference: [...new Set(rows.filter(r => r.segment === segment.label).map(r => r.inference))], cases: rows.filter(r => r.segment === segment.label).map(r => r.id) }));
   const reusedNativeWitnesses = [];
   for (const entry of record.reusedNativeWitnesses ?? []) reusedNativeWitnesses.push({ ...await verifyReusedNativeWitness(reference, entry, subsetSegment.caseRoot), segment: subsetSegment.label });
+  if (preDecisionAnchorCases.length) {
+    const packet = record.anchorPackets?.[backend];
+    assert.ok(packet?.retainedDirectory, `the prior-decision record retains no ${backend} anchor packet to bind the decision run's pre-decision anchor cases to`);
+    assert.equal(String(packet.runId), String(record.decisionRun.runId), `the retained ${backend} anchor packet is not the decision run's`); assert.equal(String(packet.runAttempt), String(record.decisionRun.attempt), `the retained ${backend} anchor packet is not the decision run attempt's`);
+    const loaded = await readRetainedAnchorPacket(contained(subsetSegment.caseRoot, packet.retainedDirectory), { backend, sceneworks: record.sourceSha, inference: expectedPin(priorSegment.label), nativeEvidenceSha: reference.nativeEvidence?.sha, runId: packet.runId, runAttempt: packet.runAttempt });
+    for (const id of preDecisionAnchorCases) {
+      const anchor = loaded.anchors.find(a => a.caseId === id), row = rows.find(r => r.id === id && r.segment === priorSegment.label);
+      assert.ok(anchor, `${id}: the decision run's retained ${backend} anchor packet does not carry it`);
+      assert.ok((reference.matrixAnchors ?? []).some(m => m.backend === backend && m.caseId === id && m.receiptInput?.sha256 === anchor.receiptInput.sha256 && m.wallMs === anchor.wallMs), `retained ${backend} anchor ${id} is not an anchor the subset plan adopted its decision from`);
+      assert.equal(row.executionSha256, anchor.receiptInput.sha256, `${id}: execution receipt is not the anchor receipt the decision was measured from`);
+    }
+  }
   let crossCaseControls = null;
   if (!missing.length) {
     const dirs = new Map(rows.map(row => [row.id, row.dir])), segmentOf = new Map(rows.map(row => [row.id, row.segment]));
@@ -1641,9 +1669,9 @@ export async function verifySplitBackendEvidence({ backend, segments }, { verify
     status: missing.length ? 'split-backend-incomplete' : 'split-backend-content-reverified',
     matrixDecision: record.decision, priorMatrixDecision: record,
     inference: reference.inference, inferenceChange, nativeEvidenceSha: reference.nativeEvidence?.sha ?? null,
-    segments: bySegment, allocation, missing, crossCaseControls, reusedNativeWitnesses,
+    segments: bySegment, allocation, missing, crossCaseControls, reusedNativeWitnesses, preDecisionAnchorCases,
     cases: rows.map(({ dir: _dir, ...row }) => row),
-    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. The decision-run segment must be the run the subset segment\'s prior-decision record names, its cases must be that record\'s priorPassedCaseIds and the subset segment\'s cases its subsetCaseIds; segment roles come from the record, so the result does not depend on manifest order. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. reusedNativeWitnesses are native witnesses the subset segment adopted from its decision\'s anchor packets (same native evidence SHA) instead of running its own; each was re-hashed from the segment\'s retained files. inference is the subset segment\'s pin; each segment and case lists the pin it actually ran at, and inferenceChange (when not null) is the recorded, descendant pin change between the decision run and the subset run. This is not a single-SHA backend readback.',
+    meaning: 'Each case re-validated against the plan it actually ran under and attributed to its own run and SceneWorks SHA. The decision-run segment must be the run the subset segment\'s prior-decision record names, its cases must be that record\'s priorPassedCaseIds and the subset segment\'s cases its subsetCaseIds; segment roles come from the record, so the result does not depend on manifest order. Cases from different SHAs are listed separately; cross-segment controls are flagged crossSegment. preDecisionAnchorCases are the decision run\'s own anchor cases, which ran before the decision was measured; each is bound to its retained anchor receipt. reusedNativeWitnesses are native witnesses the subset segment adopted from its decision\'s anchor packets (same native evidence SHA) instead of running its own; each was re-hashed from the segment\'s retained files. inference is the subset segment\'s pin; each segment and case lists the pin it actually ran at, and inferenceChange (when not null) is the recorded, descendant pin change between the decision run and the subset run. This is not a single-SHA backend readback.',
   };
 }
 export async function verifyCampaign(p) {

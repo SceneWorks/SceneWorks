@@ -125,7 +125,10 @@ run's record declares an `inferenceChange`, below; each segment and case reports
 refuses a case that passed in both
 segments, reports any allocation gap as `split-backend-incomplete`, and flags cross-case controls
 whose cases come from different segments (`crossSegment: true`, e.g. `real-hybrid-text-repeat`
-against `real-hybrid-text`). Its output is a `split-backend-content-readback` with
+against `real-hybrid-text`). The decision run's own two anchors ran before its decision was measured, so
+their plans carry none; they are accepted only as the decision's `anchorIds` for the lane, with an
+execution receipt byte-identical to the retained anchor packet's, and reported as
+`preDecisionAnchorCases`. Its output is a `split-backend-content-readback` with
 `singleShaBackendReadback: false`; it is not accepted where a single-SHA backend readback is required.
 
 It is tied to the subset run's prior-decision record: exactly two segments, the subset segment is the

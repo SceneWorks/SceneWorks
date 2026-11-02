@@ -4,6 +4,7 @@
 // (cuda) / 41213914294 (mlx) and the decision fields of run 41213935677's retained adapter plan.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile, appendFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -199,19 +200,36 @@ test('the retained evidence is located by the declared run alone: its reduced ar
   await assert.rejects(retainedDecisionPlan(empty, 'cuda'), /no retained cuda case plan carries a measured matrix decision/);
 });
 // Two segments of one backend: the prior run's passed cases at 4c3625898 and the subset run at a new SHA.
-async function splitFixture(t, { duplicate = false, omit = null, retainPackets = true, toSubset = null, toPrior = null, pinChange = false, dropChangeRecord = false } = {}) {
-  const w = await workspace(t), decided = { ...w.plan, sceneworks: PRIOR_SW, matrixDecision: w.decisionPlan.matrixDecision, matrixAnchors: w.decisionPlan.matrixAnchors };
+// As in the real run 41213935677, the decision run's two cuda anchors (its first reference and prompt
+// cases) ran BEFORE the decision was measured, under the plan without matrixDecision/matrixAnchors, and
+// their execution receipts are the receipts in the decision run's anchor packet.
+const CUDA_ANCHORS = { 'cuda.reduced.artifact-0-ordered-mixed-baseline-ref-turbo': '1.execution.json', 'cuda.reduced.real-hybrid-text': '15.execution.json' };
+async function splitFixture(t, { duplicate = false, omit = null, retainPackets = true, toSubset = null, toPrior = null, pinChange = false, dropChangeRecord = false, anchorsDecided = false, tamperAnchorReceipt = false } = {}) {
+  const w = await workspace(t), undecided = { ...w.plan, sceneworks: PRIOR_SW }, decided = { ...undecided, matrixDecision: w.decisionPlan.matrixDecision, matrixAnchors: w.decisionPlan.matrixAnchors };
+  const segments = [{ label: 'prior', caseRoot: path.join(w.root, 'seg-prior'), runId: RUN, attempt: '1' }, { label: 'subset', caseRoot: path.join(w.root, 'seg-subset'), runId: '99', attempt: '1' }];
+  const write = async (segment, plan, id, runId, extra = {}) => {
+    const dir = path.join(segment.caseRoot, id); await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, 'adapter-plan.json'), JSON.stringify(plan));
+    const execution = JSON.stringify({ caseId: id, status: 'passed', runId, runAttempt: '1', sceneworks: plan.sceneworks, inference: plan.inference, planSha256: executionPlanDigest(plan), verified: { files: [] }, ...extra });
+    await writeFile(path.join(dir, 'execution.json'), execution); return execution;
+  };
+  // The anchor receipts in the decision run's packet (and so in the decision it carries) are these cases' execution receipts.
+  const packetFile = path.join(w.root, 'anchors-cuda', 'anchors.json'), packet = JSON.parse(await readFile(packetFile, 'utf8'));
+  for (const [id, receipt] of Object.entries(CUDA_ANCHORS)) {
+    if (id === toSubset) continue;
+    const { wallMs } = packet.anchors.find(a => a.caseId === id), started = '2026-10-30T00:00:00.000Z';
+    const execution = await write(segments[0], anchorsDecided ? decided : undecided, id, RUN, { started, completed: new Date(Date.parse(started) + wallMs).toISOString(), verified: { files: [{ path: 'output-0-0.mp4', sha256: 'c'.repeat(64) }] } }), sha256 = createHash('sha256').update(execution).digest('hex');
+    await writeFile(path.join(w.root, 'anchors-cuda', receipt), execution);
+    for (const v of [...packet.anchors.map(a => a.receiptInput), ...packet.files]) if (v.path === receipt) v.sha256 = sha256;
+    for (const a of w.decisionPlan.matrixAnchors) if (a.backend === 'cuda' && a.caseId === id) a.receiptInput.sha256 = sha256;
+  }
+  await writeFile(packetFile, JSON.stringify(packet, null, 2));
   const subsetPlan = structuredClone(w.plan);
   if (pinChange) { subsetPlan.inference = NEW_PIN; subsetPlan.nativeEvidence.productPin = NEW_PIN; }
   await adopt({ ...w, plan: subsetPlan }, pinChange ? { inferenceAncestry: descends } : {});
   if (dropChangeRecord) delete subsetPlan.priorMatrixDecision.inferenceChange;
-  const segments = [{ label: 'prior', caseRoot: path.join(w.root, 'seg-prior'), runId: RUN, attempt: '1' }, { label: 'subset', caseRoot: path.join(w.root, 'seg-subset'), runId: '99', attempt: '1' }];
-  const write = async (segment, plan, id, runId) => {
-    const dir = path.join(segment.caseRoot, id); await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, 'adapter-plan.json'), JSON.stringify(plan));
-    await writeFile(path.join(dir, 'execution.json'), JSON.stringify({ caseId: id, status: 'passed', runId, runAttempt: '1', sceneworks: plan.sceneworks, inference: plan.inference, planSha256: executionPlanDigest(plan), verified: { files: [] } }));
-  };
-  for (const c of executionCases(decided).filter(c => c.backend === 'cuda' && !REMAINING.includes(c.id))) if (c.id !== toSubset) await write(segments[0], decided, c.id, RUN);
+  if (tamperAnchorReceipt) { const file = path.join(segments[0].caseRoot, 'cuda.reduced.real-hybrid-text', 'execution.json'); await writeFile(file, (await readFile(file, 'utf8')) + ' '); }
+  for (const c of executionCases(decided).filter(c => c.backend === 'cuda' && !REMAINING.includes(c.id) && !CUDA_ANCHORS[c.id])) if (c.id !== toSubset) await write(segments[0], decided, c.id, RUN);
   for (const id of REMAINING) if (id !== omit && id !== toPrior) await write(segments[1], subsetPlan, id, '99');
   if (toSubset) await write(segments[1], subsetPlan, toSubset, '99');
   if (toPrior) await write(segments[0], decided, toPrior, RUN);
@@ -233,6 +251,7 @@ test('a split readback attributes each case to its own run and SHA, flags cross-
   const reversed = await verifySplitBackendEvidence({ backend: 'cuda', segments: [...f.segments].reverse() }, { verifyCase: async () => {}, controls });
   assert.deepEqual(reversed, r);
   assert.deepEqual(r.segments.map(s => s.role), ['decision-run', 'prior-decision-subset']);
+  assert.deepEqual(r.preDecisionAnchorCases, Object.keys(CUDA_ANCHORS), 'the decision run\'s anchors ran before its decision and are bound to their anchor receipts');
   assert.equal(verified.length, 25); assert.deepEqual(r.missing, []);
   assert.deepEqual(r.segments.map(s => [s.label, s.sceneworks, s.cases.length]), [['prior', [PRIOR_SW], 18], ['subset', [NEW_SW], 7]]);
   assert.deepEqual(r.crossCaseControls.map(v => v.crossSegment), [true, false]);
@@ -277,6 +296,19 @@ test('a split readback is tied to the prior-decision record: its decision run, s
   await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { toPrior: REMAINING[0] })).segments }, { verifyCase: none, controls }), /real-hybrid-first-last from the decision run is not among the record's priorPassedCaseIds/);
   const three = await splitFixture(t);
   await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: [...three.segments, { ...three.segments[0], label: 'extra' }] }, { verifyCase: none, controls }), /exactly two run segments/);
+});
+test('only the decision run\'s own anchors may have run before the decision, each bound to its anchor receipt', async t => {
+  const none = async () => {}, controls = async () => [];
+  // An anchor whose execution receipt is not the packet's anchor receipt is refused.
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { tamperAnchorReceipt: true })).segments }, { verifyCase: none, controls }), /real-hybrid-text: execution receipt is not the anchor receipt the decision was measured from/);
+  // A non-anchor decision-run case without the decision is refused.
+  const plain = await splitFixture(t), dir = path.join(plain.segments[0].caseRoot, 'cuda.reduced.real-drop-audio');
+  const plan = JSON.parse(await readFile(path.join(dir, 'adapter-plan.json'), 'utf8')); delete plan.matrixDecision; delete plan.matrixAnchors;
+  await writeFile(path.join(dir, 'adapter-plan.json'), JSON.stringify(plan));
+  await assert.rejects(verifySplitBackendEvidence({ backend: 'cuda', segments: plain.segments }, { verifyCase: none, controls }), /case cuda\.reduced\.real-drop-audio ran under no matrix decision; only the decision run's own cuda anchors/);
+  // Anchors that DID carry the decision still verify, and are not reported as pre-decision.
+  const decided = await verifySplitBackendEvidence({ backend: 'cuda', segments: (await splitFixture(t, { anchorsDecided: true })).segments }, { verifyCase: none, controls });
+  assert.equal(decided.status, 'split-backend-content-reverified'); assert.deepEqual(decided.preDecisionAnchorCases, []);
 });
 test('the terminal workflow adopts a declared prior decision before resolving cases and then exchanges no anchors', async () => {
   const workflow = await readFile(new URL('../.github/workflows/h3-finetune-terminal.yml', import.meta.url), 'utf8');
