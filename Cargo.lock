@@ -751,6 +751,7 @@ dependencies = [
  "rayon",
  "safetensors 0.7.0",
  "sceneworks-load-progress",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "tokenizers 0.22.2",
  "yoke 0.8.2",
