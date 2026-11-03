@@ -3020,8 +3020,6 @@ pub(crate) fn resolved_files_tree_stamp(
 }
 
 fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
-    use std::io::Read;
-
     let mut digest = Sha256::new();
     for path in artifact_files(root)? {
         let relative = path.strip_prefix(root).map_err(|_| {
@@ -3037,26 +3035,10 @@ fn artifact_content_fingerprint(root: &Path) -> WorkerResult<String> {
         if metadata.file_type().is_symlink() {
             digest.update(std::fs::read_link(&path)?.to_string_lossy().as_bytes());
             if std::fs::metadata(&path)?.is_file() {
-                let mut file = std::fs::File::open(&path)?;
-                let mut buffer = [0_u8; 64 * 1024];
-                loop {
-                    let read = file.read(&mut buffer)?;
-                    if read == 0 {
-                        break;
-                    }
-                    digest.update(&buffer[..read]);
-                }
+                sceneworks_core::hashing::update_sha256(std::fs::File::open(&path)?, &mut digest)?;
             }
         } else if metadata.is_file() {
-            let mut file = std::fs::File::open(&path)?;
-            let mut buffer = [0_u8; 64 * 1024];
-            loop {
-                let read = file.read(&mut buffer)?;
-                if read == 0 {
-                    break;
-                }
-                digest.update(&buffer[..read]);
-            }
+            sceneworks_core::hashing::update_sha256(std::fs::File::open(&path)?, &mut digest)?;
         }
         digest.update([0xff]);
     }

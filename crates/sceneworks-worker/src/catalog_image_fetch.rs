@@ -19,10 +19,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use serde_json::json;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions};
 use std::future::Future;
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -2239,17 +2238,8 @@ fn validate_cached_file(path: &Path, expected_hash: &str, bytes: u64) -> std::io
             "cached image metadata mismatch",
         ));
     }
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    if format!("{:x}", hasher.finalize()) != expected_hash {
+    let digest = sceneworks_core::hashing::sha256_file(path)?;
+    if digest != expected_hash {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "cached image hash mismatch",
@@ -2263,7 +2253,7 @@ fn bounded_failure_reason(error: &WorkerError) -> String {
 }
 
 fn hex_digest(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    sceneworks_core::hashing::sha256_bytes(bytes)
 }
 
 #[cfg(test)]

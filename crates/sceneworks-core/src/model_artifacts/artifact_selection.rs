@@ -160,8 +160,6 @@ type DigestKey = (PathBuf, u64, Option<std::time::SystemTime>);
 /// SHA-256 of `path`, memoized per (path, size, mtime) for the life of the process, so a catalog
 /// read does not re-hash a multi-GB derived weights file that has not changed.
 fn memoized_file_sha256(path: &Path, len: u64) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
     static CACHE: std::sync::OnceLock<std::sync::Mutex<BTreeMap<DigestKey, String>>> =
         std::sync::OnceLock::new();
     let modified = std::fs::metadata(path)?.modified().ok();
@@ -170,17 +168,7 @@ fn memoized_file_sha256(path: &Path, len: u64) -> std::io::Result<String> {
     if let Some(hit) = cache.lock().ok().and_then(|map| map.get(&key).cloned()) {
         return Ok(hit);
     }
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = crate::hashing::sha256_file(path)?;
     if let Ok(mut map) = cache.lock() {
         map.insert(key, digest.clone());
     }

@@ -178,16 +178,8 @@ pub(crate) fn optional_f64(value: &Value, key: &str) -> Option<f64> {
 /// `getrandom` and hex-encodes in Rust — no connection, no SQLite failure
 /// surface.
 pub(crate) fn random_hex(bytes: usize) -> ProjectStoreResult<String> {
-    const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-    let mut buffer = vec![0u8; bytes];
-    getrandom::fill(&mut buffer)
-        .map_err(|error| ProjectStoreError::Io(std::io::Error::other(error.to_string())))?;
-    let mut hex = String::with_capacity(bytes * 2);
-    for byte in buffer {
-        hex.push(HEX_DIGITS[(byte >> 4) as usize] as char);
-        hex.push(HEX_DIGITS[(byte & 0x0f) as usize] as char);
-    }
-    Ok(hex)
+    crate::hashing::random_hex(bytes)
+        .map_err(|error| ProjectStoreError::Io(std::io::Error::other(error.to_string())))
 }
 
 /// Deserialize a single string into one of the crate's [`StringEnum`] types.

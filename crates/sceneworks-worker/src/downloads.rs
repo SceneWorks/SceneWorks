@@ -1089,18 +1089,7 @@ pub(crate) async fn sha256_file(
 ) -> WorkerResult<String> {
     let path = path.to_path_buf();
     let handle = crate::load_progress::spawn_blocking(move || -> WorkerResult<String> {
-        use std::io::Read;
-        let mut file = std::fs::File::open(&path).map_err(WorkerError::Io)?;
-        let mut hasher = Sha256::new();
-        let mut buffer = vec![0_u8; 1024 * 1024];
-        loop {
-            let read = file.read(&mut buffer).map_err(WorkerError::Io)?;
-            if read == 0 {
-                break;
-            }
-            hasher.update(&buffer[..read]);
-        }
-        Ok(format!("{:x}", hasher.finalize()))
+        sceneworks_core::hashing::sha256_file(&path).map_err(WorkerError::Io)
     });
     heartbeat_while_blocking(api, settings, job_id, "sha256 verify", handle).await
 }

@@ -4198,11 +4198,7 @@ fn seal_sdxl_endpoint_load_spec(
     for file in expected {
         let pin = gen_core::PinnedWeightsFile::pin(&actual[&file.path])
             .map_err(|error| crate::classify_engine_error("SDXL endpoint load pin", error))?;
-        let digest = pin
-            .content_sha256()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+        let digest = sceneworks_core::hashing::hex(pin.content_sha256());
         if pin.target_fingerprint().size != file.bytes || digest != file.sha256 {
             return Ok(false);
         }

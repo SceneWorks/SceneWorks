@@ -90,8 +90,6 @@ pub fn installed_repa_teacher(data_dir: &Path) -> Option<PathBuf> {
 
 /// The integrity check of a staged teacher file: the exact pinned size, then the pinned sha256.
 pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
-    use sha2::{Digest, Sha256};
-    use std::io::Read;
     let (pinned_size, pinned_sha256) = pinned_teacher_integrity();
     let size = std::fs::metadata(path)
         .map_err(|error| format!("the REPA teacher {} is unreadable: {error}", path.display()))?
@@ -106,18 +104,9 @@ pub fn verify_repa_teacher_file(path: &Path) -> Result<(), String> {
     }
     let mut file = std::fs::File::open(path)
         .map_err(|error| format!("the REPA teacher {} is unreadable: {error}", path.display()))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 1 << 20];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("reading the REPA teacher failed: {error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = sceneworks_core::hashing::sha256_reader(&mut file)
+        .map_err(|error| format!("reading the REPA teacher failed: {error}"))?
+        .0;
     if digest != pinned_sha256 {
         return Err(format!(
             "the REPA teacher {} has sha256 {digest}, not the pinned {pinned_sha256}; reinstall \
