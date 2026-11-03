@@ -80,3 +80,28 @@ test('registered dispatcher forwards exactly the CV contract and isolates every 
   assert.match(caller,/github.event_name == 'workflow_dispatch'/);
   assert.doesNotMatch(caller,/suite:|cv-provider-validation|cv-oracle-provision/);
 });
+
+test('native provisioning startup preserves Windows paths and passes arguments without a shell',async()=>{
+  const {provisionPaths,provisionCommand,run}=await import('./cv-provision-entry.mjs');
+  const env={RUNNER_TEMP:'D:\\runner temp',GITHUB_RUN_ID:'123',GITHUB_RUN_ATTEMPT:'2'};
+  assert.match(provisionPaths('provider',env,'win32'),/CV_PROVISION_ROOT=D:\\runner temp\\cv-provision-123-2\n/);
+  assert.throws(()=>provisionPaths('provider',{...env,RUNNER_TEMP:'D:\\runner\ninject'},'win32'));
+  const python={CV_NATIVE_PYTHON:'C:\\Python 3.12\\python.exe',CV_BACKEND:'cuda',CV_SOURCE_SHA:source,CV_INFERENCE_SHA:inference,CV_PROVISION_ROOT:'D:\\runner temp\\fixtures',CV_ORACLE_ARTIFACT:'D:\\runner temp\\oracles'};
+  const [command,args]=provisionCommand(python,'win32');
+  assert.equal(command,python.CV_NATIVE_PYTHON);assert(args.includes(python.CV_PROVISION_ROOT));
+  assert.throws(()=>provisionCommand({...python,CV_NATIVE_PYTHON:'python'},'win32'));
+  let called=false;
+  assert.equal(run(['proof'],{...python,CV_NATIVE_PYTHON:'/tmp/native python'},(executable,argv,options)=>{
+    called=true;assert.equal(executable,'/tmp/native python');assert.equal(options.shell,false);
+    assert(argv.includes(python.CV_PROVISION_ROOT));return {status:17,signal:null};
+  }),17);
+  assert(called);
+  for(const file of ['cv-provider-validation.yml','cv-oracle-provision.yml']) {
+    const text=await readFile(new URL(`../.github/workflows/${file}`,import.meta.url),'utf8');
+    assert.match(text,/run: bash scripts\/select-cv-python.sh/);
+    assert.match(text,/shell: node \{0\}/);
+    assert.doesNotMatch(text,/python -B - <<|run: python -I -B scripts\/cv_provision.py --mode proof/);
+    if(file==='cv-oracle-provision.yml') assert.doesNotMatch(text,/actions\/setup-python/);
+    else assert.match(text,/id: python\n        if: \$\{\{ inputs.backend == 'cuda' && !inputs.build_only \}\}/);
+  }
+});

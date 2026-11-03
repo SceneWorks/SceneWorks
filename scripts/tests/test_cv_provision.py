@@ -56,18 +56,65 @@ class ProvisionContracts(unittest.TestCase):
         # Execute only the embedded stdlib path initialization from each assembled workflow.
         for name in ("cv-provider-validation.yml", "cv-oracle-provision.yml"):
             workflow = (SCRIPTS.parent / ".github/workflows" / name).read_text()
-            code = workflow.split("python -B - <<'PYTHON'\n", 1)[1].split("          PYTHON", 1)[0]
+            step = workflow.split("      - name: Select run-private provisioning paths\n", 1)[1].split("      - name:", 1)[0]
+            self.assertIn("shell: node {0}", step)
+            code = step.split("        run: |\n", 1)[1]
             code = "\n".join(line.removeprefix("          ") for line in code.splitlines())
             output = self.root / (name + ".env")
             env = dict(os.environ, RUNNER_TEMP=str(self.root / "runner space"),
                        GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="2", GITHUB_ENV=str(output))
-            subprocess.run([sys.executable, "-I", "-B", "-c", code], env=env, check=True)
+            subprocess.run(["node", "-e", code], cwd=SCRIPTS.parent, env=env, check=True)
             values = dict(line.split("=", 1) for line in output.read_text().splitlines())
             self.assertTrue(values)
             for value in values.values():
                 self.assertTrue(value.startswith(str(self.root / "runner space")))
                 self.assertTrue(value.endswith("-123-2"))
                 self.assertFalse(Path(value).exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "native Mac host interpreter setup")
+    def test_actual_mac_python_setup_is_run_private_and_validates_interpreter(self):
+        env_file, path_file = self.root / "github env", self.root / "github path"
+        env = dict(os.environ, RUNNER_TEMP=str(self.root), GITHUB_JOB="produce",
+                   GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="2",
+                   GITHUB_ENV=str(env_file), GITHUB_PATH=str(path_file))
+        subprocess.run(["bash", str(SCRIPTS / "select-cv-python.sh")], env=env, check=True)
+        shim = Path(path_file.read_text().strip())
+        self.assertEqual(shim.parent, self.root)
+        self.assertTrue((shim / "python").is_symlink())
+        self.assertTrue((shim / "python3").is_symlink())
+        selected = env_file.read_text().strip().split("=", 1)[1]
+        self.assertEqual((shim / "python").resolve(), Path(selected).resolve())
+        output = subprocess.check_output([str(shim / "python"), "-I", "-B", "-c", "import sys; print(sys.version_info[:2])"], text=True)
+        self.assertEqual(output.strip(), "(3, 12)")
+        venv = self.root / "private tools"
+        subprocess.run([str(shim / "python"), "-I", "-B", "-m", "venv", "--without-pip", str(venv)], check=True)
+        output = subprocess.check_output([str(venv / "bin/python"), "-I", "-B", "-c", "import sys; print(sys.version_info[:2]); assert sys.prefix != sys.base_prefix"], text=True)
+        self.assertEqual(output.strip(), "(3, 12)")
+        wrong = self.root / "wrong interpreter"
+        wrong.mkdir()
+        fake = wrong / "python3.12"
+        fake.write_text("#!/bin/sh\nexit 19\n")
+        fake.chmod(0o755)
+        env.update(PATH=str(wrong) + os.pathsep + env["PATH"], GITHUB_RUN_ATTEMPT="3")
+        rejected = subprocess.run(["bash", str(SCRIPTS / "select-cv-python.sh")], env=env)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertFalse((self.root / "cv-python-produce-123-3").exists())
+
+    def test_actual_node_provision_step_refuses_before_assets(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/cv-provider-validation.yml").read_text()
+        step = workflow.split("      - name: Provision pinned model fixtures and verified native runtime\n", 1)[1].split("      - uses:", 1)[0]
+        self.assertIn("shell: node {0}", step)
+        code = step.split("        run: |\n", 1)[1]
+        entry = self.root / "step.js"
+        entry.write_text("\n".join(line.removeprefix("          ") for line in code.splitlines()))
+        env = dict(os.environ, CV_NATIVE_PYTHON=sys.executable, CV_BACKEND="mlx",
+                   CV_SOURCE_SHA="a" * 40, CV_INFERENCE_SHA="b" * 40,
+                   CV_PROVISION_ROOT=str(self.root / "assets"), CV_ORACLE_ARTIFACT=str(self.root / "oracle"))
+        env.pop("GITHUB_ACTIONS", None)
+        result = subprocess.run(["node", str(entry)], cwd=SCRIPTS.parent, env=env, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("explicit Actions dispatch", result.stderr)
+        self.assertFalse((self.root / "assets").exists())
 
     def test_nested_manual_dispatch_admits_exact_source_and_all_pin_sites(self):
         source, pin = "a" * 40, "b" * 40

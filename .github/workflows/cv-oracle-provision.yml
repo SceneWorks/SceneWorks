@@ -56,22 +56,16 @@ jobs:
         with:
           ref: ${{ inputs.source_sha }}
           persist-credentials: false
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          python-version: "3.12"
-      - name: Select run-private provisioning paths
+          node-version: 22
+      - name: Require native host CPython 3.12 without privileged installation
         shell: bash
+        run: bash scripts/select-cv-python.sh
+      - name: Select run-private provisioning paths
+        shell: node {0}
         run: |
-          python -B - <<'PYTHON'
-          import os
-          from pathlib import Path
-          root = Path(os.environ["RUNNER_TEMP"])
-          suffix = os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"]
-          names = {'CV_ORACLE_INPUT': 'cv-oracle-input', 'CV_ORACLE_TOOLS': 'cv-oracle-tools', 'CV_ORACLE_OUTPUT': 'cv-oracles', 'YOLO_CONFIG_DIR': 'cv-ultralytics', 'MPLCONFIGDIR': 'cv-matplotlib', 'TORCH_HOME': 'cv-torch', 'XDG_CACHE_HOME': 'cv-oracle-cache', 'PIP_CACHE_DIR': 'cv-pip'}
-          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
-              for name, prefix in names.items():
-                  stream.write(f"{name}={root / (prefix + '-' + suffix)}\n")
-          PYTHON
+          require('node:child_process').execFileSync(process.execPath, ['scripts/cv-provision-entry.mjs', 'paths', 'oracle'], {stdio: 'inherit'});
       - name: Admit exact pair and stage only pinned oracle inputs
         run: python -I -B scripts/cv_provision.py --mode oracle-input --backend mlx --source-sha "$CV_SOURCE_SHA" --inference-sha "$CV_INFERENCE_SHA" --output "$CV_ORACLE_INPUT"
       - name: Install bounded run-private CPU oracle tools

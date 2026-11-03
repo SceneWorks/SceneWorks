@@ -74,7 +74,11 @@ boxes `<1px`, final classes `<1e-3`, isolated blocks/attention/PE `<1e-3`, and p
 corners `<2px`/confidence `<0.02`. Missing, partial or failed oracle artifacts
 reject the hardware run.
 
-Tools install in a run-private CPython 3.12 venv. The primary wheel hashes pin
+Mac jobs validate the runner-provisioned native arm64 CPython 3.12 and expose it
+through a run-private shim; they never use the hosted `/Users/runner` installer.
+Windows retains `setup-python` and passes its exact interpreter path to the native
+Node provisioning entry point, without Bash or a WSL dependency. Path setup is
+also native Node on both platforms. Tools install in a run-private CPython 3.12 venv. The primary wheel hashes pin
 Ultralytics 8.3.0, PyTorch 2.8.0, torchvision 0.23.0, NumPy 1.26.4,
 safetensors 0.6.2, OpenCV 4.10.0.84 and Pillow 11.3.0. Dependency resolution is
 recorded; every selected wheel is length/hash checked before an offline install.
