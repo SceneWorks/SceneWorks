@@ -1,3 +1,6 @@
+import { FakeEventSource } from "../testUtils/events.js";
+import { deferred } from "../testUtils/async.js";
+import { settle } from "../testUtils/dom.js";
 // sc-9750 (F-052 follow-up): focused unit coverage for the two hooks extracted from
 // App.jsx — useAccessGate (the remote-access gate + media-ticket mint) and useJobEvents
 // (the live job/worker/queue SSE stream). The App.*.test.jsx suite already exercises
@@ -88,37 +91,11 @@ vi.mock("../runtime.js", async (importOriginal) => {
 
 // A minimal FakeEventSource capturing listeners so tests can dispatch SSE events, plus
 // close() bookkeeping so the effect-cleanup assertion has something to check.
-class FakeEventSource {
-  static instances = [];
-  constructor(url) {
-    this.url = url;
-    this.listeners = {};
-    this.closed = false;
-    FakeEventSource.instances.push(this);
-  }
-  addEventListener(event, handler) {
-    this.listeners[event] = handler;
-  }
-  close() {
-    this.closed = true;
-  }
-}
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
 
-async function settle() {
-  await act(async () => {
-    for (let i = 0; i < 6; i += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
+
+
 
 describe("useAccessGate (sc-9750)", () => {
   let container;

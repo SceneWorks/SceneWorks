@@ -1,3 +1,4 @@
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { click, mountRoot, setInput, setSelect, unmountRoot } from "../testUtils/dom.js";
@@ -226,11 +227,7 @@ function context(overrides = {}) {
 
 // ---- helpers --------------------------------------------------------------------------------
 
-const settle = async () => {
-  await act(async () => {
-    for (let index = 0; index < 10; index += 1) await Promise.resolve();
-  });
-};
+
 const wait = async (ms) => {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, ms));
@@ -307,7 +304,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
         </AppContext.Provider>,
       );
     });
-    await settle();
+    await settle({ microtasks: 10 });
   }
   const lab = () => container.querySelector('[data-testid="yue2-song-lab"]');
   // Lyrics default to the section editor; whole-string lyrics go through its Text view.
@@ -350,7 +347,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       resolveComparisons({ items: [], unreadable: ["old-comparison"] });
     });
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lab().querySelector('[data-testid="yue2-version-row"]')).toBeTruthy();
     expect(lab().textContent).not.toContain("old-version");
     await click(buttonWithText(lab(), "Compare"));
@@ -384,7 +381,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   it("opens only on an explicit click, behind the opt-in and the server licence acknowledgment", async () => {
     await render(context());
     await click(container.querySelector('[data-testid="yue2-lab-tab"]'));
-    await settle();
+    await settle({ microtasks: 10 });
     const gate = container.querySelector('[data-testid="yue2-gate"]');
     expect(gate).toBeTruthy();
     expect(container.querySelector("form.studio-shell").hidden).toBe(true);
@@ -404,7 +401,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(accept);
     expect(enable.disabled).toBe(false);
     await click(enable);
-    await settle();
+    await settle({ microtasks: 10 });
     expect(calls("/license-acknowledgment", "PUT")).toHaveLength(1);
     expect(container.querySelector('[data-testid="yue2-compose"]')).toBeTruthy();
     // Leaving the lab returns to the standard form exactly as it was.
@@ -511,7 +508,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await render(context({ requestedGpu: "0", visibleWorkers: [{ gpuId: "0", capabilities: ["gpu", "nvidia", "candle", "int8_convrot"] }] }));
     expect(buttonWithText(lab(), "Generate song").disabled).toBe(false);
     await click(buttonWithText(lab(), "Generate song"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toMatchObject({ kind: "create", tier: "bf16", arMode: "experimentalFp8", requestedGpu: "0" });
   });
 
@@ -549,7 +546,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await type(byLabel(lab(), "Takes"), "3");
     await setEveryAdvancedControl();
     await click(buttonWithText(lab(), "Generate song"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toEqual({
       kind: "create",
       style: "dream pop, airy vocal",
@@ -576,7 +573,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(lab().querySelector('[data-testid="yue2-compose"] input[type="checkbox"]'));
     await setEveryAdvancedControl();
     await click(buttonWithText(lab(), "Plan the score"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toEqual({
       kind: "plan",
       lyrics: "[verse]\nhello",
@@ -598,11 +595,11 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(buttonWithText(lab(), "Off (no score)").disabled).toBe(true);
     await typeText(byLabel(lab(), "Supplied ABC score"), "X:1\nK:C\nC4|");
     await click(buttonWithText(lab(), "Preview score"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(JSON.parse(calls("/yue2/score/inspect").at(-1)[2].body)).toEqual({ abc: "X:1\nK:C\nC4|" });
     expect(lab().querySelector('[data-testid="yue2-score-preview"]').textContent).toContain("88 BPM");
     await click(buttonWithText(lab(), "Generate song"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toEqual({ kind: "create", lyrics: "[verse]\nhello", planning: "full", score: "X:1\nK:C\nC4|", computePolicy: "auto", requestedGpu: "auto" });
   });
 
@@ -616,7 +613,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       "% SceneWorks YuE2 export: weights licence CC BY-NC 4.0 · NONCOMMERCIAL USE ONLY\nX:1\nK:C\nC4|",
     );
     await click(buttonWithText(lab(), "Preview score"));
-    await settle();
+    await settle({ microtasks: 10 });
     // Mutation that reds this: `inspectYue2Score(abc, token)` (the raw pasted text).
     expect(JSON.parse(calls("/yue2/score/inspect").at(-1)[2].body)).toEqual({ abc: "X:1\nK:C\nC4|" });
   });
@@ -651,7 +648,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(byLabel(lab(), "Style").value).toBe("folk ");
     await setEveryAdvancedControl();
     await click(buttonWithText(lab(), "Render from the saved plan"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toEqual({
       kind: "fromPlan",
       style: "folk ",
@@ -741,13 +738,13 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lastJobBody()).toMatchObject({ kind: "cover", cover: { versionId: "ver_take", mode: "melody" } });
     expect(lastJobBody()).not.toHaveProperty("sourceAudioAssetId");
     await click(buttonWithText(review.querySelector('[data-testid="yue2-transcription-mode-full"]'), "Review & edit in Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lab().querySelector('[data-testid="yue2-version-transcription"]').textContent).toContain("full score");
     await choose(byLabel(lab(), "Edit operation"), "set_tempo");
     await type(lab().querySelector('[data-testid="yue2-edit-panel"] input[type="number"]'), "72");
     await type(byLabel(lab(), "Edit brief"), "slower cover");
     await click(buttonWithText(lab(), "Save as new version"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(editSaved).toBe(true);
     await click(buttonWithText(lab(), "Use as cover score"));
     expect(byLabel(lab(), "Cover score version").value).toBe("ver_edit");
@@ -784,7 +781,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonWithText(lab(), "Record with microphone"));
     expect(lab().querySelector('[data-testid="yue2-microphone"]').dataset.state).toBe("recording");
     await click(buttonWithText(lab(), "Stop and use recording"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(tracks[0].stop).toHaveBeenCalled();
     expect(importAsset).toHaveBeenCalledTimes(1);
     expect(importAsset.mock.calls[0][0].type).toBe("audio/webm");
@@ -822,7 +819,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lab().querySelector('[data-testid="yue2-microphone-error"]').textContent).toContain("Microphone permission denied");
     await click(buttonWithText(lab(), "Record with microphone"));
     await click(buttonWithText(lab(), "Stop and use recording"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(track.stop).toHaveBeenCalled();
     expect(lab().querySelector('[data-testid="yue2-microphone-error"]').textContent).toContain("Import failed");
     expect(buttonStarting(lab(), "Transcribe the recording").disabled).toBe(true);
@@ -854,7 +851,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lab().querySelector('[data-testid="yue2-transcription-error"]').textContent).toContain("temporarily unavailable");
     failRead = false;
     await click(buttonWithText(lab(), "Retry transcription"));
-    await settle();
+    await settle({ microtasks: 10 });
     const review = lab().querySelector('[data-testid="yue2-transcription-review"]');
     expect(review.querySelector('[data-testid="yue2-readiness-reason-melody"]').textContent).toContain("No vocal melody");
     expect(review.querySelector('[data-testid="yue2-abc-error-melody"]').textContent).toContain("No melody score");
@@ -870,7 +867,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await typeText(byLabel(lab(), "Style"), "acoustic");
     await choose(byLabel(lab(), "Cover score version"), "ver_1");
     await click(buttonWithText(lab(), "Review score"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lab().querySelector('[data-testid="yue2-cover-review"]').textContent).toContain("verse");
     await choose(byLabel(lab(), "Cover mode"), "melody");
     await choose(byLabel(lab(), "Cover keep"), "vocal");
@@ -878,7 +875,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(lab().querySelector('[data-testid="yue2-regeneration-notice"]').textContent).toContain("regenerates the whole recording");
     await setEveryAdvancedControl();
     await click(buttonWithText(lab(), "Generate cover"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toEqual({
       kind: "cover",
       style: "acoustic",
@@ -904,7 +901,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonWithText(lab(), "Paste ABC"));
     await typeText(byLabel(lab(), "Cover ABC score"), "X:1\nK:C\nC4|");
     await click(buttonWithText(lab(), "Generate cover"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toEqual({ kind: "cover", lyrics: "[verse]\nhello", cover: { score: "X:1\nK:C\nC4|", mode: "melody" }, computePolicy: "auto", requestedGpu: "auto" });
   });
 
@@ -942,11 +939,11 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       },
     );
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     const rows = lab().querySelectorAll('[data-testid="yue2-version-row"]');
     expect(rows).toHaveLength(2);
     await click(rows[0]);
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lab().querySelector('[data-testid="yue2-score-preview"]').textContent).toContain("chorus");
     expect(lab().querySelector('[data-testid="yue2-version-abc"]').textContent).toContain("X:1");
     expect(lab().querySelector('[data-testid="yue2-regeneration-notice"]').textContent).toContain(
@@ -956,7 +953,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await type(lab().querySelector('[data-testid="yue2-edit-panel"] input[type="number"]'), "72");
     await type(byLabel(lab(), "Edit brief"), "slower verse");
     await click(buttonWithText(lab(), "Check edit"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(editBody).toEqual({
       operation: { op: "set_tempo", bpm: 72 },
       brief: "slower verse",
@@ -983,14 +980,14 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       },
     });
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
-    await settle();
+    await settle({ microtasks: 10 });
     await choose(byLabel(lab(), "Edit operation"), "set_style");
     await type(lab().querySelector('[data-testid="yue2-edit-panel"] .yue2-edit-fields input'), "jazz");
     await type(byLabel(lab(), "Edit brief"), "restyle");
     await click(buttonWithText(lab(), "Save as new version"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lab().querySelector('[data-testid="yue2-edit-error"]').textContent).toContain("melody changed in bar 3");
     expect(lab().querySelector('[data-testid="yue2-invariant-report"]').textContent).toContain("melody — violated");
   });
@@ -1009,9 +1006,9 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       },
     });
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[1]);
-    await settle();
+    await settle({ microtasks: 10 });
     const renders = lab().querySelector('[data-testid="yue2-version-renders"]');
     expect(renders.querySelector('[data-testid="yue2-render-truncation-unknown"]')).toBeTruthy();
     expect(renders.textContent).toContain("worker died");
@@ -1021,11 +1018,11 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await openEnabledLab();
     await setEveryAdvancedControl();
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
-    await settle();
+    await settle({ microtasks: 10 });
     await click(buttonWithText(lab(), "Render this version"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toEqual({
       kind: "renderVersion",
       versionId: "ver_1",
@@ -1044,12 +1041,12 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     const song = { id: "asset_song", type: "audio", projectId: "project_1", displayName: "Song", file: { path: "a.wav" } };
     await openEnabledLab(context({ assets: [song] }));
     await click(buttonWithText(lab(), "Compare"));
-    await settle();
+    await settle({ microtasks: 10 });
     await choose(byLabel(lab(), "Version A"), "ver_1");
     await choose(byLabel(lab(), "Version B"), "ver_2");
-    await settle();
+    await settle({ microtasks: 10 });
     await click(buttonWithText(lab(), "Compare A / B"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(JSON.parse(calls("/yue2/comparisons").at(-1)[2].body)).toEqual({
       versionA: "ver_1",
       versionB: "ver_2",
@@ -1177,7 +1174,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     const card = container.querySelector('[data-testid="yue2-run-card"]');
     await click(buttonStarting(card, "Run record (.json)"));
     await click(buttonStarting(card, "Score (.abc)"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(created).toHaveBeenCalledTimes(2);
     const record = JSON.parse(await readBlob(blobs[0]));
     expect(record.usagePolicy).toEqual(POLICY);
@@ -1204,7 +1201,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     const card = container.querySelector('[data-testid="yue2-run-card"]');
     await choose(byLabel(card, "Decode again with"), "standard");
     await click(buttonWithText(card, "Decode again"));
-    await settle();
+    await settle({ microtasks: 10 });
     // Mutation that reds this: sending `s.decoder` (the lab-wide select) for a decode.
     expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "standard", computePolicy: "auto", requestedGpu: "auto" });
   });
@@ -1231,7 +1228,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(card.querySelector('[data-testid="yue2-decode-legacy-missing"]')).toBeNull();
     await choose(byLabel(card, "Decode again with"), "legacy");
     await click(buttonWithText(card, "Decode again"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody()).toEqual({ kind: "decode", sourceJobId: "job_trunc", decoder: "legacy", computePolicy: "auto", requestedGpu: "auto" });
   });
 
@@ -1244,7 +1241,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(buttonWithText(card, "Decode again").disabled).toBe(true);
     expect(card.querySelector('[data-testid="yue2-decode-blocked"]').textContent).toBe("Install YuE2 first.");
     await click(buttonWithText(card, "Decode again"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(calls("/yue2/jobs").length).toBe(0);
   });
 
@@ -1263,7 +1260,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     });
     await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Generate song"));
-    await settle();
+    await settle({ microtasks: 10 });
     const error = lab().querySelector('[data-testid="yue2-submit-error"]');
     expect(error.textContent).toContain("transcription is blocked");
     expect(error.textContent).toContain(BLOCK_UNBLOCK);
@@ -1272,7 +1269,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       code: "license_acknowledgment_required",
     });
     await click(buttonWithText(lab(), "Generate song"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(container.querySelector('[data-testid="yue2-gate"]')).toBeTruthy();
   });
 
@@ -1379,9 +1376,9 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     });
     await openEnabledLab();
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
-    await settle();
+    await settle({ microtasks: 10 });
     await click(buttonStarting(lab().querySelector('[data-testid="yue2-score-workbench"]'), "Score (.abc)"));
     const abc = await readBlob(blobs.at(-1));
     expect(abc.split("\n")[0]).toContain("NONCOMMERCIAL USE ONLY");
@@ -1399,7 +1396,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       "% SceneWorks YuE2 export: weights licence CC BY-NC 4.0 · NONCOMMERCIAL USE ONLY\nX:1\nK:C\nC4|",
     );
     await click(buttonWithText(lab(), "Generate song"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lastJobBody().score).toBe("X:1\nK:C\nC4|");
   });
 
@@ -1409,7 +1406,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await click(buttonStarting(lab(), "Advanced"));
     await type(byLabel(lab(), "Seed"), "9007199254740991");
     await click(buttonWithText(lab(), "Generate song"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(calls("/yue2/jobs").at(-1)[2].body).toContain('"seed":9007199254740991');
     expect(lastJobBody().seed).toBe(Number.MAX_SAFE_INTEGER);
     const sent = calls("/yue2/jobs").length;
@@ -1426,12 +1423,12 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     await openEnabledLab();
     await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(buttonStarting(lab(), "Import ABC"));
     await typeText(byLabel(lab(), "ABC score to import"), "X:1\nK:C\nC4|");
     await type(byLabel(lab(), "Import seed"), "9007199254740993");
     await click(buttonWithText(lab(), "Save version"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(lab().querySelector('[data-testid="yue2-import-error"]').textContent).toContain(
       "The seed must be a whole number from 0 to 9007199254740991.",
     );
@@ -1497,7 +1494,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(window.localStorage.getItem("sceneworks-license-ack:yue2")).toBe("true");
     await typeLyrics("[verse]\nhello");
     await click(buttonWithText(lab(), "Generate song"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(window.localStorage.getItem("sceneworks-license-ack:yue2")).toBeNull();
   });
 
@@ -1507,9 +1504,9 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(badge.textContent).toBe("completed · truncated");
     expect(badge.className).toBe("status-badge warning");
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
-    await settle();
+    await settle({ microtasks: 10 });
     // ver_1's render in the router is not truncated: plain completed.
     expect(lab().querySelector('[data-testid="yue2-render-status"]').textContent).toBe("completed");
   });
@@ -1529,7 +1526,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     const note = lab().querySelector('[data-testid="yue2-session-only-note"]');
     expect(note.textContent).toContain("Kept for this session only");
     await click(buttonWithText(note, "Import it as a score version"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(byLabel(lab(), "ABC score to import").value).toBe(huge);
   });
 
@@ -1545,14 +1542,14 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     );
 
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(buttonStarting(lab(), "Import ABC"));
     expect(lab().querySelector('[data-testid="yue2-import-session-only"]')).toBeNull();
     await typeText(byLabel(lab(), "ABC score to import"), `X:1\n${"C4|".repeat(12000)}`);
     expect(lab().querySelector('[data-testid="yue2-import-session-only"]')).not.toBeNull();
 
     await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
-    await settle();
+    await settle({ microtasks: 10 });
     await choose(byLabel(lab(), "Edit operation"), "set_lyrics");
     expect(lab().querySelector('[data-testid="yue2-edit-session-only"]')).toBeNull();
     await typeText(lab().querySelector(".yue2-edit-fields textarea"), `[verse]\n${"oh ".repeat(12000)}`);
@@ -1562,14 +1559,14 @@ describe("YuE2 Song Lab (sc-23000)", () => {
   it("keeps an in-progress edit draft across a tab change", async () => {
     await openEnabledLab();
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
-    await settle();
+    await settle({ microtasks: 10 });
     await choose(byLabel(lab(), "Edit operation"), "set_style");
     await type(byLabel(lab(), "Edit brief"), "moodier");
     await click(buttonWithText(lab(), "Compose"));
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(byLabel(lab(), "Edit operation").value).toBe("set_style");
     expect(byLabel(lab(), "Edit brief").value).toBe("moodier");
     await wait(500);
@@ -1598,14 +1595,14 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       },
     });
     await click(buttonWithText(lab(), "Scores"));
-    await settle();
+    await settle({ microtasks: 10 });
     await click(lab().querySelectorAll('[data-testid="yue2-version-row"]')[0]);
-    await settle();
+    await settle({ microtasks: 10 });
     await choose(byLabel(lab(), "Edit operation"), "strip_chords");
     await choose(lab().querySelector('[data-testid="yue2-edit-panel"] .yue2-edit-fields select'), "Vocal");
     await type(byLabel(lab(), "Edit brief"), "melody only");
     await click(buttonWithText(lab(), "Check edit"));
-    await settle();
+    await settle({ microtasks: 10 });
     expect(editBody.operation).toEqual({ op: "strip_chords", keepVoice: "Vocal" });
   });
 
@@ -1622,9 +1619,9 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       },
     });
     await click(buttonWithText(lab(), "Compare"));
-    await settle();
+    await settle({ microtasks: 10 });
     await choose(byLabel(lab(), "Version B"), "ver_2");
-    await settle();
+    await settle({ microtasks: 10 });
     expect([...byLabel(lab(), "Render B").options].map((option) => option.value)).toEqual([""]);
     renders = [{ id: "rnd_new", status: "completed", audioAssetId: "asset_song", truncated: { abc: false, semantic: false } }];
     const done = {
@@ -1637,7 +1634,7 @@ describe("YuE2 Song Lab (sc-23000)", () => {
       result: { yue2: { renderRecordId: "rnd_new", usagePolicy: POLICY } },
     };
     await render({ ...ctx, jobs: [done] });
-    await settle();
+    await settle({ microtasks: 10 });
     expect([...byLabel(lab(), "Render B").options].map((option) => option.value)).toEqual(["", "rnd_new"]);
   });
 

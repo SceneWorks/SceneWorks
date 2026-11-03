@@ -1,3 +1,5 @@
+import { deferred } from "../testUtils/async.js";
+import { settle } from "../testUtils/dom.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -22,13 +24,7 @@ import { KEEP_ALIVE_VIEWS } from "../App.jsx";
 const datasetOne = { id: "dataset-1", name: "Mira Set", version: 2, characterId: "", items: [] };
 const datasetTwo = { id: "dataset-2", name: "Other Set", version: 1, characterId: "", items: [] };
 
-function deferred() {
-  let resolve;
-  const promise = new Promise((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
+
 
 function baseContext(overrides = {}) {
   return {
@@ -59,13 +55,7 @@ function baseContext(overrides = {}) {
   };
 }
 
-async function settle() {
-  await act(async () => {
-    for (let index = 0; index < 6; index += 1) {
-      await Promise.resolve();
-    }
-  });
-}
+
 
 function nameInput(container) {
   return container.querySelector('input[aria-label="Dataset name"]');
