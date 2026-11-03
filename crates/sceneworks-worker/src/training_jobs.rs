@@ -8602,10 +8602,16 @@ mod tests {
                     value["dataset"]["items"][0]["caption"] =
                         json!("日本語 caption {\"layout\":\"left\"}");
                     value["output"]["triggerWords"] = json!(["sksmoss"]);
+                    // Generic signed-i32 parsing precedes MOSS field-domain validation.
+                    // Overflow refuses there; zero and numeric strings reach MOSS-specific checks.
                     for (field, invalid, expected) in [
                         ("loraTargetModules", json!("q"), "must be an array"),
                         ("loraTargetModules", json!(["q", 7]), "only strings"),
-                        ("decomposeFactor", json!(4_294_967_295_i64), "positive i32"),
+                        (
+                            "decomposeFactor",
+                            json!(4_294_967_295_i64),
+                            "must be a signed 32-bit integer",
+                        ),
                         ("decomposeFactor", json!(0), "positive i32"),
                         ("decomposeFactor", json!("4"), "must be an integer"),
                     ] {
