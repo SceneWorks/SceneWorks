@@ -49,6 +49,7 @@ use sceneworks_core::training_subject_masks::{
     lookup_subject_mask_for_image, read_subject_mask_index_at, subject_mask_relative_path,
     SubjectMaskLookup,
 };
+#[cfg(any(native_lane, test))]
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::Write;
