@@ -1054,6 +1054,61 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ),
         ("crates/sceneworks-core/src/slug.rs", "slugify"),
         ("crates/sceneworks-core/src/slug.rs", "slugify_with"),
+        ("crates/sceneworks-core/src/fsutil.rs", "write_atomic"),
+        ("crates/sceneworks-core/src/fsutil.rs", "write_atomic_with"),
+        (
+            "crates/sceneworks-core/src/fsutil.rs",
+            "atomic_create_supported",
+        ),
+        (
+            "crates/sceneworks-core/src/fsutil.rs",
+            "write_new_unpublished_with",
+        ),
+        (
+            "crates/sceneworks-core/src/fsutil.rs",
+            "payload_entry_metadata",
+        ),
+        (
+            "crates/sceneworks-core/src/fsutil.rs",
+            "sync_parent_directory",
+        ),
+        (
+            "crates/sceneworks-core/src/media_process.rs",
+            "ffmpeg_program",
+        ),
+        (
+            "crates/sceneworks-core/src/media_process.rs",
+            "resolve_ffmpeg_program",
+        ),
+        (
+            "crates/sceneworks-core/src/media_process.rs",
+            "bounded_tail",
+        ),
+        ("crates/sceneworks-core/src/media_process.rs", "run_command"),
+        (
+            "crates/sceneworks-core/src/image_decode.rs",
+            "decode_image_any",
+        ),
+        (
+            "crates/sceneworks-core/src/image_decode.rs",
+            "decode_image_bytes_any",
+        ),
+        (
+            "crates/sceneworks-core/src/image_decode.rs",
+            "decode_image_with",
+        ),
+        (
+            "crates/sceneworks-core/src/image_decode.rs",
+            "decode_image_bounded",
+        ),
+        (
+            "crates/sceneworks-core/src/media_convert.rs",
+            "ingest_image",
+        ),
+        (
+            "crates/sceneworks-core/src/media_convert.rs",
+            "ingest_image_with_naming",
+        ),
         (
             "crates/sceneworks-core/src/slug.rs",
             "slugify_worker_id_part",
