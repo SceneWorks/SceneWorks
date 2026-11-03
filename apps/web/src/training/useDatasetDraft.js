@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { assetCanRenderAsImage } from "../components/assetMedia.jsx";
 import { useValidation } from "../validation/useValidation.js";
 import {
@@ -82,7 +82,7 @@ export function useDatasetDraft({ activeProject, assets }) {
   // Thumbnail for the compact dataset selector (sc-2025): the list summary's
   // server-resolved cover image (first item), falling back to the open dataset's
   // first loaded member.
-  const datasetThumbAsset = (dataset) => {
+  const datasetThumbAsset = useCallback((dataset) => {
     if (dataset?.coverPath) {
       return { projectId: activeProject?.id, type: "image", file: { path: dataset.coverPath } };
     }
@@ -90,7 +90,7 @@ export function useDatasetDraft({ activeProject, assets }) {
       return memberAssets[0];
     }
     return null;
-  };
+  }, [activeProject?.id, selectedDatasetId, memberAssets]);
   const health = useMemo(
     () => datasetHealth({ activeDataset, imageAssets, selectedAssetIds }),
     [activeDataset, imageAssets, selectedAssetIds],
