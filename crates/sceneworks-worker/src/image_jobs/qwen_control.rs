@@ -145,9 +145,9 @@ fn qwen_control_guidance(request: &ImageRequest) -> f32 {
 /// may legitimately fetch its tier on demand), and an absent `snapshot` falls back to `q8`, the
 /// fresh-install co-requisite the base download brings. Mirrors the MLX `qwen_control_tier_subdir`.
 fn qwen_control_tier_subdir(request: &ImageRequest, snapshot: Option<&Path>) -> &'static str {
-    crate::payload::tier_for_bits(
-        request.quant_bits(),
-        qwen_control_installed_default_tier(snapshot),
+    request.quant_bits().map_or_else(
+        || qwen_control_installed_default_tier(snapshot),
+        |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
     )
 }
 
