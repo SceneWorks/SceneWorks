@@ -618,9 +618,26 @@ async fn license_acknowledgment_repo_index(
 fn license_acknowledgment_index_for(
     models: &[Value],
 ) -> std::collections::BTreeMap<String, LicenseAcknowledgmentSource> {
+    license_acknowledgment_index_for_selected(models, None)
+}
+
+fn license_acknowledgment_index_for_selected(
+    models: &[Value],
+    selected_model_id: Option<&str>,
+) -> std::collections::BTreeMap<String, LicenseAcknowledgmentSource> {
     let mut index: std::collections::BTreeMap<String, LicenseAcknowledgmentSource> =
         std::collections::BTreeMap::new();
-    for model in models {
+    // A catalog-validated selection owns its declared shared repositories. Raw
+    // repository requests retain canonical manifest order; an arbitrary accepted
+    // model must never grant access. Blocked components from ANY entry still win.
+    let selected = |model: &&Value| {
+        selected_model_id.is_some_and(|id| model.get("id").and_then(Value::as_str) == Some(id))
+    };
+    for model in models
+        .iter()
+        .filter(selected)
+        .chain(models.iter().filter(|model| !selected(model)))
+    {
         let Some(model_id) = model.get("id").and_then(Value::as_str) else {
             continue;
         };
@@ -808,6 +825,18 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
     source_url: Option<&str>,
     acknowledged: bool,
 ) -> Result<(), ApiError> {
+    ensure_license_acknowledged_for_source_inner(state, repos, source_url, acknowledged, None).await
+}
+
+// Only catalog-resolved model/component download routes supply a selected ID.
+// Other repository-bearing doors deliberately use the public canonical wrapper.
+async fn ensure_license_acknowledged_for_source_inner(
+    state: &AppState,
+    repos: &[Option<&str>],
+    source_url: Option<&str>,
+    acknowledged: bool,
+    selected_model_id: Option<&str>,
+) -> Result<(), ApiError> {
     // Each candidate keeps the caller's own spelling next to the lookup key, so the refusal echoes
     // what was actually requested rather than the lowercased index key.
     let candidates: Vec<(String, String)> = repos
@@ -821,7 +850,12 @@ pub(crate) async fn ensure_license_acknowledged_for_source(
     if candidates.is_empty() {
         return Ok(());
     }
-    let index = license_acknowledgment_repo_index(state).await?;
+    let index = if selected_model_id.is_some() {
+        let (models, _) = merged_model_manifest_entries(state).await?;
+        license_acknowledgment_index_for_selected(&models, selected_model_id)
+    } else {
+        license_acknowledgment_repo_index(state).await?
+    };
     // A blocked conditional component is refused before anything else, and an acknowledgment does
     // not clear it (sc-22998).
     if let Some((requested, source, blocked)) = candidates.iter().find_map(|(named, key)| {
@@ -1103,11 +1137,12 @@ pub(crate) async fn create_model_download_job(
             payload.license_acknowledged,
         )
         .await?;
-        ensure_license_acknowledged_for_source(
+        ensure_license_acknowledged_for_source_inner(
             &state,
             &[download.get("repo").and_then(Value::as_str)],
             None,
             payload.license_acknowledged,
+            base.get("id").and_then(Value::as_str),
         )
         .await?;
         let mut job_payload = build_model_download_job_payload(
@@ -1296,11 +1331,12 @@ pub(crate) async fn create_model_download_job(
         .iter()
         .map(|repo| Some(repo.as_str()))
         .collect();
-    ensure_license_acknowledged_for_source(
+    ensure_license_acknowledged_for_source_inner(
         &state,
         &queued_repos,
         None,
         payload.license_acknowledged,
+        Some(&model_id),
     )
     .await?;
 
@@ -1457,8 +1493,14 @@ pub(crate) async fn create_conditional_components_download_jobs(
         .map(str::to_owned)
         .collect();
     let repo_refs: Vec<Option<&str>> = repos.iter().map(|repo| Some(repo.as_str())).collect();
-    ensure_license_acknowledged_for_source(&state, &repo_refs, None, payload.license_acknowledged)
-        .await?;
+    ensure_license_acknowledged_for_source_inner(
+        &state,
+        &repo_refs,
+        None,
+        payload.license_acknowledged,
+        Some(&model_id),
+    )
+    .await?;
     let requested_gpu = requested_gpu_or_auto(payload.requested_gpu);
     let mut jobs = Vec::new();
     let mut components = Vec::new();

@@ -814,3 +814,170 @@ async fn accepting_a_license_can_bind_the_exact_terms_the_browser_reviewed() {
     let (_, view) = request(changed_app, "GET", route, Value::Null).await;
     assert_eq!(view["acknowledged"], false);
 }
+
+fn app_with_licensed_models(
+    temp: &tempfile::TempDir,
+    models: Vec<Value>,
+) -> (axum::Router, AppState) {
+    let config = temp.path().join("config/manifests");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(
+        config.join("builtin.models.jsonc"),
+        serde_json::to_vec(&json!({"schemaVersion":1,"models":models})).unwrap(),
+    )
+    .unwrap();
+    write_empty_sibling_manifests(&config);
+    let (app, state) = create_app_with_state(test_settings(temp)).unwrap();
+    *state.model_size_estimate_disabled_override.lock() = Some(true);
+    (app, state)
+}
+
+#[tokio::test]
+async fn selected_h3_model_uses_its_own_current_terms_for_shared_repositories() {
+    let _env = isolate_hf_cache();
+    for (selected, sibling) in [
+        ("minimax_h3_ref", "minimax_h3"),
+        ("minimax_h3", "minimax_h3_ref"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let models = vec![builtin_model("minimax_h3"), builtin_model("minimax_h3_ref")];
+        let (app, _) = app_with_licensed_models(&temp, models.clone());
+        let ack = format!("/api/v1/models/{selected}/license-acknowledgment");
+        let download = format!("/api/v1/models/{selected}/download");
+        let (status, accepted) = request(app.clone(), "PUT", &ack, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{selected}: {accepted}");
+        let (_, other) = request(
+            app.clone(),
+            "GET",
+            &format!("/api/v1/models/{sibling}/license-acknowledgment"),
+            Value::Null,
+        )
+        .await;
+        assert_eq!(other["acknowledged"], false);
+        let (status, body) = request(app.clone(), "POST", &download, json!({"variant":"q4"})).await;
+        assert_eq!(status, StatusCode::CREATED, "{selected}: {body}");
+        assert_eq!(body["payload"]["modelId"], selected);
+        assert!(
+            body["payload"].get("licenseAcknowledged").is_none(),
+            "{body}"
+        );
+        let (_, unchanged) = request(app.clone(), "GET", &ack, Value::Null).await;
+        assert_eq!(unchanged["acknowledgment"], accepted["acknowledgment"]);
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            &format!("/api/v1/models/{sibling}/download"),
+            json!({"variant":"q4"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{sibling}: {body}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+        let (status, _) = request(app.clone(), "DELETE", &ack, Value::Null).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, body) = request(app.clone(), "POST", &download, json!({"variant":"q4"})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{selected}: {body}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+        request(app, "PUT", &ack, Value::Null).await;
+        let mut changed = models;
+        changed.iter_mut().find(|m| m["id"] == selected).unwrap()["licenseNotice"] =
+            json!("Changed terms require fresh acceptance");
+        let (app, _) = app_with_licensed_models(&temp, changed);
+        let (_, view) = request(app.clone(), "GET", &ack, Value::Null).await;
+        assert_eq!(view["acknowledged"], false);
+        let (status, body) = request(app.clone(), "POST", &download, json!({"variant":"q4"})).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "license_acknowledgment_required");
+        let (status, body) = request(app.clone(), "PUT", &ack, Value::Null).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = request(app, "POST", &download, json!({"variant":"q4"})).await;
+        assert_eq!(status, StatusCode::CREATED, "{selected}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn h3_ref_acceptance_does_not_grant_an_unselected_raw_repository_request() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let (app, state) = app_with_licensed_models(
+        &temp,
+        vec![builtin_model("minimax_h3"), builtin_model("minimax_h3_ref")],
+    );
+    let (status, _) = request(
+        app,
+        "PUT",
+        "/api/v1/models/minimax_h3_ref/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let error = crate::models::ensure_license_acknowledged_for_source(
+        &state,
+        &[Some("SceneWorks/minimax-h3-mlx")],
+        None,
+        false,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, Some("license_acknowledgment_required"));
+    assert!(error.detail.contains("'minimax_h3'"), "{}", error.detail);
+}
+
+#[tokio::test]
+async fn selected_h3_terms_never_unblock_a_shared_blocked_component() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let mut base = builtin_model("minimax_h3");
+    base["conditionalComponents"] = json!([{"componentId":"blocked_fixture","repo":"SceneWorks/minimax-h3-mlx","purpose":"fixture","blocked":{"reason":"not licensed","unblock":"explicit upstream release"}}]);
+    let (app, _) = app_with_licensed_models(&temp, vec![base, builtin_model("minimax_h3_ref")]);
+    let (status, _) = request(
+        app.clone(),
+        "PUT",
+        "/api/v1/models/minimax_h3_ref/license-acknowledgment",
+        Value::Null,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    for body in [
+        json!({"variant":"q4"}),
+        json!({"variant":"q4","licenseAcknowledged":true}),
+    ] {
+        let (status, body) = request(
+            app.clone(),
+            "POST",
+            "/api/v1/models/minimax_h3_ref/download",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["code"], "component_blocked");
+    }
+}
+
+#[tokio::test]
+async fn selected_conditional_components_use_the_selected_current_terms() {
+    let _env = isolate_hf_cache();
+    let temp = tempfile::tempdir().unwrap();
+    let base = builtin_yue2();
+    let mut selected = base.clone();
+    selected["id"] = json!("selected_yue2");
+    let (app, _) = app_with_licensed_models(&temp, vec![base, selected]);
+    let ack = "/api/v1/models/selected_yue2/license-acknowledgment";
+    let route = "/api/v1/models/selected_yue2/conditional-components/cover/download";
+    let (status, body) = request(app.clone(), "PUT", ack, Value::Null).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = request(app.clone(), "POST", route, json!({})).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (status, body) = request(
+        app.clone(),
+        "POST",
+        "/api/v1/models/yue2/conditional-components/cover/download",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+    request(app.clone(), "DELETE", ack, Value::Null).await;
+    let (status, body) = request(app, "POST", route, json!({})).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["code"], "license_acknowledgment_required");
+}
