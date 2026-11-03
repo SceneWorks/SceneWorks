@@ -1,5 +1,5 @@
 import { formatDecimalGb } from "../formatting.js";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useInsertionEffect, useMemo, useRef, useState } from "react";
 import { isImageUpload, isCaptionUpload, uploadFileBaseName, uploadFileExtension, uploadFiles } from "../uploadFiles.js";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
@@ -1881,15 +1881,24 @@ export function TrainingStudio({ mode = "training" } = {}) {
 
   // Iris depth / restoration sidecars (sc-25687 / sc-25688): attach (file) or remove (null) one
   // saved item's depth map / mask / degraded input; the API answers with the updated dataset.
-  async function irisSidecar(item, kind, file, fields) {
+  const sidecarOwner = useMemo(() => ({ projectId: activeProject?.id, datasetId: activeDataset?.id, token }),
+    [activeProject?.id, activeDataset?.id, token]);
+  const committedSidecarOwner = useRef(null);
+  useInsertionEffect(() => {
+    committedSidecarOwner.current = sidecarOwner;
+    return () => { committedSidecarOwner.current = null; };
+  }, [sidecarOwner]);
+  const irisSidecar = useCallback(async (item, kind, file, fields) => {
+    if (committedSidecarOwner.current !== sidecarOwner) throw new Error("Dataset changed.");
     const dataset = await irisItemSidecar(
-      { projectId: activeProject?.id, datasetId: activeDataset?.id, itemId: item.id, kind, file, fields },
-      { token },
+      { projectId: sidecarOwner.projectId, datasetId: sidecarOwner.datasetId, itemId: item.id, kind, file, fields },
+      { token: sidecarOwner.token },
     );
+    if (committedSidecarOwner.current !== sidecarOwner) return dataset;
     setActiveDataset(dataset);
     setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
     return dataset;
-  }
+  }, [sidecarOwner, assets, setActiveDataset, setSelectedAssetIds]);
 
   async function importParquetDataset(settings) {
     setDatasetError("");
@@ -2289,7 +2298,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     removeUnavailableAsset, importParquetDataset, handleDeleteDataset, setItemReferences, addItemReferences,
     importItemReferences, setEditPairsMode, onPreview, updateCaption, addAssets, handleImport,
     updateCaptionSetting, runCaptionJob, toggleCaptionExtraOption, toggleItemQualityAck, setActiveView,
-    cancelDatasetImport, uploadPreparedBundle, irisSidecar, generateSubjectMasks, uploadSubjectMask,
+    cancelDatasetImport, uploadPreparedBundle, generateSubjectMasks, uploadSubjectMask,
     onToggleHoldout: (id, on) => setHoldoutById((current) => ({ ...current, [id]: on })),
     onDownloadCaptionModel,
   });
@@ -2324,8 +2333,8 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const config = useMemo(() => ({
     imageAssets, characters, associatedCharacterId, setActiveView: sessionHandlers.setActiveView,
     importingAssets, importProgress, onCancelImport: sessionHandlers.cancelDatasetImport, gpuOptions, onUploadPreparedBundle: sessionHandlers.uploadPreparedBundle,
-    onIrisSidecar: activeDataset?.id ? sessionHandlers.irisSidecar : undefined,
-  }), [imageAssets, characters, associatedCharacterId, sessionHandlers, importingAssets, importProgress, gpuOptions, activeDataset]);
+    onIrisSidecar: activeDataset?.id ? irisSidecar : undefined,
+  }), [imageAssets, characters, associatedCharacterId, sessionHandlers, importingAssets, importProgress, gpuOptions, activeDataset, irisSidecar]);
   const maskSession = useMemo(() => ({
     projectId: activeProject?.id,
     report: subjectMasks,
