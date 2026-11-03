@@ -56,7 +56,7 @@ use crate::{
     DEFAULT_CORS_ORIGINS,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Settings {
     pub app_version: String,
     pub host: String,
@@ -203,6 +203,49 @@ where
                 }
             }
         }
+    }
+}
+
+/// A redacting view prevents accidental secret formatting without changing the
+/// public settings construction contract used by API embedders.
+struct RedactedSecret<'a>(&'a str);
+impl std::fmt::Debug for RedactedSecret<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _ = self.0;
+        f.write_str("[REDACTED]")
+    }
+}
+impl std::fmt::Debug for Settings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Settings")
+            .field("app_version", &self.app_version)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("data_dir", &self.data_dir)
+            .field("resolved_cache", &self.resolved_cache)
+            .field("config_dir", &self.config_dir)
+            .field("credentials_dir", &self.credentials_dir)
+            .field("access_token", &RedactedSecret(&self.access_token))
+            .field("cors_origins", &self.cors_origins)
+            .field("worker_timeout_seconds", &self.worker_timeout_seconds)
+            .field("jobs_db_path", &self.jobs_db_path)
+            .field("jobs_retention_days", &self.jobs_retention_days)
+            .field("run_utility_inprocess", &self.run_utility_inprocess)
+            .field("mlx_required", &self.mlx_required)
+            .field("mlx_enforce_unsupported", &self.mlx_enforce_unsupported)
+            .field("candle_required", &self.candle_required)
+            .field(
+                "candle_enforce_unsupported",
+                &self.candle_enforce_unsupported,
+            )
+            .field("trust_loopback", &self.trust_loopback)
+            .field("host_os", &self.host_os)
+            .field("mcp_api_url", &self.mcp_api_url)
+            .field("mcp_job_poll_interval", &self.mcp_job_poll_interval)
+            .field("mcp_job_timeout", &self.mcp_job_timeout)
+            .field("external_model_roots", &self.external_model_roots)
+            .field("mcp_allowed_hosts_extra", &self.mcp_allowed_hosts_extra)
+            .finish()
     }
 }
 
@@ -1307,5 +1350,19 @@ mod server_tests {
             "https://api.internal.example/base",
             "an explicit proxy/container URL remains authoritative"
         );
+    }
+}
+
+#[cfg(test)]
+mod secret_debug_tests {
+    use super::*;
+    #[test]
+    fn settings_debug_redacts_access_token_and_retains_useful_fields() {
+        let mut settings = Settings::from_env();
+        settings.access_token = "never-log-this-token".to_owned();
+        let debug = format!("{settings:?}");
+        assert!(!debug.contains("never-log-this-token"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("data_dir"));
     }
 }

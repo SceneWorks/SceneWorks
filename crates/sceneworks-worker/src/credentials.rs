@@ -40,8 +40,15 @@ pub(crate) fn parse_credentials_env(raw: &str) -> Vec<WorkerCredential> {
         #[serde(default)]
         scheme: Option<String>,
     }
-    let parsed: std::collections::HashMap<String, RawCredential> =
-        serde_json::from_str(raw).unwrap_or_default();
+    let parsed: std::collections::HashMap<String, RawCredential> = match serde_json::from_str(raw) {
+        Ok(parsed) => parsed,
+        Err(_) => {
+            tracing::warn!(
+                "Invalid SCENEWORKS_CREDENTIALS JSON; no environment credentials loaded"
+            );
+            return Vec::new();
+        }
+    };
     parsed
         .into_iter()
         .filter_map(|(host, credential)| {
