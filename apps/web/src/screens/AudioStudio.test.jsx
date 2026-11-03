@@ -458,14 +458,14 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
 
     await click(buttonWithText(container, "Prompt guide"));
     await settle();
-    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/kokoro-82m.md");
+    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/kokoro-82m.md", { signal: expect.any(AbortSignal) });
     expect(document.querySelector("#prompt-guide-title").textContent).toBe("Kokoro Speech Guide");
 
     await click(buttonWithText(document, "Close"));
     await click(modeTab(container, "Music"));
     await click(buttonWithText(container, "Prompt guide"));
     await settle();
-    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/acestep-v15-turbo.md");
+    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/acestep-v15-turbo.md", { signal: expect.any(AbortSignal) });
     expect(document.querySelector("#prompt-guide-title").textContent).toBe("ACE-Step Music Guide");
   });
 
@@ -534,7 +534,7 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
     await click(modeTab(container, "Sound FX"));
     await click(buttonWithText(container, "Prompt guide"));
     await settle();
-    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/generic-audio.md");
+    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/generic-audio.md", { signal: expect.any(AbortSignal) });
     expect(document.querySelector("#prompt-guide-title").textContent).toBe("Audio Prompt Guide");
   });
 
@@ -611,7 +611,7 @@ describe("AudioStudio prompt guides and refinement (sc-14353)", () => {
 
     await click(buttonWithText(container, "Prompt guide"));
     await settle();
-    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/moss-ttsd-v05.md");
+    expect(fetchGuide).toHaveBeenLastCalledWith("/prompt-guides/moss-ttsd-v05.md", { signal: expect.any(AbortSignal) });
     expect(document.querySelector("#prompt-guide-title").textContent).toBe(
       "MOSS Multi-Speaker Guide",
     );
