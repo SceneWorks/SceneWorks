@@ -2640,10 +2640,40 @@ fn web_depth_anchoring_bounds_match_the_api_bounds() {
         serde_json::from_str(&web_training_const("depthAnchoringModelOptions"))
             .expect("depthAnchoringModelOptions is a JSON-compatible string array");
     assert_eq!(models, DEPTH_ANCHORING_MODELS.to_vec());
-    let workflows: Vec<String> =
-        serde_json::from_str(&web_training_const("depthAnchoringNoVideoLtxWorkflows"))
-            .expect("depthAnchoringNoVideoLtxWorkflows is a JSON-compatible string array");
-    assert_eq!(workflows, DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.to_vec());
+    let registry = builtin_training_targets();
+    let ltx = registry
+        .targets
+        .iter()
+        .find(|target| target.id == "ltx_2_5_video_lora")
+        .unwrap();
+    assert_eq!(
+        ltx.ui.get("noVideoLossWorkflows"),
+        Some(&serde_json::json!(DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS))
+    );
+    let plans = ltx
+        .ui
+        .get("ltxWorkflowPlans")
+        .and_then(serde_json::Value::as_object)
+        .unwrap();
+    let workflows = ltx
+        .limits
+        .get("ltxWorkflows")
+        .and_then(serde_json::Value::as_array)
+        .unwrap();
+    assert_eq!(plans.len(), workflows.len());
+    for workflow in workflows {
+        let name = workflow.as_str().unwrap();
+        let video_generated = plans[name]
+            .get("video")
+            .and_then(|video| video.get("isGenerated"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        assert_eq!(
+            video_generated,
+            !DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS.contains(&name),
+            "{name}"
+        );
+    }
 }
 
 /// sc-24830 review: submit refuses the depth-anchoring combinations the engine refuses even on an

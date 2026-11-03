@@ -1,5 +1,6 @@
 import { formatDecimalGb } from "../formatting.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { isImageUpload, isCaptionUpload, uploadFileBaseName, uploadFileExtension, uploadFiles } from "../uploadFiles.js";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { DEFAULT_MAC_CAPABILITIES, macTrainingKernelBlocked } from "../macGating.js";
@@ -97,32 +98,12 @@ import { DatasetEditorPanel } from "./training/DatasetEditorPanel.jsx";
 // screen; the implementations now live in ../training/trainingConfig.js (sc-4199).
 export { configDraftFromTarget, trainingConfigSnapshot };
 
-const IMPORT_IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"]);
-
-function uploadFileBaseName(name) {
-  return String(name ?? "").replaceAll("\\", "/").split("/").pop() ?? "";
-}
-
-function uploadFileExtension(name) {
-  const base = uploadFileBaseName(name);
-  const dotIndex = base.lastIndexOf(".");
-  return dotIndex > 0 ? base.slice(dotIndex + 1).toLowerCase() : "";
-}
-
 // Lowercased stem used to pair an image upload with its caption sidecar
 // (e.g. `Mira_01.png` and `Mira_01.txt` both resolve to `mira_01`).
 function uploadFileStem(name) {
   const base = uploadFileBaseName(name);
   const dotIndex = base.lastIndexOf(".");
   return (dotIndex > 0 ? base.slice(0, dotIndex) : base).toLowerCase();
-}
-
-function isCaptionUpload(file) {
-  return uploadFileExtension(file?.name) === "txt" || file?.type === "text/plain";
-}
-
-function isImageUpload(file) {
-  return String(file?.type ?? "").startsWith("image/") || IMPORT_IMAGE_EXTENSIONS.has(uploadFileExtension(file?.name));
 }
 
 function parseTriggerWords(value) {
@@ -432,7 +413,25 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetsError = trainingDatasetsError;
   const loadingDatasets = loadingTrainingDatasets;
   const onPreview = setPreviewAsset;
-  const uploadDatasetItem = uploadTrainingDatasetItem ?? ((file) => importAssetRaw(file, { throwOnError: true }));
+  const uploadDatasetItem = uploadTrainingDatasetItem ?? ((file, _projectId, { signal } = {}) => importAssetRaw(file, { throwOnError: true, select: false, signal }));
+  const importController = useRef(null);
+  const importProject = useRef(activeProject?.id);
+  if (importProject.current !== activeProject?.id) {
+    importController.current?.abort();
+    importProject.current = activeProject?.id;
+  }
+  useEffect(() => () => importController.current?.abort(), []);
+  useEffect(() => { setImportingAssets(false); }, [activeProject?.id]);
+  async function uploadDatasetFiles(files, controller, projectId) {
+    return uploadFiles(files, (file, signal) => uploadDatasetItem(file, projectId, { signal }), {
+      signal: controller.signal,
+      onProgress: (done, total) => {
+        const message = `Uploading ${done} of ${total}…`;
+        setImportProgress(message);
+        setDatasetMessage(message);
+      },
+    });
+  }
   const loadDataset = loadTrainingDataset;
   const createDataset = createTrainingDataset;
   const updateDataset = updateTrainingDataset;
@@ -452,6 +451,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [draftName, setDraftName] = useState("");
   const [busyDatasetId, setBusyDatasetId] = useState("");
   const [importingAssets, setImportingAssets] = useState(false);
+  const [importProgress, setImportProgress] = useState("");
+  function cancelDatasetImport() {
+    importController.current?.abort();
+    setImportingAssets(false);
+    setImportProgress("");
+    setDatasetMessage("Import cancelled.");
+  }
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
@@ -1670,6 +1676,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // Replace one item's ordered reference list (reorder / remove from the reference rail, sc-24161).
   function setItemReferences(selectionId, referenceIds) {
     setDatasetMessage("");
+    setDatasetError("");
     setReferenceDraftById((current) => ({ ...current, [selectionId]: [...(referenceIds ?? [])] }));
   }
 
@@ -1680,12 +1687,16 @@ export function TrainingStudio({ mode = "training" } = {}) {
       cap: datasetReferenceLimit,
       itemId: selectionId,
     });
+    const current = referenceDraftById[selectionId] ?? [];
+    const rejectedIds = [...new Set(pickedIds)].filter((id) => id && id !== selectionId && !next.includes(id));
+    const accepted = next.length - current.length;
     setItemReferences(selectionId, next);
     if (dropped > 0) {
-      setDatasetMessage(
-        `Maximum ${datasetReferenceLimit} references; ${dropped} not added.`,
-      );
+      setDatasetError(`Attached ${accepted} of ${accepted + dropped} references. Maximum ${datasetReferenceLimit} reference${datasetReferenceLimit === 1 ? "" : "s"}; ${dropped} not added.`);
+    } else {
+      setDatasetError("");
     }
+    return { accepted, dropped, rejectedIds };
   }
 
   // Upload dropped files as dataset-only images, then attach them as references (sc-24161) —
@@ -1695,24 +1706,26 @@ export function TrainingStudio({ mode = "training" } = {}) {
     if (!files.length) {
       return;
     }
+    importController.current?.abort();
+    const controller = new AbortController();
+    importController.current = controller;
+    const projectId = activeProject?.id;
     setImportingAssets(true);
+    setImportProgress(`Uploading 0 of ${files.length}…`);
     setDatasetError("");
-    try {
-      const imported = [];
-      for (const file of files) {
-        const asset = await uploadDatasetItem(file);
-        if (asset?.id) {
-          const datasetAsset = { ...asset, datasetOnly: true };
-          imported.push(datasetAsset.id);
-          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
-        }
-      }
-      addItemReferences(selectionId, imported);
-    } catch (err) {
-      setDatasetError(err.message);
-    } finally {
-      setImportingAssets(false);
-    }
+    const results = await uploadDatasetFiles(files, controller, projectId);
+    if (controller.signal.aborted) return;
+    const imported = results.filter((result) => result.value).map(({ value }) => ({ ...value, datasetOnly: true }));
+    setUploadedDatasetAssets((current) => [...imported, ...current.filter((item) => !imported.some((asset) => item.id === asset.id))]);
+    const { accepted, dropped, rejectedIds } = addItemReferences(selectionId, imported.map((asset) => asset.id));
+    const failed = results.filter((result) => result.error);
+    const capNote = dropped ? ` Maximum ${datasetReferenceLimit} reference${datasetReferenceLimit === 1 ? "" : "s"}; ${dropped} not added.` : "";
+    const failureNote = failed.length ? ` Failed to upload: ${failed.map(({ file }) => file.name).join(", ")}. Retry those files.` : "";
+    const message = `Attached ${accepted} of ${files.length} references.${capNote}${failureNote}`;
+    setDatasetMessage(message);
+    if (dropped || failed.length) setDatasetError(message);
+    setImportingAssets(false);
+    return { complete: failed.length === 0 && dropped === 0, rejectedIds };
   }
 
   // Editing a caption marks it as manually authored (sc-2025) — caption source
@@ -1882,7 +1895,12 @@ export function TrainingStudio({ mode = "training" } = {}) {
     if (!files.length) {
       return;
     }
+    importController.current?.abort();
+    const controller = new AbortController();
+    importController.current = controller;
+    const projectId = activeProject?.id;
     setImportingAssets(true);
+    setImportProgress(`Uploading 0 of ${files.length}…`);
     setDatasetError("");
     setDatasetMessage("");
     try {
@@ -1904,24 +1922,19 @@ export function TrainingStudio({ mode = "training" } = {}) {
       const imported = [];
       const captionsByAssetId = {};
       const namedCaptionsByAssetId = {};
-      for (const file of imageFiles) {
-        const asset = await uploadDatasetItem(file);
-        if (asset?.id) {
-          // Flag the dataset-only origin on a COPY (sc-8939): mutating the API-returned
-          // record in place can leak the flag into any other holder of that instance
-          // (e.g. an asset cached in context). Build a fresh object instead.
-          const datasetAsset = { ...asset, datasetOnly: true };
-          imported.push(datasetAsset.id);
-          setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter((item) => item.id !== datasetAsset.id)]);
-          const sidecar = sidecarByStem.get(uploadFileStem(file.name));
-          if (sidecar?.text) {
-            captionsByAssetId[asset.id] = { source: "imported", text: sidecar.text };
-          }
-          if (sidecar?.captions && Object.keys(sidecar.captions).length) {
-            namedCaptionsByAssetId[asset.id] = sidecar.captions;
-          }
-        }
+      const results = await uploadDatasetFiles(imageFiles, controller, projectId);
+      if (controller.signal.aborted) return;
+      const failures = results.filter((result) => result.error);
+      for (const { file, value: asset } of results) {
+        if (!asset) continue;
+        const datasetAsset = { ...asset, datasetOnly: true };
+        imported.push(datasetAsset.id);
+        setUploadedDatasetAssets((current) => [datasetAsset, ...current.filter (item => item.id !== datasetAsset.id)]);
+        const sidecar = sidecarByStem.get(uploadFileStem(file.name));
+        if (sidecar?.text) captionsByAssetId[asset.id] = { source: "imported", text: sidecar.text };
+        if (sidecar?.captions && Object.keys(sidecar.captions).length) namedCaptionsByAssetId[asset.id] = sidecar.captions;
       }
+      if (failures.length) setDatasetError(`Failed to upload: ${failures.map(({ file }) => file.name).join(", ")}. Retry those files.`);
 
       if (imported.length) {
         setSelectedAssetIds((current) => Array.from(new Set([...current, ...imported])));
@@ -1955,9 +1968,9 @@ export function TrainingStudio({ mode = "training" } = {}) {
         setDatasetError("No images were imported.");
       }
     } catch (err) {
-      setDatasetError(err.message);
+      if (!controller.signal.aborted) setDatasetError(err.message);
     } finally {
-      setImportingAssets(false);
+      if (!controller.signal.aborted) setImportingAssets(false);
     }
   }
 
@@ -2523,7 +2536,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 }}
                 config={{
                   imageAssets, characters, associatedCharacterId, setActiveView,
-                  importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
+                  importingAssets, importProgress, onCancelImport: cancelDatasetImport, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
                   onIrisSidecar: activeDataset?.id ? irisSidecar : undefined,
                 }}
                 maskSession={{

@@ -1264,7 +1264,7 @@ describe("ConfigureJobPanel resolution buckets", () => {
   });
 
   it("offers no toggle for a target whose trainer does not declare buckets (LTX-2.5)", () => {
-    const ltx25 = { ...TARGET, id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", limits: { resolutions: [512, 768, 1024] } };
+    const ltx25 = { ...TARGET, id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", ui: { subjectRestrictedNormalLoss: false }, limits: { resolutions: [512, 768, 1024] } };
     mount(
       <ConfigureJobPanel
         {...baseProps({
@@ -1610,7 +1610,7 @@ describe("ConfigureJobPanel subject-masked loss", () => {
 
   it("is absent for a target that does not advertise it, and a carried-over true blocks Start", () => {
     // e.g. LTX-2.5 (prepared latent bundles) — no supportsSubjectMaskLoss limit.
-    const ltx25 = { id: "ltx_2_5_video_lora", name: "LTX-2.5", baseModel: "ltx_2_5", limits: {} };
+    const ltx25 = { id: "ltx_2_5_video_lora", name: "LTX-2.5", baseModel: "ltx_2_5", ui: { subjectRestrictedNormalLoss: false }, limits: {} };
     const validity = validityFor(onDraft, ctx(fullReport, ltx25));
     mount(
       <ConfigureJobPanel
@@ -1865,6 +1865,7 @@ describe("ConfigureJobPanel technique toggles on a refused combination", () => {
     id: "ltx_2_5_video_lora",
     name: "LTX-2.5 Video LoRA",
     baseModel: "ltx_2_5",
+    ui: { noVideoLossWorkflows: ["t2a_lora"] },
     limits: { networkTypes: ["lora"], ltxWorkflows: ["t2v_lora", "t2a_lora"], ...supports },
   };
 

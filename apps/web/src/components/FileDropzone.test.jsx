@@ -29,7 +29,6 @@ describe("FileDropzone", () => {
           active
           hint="Drop an image"
           onActiveChange={onActiveChange}
-          onDrop={vi.fn()}
           onFiles={onFiles}
         />,
       ),
@@ -39,6 +38,13 @@ describe("FileDropzone", () => {
     dropzone.dispatchEvent(drag);
     expect(drag.defaultPrevented).toBe(true);
     expect(onActiveChange).toHaveBeenCalledWith(true);
+    const dropped = [new File(["image"], "drop.png", { type: "image/png" })];
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { files: dropped } });
+    act(() => dropzone.dispatchEvent(drop));
+    expect(drop.defaultPrevented).toBe(true);
+    expect(onActiveChange).toHaveBeenCalledWith(false);
+    expect(onFiles).toHaveBeenCalledWith(dropped);
 
     const input = container.querySelector('input[type="file"]');
     const files = { 0: new File(["image"], "one.png", { type: "image/png" }), length: 1 };

@@ -57,7 +57,7 @@ pub fn target_supports_depth_anchoring(target: &TrainingTarget) -> bool {
         == Some(true)
 }
 
-/// The LTX-2.5 workflows (`advanced.ltxWorkflow`, web: `depthAnchoringNoVideoLtxWorkflows`) that
+/// The LTX-2.5 workflows (`advanced.ltxWorkflow`, advertised in the target UI contract) that
 /// generate no video stream — audio-only, or video as frozen conditioning — so there is no x0 video
 /// latent to decode; the engine's LTX-2.5 trainers refuse depth anchoring for them (sc-24830).
 pub const DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS: [&str; 6] = [
