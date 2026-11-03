@@ -765,8 +765,7 @@ async fn spawn_overlay_stub(bytes: Vec<u8>) -> String {
             "/api/models/:owner/:repo/tree/:revision",
             get(overlay_tree_stub),
         )
-        .route("/api/v1/jobs/:job_id", get(job_stub))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_stub))
+        .merge(crate::test_api_stub::job_progress_routes(job_stub, progress_stub))
         .route("/*path", get(binary_stub).head(binary_head_stub))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -1383,8 +1382,7 @@ async fn spawn_tree_stub_with_bodies(
         // stub that simply can't serve the download. Without this the test would pass for the wrong
         // reason and would not actually guard the regression.
         .route("/:owner/:repo/resolve/:revision/*path", get(blob_route))
-        .route("/api/v1/jobs/:job_id", get(job_route))
-        .route("/api/v1/jobs/:job_id/progress", post(progress_route))
+        .merge(crate::test_api_stub::job_progress_routes(job_route, progress_route))
         .route("/fixture/claimed-model-import", post(claim_fixture_job))
         .route(
             "/api/v1/workers/:worker_id/heartbeat",
