@@ -1883,22 +1883,22 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // saved item's depth map / mask / degraded input; the API answers with the updated dataset.
   const sidecarOwner = useMemo(() => ({ projectId: activeProject?.id, datasetId: activeDataset?.id, token }),
     [activeProject?.id, activeDataset?.id, token]);
-  const committedSidecarOwner = useRef(null);
+  const committedSidecarContext = useRef(null);
   useInsertionEffect(() => {
-    committedSidecarOwner.current = sidecarOwner;
-    return () => { committedSidecarOwner.current = null; };
-  }, [sidecarOwner]);
+    committedSidecarContext.current = { owner: sidecarOwner, assets };
+    return () => { committedSidecarContext.current = null; };
+  }, [sidecarOwner, assets]);
   const irisSidecar = useCallback(async (item, kind, file, fields) => {
-    if (committedSidecarOwner.current !== sidecarOwner) throw new Error("Dataset changed.");
+    if (committedSidecarContext.current?.owner !== sidecarOwner) throw new Error("Dataset changed.");
     const dataset = await irisItemSidecar(
       { projectId: sidecarOwner.projectId, datasetId: sidecarOwner.datasetId, itemId: item.id, kind, file, fields },
       { token: sidecarOwner.token },
     );
-    if (committedSidecarOwner.current !== sidecarOwner) return dataset;
+    if (committedSidecarContext.current?.owner !== sidecarOwner) return dataset;
     setActiveDataset(dataset);
-    setSelectedAssetIds(normalizeDatasetAssetIds(dataset, assets));
+    setSelectedAssetIds(normalizeDatasetAssetIds(dataset, committedSidecarContext.current.assets));
     return dataset;
-  }, [sidecarOwner, assets, setActiveDataset, setSelectedAssetIds]);
+  }, [sidecarOwner, setActiveDataset, setSelectedAssetIds]);
 
   async function importParquetDataset(settings) {
     setDatasetError("");
