@@ -1,6 +1,6 @@
 //! Model-output text cleanup. Policies preserve each provider's established output contract.
 
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 #[derive(Clone, Copy)]
 pub(crate) enum ThinkPolicy {
     /// Prompt refinement mirrors its case-insensitive non-greedy regex: keep unfinished blocks.
@@ -9,7 +9,7 @@ pub(crate) enum ThinkPolicy {
     DropUnclosed,
 }
 
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn strip_think_blocks(input: &str, policy: ThinkPolicy) -> String {
     const OPEN: &str = "<think>";
     const CLOSE: &str = "</think>";
@@ -42,7 +42,7 @@ pub(crate) fn strip_think_blocks(input: &str, policy: ThinkPolicy) -> String {
     }
 }
 
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn first_ci(haystack: &str, needle: &str) -> Option<usize> {
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
     if n.is_empty() || n.len() > h.len() {
@@ -51,7 +51,7 @@ pub(crate) fn first_ci(haystack: &str, needle: &str) -> Option<usize> {
     (0..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
 }
 
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
     if n.is_empty() || n.len() > h.len() {
@@ -62,7 +62,7 @@ fn last_ci(haystack: &str, needle: &str) -> Option<usize> {
         .find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
 }
 
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn strip_reasoning_and_fence(text: &str) -> String {
     let mut text = strip_think_blocks(text.trim(), ThinkPolicy::PreserveUnclosed)
         .trim()
@@ -82,7 +82,7 @@ pub(crate) fn strip_reasoning_and_fence(text: &str) -> String {
 }
 
 /// Prompt cleanup: reasoning/orphan tags, a wrapping fence, then the outermost JSON object.
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn clean_json_output(text: &str) -> String {
     let text = strip_reasoning_and_fence(text);
     isolate_json_object(&text)

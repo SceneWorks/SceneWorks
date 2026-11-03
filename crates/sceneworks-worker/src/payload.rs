@@ -14,7 +14,7 @@ pub(crate) fn json_size_to_u64(value: &Value) -> Option<u64> {
 pub(crate) use sceneworks_core::payload_util::json_integer as quant_int;
 
 /// Common bits-to-tier ladder. The caller owns the omitted/invalid-value default.
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn tier_for_bits(bits: Option<i64>, default: &str) -> &str {
     match bits {
         Some(bits) if bits <= 0 => "bf16",

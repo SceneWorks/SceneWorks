@@ -375,10 +375,7 @@ pub(crate) async fn ensure_cached_file_verified(
     Ok(target.to_path_buf())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn remote_content_length(
     context: &DownloadContext<'_>,
     url: &str,
@@ -488,7 +485,7 @@ pub(crate) async fn ensure_hf_cached_file(
     .await
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 async fn resolve_single_hf_file(
     context: &DownloadContext<'_>,
     repo: &str,
@@ -3047,7 +3044,7 @@ mod resolve_hf_component_file_tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+#[cfg(all(test, native_lane))]
 mod atomic_cache_publication_tests {
     use super::*;
     use axum::{

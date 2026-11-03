@@ -183,7 +183,7 @@ impl IrisPlanRefusal {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 fn training_config_refusal(error: crate::WorkerError) -> IrisPlanRefusal {
     IrisPlanRefusal {
         kind: "invalid".to_owned(),

@@ -358,7 +358,7 @@ pub(crate) fn unified_available_bytes(total: u64) -> u64 {
     total.saturating_sub(reserve)
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) async fn lane_total_gb(gpu_id: &str) -> Option<f64> {
     #[cfg(target_os = "macos")]
     {
@@ -373,7 +373,7 @@ pub(crate) async fn lane_total_gb(gpu_id: &str) -> Option<f64> {
     }
 }
 
-#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[cfg(native_lane)]
 pub(crate) async fn lane_available_gb(gpu_id: &str) -> Option<f64> {
     #[cfg(target_os = "macos")]
     {

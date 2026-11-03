@@ -7,7 +7,7 @@ use gen_core::CancelFlag;
 /// Strict analysis jobs reject malformed items and normalize text. Upscale historically skips
 /// malformed entries and preserves their raw strings; keep that supported contract explicit.
 pub(crate) enum DatasetItemPolicy {
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     Strict,
     SkipMalformed,
 }
@@ -22,7 +22,7 @@ pub(crate) struct DatasetItem<'a> {
 }
 
 impl DatasetItem<'_> {
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     pub(crate) fn required(&self, field: &str) -> WorkerResult<&str> {
         payload::required_trimmed_str(
             self.object,
@@ -459,7 +459,7 @@ mod parsing_tests {
                 .expect("root")
                 .join("datasets/ds-1/one.png")
         );
-        #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+        #[cfg(native_lane)]
         {
             assert!(parse_dataset_items(
                 &settings,

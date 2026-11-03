@@ -749,7 +749,7 @@ pub(crate) fn every_planned_lane_row_resolves_a_weights_free_contract_implementi
 
 #[cfg(test)]
 mod tests {
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn every_shipped_partial_component_floor_table_uses_the_provider_entry_rule() {
         use gen_core::Quant;
