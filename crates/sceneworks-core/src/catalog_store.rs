@@ -4381,7 +4381,9 @@ fn directory_file_bytes(root: &Path) -> CatalogResult<u64> {
     while let Some(directory) = pending.pop() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
+            let Some(metadata) = crate::fsutil::payload_entry_metadata(&entry.path())? else {
+                continue;
+            };
             if metadata.file_type().is_symlink() {
                 total = total.saturating_add(metadata.len());
             } else if metadata.is_dir() {
