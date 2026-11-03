@@ -20,9 +20,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// The `<safe>` in the API/worker's managed `models/<safe>` download directory. Byte-identical to
-/// the API and worker, which re-export this implementation. Receipts written by either are
-/// read here, so this compatibility spelling is shared.
+/// The `<safe>` in the API/worker's managed `models/<safe>` download directory.
+/// Both re-export this implementation so receipt paths share one compatibility spelling.
 pub fn safe_download_dir(value: &str) -> String {
     let mut output = String::new();
     let mut in_replacement = false;
@@ -594,7 +593,9 @@ fn string_array_field(payload: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn pattern_matches(pattern: &str, value: &str) -> bool {
+/// Match the manifest/download glob contract: default `glob` options, ASCII case-folded
+/// only on Windows. Malformed patterns never match.
+pub fn pattern_matches(pattern: &str, value: &str) -> bool {
     let (pattern, value) = if cfg!(windows) {
         (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
     } else {
@@ -603,7 +604,8 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
     glob::Pattern::new(&pattern).is_ok_and(|pattern| pattern.matches(&value))
 }
 
-fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
+/// An empty allow-list permits every path; otherwise any matching pattern permits it.
+pub fn allow_pattern_matches(path: &str, patterns: &[String]) -> bool {
     if patterns.is_empty() {
         return true;
     }

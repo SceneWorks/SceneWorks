@@ -1751,7 +1751,8 @@ mod tests {
 
         // The task classifies from the discriminator, emits JSON (so it takes the cleanup above
         // rather than the prose one), and reads reference images when they are present.
-        let task = RefineTask::from_payload(Some("qwen_image_rewrite"));
+        let task =
+            RefineTask::from_payload(Some(sceneworks_core::contracts::QWEN_IMAGE_REWRITE_TASK));
         assert_eq!(task, RefineTask::QwenImageRewrite);
         assert!(task.emits_json(), "the rewrite must take the JSON cleanup");
         assert!(task.takes_reference_images());
