@@ -1,16 +1,11 @@
 import React, { act } from "react";
 import { expect, it, vi } from "vitest";
 import { mountRoot, unmountRoot } from "../testUtils/dom.js";
+import { deferred } from "../testUtils/async.js";
 
 vi.mock("../modelCache.js", async (original) => ({ ...(await original()), fetchModelCache: vi.fn() }));
 import { fetchModelCache } from "../modelCache.js";
 import { useModelCacheStatus } from "./useModelCacheStatus.js";
-
-function deferred() {
-  let resolve;
-  const promise = new Promise((done) => { resolve = done; });
-  return { promise, resolve };
-}
 
 it("discards an old token's response and exposes the current snapshot and error", async () => {
   global.IS_REACT_ACT_ENVIRONMENT = true;
