@@ -74,14 +74,16 @@ def candidates(asset, extra=None):
         yield root / ("models--" + asset["repo"].replace("/", "--")) / "snapshots" / asset["revision"] / asset["name"]
 
 
-def acquire(asset, destination, receipt, budget, *, extra=None, opener=urllib.request.urlopen):
+def acquire(asset, destination, receipt, budget, *, extra=None, use_cache=True, opener=urllib.request.urlopen):
     """Never mutate cache candidates; stage a regular file and verify bytes before publication."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise ValueError("fresh staging destination required")
     partial = destination.with_name(destination.name + ".partial")
     origin = "download"
-    cached = next((file for file in candidates(asset, extra) if file.is_file()), None)
+    print(json.dumps({"event": "asset-start", "file": asset["name"], "bytes": asset["bytes"],
+                      "cachePolicy": "verified-cache" if use_cache else "public-only"}), flush=True)
+    cached = next((file for file in candidates(asset, extra) if file.is_file()), None) if use_cache else None
     try:
         if cached:
             verify_asset(cached, asset)
@@ -107,6 +109,7 @@ def acquire(asset, destination, receipt, budget, *, extra=None, opener=urllib.re
         verify_asset(partial, asset)
         partial.rename(destination)
         receipt["assets"].append({"file": asset["name"], "bytes": asset["bytes"], "sha256": asset["sha256"], "origin": origin, "url": asset["url"]})
+        print(json.dumps({"event": "asset-verified", "file": asset["name"], "bytes": asset["bytes"]}), flush=True)
     finally:
         partial.unlink(missing_ok=True)
 
@@ -230,6 +233,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--oracle-dir", type=Path)
     parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument("--public-only", action="store_true", help="stage pinned public bytes without inspecting host caches")
     args = parser.parse_args()
     admit(args.source_sha, args.inference_sha, args.backend)
     if (sys.platform, args.backend) not in (("darwin", "mlx"), ("win32", "cuda")):
@@ -242,12 +246,12 @@ def main():
     fixture.mkdir()
     manifest = load_manifest()
     receipt = {"status": "provisioning", "sourceSha": args.source_sha, "inferenceSha": args.inference_sha,
-               "manifestSha256": digest(MANIFEST), "downloadBytes": 0, "assets": [], "onnx": [], "runtime": []}
+               "manifestSha256": digest(MANIFEST), "cachePolicy": "public-only" if args.public_only else "verified-cache", "downloadBytes": 0, "assets": [], "onnx": [], "runtime": []}
     try:
         selected = [item for item in manifest["models"] if args.backend in item["backends"] and
                     (args.mode == "proof" or item["name"] == "yolo11m_fused_mlx.safetensors")]
         for asset in [*selected, manifest["photo"]]:
-            acquire(asset, fixture / asset["name"], receipt, manifest["budgets"]["assetDownloadBytes"], extra=args.cache_dir)
+            acquire(asset, fixture / asset["name"], receipt, manifest["budgets"]["assetDownloadBytes"], extra=args.cache_dir, use_cache=not args.public_only)
             if asset["name"].endswith(".onnx"):
                 receipt["onnx"].append(inspect_onnx(fixture / asset["name"]))
         if args.mode == "proof":
@@ -260,7 +264,7 @@ def main():
             remaining = manifest["budgets"]["extractedRuntimeBytes"]
             for asset in manifest["runtime"][args.backend]:
                 wheel = output / "downloads" / asset["name"]
-                acquire(asset, wheel, receipt, manifest["budgets"]["assetDownloadBytes"])
+                acquire(asset, wheel, receipt, manifest["budgets"]["assetDownloadBytes"], use_cache=not args.public_only)
                 files = extract_runtime(wheel, output / "runtime" / asset["kind"], asset["kind"], args.backend, remaining)
                 remaining -= sum(item["bytes"] for item in files)
                 receipt["runtime"] += files

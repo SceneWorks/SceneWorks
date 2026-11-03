@@ -89,6 +89,9 @@ test('native provisioning startup preserves Windows paths and passes arguments w
   const python={CV_NATIVE_PYTHON:'C:\\Python 3.12\\python.exe',CV_BACKEND:'cuda',CV_SOURCE_SHA:source,CV_INFERENCE_SHA:inference,CV_PROVISION_ROOT:'D:\\runner temp\\fixtures',CV_ORACLE_ARTIFACT:'D:\\runner temp\\oracles'};
   const [command,args]=provisionCommand(python,'win32');
   assert.equal(command,python.CV_NATIVE_PYTHON);assert(args.includes(python.CV_PROVISION_ROOT));
+  assert(!args.includes('--public-only'),'Windows retains verified cache reuse');
+  const [,macArgs]=provisionCommand({...python,CV_NATIVE_PYTHON:'/opt/homebrew/bin/python3.12',CV_BACKEND:'mlx'},'darwin');
+  assert(macArgs.includes('--public-only'),'Mac provider must never open host caches');
   assert.throws(()=>provisionCommand({...python,CV_NATIVE_PYTHON:'python'},'win32'));
   let called=false;
   assert.equal(run(['proof'],{...python,CV_NATIVE_PYTHON:'/tmp/native python'},(executable,argv,options)=>{
@@ -101,7 +104,51 @@ test('native provisioning startup preserves Windows paths and passes arguments w
     assert.match(text,/run: bash scripts\/select-cv-python.sh/);
     assert.match(text,/shell: node \{0\}/);
     assert.doesNotMatch(text,/python -B - <<|run: python -I -B scripts\/cv_provision.py --mode proof/);
-    if(file==='cv-oracle-provision.yml') assert.doesNotMatch(text,/actions\/setup-python/);
+    if(file==='cv-oracle-provision.yml') {
+      assert.doesNotMatch(text,/actions\/setup-python/);
+      assert.match(text,/scripts\/cv_provision.py --mode oracle-input --backend mlx --public-only/);
+    }
     else assert.match(text,/id: python\n        if: \$\{\{ inputs.backend == 'cuda' && !inputs.build_only \}\}/);
   }
+});
+
+test('assembled native proof plan binds every registered body, fixture and receipt without execution',async()=>{
+  const {body}=await import('./ci/aesthetic-cpu-validation.mjs');
+  const controller=await readFile(new URL('./cv-provider-validation.mjs',import.meta.url),'utf8');
+  const manifest=await readFile(new URL('../crates/sceneworks-worker/Cargo.toml',import.meta.url),'utf8');
+  assert.match(controller,/const build=\['test','--locked','-p','sceneworks-worker','--lib','--no-run','--message-format=json-render-diagnostics','-j','1'\]/);
+  assert.match(controller,/if\(process.platform==='win32'\) build.push\('--features','backend-candle'\)/);
+  assert.match(manifest,/backend-candle = \["dep:runtime-cuda"/);
+  assert.match(manifest,/runtime-cuda = .*features = \["cv"\]/);
+  assert.match(manifest,/runtime-macos = .*features = \["audio-metal", "cv"\]/);
+  assert.match(controller,/message.target\?\.name==='sceneworks_worker'&&message.profile\?\.test&&message.executable/);
+  assert.match(controller,/assert.equal\(binaries.length,1/);
+  assert.match(controller,/\[selected.test,'--list','--ignored','--exact'\]/);
+  assert.match(controller,/if\(buildOnly\) continue;/);
+  assert.match(controller,/\[selected.test,'--ignored','--exact','--nocapture','--test-threads=1'\]/);
+  const pins=JSON.parse(await readFile(new URL('./cv-fixture-manifest.json',import.meta.url),'utf8'));
+  for(const platform of ['darwin','win32']) {
+    const names=new Set([...pins.models.filter(item=>item.backends.includes(platform==='darwin'?'mlx':'cuda')).map(item=>item.name),pins.photo.name,...(platform==='darwin'?['refs.safetensors','refs_ext.safetensors','ref_people.json']:[])]);
+    assert.deepEqual(new Set(requiredFixtures(platform)),names);
+    for(const selected of proofCases(platform)) {
+      const [module,,name]=selected.test.split('::');
+      const source=await readFile(new URL(`../crates/sceneworks-worker/src/${module}/tests.rs`,import.meta.url),'utf8');
+      const prefix=source.slice(0,source.indexOf(`fn ${name}(`)).slice(-350);
+      assert.match(prefix,/#\[ignore(?:[^\]]*)\]/,`${selected.test}: ignored registration required`);
+      const implementation=body(source,name);
+      assert.match(implementation,new RegExp(`proof_(?:ort_)?complete\\(\\s*"${name}"`));
+      assert.doesNotMatch(implementation,/\breturn\s*;/,'required proof cannot skip its body');
+      assert.match(implementation,/assert(?:_eq)?!\(/,'numerical/output assertions remain in the selected body');
+    }
+  }
+  for(const name of ['SCENEWORKS_PERSON_DETECTOR_WEIGHTS','SCENEWORKS_TEST_PERSON_IMAGE','SCENEWORKS_TEST_POSE_IMAGE','SCENEWORKS_DWPOSE_DET','SCENEWORKS_DWPOSE_POSE','SCENEWORKS_REALESRGAN_X2_ONNX','SCENEWORKS_REALESRGAN_X4_ONNX']) {
+    assert.match(controller,new RegExp(`${name}:path\\.join\\(directory,`));
+  }
+  assert.match(controller,/delete childEnv.SCENEWORKS_TEST_UPSCALE_IMAGE/);
+  assert.match(controller,/SCENEWORKS_TEST_UPSCALE_FACTOR:String\(selected.factor\)/);
+  const workflow=await readFile(new URL('../.github/workflows/cv-provider-validation.yml',import.meta.url),'utf8');
+  assert.match(workflow,/--actor cv-provider-validation --admission-policy strict-idle --budget-minutes 170 --cuda-ordinals 0 --probe-visible 1/);
+  assert.doesNotMatch(workflow,/functional-coexistence/);
+  assert.match(controller,/CV_BUILD_ONLY==='true'\|\|!\(await enterMacMetalExecution\(3600\)\)/);
+  assert.match(controller,/metalChildOptions\(/);
 });

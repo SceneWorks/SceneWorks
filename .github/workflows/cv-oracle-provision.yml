@@ -67,7 +67,7 @@ jobs:
         run: |
           require('node:child_process').execFileSync(process.execPath, ['scripts/cv-provision-entry.mjs', 'paths', 'oracle'], {stdio: 'inherit'});
       - name: Admit exact pair and stage only pinned oracle inputs
-        run: python -I -B scripts/cv_provision.py --mode oracle-input --backend mlx --source-sha "$CV_SOURCE_SHA" --inference-sha "$CV_INFERENCE_SHA" --output "$CV_ORACLE_INPUT"
+        run: python -I -B scripts/cv_provision.py --mode oracle-input --backend mlx --public-only --source-sha "$CV_SOURCE_SHA" --inference-sha "$CV_INFERENCE_SHA" --output "$CV_ORACLE_INPUT"
       - name: Install bounded run-private CPU oracle tools
         run: python -I -B scripts/cv_oracle_tools.py --source-sha "$CV_SOURCE_SHA" --inference-sha "$CV_INFERENCE_SHA" --output "$CV_ORACLE_TOOLS"
       - name: Execute independent pinned upstream CPU oracle and assert contracts

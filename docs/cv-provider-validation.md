@@ -90,10 +90,14 @@ installation reports and complete producer receipt are retained as artifacts.
 ### Pinned fixtures and runtime
 
 `scripts/cv-fixture-manifest.json` records immutable URLs, byte sizes and SHA-256s.
-`scripts/cv_provision.py` checks the supported HF cache roots for those exact
-snapshots, verifies cached bytes, and copies them into a fresh regular-file
-fixture directory. It never writes to an application/HF cache. Missing assets
-come from the pinned public URLs. Corrupt cached bytes fail explicitly.
+Mac manual oracle and provider jobs pass `--public-only` to
+`scripts/cv_provision.py`: they stage pinned public bytes directly into fresh
+run-private directories without inspecting host caches. This avoids a measured
+runner stall opening an optional cache file on an external volume. Windows and
+explicit cache-enabled provisioning retain exact-snapshot, digest-verified cache
+reuse, with pinned public URLs for missing files and explicit failure for corrupt
+cached bytes. No mode writes to an application/HF cache. Each asset emits start
+and verified events; both modes enforce the same sizes, hashes and budgets.
 
 | Fixture | Immutable source |
 | --- | --- |
@@ -121,11 +125,12 @@ Payload limits are enforced: 3 GiB of asset downloads per provisioning job,
 6 GiB of extracted runtime libraries, 512 MiB of oracle wheels and 128 MiB of
 oracle outputs. Cold payloads are approximately 563 MB for Mac model/photo/ORT
 staging and 2.400 GB for Windows model/photo/full runtime staging. The separate
-Mac oracle inputs are 80.5 MB before cache reuse, and its seven primary tool
+Mac oracle inputs are 80.5 MB, and its seven primary tool
 wheels total approximately 150 MB plus recorded bounded dependencies. The oracle
 job has a 35-minute timeout; hardware proof retains its 180-minute timeout and
-Windows execution controller's 170-minute budget. These are bounded correctness
-passes, not memory matrices or calibration campaigns.
+Windows execution controller's 170-minute budget. CUDA uses the existing
+`strict-idle` admission policy with physical GPU 1 exposed as logical device 0.
+These are bounded correctness passes, not memory matrices or calibration campaigns.
 
 ### Acceptance and artifacts
 

@@ -1,5 +1,7 @@
 """Ordinary metadata/buffer contracts only: never import or initialize a model runtime."""
 import hashlib
+import importlib.util
+import shlex
 import io
 import json
 import os
@@ -116,6 +118,42 @@ class ProvisionContracts(unittest.TestCase):
         self.assertIn("explicit Actions dispatch", result.stderr)
         self.assertFalse((self.root / "assets").exists())
 
+    def test_actual_cuda_workflow_arguments_use_standard_admission_before_any_probe(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/cv-provider-validation.yml").read_text()
+        command = workflow.split("python -I scripts/ci/windows_cuda_execution.py ", 1)[1].split(" -- node scripts/cv-provider-validation.mjs)", 1)[0]
+        args = shlex.split(command) + ["--", "node", "scripts/cv-provider-validation.mjs"]
+        spec = importlib.util.spec_from_file_location("cv_cuda_admission", SCRIPTS / "ci/windows_cuda_execution.py")
+        helper = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helper)
+        # Capture the actual helper's argparse output, stopping before Windows setup/probes.
+        captured = []
+        parse = helper.argparse.ArgumentParser.parse_args
+        class Parsed(Exception):
+            pass
+        def capture(parser, *_args, **_kwargs):
+            captured.append(parse(parser, args))
+            raise Parsed()
+        with patch.object(helper.argparse.ArgumentParser, "parse_args", capture), \
+             patch.object(helper, "prepared_components", side_effect=AssertionError("no GPU setup")), \
+             patch.object(helper, "resolve_binding", side_effect=AssertionError("no GPU probe")):
+            with self.assertRaises(Parsed):
+                helper.main()
+        selected = captured[0]
+        self.assertEqual(selected.actor, "cv-provider-validation")
+        self.assertEqual(selected.admission_policy, helper.STRICT_POLICY)
+        self.assertEqual(selected.budget_minutes, 170)
+        self.assertEqual((selected.physical_indices, selected.cuda_ordinals, selected.probe_visible), (None, "0", "1"))
+        self.assertEqual(selected.command, ["--", "node", "scripts/cv-provider-validation.mjs"])
+        env = dict(GITHUB_EVENT_NAME="workflow_dispatch", GITHUB_WORKFLOW_REF="SceneWorks/SceneWorks/.github/workflows/nax-kernel-validation.yml@refs/heads/proof",
+                   SCENEWORKS_GPU_ID="1", CUDA_VISIBLE_DEVICES="1", NVIDIA_VISIBLE_DEVICES="1", CUDA_DEVICE_ORDER="PCI_BUS_ID")
+        helper.require_outermost(env)
+        helper.require_admission_policy(selected.admission_policy, selected.actor, env, selected.physical_indices, selected.cuda_ordinals, selected.probe_visible)
+        with self.assertRaisesRegex(RuntimeError, "restricted to load-progress"):
+            helper.require_admission_policy(helper.FUNCTIONAL_POLICY, selected.actor, env, None, "0", "1")
+        with self.assertRaises(RuntimeError):
+            helper.require_outermost({**env, helper.ACTIVE_KEY: "123"})
+        self.assertIn('if "%CV_BUILD_ONLY%"=="true" (node scripts/cv-provider-validation.mjs)', workflow)
+
     def test_nested_manual_dispatch_admits_exact_source_and_all_pin_sites(self):
         source, pin = "a" * 40, "b" * 40
         for name in ("Cargo.toml", "crates/sceneworks-core/Cargo.toml", "crates/sceneworks-worker/Cargo.toml", "crates/sceneworks-memory-adapter/Cargo.toml"):
@@ -148,7 +186,7 @@ class ProvisionContracts(unittest.TestCase):
         env.pop("GITHUB_ACTIONS", None)
         common = ["--source-sha", "a" * 40, "--inference-sha", "b" * 40, "--output", str(self.root / "output")]
         entries = {
-            "cv_provision.py": ["--mode", "oracle-input", "--backend", "mlx"],
+            "cv_provision.py": ["--mode", "oracle-input", "--backend", "mlx", "--public-only"],
             "cv_oracle_tools.py": [],
             "cv_oracle_producer.py": ["--fixtures", str(self.root), "--install-report", str(self.root / "missing.json")],
         }
@@ -164,6 +202,44 @@ class ProvisionContracts(unittest.TestCase):
         self.assertEqual((self.root / "out").read_bytes(), self.payload)
         self.assertEqual(self.receipt["downloadBytes"], len(self.payload))
         self.assertFalse((self.root / "out.partial").exists())
+
+    def test_actual_mac_oracle_command_stages_public_metadata_fixture(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/cv-oracle-provision.yml").read_text()
+        command = next(line.strip().removeprefix("run: ") for line in workflow.splitlines()
+                       if "scripts/cv_provision.py --mode oracle-input" in line)
+        output = self.root / "oracle-input"
+        for key, value in {"CV_SOURCE_SHA": "a" * 40, "CV_INFERENCE_SHA": "b" * 40,
+                           "CV_ORACLE_INPUT": str(output)}.items():
+            command = command.replace("$" + key, value)
+        argv = shlex.split(command)
+        argv = argv[argv.index("scripts/cv_provision.py"):]
+        manifest = {"models": [], "photo": self.asset, "budgets": {"assetDownloadBytes": 1000}}
+        acquire = cv.acquire
+        def fixture_acquire(*args, **kwargs):
+            self.assertFalse(kwargs["use_cache"])
+            return acquire(*args, **kwargs, opener=lambda *_a, **_k: Response(self.payload))
+        with patch.object(cv, "admit"), patch.object(cv.sys, "argv", argv), \
+             patch.object(cv.sys, "platform", "darwin"), patch.object(cv, "load_manifest", return_value=manifest), \
+             patch.object(cv, "candidates", side_effect=AssertionError("no external cache access")), \
+             patch.object(cv, "acquire", side_effect=fixture_acquire):
+            cv.main()
+        self.assertEqual((output / "fixtures" / self.asset["name"]).read_bytes(), self.payload)
+        receipt = json.loads((output / "provisioning.json").read_text())
+        self.assertEqual((receipt["status"], receipt["cachePolicy"]), ("passed", "public-only"))
+
+    def test_public_only_never_inspects_host_cache_and_still_checks_bytes(self):
+        with patch.object(cv, "candidates", side_effect=AssertionError("host cache must not be inspected")):
+            cv.acquire(self.asset, self.root / "out", self.receipt, 1000, use_cache=False,
+                       opener=lambda *_a, **_k: Response(self.payload, len(self.payload)))
+            self.assertEqual((self.root / "out").read_bytes(), self.payload)
+            self.assertEqual(self.receipt["assets"][0]["origin"], "download")
+            with self.assertRaisesRegex(ValueError, "identity"):
+                cv.acquire(self.asset, self.root / "bad", self.receipt, 1000, use_cache=False,
+                           opener=lambda *_a, **_k: Response(b"x" * len(self.payload)))
+            self.assertFalse((self.root / "bad").exists())
+            with self.assertRaisesRegex(ValueError, "budget"):
+                cv.acquire(self.asset, self.root / "over", self.receipt, 0, use_cache=False,
+                           opener=lambda *_a, **_k: self.fail("budget must precede network"))
 
     def test_oversized_or_wrong_bytes_never_publish(self):
         for payload in (self.payload + b"!", b"x" * len(self.payload)):

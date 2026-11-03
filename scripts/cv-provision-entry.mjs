@@ -20,7 +20,7 @@ export function provisionCommand(env,platform=process.platform) {
   const paths=platform==='win32'?path.win32:path.posix;
   assert(paths.isAbsolute(env.CV_NATIVE_PYTHON??'')&&!/[\r\n]/.test(env.CV_NATIVE_PYTHON),'explicit native Python required');
   for(const key of ['CV_BACKEND','CV_SOURCE_SHA','CV_INFERENCE_SHA','CV_PROVISION_ROOT','CV_ORACLE_ARTIFACT']) assert(env[key],`missing ${key}`);
-  return [env.CV_NATIVE_PYTHON,['-I','-B',path.join(root,'scripts/cv_provision.py'),'--mode','proof','--backend',env.CV_BACKEND,'--source-sha',env.CV_SOURCE_SHA,'--inference-sha',env.CV_INFERENCE_SHA,'--output',env.CV_PROVISION_ROOT,'--oracle-dir',env.CV_ORACLE_ARTIFACT]];
+  return [env.CV_NATIVE_PYTHON,['-I','-B',path.join(root,'scripts/cv_provision.py'),'--mode','proof','--backend',env.CV_BACKEND,'--source-sha',env.CV_SOURCE_SHA,'--inference-sha',env.CV_INFERENCE_SHA,'--output',env.CV_PROVISION_ROOT,'--oracle-dir',env.CV_ORACLE_ARTIFACT,...(env.CV_BACKEND==='mlx'?['--public-only']:[])]];
 }
 export function run(args,env=process.env,spawn=spawnSync) {
   if(args.length===2&&args[0]==='paths') {
