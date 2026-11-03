@@ -291,18 +291,7 @@ fn unified_memory_admission_accounts_for_the_output_canvas() {
 }
 
 fn shipped_entry(id: &str) -> Value {
-    let text = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(name, _)| *name == "builtin.models.jsonc")
-        .expect("builtin.models.jsonc embedded")
-        .1;
-    let manifest: Value =
-        serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(text)).unwrap();
-    manifest["models"]
-        .as_array()
-        .and_then(|models| models.iter().find(|model| model["id"] == id))
-        .cloned()
-        .unwrap_or_else(|| panic!("{id} is in the builtin catalog"))
+    Value::Object(crate::test_env::shipped_catalog_entry(id))
 }
 
 /// The catalog's declared (unmeasured) floors are the worker's floor + reserve on each lane, so the

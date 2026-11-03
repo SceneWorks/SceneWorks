@@ -113,14 +113,7 @@ fn instantid_gib_bytes(gb: f64) -> u64 {
     (gb * INSTANTID_BYTES_PER_GIB).ceil() as u64
 }
 
-/// The single path inside a [`gen_core::WeightsSource`]. Local rather than
-/// `conditioning_fit::weights_source_path` because that module is candle-only and this seam runs on
-/// BOTH lanes.
-fn instantid_source_path(source: &WeightsSource) -> &Path {
-    match source {
-        WeightsSource::Dir(path) | WeightsSource::File(path) => path.as_path(),
-    }
-}
+
 
 /// The exact, ORDERED artifact set one InstantID load consumes, each tagged with the role it plays.
 ///
@@ -140,13 +133,13 @@ fn instantid_artifact_entries<'a>(
 ) -> Vec<(&'static str, &'a Path)> {
     let mut entries: Vec<(&'static str, &Path)> = vec![
         ("sdxl_base", sdxl_base),
-        ("identitynet", instantid_source_path(identitynet)),
+        ("identitynet", crate::weights_source::WeightsSourceExt::path(identitynet)),
         ("ip_adapter", ip_adapter),
         ("scrfd", scrfd),
         ("arcface", arcface),
     ];
     if let Some(openpose) = openpose {
-        entries.push(("openpose", instantid_source_path(openpose)));
+        entries.push(("openpose", crate::weights_source::WeightsSourceExt::path(openpose)));
     }
     entries.extend(
         adapters
@@ -154,8 +147,8 @@ fn instantid_artifact_entries<'a>(
             .map(|adapter| ("adapter", adapter.path.as_path())),
     );
     if let Some(pid) = pid {
-        entries.push(("pid_checkpoint", instantid_source_path(&pid.checkpoint)));
-        entries.push(("pid_gemma", instantid_source_path(&pid.gemma)));
+        entries.push(("pid_checkpoint", crate::weights_source::WeightsSourceExt::path(&pid.checkpoint)));
+        entries.push(("pid_gemma", crate::weights_source::WeightsSourceExt::path(&pid.gemma)));
     }
     entries
 }
@@ -1240,7 +1233,7 @@ async fn generate_instantid_stream(
         // freshly-downloaded layout (where both files ARE the directory's contents) prices identically.
         let openpose_dir = openpose
             .as_ref()
-            .map(crate::conditioning_fit::weights_source_path);
+            .map(crate::weights_source::WeightsSourceExt::path);
         let openpose_files: Vec<std::path::PathBuf> = openpose_dir
             .map(|dir| {
                 INSTANTID_CONTROLNET_FILES
@@ -1250,7 +1243,7 @@ async fn generate_instantid_stream(
             })
             .unwrap_or_default();
         let mut overlays = vec![
-            crate::conditioning_fit::weights_source_path(&controlnet),
+            crate::weights_source::WeightsSourceExt::path(&controlnet),
             ip_adapter.as_path(),
             scrfd_path.as_path(),
             arcface_path.as_path(),

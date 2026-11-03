@@ -16,6 +16,10 @@
 //! UNCERTIFIED artifact gets no floors at all (the manifest rows describe the certified bytes,
 //! not an imported checkpoint) and keeps its resident-estimate-only behavior.
 
+pub(crate) use crate::memory_route_registry::{
+    KOLORS_REQUEST_EVIDENCE_REVISION, PULID_FLUX_REQUEST_EVIDENCE_REVISION,
+    SDXL_REQUEST_EVIDENCE_REVISION,
+};
 use gen_core::{
     GenerationMemory, LoadSpec, MemoryBackend, MemoryCacheState, MemoryConformanceState,
     MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryGeometry, MemoryMode,
@@ -34,19 +38,6 @@ use crate::memory_strategy::{Budget, Candidate, RequestScope, Selection};
 use crate::vram_gate::VramBudget;
 use crate::{WorkerError, WorkerResult};
 
-const Z_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15815-candle-z-image-request-scope-v1";
-const QWEN_IMAGE_REQUEST_EVIDENCE_REVISION: &str = "sc-15817-candle-qwen-image-request-scope-v1";
-const FLUX1_REQUEST_EVIDENCE_REVISION: &str = "sc-15823-candle-flux1-request-scope-v1";
-const FLUX2_DEV_REQUEST_EVIDENCE_REVISION: &str = "sc-15833-candle-flux2-dev-request-scope-v1";
-const FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION: &str = "sc-15831-candle-flux2-klein-request-scope-v1";
-const MAGE_FLOW_REQUEST_EVIDENCE_REVISION: &str = "sc-15813-candle-mage-flow-request-scope-v1";
-const CHROMA_REQUEST_EVIDENCE_REVISION: &str = "sc-20788-candle-chroma-staged-residency-v2";
-const IDEOGRAM_REQUEST_EVIDENCE_REVISION: &str =
-    "sc-20789-candle-ideogram-request-scoped-staged-residency-v1";
-pub(crate) const PULID_FLUX_REQUEST_EVIDENCE_REVISION: &str =
-    "sc-15839-candle-pulid-flux-request-scope-v1";
-const DECLARATION_REQUEST_EVIDENCE_REVISION: &str = "sc-18456-candle-declaration-request-scope-v1";
-pub(crate) const SDXL_REQUEST_EVIDENCE_REVISION: &str = "sdxl-candle-request-contract-v3";
 const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 const CHROMA_ADAPTER_OVERLAY_PREFIX: &str = "chroma.adapters.ordered-additive.sha256:";
 const IDEOGRAM_ADAPTER_OVERLAY_PREFIX: &str = "ideogram.adapters.ordered-additive.sha256:";
@@ -56,9 +47,7 @@ const IDEOGRAM_PHYSICAL_RECEIPT_PREFIX: &str = "ideogram.physical.sha256:";
 const SANA_PHYSICAL_RECEIPT_PREFIX: &str = "sana.candle.dense.physical.sha256:";
 const SD35_PHYSICAL_RECEIPT_PREFIX: &str = "sd3.5.candle.physical.sha256:";
 const SD35_ADAPTER_RECEIPT_PREFIX: &str = "sd3.5.adapters.ordered-additive.sha256:";
-pub(crate) const KOLORS_REQUEST_EVIDENCE_REVISION: &str = "kolors-candle-request-contract-v1";
-const SANA_REQUEST_EVIDENCE_REVISION: &str = "sana-candle-dense-request-contract-v1";
-const SD35_REQUEST_EVIDENCE_REVISION: &str = "sd3.5-candle-request-contract-v1";
+
 const KOLORS_PHYSICAL_RECEIPT_PREFIX: &str = "kolors.physical.sha256:";
 const KOLORS_ADAPTER_RECEIPT_PREFIX: &str = "kolors.adapters.ordered.sha256:";
 const KOLORS_IP_RECEIPT_PREFIX: &str = "kolors.ip.sha256:";
@@ -68,34 +57,34 @@ const SDXL_OVERLAY_RECEIPT_DOMAIN: &str = "sdxl-candle-overlay-assembly-v1";
 const SDXL_OVERLAY_RECEIPT_PREFIX: &str = "sdxl.overlay.ordered.sha256:";
 
 fn is_chroma(engine_id: &str) -> bool {
-    matches!(engine_id, "chroma1_hd" | "chroma1_base" | "chroma1_flash")
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Chroma)
 }
 
 fn is_ideogram(engine_id: &str) -> bool {
-    matches!(engine_id, "ideogram_4" | "ideogram_4_turbo")
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Ideogram)
 }
 
 fn is_sana(engine_id: &str) -> bool {
-    matches!(engine_id, "sana_1600m" | "sana_sprint_1600m")
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Sana)
 }
 
 /// The FLUX 3 Image Klein provider ids, whose packages include the publisher FP8R/NVFP4 tiers.
 fn is_flux3(engine_id: &str) -> bool {
-    matches!(engine_id, "flux3_klein" | "flux3_klein_base")
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Flux3)
 }
 
 pub(crate) fn is_sd35(engine_id: &str) -> bool {
-    matches!(
-        engine_id,
-        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium"
-    )
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Sd35)
 }
 
 fn is_sealed_kolors_bespoke(engine_id: &str) -> bool {
-    matches!(
-        engine_id,
-        "candle_kolors_ipadapter" | "candle_kolors_control"
-    )
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::KolorsBespoke)
 }
 
 /// Every family whose admitted peak is priced from an exact provider receipt rather than a
@@ -2322,9 +2311,11 @@ pub(crate) fn evaluate_shared_bespoke_image(
     request_evidence_revision: &'static str,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
     let expected_revision = match engine_id {
-        "pulid_flux" => PULID_FLUX_REQUEST_EVIDENCE_REVISION,
-        "candle_kolors_ipadapter" | "candle_kolors_control" => KOLORS_REQUEST_EVIDENCE_REVISION,
-        "sdxl" => SDXL_REQUEST_EVIDENCE_REVISION,
+        "pulid_flux" => crate::memory_route_registry::PULID_FLUX_REQUEST_EVIDENCE_REVISION,
+        "candle_kolors_ipadapter" | "candle_kolors_control" => {
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION
+        }
+        "sdxl" => crate::memory_route_registry::SDXL_REQUEST_EVIDENCE_REVISION,
         _ => {
             return Err(WorkerError::InvalidPayload(format!(
                 "{engine_id} has no registered bespoke memory evidence authority"
@@ -2533,28 +2524,15 @@ fn evaluate_shared_image_inner_priced_with_resources(
     reference_workspace_bytes: u64,
     sdxl_endpoints: Option<&SdxlCudaMemoryEndpoints>,
 ) -> WorkerResult<Option<CandleMemoryEvaluation>> {
-    let request_evidence_revision = request_evidence_revision_override.unwrap_or(match engine_id {
-        "z_image" | "z_image_turbo" | "z_image_control" | "z_image_turbo_control" => {
-            Z_IMAGE_REQUEST_EVIDENCE_REVISION
-        }
-        "qwen_image" | "qwen_image_edit" => QWEN_IMAGE_REQUEST_EVIDENCE_REVISION,
-        "flux1_schnell" | "flux1_dev" => FLUX1_REQUEST_EVIDENCE_REVISION,
-        "flux2_dev" => FLUX2_DEV_REQUEST_EVIDENCE_REVISION,
-        "flux2_klein_9b" => FLUX2_KLEIN_REQUEST_EVIDENCE_REVISION,
-        "mage_flow_base"
-        | "mage_flow"
-        | "mage_flow_turbo"
-        | "mage_flow_edit_base"
-        | "mage_flow_edit"
-        | "mage_flow_edit_turbo" => MAGE_FLOW_REQUEST_EVIDENCE_REVISION,
-        "chroma1_hd" | "chroma1_base" | "chroma1_flash" => CHROMA_REQUEST_EVIDENCE_REVISION,
-        "ideogram_4" | "ideogram_4_turbo" => IDEOGRAM_REQUEST_EVIDENCE_REVISION,
-        "kolors" => KOLORS_REQUEST_EVIDENCE_REVISION,
-        "sana_1600m" | "sana_sprint_1600m" => SANA_REQUEST_EVIDENCE_REVISION,
-        "sd3_5_large" | "sd3_5_large_turbo" | "sd3_5_medium" => SD35_REQUEST_EVIDENCE_REVISION,
-        "sdxl" => SDXL_REQUEST_EVIDENCE_REVISION,
-        _ => DECLARATION_REQUEST_EVIDENCE_REVISION,
-    });
+    let Some(registered_revision) =
+        crate::memory_route_registry::candle_gate_evidence_revision(engine_id)
+    else {
+        // Unregistered families retain resident/legacy admission and cannot acquire an optimized
+        // request contract through the former declaration-revision catch-all.
+        return Ok(None);
+    };
+    let request_evidence_revision =
+        request_evidence_revision_override.unwrap_or(registered_revision);
     // Hires-fix is two independently shaped denoise passes. Only families whose generation harness
     // mints and carries one exact context per pass may use request-scoped optimized admission.
     if worker_multipass && !is_ideogram(engine_id) && !is_sana(engine_id) && engine_id != "sdxl" {
@@ -3413,7 +3391,8 @@ mod tests {
             },
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             calibration_fingerprint: contract.calibration.as_ref().unwrap().fingerprint.clone(),
-            sceneworks_revision: SDXL_REQUEST_EVIDENCE_REVISION.into(),
+            sceneworks_revision: crate::memory_route_registry::SDXL_REQUEST_EVIDENCE_REVISION
+                .into(),
             inference_revision: sceneworks_core::inference_provenance::INFERENCE_REVISION.into(),
             harness_version: String::new(),
             predicted_peak_bytes: 0,
@@ -3691,7 +3670,7 @@ mod tests {
                 },
                 (resident * BYTES_PER_GIB).ceil() as u64,
                 overlay_bytes,
-                SDXL_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::SDXL_REQUEST_EVIDENCE_REVISION,
                 no_anchors(),
             )
         };
@@ -3749,7 +3728,7 @@ mod tests {
             full_min.evidence.key.geometry,
             (resident * BYTES_PER_GIB).ceil() as u64,
             0,
-            SDXL_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::SDXL_REQUEST_EVIDENCE_REVISION,
             no_anchors(),
         );
         assert!(refused.iter().all(|candidate| candidate
@@ -3862,7 +3841,8 @@ mod tests {
                 34
             }),
             cache_state: MemoryCacheState::Cold,
-            evidence_revision: IDEOGRAM_REQUEST_EVIDENCE_REVISION.to_owned(),
+            evidence_revision: crate::memory_route_registry::IDEOGRAM_REQUEST_EVIDENCE_REVISION
+                .to_owned(),
         }
     }
 
@@ -4346,7 +4326,7 @@ mod tests {
         .expect("registered Kolors staged selection");
         assert_eq!(
             evaluation.context.evidence_revision,
-            KOLORS_REQUEST_EVIDENCE_REVISION
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION
         );
         let assembly = evaluation.context.overlay.unwrap();
         assert!(assembly.contains(KOLORS_PHYSICAL_RECEIPT_PREFIX));
@@ -4481,7 +4461,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
-            KOLORS_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
         )
         .unwrap()
         .expect("exact staged candidate");
@@ -4491,7 +4471,7 @@ mod tests {
         );
         assert_eq!(
             evaluation.context.evidence_revision,
-            KOLORS_REQUEST_EVIDENCE_REVISION
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION
         );
         assert!(evaluation
             .context
@@ -4529,7 +4509,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
-            KOLORS_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
         );
         assert!(
             crossed.is_err(),
@@ -4677,7 +4657,7 @@ mod tests {
                         0,
                         cache_state,
                         ip_contract.clone(),
-                        KOLORS_REQUEST_EVIDENCE_REVISION,
+                        crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
                     )
                     .unwrap()
                     .expect("IP staged candidate");
@@ -4726,7 +4706,7 @@ mod tests {
                             0,
                             cache_state,
                             control_contract.clone(),
-                            KOLORS_REQUEST_EVIDENCE_REVISION,
+                            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
                         )
                         .unwrap()
                         .expect("Control staged candidate");
@@ -4773,7 +4753,7 @@ mod tests {
             0,
             MemoryCacheState::Cold,
             kolors_bespoke_probe_contract("candle_kolors_ipadapter", "q4", false),
-            KOLORS_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::KOLORS_REQUEST_EVIDENCE_REVISION,
         )
         .unwrap()
         .expect("a roomy card still admits");
@@ -5013,7 +4993,7 @@ mod tests {
                 MemoryCacheState::Cold,
                 None,
                 Some(contract.clone()),
-                Some(CHROMA_REQUEST_EVIDENCE_REVISION),
+                Some(crate::memory_route_registry::CHROMA_REQUEST_EVIDENCE_REVISION),
                 None,
                 surcharge,
                 None,
@@ -5145,7 +5125,7 @@ mod tests {
                 MemoryCacheState::Cold,
                 None,
                 Some(contract),
-                Some(CHROMA_REQUEST_EVIDENCE_REVISION),
+                Some(crate::memory_route_registry::CHROMA_REQUEST_EVIDENCE_REVISION),
                 None,
             )
         };
@@ -5274,7 +5254,7 @@ mod tests {
                     MemoryCacheState::Cold,
                     None,
                     Some(contract),
-                    Some(SANA_REQUEST_EVIDENCE_REVISION),
+                    Some(crate::memory_route_registry::SANA_REQUEST_EVIDENCE_REVISION),
                     None,
                 )
             };
@@ -5302,7 +5282,7 @@ mod tests {
                 assert_eq!(evaluation.context.has_phases, request_has_phases);
                 assert_eq!(
                     evaluation.context.evidence_revision,
-                    SANA_REQUEST_EVIDENCE_REVISION
+                    crate::memory_route_registry::SANA_REQUEST_EVIDENCE_REVISION
                 );
             }
 
@@ -5730,7 +5710,7 @@ mod tests {
                 MemoryCacheState::Warm,
                 Some("text_to_image"),
                 Some(contract),
-                Some(IDEOGRAM_REQUEST_EVIDENCE_REVISION),
+                Some(crate::memory_route_registry::IDEOGRAM_REQUEST_EVIDENCE_REVISION),
                 None,
             )
         };
@@ -5783,7 +5763,7 @@ mod tests {
             MemoryCacheState::Cold,
             Some("image_to_image"),
             Some(contract.clone()),
-            Some(IDEOGRAM_REQUEST_EVIDENCE_REVISION),
+            Some(crate::memory_route_registry::IDEOGRAM_REQUEST_EVIDENCE_REVISION),
             None,
         )
         .expect("Hires structural estimate")
@@ -6827,7 +6807,7 @@ mod tests {
         // Estimate admissions are legacy-scoped in telemetry, exactly like the resident estimate.
         assert_eq!(
             evaluation.context.evidence_revision,
-            Z_IMAGE_REQUEST_EVIDENCE_REVISION
+            crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION
         );
 
         // Margin mutation arm: at 4.52 GiB free the padded staged floor (2.5 + 2 = 4.5) fits but
@@ -7195,7 +7175,7 @@ mod tests {
             Z_IMAGE_FIXTURE_GEOMETRY,
             (18.4 * BYTES_PER_GIB) as u64,
             0,
-            Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
             anchors,
         )
     }
@@ -8276,7 +8256,7 @@ mod tests {
             geometry,
             (18.4 * BYTES_PER_GIB) as u64,
             0,
-            Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+            crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
             anchors,
         )
     }
@@ -8603,7 +8583,7 @@ mod tests {
                 geometry,
                 resident_peak_bytes,
                 0,
-                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 no_anchors(),
             )
         };
@@ -8793,7 +8773,7 @@ mod tests {
                 geometry,
                 resident_peak_bytes,
                 0,
-                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 CandleLadderAnchors {
                     store: anchors,
                     facts: ArchitectureFacts::default(),
@@ -8933,7 +8913,7 @@ mod tests {
                 geometry,
                 resident_peak_bytes,
                 0,
-                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 CandleLadderAnchors {
                     store: Some(&store),
                     facts: ArchitectureFacts::default(),
@@ -9009,7 +8989,7 @@ mod tests {
                 geometry,
                 resident_peak_bytes,
                 0,
-                Z_IMAGE_REQUEST_EVIDENCE_REVISION,
+                crate::memory_route_registry::Z_IMAGE_REQUEST_EVIDENCE_REVISION,
                 CandleLadderAnchors {
                     store: Some(&foreign_store),
                     facts: ArchitectureFacts::default(),

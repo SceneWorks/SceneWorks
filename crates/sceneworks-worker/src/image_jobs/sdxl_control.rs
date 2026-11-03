@@ -457,20 +457,20 @@ fn sdxl_control_admission_paths(spec: &LoadSpec) -> WorkerResult<(&Path, Vec<&Pa
     };
     let mut overlays = Vec::new();
     if let Some(control) = &spec.control {
-        overlays.push(crate::conditioning_fit::weights_source_path(control));
+        overlays.push(crate::weights_source::WeightsSourceExt::path(control));
     }
     overlays.extend(
         spec.extra_controls
             .iter()
-            .map(crate::conditioning_fit::weights_source_path),
+            .map(crate::weights_source::WeightsSourceExt::path),
     );
     if let Some(ip_adapter) = &spec.ip_adapter {
-        overlays.push(crate::conditioning_fit::weights_source_path(ip_adapter));
+        overlays.push(crate::weights_source::WeightsSourceExt::path(ip_adapter));
     }
     overlays.extend(spec.adapters.iter().map(|adapter| adapter.path.as_path()));
     if let Some(pid) = &spec.pid {
-        overlays.push(crate::conditioning_fit::weights_source_path(&pid.checkpoint));
-        overlays.push(crate::conditioning_fit::weights_source_path(&pid.gemma));
+        overlays.push(crate::weights_source::WeightsSourceExt::path(&pid.checkpoint));
+        overlays.push(crate::weights_source::WeightsSourceExt::path(&pid.gemma));
     }
     if let Some(identity) = &spec.identity {
         overlays.extend(
@@ -481,16 +481,16 @@ fn sdxl_control_admission_paths(spec: &LoadSpec) -> WorkerResult<(&Path, Vec<&Pa
             ]
             .into_iter()
             .flatten()
-            .map(crate::conditioning_fit::weights_source_path),
+            .map(crate::weights_source::WeightsSourceExt::path),
         );
     }
     if let Some(text_encoder) = &spec.text_encoder {
-        overlays.push(crate::conditioning_fit::weights_source_path(text_encoder));
+        overlays.push(crate::weights_source::WeightsSourceExt::path(text_encoder));
     }
     overlays.extend(
         spec.components
             .values()
-            .map(crate::conditioning_fit::weights_source_path),
+            .map(crate::weights_source::WeightsSourceExt::path),
     );
     Ok((base, overlays))
 }
@@ -748,13 +748,7 @@ mod sdxl_control_tests {
         ImageRequest::from_payload(value.as_object().expect("payload"))
     }
 
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
+
 
     fn offline_settings_at(data_dir: &Path) -> Settings {
         Settings {
@@ -851,7 +845,7 @@ mod sdxl_control_tests {
 
     #[test]
     fn installed_control_component_resolves_from_the_exact_pinned_snapshot() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let root = tempfile::tempdir().expect("data dir");
         let artifact = sceneworks_core::control_weights::shipped_control_weight(
             SDXL_CONTROL_ENGINE_ID,
@@ -870,7 +864,7 @@ mod sdxl_control_tests {
 
     #[test]
     fn missing_control_component_is_an_actionable_model_manager_refusal() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let root = tempfile::tempdir().expect("data dir");
         let error = require_sdxl_control_weights(
             &offline_settings_at(root.path()),
@@ -889,7 +883,7 @@ mod sdxl_control_tests {
 
     #[test]
     fn control_component_is_cache_only_with_no_legacy_or_mutable_fallback() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let root = tempfile::tempdir().expect("data dir");
         let repo_cache = crate::huggingface_repo_cache_path(root.path(), SDXL_CONTROL_REPO)
             .expect("repo cache path");

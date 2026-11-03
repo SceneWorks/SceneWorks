@@ -2760,17 +2760,6 @@ mod resolve_hf_component_file_tests {
     const REPO: &str = "SceneWorks/sam3-mlx";
     const FILE: &str = "model.safetensors";
 
-    /// Neutralize the ambient HF cache env so `huggingface_repo_cache_path` resolves under the
-    /// test's own `data_dir` — else a developer's real `HF_HOME` wins and the test reads the
-    /// machine's actual 2.1 TB cache (the sc-13679 trap).
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
-
     fn settings_at(data_dir: PathBuf) -> Settings {
         Settings {
             api_url: "http://127.0.0.1:0".to_owned(),
@@ -2821,7 +2810,7 @@ mod resolve_hf_component_file_tests {
     /// The happy path: a pinned revision reads that exact `snapshots/<sha>/`.
     #[test]
     fn resolves_a_pinned_snapshot_file() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let staged = stage_snapshot_file(data_dir.path(), PIN, FILE);
 
@@ -2833,7 +2822,7 @@ mod resolve_hf_component_file_tests {
     /// An UNPINNED revision (`main`) takes the `refs/main`-preferring resolver.
     #[test]
     fn resolves_an_unpinned_revision_through_refs_main() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let staged = stage_snapshot_file(data_dir.path(), PIN, FILE);
         stage_refs_main(data_dir.path(), PIN);
@@ -2854,7 +2843,7 @@ mod resolve_hf_component_file_tests {
     /// every other test in this module and fails only this one.
     #[test]
     fn refuses_to_fall_back_from_an_uncached_pin_to_refs_main() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         stage_snapshot_file(data_dir.path(), OTHER_PIN, FILE);
         stage_refs_main(data_dir.path(), OTHER_PIN);
@@ -2871,7 +2860,7 @@ mod resolve_hf_component_file_tests {
     /// "install X from the Model Manager" error instead of a mid-render fetch.
     #[test]
     fn returns_none_when_the_component_is_not_installed() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let resolved =
             resolve_hf_component_file(&settings_at(data_dir.path().to_path_buf()), REPO, PIN, FILE);
@@ -2891,7 +2880,7 @@ mod resolve_hf_component_file_tests {
     /// produce, and it really is a file. Only then does the `None` mean confinement.
     #[test]
     fn confines_a_traversing_component_file() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data_dir = tempfile::tempdir().expect("temp data dir");
         let snapshot = stage_snapshot_file(data_dir.path(), PIN, FILE)
             .parent()

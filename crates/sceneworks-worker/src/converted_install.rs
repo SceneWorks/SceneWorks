@@ -256,14 +256,6 @@ mod tests {
         settings
     }
 
-    fn isolate_hf_cache() -> crate::test_env::EnvVars {
-        crate::test_env::EnvVars::set(&[
-            ("HF_HUB_CACHE", ""),
-            ("HUGGINGFACE_HUB_CACHE", ""),
-            ("HF_HOME", ""),
-        ])
-    }
-
     fn payload(bundle: &std::path::Path) -> JsonObject {
         json!({
             "model": "supra2_img",
@@ -354,7 +346,7 @@ mod tests {
     /// marked (it is not the fault).
     #[tokio::test]
     async fn a_corrupt_component_is_named_with_its_remedy() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let bundle = data.path().join("models/mlx/supra2_img");
         converted_artifacts::write_same_size_corrupt_supra2_bundle(&bundle).unwrap();
@@ -380,7 +372,7 @@ mod tests {
     /// `modelPath` keep their original error untouched.
     #[tokio::test]
     async fn only_contract_installs_are_explained() {
-        let _env = isolate_hf_cache();
+        let _env = crate::test_env::isolate_hf_cache();
         let data = tempfile::tempdir().unwrap();
         let bundle = data.path().join("models/mlx/supra2_img");
         converted_artifacts::write_same_size_corrupt_supra2_bundle(&bundle).unwrap();

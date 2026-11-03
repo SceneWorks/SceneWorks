@@ -720,7 +720,7 @@ pub(super) async fn generate_mochi_using(
         model_dir,
         quant,
         // No adapter path on either backend (`supports_lora`/`supports_lokr` = false).
-        adapters: Vec::new(),
+        adapters: PreparedVideoAdapters::default(),
         // t2v only — `conditioning: []` on the descriptor.
         conditioning: Vec::new(),
         prompt: request.prompt.clone(),

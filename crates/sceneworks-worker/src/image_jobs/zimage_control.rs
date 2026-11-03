@@ -269,20 +269,16 @@ fn zimage_control_raw_settings(
     is_base: bool,
     guidance: f32,
 ) -> JsonObject {
-    let mut raw = request.advanced.clone();
-    raw.insert("realModelInference".to_owned(), Value::Bool(true));
-    raw.insert("repo".to_owned(), Value::String(repo.to_owned()));
-    raw.insert("numInferenceSteps".to_owned(), json!(steps));
-    raw.insert("controlScale".to_owned(), json!(control_scale));
-    raw.insert("poseCount".to_owned(), json!(pose_count));
-    if is_base {
-        raw.insert("guidanceScale".to_owned(), json!(guidance));
-    }
-    raw.insert(
-        "controlEngine".to_owned(),
-        Value::String(ZIMAGE_CTRL_ENGINE.to_owned()),
-    );
-    raw
+    super::tier_resolver::control_raw_settings(
+        request,
+        repo,
+        steps,
+        control_scale,
+        pose_count,
+        super::tier_resolver::ControlBackend::Candle,
+        is_base.then_some(guidance),
+        Some(ZIMAGE_CTRL_ENGINE),
+    )
 }
 
 /// The per-lane half of the candle Z-Image strict-control [`CandleStrictControl`] driver (sc-8304): the
@@ -391,7 +387,7 @@ impl CandleStrictControl for ZImageStrictControl {
             let transformer = self.snapshot.join("transformer");
             let vae = self.snapshot.join("vae");
             if transformer.is_dir() && vae.is_dir() {
-                overlays.push(crate::conditioning_fit::weights_source_path(text_encoder));
+                overlays.push(crate::weights_source::WeightsSourceExt::path(text_encoder));
                 overlays.push(vae.as_path());
                 return ConditioningAdmission::Floor(ConditioningFootprint::from_paths(
                     if self.is_base {

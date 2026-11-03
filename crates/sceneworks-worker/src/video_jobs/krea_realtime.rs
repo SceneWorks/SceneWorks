@@ -442,7 +442,7 @@ pub(super) fn resolve_krea_realtime_model_dir(settings: &Settings) -> WorkerResu
 pub(super) fn resolve_krea_realtime_adapters(
     settings: &Settings,
     request: &VideoRequest,
-) -> WorkerResult<Vec<AdapterSpec>> {
+) -> WorkerResult<PreparedVideoAdapters> {
     resolve_dense_adapters(settings, request, MAX_JOB_LORAS)
 }
 

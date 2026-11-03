@@ -58,7 +58,7 @@ use crate::memory_strategy::memory_mode_from_mode_key;
 use crate::model_jobs::ResolvedArtifactProvenance;
 use crate::{WorkerError, WorkerResult};
 
-const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
+use crate::memory_route_registry::MLX_REQUEST_EVIDENCE_REVISION as REQUEST_EVIDENCE_REVISION;
 #[cfg(test)]
 use sceneworks_core::inference_provenance::INFERENCE_REVISION;
 // Must remain identical to mlx-gen-mage's loaded provider contract. sc-22733 (inference #953,
@@ -1559,24 +1559,18 @@ fn provider_request_mode(engine_id: &str, inputs: &MlxRequestInputs) -> (MemoryM
 }
 
 fn is_krea_base_dit_provider(engine_id: &str) -> bool {
-    matches!(
-        engine_id,
-        "krea_2_raw" | "krea_2_turbo" | "krea_2_edit" | "krea_2_turbo_edit"
-    )
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Krea)
 }
 
 fn is_flux2_klein_provider(engine_id: &str) -> bool {
-    matches!(
-        engine_id,
-        "flux2_klein_9b" | "flux2_klein_9b_edit" | "flux2_klein_9b_kv_edit"
-    )
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Flux2Klein)
 }
 
 fn is_flux1_provider(engine_id: &str) -> bool {
-    matches!(
-        engine_id,
-        "flux1_schnell" | "flux1_dev" | "flux1_dev_control"
-    )
+    crate::memory_route_registry::gate_family(engine_id)
+        == Some(crate::memory_route_registry::MemoryGateFamily::Flux1)
 }
 
 /// Provider-owned request overlay derived from the complete load identity.
@@ -3794,7 +3788,11 @@ fn select_request_with_budget_using_bundle(
         &fallback_contract
     };
     let refused_contract;
-    let contract = if plan.load_shape_declaration_result == LoadShapeDeclarationResult::Refused {
+    let contract = if plan.load_shape_declaration_result == LoadShapeDeclarationResult::Refused
+        || !crate::memory_route_registry::has_gate_policy(
+            crate::memory_route_registry::MemoryRouteBackend::Mlx,
+            plan.engine_id,
+        ) {
         // A declaration refusal is terminal authority, not an invitation for the later request
         // selector to rediscover lower optimized rungs directly from the provider. Preserve only
         // the exact provider/load/calibration handshake needed for a safe resident request; the
@@ -5496,12 +5494,6 @@ fn weights_source_bytes(src: &WeightsSource) -> u64 {
     }
 }
 
-fn weights_source_path(source: &WeightsSource) -> &Path {
-    match source {
-        WeightsSource::Dir(path) | WeightsSource::File(path) => path.as_path(),
-    }
-}
-
 #[derive(Clone, Debug)]
 struct ResolvedTextEncoderSource {
     path: PathBuf,
@@ -5509,7 +5501,7 @@ struct ResolvedTextEncoderSource {
 }
 
 fn text_encoder_discovery_roots(source: &WeightsSource) -> gen_core::Result<Vec<PathBuf>> {
-    let entry = std::path::absolute(weights_source_path(source))?;
+    let entry = std::path::absolute(crate::weights_source::WeightsSourceExt::path(source))?;
     let lexical_root = match source {
         WeightsSource::Dir(_) => entry.clone(),
         WeightsSource::File(_) => entry.parent().map(Path::to_path_buf).ok_or_else(|| {
@@ -6312,7 +6304,7 @@ fn spec_component_bytes_with_provider_footprint(
     // estimate and will still fail contract validation before a real provider load.
     let selected_text_encoder = spec.text_encoder.as_ref().map(|source| {
         resolved_text_encoder_source(spec, source).unwrap_or_else(|_| ResolvedTextEncoderSource {
-            path: weights_source_path(source).to_path_buf(),
+            path: crate::weights_source::WeightsSourceExt::path(source).to_path_buf(),
             direct_shard_bytes: weights_source_bytes(source),
         })
     });
@@ -6379,11 +6371,12 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
     // Every directory source in this set was priced recursively. A selected encoder at the same
     // path or below one is already covered; a selected encoder above one is not, because its exact
     // loader inventory contains direct shards only and excludes nested descendants.
-    let mut recursively_priced_paths = vec![weights_source_path(&spec.weights)];
+    let mut recursively_priced_paths =
+        vec![crate::weights_source::WeightsSourceExt::path(&spec.weights)];
     if let Some(control) = &spec.control {
         let bytes = source_bytes(control);
         total_bytes = total_bytes.saturating_add(bytes);
-        recursively_priced_paths.push(weights_source_path(control));
+        recursively_priced_paths.push(crate::weights_source::WeightsSourceExt::path(control));
     }
     // Read the actual adapter sources at the same pre-load seam as controls. Provider-specific
     // residency matters: packed Wan keeps additive residuals, while dense Wan folds them into the
@@ -6446,7 +6439,7 @@ fn spec_component_bytes_with_provider_footprint_and_sizes(
         if !inside {
             let component_bytes = source_bytes(source);
             total_bytes = total_bytes.saturating_add(component_bytes);
-            recursively_priced_paths.push(weights_source_path(source));
+            recursively_priced_paths.push(crate::weights_source::WeightsSourceExt::path(source));
             if matches!(&spec.weights, WeightsSource::File(_))
                 && component_id == gen_core::COMFYUI_TEXT_ENCODER_COMPONENT
             {
@@ -10503,6 +10496,47 @@ mod tests {
         rung4.support = MemoryStrategySupport::Implemented;
         rung4.parameters.transformer_window_sizes = vec![2, 4];
         generator
+    }
+
+    #[test]
+    fn an_unregistered_gate_cannot_select_an_optimized_contract_or_borrow_a_family() {
+        let mut generator = full_ladder_generator();
+        generator.contract.as_mut().unwrap().provider_id = "unregistered_future_provider".into();
+        let mut plan = fixture_plan();
+        plan.engine_id = "unregistered_future_provider";
+        plan.calibration = MlxCalibrationConfig::Absent;
+        let inputs = fixture_inputs(1024, 1024);
+        let evaluation = evaluate_request_with_budget(
+            &generator,
+            &plan,
+            &inputs,
+            MemoryCacheState::Cold,
+            OffloadPolicy::Resident,
+            fixture_budget(128.0),
+            full_ladder_baseline_bytes(),
+            0,
+            &[],
+        )
+        .expect("legacy resident fallback remains available");
+        assert_eq!(
+            evaluation.context.selection.strategy,
+            MemoryStrategy::Resident
+        );
+        assert!(
+            evaluate_request_with_budget(
+                &generator,
+                &plan,
+                &inputs,
+                MemoryCacheState::Cold,
+                OffloadPolicy::Resident,
+                budget_admitting_only_the_deepest_estimate_rung(),
+                full_ladder_baseline_bytes(),
+                0,
+                &[]
+            )
+            .is_err(),
+            "an unknown family cannot inherit rung four"
+        );
     }
 
     /// Unknown activation splits and declared splits receive the same active-peak uncertainty.

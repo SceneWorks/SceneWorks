@@ -441,11 +441,14 @@ fn sealed_video_carriers_separate_payloads_that_used_to_share_one_identity() {
         engine_id: "scail2_14b",
         width: 512,
         height: 512,
-        adapters: vec![AdapterSpec::new(
-            std::path::PathBuf::from("lightning.safetensors"),
-            1.0,
-            gen_core::AdapterKind::Lora,
-        )],
+        adapters: PreparedVideoAdapters {
+            specs: vec![AdapterSpec::new(
+                std::path::PathBuf::from("lightning.safetensors"),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )],
+            pins: BTreeMap::new(),
+        },
         conditioning: scail2(1),
         ..Default::default()
     };
@@ -490,16 +493,19 @@ fn sealed_video_carriers_separate_payloads_that_used_to_share_one_identity() {
     // --- Adapters: cardinality -> exact ordered content receipt. ---
     let with_adapters = |paths: &[&str]| VideoGenInput {
         engine_id: "wan_2_2",
-        adapters: paths
-            .iter()
-            .map(|path| {
-                AdapterSpec::new(
-                    std::path::PathBuf::from(path),
-                    1.0,
-                    gen_core::AdapterKind::Lora,
-                )
-            })
-            .collect(),
+        adapters: PreparedVideoAdapters {
+            specs: paths
+                .iter()
+                .map(|path| {
+                    AdapterSpec::new(
+                        std::path::PathBuf::from(path),
+                        1.0,
+                        gen_core::AdapterKind::Lora,
+                    )
+                })
+                .collect(),
+            pins: BTreeMap::new(),
+        },
         ..Default::default()
     };
     let a = video_admission_overlay(&with_adapters(&["a.safetensors"]), "text_to_video", None)
@@ -555,11 +561,14 @@ fn bernini_adapter_overlay_records_exact_artifact_identity() {
     std::fs::write(&adapter_path, b"weights-free-adapter").unwrap();
     let input = VideoGenInput {
         engine_id: "bernini",
-        adapters: vec![AdapterSpec::new(
-            adapter_path.clone(),
-            0.75,
-            gen_core::AdapterKind::Lora,
-        )],
+        adapters: PreparedVideoAdapters {
+            specs: vec![AdapterSpec::new(
+                adapter_path.clone(),
+                0.75,
+                gen_core::AdapterKind::Lora,
+            )],
+            pins: BTreeMap::new(),
+        },
         ..Default::default()
     };
 
@@ -6155,7 +6164,7 @@ fn krea_realtime_passes_selected_loras_to_the_engine_load_spec() {
         2,
         "both selected LoRAs must reach the engine's LoadSpec"
     );
-    assert_eq!(spec.adapters[0].path, style.canonicalize().unwrap());
+    assert_eq!(spec.adapters[0].path, style);
     assert!(
         (spec.adapters[0].scale - 0.35).abs() < 1e-6,
         "the request's own weight must ride through, not the 0.8 default: {}",
@@ -10938,7 +10947,7 @@ fn wan_vace_adapters_are_single_dense() {
     };
     let specs = resolve_wan_vace_adapters(&settings, &req).expect("resolve vace adapters");
     assert_eq!(specs.len(), 2);
-    assert_eq!(specs[0].path, plain.canonicalize().unwrap());
+    assert_eq!(specs[0].path, plain);
     assert_eq!(specs[0].kind, AdapterKind::Lora);
     assert!((specs[0].scale - 0.5).abs() < 1e-6);
     assert!(specs[0].moe_expert.is_none(), "VACE is single-dense");
@@ -11075,7 +11084,7 @@ fn wan_adapters_gate_lightning_on_toggle() {
         assert_eq!(specs[1].path, low);
         assert_eq!(specs[1].moe_expert, Some(MoeExpert::Low));
         // The user LoRA is the single-file shared spec (no high_noise sibling).
-        assert_eq!(specs[2].path, user_lora.canonicalize().unwrap());
+        assert_eq!(specs[2].path, user_lora);
         assert!(specs[2].moe_expert.is_none());
         assert!((specs[2].scale - 0.5).abs() < 1e-6);
     }
@@ -11089,7 +11098,7 @@ fn wan_adapters_gate_lightning_on_toggle() {
     let specs = resolve_wan_adapters(&settings, &off, "wan2_2_t2v_14b")
         .expect("resolve adapters (lightning off)");
     assert_eq!(specs.len(), 1, "no Lightning, user LoRA only");
-    assert_eq!(specs[0].path, user_lora.canonicalize().unwrap());
+    assert_eq!(specs[0].path, user_lora);
     assert!(specs[0].moe_expert.is_none());
 
     // Toggle OFF works even when the Lightning snapshot is absent (nothing to resolve): remove
@@ -11171,7 +11180,7 @@ fn scail2_adapters_are_single_dense() {
     };
     let specs = resolve_scail2_adapters(&settings, &req).expect("resolve scail2 adapters");
     assert_eq!(specs.len(), 2);
-    assert_eq!(specs[0].path, plain.canonicalize().unwrap());
+    assert_eq!(specs[0].path, plain);
     assert_eq!(specs[0].kind, AdapterKind::Lora);
     assert!((specs[0].scale - 1.0).abs() < 1e-6);
     assert!(specs[0].moe_expert.is_none(), "SCAIL-2 is single-dense");
@@ -11195,7 +11204,7 @@ fn scail2_adapters_are_single_dense() {
 /// The old candle twin `candle_resolve_lora_file` used a shallow non-recursive `read_dir`, so it
 /// returned "LoRA has no .safetensors" for exactly this shape — a latent candle-lane bug that
 /// converging on the core helper fixes. Both backends now resolve it identically.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn resolve_lora_file_finds_nested_safetensors() {
     let dir_guard = tempfile::Builder::new()
@@ -11222,7 +11231,7 @@ fn resolve_lora_file_finds_nested_safetensors() {
 /// sc-10221: a trained LoRA's folder holds step checkpoints alongside the final
 /// adapter; the video resolver must load the manifest-declared final file, not an
 /// arbitrary sibling the directory scan might pick.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 #[test]
 fn resolve_lora_file_prefers_declared_over_checkpoint() {
     let dir_guard = tempfile::Builder::new()
@@ -11636,7 +11645,10 @@ fn wan_a14b_lightning_additive_ondevice() {
             // Pre-packed q4 tier: config.json is authoritative, so load with None (the worker
             // path does the same). Adapters install ADDITIVELY on the packed experts.
             quant: None,
-            adapters,
+            adapters: PreparedVideoAdapters {
+                specs: adapters,
+                pins: BTreeMap::new(),
+            },
             prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
             width: 256,
             height: 256,
@@ -11798,7 +11810,10 @@ fn wan_i2v_a14b_lightning_additive_ondevice() {
             engine_id: ENGINE,
             model_dir: tier.clone(),
             quant: None,
-            adapters,
+            adapters: PreparedVideoAdapters {
+                specs: adapters,
+                pins: BTreeMap::new(),
+            },
             conditioning: conditioning.clone(),
             prompt: "a calm ocean wave at sunset, cinematic".to_owned(),
             width: w,
@@ -13559,11 +13574,14 @@ fn video_load_spec_threads_text_encoder_dir() {
     let adapted_ltx25 = VideoGenInput {
         engine_id: "ltx_2_5_distilled",
         model_dir: PathBuf::from("/models/ltx-2.5-mlx/distilled/q4"),
-        adapters: vec![AdapterSpec::new(
-            PathBuf::from("/models/ltx-2.5-mlx/distilled_lora/refinement.safetensors"),
-            1.0,
-            gen_core::AdapterKind::Lora,
-        )],
+        adapters: PreparedVideoAdapters {
+            specs: vec![AdapterSpec::new(
+                PathBuf::from("/models/ltx-2.5-mlx/distilled_lora/refinement.safetensors"),
+                1.0,
+                gen_core::AdapterKind::Lora,
+            )],
+            pins: BTreeMap::new(),
+        },
         ..VideoGenInput::default()
     };
     let spec = video_load_spec(&adapted_ltx25);
@@ -16527,7 +16545,7 @@ mod candle_video_label_tests {
         let adapters = resolve_ltx_user_adapters(&settings, &request)
             .expect("Candle LTX user LoRA should resolve");
         assert_eq!(adapters.len(), 1);
-        assert_eq!(adapters[0].path, lora.canonicalize().unwrap());
+        assert_eq!(adapters[0].path, lora);
         assert_eq!(adapters[0].kind, gen_core::AdapterKind::Lora);
         assert!((adapters[0].scale - 0.55).abs() < 1e-6);
         assert!(adapters[0].pass_scales.is_none());
@@ -16539,7 +16557,7 @@ mod candle_video_label_tests {
         };
         let spec = video_load_spec(&input);
         assert_eq!(spec.adapters.len(), 1);
-        assert_eq!(spec.adapters[0].path, lora.canonicalize().unwrap());
+        assert_eq!(spec.adapters[0].path, lora);
         assert!((spec.adapters[0].scale - 0.55).abs() < 1e-6);
     }
 
@@ -16575,7 +16593,10 @@ mod candle_video_label_tests {
             engine_id: "ltx_2_3_distilled",
             model_dir: tier,
             text_encoder_dir: Some(gemma),
-            adapters: vec![AdapterSpec::new(adapter, 1.0, gen_core::AdapterKind::Lora)],
+            adapters: PreparedVideoAdapters {
+                specs: vec![AdapterSpec::new(adapter, 1.0, gen_core::AdapterKind::Lora)],
+                pins: BTreeMap::new(),
+            },
             ..VideoGenInput::default()
         };
         assert_eq!(
@@ -22036,4 +22057,174 @@ fn shared_mlx_family_dirs_preserve_override_managed_and_snapshot_resolution() {
             },
         );
     }
+}
+
+/// Filesystem-only regression: every video adapter family preserves the exact selection token
+/// through LoadSpec preparation. Neither a model nor an accelerator is loaded here.
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn video_prepared_adapter_tokens_reject_swaps_for_every_user_route() {
+    for route in ["dense", "wan", "ltx", "h3", "krea"] {
+        let data = tempfile::tempdir().unwrap();
+        let dir = data.path().canonicalize().unwrap().join("loras/style");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("final.safetensors");
+        write_lora_fixture(&file, Some("lokr"));
+        write_lora_fixture(&dir.join("step.safetensors"), None);
+        let settings = Settings {
+            data_dir: data.path().to_path_buf(),
+            ..crate::test_env::offline_settings()
+        };
+        let request = request(
+            json!({"model":"ltx_2_3", "advanced":{"lightning":false}, "loras":[{"path":dir,"files":["final.safetensors"],"weight":"0.75"},{"path":file}]}),
+        );
+        let prepared = match route {
+            "dense" => resolve_dense_adapters(&settings, &request, MAX_JOB_LORAS),
+            "wan" => resolve_wan_adapters(&settings, &request, "wan2_2_ti2v_5b"),
+            "h3" => super::minimax_h3::resolve_minimax_h3_adapters(&settings, &request),
+            "krea" => {
+                #[cfg(target_os = "macos")]
+                {
+                    resolve_krea_realtime_adapters(&settings, &request)
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    continue;
+                }
+            }
+            _ => resolve_ltx_user_adapters(&settings, &request),
+        }
+        .unwrap();
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(
+            prepared.pins.len(),
+            1,
+            "duplicate lexical entries retain one exact token"
+        );
+        assert_eq!(prepared[0].path, file.canonicalize().unwrap());
+        assert_eq!(prepared[0].kind, AdapterKind::Lokr);
+        assert_eq!(prepared[0].scale, 0.75);
+        assert_eq!(prepared[1].scale, 1.0);
+        let mut spec = LoadSpec::new(WeightsSource::Dir(data.path().to_path_buf()))
+            .with_adapters(prepared.specs.clone());
+        // H3's source-owned receipt finalizes a full pin set first; matching classification
+        // tokens must compose without replacing or weakening that finalized receipt.
+        spec.prepare_with_file_pins(prepared.pins.values().cloned())
+            .unwrap();
+        prepared.install(&mut spec).unwrap();
+        assert!(spec.prepared_file_pins().is_prepared());
+        std::fs::rename(&file, dir.join("old.safetensors")).unwrap();
+        write_lora_fixture(&file, None);
+        assert!(
+            prepared.install(&mut spec).is_err(),
+            "{route} must not re-pin a swapped adapter"
+        );
+    }
+}
+
+#[cfg(all(unix, any(target_os = "macos", feature = "backend-candle")))]
+#[test]
+fn video_prepared_adapter_tokens_reconfine_directory_children_and_moe_siblings() {
+    let data = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..crate::test_env::offline_settings()
+    };
+    let external = outside.path().join("outside.safetensors");
+    write_lora_fixture(&external, None);
+    let dir = data.path().join("loras/style");
+    std::fs::create_dir_all(&dir).unwrap();
+    let child = dir.join("final.safetensors");
+    std::os::unix::fs::symlink(&external, &child).unwrap();
+    let req = request(json!({"loras":[{"path":dir,"files":["final.safetensors"]}]}));
+    assert!(resolve_dense_adapters(&settings, &req, MAX_JOB_LORAS).is_err());
+    let high = data.path().join("loras/pair.high_noise.safetensors");
+    write_lora_fixture(&high, None);
+    let low = high.with_file_name("pair.low_noise.safetensors");
+    std::os::unix::fs::symlink(&external, &low).unwrap();
+    let req = request(json!({"advanced":{"lightning":false},"loras":[{"path":high}]}));
+    assert!(resolve_wan_adapters(&settings, &req, "wan2_2_t2v_14b").is_err());
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn video_prepared_repeated_selection_cannot_replace_the_classification_identity() {
+    let data = tempfile::tempdir().unwrap();
+    let file = data.path().join("loras/style.safetensors");
+    write_lora_fixture(&file, None);
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..crate::test_env::offline_settings()
+    };
+    let lora = json!({"path":file});
+    let mut prepared = PreparedVideoAdapters::default();
+    prepared.user(&settings, &lora, "ltx_2_3").unwrap();
+    std::fs::rename(&file, file.with_extension("old")).unwrap();
+    write_lora_fixture(&file, Some("lokr"));
+    assert!(prepared.user(&settings, &lora, "ltx_2_3").is_err());
+}
+
+#[cfg(all(unix, any(target_os = "macos", feature = "backend-candle")))]
+#[test]
+fn video_prepared_adapter_tokens_preserve_lexical_alias_retarget_detection() {
+    let data = tempfile::tempdir().unwrap();
+    let first = data.path().join("loras/first.safetensors");
+    let second = data.path().join("loras/second.safetensors");
+    write_lora_fixture(&first, None);
+    write_lora_fixture(&second, None);
+    let alias = data.path().join("loras/alias.safetensors");
+    std::os::unix::fs::symlink(&first, &alias).unwrap();
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..crate::test_env::offline_settings()
+    };
+    let request = request(json!({"loras":[{"path":alias}]}));
+    let prepared = resolve_dense_adapters(&settings, &request, MAX_JOB_LORAS).unwrap();
+    assert_eq!(
+        prepared[0].path, alias,
+        "the caller's lexical entry must be retained"
+    );
+    assert_eq!(
+        prepared.pins[&alias].canonical_target_path(),
+        first.canonicalize().unwrap()
+    );
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(&second, &alias).unwrap();
+    let mut spec = LoadSpec::new(WeightsSource::Dir(data.path().to_path_buf()))
+        .with_adapters(prepared.specs.clone());
+    assert!(
+        prepared.install(&mut spec).is_err(),
+        "even a same-root alias retarget invalidates classification"
+    );
+}
+
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
+#[test]
+fn video_prepared_ltx_auto_distill_classification_and_load_retain_one_token() {
+    let _env = crate::test_env::isolate_hf_cache();
+    let data = tempfile::tempdir().unwrap();
+    let repo = "example/distill";
+    let snapshot = crate::huggingface_repo_cache_path(data.path(), repo)
+        .unwrap()
+        .join("snapshots")
+        .join("b".repeat(40));
+    let file = snapshot.join("distill.safetensors");
+    write_lora_fixture(&file, Some("lokr"));
+    let settings = Settings {
+        data_dir: data.path().to_path_buf(),
+        ..crate::test_env::offline_settings()
+    };
+    let request = request(
+        json!({"model":"ltx_2_3_eros","modelManifestEntry":{"mlx":{"autoDistillLora":{"stage1Strength":1.0,"stage2Strength":0.4}},"resources":{"distilledLora":{"repo":repo,"file":"distill.safetensors"}}}}),
+    );
+    let prepared = resolve_ltx_adapters(&settings, &request).unwrap();
+    assert_eq!(prepared[0].kind, AdapterKind::Lokr);
+    assert_eq!(prepared[0].pass_scales, Some(vec![1.0, 0.4]));
+    assert_eq!(prepared.pins.len(), 1);
+    std::fs::rename(&file, snapshot.join("old.safetensors")).unwrap();
+    write_lora_fixture(&file, None);
+    let mut spec = LoadSpec::new(WeightsSource::Dir(data.path().to_path_buf()))
+        .with_adapters(prepared.specs.clone());
+    assert!(prepared.install(&mut spec).is_err());
 }

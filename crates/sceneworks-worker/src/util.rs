@@ -163,3 +163,42 @@ mod cache_path_tests {
         ));
     }
 }
+
+pub(crate) fn gradient_rgb8(width: u32, height: u32, seed: i64) -> Vec<u8> {
+    let seed = seed as u64;
+    let base = [
+        (seed & 0xFF) as u8,
+        ((seed >> 8) & 0xFF) as u8,
+        ((seed >> 16) & 0xFF) as u8,
+    ];
+    let span = height.saturating_sub(1).max(1) as f32;
+    let mut buffer = Vec::with_capacity((width as usize) * (height as usize) * 3);
+    for y in 0..height {
+        let t = y as f32 / span;
+        let row = [lerp(base[0], t), lerp(base[1], t), lerp(base[2], t)];
+        for _ in 0..width {
+            buffer.extend_from_slice(&row);
+        }
+    }
+    buffer
+}
+
+pub(crate) fn lerp(a: u8, t: f32) -> u8 {
+    let a = a as f32;
+    (a + (255.0 - a) * t).round().clamp(0.0, 255.0) as u8
+}
+
+#[cfg(test)]
+mod gradient_tests {
+    use super::*;
+    #[test]
+    fn gradient_preserves_seed_bytes_white_endpoint_and_degenerate_dimensions() {
+        assert_eq!(gradient_rgb8(1, 1, 0x030201), vec![1, 2, 3]);
+        assert_eq!(
+            gradient_rgb8(2, 2, 0x030201),
+            vec![1, 2, 3, 1, 2, 3, 255, 255, 255, 255, 255, 255]
+        );
+        assert!(gradient_rgb8(0, 8, 7).is_empty());
+        assert!(gradient_rgb8(8, 0, 7).is_empty());
+    }
+}

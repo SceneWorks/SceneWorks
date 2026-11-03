@@ -32,7 +32,9 @@ use std::sync::{mpsc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
-use gen_core::{LoadSpec, Precision, Quant, Transform, WeightsSource};
+#[cfg(test)]
+use gen_core::WeightsSource;
+use gen_core::{LoadSpec, Precision, Quant, Transform};
 
 use crate::cache_thread::{self, CacheJob, Fingerprint, SeamMessages};
 use crate::{WorkerError, WorkerResult};
@@ -70,9 +72,7 @@ pub(crate) struct TransformIdentity {
 
 impl TransformIdentity {
     pub(crate) fn new(engine_id: &str, spec: &LoadSpec) -> Self {
-        let weights = match &spec.weights {
-            WeightsSource::Dir(path) | WeightsSource::File(path) => path.clone(),
-        };
+        let weights = crate::weights_source::WeightsSourceExt::path(&spec.weights).to_path_buf();
         Self {
             engine_id: engine_id.to_owned(),
             weights_fingerprint: Fingerprint::of(&weights),

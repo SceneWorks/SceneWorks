@@ -78,12 +78,6 @@ impl Candidate {
     }
 }
 
-fn source_path(source: &WeightsSource) -> &Path {
-    match source {
-        WeightsSource::File(path) | WeightsSource::Dir(path) => path,
-    }
-}
-
 fn source_kind(source: &WeightsSource) -> SourceKind {
     match source {
         WeightsSource::File(_) => SourceKind::File,
@@ -92,7 +86,7 @@ fn source_kind(source: &WeightsSource) -> SourceKind {
 }
 
 fn opaque_id(source: &WeightsSource) -> Result<String, std::io::Error> {
-    let path = std::path::absolute(source_path(source))?;
+    let path = std::path::absolute(crate::weights_source::WeightsSourceExt::path(source))?;
     let kind = match source_kind(source) {
         SourceKind::File => "file",
         SourceKind::Directory => "directory",
@@ -105,7 +99,7 @@ fn opaque_id(source: &WeightsSource) -> Result<String, std::io::Error> {
 }
 
 fn display_name(source: &WeightsSource) -> String {
-    let path = source_path(source);
+    let path = crate::weights_source::WeightsSourceExt::path(source);
     path.file_stem()
         .or_else(|| path.file_name())
         .and_then(|name| name.to_str())
@@ -116,8 +110,10 @@ fn display_name(source: &WeightsSource) -> String {
 fn source_key(source: &WeightsSource) -> Result<(SourceKind, PathBuf), std::io::Error> {
     Ok((
         source_kind(source),
-        crate::paths::normalize_absolute_path(source_path(source))
-            .map_err(std::io::Error::other)?,
+        crate::paths::normalize_absolute_path(crate::weights_source::WeightsSourceExt::path(
+            source,
+        ))
+        .map_err(std::io::Error::other)?,
     ))
 }
 

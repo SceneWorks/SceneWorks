@@ -269,7 +269,7 @@ pub(super) async fn generate_svd(
         engine_id,
         model_dir: resolve_svd_model_dir(settings)?,
         quant: None,
-        adapters: Vec::new(),
+        adapters: PreparedVideoAdapters::default(),
         conditioning: resolve_svd_conditioning(settings, request, project_path)?,
         prompt: String::new(),
         negative_prompt: None,
