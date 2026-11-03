@@ -71,57 +71,9 @@ pub(crate) fn read_json(path: &Path) -> ProjectStoreResult<Value> {
     Ok(serde_json::from_str(&payload)?)
 }
 
-/// Atomically writes `contents` to `path`: stage into a uniquely-named temp file
-/// in the same directory, fsync the temp (and the directory) so its bytes hit the
-/// disk before the rename, then rename it into place.
-///
-/// The temp suffix carries random bytes so two threads writing the *same* target
-/// never collide on the temp path. Previously the temp name was deterministic
-/// (`foo.json` -> `foo.json.tmp`), so overlapping writers interleaved their bytes
-/// into one temp file and the second `rename` failed once the first had already
-/// renamed the temp away (sc-1633). Pair with [`lock_project_files`] when the
-/// caller does a read-modify-write so concurrent updates don't clobber each other.
-///
-/// The `sync_all` before the rename closes the crash window the atomic pattern is
-/// meant to preclude: without it a filesystem may persist the rename before the
-/// temp's data, so a power loss right after the write could leave a zero-length or
-/// partial "atomically written" sidecar/manifest (sc-8949 / F-147). The parent-dir
-/// fsync then durably records the rename itself so the new name survives too.
+/// Store-error adapter for the shared neutral filesystem writer.
 pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> ProjectStoreResult<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("json");
-    let token = random_hex(8)?;
-    let tmp_path = path.with_extension(format!("{extension}.{token}.tmp"));
-    write_and_sync(&tmp_path, contents)?;
-    fs::rename(&tmp_path, path)?;
-    sync_parent_dir(path);
-    Ok(())
-}
-
-/// Write `contents` to `path` and `sync_all` the handle so the bytes are durable
-/// before the caller renames the file into place (see [`atomic_write`]).
-fn write_and_sync(path: &Path, contents: &[u8]) -> ProjectStoreResult<()> {
-    use std::io::Write;
-    let mut file = fs::File::create(path)?;
-    file.write_all(contents)?;
-    file.sync_all()?;
-    Ok(())
-}
-
-/// fsync the directory holding `path` so a just-completed rename is itself durable.
-/// Best-effort: some platforms/filesystems refuse to open a directory for this, and
-/// the temp fsync already covers the data — so a failure here is not fatal.
-fn sync_parent_dir(path: &Path) {
-    if let Some(parent) = path.parent() {
-        if let Ok(dir) = fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
-    }
+    Ok(crate::fsutil::write_atomic(path, contents)?)
 }
 
 pub(crate) fn write_json<T: Serialize>(path: &Path, payload: &T) -> ProjectStoreResult<()> {

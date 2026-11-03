@@ -605,17 +605,18 @@ fn vector_bytes(vector: &[f32]) -> Vec<u8> {
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> WorkerResult<()> {
-    let parent = path.parent().ok_or_else(|| {
+    path.parent().ok_or_else(|| {
         WorkerError::InvalidPayload("artifact path has no parent directory".to_owned())
     })?;
-    fs::create_dir_all(parent)?;
-    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
-    temporary.write_all(bytes)?;
-    temporary.as_file_mut().sync_all()?;
-    temporary
-        .persist(path)
-        .map_err(|error| WorkerError::Io(error.error))?;
-    Ok(())
+    Ok(sceneworks_core::fsutil::write_atomic_with(
+        path,
+        bytes,
+        sceneworks_core::fsutil::AtomicWriteOptions {
+            secret: true,
+            ..Default::default()
+        },
+        || Ok::<(), std::io::Error>(()),
+    )?)
 }
 
 fn persist_semantic_checkpoint(
@@ -1230,6 +1231,9 @@ fn persist_embedding_failure(
         .map_err(|error| WorkerError::InvalidPayload(error.to_string()))
 }
 
+// This paged JSONL writer intentionally streams into NamedTempFile instead of buffering
+// the full index for the byte-file helper. NamedTempFile provides exclusive allocation,
+// failure cleanup and atomic replace; sync staged bytes and the published parent as well.
 fn rebuild_embedding_index_streaming(
     registry: &CatalogRegistry,
     catalog_id: &str,
@@ -1301,6 +1305,7 @@ fn rebuild_embedding_index_streaming(
     temporary
         .persist(&index)
         .map_err(|error| WorkerError::Io(error.error))?;
+    sceneworks_core::fsutil::sync_parent_directory(&index)?;
     if canceled {
         Err(WorkerError::Canceled(CANCEL_MESSAGE.to_owned()))
     } else {

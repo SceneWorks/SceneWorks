@@ -53,6 +53,9 @@ png = { workspace = true }
 # so no new locked version appears.
 sha2 = "0.10"
 subtle = "2.6"
+# Safe platform-native no-clobber publication (renameat2/renameatx_np/MoveFileExW).
+# Already locked; 3.27 supplies the fallible TempPath::try_from_path adapter.
+tempfile = "3.27"
 # sc-26684: the pruned AdaLN content hash widens stored F16 operands losslessly to F32 through
 # the same `half` the checkpoint readers already compile; the 2.7 line is already locked, so no
 # new version or extension of the graph appears.
@@ -108,7 +111,6 @@ jsonschema = "0.28"
 # pinned-checksum verification path runs for real. Same 0.10 line the crate already depends on, so
 # no new locked version appears.
 sha2 = "0.10"
-tempfile = "3.13"
 
 [lints]
 workspace = true
