@@ -1,6 +1,36 @@
 name: Native CV provider validation
 # SW-6775/SW-6680: model execution is explicit only; never PR/push CI.
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        description: Exact SceneWorks SHA, matching the dispatch ref
+        required: true
+        type: string
+      inference_sha:
+        description: Exact inference SHA pinned by source_sha
+        required: true
+        type: string
+      backend:
+        description: MLX plus CoreML on Mac, or ORT/CUDA on physical GPU1
+        required: true
+        type: string
+      fixture_dir:
+        description: Dedicated existing absolute fixture directory (see docs/cv-provider-validation.md)
+        required: true
+        type: string
+      ort_dylib:
+        description: Existing absolute ONNX Runtime 1.26 library path
+        required: true
+        type: string
+      build_only:
+        description: Compile and discover proofs without model execution
+        required: true
+        type: boolean
+      mac_go:
+        description: Developer Mac GPU execution explicitly authorized
+        required: true
+        type: boolean
   workflow_dispatch:
     inputs:
       source_sha:
