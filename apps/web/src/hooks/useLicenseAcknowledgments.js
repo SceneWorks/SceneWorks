@@ -20,9 +20,12 @@ export function useLicenseAcknowledgments(models, token) {
     for (const [id, license, licenseUrl, licenseNotice] of JSON.parse(key)) {
       const mutation = mutations.current.get(id);
       getLicenseAcknowledgment(id, token).then((view) => {
-        if (!live || mutations.current.get(id) !== mutation) return;
+        if (!live) return;
         const matches = typeof view?.termsSha256 === "string" && licenseTermsMatch({ license, licenseUrl, licenseNotice }, view);
         views.current.set(id, { ...view, matches });
+        // A newer user action owns the acknowledgment, but the current catalog's
+        // server terms are still needed for a later explicit acceptance.
+        if (mutations.current.get(id) !== mutation) return;
         if (!matches) setError("License terms changed. Refresh the model catalog and review them before accepting.");
         const acknowledged = matches && view?.acknowledged === true;
         writeLicenseAck(id, acknowledged);
