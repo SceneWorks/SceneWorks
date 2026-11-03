@@ -336,7 +336,7 @@ pub(crate) fn working_set_capacity_gb(
 }
 
 /// Unified-memory total under the existing small-device emulation policy.
-#[cfg(any(test, target_os = "macos"))]
+#[cfg(target_os = "macos")]
 pub(crate) fn unified_total_gb() -> Option<f64> {
     crate::mlx_fit_gate::resolve_budget(
         crate::mlx_fit_gate::probe_total_unified_memory_gib(),
@@ -358,7 +358,7 @@ pub(crate) fn unified_available_bytes(total: u64) -> u64 {
     total.saturating_sub(reserve)
 }
 
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) async fn lane_total_gb(gpu_id: &str) -> Option<f64> {
     #[cfg(target_os = "macos")]
     {
@@ -371,14 +371,9 @@ pub(crate) async fn lane_total_gb(gpu_id: &str) -> Option<f64> {
             .await
             .map(|budget| budget.total_gb)
     }
-    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
-    {
-        let _ = gpu_id;
-        None
-    }
 }
 
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(target_os = "macos", feature = "backend-candle"))]
 pub(crate) async fn lane_available_gb(gpu_id: &str) -> Option<f64> {
     #[cfg(target_os = "macos")]
     {
@@ -390,11 +385,6 @@ pub(crate) async fn lane_available_gb(gpu_id: &str) -> Option<f64> {
         crate::vram_gate::live_capped_budget(gpu_id)
             .await
             .map(|budget| budget.free_gb - dedicated_vram_reserve().gb)
-    }
-    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
-    {
-        let _ = gpu_id;
-        None
     }
 }
 
