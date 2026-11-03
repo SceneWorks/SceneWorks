@@ -1010,7 +1010,7 @@ pub fn collect_engine_capability_facts() -> Result<Vec<EngineCapabilityFacts>, S
     let registry = crate::inference_runtime::media();
     let mut facts = facts_from_registry(
         registry,
-        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+        sceneworks_core::inference_provenance::INFERENCE_REVISION,
         dumper_invocation(),
     )?;
     let contract_registry = crate::inference_runtime::memory_contract_surface_registry()
@@ -1135,7 +1135,7 @@ pub fn collect_audio_capability_facts() -> Result<Vec<AudioCapabilityFacts>, Str
         .collect();
     audio_facts_from_descriptors(
         &descriptors,
-        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+        sceneworks_core::inference_provenance::INFERENCE_REVISION,
         AUDIO_DUMPER_INVOCATION,
     )
 }
@@ -1171,7 +1171,7 @@ pub fn collect_runtime_descriptor_facts() -> Result<RuntimeDescriptorFacts, Stri
         video_model_mappings,
         trainer_mappings,
         worker_capabilities,
-        crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+        sceneworks_core::inference_provenance::INFERENCE_REVISION,
         dumper_invocation(),
     )
 }

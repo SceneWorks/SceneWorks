@@ -14,6 +14,7 @@ import { createInterface } from "node:readline";
 import { isDeepStrictEqual, promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
+import { inferenceRevision as currentInferenceRevision } from "./lib/inference-provenance.mjs";
 import { hashArtifactInventory } from "./hash-artifact-inventory.mjs";
 import {
   canonicalJson, capturePlannedCase, logicalCaseId, validateBundle,
@@ -4841,8 +4842,7 @@ async function controller(argv) {
     git(inferenceRepo, ["rev-parse", "HEAD^{tree}"]),
     repositoryToolchain(),
   ]);
-  const adapterSource = await readFile(path.join(ROOT, "crates/sceneworks-memory-adapter/src/lib.rs"), "utf8");
-  const pin = adapterSource.match(/pub const INFERENCE_PIN: &str = "([0-9a-f]{40})";/)?.[1];
+  const pin = await currentInferenceRevision();
   if (!pin || inferenceRevision !== pin) fail(`inference checkout ${inferenceRevision} does not match adapter pin ${pin}`);
   if (process.env.SCENEWORKS_LTX_REPOSITORY !== ARTIFACT_REPOSITORY
       || process.env.SCENEWORKS_LTX_REVISION !== ARTIFACT_REVISION) {

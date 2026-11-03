@@ -49,7 +49,7 @@ const CLIP_MODEL_REVISION: &str = "32bd64288804d66eefd0ccbe215aa642df71cc41";
 const CLIP_EMBEDDER_ID: &str = "clip_vit_l14";
 const CLIP_PROVIDER: &str = CLIP_EMBEDDER_ID;
 const CLIP_SPACE: &str = "clip-vit-l14";
-pub(crate) const INFERENCE_RUNTIME_REVISION: &str = "a43724b82fbae35c9227cef4bcdabba6dd1da12c";
+use sceneworks_core::inference_provenance::INFERENCE_REVISION as INFERENCE_RUNTIME_REVISION;
 const DEFAULT_BATCH_SIZE: usize = 16;
 const MAX_BATCH_SIZE: usize = 64;
 const PAGE_SIZE: u32 = 250;

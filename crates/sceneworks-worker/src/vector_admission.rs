@@ -727,7 +727,7 @@ mod tests {
         })];
         json!({
             "schemaVersion": 1,
-            "inferenceRevision": crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+            "inferenceRevision": sceneworks_core::inference_provenance::INFERENCE_REVISION,
             "corpusSha256": "b".repeat(64),
             "model": {
                 "repository": TERMINAL_8B_REPOSITORY,

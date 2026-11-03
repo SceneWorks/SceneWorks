@@ -346,48 +346,11 @@ fn sensenova_selection_parameters(
     contract: &gen_core::MemoryProviderContract,
     strategy: gen_core::MemoryStrategy,
 ) -> Option<gen_core::MemoryStrategyParameters> {
-    let smallest = |rung: gen_core::MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !contract.engages(strategy, rung) {
-            return Some(None);
-        }
-        pick(&contract.capability(rung)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    let window_component = if contract.engages(
-        strategy,
-        gen_core::MemoryStrategy::BoundedTransformerResidency,
-    ) {
-        contract
-            .capability(gen_core::MemoryStrategy::BoundedTransformerResidency)?
-            .parameters
-            .transformer_window_components
-            .first()
-            .copied()
-    } else {
-        None
-    };
-    Some(gen_core::MemoryStrategyParameters {
-        stage_residency: None,
-        decode_tile_edge: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
-        attention_chunk_size: smallest(gen_core::MemoryStrategy::BoundedAttention, |ranges| {
-            &ranges.attention_chunk_sizes
-        })?,
-        transformer_window_size: smallest(
-            gen_core::MemoryStrategy::BoundedTransformerResidency,
-            |ranges| &ranges.transformer_window_sizes,
-        )?,
-        transformer_window_component: window_component,
-    })
+    sceneworks_core::memory_contracts::smallest_parameters(
+        contract,
+        &contract.engaged_composition(strategy),
+        sceneworks_core::memory_contracts::TransformerScopeParameters::ProviderOrder,
+    )
 }
 
 /// The request's predicted resident peak, in bytes.
