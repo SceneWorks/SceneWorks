@@ -4389,7 +4389,7 @@ mod tests {
         let mut catalog = registry
             .create_catalog(&temp.path().join("catalog"), "local images")
             .unwrap();
-        fs::create_dir(catalog.root().join("images")).unwrap();
+        fs::create_dir_all(catalog.root().join("images")).unwrap();
         fs::write(catalog.root().join("images/cached.png"), b"cached").unwrap();
         fs::write(catalog.root().join("images/original.png"), b"original").unwrap();
         catalog
