@@ -3968,6 +3968,12 @@ fn resolve_item_path(
     dataset_root: &Path,
     relative_path: &str,
 ) -> Result<String, TrainingPlanError> {
+    // Dataset items are portable strings; native export filenames use a separate policy.
+    if crate::safe_path::relative_normal_components(relative_path).is_err() {
+        return Err(TrainingPlanError::InvalidConfig(
+            "Dataset item path must be relative to the dataset root.".to_owned(),
+        ));
+    }
     crate::safe_path::confine_under(
         dataset_root,
         relative_path,
