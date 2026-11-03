@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.3.** Addresses all nine round-2 findings; dispositions and the subsequent architecture review are in [REVIEW_LOG.md](REVIEW_LOG.md). Proposed design only: no implementation, tracker items, model execution or approval of §10 decisions. |
+| **Status** | **Draft 0.4.** Addresses the round-2 findings (R2-01…09) and the round-4 findings (C4-01…08); dispositions and the subsequent architecture review are in [REVIEW_LOG.md](REVIEW_LOG.md). Proposed design only: no implementation, tracker items, model execution or approval of §10 decisions. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -156,7 +156,7 @@ pub struct RenderPlan {
     pub seeds: SeedPlan,                        // route SeedScheme (legacy, bit-exact) + new-stream salts
     pub passes: Vec<PassPlan>,                  // ordered, stable PassIds; ≥1 for denoising routes
     pub features: Vec<AppliedFeature>,
-    pub memory: LiveSetPlan,                    // stage/phase/transition allocations by budget domain
+    pub memory: PricingPlan,                    // per-component weights, per-phase peaks, transition deltas (§3.9)
 }
 
 pub struct PassPlan {
@@ -201,11 +201,31 @@ pub enum BoundaryState<L> {
 }
 ```
 
-**Coordinates and composition (R2-02).** A pass owns a schedule domain; phase spans are half-open **executed** outer-step ranges in that pass, with both endpoint nodes available. Img2img truncation is resolved before K and other span parameters. Global, fresh and explicit refer to schedule construction, not three incompatible ways to index a phase. A stream-coupling declaration maps each outer step/evaluation to its per-stream sigma; joint H3 uses the same outer-step ordinal with different audio/video sigmas. No ordering comparison between those sigmas is implied. Different-length stream schedules require an explicit route coupling rule; otherwise compilation refuses.
+**Coordinates and composition (R2-02).**
 
-Pass-producing Features run before span contributions that target those passes, through declared `requires`/ordering edges. Stable pass roles identify base, refinement and native stages; a reference to an absent or ambiguous role refuses. Default low-res targets the first denoising pass once. A generic per-phase option must name its pass or an explicit all-pass rule. Wan expert thresholds remain model-slot functions evaluated at every actual sigma, including intermediate and endpoint evaluations, rather than being rounded into an outer-step boundary.
+*Coordinates*
+- A pass owns one schedule domain.
+- Phase spans are half-open ranges of **executed** outer steps within that pass. Both endpoint nodes are available to the phase.
+- Img2img truncation is resolved before K and other span parameters are applied.
+- Global, fresh and explicit describe how a pass's schedule is built. They are not three ways of indexing a phase.
+- A stream-coupling declaration maps each outer step and evaluation to its per-stream σ. For example, joint H3 uses the same outer-step ordinal for audio and video, with different σ values. No ordering between those σ values is implied.
+- Stream schedules of different lengths need an explicit route coupling rule. Without one, compilation refuses.
 
-Within one pass, boundaries are merged by executed step ordinal. Overrides own `(PassId, stream set, axis, span)`; axes include geometry, model rule, adapters, guidance, solver and schedule policy. Native route defaults are overridable only on declared surfaces. Each boundary also has one typed transition composition and one resolved history policy; competing transition owners refuse unless a registered composition defines their operation order and input/output states. For low-res that order is endpoint estimate → unpack/resize clean sample → destination noise scaling → repack → history reset. Hires owns a separate pass boundary, so it does not conflict with an interior low-res boundary. No registration-order tie breaks or implicit overwrites are permitted.
+*Passes*
+- Pass-producing Features run before the span contributions that target their passes. This order comes from declared `requires` and ordering edges.
+- Stable pass roles identify the base, refinement and native stages. A reference to a missing or ambiguous role refuses.
+- By default, low-res start targets the first denoising pass, once.
+- A generic per-phase option must name its pass, or state an explicit all-pass rule.
+- Wan expert thresholds stay as model-slot functions evaluated at every actual σ, including intermediate and endpoint evaluations. They are never rounded to an outer-step boundary.
+
+*Ownership*
+- Within a pass, boundaries merge by executed step ordinal.
+- Each override is owned by one `(PassId, stream set, axis, span)`. The axes are geometry, model rule, adapters, guidance, solver and schedule policy.
+- Native route defaults can be overridden only through declared surfaces.
+- Each boundary has exactly one typed transition composition and one resolved history policy. Competing transition owners refuse, unless a registered composition defines their operation order and their input and output states.
+- For low-res start, the composition order is: estimate → unpack and resize the clean sample → destination noise scaling → repack → history reset.
+- Hires.fix owns a separate pass boundary, so it never conflicts with an interior low-res boundary.
+- No tie is broken by registration order, and nothing is silently overwritten.
 
 **Plan compilation.** Compilation is weights-free and deterministic. It runs in this order:
 1. Resolve route defaults, request versions and recipe versions; validate raw parameter types/ranges.
@@ -215,9 +235,34 @@ Within one pass, boundaries are merged by executed step ordinal. Overrides own `
 5. Resolve conditioning and preparation dependencies per pass/phase, including negative branches, scales and stage-result reuse; construct their immutable dependency keys.
 6. Derive the allocation live set and all boundary-evaluation work. Compile the exact resolved plan used by admission and execution. Admission-selected equivalent Features use the same validation and pricing path; each finite candidate is considered once in deterministic order, and no unvalidated rewrite occurs after selection. Run admission can change a selection only by repeating that path before execution; recipe Features and tiers stay fixed.
 
-**Boundary conversion (R2-01).** The low-res recipe requires a clean estimate at the actual endpoint `sigma[K]`. Its default is one additional **read-only** model evaluation on the post-K-step low-res `x_sigma`, with the departing phase's guidance/adapter configuration and its slot rule evaluated at that endpoint sigma. The runner applies the route's `ModelSampling::denoised_coeffs` (or a conformance-tested driver estimator), producing x0 with provenance `(pass, stream, sigma, input state, model/adapter/branch configuration, dtype)`. A solver's earlier primary or midpoint x0 is not eligible simply because it is the most recent estimate. A route may reuse an estimate only if it certifies the same endpoint state/configuration. The evaluation cannot commit autoregressive KV or advance stochastic draws; drivers without a read-only compatible estimator refuse structurally. It is counted in internal evaluations, cancellation and pricing; it adds no outer progress step or duplicate preview.
+**Boundary conversion (R2-01).**
 
-Resample **clean normalized codec latents**, unpacked into their physical spatial axes; do not interpolate a packed token dimension, audio axis or residual noise. No second codec mean/scale transform is applied. New `low-res-start/1` uses bilinear half-pixel sampling (`align_corners=false`, border clamp), f32 interpolation and noise arithmetic, then the destination route's declared solver-latent dtype/layout. Backend kernels implement that same new-recipe rule; legacy/native route transitions keep their existing casts and noise draws. Draw independent target-grid noise using the feature's domain-separated seed. For destination sigma s, `ModelSampling::noise_scaling_coeffs(s)` supplies `(a_noise,a_clean)`: `x_dst = a_clean * resize(x0) + a_noise * eps_dst`; flow is `(1−s)*resize(x0)+s*eps_dst`, VE/EDM is `resize(x0)+s*eps_dst`. A noisy-to-noisy transform must be a separately declared law; it cannot call `FromClean` on `Noisy`. Other streams remain unchanged unless named by the transition. Any changed geometry/re-noise forces the joint solver history to Reset unless its route explicitly partitions independent solver states. Source evidence: inference `gen-core/src/sampling/model_sampling.rs:59-68,223-231`; round-2 report R2-01.
+*Getting the clean estimate.* `EstimateSource` is declared in the plan and recorded with provenance: (pass, stream, σ, input state, model/adapter/branch configuration, dtype).
+
+| Source | What it does | Status |
+|---|---|---|
+| `EndpointEvaluation` **(default)** | One additional **read-only** model evaluation on the low-res `x_σ` after step K, at the actual endpoint σ[K]. It uses the departing phase's guidance and adapter configuration, and that phase's slot rule evaluated at σ[K]. The runner applies the route's `ModelSampling::denoised_coeffs`, or a conformance-tested driver estimator. | Default |
+| `PreviousEvaluation` | No extra evaluation. Take x0 from the trajectory evaluation at σ[K−1] and skip the K-th low-res integration; the full-resolution phase starts at σ[K]. For Euler, this x0 is exactly what the step integrates toward. Saves one low-res forward (about 1–3% of total time). | Candidate under DEC-10, chosen only through the bounded quality comparison [C4-04] |
+
+- **No silent reuse.** An earlier primary or midpoint x0 is never used just because it is the most recent estimate. A source is valid only when declared, and a route reuses an estimate only if it certifies the declared state and configuration.
+- **The endpoint evaluation is read-only.** It cannot commit autoregressive KV or advance stochastic draws. Drivers without a read-only compatible estimator refuse structurally.
+- **It is accounted internally.** It counts toward internal evaluations, cancellation and pricing. It adds no outer progress step and no duplicate preview.
+
+*Resample and re-noise.*
+- **Resample clean, normalized codec latents** in their physical spatial axes, after unpacking. Never interpolate a packed token dimension, an audio axis or residual noise. Never apply a second codec mean/scale transform.
+- **`low-res-start/1` arithmetic:**
+  - bilinear half-pixel sampling (`align_corners=false`, border clamp);
+  - interpolation and noise arithmetic in f32;
+  - conversion to the destination route's declared solver-latent dtype and layout afterwards.
+
+  Backend kernels implement this same rule. Legacy and native route transitions keep their existing casts and noise draws.
+- **Noise:** independent target-grid noise from the Feature's domain-separated seed. For destination σ = s, `ModelSampling::noise_scaling_coeffs(s)` gives `(a_noise, a_clean)`, and `x_dst = a_clean·resize(x0) + a_noise·ε`:
+  - flow: `(1−s)·resize(x0) + s·ε`;
+  - VE/EDM: `resize(x0) + s·ε`.
+- **Noisy state is never treated as clean.** A noisy-to-noisy transform needs its own declared law. `FromClean` cannot accept a `Noisy` state.
+- **Other streams are untouched** unless the transition names them.
+- **History.** Any geometry change or re-noise resets the joint solver history, unless the route explicitly partitions independent solver states.
+- **Evidence:** inference `gen-core/src/sampling/model_sampling.rs:59-68,223-231`; round-2 R2-01.
 
 ### 3.2 Route structure and primary declarations (AP5, HOOK-4)
 
@@ -287,13 +332,39 @@ pub enum TimeInput { Sigma(PerStream<f32>), FlowMap{ t: f32, t_ref: f32 },
                      PerToken(TokenTimeBuilder), RowTimesteps(RowTimes), Angle(f32) }
 ```
 
-**Request execution state (R2-03).** `RunState` owns the solver/driver state, previous nodes/intervals, stochastic draw coordinates, request caches and any autoregressive causal state. The shared driver takes `&mut SolverRunState`, as the native driver takes `&mut DriverRunState`; neither creates fresh history on every slice. A phase references its range in the **whole pass schedule**, not a newly zero-indexed solver call. `Carry` requires the same solver variant and numerical convention, a contiguous schedule and compatible geometry; a solver change uses Reset unless an explicit tested conversion exists. For native Wan the same scheduler continues across the expert crossing; native Krea retains its declared Reset behavior.
+**Request execution state (R2-03).**
+- **`RunState` is request-owned.** It holds solver and driver state, previous nodes and intervals, stochastic draw coordinates, request caches and any autoregressive causal state.
+- **No fresh history per slice.** The shared driver takes `&mut SolverRunState` and the native driver takes `&mut DriverRunState`.
+- **Absolute schedule positions.** A phase addresses its range in the **whole pass schedule**, not as a freshly zero-indexed solver call.
+- **`Carry` requires** the same solver variant and numerical convention, a contiguous schedule and compatible geometry. A solver change resets, unless an explicit, tested conversion exists.
+- **Native routes keep their behaviour.** Wan continues one scheduler across the expert crossing; Krea keeps its declared Reset.
 
-RNG coordinates and solver history are separate fields. For an inert split, a draw previously addressed by `i`, `2*i` or `2*i+1` keeps that absolute pass index. New boundary noise uses `(recipe version, PassId, stream, sample identity, transition role)` salts and does not advance the solver draw stream. Pass restarts follow the route's existing legacy policy or a named new recipe stream. Reset clears numerical history and previous intervals, not RNG coordinates or unrelated KV. State retention/reset rules for driver caches are explicit and checked when geometry changes. An inert boundary may be elided for execution so it cannot introduce an extra materialization, terminal sigma or cast. Evidence: inference `sampling/solvers.rs:219,264,380,403` and Wan `pipeline/moe.rs:33-46`.
+*RNG and caches*
+- **RNG coordinates and solver history are separate fields.** Reset clears numerical history and previous intervals. It does not touch RNG coordinates or unrelated KV state.
+- **Inert splits keep absolute draw indices.** A draw addressed by `i`, `2*i` or `2*i+1` keeps its absolute pass index.
+- **New boundary noise is salted** by `(recipe version, PassId, stream, sample identity, transition role)` and never advances the solver's draw stream.
+- **Pass restarts** follow the route's legacy policy or a named new recipe stream.
+- **Driver-cache retention and reset rules** are explicit, and are checked on geometry change.
+- **Inert boundaries can be elided** at execution, so they never add a materialization, terminal σ or cast.
+- **Evidence:** inference `sampling/solvers.rs:219,264,380,403`; Wan `pipeline/moe.rs:33-46`.
 
-**Guidance/Feature state (round-3 correction).** `RunState` also owns guidance momentum and mutable Feature state. `EvaluationKind::BoundaryEstimate` propagates through prediction, combine and hooks: evaluate the departing configuration against a snapshot, discard all updates to momentum/history/cache counters, and emit only internal evaluation/telemetry accounting. It cannot mutate live APG state, advance outer progress, commit KV or consume solver draws. Derived immutable preparation caches may be reused through their ordinary dependency keys; any snapshot/scratch allocations are priced. If an active Feature cannot provide this read-only behavior, composed-plan validation refuses the combination rather than silently bypassing it. State descriptors specify dependencies and invalidation for geometry, branch layout, model and adapter changes. In recipe v1 a geometry change resets incompatible shape-dependent momentum/residual caches before the next trajectory evaluation; geometry-independent state retains its declared cadence. Native no-Feature paths keep existing update behavior. This is required because APG's `MomentumBuffer::update` stores a running tensor and guidance calls it (`gen-core/src/guidance.rs:168-190,201-208`), independently of solver history. Tier 0 uses a fake/stateful guidance operator to check snapshot nonmutation and invalidation before new-shape arithmetic; no learned forward runs in that test.
+**Guidance and Feature state (round-3 correction).**
+- **`RunState` also owns** guidance momentum and mutable Feature state.
+- **`EvaluationKind::BoundaryEstimate` propagates** through prediction, combine and hooks. It evaluates the departing configuration against a snapshot and discards every update to momentum, history and cache counters. It only emits internal evaluation and telemetry accounting.
+- **It cannot** mutate live APG state, advance outer progress, commit KV or consume solver draws. Immutable preparation caches can be reused through their normal dependency keys. Snapshot and scratch allocations are priced.
+- **Features that cannot be evaluated read-only refuse.** Composed-plan validation refuses the combination instead of silently bypassing it.
+- **State descriptors declare** their dependencies and their invalidation rules for geometry, branch-layout, model and adapter changes.
+- **Recipe v1:** a geometry change resets incompatible, shape-dependent momentum and residual caches before the next trajectory evaluation. Geometry-independent state keeps its declared cadence. Native paths with no Feature keep their existing update behaviour.
+- **Why:** APG's `MomentumBuffer::update` stores a running tensor that guidance updates on every call, independently of solver history (`gen-core/src/guidance.rs:168-190,201-208`).
+- **Tier 0 check:** a fake stateful guidance operator verifies snapshot non-mutation and invalidation before any new-shape arithmetic, with no learned forward.
 
-**Preparation/cache dependency contract (R2-04).** The runner resolves the model slot for the **actual evaluation**, ensures its weights/residency, derives aligned inputs, then prepares context with `PrepareArgs`. Keys include the declared subset of request/pass/sample identity, effective weights/tier, geometry, encoded conditioning, adapter identity/scales, branch layout and perturbation. An adapter-dependent aggregator cannot share a key with base-only preparation; a CFG batch-1 cache cannot stand in for batch 2. Split independent caches where their dependency subsets differ. Numeric scale or branch-count changes need not invalidate a geometry-only RoPE cache. Future-use cache retention is an explicit live allocation, not free reuse. Krea's existing preparation explains the adapter dependency (`mlx-gen-krea/src/pipeline.rs:1127-1148`). No per-request cache values are installed on shared resident modules.
+**Preparation and cache dependencies (R2-04).**
+- **Order per evaluation:** resolve the model slot for the **actual evaluation** → ensure weights and residency → derive aligned inputs → prepare context with `PrepareArgs`.
+- **Keys contain the declared subset of:** request, pass and sample identity; effective weights and tier; geometry; encoded conditioning; adapter identity and scales; branch layout; perturbation.
+- **Examples:** an adapter-dependent aggregator never shares a key with base-only preparation (Krea, `mlx-gen-krea/src/pipeline.rs:1127-1148`). A CFG batch-1 cache never stands in for batch 2 (Wan).
+- **Caches with different dependency subsets are split.** A geometry-only RoPE cache survives scale or branch-count changes.
+- **Reuse is not free.** Retaining a cache for future use is an explicit, priced live allocation.
+- **Nothing per-request is installed** on shared resident modules.
 
 **Stage execution:**
 
@@ -319,7 +390,11 @@ for trajectory in plan.count:                                 [sequential/batche
 finish request accounting and host resource release on every exit; GPU cleanup only where safe
 ```
 
-`PixelRoundTrip` references the runner's intermediate decode, pixel resize and next-pass reference/encode stages; it does not hide those stages inside `FamilyDriver` or decode an already produced intermediate twice. Hires refinement may run S1/S2 again after that decode. Encode's component dependency graph can run a vision encoder before the text encoder that consumes its features (Qwen edit); later S3 denotes latent/aligned reference preparation, not all possible image inputs. Repeated chunk stage invocations use the same owners when a streaming route adopts them, with explicit causal state and bounded sinks. The current Krea-realtime batch path remains a single terminal decode (PIPE-16). Execution is limited to these typed generation stages and earlier-pass/chunk dependencies.
+**Stage notes.**
+- **`PixelRoundTrip` points at runner-owned stages:** intermediate decode, pixel resize, and next-pass reference and encode. It never hides them inside a `FamilyDriver`, and never decodes the same intermediate twice. Hires.fix refinement can re-run S1 and S2 after that decode.
+- **Encode has an internal dependency graph.** A vision encoder can run before the text encoder that consumes its features (Qwen edit). S3 refers to latent and aligned reference preparation, not to every image input.
+- **Chunked output.** A streaming route repeats chunk stage invocations under the same owners, with explicit causal state and bounded sinks. Today's Krea-realtime batch path stays a single terminal decode (PIPE-16).
+- **Scope.** Execution is limited to these typed generation stages and their earlier-pass and chunk dependencies.
 
 **Runner invariants.** These are salvaged from sc-20414 and corrected [ENG-2, ENG-19]:
 - **Progress is monotone in outer steps.** Evaluation counts stay internal (DEC-19).
@@ -460,8 +535,29 @@ pub struct ComponentPlan {
 
 - **Until relocation, the runner drives today's `MemoryRequestScope` lifecycle** for each migrated route (MEM-5): `enter_phase`, `configure_decode`, `materialize_transformer_window` and `finish`.
 - **Contracts are computed from the route record plus these declarations (MEM-2).**
-- **Pricing (MEM-3, R2-05)** builds a live-allocation graph over stages, model evaluations and transitions, including references at their actual pixel geometry. An allocation has a stable physical-allocation identity, a size bound, a budget domain, and first/last use. At point t and domain d, `peak[d] = max_t(sum(bytes(a) for distinct live allocation a charged to d))`. Sum concurrent audio/video latents and their **joint** workspace; deduplicate aliases, packed views and shared weights. Sum stages only when their lifetimes overlap; do not sum mutually exclusive weights. Include deferred materialization and retained outputs/context, old/new latents, endpoint x0, fresh noise, f32 conversion scratch and component workspace. A unified-memory allocation is charged once in the unified domain; distinct host/CUDA-device budgets are tested separately. Feature memory effects contribute allocation/lifetime deltas, not an unexplained additive correction that can double-count base buffers.
-- **First-consumer admission (R2-06).** ENG-1 delivers the live-set/transition pricing interface and actual phase/scope identities for all adopted FLUX.1 routes. Existing SceneWorks admission paths consume the validated plan or its derived priced inputs; they do not guess from final width/height. `MemoryRequestScope` receives each phase's geometry, mode/conditioning, selected rungs and transition identity under the whole-plan budget reservation. ENG-2 extends this integration to Hires intermediate codec/encoder stages and its adopted routes. These are production interfaces retained by APP-4, not temporary parallel admission implementations. If a legacy estimator already bounds every added live allocation, document that bound over supported settings; one selected peak measurement is insufficient. APP-4 later centralizes the callers and budget hooks without being a dependency of ENG-1/2.
+- **Pricing (MEM-3, R2-05, C4-02): sum what is live together, at component and phase granularity, on existing evidence.**
+  - **Building blocks:**
+    - per-component weight bytes, taken from the weight plan;
+    - per-stage and per-phase activation peaks, taken from today's measured or derived evidence (two anchors plus derivation, per standing direction; no new grid);
+    - **transition deltas**, computed from latent shapes and dtypes: source and destination latents, the endpoint x0, fresh noise and f32 scratch, plus declared component residency such as an upsampler, codec or retained context.
+  - **Phase peak:** resident weights + that phase's activation peak. **Concurrent streams are summed, never maxed.** A joint AV phase prices its streams *and* its joint workspace together, from evidence for that joint phase.
+  - **Transition peak:** the departing phase's resident set + the transition delta.
+  - **Request peak:** the maximum over phases and transitions.
+  - **Deduplication:** aliases (a latent reused in place, packed views, shared weights) are counted once, through declared alias rules. Per-allocation identity is used **only** where it matters, mainly latent aliasing at transitions. It is not a program-wide modelling obligation.
+  - **Budget domains:** unified memory is charged once. Separate host and CUDA-device budgets are priced separately.
+  - **Feature memory effects** are expressed as component and transition deltas, never as an unexplained additive correction.
+  - **Closure fixtures (pure, no model execution):**
+    - two streams that each fit alone but not together;
+    - a transition peak above both steady phases;
+    - alias deduplication.
+  - **What this deliberately avoids:** a per-allocation live graph covering every family's activations. That would re-create the dismantled calibration apparatus.
+- **First-consumer admission (R2-06).**
+  - **ENG-1b** delivers the pricing interface (phase peaks plus transition deltas) and the actual phase and scope identities for every adopted FLUX.1 route.
+  - **Existing SceneWorks admission paths consume the validated plan** or its derived priced inputs. They never guess from the final width and height.
+  - **`MemoryRequestScope` receives,** for each phase, its geometry, mode and conditioning, selected rungs and transition identity, under the whole-plan budget reservation.
+  - **ENG-2** extends the same integration to Hires.fix's intermediate codec and encoder stages, and to its own adopted routes.
+  - **These are production interfaces that APP-4 keeps**, not temporary parallel implementations. APP-4 later centralizes the callers and budget hooks. ENG-1b and ENG-2 do not depend on it.
+  - **Gate:** ENG-1b's admission edits touch files in SW-F327 #3264, so they wait for that PR to merge (DEC-5).
 - **iOS admission** (`ios_admission.rs`, per-family `ios_pricing/`) is replaced by plan-byte pricing plus quantum hooks (MEM-6).
 
 ### 3.10 Route records and the capability export (REG-1…6)
@@ -627,17 +723,17 @@ The hook enum in code is the source of truth (HOOK-1). The table below is the de
 
 ## 6. Worked examples (files touched)
 
-### 6.1 Low-res start: FEAT-1 (ships in ENG-1, extended as routes migrate)
+### 6.1 Low-res start: FEAT-1 (ships in ENG-1b, extended as routes migrate)
 
 | Where | Change |
 |---|---|
 | Engine `[INF]` | `gen-core/src/features/low_res_start.rs`. **Params:** `{version: 1, k, scale}`. **Resolved constants:** first denoising PassId only; fixed final-pass-geometry schedule/mu; read-only endpoint x0; bilinear clean-latent resample; destination noise law; Reset. No exposed `renoise` or `mu_policy` knob in v1. **Applicability:** supported spatial axes/grids/modes, endpoint estimator, transition, stream coupling and composed-plan checks (§3.1, FEAT-1). Edit/reference/control initially refuse until ENG-12 rebuild support; ordinary img2img init remains supported. **Plan rewrite:** split that pass's M executed steps at K, use reduced spatial dimensions for `[0,K)` and full pass dimensions for `[K,M)`. Other axes and later passes are unchanged. All transition allocations are priced. |
-| Backend `[INF]` | None after ENG-1, which builds `BundleOps::resample` and pack/unpack once. |
+| Backend `[INF]` | None after ENG-1a, which builds `BundleOps::resample` and pack/unpack once. |
 | Families | None after adoption. `prepare_step_context` uses its complete declared dependency key (PIPE-5), and model/guidance/Feature hooks honor boundary-estimate nonmutation and state invalidation (§3.3). Refusals come from composed route support. |
-| SceneWorks `[SW]` | The `lowResStart` option entry, common parameter validation, persistence/upgrade/replay wiring and web controls gated by the export. ENG-1 updates adopted-route admission to the shared plan/live-set interface and per-phase scope identities (§3.9); it does not wait for APP-4. Preserve existing user shapes through the upgrader and recipe-version rules. Reuse this integration when APP-2 supplies the general option registry, migrating consumers in that producer feature. |
-| **Not the PAT-1 measure** | ENG-1 legitimately touches SceneWorks option, validation and web files. PAT-1 is measured on a later Feature (§6.4). |
+| SceneWorks `[SW]` | The `lowResStart` option entry, common parameter validation and web controls, all gated by the export. **Persistence:** a versioned `lowResStart` block (`{version, k, scale}` plus the resolved fields) travels through the existing `ADVANCED_KEY_RULES` and share path. There is no new upgrader: no legacy shape exists. Forward compatibility follows the existing share-envelope rules. APP-2's upgrader later adopts this block as one of its shapes (C4-05). **Admission:** ENG-1b updates admission on adopted routes to the shared plan and pricing interface and to per-phase scope identities (§3.9). It does not wait for APP-4, but it does wait for #3264 (DEC-5). |
+| **Not the PAT-1 measure** | ENG-1b legitimately touches SceneWorks option, validation and web files. PAT-1 is measured on a later Feature (§6.4). |
 
-**Version-1 recipe choices (proposed under DEC-10, R2-09).** M is the selected pass's actual executed step count after strength truncation. Valid K is `1 ≤ K < M`; the UI default is `max(1, floor(M/2))` when M ≥ 2 and the linked fraction is `K/M`. An existing K made invalid by a steps/strength change produces a validation issue; it is not silently clamped. K=0/M or M<2 refuses; Feature absent is the no-op. Scale is finite in [0.25,0.9], default 0.5. Spatial dimensions are `floor(full_dim * scale / legal_quantum) * legal_quantum`, then checked against minimums, strict reduction on each spatial axis and joint legal-grid rules. If invalid, refuse with the legal limits; do not silently select a different aspect ratio/grid. Frames, audio duration/tokens and count remain fixed. Native fixed-table passes permit only eligible interior nodes, with typed refusal otherwise. Persist the resolved recipe version, pass role, dimensions, K, unchanged schedule identity/shift policy, transition arithmetic and seed scheme. Existing persistence carriers are upgraded in ENG-1, ahead of the general APP-2 consolidation. The new recipe is result-changing; disabled paths retain class (a).
+**Version-1 recipe choices (proposed under DEC-10, R2-09).** M is the selected pass's actual executed step count after strength truncation. Valid K is `1 ≤ K < M`; the UI default is `max(1, floor(M/2))` when M ≥ 2 and the linked fraction is `K/M`. An existing K made invalid by a steps/strength change produces a validation issue; it is not silently clamped. K=0/M or M<2 refuses; Feature absent is the no-op. Scale is finite in [0.25,0.9], default 0.5. Spatial dimensions are `floor(full_dim * scale / legal_quantum) * legal_quantum`, then checked against minimums, strict reduction on each spatial axis and joint legal-grid rules. If invalid, refuse with the legal limits; do not silently select a different aspect ratio/grid. Frames, audio duration/tokens and count remain fixed. Native fixed-table passes permit only eligible interior nodes, with typed refusal otherwise. Persist the resolved recipe version, pass role, dimensions, K, unchanged schedule identity/shift policy, transition arithmetic and seed scheme. Persistence uses the versioned block above, through the existing path. The new recipe is result-changing; disabled paths retain class (a).
 
 **Feature acceptance.** Tier 0 checks all FEAT-1 boundary, composition, replay and refusal cases with mocks. Tier 1 includes the endpoint forward and transition allocations. Tier 2 reuses the feature's bounded proof set for active-versus-full-res prompt/content, structural integrity, blur/seams, finite outputs and img2img retention, alongside end-to-end speed and peak memory. State the prompts/seeds and inspect results for each backend; a quality failure is repaired before that route advertises the recipe, or surfaced as a named DEC-13 decision. No extra Cartesian campaign or fixed speedup promise. Active execution reports count the additional read-only evaluation; user progress still counts M outer steps.
 
@@ -706,7 +802,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 4. **List behaviour changes; never let them slip in.** Each change is a named PR entry with its AP13 class and evidence. Class (c) needs sign-off.
 5. **Order within a feature:** ABI, fingerprint and evidence-key changes first; then the walking skeleton; then mechanism slices; then the terminal item (pin, Tier 1/2, whole-branch review, merge).
 6. **File ownership.** Each feature's plan includes a file-ownership table. Features that overlap in time own disjoint files.
-7. **New-model rule.** Once ENG-1 lands, new families target the runner. Once the kit, weights and components features land, new families use them.
+7. **New-model rule.** Once ENG-1a lands, new families target the runner. Once the kit, weights and components features land, new families use them.
 
 ### 7.2 Characterization tiers (MIG-3)
 
@@ -732,7 +828,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 | Feature | Expected class | Notes |
 |---|---|---|
-| ENG-1…3, ENG-5, ENG-6 (pipeline adoption) | (a) | Loops, combines, seeds and history are preserved bit-exactly by design |
+| ENG-1a, ENG-2, ENG-3, ENG-5, ENG-6 (pipeline adoption) | (a) | Loops, combines, seeds and history are preserved bit-exactly by design |
 | ENG-4a (primitive extraction, media/LLM projections) | (a) target, per projection variant | Preserve existing codec, operation order and fused/trainable paths; an unavoidable change is listed and handled under AP13 |
 | ENG-4b (ScaleContext, per-phase adapters) | (a) for fold-kept routes; Krea candle per-phase `[M]` (b)/(c) | Krea candle re-adapts in place today; preparation must receive phase scales |
 | ENG-7 (route records, export) | (a) | No numerics |
@@ -759,6 +855,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 | #3264 | SW-6659 (`apply_vram_cap` sites), SW-6662 (YuE/YuE2 admission), SW-6753 (Mochi/SVD twins), SW-6754 (`hw.memsize` probes), SW-6640 (floor semantics); touches `krea_multiphase.rs`, `candle_memory_strategy.rs`, `generator_cache.rs`, `base_admission.rs`, `conditioning_gate.rs`, `moss.rs`, `instantid.rs` | ADM-2 (part), ENG-4b `[SW]`, APP-4 | **Partly delivered by SW-F327.** All `[SW]` items touching these files are gated on its merge. APP-4 re-baselines after it. |
 | #3268 | Deletes `apps/web/src/modelCatalog.js` | TOOL-3, APPREG-2 | **Delivered by SW-F327.** Removed from SGA scope. |
 | #3270 | SW-6677/6679 cfg alias, SW-6686 AST architecture checks, SW-6812/6817/6824 dependency de-dup and direction guard | LANE-5, DEC-6, LANE-6 | **Delivered by SW-F327.** SGA builds on it. Structural guards extend `architecture_tests.rs` if DEC-6 allows. |
+| (other epic) | Krea-realtime streaming epic (owner confirmed at ENG-6 planning) | PIPE-16 | **Delivered elsewhere / sequenced.** The epic owns decoded chunk streaming. SGA owns the runner chunk contract and migrates whatever path exists at ENG-6 [C4-07]. |
 
 **Rule (DEC-5).**
 - `[INF]` items run now, behind unchanged worker-facing APIs.
@@ -814,13 +911,14 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 
 | Feature | Scope (slices sketched) | Depends on | Est. |
 |---|---|---|---|
-| **ENG-1: Runner skeleton + FLUX.1 + low-res start** | **0** `[INF]` DEC-11 policy PR; route-inventory dump; baselines; Tier 1 workflow route; prior-art salvage review. **1** `[INF]` pass/phase `RenderPlan`, typed boundary states, request-owned solver/RNG state, declared preparation keys, full-plan validation, `BundleOps`, priced live-set inputs and actual `MemoryRequestScope` identities, error/count contracts. **2** `[INF]` **all FLUX.1 routes on both backends** (t2i, img2img, ControlNet, IP, PuLID), legacy class (a). **3** `[INF]` Feature registry and parameter/composition applicability on the existing dump format. **4** `[INF]` low-res recipe v1 with endpoint estimator, typed noise law and bounded quality/replay acceptance. **5** `[SW]` existing admission consumers use plan/live-set inputs; option, validator, persistence/upgrader and UI migrate together. **6** terminal. §6.5 is the walking-skeleton contract; R2 prerequisites ship here, not in APP-4. | DEC-3/10/13 proposals approved at planning; DEC-5 for `[SW]` | Re-estimate at planning; split if >6 wk, preserving one usable complete first-consumer feature |
-| **ENG-2: Shared-driver image wave** | flux2, chroma, lens, anima, sd3, sana base, boogu base, qwen-image (t2i, edit, control), qwen-2.1, z-image (base, turbo, control), kolors curated, sdxl curated. Schedules as data, `img2img_start`, `mu`/shift; `RefBundle` grid-aligned typing. **Hires.fix becomes an engine Feature** (pass-local prompt/encode/reference bindings plus `PixelRoundTrip`, §6.6); preserve final-pass-only enhancement, legacy pixel-fit, seeds, events and output policies. `[SW]` migrate its existing admission consumers to live-set inputs and actual pass scopes, then delete the worker `HiresFixPlan` path. No wait for APP-4. | ENG-1 | 5–6 wk (split at planning if needed) |
-| **ENG-3: Shared-driver video wave** | Wan curated (σ-keyed MoE slot, history `Carry`), Mochi, SVD, SCAIL-2 | ENG-1 | 4–6 wk |
-| **ENG-4a: Backend primitives + media/LLM Linear spine** | Extract `mlx-layers`/`candle-layers` below media and LLM (§1.2); move primitive contracts without a media↔LLM edge. Migrate media Linears (including LTX-local) and LLM projections with existing dense/quantized/Prism/fused/trainable variants preserved. Resolve all consumers of the moved source in this feature; locked Cargo graph and iOS partitions remain valid. | ENG-2, ENG-3 | Re-estimate against full projection inventory; ≤6 wk or split at a complete consumer boundary |
-| **ENG-4b: Request-scoped scales + per-phase adapters** | Preparation **and** forward receive phase scales/branches; dependency-keyed caches (§6.7); keep per-route fold defaults. Move Krea multiphase to runner phases; LTX pass scales and Wan filtering use the same scale seam. Deliver per-phase adapter Feature, delete candle `ip_dit`, `packed_dit`, `packed_te`. `[SW]` Krea uses existing generic generation entrypoints after #3264; no dependency on APP-5’s future lane harness. | ENG-4a | Re-estimate; ≤6 wk or split at planning |
+| **ENG-1a: Runner core + FLUX.1 migration** (walking skeleton; no user-visible change) | **0** `[INF]` prerequisites: the DEC-11 policy PR; the route-inventory dump; baselines (LOC census, fact audit, iOS size); the Tier 1 workflow route on `nax-macos-2`; the prior-art salvage review. **1** `[INF]` the pass/phase `RenderPlan` with stream bundles; typed boundary states; request-owned solver, RNG and guidance state (`RunState`); dependency-keyed preparation; whole-plan validation; `BundleOps`; the runner driving `MemoryRequestScope` with actual phase identities; the error and count contracts. **2** `[INF]` **every FLUX.1 route on both backends** (t2i, img2img, ControlNet, IP, PuLID) moves onto the runner, class (a), and its legacy orchestration is deleted. **3** terminal. **Complete consumer boundary:** FLUX.1 runs entirely on the runner and the old path is gone (AP9). | — | 5–6 wk `[L]` |
+| **ENG-1b: Low-res start (first Feature)** | **1** `[INF]` `FeatureSpec` registry; parameter and composition applicability; the `features` field on the existing dump format; typed refusal, which fixes the silent `phases` ignore. **2** `[INF]` low-res recipe v1: `EstimateSource` (endpoint by default), the typed noise law, transition deltas in pricing, scope identities; bounded quality and replay acceptance (§6.1, §6.5). **3** `[SW]` existing admission consumers move to the plan and pricing inputs; the `lowResStart` option, validation, versioned persistence block and UI (no upgrader, C4-05). **4** terminal. | ENG-1a; DEC-3/10/13 approved at planning; DEC-5 (`[SW]` waits for SW-F327 #3264) | 4–6 wk `[L]` |
+| **ENG-2: Shared-driver image wave** | flux2, chroma, lens, anima, sd3, sana base, boogu base, qwen-image (t2i, edit, control), qwen-2.1, z-image (base, turbo, control), kolors curated, sdxl curated. Schedules as data, `img2img_start`, `mu`/shift; `RefBundle` grid-aligned typing. **Hires.fix becomes an engine Feature** (pass-local prompt/encode/reference bindings plus `PixelRoundTrip`, §6.6); preserve final-pass-only enhancement, legacy pixel-fit, seeds, events and output policies. `[SW]` migrate its existing admission consumers to live-set inputs and actual pass scopes, then delete the worker `HiresFixPlan` path. No wait for APP-4. | ENG-1b | 5–6 wk (split at planning if needed) |
+| **ENG-3: Shared-driver video wave** | Wan curated (σ-keyed MoE slot, history `Carry`), Mochi, SVD, SCAIL-2 | ENG-1b | 4–6 wk |
+| **ENG-4a: Backend primitives + media/LLM Linear spine** | Extract `mlx-layers`/`candle-layers` below media and LLM (§1.2); move primitive contracts without a media↔LLM edge. Migrate media Linears (including LTX-local) and LLM projections with existing dense/quantized/Prism/fused/trainable variants preserved. Resolve all consumers of the moved source in this feature; locked Cargo graph and iOS partitions remain valid. | ENG-2, ENG-3 | 5–6 wk `[L]`; re-estimate against the full projection inventory; split at a complete consumer boundary if larger |
+| **ENG-4b: Request-scoped scales + per-phase adapters** | Preparation **and** forward receive phase scales/branches; dependency-keyed caches (§6.7); keep per-route fold defaults. Move Krea multiphase to runner phases; LTX pass scales and Wan filtering use the same scale seam. Deliver per-phase adapter Feature, delete candle `ip_dit`, `packed_dit`, `packed_te`. `[SW]` Krea uses existing generic generation entrypoints after #3264; no dependency on APP-5’s future lane harness. | ENG-4a | 5–6 wk `[L]` |
 | **ENG-5: FamilyDrivers I** | SDXL native (with inpaint, IP, control) + InstantID; Kolors native; Wan native UniPC (`Carry`); FLUX.3 flow-map; Boogu Turbo DMD; Sana Sprint SCM; MOSS-Image DMD; Iris FlowDPM (quanta hooks); Ideogram; Supra2 | ENG-4b | 5–6 wk |
-| **ENG-6: FamilyDrivers II (multi-stream, autoregressive)** | LTX (explicit tables, route transition, learned upsampler component, AV streams, per-token time); MiniMax-H3 (two schedules); Mage; SenseNova (interleaved output); Bernini; Krea-realtime (preserve batch path; deliver/adopt decoded chunk streaming, reconciling existing streaming-epic ownership and re-anchor semantics under PIPE-16); SeedVR2; PiD sampler hosted in S10. **Exit:** PIPE-1 complete for every inventory row; streaming adoption is explicitly owned and validated, not assumed already shipped. | ENG-5 | 6 wk (likely 6a/6b) |
+| **ENG-6: FamilyDrivers II (multi-stream, autoregressive)** | LTX (explicit tables, route transition, learned upsampler component, AV streams, per-token time); MiniMax-H3 (two schedules); Mage; SenseNova (interleaved output); Bernini; Krea-realtime (the batch path migrates unchanged; the runner's chunk-stage contract is proven with a mocked producer; if the streaming epic has delivered chunked decode by then, migrate it onto that contract. Delivering streaming itself stays with that epic, per the MIG-7 ledger [C4-07]); SeedVR2; PiD sampler hosted in S10. **Exit:** PIPE-1 complete for every inventory row; the chunk contract is validated; streaming delivery is owned by its epic. | ENG-5 | 6 wk (likely 6a/6b) |
 | **ENG-7: Route records + capability export + registration** | `RouteRecord`, defaults and limits on records; capabilities computed from records; hardware-free export (item 0: hosted candle build check); `Generator` cleanup and typed reports; typed request blocks; REG-6 bespoke providers registered. `[SW]` migrate every dump consumer, SceneWorks linking via bundles only, no direct `runtime_*::providers` imports. | ENG-6 | 5–6 wk |
 | **ENG-8: Layer kit II** | `AttentionOp` (all raw SDPA), RoPE/qkv/norm/MLP/timestep kit, `ExecPolicy`, trainable op-set switch; delete training model copies (WGT-4) | ENG-6 | 5–6 wk |
 | **ENG-9: Weights** | Codec registry, `WeightPlan` lifecycle, loaders migrated by dialect, per-component tiers, load cancellation, generic load progress, generated adapter routing | ENG-7 | 6 wk (likely 9a/9b) |
@@ -846,7 +944,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 ### 9.4 Sequencing and delivery bounds
 
 ```text
-ENGINE  ENG-1 → [ENG-2 + ENG-3] → ENG-4a → ENG-4b → ENG-5 → ENG-6
+ENGINE  ENG-1a → ENG-1b → [ENG-2 + ENG-3] → ENG-4a → ENG-4b → ENG-5 → ENG-6
         ENG-6 → ENG-7 → ENG-9; ENG-6 → ENG-8
         ENG-8 → ENG-10; [ENG-8 + ENG-9] → [ENG-11 + ENG-12]
         [ENG-10 + ENG-11 + ENG-12] → ENG-13 → ENG-14
@@ -856,12 +954,18 @@ APP     (DEC-5 gate) APP-1 → APP-2 → APP-3
                          └──────────(after ENG-9)→ APP-7
 ```
 
-- **Delivery bounds.** Engine ENG-1…14, with ENG-4a/4b, contains at least 15 features before further necessary splits. The prior draft's aggregate/month estimates are withdrawn: first-consumer pricing, projection adoption and streaming reconciliation must be sized against actual consumer inventories before a delivery calendar is approved. Keep the full scope and ≤6-week feature branches, splitting only at a complete consumer boundary. Available parallelism is ENG-2∥3, ENG-8∥9 and ENG-10∥11∥12 where files are disjoint. APP-1…3 can run independently after DEC-5; APP-4…7 follow their engine producers. Backend-generic rollout remains conditional on pilots and separately planned.
+- **Delivery estimates `[L]`, restored (C4-06).** These are my estimates, at low confidence, re-estimated when each feature is planned.
+  - **Per feature:** 4–6 weeks each, as shown in the tables. Any feature planned above 6 weeks is split at a complete consumer boundary (DEC-12).
+  - **Engine track:** ENG-1a…14 is about 17 features including the 1a/1b and 4a/4b splits. With the parallelism the graph allows (ENG-2∥3, ENG-8∥9, ENG-10∥11∥12 on disjoint files), that is **about 14–18 months**.
+  - **SceneWorks track:** APP-1…3 can run from the DEC-5 gate onward, in roughly months 2–8. APP-4…7 follow their engine producers and finish around months 14–18.
+  - **DEC-1 (c):** backend-generic rollout adds 3–6 months if approved.
+  - **Why longer than draft 0.2's 13–16 months:** the R2 prerequisites (pass model, state contracts, first-consumer admission, the primitives extraction) now land inside early features.
+  - **Main uncertainty:** the size of the inventories found at each planning — projection inventory, admission consumers, route-inventory exceptions.
 - **Value milestones.**
 
 | Milestone | Prerequisite | What lands |
 |---|---|---|
-| M1 | ENG-1 complete, including its `[SW]` admission/persistence inputs | Low-res start on FLUX.1 |
+| M1 | ENG-1b complete, including its `[SW]` admission and persistence inputs, which wait for SW-F327 #3264 | Low-res start on FLUX.1 (about 2.5–3.5 months `[L]`) |
 | M2 | ENG-2/3 complete | Low-res start on supported shared-driver image/video routes |
 | M3 | ENG-4b mechanism, extended as remaining routes migrate | Per-phase LoRA on every structurally supported migrated route |
 | M4 | ENG-6 and APP-1/2 complete | Every route on the runner; one registry and options pipeline |
@@ -918,7 +1022,7 @@ A checked-in script counts `git ls-files` lines per area in both repos, separati
 ### 10.4 Performance and size
 
 - **PERF-1 and PERF-2:** A/B on the same runner and in the same window (pre-feature `main` against the feature head), on proof-set routes the feature touched.
-- **iOS size:** binary size is baselined in ENG-1, item 0.
+- **iOS size:** binary size is baselined in ENG-1a, item 0.
 
 ---
 
@@ -931,7 +1035,7 @@ A checked-in script counts `git ls-files` lines per area in both repos, separati
 | R3 | Performance loss (dynamic dispatch, batching, lost MLX fusion) | Med/High | Families batch branches; dyn only at family granularity; `ExecPolicy::fuse`; PERF-1 A/B |
 | R4 | Collisions with in-flight work | High/Med | DEC-5 gating; overlap ledger refreshed at each planning; file-ownership tables; new-model rule |
 | R5 | Agent failure modes (regrowth, stubs, scope narrowing, boundary gaps) | High/Med | DEC-6 guards or terminal greps; verification contract; stub grep at item end; terminal integration sweep |
-| R6 | iOS size and memory | Med/Med | Baseline in ENG-1; feature-partitioned crates; MEM-6 |
+| R6 | iOS size and memory | Med/Med | Baseline in ENG-1a; feature-partitioned crates; MEM-6 |
 | R7 | Training regressions | Med/Med | Trainers in Tier 1 from ENG-8 |
 | R8 | Hardware contention | High/Med | Live pool discovery per planning; Tier 1 off the dev Mac; batching |
 | R9 | Decision latency (DEC-1…19) | Med/Med | Each feature depends on a named decision subset |
@@ -940,7 +1044,7 @@ A checked-in script counts `git ls-files` lines per area in both repos, separati
 | R12 | Disk exhaustion from agent `target/` directories | High/Med | Clean finished `target/`; cap building agents |
 | R13 | Capability export cannot be produced hardware-free for candle | Med/Med | ENG-7 item 0 checks this first; otherwise the CUDA host goes on the critical path and the plan is re-cut |
 | R14 | `FamilyDriver` claims diverge from behaviour | Med/High | Drivers generic over a forward seam; conformance suite for slicing, read-only estimates and state continuity (PIPE-7) |
-| R15 | A new Feature uses unpriced transitions or stale preparation | Med/High | ENG-1 first-consumer pricing/scope identities; complete dependency keys; §6.5–6.8 design traces and scoped implementation proofs |
+| R15 | A new Feature uses unpriced transitions or stale preparation | Med/High | ENG-1b first-consumer pricing/scope identities; complete dependency keys; §6.5–6.8 design traces and scoped implementation proofs |
 
 ---
 

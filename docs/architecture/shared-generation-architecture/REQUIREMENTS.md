@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.3.** Revised to address all nine round-2 findings, in addition to the 69 round-0 findings (see [REVIEW_LOG.md](REVIEW_LOG.md)). These are proposed design resolutions, not implementation evidence or approval of the open decisions in §10. Design-only: no program tracker items or implementation will be created until the design is approved. |
+| **Status** | **Draft 0.4.** It addresses the 69 round-0 findings, the nine round-2 findings and the eight round-4 findings (see [REVIEW_LOG.md](REVIEW_LOG.md)). These are proposed design resolutions, not implementation evidence or approval of the open decisions in §10. Design-only: no program tracker items or implementation will be created until the design is approved. |
 | **Date** | 2026-11-03 |
 | **Repositories** | SceneWorks (`main` @ `a1d95e2c4`) and inference (`origin/main` @ `a43724b82`). All citations refer to those revisions. |
 | **Companion** | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): target design, migration strategy and phased roadmap. |
@@ -260,7 +260,13 @@ Encode includes declared dependencies among encoder components, such as Qwen edi
 
 **Accept:** a Tier 0 fault-injection suite covers each class at each stage.
 
-**PIPE-16 — Streaming and incremental outputs are supported** through runner-owned repeated chunk stage invocations and the event sink, with bounded buffering, cancellation, causal codec state and residency declared. At the cited baseline Krea-realtime generates a whole clip and then decodes it (`mlx-gen-krea-realtime/src/t2v.rs:12-16`); autoregressive latent chunks are not streamed decoded output. **Accept:** migrate that batch route unchanged and deliver chunked output through the runner in ENG-6. Reconcile the existing streaming epic when ENG-6 is planned: reuse any delivered implementation, or include its outstanding chunk-output/re-anchor requirements in ENG-6 with explicit ownership and dependencies. Validate chunk ordering, backpressure, cancellation and bounded retention. Do not report new chunk streaming as an existing capability preserved by a refactor, and do not silently remove it from the program's scope.
+**PIPE-16 — The runner supports chunked and incremental output.** Chunks are runner-owned repeated stage invocations delivered through the event sink. Buffering is bounded, cancellation is supported, and causal codec state and residency are declared.
+- **Today's state:** Krea-realtime generates a whole clip and then decodes it once (`mlx-gen-krea-realtime/src/t2v.rs:12-16`).
+- **Ownership:** delivery of decoded chunk streaming as a product capability belongs to its existing streaming epic. SGA owns the runner contract and migrates whichever Krea-realtime path exists when ENG-6 runs (MIG-7 ledger).
+
+**Accept:**
+- The batch route migrates unchanged.
+- The chunk contract is proven by a mocked chunk producer in Tier 0: ordering, backpressure, cancellation and bounded retention.
 
 **PIPE-17 — Telemetry flows through `gen-core-telemetry`** at stage, phase and lifecycle hooks. Existing telemetry fields stay stable (OPT-8). **Accept:** existing telemetry consumers see unchanged field names.
 
@@ -400,7 +406,19 @@ Families supply **declarations only**: a component lifetime graph across stages,
 - per-phase, per-stream geometry;
 - streamed or buffered output.
 
-The rung set is open. **Peak pricing is the maximum over execution points of the total distinct simultaneously live allocations in each budget domain.** Concurrent streams and joint workspaces are aggregated; aliases/shared weights are counted once. Transitions include source and destination buffers, endpoint estimates, pending materialization, codecs/upsamplers and retained contexts. Host and device budgets are not conflated; unified-memory allocations are counted once in their shared domain. **Accept:** low-res start, multi-phase, video and audio-video plans are priced by one mechanism. Pure fixtures cover two streams that fit separately but exceed the budget together, a transition peak greater than either steady phase, and alias deduplication.
+The rung set is open.
+
+**Peak memory counts what is live together:**
+- **Concurrent streams and joint workspaces are summed, never maxed.** Example: H3 video plus audio plus their joint workspace.
+- **Transitions are priced** above both the phase they leave and the phase they enter.
+- **Aliases and shared weights are counted once.**
+- **Budget domains are kept apart:** host, device, and unified memory (counted once).
+
+Pricing is built from per-component weights, per-phase activation evidence (two anchors plus derivation) and shape-computed transition deltas. It is not a per-allocation model of every family's activations (C4-02).
+
+**Accept:**
+- Low-res start, multi-phase, video and audio-video plans are priced by one mechanism.
+- Pure fixtures cover two streams that each fit alone but exceed the budget together, a transition peak above either steady phase, and alias deduplication.
 
 **MEM-4 — Equivalent-class Features stay within a declared, recorded quality bound.**
 - **Equivalent-class Features are output-preserving within a declared and recorded quality bound.** Tiled decode changes pixels (`gen-core/src/memory_strategy/decode_quality.rs`), so "output-preserving" cannot mean byte-identical here.
@@ -634,24 +652,32 @@ Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs
 
 ### 6.16 First consumer: low-res start (FEAT)
 
-**FEAT-1 — "Low-res start" is an opt-in recipe-class Feature.**
-- **Behaviour:** it runs the first K **executed outer steps of the first denoising pass** at a reduced spatial scale, then obtains a clean endpoint estimate, resamples it and re-noises to that pass's boundary sigma at full pass geometry (PIPE-4). The recipe and schedule policy are versioned and persisted. Composed Hires.fix therefore applies low-res start to its base pass once; the refinement pass is unchanged.
-- **Parameter semantics (proposed under ⟂DEC-10):** active K satisfies `1 ≤ K < M`, where M is the selected pass's executed step count after img2img truncation. Zero, K ≥ M, non-finite scale, and M < 2 refuse; disabling the Feature is the byte-identical no-op. Scale is spatial only, finite and within 0.25–0.9 (default 0.5); frames, duration, audio geometry and count are unchanged. Each spatial dimension rounds down to its declared legal quantum, must meet its minimum and be smaller than its full-pass dimension; an invalid pair refuses rather than clamps. Nonrectangular legal-grid rules remain route-declared. The UI fraction uses M and reports the resolved dimensions.
-- **Schedule and switch:** keep the full pass's schedule and final-geometry `mu`/shift unchanged. No phase-local schedule shift. Obtain x0 through a read-only evaluation of the departing configuration at the actual boundary sigma, using that configuration's model-slot rule at that sigma; drivers may supply an equivalent endpoint estimator with conformance. Use the destination stream's noise-scaling law, a new domain-separated seed stream and Reset history. Additional evaluations appear in the execution report and pricing, not as extra user-visible outer steps.
-- **Availability:** it is offered on every route with the required spatial resize, read-only endpoint-estimate and transition support, and refused elsewhere with a typed reason. The predicate checks the **targeted pass's** mode/conditioning, legal parameters, stream coupling and active Features. Initially noise-start modes and img2img are supported; edit/reference/control inputs to that pass refuse until their shared conditioning rebuild is delivered in ENG-12/COMP-5. This excludes ordinary img2img's init image from the reference-mode refusal. A generated reference in a later, untargeted Hires refinement pass does not make the base pass ineligible. Any structurally unavoidable route exception is listed under DEC-13; the expected-route inventory cannot shrink silently.
-- **UI:**
-  - a number field for K;
-  - a linked slider showing K/M for the selected pass's executed steps, snapped to whole steps;
-  - a scale control.
-- **Product choices** are recorded under ⟂DEC-10.
-- **Expected routes:** the feature that ships FEAT-1 on a route set lists, from the route inventory, which routes are expected to support it, so availability cannot pass vacuously. Fixed native tables use their actual eligible boundaries; unsupported requested boundaries refuse.
+**FEAT-1 — "Low-res start" is an opt-in recipe-class Feature.** The mechanics are recipe v1, in IMPLEMENTATION_PLAN §6.1 and §3.1 (⟂DEC-10).
+
+- **Behaviour:**
+  - It runs the first K executed steps of the first denoising pass at reduced spatial resolution.
+  - It then converts a clean estimate to full resolution and re-noises it to that pass's boundary σ.
+  - Composed with Hires.fix, it applies once, to the base pass only.
+- **Parameters:**
+  - K must satisfy `1 ≤ K < M`, where M is the number of steps the pass actually executes.
+  - Scale reduces spatial dimensions only. Frames, audio and count are unchanged.
+  - Invalid values refuse; they are never clamped.
+  - With the Feature absent, the output is byte-identical to today.
+- **Availability:**
+  - It is offered on every route whose targeted pass supports the required resize, estimator and transition.
+  - Every other route refuses it with a typed reason.
+  - Initially, edit, reference and control inputs on the targeted pass refuse, until COMP-5 rebuilds aligned conditioning. Ordinary img2img stays supported.
+  - Unavoidable exceptions are listed under DEC-13.
+  - The expected-route list comes from the route inventory, so availability cannot pass vacuously.
+- **UI:** a number field for K; a linked slider showing K/M; a scale control; the resolved dimensions shown.
+- **Replay:** the resolved recipe is persisted and versioned. Replay with the same seed is deterministic per backend, and unknown recipe versions refuse.
 
 **Accept:**
+- Correct plans and refusals at the parameter boundaries, under img2img truncation, on legal-grid limits, with spatial-only scaling on AV routes, and under composition.
 - Correct output size on every expected route.
-- Correct plans/refusals for K=0/1/M−1/M, M=1, img2img truncation, minimum/non-square grids, AV spatial-only scaling and mode/composition restrictions. Disabled remains class (a); the active recipe is intentionally result-changing.
-- Replay of the same persisted recipe and seed is deterministic per backend under the same runtime; capture resolved pass, dimensions, K, schedule policy, transition version and seed derivation. Unknown recipe versions refuse through the existing versioned upgrader rules.
-- A bounded, declared prompt/seed set compares active low-res output with the full-resolution baseline per backend. Inspect prompt/content retention, structure, blur, seams and non-finite outputs, including img2img source retention where supported. Unusable results block availability on that route pending repair or an explicit DEC-13 decision; record quality observations alongside speed and memory. No requirement for active-recipe bit identity and no Cartesian quality campaign.
-- The speedup is measured per PERF-3, including endpoint-evaluation and transition costs. A benefit claim is made only where measurements and quality support it; the expected 1.5–1.7× is not a gate.
+- Deterministic replay.
+- A bounded prompt/seed comparison against full resolution, per backend, checking prompt and content retention, structure, blur, seams, non-finite values and img2img retention. An unusable result blocks that route until it is repaired, or decided under DEC-13. There is no bit-identity requirement and no Cartesian campaign.
+- Speedup measured per PERF-3, including estimator and transition costs. A benefit is claimed only where measurement and quality support it.
 
 ---
 
@@ -745,7 +771,7 @@ These are measured at baseline and again at every feature end. They are **goals,
 | **DEC-7** | **Numerics classes (AP13).** | Bit-exact only; (a)/(b)/(c) classes | **(a)/(b)/(c).** Class (c) needs your sign-off per route. Each feature lists its expected (b) and (c) entries at planning. (High.) | PIPE-10, COMP-1/4, WGT-3 |
 | **DEC-8** | **Feature classes.** | Reuse the "approximation" regime; add a recipe class | **Recipe / equivalent (within a declared quality bound) / diagnostic.** Admission selects only equivalent-class Features. (High.) | HOOK-2, MEM-4 |
 | **DEC-9** | **Web validation mechanism.** | Server endpoint per change; core validator compiled to WebAssembly and run in the browser; hybrid (availability cached per (model, backend, mode) plus server round-trip for cross-field rules) | **WebAssembly-compiled core validator.** One Rust implementation, instant, works offline and over the RunPod proxy. Cost: wasm build and bundle size. **Fallback:** hybrid. (Medium.) | OPT-4 |
-| **DEC-10** | **Low-res start recipe v1.** | Coverage/modes; step domain; spatial scale/grid policy; switch and schedule policy; quality acceptance | **Every structurally supporting route; noise-start plus img2img.** Initially refuse edit/reference/control on the targeted pass until COMP-5. Target the first denoising pass once; `1 ≤ K < executed M`, default floor(M/2) with minimum 1 for M≥2. Spatial scale 0.25–0.9 (default 0.5), floor-to-quantum then validate. Keep the full-pass schedule/mu, use a read-only endpoint x0 estimate and destination noise-scaling law; additional evaluation is counted/priced. Fix these semantics in a persisted recipe version, with K/scale controls only. Require the bounded quality/replay checks in FEAT-1 as well as speed. **Proposed, not approved by this revision.** (Medium on quality/benefit; high on the need for explicit semantics.) | FEAT-1, PIPE-2/4/5, ADM-3 |
+| **DEC-10** | **Low-res start recipe v1** (mechanics: PLAN §6.1, §3.1). | Coverage and modes; step domain; scale and grid policy; estimator; schedule policy; quality acceptance | **Coverage:** every structurally supporting route; noise-start plus img2img. Edit, reference and control refuse on the targeted pass until COMP-5. **Step domain:** the first denoising pass, once; `1 ≤ K < M` executed steps; default `max(1, floor(M/2))`. **Scale:** 0.25–0.9, default 0.5, floor-to-quantum, refuse when invalid. **Schedule:** the full-pass schedule and `mu` are kept. **Estimator:** `EndpointEvaluation` by default. `PreviousEvaluation` (no extra forward) is a candidate decided by the bounded quality comparison (C4-04). **Fixed:** these semantics are versioned and persisted; the only user controls are K and scale. **Quality:** the bounded checks and replay in FEAT-1, plus speed. (Medium on quality and benefit; high on the need for explicit semantics.) | FEAT-1, PIPE-2/4/5, ADM-3 |
 | **DEC-11** | **Tracker naming in inference CI.** | Land the CodeGraph-key policy fix first; use `sc-` names | **Policy fix first, as a prerequisite PR.** (High.) | MIG-1 |
 | **DEC-12** | **Branch lifetime window.** | ≤4, ≤6 or ≤8 weeks | **≤6 weeks, with a re-plan if it is exceeded.** (Medium.) | MIG-1 |
 | **DEC-13** | **Routes that cannot change geometry or adapters per phase** (Mage watermark, merge-only adapters, fixed-grid planners), plus any driver refusal under PIPE-7. | Refuse; change product behaviour | **Refuse with a typed reason.** Each refusal is listed for your approval when its feature is planned. (High.) | HOOK-4, FEAT-1, PIPE-7 |
