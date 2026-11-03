@@ -482,7 +482,14 @@ describe("simpleNativeControls", () => {
 
 it("H3 Simple last-only requests keep the last carrier and other families omit it",()=>{
   const common={prompt:"A cyclist rides",mode:"image_to_video",resolution:"768x768",duration:5.1667,sourceAssetId:null,lastFrameAssetId:"last"};
-  expect(buildSimpleVideoRequest({...common,model:"minimax_h3"}).lastFrameAssetId).toBe("last");
+  expect(buildSimpleVideoRequest({...common,model:"minimax_h3",selectedModel:{id:"minimax_h3",supportsLastOnlyImageToVideo:true}}).lastFrameAssetId).toBe("last");
   expect(buildSimpleVideoRequest({...common,model:"minimax_h3_ref"}).lastFrameAssetId).toBeNull();
   expect(buildSimpleVideoRequest({...common,model:"bernini"}).lastFrameAssetId).toBeNull();
+});
+
+it("uses the selected catalog capability and fails closed when it is absent or stale", () => {
+  const request = { prompt: "scene", mode: "image_to_video", model: "custom", resolution: "768x768", duration: 5, lastFrameAssetId: "last" };
+  expect(buildSimpleVideoRequest({ ...request, selectedModel: { id: "custom", supportsLastOnlyImageToVideo: true } }).lastFrameAssetId).toBe("last");
+  expect(buildSimpleVideoRequest({ ...request, selectedModel: { id: "custom" } }).lastFrameAssetId).toBeNull();
+  expect(buildSimpleVideoRequest({ ...request, selectedModel: { id: "other", supportsLastOnlyImageToVideo: true } }).lastFrameAssetId).toBeNull();
 });
