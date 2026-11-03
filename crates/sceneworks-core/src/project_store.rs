@@ -7477,6 +7477,18 @@ fn is_public_project_file(path: &Path) -> bool {
     );
     match parts.as_slice() {
         ["assets", "documents", ..] => media || document,
+        // MOSS writes one portable authoring envelope alongside each numbered
+        // tensor output. The UI downloads it and the asset-workflow reader verifies
+        // its recorded digest. This is not a general JSON/state-file allowance.
+        ["assets", "tensors", _, file]
+            if file
+                .strip_suffix(".sceneworks-workflow.json")
+                .is_some_and(|sample| {
+                    sample.len() >= 4 && sample.bytes().all(|byte| byte.is_ascii_digit())
+                }) =>
+        {
+            true
+        }
         ["assets", "tensors", ..] => media || tensor,
         ["assets", "depth", ..] => media || extension == "npy",
         // Uploaded NPY assets and the importer's inert fallback .bin are public;
@@ -15914,6 +15926,8 @@ mod tests {
             "assets/images/picture.png",
             "assets/videos/movie.mp4",
             "assets/tensors/latents.safetensors",
+            "assets/tensors/genset/0000.sceneworks-workflow.json",
+            "assets/tensors/genset/10000.sceneworks-workflow.json",
             "assets/uploads/measurement.npy",
             "assets/depth/set/map.npy",
             "training/uploads/legacy.bin",
@@ -15967,6 +15981,11 @@ mod tests {
             "assets/images/state.safetensors",
             "assets/images/index.json",
             "assets/tensors/latent.sceneworks-workflow.json",
+            "assets/tensors/genset/state.json",
+            "assets/tensors/genset/0000.sceneworks.json",
+            "assets/tensors/genset/000.sceneworks-workflow.json",
+            "assets/tensors/genset/latent.sceneworks-workflow.json",
+            "assets/tensors/genset/nested/0000.sceneworks-workflow.json",
             "generation-sets/run.json",
             "characters/mira.json",
             "person-tracks/track.sceneworks.person-track.json",
@@ -15989,6 +16008,17 @@ mod tests {
         assert!(store.project_file(&project.id, "../escape.png").is_err());
         #[cfg(unix)]
         {
+            std::os::unix::fs::symlink(
+                root.join("project.db"),
+                root.join("assets/tensors/genset/0001.sceneworks-workflow.json"),
+            )
+            .unwrap();
+            assert!(store
+                .project_file(
+                    &project.id,
+                    "assets/tensors/genset/0001.sceneworks-workflow.json"
+                )
+                .is_err());
             std::os::unix::fs::symlink(
                 root.join("project.db"),
                 root.join("assets/images/alias.png"),

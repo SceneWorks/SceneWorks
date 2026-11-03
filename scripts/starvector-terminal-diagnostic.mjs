@@ -1,12 +1,12 @@
 #!/usr/bin/env node
+import { execFileBounded as execFile } from "./lib/exec.mjs";
+import { legacyUtf16Json as stable } from "./lib/canonical-json.mjs";
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Fixed-purpose, Windows-only StarVector CUDA diagnostic. This exercises the
 // production product route with sealed local inputs, but cannot author terminal
 // acceptance, preflight, or performance evidence.
-import { createHash } from "node:crypto";
-import { execFile as execFileCallback } from "node:child_process";
 import { lstat, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { terminalSourceRowsSha256 } from "./starvector-terminal-campaign.mjs";
@@ -50,9 +50,8 @@ const MODEL = Object.freeze({
 });
 const REVISION = /^[a-f0-9]{40}$/;
 const SHA256 = /^[a-f0-9]{64}$/;
-const execFile = promisify(execFileCallback);
-const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
-const stable = (value) => Array.isArray(value) ? `[${value.map(stable).join(",")}]` : value && typeof value === "object" ? `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}` : JSON.stringify(value);
+
+
 const die = (message) => { throw new Error(`starvector terminal diagnostic: ${message}`); };
 
 function confined(root, target) {

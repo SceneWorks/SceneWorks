@@ -1,7 +1,7 @@
 #!/usr/bin/env node
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Materialize the terminal route bundle from pre-provisioned, immutable corpus
 // rows.  This process reads only local assets; it never fetches datasets/models.
-import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -11,7 +11,7 @@ import { loadUpstreamReference, verifyUpstreamExecution } from "./lib/starvector
 
 import { validateLimitCases } from "./lib/starvector-terminal-limit-cases.mjs";
 
-const sha = (value) => createHash("sha256").update(value).digest("hex");
+
 const die = (message) => { throw new Error(`starvector terminal bundle: ${message}`); };
 const json = async (file) => JSON.parse(await readFile(file, "utf8"));
 const shippingMaxNewTokens = Object.freeze({ "1b": 7933, "8b": 15422 });

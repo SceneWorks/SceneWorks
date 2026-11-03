@@ -730,7 +730,7 @@ jobs:
           HF_HUB_DISABLE_TELEMETRY: "1"
           HF_HUB_VERBOSITY: "error"
         run: |
-          python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw "installing huggingface_hub failed with exit code $LASTEXITCODE" }
           @'
           import os
@@ -1168,7 +1168,7 @@ jobs:
           python -m venv $venv
           if ($LASTEXITCODE -ne 0) { throw 'failed to create the job-local LTX provisioning venv' }
           $python = Join-Path $venv 'Scripts\python.exe'
-          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw 'failed to install the pinned huggingface_hub client' }
           @'
           import os
@@ -1489,7 +1489,7 @@ jobs:
           python -m venv $venv
           if ($LASTEXITCODE -ne 0) { throw 'Python 3 with venv support is required for terminal artifact staging' }
           $python = Join-Path $venv 'Scripts\python.exe'
-          & $python -m pip install --disable-pip-version-check --no-input 'huggingface_hub==0.36.0'
+          & $python -m pip install --disable-pip-version-check --no-input -r .github/requirements-hf.txt
           if ($LASTEXITCODE -ne 0) { throw 'failed to install pinned huggingface_hub 0.36.0 in the isolated terminal venv' }
           & $python -c "from huggingface_hub import __version__; assert __version__ == '0.36.0', __version__; print('terminal artifact Python ready')"
           if ($LASTEXITCODE -ne 0) { throw 'isolated terminal Python did not retain exact huggingface_hub 0.36.0' }
