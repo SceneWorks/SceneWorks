@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../../hooks/useMediaTicket.js";
 import React from "react";
 import { itemSplit } from "../../training/irisCurricula.js";
 
@@ -86,6 +87,7 @@ export function DatasetEditorPanel({
   // trainable edit target) leaves the editor exactly as it was.
   editPairSession = {},
 }) {
+  useMediaTicket();
   const {
     loadingDatasets, onRefreshDatasets, busyDatasetId, datasetThumbAsset, datasets,
     startNewDataset, openDataset, activeDataset, selectedDatasetId, datasetsError,

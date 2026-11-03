@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { useConsentRequestOwner } from "../hooks/useConsentRequestOwner.js";
 import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
 import { mossAdvancedIssue, mossPositivePromptIssue } from "../mossImageAdvancedValidation.js";
@@ -335,6 +336,7 @@ function jobExpectedCount(job, completedCount) {
 }
 
 export function ImageStudio() {
+  useMediaTicket();
   const {
     activeProject,
     assets,
