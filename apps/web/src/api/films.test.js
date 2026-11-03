@@ -3,10 +3,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const { apiFetchMock } = vi.hoisted(() => ({ apiFetchMock: vi.fn() }));
 vi.mock("../api.js", () => ({ apiFetch: apiFetchMock }));
 
-import { getFilmRenderOptions, previewFilmRenderOptions, startFilmPlanning } from "./films.js";
+import { filmRequest, getFilmRun, listFilmRuns, startFilmRun, getFilmRenderOptions, previewFilmRenderOptions, startFilmPlanning } from "./films.js";
 
 describe("film render options API", () => {
   beforeEach(() => apiFetchMock.mockReset());
+
+  it("encodes film and run identifiers and forwards cancellation", () => {
+    const signal = new AbortController().signal;
+    filmRequest("p/1", "f/1", "t", { signal }, "/references");
+    listFilmRuns("p/1", "t", { signal });
+    getFilmRun("p/1", "r/1", "t", { signal });
+    startFilmRun("p/1", "r/1", "start", "t", { signal });
+    expect(apiFetchMock.mock.calls).toEqual([
+      ["/api/v1/projects/p%2F1/films/f%2F1/references", "t", { signal }],
+      ["/api/v1/projects/p%2F1/film-runs", "t", { signal }],
+      ["/api/v1/projects/p%2F1/film-runs/r%2F1", "t", { signal }],
+      ["/api/v1/projects/p%2F1/film-runs/r%2F1/start", "t", { signal, method: "POST" }],
+    ]);
+  });
 
   it("starts planning with the author's repair-round limit", () => {
     startFilmPlanning("project_1", "film_1", 4, 75, "token");

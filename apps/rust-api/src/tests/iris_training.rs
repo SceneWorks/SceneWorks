@@ -1175,7 +1175,8 @@ async fn parquet_import_forwards_caption_field_columns() {
     std::fs::write(&source, b"PAR1").unwrap();
     let path =
         format!("/api/v1/projects/{project_id}/training/datasets/{dataset_id}/parquet-import-jobs");
-    let (status, job) = request(
+    // Selecting an absolute host source path is a local UI operation.
+    let (status, job) = request_with_peer(
         app.clone(),
         "POST",
         &path,
@@ -1183,6 +1184,7 @@ async fn parquet_import_forwards_caption_field_columns() {
             "sourcePath": source.display().to_string(),
             "captionFieldColumns": ["short_caption", "tags"]
         }),
+        "127.0.0.1:50000",
     )
     .await;
     assert_eq!(status, StatusCode::CREATED, "{job}");
@@ -1190,7 +1192,7 @@ async fn parquet_import_forwards_caption_field_columns() {
         job["payload"]["captionFieldColumns"],
         json!(["short_caption", "tags"])
     );
-    let (status, error) = request(
+    let (status, error) = request_with_peer(
         app,
         "POST",
         &path,
@@ -1198,6 +1200,7 @@ async fn parquet_import_forwards_caption_field_columns() {
             "sourcePath": source.display().to_string(),
             "captionFieldColumns": [" padded"]
         }),
+        "127.0.0.1:50000",
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{error}");

@@ -1,39 +1,23 @@
+import { AppearanceTab } from "./settings/AppearanceTab.jsx";
+import { SettingsTab } from "./settings/SettingsTab.jsx";
+import { DeviceTab } from "./settings/DeviceTab.jsx";
+import { ServerTab } from "./settings/ServerTab.jsx";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  SCHEME_LABELS,
-  loadCredentials,
-  removeCredentialRequest,
-  saveCredential,
-} from "../credentials.js";
+import { SCHEME_LABELS, loadCredentials, removeCredentialRequest, saveCredential } from "../credentials.js";
 import { apiFetch } from "../api.js";
 import { putUiPreferences } from "../uiPreferences.js";
 import { isDesktop, tauriInvoke as invoke } from "../runtime.js";
-import {
-  GENERATION_QUALITY_OPTIONS,
-  generationQualityLabel,
-  readDefaultGenerationQuality,
-  shortQualityLabel,
-  writeDefaultGenerationQuality,
-} from "../generationQuality.js";
+import { generationQualityLabel, readDefaultGenerationQuality, writeDefaultGenerationQuality } from "../generationQuality.js";
 import { writeClipboardText } from "../clipboard.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { formatBytes } from "../formatting.js";
-import {
-  bytesToGib,
-  daysToSeconds,
-  describeDisableConsequence,
-  describeLimitConsequence,
-  fetchModelCache,
-  gibToBytes,
-  policyNeedsRestart,
-  secondsToDays,
-} from "../modelCache.js";
+import { bytesToGib, daysToSeconds, describeDisableConsequence, describeLimitConsequence, fetchModelCache, gibToBytes, secondsToDays } from "../modelCache.js";
 import { useCacheConvergence } from "../hooks/useCacheConvergence.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
-import { Icon } from "../components/Icons.jsx";
+
 import { ModeTabs } from "../components/generationStudio.jsx";
-import { WorkflowEmbedDetails } from "../components/WorkflowEmbedNotice.jsx";
-import { ACCENTS } from "../accents.js";
+
+
 import { describeDevice } from "../deviceSummary.js";
 import { useAppContext } from "../context/AppContext.js";
 
@@ -118,7 +102,7 @@ function fractionToPercent(fraction) {
 // preserve a reported zero while distinguishing an absent reading from zero.
 function telemetryBytesToGib(bytes) {
   if (typeof bytes !== "number" || !Number.isFinite(bytes) || bytes < 0) return null;
-  return bytes / (1024 * 1024 * 1024);
+  return bytesToGib(bytes);
 }
 
 function telemetryGibLabel(bytes, digits = 1) {
@@ -729,687 +713,96 @@ export function SettingsScreen({
         ) : null}
 
         {activeTab === "appearance" ? (
-          <div className="settings-tab-body">
-            <div className="settings-group-title">Theme</div>
-            <div className="settings-row">
-              <span className="settings-row-title">Mode</span>
-              <div className="settings-segment" role="radiogroup" aria-label="Theme">
-                <button
-                  aria-checked={theme === "light"}
-                  className={theme === "light" ? "active" : ""}
-                  onClick={() => changeTheme("light")}
-                  role="radio"
-                  type="button"
-                >
-                  <Icon.Sun size={14} />
-                  Light
-                </button>
-                <button
-                  aria-checked={theme === "dark"}
-                  className={theme === "dark" ? "active" : ""}
-                  onClick={() => changeTheme("dark")}
-                  role="radio"
-                  type="button"
-                >
-                  <Icon.Moon size={14} />
-                  Dark
-                </button>
-              </div>
-            </div>
-            <div className="settings-row settings-row--top">
-              <div>
-                <div className="settings-row-title">Accent</div>
-                <div className="settings-row-sub">Recolors the whole app — chips, buttons, the mark.</div>
-              </div>
-              <div className="settings-accents" role="radiogroup" aria-label="Accent">
-                {ACCENTS.map((entry) => (
-                  <button
-                    aria-checked={accent === entry.id}
-                    aria-label={entry.name}
-                    className={
-                      accent === entry.id ? "settings-accent-swatch active" : "settings-accent-swatch"
-                    }
-                    key={entry.id}
-                    onClick={() => onAccentChange?.(entry.id)}
-                    role="radio"
-                    style={{ background: entry.swatch }}
-                    type="button"
-                  />
-                ))}
-              </div>
-            </div>
-
-            <div className="work-panel-divider" />
-            <div className="settings-group-title">Simple mode</div>
-            <div className="settings-row">
-              <div>
-                <div className="settings-row-title">Use Simple mode by default</div>
-                <div className="settings-row-sub">
-                  {lockedToSimple
-                    ? "Phones always use it."
-                    : "Phones always use it; the sidebar switch overrides it for this session."}
-                </div>
-              </div>
-              <button
-                aria-checked={simpleDefault}
-                aria-label="Use Simple mode by default"
-                className={simpleDefault ? "settings-toggle on" : "settings-toggle"}
-                onClick={() => onSimpleDefaultChange?.(!simpleDefault)}
-                role="switch"
-                type="button"
-              >
-                <span />
-              </button>
-            </div>
-
-            <div className="work-panel-divider" />
-            <div className="settings-group-title">Generation</div>
-            <div>
-              <div className="settings-row-title">Default quality</div>
-              {/* SHORT labels (the tier keys) — the descriptive wording ("Auto (best that fits this
-                  Mac)") doesn't fit a 34px chip, so it rides the title attribute and the line below. */}
-              <div className="settings-chips" role="radiogroup" aria-label="Default generation quality">
-                {GENERATION_QUALITY_OPTIONS.map((value) => (
-                  <button
-                    aria-checked={defaultQuality === value}
-                    className={defaultQuality === value ? "settings-chip active" : "settings-chip"}
-                    key={value}
-                    onClick={() => changeDefaultQuality(value)}
-                    role="radio"
-                    title={generationQualityLabel(value)}
-                    type="button"
-                  >
-                    {shortQualityLabel(value)}
-                  </button>
-                ))}
-              </div>
-              <div className="settings-row-sub">{generationQualityLabel(defaultQuality)}</div>
-              <p className="settings-note settings-note--spaced">
-                The tier new generations use for a model you haven’t picked one for yet.{" "}
-                <strong>Auto</strong> takes the highest-fidelity tier that fits this machine for each
-                model. Per-model picks in a studio always win, and are remembered.
-              </p>
-            </div>
-          </div>
+          <AppearanceTab
+            accent={accent}
+            changeDefaultQuality={changeDefaultQuality}
+            changeTheme={changeTheme}
+            defaultQuality={defaultQuality}
+            lockedToSimple={lockedToSimple}
+            onAccentChange={onAccentChange}
+            onSimpleDefaultChange={onSimpleDefaultChange}
+            simpleDefault={simpleDefault}
+            theme={theme}
+          />
         ) : null}
 
         {activeTab === "settings" ? (
-          <div className="settings-tab-body">
-            {/* Sharing (sc-15953). The toggle writes `embedWorkflowInImages` into
-                ui-preferences.json, which the WORKER re-reads at its PNG write seam on every job —
-                so the change lands on the next generation with no restart. The copy under it is
-                the same block the first-run disclosure shows; see WorkflowEmbedNotice.jsx for why
-                its claims are shaped the way they are. */}
-            <div className="settings-group-title" ref={sharingHeadingRef} tabIndex={-1}>Sharing</div>
-            <div className="settings-row">
-              <div>
-                <div className="settings-row-title">Include the recipe in generated images</div>
-                <div className="settings-row-sub">
-                  New PNGs carry a small block of JSON, so dropping one back into SceneWorks
-                  reloads the recipe that made it.
-                </div>
-              </div>
-              <button
-                aria-checked={embedWorkflow}
-                aria-label="Include the recipe in generated images"
-                className={embedWorkflow ? "settings-toggle on" : "settings-toggle"}
-                onClick={() => onEmbedWorkflowChange?.(!embedWorkflow)}
-                role="switch"
-                type="button"
-              >
-                <span />
-              </button>
-            </div>
-            <WorkflowEmbedDetails />
-            <div className="work-panel-divider" />
-
-            {isDesktop ? <DesktopUpdatesGroup update={appUpdate} /> : null}
-
-            {isDesktop ? (
-              <>
-                <div className="settings-group-title">Storage</div>
-                <div>
-                  <div className="settings-row-title">Data directory</div>
-                  <div className="settings-row-sub">
-                    Projects, generated assets, models and LoRAs. Moving it needs a restart.
-                  </div>
-                  <div className="settings-path">{dataDirLabel}</div>
-                  <div className="settings-button-row">
-                    <button className="settings-btn" type="button" onClick={changeDataDir}>
-                      Change…
-                    </button>
-                    <button
-                      className="settings-btn"
-                      type="button"
-                      onClick={revealDataDir}
-                      disabled={!settings?.dataDir}
-                    >
-                      Reveal in {gpu?.platform === "windows" ? "Explorer" : "Finder"}
-                    </button>
-                  </div>
-                </div>
-                {/* The Hugging Face cache home (`HF_HOME`) — where downloaded model weights live.
-                    Changing it runs the sc-19709 relocation: the folder is checked first (with
-                    models installed it must hold every one this install recorded, so nothing is
-                    orphaned; before anything is installed any folder is acceptable), then the
-                    override is persisted and the library re-bound. Like the data directory, the
-                    sidecars pick it up at their next spawn, so it needs a restart. */}
-                <div>
-                  <div className="settings-row-title">Model library (Hugging Face cache)</div>
-                  <div className="settings-row-sub">
-                    Downloaded model weights. Choose the Hugging Face cache folder (the one
-                    containing <code>hub</code>) — if you moved your cache to another drive, point
-                    SceneWorks at it here. Needs a restart.
-                  </div>
-                  <div className="settings-path">{modelLibraryPath ?? "…"}</div>
-                  {modelLibraryFromEnvironment ? (
-                    <div className="settings-row-sub">
-                      Set by the <code>HF_HOME</code> environment variable, which overrides
-                      anything chosen here. Unset it to change the location from Settings.
-                    </div>
-                  ) : null}
-                  {modelLibraryNotice ? (
-                    <p aria-live="polite" className="settings-status" role="status">
-                      {modelLibraryNotice}
-                    </p>
-                  ) : null}
-                  <div className="settings-button-row">
-                    <button
-                      className="settings-btn"
-                      type="button"
-                      onClick={changeModelLibrary}
-                      disabled={!onChangeModelLibrary || modelLibraryFromEnvironment}
-                    >
-                      Change…
-                    </button>
-                    <button
-                      className="settings-btn"
-                      type="button"
-                      onClick={revealModelLibrary}
-                      disabled={!modelLibraryPath}
-                    >
-                      Reveal in {gpu?.platform === "windows" ? "Explorer" : "Finder"}
-                    </button>
-                  </div>
-                </div>
-                <div className="work-panel-divider" />
-              </>
-            ) : null}
-
-            {/* Resolved-model hot cache (epic 19703, sc-19711). The controls are shell-backed and
-                therefore desktop-only, exactly like the data directory above; the usage readout
-                comes from the API and renders in every deployment, because a remote admin still
-                needs to see what the host is holding. */}
-            <div className="settings-group-title">Local model copies</div>
-            <div className="settings-row settings-row--top">
-              <div>
-                <div className="settings-row-title">
-                  Keep a working copy of models from external libraries
-                </div>
-                <div className="settings-row-sub">
-                  Copies models loaded from an attached or network model library into SceneWorks’
-                  own storage, so they keep working when that library is disconnected. Off by
-                  default. Takes effect after a restart.
-                </div>
-              </div>
-              <button
-                aria-checked={Boolean(persistedPolicy?.enabled)}
-                aria-label="Keep a working copy of models from external libraries"
-                className={persistedPolicy?.enabled ? "settings-toggle on" : "settings-toggle"}
-                disabled={!isDesktop || !persistedPolicy}
-                onClick={() => changeCacheEnabled(!persistedPolicy?.enabled)}
-                role="switch"
-                type="button"
-              >
-                <span />
-              </button>
-            </div>
-            {isDesktop && persistedPolicy ? (
-              <div className="settings-field-row">
-                <label className="settings-note" htmlFor="model-cache-limit">
-                  Use at most
-                </label>
-                <input
-                  aria-label="Maximum size for local model copies, in GiB"
-                  className="settings-port"
-                  id="model-cache-limit"
-                  min="1"
-                  onBlur={commitCacheLimit}
-                  onChange={(event) => setCacheLimitGb(event.target.value)}
-                  type="number"
-                  value={cacheLimitGb}
-                />
-                <span className="settings-note">GiB, and remove copies unused for</span>
-                <input
-                  aria-label="Remove local model copies unused for this many days"
-                  className="settings-port"
-                  id="model-cache-days"
-                  min="1"
-                  onBlur={commitCacheInterval}
-                  onChange={(event) => setCacheDays(event.target.value)}
-                  type="number"
-                  value={cacheDays}
-                />
-                <span className="settings-note settings-grow">days.</span>
-              </div>
-            ) : null}
-            {!isDesktop ? (
-              <p className="settings-note">
-                These settings are configured on the machine running SceneWorks.
-              </p>
-            ) : null}
-            {policyNeedsRestart(persistedPolicy, cache?.policy) ? (
-              <p className="settings-note">
-                Saved. SceneWorks is still running under the previous setting — restart to apply
-                it.
-              </p>
-            ) : null}
-            {cacheError ? (
-              <p className="inline-warning">Couldn’t read local copy storage: {cacheError}</p>
-            ) : cache?.error ? (
-              <p className="inline-warning">Couldn’t read local copy storage: {cache.error}</p>
-            ) : cache?.policy ? (
-              <div className="settings-inset settings-inset--spaced">
-                <div className="settings-inset-title">Storage</div>
-                <div className="settings-kv">
-                  <span>Used</span>
-                  <span className="settings-mono">
-                    {formatBytes(cache.usedBytes)} of {formatBytes(cache.policy.maxBytes)}
-                  </span>
-                </div>
-                <div className="settings-kv">
-                  <span>Copies</span>
-                  <span className="settings-mono">{cache.entryCount}</span>
-                </div>
-                <div className="settings-kv">
-                  <span>Can be reclaimed</span>
-                  <span className="settings-mono">{formatBytes(cache.reclaimableBytes)}</span>
-                </div>
-                <div className="settings-kv">
-                  <span>Kept</span>
-                  <span className="settings-mono">{formatBytes(cache.pinnedBytes)}</span>
-                </div>
-                {/* The external library these copies are made FROM. It is the location every other
-                    line here is relative to — and the one the same-volume warning below is about —
-                    so a user who has to act on that warning can see what is actually configured
-                    instead of hunting for "the model library". Reported by the API rather than
-                    re-derived here: the status read compares against this exact path, so showing
-                    anything else could name a location the comparison never used. */}
-                {cache.sourceLibraryPath ? (
-                  <div className="settings-kv">
-                    <span>Library</span>
-                    <span className="settings-mono" title={cache.sourceLibraryPath}>
-                      {cache.sourceLibraryPath}
-                    </span>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            {/* Same-volume is not an error, but it silently removes the whole point of the
-                feature, so it is stated plainly rather than left for the user to infer — and it
-                names the configured location, because "point the model library elsewhere" is not
-                an actionable instruction to someone who cannot see where it currently points. */}
-            {cache?.sourceVolumeRelation === "same" ? (
-              <div className="settings-notice">
-                <Icon.Warning size={16} />
-                <span>
-                  Local copies are on the same disk as the model library
-                  {cache.sourceLibraryPath ? ` (${cache.sourceLibraryPath})` : ""}, so they protect
-                  against neither a disconnect nor a slow drive — they only use extra space. Point
-                  the model library at a different volume to get the benefit.
-                </span>
-              </div>
-            ) : null}
-            <p className="settings-note">
-              Remove individual copies, or mark one to keep, from a model’s card in Model Manager.
-            </p>
-            <div className="work-panel-divider" />
-
-            <div className="settings-group-title">Service credentials</div>
-            <p className="settings-note">
-              API tokens for model &amp; LoRA downloads — Hugging Face, Civit.ai, any authenticated
-              source. Stored in {credentialLocation}. Tokens are write-only: never shown again after
-              saving, and a change takes effect on the next worker restart.
-            </p>
-            {credentials.length ? (
-              <div className="settings-credential-list">
-                {credentials.map((credential) => (
-                  <div className="settings-credential" key={credential.host}>
-                    <span
-                      className={
-                        credential.present === false
-                          ? "settings-credential-glyph missing"
-                          : "settings-credential-glyph"
-                      }
-                    >
-                      {credential.present === false ? (
-                        <Icon.Warning size={18} />
-                      ) : (
-                        <Icon.Model size={18} />
-                      )}
-                    </span>
-                    <span className="settings-credential-text">
-                      <span className="settings-credential-host">{credential.host}</span>
-                      <span className="settings-credential-meta">
-                        {credential.label ? `${credential.label} · ` : ""}
-                        {SCHEME_LABELS[credential.scheme] ?? credential.scheme}
-                        {credential.present === false ? " · token missing" : " · token saved"}
-                      </span>
-                    </span>
-                    <button
-                      className="settings-btn settings-btn--quiet settings-btn--compact"
-                      type="button"
-                      onClick={() => removeCredential(credential.host)}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="settings-note">No credentials saved.</p>
-            )}
-            <div className="settings-inset settings-credential-form">
-              <div className="settings-inset-title">Add a token</div>
-              <div className="settings-field-pair">
-                <input
-                  type="text"
-                  placeholder="huggingface.co"
-                  value={newHost}
-                  onChange={(event) => setNewHost(event.target.value)}
-                  aria-label="Credential host"
-                />
-                <input
-                  type="text"
-                  placeholder="Label (optional)"
-                  value={newLabel}
-                  onChange={(event) => setNewLabel(event.target.value)}
-                  aria-label="Credential label"
-                />
-              </div>
-              <div
-                className="settings-chips settings-chips--narrow"
-                role="radiogroup"
-                aria-label="Authentication scheme"
-              >
-                {SCHEME_OPTIONS.map(([value, label]) => (
-                  <button
-                    aria-checked={newScheme === value}
-                    className={newScheme === value ? "settings-chip active" : "settings-chip"}
-                    key={value}
-                    onClick={() => setNewScheme(value)}
-                    role="radio"
-                    type="button"
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
-              <div className="settings-field-row">
-                <input
-                  className="settings-grow"
-                  type="password"
-                  placeholder="Access token"
-                  value={newToken}
-                  onChange={(event) => setNewToken(event.target.value)}
-                  aria-label="Credential token"
-                />
-                <button
-                  className="settings-btn settings-btn--primary"
-                  type="button"
-                  onClick={addCredential}
-                  disabled={!canSaveCredential}
-                >
-                  Add
-                </button>
-              </div>
-            </div>
-          </div>
+          <SettingsTab
+            DesktopUpdatesGroup={DesktopUpdatesGroup}
+            SCHEME_OPTIONS={SCHEME_OPTIONS}
+            addCredential={addCredential}
+            appUpdate={appUpdate}
+            cache={cache}
+            cacheDays={cacheDays}
+            cacheError={cacheError}
+            cacheLimitGb={cacheLimitGb}
+            canSaveCredential={canSaveCredential}
+            changeCacheEnabled={changeCacheEnabled}
+            changeDataDir={changeDataDir}
+            changeModelLibrary={changeModelLibrary}
+            commitCacheInterval={commitCacheInterval}
+            commitCacheLimit={commitCacheLimit}
+            credentialLocation={credentialLocation}
+            credentials={credentials}
+            dataDirLabel={dataDirLabel}
+            embedWorkflow={embedWorkflow}
+            gpu={gpu}
+            modelLibraryFromEnvironment={modelLibraryFromEnvironment}
+            modelLibraryNotice={modelLibraryNotice}
+            modelLibraryPath={modelLibraryPath}
+            newHost={newHost}
+            newLabel={newLabel}
+            newScheme={newScheme}
+            newToken={newToken}
+            onChangeModelLibrary={onChangeModelLibrary}
+            onEmbedWorkflowChange={onEmbedWorkflowChange}
+            persistedPolicy={persistedPolicy}
+            removeCredential={removeCredential}
+            revealDataDir={revealDataDir}
+            revealModelLibrary={revealModelLibrary}
+            setCacheDays={setCacheDays}
+            setCacheLimitGb={setCacheLimitGb}
+            setNewHost={setNewHost}
+            setNewLabel={setNewLabel}
+            setNewScheme={setNewScheme}
+            setNewToken={setNewToken}
+            settings={settings}
+            sharingHeadingRef={sharingHeadingRef}
+          />
         ) : null}
 
         {activeTab === "device" ? (
-          <div className="settings-tab-body">
-            <div className="settings-group-title">This machine</div>
-            <div className="settings-kv-list">
-              <div className="settings-kv">
-                <span>Engine</span>
-                <span>{device.engine}</span>
-              </div>
-              <div className="settings-kv">
-                <span>GPU</span>
-                <span>{device.gpu}</span>
-              </div>
-              {macGpuMemory ? (
-                <div className="settings-kv">
-                  <span>Unified memory</span>
-                  <span>
-                    {unifiedGb} GiB
-                    {typeof gpu.wiredLimitMb === "number"
-                      ? ` · system cap ${Math.round(gpu.wiredLimitMb / 1024)} GiB`
-                      : ""}
-                  </span>
-                </div>
-              ) : null}
-            </div>
-
-            {macGpuMemory || cudaGpuMemory ? (
-              <>
-                <div className="work-panel-divider" />
-                <div className="settings-group-title">GPU memory</div>
-                <div>
-                  <div className="settings-row settings-row--baseline">
-                    <div className="settings-row-title">Memory target</div>
-                    <div className="settings-readout">{gpuTargetLabel}</div>
-                  </div>
-                  <input
-                    className="settings-range"
-                    type="range"
-                    min={GPU_LIMIT_MIN_PERCENT}
-                    max={100}
-                    step={5}
-                    value={gpuLimitPercent}
-                    aria-label={macGpuMemory ? "GPU memory target for SceneWorks (percent of unified memory)" : "MOSS training GPU memory target (percent of selected GPU VRAM)"}
-                    onChange={(event) => setGpuLimitPercent(Number(event.target.value))}
-                    onMouseUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
-                    onKeyUp={(event) => commitGpuMemoryLimit(Number(event.target.value))}
-                    onTouchEnd={(event) => commitGpuMemoryLimit(Number(event.target.value))}
-                  />
-                  <div className="settings-scale">
-                    <span>{GPU_LIMIT_MIN_PERCENT}%</span>
-                    <span>Use all available</span>
-                  </div>
-                  <p className="settings-note settings-note--spaced">
-                    {macGpuMemory ? (
-                      <>An MLX soft target, not an OS memory quota. Native MOSS training also uses
-                        it for memory admission and refuses jobs that cannot fit. Changes apply
-                        to new jobs without a restart; active jobs keep their admitted cap.{" "}
-                        <code>sudo sysctl iogpu.wired_limit_mb=&lt;bytes&gt;</code> raises the system cap
-                        on 96/128 GB Macs.</>
-                    ) : (
-                      <>For native MOSS training only: limits its admission budget using the actual
-                        selected GPU&apos;s total VRAM, not host RAM or another GPU. Other CUDA jobs
-                        retain their existing memory policy. Changes apply to new jobs without a restart.</>
-                    )}
-                  </p>
-                  {macGpuMemory && gpuTelemetry ? (
-                    <div className="settings-inset settings-inset--spaced">
-                      <div className="settings-inset-title">Live MLX memory</div>
-                      <div className="settings-kv">
-                        <span>Active</span>
-                        <span className="settings-mono">
-                          {telemetryGibLabel(gpuTelemetry.activeBytes)}
-                        </span>
-                      </div>
-                      <div className="settings-kv">
-                        <span>Peak</span>
-                        <span className="settings-mono">
-                          {telemetryGibLabel(gpuTelemetry.peakBytes)}
-                        </span>
-                      </div>
-                      {gpuTelemetry.limitBytes !== null && gpuTelemetry.limitBytes !== undefined ? (
-                        <div className="settings-kv">
-                          <span>Limit</span>
-                          <span className="settings-mono">
-                            {telemetryGibLabel(gpuTelemetry.limitBytes, 0)}
-                          </span>
-                        </div>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </div>
-              </>
-            ) : null}
-
-            {gpu?.platform === "windows" || gpu?.platform === "linux" ? (
-              <p className="settings-note">
-                Requires current NVIDIA drivers with CUDA support.{" "}
-                {!cudaGpuMemory ? "GPU memory target unavailable: NVIDIA VRAM metadata could not be read. Check the driver and retry." : "The MOSS training target is not a per-process quota for other CUDA jobs."}
-              </p>
-            ) : null}
-
-            <div className="work-panel-divider" />
-            <div className="settings-group-title">Maintenance</div>
-            {/* Available in both modes: desktop restarts via Tauri, a remote admin via REST
-                (epic 4484 story 12). */}
-            <div className="settings-row">
-              <div>
-                <div className="settings-row-title">Inference worker</div>
-                <div className="settings-row-sub">
-                  Restart to pick up credential changes or clear a stuck job.
-                </div>
-              </div>
-              <button className="settings-btn" type="button" onClick={restartWorker}>
-                Restart
-              </button>
-            </div>
-            {isDesktop ? (
-              <div className="settings-row">
-                <div>
-                  <div className="settings-row-title">Setup wizard</div>
-                  <div className="settings-row-sub">
-                    Re-open the guided setup to download more models or create a project.
-                  </div>
-                </div>
-                <button className="settings-btn" type="button" onClick={rerunSetupWizard}>
-                  Re-run
-                </button>
-              </div>
-            ) : null}
-          </div>
+          <DeviceTab
+            GPU_LIMIT_MIN_PERCENT={GPU_LIMIT_MIN_PERCENT}
+            commitGpuMemoryLimit={commitGpuMemoryLimit}
+            cudaGpuMemory={cudaGpuMemory}
+            device={device}
+            gpu={gpu}
+            gpuLimitPercent={gpuLimitPercent}
+            gpuTargetLabel={gpuTargetLabel}
+            gpuTelemetry={gpuTelemetry}
+            macGpuMemory={macGpuMemory}
+            rerunSetupWizard={rerunSetupWizard}
+            restartWorker={restartWorker}
+            setGpuLimitPercent={setGpuLimitPercent}
+            telemetryGibLabel={telemetryGibLabel}
+            unifiedGb={unifiedGb}
+          />
         ) : null}
 
         {activeTab === "server" && serverTabAvailable ? (
-          <div className="settings-tab-body">
-            <div className="settings-group-title">Remote access (LAN)</div>
-            <div className="settings-row">
-              <div>
-                <div className="settings-row-title">Let other devices on this network in</div>
-                <div className="settings-row-sub">
-                  Generation still runs on this computer. Takes effect after a restart.
-                </div>
-              </div>
-              <button
-                aria-checked={Boolean(remote.enabled)}
-                aria-label="Remote access"
-                className={remote.enabled ? "settings-toggle on" : "settings-toggle"}
-                disabled={!remote.passwordSet && !remote.enabled}
-                onClick={() => applyRemoteAccess(!remote.enabled)}
-                role="switch"
-                type="button"
-              >
-                <span />
-              </button>
-            </div>
-
-            {remote.url ? (
-              <>
-                <div className="settings-field-row">
-                  <span className="settings-url">{remote.url}</span>
-                  <button
-                    className="settings-btn settings-btn--compact"
-                    type="button"
-                    onClick={copyRemoteUrl}
-                  >
-                    <Icon.Duplicate size={14} />
-                    Copy
-                  </button>
-                </div>
-                {remote.lanCandidates && remote.lanCandidates.length > 1 ? (
-                  <div className="settings-note">
-                    Also reachable at {remote.lanCandidates.slice(1).join(", ")}
-                  </div>
-                ) : null}
-              </>
-            ) : (
-              <p className="settings-note">
-                Couldn’t determine this computer’s LAN address — check your network connection.
-              </p>
-            )}
-
-            <div className="settings-inset">
-              <div className="settings-inset-title">Access</div>
-              <div className="settings-field-row">
-                <input
-                  className="settings-grow"
-                  type="password"
-                  placeholder={remote.passwordSet ? "Change password" : "Set a password"}
-                  value={remotePassword}
-                  onChange={(event) => setRemotePassword(event.target.value)}
-                  aria-label="Remote access password"
-                />
-                <button
-                  className="settings-btn"
-                  type="button"
-                  onClick={saveRemotePassword}
-                  disabled={!remotePasswordCandidate(remotePassword, remote)?.meetsMinimum}
-                >
-                  Save
-                </button>
-                {remote.passwordSet ? (
-                  <button
-                    className="settings-btn settings-btn--quiet"
-                    type="button"
-                    onClick={clearRemotePassword}
-                  >
-                    Clear
-                  </button>
-                ) : null}
-              </div>
-              <div className="settings-field-row">
-                <span className="settings-note settings-grow">
-                  Use at least {remote.minimumPasswordLength} characters.{" "}
-                  {remote.passwordSet
-                    ? "A password is set — remote browsers must enter it."
-                    : "Set a password before enabling remote access."}
-                </span>
-                <label className="settings-note" htmlFor="remote-port">
-                  Port
-                </label>
-                <input
-                  className="settings-port"
-                  id="remote-port"
-                  type="number"
-                  min="1024"
-                  max="65535"
-                  value={remotePort}
-                  onChange={(event) => setRemotePort(event.target.value)}
-                  aria-label="Remote access port"
-                />
-              </div>
-            </div>
-
-            {/* Security note + platform firewall guidance (story 11), consolidated into one notice. */}
-            <div className="settings-notice">
-              <Icon.Warning size={16} />
-              <span>
-                Trusted local networks only. Traffic is plain HTTP, so the password and your content
-                travel unencrypted — never port-forward this or expose it to the internet.{" "}
-                {remote.platform === "windows"
-                  ? "The first time SceneWorks binds the port, allow it on Private networks in the Windows Security prompt."
-                  : "The first time SceneWorks binds the port, macOS may ask to allow incoming connections — click Allow."}
-              </span>
-            </div>
-          </div>
+          <ServerTab
+            applyRemoteAccess={applyRemoteAccess}
+            clearRemotePassword={clearRemotePassword}
+            copyRemoteUrl={copyRemoteUrl}
+            remote={remote}
+            remotePassword={remotePassword}
+            remotePasswordCandidate={remotePasswordCandidate}
+            remotePort={remotePort}
+            saveRemotePassword={saveRemotePassword}
+            setRemotePassword={setRemotePassword}
+            setRemotePort={setRemotePort}
+          />
         ) : null}
       </WorkPanel>
     </section>

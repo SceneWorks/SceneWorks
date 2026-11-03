@@ -988,10 +988,12 @@ async fn reconcile_canceled_planning(
             .await
             {
                 Ok(snapshot)
-                    if matches!(
-                        snapshot.get("status").and_then(Value::as_str),
-                        Some("completed" | "failed" | "canceled" | "interrupted")
-                    ) =>
+                    if snapshot
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .is_some_and(|status| {
+                            sceneworks_core::jobs_store::TERMINAL_STATUSES.contains(&status)
+                        }) =>
                 {
                     break;
                 }

@@ -53,6 +53,7 @@ pub(crate) async fn create_event_ticket(
     // This reconnect context is intentionally far smaller than the router-wide
     // 10 MiB JSON allowance. Read with an explicit cap so a chunked body cannot
     // bypass the route-specific memory bound.
+    let headers = request.headers().clone();
     let body = to_bytes(request.into_body(), MAX_EVENT_TICKET_BODY_BYTES)
         .await
         .map_err(|_| {
@@ -60,6 +61,7 @@ pub(crate) async fn create_event_ticket(
                 "event ticket request body exceeds {MAX_EVENT_TICKET_BODY_BYTES} bytes"
             ))
         })?;
+    auth::require_json_content_type(&headers, !body.is_empty())?;
     let request = if body.is_empty() {
         CreateEventTicketRequest::default()
     } else {

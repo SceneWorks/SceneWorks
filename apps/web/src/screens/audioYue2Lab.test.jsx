@@ -327,6 +327,36 @@ describe("YuE2 Song Lab (sc-23000)", () => {
     expect(container.querySelector('[data-testid="yue2-gate"]')).toBeNull();
   }
 
+  it("ignores late history responses from the previous project", async () => {
+    let resolveVersions;
+    let resolveComparisons;
+    const base = router({ ack: true });
+    apiFetchMock.mockImplementation((path, token, options) => {
+      if (path === "/api/v1/projects/project_1/yue2/score-versions") return new Promise((resolve) => { resolveVersions = resolve; });
+      if (path === "/api/v1/projects/project_1/yue2/comparisons") return new Promise((resolve) => { resolveComparisons = resolve; });
+      if (path === "/api/v1/projects/project_2/yue2/score-versions") return Promise.resolve({ items: [{ ...VERSION_SUMMARY, id: "current_version" }], unreadable: [] });
+      if (path === "/api/v1/projects/project_2/yue2/comparisons") return Promise.resolve({ items: [], unreadable: [] });
+      return base(path, token, options);
+    });
+    seedStudioSettingsFromServer({
+      project_1: { audio: { songLab: true }, yue2lab: ENABLED_SETTINGS },
+      project_2: { audio: { songLab: true }, yue2lab: ENABLED_SETTINGS },
+    });
+    await render(context());
+    expect(resolveVersions).toBeTypeOf("function");
+    await render(context({ activeProject: { id: "project_2", name: "Other" } }));
+    await act(async () => {
+      resolveVersions({ items: [], unreadable: ["old-version"] });
+      resolveComparisons({ items: [], unreadable: ["old-comparison"] });
+    });
+    await click(buttonWithText(lab(), "Scores"));
+    await settle();
+    expect(lab().querySelector('[data-testid="yue2-version-row"]')).toBeTruthy();
+    expect(lab().textContent).not.toContain("old-version");
+    await click(buttonWithText(lab(), "Compare"));
+    expect(lab().textContent).not.toContain("old-comparison");
+  });
+
   // ---- AC1: explicit selection, never displacing V1 / standard defaults ------------------------
 
   it("leaves the standard modes, their defaults and pickers untouched when YuE2 is in the catalog", async () => {

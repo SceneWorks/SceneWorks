@@ -1,3 +1,5 @@
+import { fetchPromptGuide } from "../promptGuides.js";
+import { isModelMissing } from "../modelMissing.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAppStatic } from "../context/AppContext.js";
 import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
@@ -11,12 +13,6 @@ import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
 // dropped is the missing-model path: the refiner is a downloadable catalog model, so
 // when it isn't installed we surface its download rather than a raw worker error.
 
-function isModelMissing(refineModel, message) {
-  if (refineModel?.installState) {
-    return refineModel.installState === "missing";
-  }
-  return /not cached|not installed|snapshot is not/i.test(message ?? "");
-}
 
 export function useSimpleRefine(workflow) {
   const { refinePrompt, models = [], createModelDownloadJob } = useAppStatic();
@@ -53,10 +49,7 @@ export function useSimpleRefine(workflow) {
         let guide = "";
         if (guidePath) {
           try {
-            const response = await fetch(guidePath, { signal });
-            if (response.ok) {
-              guide = await response.text();
-            }
+            guide = await fetchPromptGuide(guidePath, signal);
           } catch (err) {
             if (err?.name === "AbortError") {
               return null;

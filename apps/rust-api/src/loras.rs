@@ -1197,11 +1197,11 @@ pub(crate) async fn queue_lora_import_job(
             .as_deref()
             .is_some_and(|family| canonical_lora_family(family) == "minimax-h3");
         let (local_source, detected, declared) = tokio::task::spawn_blocking(move || {
-            validate_lora_import_source_path(&local_source, &source_roots)?;
+            validate_import_source_path(&local_source, &source_roots)?;
             // A paired Wan A14B MoE upload (sc-1991) carries a second low-noise
             // file; validate it against the same upload root.
             if let Some(secondary_source) = secondary_source.as_deref() {
-                validate_lora_import_source_path(secondary_source, &source_roots)?;
+                validate_import_source_path(secondary_source, &source_roots)?;
             }
             inspect_lora_source_for_family(&local_source, h3_expected)
                 .map(|(detected, declared)| (local_source, detected, declared))

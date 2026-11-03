@@ -2119,7 +2119,224 @@
           "character",
           "style"
         ],
-        "datasetModality": "video"
+        "datasetModality": "video",
+        "subjectRestrictedNormalLoss": false,
+        "noVideoLossWorkflows": [
+          "v2a_lora",
+          "t2a_lora",
+          "audio_extend_lora",
+          "audio_inpainting_lora",
+          "audio_suffix_lora",
+          "a2a_ic_lora"
+        ],
+        "ltxWorkflowPlans": {
+          "i2v_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "firstFrame",
+                  "probability": 0.5
+                }
+              ]
+            },
+            "audio": {
+              "isGenerated": true,
+              "conditions": []
+            }
+          },
+          "t2v_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": []
+            },
+            "audio": {
+              "isGenerated": true,
+              "conditions": []
+            }
+          },
+          "v2a_lora": {
+            "video": {
+              "isGenerated": false,
+              "conditions": []
+            },
+            "audio": {
+              "isGenerated": true,
+              "conditions": []
+            }
+          },
+          "a2v_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": []
+            },
+            "audio": {
+              "isGenerated": false,
+              "conditions": []
+            }
+          },
+          "t2a_lora": {
+            "video": null,
+            "audio": {
+              "isGenerated": true,
+              "conditions": []
+            }
+          },
+          "video_extend_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "prefix",
+                  "probability": 1,
+                  "temporalBoundary": 8
+                }
+              ]
+            },
+            "audio": {
+              "isGenerated": true,
+              "conditions": []
+            }
+          },
+          "video_inpainting_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "mask",
+                  "probability": 1,
+                  "tensorKey": "video_mask"
+                }
+              ]
+            },
+            "audio": null
+          },
+          "video_outpainting_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "spatialCrop",
+                  "probability": 1,
+                  "spatialRegion": [
+                    0,
+                    0,
+                    288,
+                    576
+                  ]
+                }
+              ]
+            },
+            "audio": null
+          },
+          "video_suffix_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "suffix",
+                  "probability": 1,
+                  "temporalBoundary": 8
+                }
+              ]
+            },
+            "audio": {
+              "isGenerated": true,
+              "conditions": []
+            }
+          },
+          "audio_extend_lora": {
+            "video": null,
+            "audio": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "prefix",
+                  "probability": 1,
+                  "temporalBoundary": 8
+                }
+              ]
+            }
+          },
+          "audio_inpainting_lora": {
+            "video": null,
+            "audio": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "mask",
+                  "probability": 1,
+                  "tensorKey": "audio_mask"
+                }
+              ]
+            }
+          },
+          "audio_suffix_lora": {
+            "video": null,
+            "audio": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "suffix",
+                  "probability": 1,
+                  "temporalBoundary": 8
+                }
+              ]
+            }
+          },
+          "av2av_ic_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "reference",
+                  "probability": 1,
+                  "tensorKey": "video_reference"
+                }
+              ]
+            },
+            "audio": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "reference",
+                  "probability": 1,
+                  "tensorKey": "audio_reference"
+                }
+              ]
+            }
+          },
+          "v2v_ic_lora": {
+            "video": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "reference",
+                  "probability": 1,
+                  "tensorKey": "video_reference"
+                },
+                {
+                  "type": "firstFrame",
+                  "probability": 0.2
+                }
+              ]
+            },
+            "audio": null
+          },
+          "a2a_ic_lora": {
+            "video": null,
+            "audio": {
+              "isGenerated": true,
+              "conditions": [
+                {
+                  "type": "reference",
+                  "probability": 1,
+                  "tensorKey": "audio_reference"
+                }
+              ]
+            }
+          }
+        }
       }
     },
     {
@@ -2793,7 +3010,7 @@
       "defaults": {
         "rank": 1,
         "alpha": 1,
-        "learningRate": 0.00003,
+        "learningRate": 3e-05,
         "steps": 320000,
         "batchSize": 1,
         "gradientAccumulation": 32,
@@ -2989,7 +3206,7 @@
       "defaults": {
         "rank": 16,
         "alpha": 16,
-        "learningRate": 0.00001,
+        "learningRate": 1e-05,
         "steps": 10000,
         "batchSize": 1,
         "gradientAccumulation": 1,

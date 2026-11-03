@@ -1,3 +1,4 @@
+import { downloadBlob } from "../saveExportFile.js";
 import React, { useEffect, useMemo, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { assetUrl } from "../components/assetMedia.jsx";
@@ -33,15 +34,7 @@ import {
 // Every server failure is rendered where it happened — never replaced with an empty state.
 
 export function downloadText(text, filename, type = "application/json") {
-  const blob = new Blob([text], { type });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
+  downloadBlob(new Blob([text], { type }), filename);
 }
 
 export function ErrorNotice({ error, children = null, testId = "yue2-error" }) {

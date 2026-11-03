@@ -1,3 +1,4 @@
+import { isModelMissing } from "../modelMissing.js";
 import React, { useEffect, useRef, useState } from "react";
 import { Icon } from "./Icons.jsx";
 
@@ -33,12 +34,6 @@ import { Icon } from "./Icons.jsx";
 
 // The worker fast-fails with "…snapshot is not cached…" when the checkpoint is absent. Prefer the
 // catalog install state when the entry is supplied; fall back to the message otherwise.
-function isModelMissing(rewriteModel, errorMessage) {
-  if (rewriteModel?.installState) {
-    return rewriteModel.installState === "missing";
-  }
-  return /not cached|not installed|snapshot is not/i.test(errorMessage ?? "");
-}
 
 export function QwenRewritePromptControl({
   prompt,

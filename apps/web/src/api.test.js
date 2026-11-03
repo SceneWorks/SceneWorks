@@ -14,6 +14,20 @@ describe("apiFetch response handling", () => {
     vi.restoreAllMocks();
   });
 
+  it("returns blob bytes and routes blob failures through the 401 gate", async () => {
+    const handler = vi.fn(() => true);
+    setUnauthorizedHandler(handler);
+    global.fetch = vi.fn().mockResolvedValueOnce(new Response("export", { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: "expired", code: "auth" }), { status: 401 }));
+    const blob = await apiFetch("/file", "token", { responseType: "blob" });
+    expect(blob.size).toBe(6);
+    expect(global.fetch.mock.calls[0][1]).not.toHaveProperty("responseType");
+    const error = await apiFetch("/file", "token", { responseType: "blob" }).catch((e) => e);
+    expect(error).toMatchObject({ status: 401, code: "auth", reauthenticating: true });
+    expect(handler).toHaveBeenCalledOnce();
+    setUnauthorizedHandler(null);
+  });
+
   it("stringifies structured API details instead of coercing them to [object Object]", async () => {
     global.fetch = vi.fn(async () =>
       new Response(JSON.stringify({ detail: { field: "prompt", reason: "required" } }), {

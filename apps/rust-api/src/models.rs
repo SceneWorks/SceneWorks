@@ -511,7 +511,7 @@ pub(crate) const LICENSE_ACKNOWLEDGMENT_REQUIRED_CODE: &str = "license_acknowled
 /// True when the catalog entry declares that the user must accept its license before the weights
 /// may be downloaded (`requiresLicenseAcknowledgment`, sc-17227). Deliberately does NOT include
 /// `gated`: see the call site for why the two are enforced differently.
-fn model_requires_license_acknowledgment(model: &Value) -> bool {
+pub(crate) fn model_requires_license_acknowledgment(model: &Value) -> bool {
     model
         .get("requiresLicenseAcknowledgment")
         .and_then(Value::as_bool)
@@ -3471,7 +3471,7 @@ const MODEL_IMPORT_DISABLED_DETAIL: &str = "Model import is temporarily disabled
 /// ([`sceneworks_core::base_weights::import_supported`]). The refusal reason is surfaced to the API
 /// client as a `400` so the upload flow gets a synchronous, actionable message rather than a queued
 /// job that fails later. This gate is **additive** to path confinement — `source` has already been
-/// confined by `validate_lora_import_source_path` (LAN-exposed jobs API, epic 4484); this never
+/// confined by `validate_import_source_path` (LAN-exposed jobs API, epic 4484); this never
 /// widens or bypasses that. The worker re-runs the same predicate over the downloaded bytes so repo/
 /// URL imports (whose file is not on disk at queue time) are covered there.
 fn import_source_supported(source: &FsPath) -> Result<Option<String>, ApiError> {
@@ -4250,7 +4250,7 @@ pub(crate) async fn queue_model_import_job(
             allowed_source_roots
         };
         let (source_path, detected) = tokio::task::spawn_blocking(move || {
-            validate_lora_import_source_path(&source_path, &allowed_source_roots)?;
+            validate_import_source_path(&source_path, &allowed_source_roots)?;
             // Compatibility gate (sc-14019): refuse, with the detector's typed
             // reason, any local checkpoint whose shape has no loader today.
             let base_family = import_source_supported(FsPath::new(&source_path))?;

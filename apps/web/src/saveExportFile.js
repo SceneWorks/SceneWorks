@@ -23,14 +23,7 @@ export async function saveExportFile(
       suggestedFilename: file.name,
     });
   }
-  const url = urlApi.createObjectURL(file);
-  const anchor = documentRef.createElement("a");
-  anchor.href = url;
-  anchor.download = file.name;
-  documentRef.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  urlApi.revokeObjectURL(url);
+  downloadBlob(file, file.name, { documentRef, urlApi });
   return null;
 }
 
@@ -40,4 +33,16 @@ export function saveJsonExport(filename, value, options) {
     type: "application/json",
   });
   return saveExportFile(file, options);
+}
+
+export function downloadBlob(blob, filename, { documentRef = globalThis.document, urlApi = globalThis.URL } = {}) {
+  const url = urlApi.createObjectURL(blob);
+  const anchor = documentRef.createElement("a");
+  anchor.href = url;
+  anchor.download = filename;
+  documentRef.body.appendChild(anchor);
+  try { anchor.click(); } finally {
+    anchor.remove();
+    setTimeout(() => urlApi.revokeObjectURL(url), 0);
+  }
 }

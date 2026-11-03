@@ -1213,6 +1213,7 @@ async fn cors_preflight_allows_frontend_origin_and_token_header() {
     let request = Request::builder()
         .method("OPTIONS")
         .uri("/api/v1/jobs")
+        .header("host", "localhost:8000")
         .header("origin", "http://localhost:5173")
         .header("access-control-request-method", "POST")
         .header(

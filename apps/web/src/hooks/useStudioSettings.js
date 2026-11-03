@@ -258,9 +258,22 @@ export function useStudioSettingsWriter(studio, workspaceId, settings, ready = t
   // the important ready=false -> true transition as a deliberate first persistence.
   const scopeRef = useRef("");
   const initializedRef = useRef(false);
+  const pendingRef = useRef(null);
+  useEffect(() => () => {
+    if (pendingRef.current) {
+      clearTimeout(pendingRef.current.timer);
+      persistToServer(pendingRef.current.workspace);
+      pendingRef.current = null;
+    }
+  }, []);
   useEffect(() => {
     const scope = `${studio}:${workspaceKey(workspaceId)}`;
     if (scopeRef.current !== scope) {
+      if (pendingRef.current) {
+        clearTimeout(pendingRef.current.timer);
+        persistToServer(pendingRef.current.workspace);
+        pendingRef.current = null;
+      }
       scopeRef.current = scope;
       initializedRef.current = false;
     }
@@ -279,7 +292,10 @@ export function useStudioSettingsWriter(studio, workspaceId, settings, ready = t
     // Debounced: the advanced studios re-serialize on every keystroke, and one durable write
     // per character would hammer a disk-writing PUT. The queue keeps requests ordered; this
     // keeps them rare.
-    const timer = setTimeout(() => persistToServer(workspaceKey(workspaceId)), 400);
-    return () => clearTimeout(timer);
+    if (pendingRef.current) clearTimeout(pendingRef.current.timer);
+    const workspace = workspaceKey(workspaceId);
+    const timer = setTimeout(() => { pendingRef.current = null; persistToServer(workspace); }, 400);
+    pendingRef.current = { timer, workspace };
+    return undefined;
   }, [studio, workspaceId, serialized, ready]);
 }

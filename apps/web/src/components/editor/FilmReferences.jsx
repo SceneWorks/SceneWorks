@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from "react";
-import { apiFetch } from "../../api.js";
+import { filmRequest } from "../../api/films.js";
 import { saveJsonExport } from "../../saveExportFile.js";
 import { assetCanRenderAsImage } from "../assetMedia.jsx";
 import {
@@ -160,9 +160,8 @@ export function FilmReferences({
     setAddErrors([]);
     try {
       const saved = await saveDraft({ updateLocal: false });
-      const next = await apiFetch(
-        `/api/v1/projects/${draft.projectId}/films/${draft.id}/references`,
-        token,
+      const next = await filmRequest(
+        draft.projectId, draft.id, token,
         {
           method: "POST",
           body: JSON.stringify({
@@ -172,7 +171,7 @@ export function FilmReferences({
             description,
             approved,
           }),
-        },
+        }, "/references",
       );
       mergeAddedReferences(saved, next);
       clearAddForm();
@@ -197,9 +196,8 @@ export function FilmReferences({
     setAddErrors([]);
     try {
       const saved = await saveDraft({ updateLocal: false });
-      const next = await apiFetch(
-        `/api/v1/projects/${draft.projectId}/films/${draft.id}/references`,
-        token,
+      const next = await filmRequest(
+        draft.projectId, draft.id, token,
         {
           method: "POST",
           body: JSON.stringify({
@@ -211,7 +209,7 @@ export function FilmReferences({
             locator: locator.trim() || null,
             approved,
           }),
-        },
+        }, "/references",
       );
       mergeAddedReferences(saved, next);
       clearAddForm();
@@ -237,9 +235,8 @@ export function FilmReferences({
       setRole((current) => current || defaultRole(imported));
       // Use the returned asset directly: App state propagation is asynchronous.
       const saved = await saveDraft({ updateLocal: false });
-      const next = await apiFetch(
-        `/api/v1/projects/${draft.projectId}/films/${draft.id}/references`,
-        token,
+      const next = await filmRequest(
+        draft.projectId, draft.id, token,
         {
           method: "POST",
           body: JSON.stringify({
@@ -251,7 +248,7 @@ export function FilmReferences({
             locator: locator.trim() || null,
             approved,
           }),
-        },
+        }, "/references",
       );
       mergeAddedReferences(saved, next);
       clearAddForm();
@@ -345,13 +342,12 @@ export function FilmReferences({
     try {
       const referencePack = JSON.parse(await file.text());
       const saved = await saveDraft();
-      const next = await apiFetch(
-        `/api/v1/projects/${draft.projectId}/films/${draft.id}/reference-pack`,
-        token,
+      const next = await filmRequest(
+        draft.projectId, draft.id, token,
         {
           method: "PUT",
           body: JSON.stringify({ draftRevision: saved.revision, referencePack }),
-        },
+        }, "/reference-pack",
       );
       onReplaceDraft(next);
       setNotice("Reference pack imported.");

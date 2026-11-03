@@ -159,15 +159,10 @@ pub struct Settings {
     /// `SCENEWORKS_EXTERNAL_MODEL_ROOTS`; empty (feature off) by default and always empty
     /// on macOS — see `sceneworks_core::external_roots`.
     pub external_model_roots: Vec<PathBuf>,
-    /// F-040 (sc-11236) — operator-declared extra Host-header authorities the
-    /// `/mcp` DNS-rebinding defense accepts, on top of the always-allowed loopback
-    /// set. Read from `SCENEWORKS_MCP_ALLOWED_HOSTS` (comma-separated `host` or
-    /// `host:port` entries). Only needed for the wildcard LAN bind
-    /// (`SCENEWORKS_API_HOST=0.0.0.0`), whose reachable interface addresses can't
-    /// be enumerated: set it to the machine's LAN hostname/IP(s) to keep the
-    /// Host check ON for remote clients. Empty by default; irrelevant for a
-    /// loopback bind (loopback is always allowed) — see
-    /// [`sceneworks_mcp::mcp_allowed_hosts`].
+    /// Additional allowed HTTP authorities for API and MCP, read from
+    /// SCENEWORKS_MCP_ALLOWED_HOSTS. Loopback and concrete bind addresses always
+    /// remain allowed; wildcard listeners also enumerate interface addresses.
+    /// Configure proxy/LAN hostnames here. An empty override never disables checks.
     pub mcp_allowed_hosts_extra: Vec<String>,
 }
 
@@ -386,6 +381,7 @@ pub struct AppState {
     pub(crate) workflow_strip_slots: Arc<Semaphore>,
     // sc-8870 (F-068): per-peer-IP failed-token throttle for the auth oracle.
     pub(crate) auth_throttle: Arc<AuthThrottle>,
+    pub(crate) allowed_hosts: Arc<Vec<String>>,
     /// The ONE resolved-model cache session this API process holds (sc-19711).
     ///
     /// `ResolvedCacheStore::open` takes a session slot — a `sessions/<id>/` directory plus its own

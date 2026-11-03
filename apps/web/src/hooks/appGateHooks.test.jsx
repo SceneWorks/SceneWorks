@@ -1175,6 +1175,22 @@ describe("useJobEvents (sc-9750)", () => {
     return { setProps: (next) => act(() => setProps(next)) };
   }
 
+  it("aborts a pending ticket and suppresses teardown errors", async () => {
+    let rejectTicket;
+    const errors = [];
+    apiResponders.set("/api/v1/jobs/events/ticket", () => new Promise((_, reject) => { rejectTicket = reject; }));
+    mount(baseProps({ access: { authRequired: true }, token: "token", setError: (message) => errors.push(message) }));
+    const signal = apiFetch.mock.calls.at(-1)[2].signal;
+    expect(signal.aborted).toBe(false);
+    act(() => root.unmount());
+    root = null;
+    expect(signal.aborted).toBe(true);
+    rejectTicket(new Error("aborted"));
+    await settle();
+    expect(errors).toEqual([]);
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
   // sc-15105: the SSE ticket POST is a gated route, so a mid-session password rotation
   // 401s it too. It used to push the raw "SceneWorks access token required" into the error
   // band and arm an exponential-backoff reconnect that could never succeed.

@@ -1,3 +1,4 @@
+import { loadImage } from "./imageDimensions.js";
 import React, { useEffect, useRef, useState } from "react";
 import { apiFetch } from "./api.js";
 import {
@@ -177,12 +178,9 @@ export function useAssetBatch() {
     if (assetIsHdrSource(asset)) {
       return Promise.resolve(null);
     }
-    return new Promise((resolve) => {
-      const img = new Image();
-      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-      img.onerror = () => resolve(null);
-      img.src = assetUrl(asset);
-    });
+    return loadImage(assetUrl(asset))
+      .then((img) => ({ width: img.naturalWidth, height: img.naturalHeight }))
+      .catch(() => null);
   }
 
   // Fan out one job per selected image (NOT one mega-job): each posts independently so

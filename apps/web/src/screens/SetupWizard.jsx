@@ -1,3 +1,4 @@
+import { downloadSizeText } from "../formatting.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
 import { LicenseGateNotice, gatedRepoUrl } from "../components/LicenseGateNotice.jsx";
@@ -59,12 +60,6 @@ function isOfferable(model, caps) {
   );
 }
 
-function downloadSizeText(model) {
-  if (!model.downloadSizeLabel) {
-    return "Size unavailable";
-  }
-  return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
-}
 
 function defaultSelection(models, caps) {
   return new Set(
@@ -307,7 +302,7 @@ export function SetupWizard({
                                 {recommended && !installed ? <span className="setup-wizard-tag">Recommended</span> : null}
                               </span>
                               <span className="setup-wizard-model-meta">
-                                {installed ? "Already installed" : downloading ? "Download started" : downloadSizeText(model)}
+                                {installed ? "Already installed" : downloading ? "Download started" : downloadSizeText(model, "Size unavailable")}
                               </span>
                             </span>
                           </label>

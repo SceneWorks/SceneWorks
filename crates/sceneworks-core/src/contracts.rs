@@ -93,7 +93,12 @@ macro_rules! string_enum {
         impl $crate::contracts::StringEnum for $name {}
 
         impl $name {
-            pub fn as_str(&self) -> &str {
+            /// Wire values declared by this enum, excluding forward-compatible unknown values.
+            pub const fn known_values() -> &'static [&'static str] {
+                &[$($value,)+]
+            }
+
+            pub const fn as_str(&self) -> &str {
                 match self {
                     $(Self::$variant => $value,)+
                     Self::Unknown(value) => value.as_str(),
@@ -370,6 +375,37 @@ string_enum! {
         Failed => "failed",
         Canceled => "canceled",
         Interrupted => "interrupted",
+    }
+}
+
+impl JobStatus {
+    /// Worker-owned states. Queued and API-owned pre-steps remain pending.
+    pub const fn active_statuses() -> [&'static str; 5] {
+        [
+            Self::Preparing.as_str(),
+            Self::Downloading.as_str(),
+            Self::LoadingModel.as_str(),
+            Self::Running.as_str(),
+            Self::Saving.as_str(),
+        ]
+    }
+
+    pub const fn terminal_statuses() -> [&'static str; 4] {
+        [
+            Self::Completed.as_str(),
+            Self::Failed.as_str(),
+            Self::Canceled.as_str(),
+            Self::Interrupted.as_str(),
+        ]
+    }
+
+    /// States that can be canceled immediately without worker acknowledgement.
+    pub const fn pending_statuses() -> [&'static str; 3] {
+        [
+            Self::Queued.as_str(),
+            Self::PendingCaption.as_str(),
+            Self::PendingWorkflow.as_str(),
+        ]
     }
 }
 

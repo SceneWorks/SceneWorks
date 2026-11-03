@@ -9,7 +9,7 @@ import {
   parseFilmScript,
   preflightFilm,
   startFilmPlanning,
-  exportFilmRun,
+  exportFilmRun, filmRequest, getFilmRun, startFilmRun,
 } from "../../api/films.js";
 import { useAppLive, useAppStatic } from "../../context/AppContext.js";
 import { errorStatuses, terminalStatuses } from "../../jobTypes.js";
@@ -90,8 +90,8 @@ export function describeActiveFilmShots(run) {
   }).join(" · ");
 }
 
-export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "film", modeSwitch = null, onEngage, onFilmChange, onNewTimeline, onOpenTimeline, showStart = false, viewRequest = null } = {}) {
-  const { activeProject, activeTimeline, assets = [], importAsset, models = [], token, refreshTimelines, saveTimeline, setSelectedTimelineId } = useAppStatic();
+export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New timeline", mode = "film", modeSwitch = null, onEngage, onFilmChange, onNewTimeline, onOpenTimeline, showStart = false, viewRequest = null } = {}) {
+  const { activeProject, activeTimeline, assets = [], importAsset, models = [], token, refreshTimelines, refreshFilmTimeline, saveTimeline, setSelectedTimelineId } = useAppStatic();
   const { jobs = [] } = useAppLive();
   const [drafts, setDrafts] = useState([]);
   const [selectedId, setSelectedId] = useState("");
@@ -105,7 +105,14 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   const [selectedShotIds, setSelectedShotIds] = useState([]);
   const [preflight, setPreflight] = useState(null);
   const [lastRun, setLastRun] = useState(null);
+  const [pendingRunOperation, setPendingRunOperation] = useState(null);
   const [activeView, setActiveView] = useState("script");
+  const [pageVisible, setPageVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const changed = () => setPageVisible(!document.hidden);
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
   // A project with no timeline opens on the start paths even when drafts exist; picking or
   // creating a draft (or a hand-off from a timeline clip) is what enters the step view.
   const [engaged, setEngaged] = useState(false);
@@ -118,7 +125,36 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   const activeTimelineId = useRef("");
   const discoveredTimeline = useRef("");
   const selectedRunExplicit = useRef(false);
+  // Review actions and lifecycle reads share a generation so a pre-action list cannot
+  // overwrite a newer accepted controller receipt.
+  const runFeedFence = useRef({ generation: 0, pending: false });
+  const [reviewMutationPending, setReviewMutationPending] = useState(false);
+  const [runFeedEpoch, setRunFeedEpoch] = useState(0);
+  const beginReviewMutation = useCallback(() => {
+    const fence = runFeedFence.current;
+    fence.generation += 1;
+    fence.pending = true;
+    fence.abort?.();
+    setReviewMutationPending(true);
+    return fence.generation;
+  }, []);
+  const endReviewMutation = useCallback((generation) => {
+    const fence = runFeedFence.current;
+    if (fence.generation !== generation || !fence.pending) return;
+    fence.pending = false;
+    setReviewMutationPending(false);
+    setRunFeedEpoch((epoch) => epoch + 1);
+  }, []);
   const plannerAvailabilityRequest = useRef(0);
+  const operationScope = useRef({ projectId: activeProject?.id, mounted: true });
+  const runActionController = useRef(null);
+  useEffect(() => () => { runActionController.current?.abort(); }, [activeProject?.id]);
+  operationScope.current.projectId = activeProject?.id;
+  useEffect(() => {
+    const scope = operationScope.current;
+    scope.mounted = true;
+    return () => { scope.mounted = false; };
+  }, []);
   const activeQueuePlannerInstallJob = activeQwenPlannerInstall(jobs);
   const queuePlannerInstallJob = latestQwenPlannerInstall(jobs);
   const plannerInstallJob = activeQueuePlannerInstallJob?.id !== requestedPlannerInstallJob?.id
@@ -128,14 +164,16 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   activeTimelineId.current = activeTimeline?.id ?? "";
   lastRunId.current = lastRun?.locator?.id ?? "";
 
-  const acceptRunSnapshot = useCallback((run, { latest = false, select = false } = {}) => {
+  const acceptRunSnapshot = useCallback((run, { latest = false, select = false, actionSelection } = {}) => {
     const draftId = selectedDraftId.current;
-    if (!draftId || run?.locator?.draftId !== draftId) return;
-    if (select) selectedRunExplicit.current = true;
+    if (!draftId || run?.locator?.draftId !== draftId) return false;
+    if (actionSelection !== undefined && lastRunId.current !== actionSelection) return false;
+    if (select) { selectedRunExplicit.current = true; lastRunId.current = run.locator.id; }
     setLastRun((current) => {
       if (select || (latest && !selectedRunExplicit.current) || !current || current.locator?.draftId !== draftId || current.locator?.id === run.locator.id) return run;
       return current;
     });
+    return true;
   }, []);
 
   useEffect(() => {
@@ -186,10 +224,12 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     setSelectedShotIds([]);
     setPreflight(null);
     setLastRun(null);
+    setPendingRunOperation(null);
+    setBusy(false);
     setEngaged(false);
     setFocusShotId("");
     if (!activeProject?.id) return undefined;
-    apiFetch(`/api/v1/projects/${activeProject.id}/films`, token)
+    filmRequest(activeProject.id, null, token)
       .then((items) => {
         if (canceled) return;
         setDrafts(items);
@@ -279,7 +319,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   }
 
   useEffect(() => {
-    if (!activeProject?.id || !draft?.id || !["running", "canceling"].includes(planningOperation?.status)) return undefined;
+    if (!screenActive || !pageVisible || !activeProject?.id || !draft?.id || !["running", "canceling"].includes(planningOperation?.status)) return undefined;
     let canceled = false;
     const timer = window.setTimeout(() => {
       getFilmPlanning(activeProject.id, draft.id, token)
@@ -287,7 +327,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
         .catch((error) => !canceled && setNotice(error.message));
     }, 500);
     return () => { canceled = true; window.clearTimeout(timer); };
-  }, [activeProject?.id, draft?.id, planningOperation, token]);
+  }, [activeProject?.id, draft?.id, planningOperation, screenActive, pageVisible, token]);
 
   useEffect(() => {
     onFilmChange?.({ draft, run: lastRun });
@@ -306,7 +346,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     let canceled = false;
     (async () => {
       try {
-        const run = await apiFetch(`/api/v1/projects/${projectId}/film-runs/${encodeURIComponent(runId)}`, token);
+        const run = await getFilmRun(projectId, runId, token);
         const draftId = run?.locator?.draftId;
         if (canceled || !draftId) return;
         if (selectedDraftId.current !== draftId) {
@@ -323,6 +363,32 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     return () => { canceled = true; };
   }, [activeProject?.id, token, viewRequest]);
 
+  useEffect(() => {
+    if (!pendingRunOperation || pendingRunOperation.projectId !== activeProject?.id || lastRun?.locator?.id !== pendingRunOperation.runId) return;
+    if (lastRun.controllerActive) {
+      if (pendingRunOperation.kind === "render") {
+        const progress = describeActiveFilmShots(lastRun);
+        if (progress) setNotice(progress);
+      }
+      return;
+    }
+    if (lastRun.actionOperation?.status === "failed") {
+      setNotice(`${lastRun.actionOperation.action} failed: ${lastRun.actionOperation.detail}. Correct the problem and retry the action.`);
+    } else if (pendingRunOperation.kind === "export") {
+      const exported = lastRun.record?.export;
+      setNotice(exported?.status === "completed"
+        ? (exported.droppedAudioLayers?.length ? `Export completed with ${exported.droppedAudioLayers.length} dropped audio layer${exported.droppedAudioLayers.length === 1 ? "" : "s"}.` : "Export completed with every placed audio layer.")
+        : (exported?.error || `Export ${exported?.status ?? "did not complete"}.`));
+    } else if (!lastRun.record || lastRun.record.state !== "finished") {
+      setNotice("The film controller stopped before the shot finished. Saved progress remains in the project.");
+    } else if (lastRun.record?.timeline?.timelineId) {
+      setNotice("Shot ready in its film timeline. Export remains a separate editor action.");
+    } else {
+      setNotice(lastRun.record?.diagnostics?.map((item) => item.message).join(" ") || lastRun.record?.stop?.detail || "The run finished without a clip.");
+    }
+    setPendingRunOperation(null);
+  }, [activeProject?.id, lastRun, pendingRunOperation]);
+
   if (!activeProject) return null;
 
   function engage() {
@@ -335,7 +401,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     setBusy(true);
     setNotice("");
     try {
-      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films`, token, {
+      const created = await filmRequest(activeProject.id, null, token, {
         method: "POST",
         body: JSON.stringify({ title: `Film ${drafts.length + 1}` }),
       });
@@ -366,7 +432,7 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     }
     setBusy(true);
     try {
-      const loaded = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${id}`, token);
+      const loaded = await filmRequest(activeProject.id, id, token);
       setDraft(loaded);
       setSelectedShotIds(loaded.productionPlan.shots.map((shot) => shot.id));
       setPreflight(null);
@@ -392,13 +458,14 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     });
   }
 
-  async function saveDraft({ updateLocal = true } = {}) {
+  async function saveDraft({ updateLocal = true, signal } = {}) {
     if (!draft) return null;
-    const saved = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${draft.id}`, token, {
+    const saved = await filmRequest(activeProject.id, draft.id, token, {
       method: "PUT",
+      ...(signal ? { signal } : {}),
       body: JSON.stringify({ ...draft, reviewPlan: normalizedPlan(draft) }),
     });
-    if (updateLocal) {
+    if (updateLocal && !signal?.aborted && operationScope.current.projectId === activeProject.id && operationScope.current.mounted) {
       setDraft(saved);
       setDrafts((items) => [saved, ...items.filter((item) => item.id !== saved.id)]);
     }
@@ -484,52 +551,45 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
   }
 
   async function startRun() {
+    const projectId = activeProject.id;
+    runActionController.current?.abort();
+    const controller = new AbortController();
+    runActionController.current = controller;
+    const current = () => !controller.signal.aborted && operationScope.current.mounted && operationScope.current.projectId === projectId;
     engage();
     setBusy(true);
     setNotice("");
     try {
-      const saved = await saveDraft();
-      const inspected = await preflightFilm(activeProject.id, saved.id, selectedShotIds, token, saved.revision);
+      const saved = await saveDraft({ signal: controller.signal });
+      if (!current()) return;
+      const inspected = await preflightFilm(projectId, saved.id, selectedShotIds, token, saved.revision, { signal: controller.signal });
+      if (!current()) return;
       setPreflight(inspected);
       if (!inspected.valid) {
         setNotice("Preflight found fields that must be corrected before rendering.");
         return;
       }
-      const created = await apiFetch(`/api/v1/projects/${activeProject.id}/films/${saved.id}/runs`, token, { method: "POST", body: JSON.stringify({ selectedShotIds, expectedDraftRevision: saved.revision }) });
-      let run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}/start`, token, { method: "POST" });
+      const created = await filmRequest(projectId, saved.id, token, { method: "POST", signal: controller.signal, body: JSON.stringify({ selectedShotIds, expectedDraftRevision: saved.revision }) }, "/runs");
+      if (!current()) return;
+      const run = await startFilmRun(projectId, created.locator.id, "start", token, { signal: controller.signal });
+      if (!current()) return;
       selectedRunExplicit.current = true;
       setLastRun(run);
       setNotice(`Render requested for ${selectedShotIds.length} selected shot${selectedShotIds.length === 1 ? "" : "s"}. Checking inputs and worker availability.`);
-      while (run.controllerActive) {
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
-        run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${created.locator.id}`, token);
-        setLastRun(run);
-        const shotProgress = describeActiveFilmShots(run);
-        if (shotProgress) setNotice(shotProgress);
-      }
-      if (run.actionOperation?.status === "failed") {
-        setNotice(`${run.actionOperation.action} failed: ${run.actionOperation.detail}. Correct the problem and retry the action.`);
-        return;
-      }
-      if (!run.record || run.record.state !== "finished") {
-        setNotice("The film controller stopped before the shot finished. Saved progress remains in the project.");
-        return;
-      }
-      const timelineId = run.record?.timeline?.timelineId;
-      if (timelineId) {
-        setNotice("Shot ready in its film timeline. Export remains a separate editor action.");
-      } else {
-        const detail = run.record?.diagnostics?.map((item) => item.message).join(" ");
-        setNotice(detail || run.record?.stop?.detail || "The run finished without a clip.");
-      }
+      setPendingRunOperation({ kind: "render", runId: created.locator.id, projectId });
     } catch (error) {
-      setNotice(error.message);
+      if (current()) setNotice(error.message);
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   }
 
   async function exportCurrentCut() {
+    const projectId = activeProject.id;
+    runActionController.current?.abort();
+    const controller = new AbortController();
+    runActionController.current = controller;
+    const current = () => !controller.signal.aborted && operationScope.current.mounted && operationScope.current.projectId === projectId;
     const runId = lastRun?.locator?.id;
     const timelineId = lastRun?.record?.timeline?.timelineId;
     if (!runId || !timelineId) return;
@@ -538,26 +598,18 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
     try {
       if (activeTimeline?.id === timelineId && saveTimeline) {
         const saved = await saveTimeline(activeTimeline);
+        if (!current()) return;
         if (!saved) throw new Error("Save the current timeline before exporting.");
       }
-      let run = await exportFilmRun(activeProject.id, runId, token);
+      const run = await exportFilmRun(projectId, runId, token, { signal: controller.signal });
+      if (!current()) return;
       setLastRun(run);
       setNotice("Export started from the current saved cut.");
-      while (run.controllerActive) {
-        await new Promise((resolve) => window.setTimeout(resolve, 500));
-        run = await apiFetch(`/api/v1/projects/${activeProject.id}/film-runs/${runId}`, token);
-        setLastRun(run);
-      }
-      const exported = run.record?.export;
-      if (exported?.status === "completed") {
-        setNotice(exported.droppedAudioLayers?.length ? `Export completed with ${exported.droppedAudioLayers.length} dropped audio layer${exported.droppedAudioLayers.length === 1 ? "" : "s"}.` : "Export completed with every placed audio layer.");
-      } else {
-        setNotice(exported?.error || `Export ${exported?.status ?? "did not complete"}.`);
-      }
+      setPendingRunOperation({ kind: "export", runId, projectId });
     } catch (error) {
-      setNotice(error.message);
+      if (current()) setNotice(error.message);
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   }
 
@@ -625,6 +677,12 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
           {draft ? <button className="ve-export" disabled={busy || !filmTimelineId} onClick={exportCurrentCut} title={filmTimelineId ? "" : "Render a shot to create the film timeline."} type="button">Export current cut</button> : null}
         </div>
       </div>
+      {draft && !engaged && showStart ? <div hidden><FilmLifecycle
+        draftId={draft.id} onRunChange={acceptRunSnapshot} onRuns={refreshFilmTimeline} planningSnapshot={planningOperation} feedFence={runFeedFence} feedPaused={reviewMutationPending} feedEpoch={runFeedEpoch}
+        projectId={activeProject.id} selectedRunId={lastRun?.locator?.id}
+        runActive={Boolean(lastRun?.controllerActive)} screenActive={screenActive && !busy}
+        setNotice={setNotice} token={token}
+      /></div> : null}
       {draft && (engaged || !showStart) ? (
         <div className="ve-film-body">
           <aside className="ve-film-steps">
@@ -655,8 +713,15 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
             <FilmLifecycle
               draftId={draft.id}
               onRunChange={acceptRunSnapshot}
+              onRuns={refreshFilmTimeline}
+              feedFence={runFeedFence}
+              feedPaused={reviewMutationPending}
+              feedEpoch={runFeedEpoch}
+              planningSnapshot={planningOperation}
               projectId={activeProject.id}
               selectedRunId={lastRun?.locator?.id}
+              runActive={Boolean(lastRun?.controllerActive)}
+              screenActive={screenActive && !busy}
               setNotice={setNotice}
               token={token}
             />
@@ -726,13 +791,18 @@ export function FilmWorkspace({ blankTimelineLabel = "New timeline", mode = "fil
               </div>
               <div aria-labelledby="film-view-tab-review" hidden={activeView !== "review"} id="film-view-review" role="tabpanel">
                 <FilmReview
-                  active={mode === "film" && activeView === "review"}
+                  active={screenActive && mode === "film" && activeView === "review"}
                   draft={draft}
                   focusShotId={focusShotId}
                   onChange={updateDraft}
                   projectId={activeProject.id}
                   refreshTimelines={refreshTimelines}
+                  refreshFilmTimeline={refreshFilmTimeline}
                   runControllerActive={Boolean(lastRun?.controllerActive)}
+                  runSnapshot={lastRun}
+                  onRunChange={acceptRunSnapshot}
+                  beginRunMutation={beginReviewMutation}
+                  endRunMutation={endReviewMutation}
                   runLocatorId={lastRun?.locator?.id}
                   setNotice={setNotice}
                   setSelectedTimelineId={setSelectedTimelineId}

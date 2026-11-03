@@ -5,14 +5,14 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 
 use parking_lot::{Mutex, ReentrantMutexGuard};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use subtle::ConstantTimeEq;
@@ -727,67 +727,70 @@ fn copy_film_reference_files(
         let Some(file) = reference.file() else {
             continue;
         };
-        if !is_safe_relative_path(file) {
-            return Err(ProjectStoreError::BadRequest(format!(
-                "Film reference {:?} has an unsafe file path",
-                reference.role
-            )));
-        }
-        let source = draft_assets.join(file);
-        let canonical_source = fs::canonicalize(&source).map_err(|_| {
-            ProjectStoreError::BadRequest(format!(
-                "Film reference {:?} is missing its staged image {file}",
-                reference.role
-            ))
-        })?;
-        if !canonical_source.starts_with(&canonical_assets) || !canonical_source.is_file() {
-            return Err(ProjectStoreError::BadRequest(format!(
-                "Film reference {:?} resolves outside its immutable draft input",
-                reference.role
-            )));
-        }
-        let destination = canonical_destination.join(file);
-        if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(canonical_source, destination)?;
+        stage_draft_file(
+            &canonical_assets,
+            &canonical_destination,
+            file,
+            &reference.role,
+            "reference",
+            "image",
+            false,
+        )?;
     }
     if include_sound {
         for sound in &pack.sound {
             let Some(file) = sound.file.as_deref() else {
                 continue;
             };
-            if !is_safe_relative_path(file) {
-                return Err(ProjectStoreError::BadRequest(format!(
-                    "Film sound {:?} has an unsafe file path",
-                    sound.role
-                )));
-            }
-            let source = draft_assets.join(file);
-            // Generated dialogue may reserve its eventual filename. The harness creates that
-            // file; every prerecorded clip must already be staged and remain within the draft.
-            if !source.is_file() && sound.text.is_some() {
-                continue;
-            }
-            let canonical_source = fs::canonicalize(&source).map_err(|_| {
-                ProjectStoreError::BadRequest(format!(
-                    "Film sound {:?} is missing its staged audio {}",
-                    sound.role, file
-                ))
-            })?;
-            if !canonical_source.starts_with(&canonical_assets) || !canonical_source.is_file() {
-                return Err(ProjectStoreError::BadRequest(format!(
-                    "Film sound {:?} resolves outside its immutable draft input",
-                    sound.role
-                )));
-            }
-            let destination = canonical_destination.join(file);
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            fs::copy(canonical_source, destination)?;
+            // Generated dialogue may reserve a filename that the harness creates later.
+            stage_draft_file(
+                &canonical_assets,
+                &canonical_destination,
+                file,
+                &sound.role,
+                "sound",
+                "audio",
+                sound.text.is_some(),
+            )?;
         }
     }
+    Ok(())
+}
+
+/// Copy one immutable draft input; described-only references are skipped by the caller.
+fn stage_draft_file(
+    draft_assets: &Path,
+    destination_root: &Path,
+    file: &str,
+    role: &str,
+    kind: &str,
+    media: &str,
+    allow_missing: bool,
+) -> ProjectStoreResult<()> {
+    if !is_safe_relative_path(file) {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Film {kind} {role:?} has an unsafe file path"
+        )));
+    }
+    let source = draft_assets.join(file);
+    if allow_missing && !source.is_file() {
+        return Ok(());
+    }
+    let canonical_source = fs::canonicalize(&source).map_err(|_| {
+        ProjectStoreError::BadRequest(format!(
+            "Film {kind} {role:?} is missing its staged {media} {file}"
+        ))
+    })?;
+    if !canonical_source.starts_with(draft_assets) || !canonical_source.is_file() {
+        return Err(ProjectStoreError::BadRequest(format!(
+            "Film {kind} {role:?} resolves outside its immutable draft input"
+        )));
+    }
+    let destination = destination_root.join(file);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(canonical_source, destination)?;
     Ok(())
 }
 
@@ -1679,8 +1682,8 @@ impl ProjectStore {
         // lazily-provisioned global pose/keypoint projects): translate a write
         // denial on the project.db migration into the actionable, path-naming
         // error instead of a raw SQLITE_READONLY (issue #1435 / sc-11855).
-        if let Err(error) = connect_project_db(project_path).and_then(|conn| {
-            apply_project_migrations(&conn)?;
+        if let Err(error) = connect_project_db_migrated(project_path).and_then(|mut connection| {
+            let conn = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             // A newly provisioned project has no legacy sidecars to backfill;
             // mark its empty index complete so the first indexed write is not
             // immediately erased by an unnecessary rebuild.
@@ -1688,6 +1691,7 @@ impl ProjectStore {
                 "insert or replace into project_metadata (key, value) values (?1, ?2)",
                 params![ASSET_INDEX_VERSION_KEY, PROJECT_SCHEMA_VERSION.to_string()],
             )?;
+            conn.commit()?;
             Ok(())
         }) {
             return Err(if is_write_denied(&error) {
@@ -4061,8 +4065,8 @@ impl ProjectStore {
         write_json(&dir.join(format!("{id}.json")), &record)?;
         maybe_fail_asset_index_db_mutation()?;
         let mut connection = connect_project_db(&project_path)?;
-        let transaction = connection.transaction()?;
-        apply_project_migrations(&transaction)?;
+        apply_project_migrations(&connection)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         transaction.execute(
             "
             insert or replace into generation_sets (id, mode, model, prompt, created_at, job_id)
@@ -5137,6 +5141,18 @@ pub fn apply_project_migrations(connection: &Connection) -> ProjectStoreResult<(
     if project_schema_version(connection)? >= PROJECT_SCHEMA_VERSION {
         return Ok(());
     }
+    // Serialize migrations across processes, then re-read: another opener may
+    // have finished the entire migration while this connection waited for the lock.
+    let transaction = Transaction::new_unchecked(connection, TransactionBehavior::Immediate)?;
+    if project_schema_version(&transaction)? >= PROJECT_SCHEMA_VERSION {
+        return Ok(());
+    }
+    migrate_project_schema(&transaction)?;
+    transaction.commit()?;
+    Ok(())
+}
+
+fn migrate_project_schema(connection: &Connection) -> ProjectStoreResult<()> {
     connection.execute_batch(
         "
         create table if not exists project_metadata (
@@ -5423,8 +5439,8 @@ fn reindex_project_path(
     backfill_upscale_variant_lineage(project_path)?;
 
     let mut connection = connect_project_db(project_path)?;
-    let transaction = connection.transaction()?;
-    apply_project_migrations(&transaction)?;
+    apply_project_migrations(&connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute("delete from assets", [])?;
     transaction.execute("delete from generation_sets", [])?;
     transaction.execute("delete from timelines", [])?;
@@ -6043,8 +6059,8 @@ fn timeline_file_path(project_path: &Path, timeline_id: &str, name: &str) -> Pat
 
 fn index_timeline(project_path: &Path, timeline: &Value, rel_path: &str) -> ProjectStoreResult<()> {
     let mut connection = connect_project_db(project_path)?;
-    let transaction = connection.transaction()?;
-    apply_project_migrations(&transaction)?;
+    apply_project_migrations(&connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
         "
         insert or replace into timelines (
@@ -6099,7 +6115,8 @@ fn remove_stale_timeline_files(
 
 fn find_timeline_file(project_path: &Path, timeline_id: &str) -> ProjectStoreResult<TimelineFile> {
     ensure_project_db_ready(project_path)?;
-    let connection = connect_project_db(project_path)?;
+    let mut db = connect_project_db_migrated(project_path)?;
+    let connection = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let indexed_path = connection
         .query_row(
             "select file_path from timelines where id = ?1",
@@ -6142,12 +6159,11 @@ fn find_timeline_file(project_path: &Path, timeline_id: &str) -> ProjectStoreRes
         };
         if timeline.get("id").and_then(Value::as_str) == Some(timeline_id) {
             let rel_path = relative_string(project_path, &candidate)?;
-            // Single-statement autocommit keeps the stale-index repair atomic; if this grows
-            // beyond one write, wrap the whole repair in an explicit transaction.
             connection.execute(
                 "update timelines set file_path = ?1 where id = ?2",
                 params![rel_path, timeline_id],
             )?;
+            connection.commit()?;
             return Ok(TimelineFile {
                 path: candidate,
                 relative_path: rel_path,
@@ -6212,7 +6228,7 @@ fn connect_project_db(project_path: &Path) -> ProjectStoreResult<Connection> {
     record_asset_list_filesystem_operation(AssetListFilesystemOperation::DbOpen);
     fs::create_dir_all(project_path)?;
     let connection = Connection::open(project_path.join("project.db"))?;
-    connection.busy_timeout(Duration::from_millis(5000))?;
+    crate::store_util::configure_connection(&connection, crate::store_util::Profile::Project)?;
     Ok(connection)
 }
 
@@ -7347,8 +7363,8 @@ fn index_asset(
     };
     maybe_fail_asset_index_db_mutation()?;
     let mut connection = connect_project_db(project_path)?;
-    let transaction = connection.transaction()?;
-    apply_project_migrations(&transaction)?;
+    apply_project_migrations(&connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     index_asset_on_connection(
         &transaction,
         project_id,
@@ -7375,8 +7391,8 @@ fn find_asset_sidecar_path(
 fn purge_asset_record(project_path: &Path, asset_id: &str) -> ProjectStoreResult<()> {
     maybe_fail_asset_index_db_mutation()?;
     let mut connection = connect_project_db(project_path)?;
-    let transaction = connection.transaction()?;
-    apply_project_migrations(&transaction)?;
+    apply_project_migrations(&connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute("delete from assets where id = ?1", params![asset_id])?;
     transaction.commit()?;
     Ok(())
@@ -7601,8 +7617,8 @@ const ORPHANED_SIDECAR_DIR: &str = ".orphaned-sidecars";
 fn prune_orphaned_asset_rows(project_path: &Path) -> ProjectStoreResult<usize> {
     let _guard = lock_project_files(project_path);
     let mut connection = connect_project_db(project_path)?;
-    let transaction = connection.transaction()?;
-    apply_project_migrations(&transaction)?;
+    apply_project_migrations(&connection)?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     // (asset id, media path, orphaned sidecar to quarantine) for every row whose media is gone.
     let orphans: Vec<(String, String, Option<PathBuf>)> = {
         let mut statement =
@@ -8307,6 +8323,303 @@ mod tests {
             1,
             "the synchronized cache should perform one disk read"
         );
+    }
+
+    #[test]
+    fn stage_draft_file_preserves_media_rules_and_rejects_escapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        let source = fs::canonicalize(source).unwrap();
+        fs::create_dir_all(&destination).unwrap();
+        fs::write(source.join("nested/image.png"), b"reference fixture").unwrap();
+        fs::write(source.join("clip.wav"), b"audio fixture").unwrap();
+        super::stage_draft_file(
+            &source,
+            &destination,
+            "nested/image.png",
+            "hero",
+            "reference",
+            "image",
+            false,
+        )
+        .unwrap();
+        super::stage_draft_file(
+            &source,
+            &destination,
+            "clip.wav",
+            "music",
+            "sound",
+            "audio",
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(destination.join("nested/image.png")).unwrap(),
+            b"reference fixture"
+        );
+        assert_eq!(
+            fs::read(destination.join("clip.wav")).unwrap(),
+            b"audio fixture"
+        );
+        super::stage_draft_file(
+            &source,
+            &destination,
+            "dialogue.wav",
+            "speech",
+            "sound",
+            "audio",
+            true,
+        )
+        .unwrap();
+        assert!(!destination.join("dialogue.wav").exists());
+        let error = super::stage_draft_file(
+            &source,
+            &destination,
+            "missing.wav",
+            "music",
+            "sound",
+            "audio",
+            false,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("missing its staged audio missing.wav"));
+        for (kind, media) in [("reference", "image"), ("sound", "audio")] {
+            let error = super::stage_draft_file(
+                &source,
+                &destination,
+                "../escape",
+                "role",
+                kind,
+                media,
+                true,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("unsafe file path"));
+            #[cfg(unix)]
+            {
+                let outside = temp.path().join(format!("outside-{kind}"));
+                fs::write(&outside, b"outside").unwrap();
+                let link = format!("link-{kind}");
+                std::os::unix::fs::symlink(&outside, source.join(&link)).unwrap();
+                let error = super::stage_draft_file(
+                    &source,
+                    &destination,
+                    &link,
+                    "role",
+                    kind,
+                    media,
+                    false,
+                )
+                .unwrap_err();
+                assert!(error
+                    .to_string()
+                    .contains("outside its immutable draft input"));
+            }
+        }
+    }
+
+    // Real processes bypass the in-process project mutex. These fixtures perform
+    // only SQLite/control work; the voice vector is opaque stored fixture data.
+    fn spawn_project_db_child(project: &Path, mode: &str, token: &str) -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "project_store::tests::project_db_cross_process_child",
+                "--nocapture",
+            ])
+            .env("SW_PROJECT_DB_CHILD", mode)
+            .env("SW_PROJECT_DB_PATH", project)
+            .env("SW_PROJECT_DB_TOKEN", token)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    fn wait_for_db_child_marker(path: &Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while !path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child marker missing: {}",
+                path.display()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn assert_db_child_succeeded(child: std::process::Child) {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {} {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn project_db_cross_process_child() {
+        let Ok(mode) = std::env::var("SW_PROJECT_DB_CHILD") else {
+            return;
+        };
+        let project = std::path::PathBuf::from(std::env::var_os("SW_PROJECT_DB_PATH").unwrap());
+        let token = std::env::var("SW_PROJECT_DB_TOKEN").unwrap();
+        if mode == "hold" {
+            let connection = connect_project_db(&project).unwrap();
+            let transaction = rusqlite::Transaction::new_unchecked(
+                &connection,
+                rusqlite::TransactionBehavior::Immediate,
+            )
+            .unwrap();
+            fs::write(project.join(format!("{token}.ready")), b"ready").unwrap();
+            wait_for_db_child_marker(&project.join(format!("{token}.release")));
+            transaction.commit().unwrap();
+        } else {
+            let connection = connect_project_db(&project).unwrap();
+            if mode == "migrate" {
+                assert_eq!(super::project_schema_version(&connection).unwrap(), 2);
+            }
+            fs::write(project.join(format!("{token}.ready")), b"ready").unwrap();
+            if mode == "migrate" {
+                apply_project_migrations(&connection).unwrap();
+                // A repeat must be a no-op, including when another process won.
+                apply_project_migrations(&connection).unwrap();
+            } else if mode == "deferred" {
+                // Reproduce the original lock upgrade with a real competing process.
+                let transaction = connection.unchecked_transaction().unwrap();
+                transaction
+                    .query_row("select count(*) from project_metadata", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap();
+                let error = transaction.execute("insert into project_metadata (key, value) values ('deferred-fixture', '1')", []).unwrap_err();
+                assert!(
+                    matches!(error, rusqlite::Error::SqliteFailure(ref sqlite, _) if sqlite.code == rusqlite::ErrorCode::DatabaseBusy)
+                );
+            } else {
+                let store = crate::voice_store::SavedVoiceStore::new(&project);
+                store
+                    .create_saved_voice(
+                        "project_fixture",
+                        crate::voice_store::SavedVoiceCreateInput {
+                            name: "Fixture voice".to_owned(),
+                            reference_audio_asset_id: "asset_fixture".to_owned(),
+                            embedding: vec![0.0; crate::voice_store::VOICE_EMBEDDING_DIM],
+                        },
+                        0.92,
+                    )
+                    .unwrap();
+            }
+        }
+        fs::write(project.join(format!("{token}.done")), b"done").unwrap();
+    }
+
+    #[test]
+    fn project_writer_waits_for_other_process_before_read_then_write() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connection = connect_project_db(temp.path()).unwrap();
+        apply_project_migrations(&connection).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        assert_db_child_succeeded(spawn_project_db_child(temp.path(), "deferred", "upgrade"));
+        let mut child = spawn_project_db_child(temp.path(), "voice", "writer");
+        wait_for_db_child_marker(&temp.path().join("writer.ready"));
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "read-before-write mutator must wait for the competing writer"
+        );
+        assert!(!temp.path().join("writer.done").exists());
+        transaction.commit().unwrap();
+        assert_db_child_succeeded(child);
+        assert_eq!(
+            connection
+                .query_row("select count(*) from saved_voices", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn project_migrations_are_idempotent_across_waiting_processes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut connection = connect_project_db(temp.path()).unwrap();
+        connection
+            .execute_batch(
+                "create table training_datasets (
+            id text primary key, project_id text not null, name text not null,
+            modality text not null, status text not null, version integer not null,
+            file_path text not null, created_at text not null, updated_at text not null);
+            pragma user_version = 2;",
+            )
+            .unwrap();
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        let mut children = [
+            spawn_project_db_child(temp.path(), "migrate", "first"),
+            spawn_project_db_child(temp.path(), "migrate", "second"),
+        ];
+        for token in ["first", "second"] {
+            wait_for_db_child_marker(&temp.path().join(format!("{token}.ready")));
+        }
+        std::thread::sleep(Duration::from_millis(150));
+        for child in &mut children {
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "migration must wait for the cross-process lock"
+            );
+        }
+        transaction.commit().unwrap();
+        for child in children {
+            assert_db_child_succeeded(child);
+        }
+        assert_eq!(
+            super::project_schema_version(&connection).unwrap(),
+            PROJECT_SCHEMA_VERSION
+        );
+        connection
+            .prepare("select character_id, item_count from training_datasets")
+            .unwrap();
+        assert!(
+            connection.is_autocommit(),
+            "migration leaves no transaction open"
+        );
+        // A normal mutator after migration must never nest a migration transaction.
+        index_timeline(
+            temp.path(),
+            &json!({"id":"timeline_fixture"}),
+            "timelines/fixture.json",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn project_migration_timeout_preserves_typed_sqlite_busy_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let connection = connect_project_db(temp.path()).unwrap();
+        let child = spawn_project_db_child(temp.path(), "hold", "holder");
+        wait_for_db_child_marker(&temp.path().join("holder.ready"));
+        connection.busy_timeout(Duration::from_millis(100)).unwrap();
+        let error = apply_project_migrations(&connection).unwrap_err();
+        fs::write(temp.path().join("holder.release"), b"release").unwrap();
+        assert_db_child_succeeded(child);
+        assert!(
+            matches!(error, ProjectStoreError::Sqlite(rusqlite::Error::SqliteFailure(ref sqlite, _)) if sqlite.code == rusqlite::ErrorCode::DatabaseBusy)
+        );
+        assert_eq!(
+            super::project_schema_version(&connection).unwrap(),
+            0,
+            "failed migration must not partially stamp the schema"
+        );
+        apply_project_migrations(&connection).unwrap();
     }
 
     /// sc-2022 added `training_datasets.character_id` to the migration without

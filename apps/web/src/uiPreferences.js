@@ -1,3 +1,4 @@
+import { backoffDelay } from "./retry.js";
 // The single client seam for writing the durable UI-preferences blob (sc-15136).
 //
 // `/api/v1/ui-preferences` is METHOD-ASYMMETRIC on the server (sc-8869, F-067 —
@@ -69,10 +70,7 @@ const NAVIGATION_WRITE_RETRY_BASE_DELAY_MS = 100;
 const NAVIGATION_WRITE_RETRY_MAX_DELAY_MS = 1000;
 
 function navigationWriteRetryDelay(attempt) {
-  return Math.min(
-    NAVIGATION_WRITE_RETRY_MAX_DELAY_MS,
-    NAVIGATION_WRITE_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
-  );
+  return backoffDelay(attempt - 1, { baseMs: NAVIGATION_WRITE_RETRY_BASE_DELAY_MS, maxMs: NAVIGATION_WRITE_RETRY_MAX_DELAY_MS });
 }
 
 function waitForNavigationWriteRetry(attempt) {

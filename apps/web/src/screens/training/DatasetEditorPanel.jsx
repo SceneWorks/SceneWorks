@@ -119,7 +119,7 @@ export function DatasetEditorPanel({
   } = captionSession;
   const { datasetDoctor, readinessByKey, onToggleItemAck } = doctorSession;
   const {
-    imageAssets, characters, associatedCharacterId, setActiveView, importingAssets,
+    imageAssets, characters, associatedCharacterId, setActiveView, importingAssets, importProgress, onCancelImport,
     gpuOptions, onUploadPreparedBundle, onIrisSidecar,
   } = config;
   const {
@@ -771,6 +771,9 @@ export function DatasetEditorPanel({
           assets={imageAssets}
           characters={characters}
           importing={importingAssets}
+          importProgress={importProgress}
+          importError={datasetError}
+          onCancelImport={onCancelImport}
           memberIds={selectedAssetIds}
           onAdd={addAssets}
           onClose={() => setAddDialogOpen(false)}
@@ -788,17 +791,28 @@ export function DatasetEditorPanel({
           fileAccept="image/*"
           fileHint="Drop files, or"
           importing={importingAssets}
+          importProgress={importProgress}
+          importError={datasetError}
+          onCancelImport={onCancelImport}
           // Never offer the item's own image or a reference it already has.
           memberIds={[referencePickerFor.selectionId, ...(referenceDraftById[referencePickerFor.selectionId] ?? [])]}
           onAdd={(ids) => {
-            addItemReferences?.(referencePickerFor.selectionId, ids);
+            const result = addItemReferences?.(referencePickerFor.selectionId, ids);
+            if (!result?.dropped) {
+              if (importingAssets) onCancelImport?.();
+              setReferencePickerFor(null);
+            }
+            return result;
+          }}
+          onClose={() => {
+            if (importingAssets) onCancelImport?.();
             setReferencePickerFor(null);
           }}
-          onClose={() => setReferencePickerFor(null)}
           onImport={async (files) => {
-            const { selectionId } = referencePickerFor;
-            setReferencePickerFor(null);
-            await importItemReferences?.(selectionId, files);
+            const picker = referencePickerFor;
+            const result = await importItemReferences?.(picker.selectionId, files);
+            if (result?.complete) setReferencePickerFor((current) => current === picker ? null : current);
+            return result;
           }}
           title={`Add reference images to ${referencePickerFor.name}`}
         />

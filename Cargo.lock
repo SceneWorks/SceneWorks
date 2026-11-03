@@ -7371,6 +7371,7 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "http",
+ "if-addrs",
  "image",
  "percent-encoding",
  "reqwest 0.12.28",
