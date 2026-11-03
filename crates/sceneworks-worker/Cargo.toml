@@ -10,14 +10,14 @@ publish = false
 # in manifest.rs. The default utility pool is 4 SEPARATE PROCESSES, so an in-process
 # mutex can't stop two parallel installs from clobbering each other's manifest entry
 # (F-041 / sc-8843). Already the workspace's file-lock choice (apps/rust-api).
-fs2 = "0.4"
+fs2 = { workspace = true }
 # Inline `data:image/jpeg` preview frames in job progress (epic 16624, sc-16904): a ~128×128
 # per-step latent preview rides ProgressRequest.result as a data URL, so no file lifecycle.
-base64 = "0.22"
+base64 = { workspace = true }
 cssparser = "0.36"
 simplecss = "0.2"
-futures-util = "0.3"
-glob = "0.3"
+futures-util = { workspace = true, default-features = true }
+glob = { workspace = true }
 # png to encode generated assets (epic 3018, sc-3020); jpeg/webp to decode reference/source
 # images for the FLUX.2 edit path (sc-3029) — uploads aren't only PNG. Pure-Rust and
 # cross-platform (the image-job pipeline + its tests run everywhere; only real MLX inference
@@ -33,17 +33,17 @@ resvg = { version = "0.45", default-features = false }
 # (rotated-ellipse limbs), circles (joints/points), for the Z-Image strict-pose
 # ControlNet. Pure-Rust + cross-platform (the renderer + its tests run everywhere;
 # only the MLX control generation is macOS-gated). Pinned to the image 0.25 line.
-imageproc = { version = "0.25", default-features = false }
+imageproc = { workspace = true }
 # URL/caption and prepared-image Parquet ingest for bring-your-own ControlNet
 # datasets (sc-10898/sc-10899). Keep Arrow disabled: the record reader lets us
 # stream only the bounded import window without pulling the full Arrow compute
 # stack into every worker binary. `snap` is required for LAION's
 # `*.snappy.parquet` shards. Version 60 bounds malformed metadata list lengths
 # before allocation and removes the vulnerable external `thrift` dependency.
-parquet = { version = "60.0", default-features = false, features = ["snap"] }
-nix = { version = "0.29", default-features = false, features = ["process", "signal"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+parquet = { workspace = true }
+nix = { workspace = true, features = ["process"] }
+reqwest = { workspace = true, features = ["json", "stream"] }
+rusqlite = { workspace = true }
 sceneworks-core = { path = "../sceneworks-core" }
 # Backend-neutral inference contracts; pinned with both platform bundles to one canonical commit.
 sceneworks-gen-core = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
@@ -56,23 +56,28 @@ sceneworks-gen-core-train = { git = "https://github.com/SceneWorks/inference", r
 sceneworks-gen-core-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
 # Default-off native execution receipts for the API's CPU-only integration witness.
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", optional = true }
+# The shared Candle training validator is a weights-free contract dependency. Keeping this direct
+# lets SceneWorks dry-run preflight use the exact optimizer/timestep/bias/loss parser the production
+# family trainers use instead of maintaining a second, inevitably drifting enum mirror.
 candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-sha2 = "0.10"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
 same-file = "1.0"
-tempfile = "3.13"
+tempfile = { workspace = true }
 tracing = { workspace = true }
-tokio = { version = "1.40", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "time"] }
-uuid = { version = "1.11", features = ["v4"] }
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "signal", "time"], default-features = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 sceneworks-core = { path = "../sceneworks-core", features = ["test-support"] }
-axum = "0.7"
+axum = { workspace = true }
 sceneworks-gen-core-testkit = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
 quote = "1.0"
-syn = { version = "2.0", features = ["full"] }
-tower = { version = "0.5", features = ["util"] }
+proc-macro2 = "1.0"
+syn = { version = "2.0", features = ["full", "visit"] }
+toml = "0.8"
+tower = { workspace = true }
 # Dev-only stdout subscriber so the residency/fit-gate tests can surface their `tracing::info!`
 # events under --nocapture (e.g. `mlx_sequential_residency_selected`). sc-10863.
 tracing-subscriber = { workspace = true }
@@ -91,7 +96,7 @@ model-inference-proof = ["backend-candle", "test-support", "candle-gen/model-inf
 test-support = ["sceneworks-core/test-support", "dep:mlx-gen-moss-image", "dep:candle-gen-moss-image", "dep:sceneworks-gen-core-testkit"]
 # Native Candle inference stays opt-in because CUDA toolchain/runtime requirements do not belong in
 # the ordinary desktop build. The bundle owns the complete provider and LLM composition.
-backend-candle = ["dep:runtime-cuda", "dep:candle-gen", "dep:candle-gen-ltx", "dep:ort"]
+backend-candle = ["dep:runtime-cuda", "dep:candle-gen-ltx", "dep:ort"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mlx-gen-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", default-features = false, features = ["test-support"], optional = true }
@@ -131,10 +136,6 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 candle-gen-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", default-features = false, features = ["test-support"], optional = true }
 # Canonical NVIDIA inference composition; enabled only by `backend-candle`.
 runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", optional = true }
-# The shared Candle training validator is a weights-free contract dependency. Keeping this direct
-# lets SceneWorks dry-run preflight use the exact optimizer/timestep/bias/loss parser the production
-# family trainers use instead of maintaining a second, inevitably drifting enum mirror.
-candle-gen = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", optional = true }
 # Candle parity for the same weights-free LTX-2.5 prepared-request validation.
 candle-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", optional = true }
 # DWPose whole-body pose detection off-Mac (sc-5496, epic 5482) — the Windows/Linux/CUDA sibling of the
