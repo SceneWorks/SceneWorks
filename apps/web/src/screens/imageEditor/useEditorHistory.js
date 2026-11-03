@@ -1,6 +1,6 @@
 import { emptyHistory, historyCheckpoint, historyUndo, historyRedo, canUndo, canRedo, runGuardedRestore } from "./history.js";
 import { blobToImage } from "../../imageDimensions.js";
-import { useCallback, useRef, useState } from "react";
+import { useInsertionEffect, useCallback, useRef, useState } from "react";
 import { createLayer, sameLayerStack, snapshotLayers } from "../../imageLayers.js";
 
 // Extracted from ImageEditor along its existing concern boundary.
@@ -78,8 +78,8 @@ export function useEditorHistory({
     syncHistoryFlags();
   }, [captureSnapshot, syncHistoryFlags, workingRef]);
 
-  // Keep the tool hooks' bridge pointed at the latest checkpoint (sc-9752).
-  checkpointRef.current = checkpoint;
+  // Keep the tool hooks' bridge pointed at the committed checkpoint (sc-9752).
+  useInsertionEffect(() => { checkpointRef.current = checkpoint; }, [checkpointRef, checkpoint]);
 
   // Start a fresh history for a newly opened session (clears both stacks).
   const resetHistory = useCallback(() => {
