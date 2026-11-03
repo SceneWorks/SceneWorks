@@ -17,20 +17,20 @@ function runStatus(run) {
   return run.record.stop?.reason || run.record.outcome || run.record.state;
 }
 
-export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId = "", token, setNotice }) {
+export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId = "", runActive = false, screenActive = true, token, setNotice }) {
   const [runs, setRuns] = useState([]);
   const [planning, setPlanning] = useState(null);
   const [pending, setPending] = useState("");
   const refreshRequest = useRef(0);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (signal) => {
     if (!projectId || !draftId) return;
     const requestId = ++refreshRequest.current;
     const [runResult, planningResult] = await Promise.allSettled([
-      listFilmRuns(projectId, token),
-      getFilmPlanning(projectId, draftId, token),
+      listFilmRuns(projectId, token, { signal }),
+      getFilmPlanning(projectId, draftId, token, { signal }),
     ]);
-    if (refreshRequest.current !== requestId) return;
+    if (signal?.aborted || refreshRequest.current !== requestId) return;
     if (runResult.status === "fulfilled") {
       const listed = Array.isArray(runResult.value) ? runResult.value : [];
       const scoped = listed.filter((run) => run.locator.draftId === draftId);
@@ -42,18 +42,32 @@ export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId =
     if (planningResult.status === "fulfilled") setPlanning(planningResult.value);
   }, [draftId, onRunChange, projectId, setNotice, token]);
 
+  const [visible, setVisible] = useState(() => !document.hidden);
   useEffect(() => {
-    let canceled = false;
-    refresh();
-    const interval = window.setInterval(() => {
-      if (!canceled) refresh();
-    }, 2000);
-    return () => {
-      canceled = true;
-      refreshRequest.current += 1;
-      window.clearInterval(interval);
-    };
-  }, [refresh]);
+    const changed = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
+
+  useEffect(() => {
+    if (!screenActive || !visible) return undefined;
+    const controller = new AbortController();
+    refresh(controller.signal);
+    return () => { controller.abort(); refreshRequest.current += 1; };
+  }, [refresh, screenActive, visible, selectedRunId]);
+
+  const active = runActive || runs.some((run) => run.controllerActive) || ["running", "canceling"].includes(planning?.status);
+  useEffect(() => {
+    if (!screenActive || !visible || !active) return undefined;
+    const controller = new AbortController();
+    let timer;
+    async function poll() {
+      await refresh(controller.signal);
+      if (!controller.signal.aborted) timer = window.setTimeout(poll, 1000);
+    }
+    timer = window.setTimeout(poll, 1000);
+    return () => { controller.abort(); refreshRequest.current += 1; window.clearTimeout(timer); };
+  }, [active, refresh, screenActive, visible]);
 
   async function mutate(runId, action) {
     // A list read started before this mutation cannot overwrite the accepted controller snapshot.

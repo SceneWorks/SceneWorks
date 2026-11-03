@@ -821,6 +821,7 @@ export function EditorScreen() {
   const modeSwitch = <><EditorModeSwitch mode={mode} onChange={changeMode} /><EditorGuides /></>;
   const filmWorkspace = (
     <FilmWorkspace
+      screenActive={screenActive}
       mode={mode}
       modeSwitch={modeSwitch}
       blankTimelineLabel={timelines?.length ? "Open Timeline" : "New timeline"}
