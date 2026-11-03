@@ -256,6 +256,41 @@ describe("makeCreateJob", () => {
       unregister();
     });
 
+    it("awaits one owned retry for a detailed submission", async () => {
+      const job = { id: "recovered", status: "queued" };
+      apiFetch.mockRejectedValueOnce(unavailableRejection()).mockResolvedValue(job);
+      const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+      const unregister = setModelLibraryHandler(gate.block);
+      const creator = makeCreateJob({
+        definition: CREATE_JOB_DEFINITIONS.image, token: "", project, requestedGpu: "auto",
+        setJobs: vi.fn(), setError: vi.fn(),
+      });
+      const result = creator.withResult([{ prompt: "x" }]);
+      await vi.waitFor(() => expect(gate.getState().status).toBe("blocked"));
+      await Promise.all([gate.retry(), gate.retry()]);
+      await expect(result).resolves.toEqual({ job });
+      expect(apiFetch).toHaveBeenCalledTimes(2);
+      unregister();
+    });
+
+    it("releases a detailed submission when the dialog is cancelled during a probe", async () => {
+      apiFetch.mockRejectedValue(unavailableRejection());
+      let finishProbe;
+      const gate = createModelLibraryGate({ probe: () => new Promise((resolve) => { finishProbe = resolve; }) });
+      const unregister = setModelLibraryHandler(gate.block);
+      const creator = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image, token: "", project,
+        requestedGpu: "auto", setJobs: vi.fn(), setError: vi.fn() });
+      const result = creator.withResult([{ prompt: "x" }]);
+      await vi.waitFor(() => expect(gate.getState().status).toBe("blocked"));
+      const retry = gate.retry();
+      gate.cancel();
+      await expect(result).resolves.toEqual({ error: expect.stringContaining("external model library"), stop: true });
+      finishProbe({ available: true });
+      await retry;
+      expect(apiFetch).toHaveBeenCalledTimes(1);
+      unregister();
+    });
+
     it("leaves no queued submission behind when the prompt is cancelled", async () => {
       apiFetch.mockRejectedValue(unavailableRejection());
       const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
