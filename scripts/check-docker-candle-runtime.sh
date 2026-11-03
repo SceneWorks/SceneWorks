@@ -93,7 +93,7 @@ for identity in default override; do
   docker run -d --name "${api}" --network "${network}" --network-alias api \
     --user "${uid}:${gid}" --entrypoint sceneworks-rust-api "${common_args[@]}" \
     -e HOME=/smoke/data -e SCENEWORKS_API_HOST=0.0.0.0 -e SCENEWORKS_API_PORT=8010 \
-    -e SCENEWORKS_CANDLE_REQUIRED=0 "${api_image}" >/dev/null
+    -e SCENEWORKS_MCP_ALLOWED_HOSTS=api -e SCENEWORKS_CANDLE_REQUIRED=0 "${api_image}" >/dev/null
   ready=0
   for ((attempt=0; attempt<40; attempt++)); do
     if docker exec "${api}" curl -fsS --max-time 2 http://127.0.0.1:8010/api/v1/health >/dev/null 2>&1; then ready=1; break; fi

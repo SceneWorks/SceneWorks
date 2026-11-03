@@ -28,6 +28,7 @@
 //! status by its `code()` and carried in `context.reason` so a client branches on the code rather
 //! than on prose.
 
+use crate::ApiJson;
 use axum::extract::{ConnectInfo, Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -268,9 +269,9 @@ pub(crate) async fn list_library_roots(
 pub(crate) async fn approve_library_root(
     State(state): State<AppState>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
-    Json(request): Json<ApproveLibraryRootRequest>,
+    ApiJson(request): ApiJson<ApproveLibraryRootRequest>,
 ) -> Result<(StatusCode, Json<LibraryRootView>), ApiError> {
-    require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
+    require_local_library_change(connect_info.map(|ConnectInfo(addr)| addr))?;
     let path = required_path(&request.path)?;
     let label = request.label.as_deref().map(str::trim).map(str::to_owned);
     let store = open_store(&state);
@@ -291,7 +292,7 @@ pub(crate) async fn update_library_root(
     State(state): State<AppState>,
     Path(root_id): Path<String>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
-    Json(request): Json<UpdateLibraryRootRequest>,
+    ApiJson(request): ApiJson<UpdateLibraryRootRequest>,
 ) -> Result<Json<LibraryRootView>, ApiError> {
     let label = request.label.as_deref().map(str::trim).map(str::to_owned);
     let path = match request.path.as_deref().map(str::trim) {
@@ -306,7 +307,7 @@ pub(crate) async fn update_library_root(
     }
     if path.is_some() {
         // Only the relink half names a host path, so only it is local-only.
-        require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
+        require_local_library_change(connect_info.map(|ConnectInfo(addr)| addr))?;
     }
     let store = open_store(&state);
     let root = blocking(move || {
@@ -337,7 +338,7 @@ pub(crate) async fn remove_library_root(
     // carry. Approving and relinking are gated because they name a host path; forgetting a library
     // destroys the plans, records and derivatives that path produced, which is no less a host-state
     // change, and leaving it open let a remote caller tear down a library it could not have added.
-    require_local_peer(connect_info.map(|ConnectInfo(addr)| addr))?;
+    require_local_library_change(connect_info.map(|ConnectInfo(addr)| addr))?;
     let data_dir = state.settings.data_dir.clone();
     let (removal, derivatives) = tokio::task::spawn_blocking(move || {
         CheckpointDerivativeStore::open(&data_dir)?.remove_root(&root_id)
@@ -384,7 +385,7 @@ pub(crate) async fn scan_library_root(
 pub(crate) async fn rescan_library_checkpoint(
     State(state): State<AppState>,
     Path(root_id): Path<String>,
-    Json(request): Json<RescanCheckpointRequest>,
+    ApiJson(request): ApiJson<RescanCheckpointRequest>,
 ) -> Result<Json<LinkedCheckpointStatusV1>, ApiError> {
     let relative_path = request.relative_path.trim().to_owned();
     if relative_path.is_empty() {
@@ -567,17 +568,16 @@ fn required_path(path: &str) -> Result<PathBuf, ApiError> {
 /// local operations only — the same rule the model-library relocation seam applies, and for the
 /// same two reasons: the typed refusals are a filesystem-existence oracle, and a token-holding LAN
 /// client could otherwise re-point a shared server's library. A missing peer fails closed.
-fn require_local_peer(peer: Option<SocketAddr>) -> Result<(), ApiError> {
-    if peer.is_some_and(|addr| addr.ip().is_loopback()) {
-        return Ok(());
-    }
-    Err(ApiError::typed(
+fn require_local_library_change(peer: Option<SocketAddr>) -> Result<(), ApiError> {
+    crate::auth::require_local_peer(peer, || {
+        ApiError::typed(
         StatusCode::FORBIDDEN,
         "A model library can only be added, relinked, or forgotten from SceneWorks running on this \
          machine.",
         CHECKPOINT_LIBRARY_NOT_PERMITTED_CODE,
         json!({ "reason": "not_a_local_client" }),
-    ))
+    )
+    })
 }
 
 fn derivative_error_to_api_error(error: CheckpointDerivativeError) -> ApiError {

@@ -19,6 +19,12 @@ use tower::ServiceExt as _;
 
 use super::support::*;
 
+// Catalog host-path selection is a local operation. Explicit remote regressions
+// use request_with_peer_headers instead of this local UI fixture.
+async fn request(app: axum::Router, method: &str, uri: &str, body: Value) -> (StatusCode, Value) {
+    request_with_peer(app, method, uri, body, "127.0.0.1:50000").await
+}
+
 fn catalog_scan_hook_test_lock() -> &'static TestSerializationLock {
     static LOCK: OnceLock<TestSerializationLock> = OnceLock::new();
     LOCK.get_or_init(|| {
