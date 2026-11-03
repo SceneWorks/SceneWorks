@@ -276,7 +276,6 @@ mod mlx_worker_recovery;
 // gen-core's typed execution domains (graph-eval cadence, FFN chunk, CFG batching) from what each
 // provider declares. Backend-neutral and typed entirely against `gen_core::*`, so it links on all
 // targets exactly like `generator_cache`; off macOS its production callers are cfg'd out.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod execution_planner;
 // Resident-model cache for the native prompt-refine / caption / describe LLM (sc-8840, F-038): the
 // text-LLM sibling of `generator_cache`. Typed entirely against the tensor-free
@@ -338,9 +337,7 @@ pub mod memory_strategy;
 // `sceneworks_core::video_request`'s selector seam by calling `memory_strategy::select_strategy`.
 // Cross-platform on purpose — the video lane spans both backends and the gate must not imply the
 // two are symmetric, so one module serves both and names the difference explicitly.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_fit_gate;
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod mlx_phase_estimate;
 #[cfg_attr(not(native_lane), allow(dead_code))]
 mod video_admission;

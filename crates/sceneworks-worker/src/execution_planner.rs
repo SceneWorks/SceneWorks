@@ -354,6 +354,7 @@ fn differs_in_execution(loaded: ExecutionPolicy, requested: ExecutionPolicy) -> 
 /// Both `reopenability` (a property of the SOURCE) and `attestation` (a property of the loaded
 /// INSTANCE) must admit the switch. They answer different questions and either one alone is
 /// insufficient — see the doc comments on both types.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) fn decide_warm_policy(
     loaded: ExecutionPolicy,
     requested: ExecutionPolicy,
@@ -414,6 +415,7 @@ pub(crate) fn decide_warm_policy(
 /// than a silently dropped observation.
 #[must_use = "a warm-policy proposal must be settled or declined, or the decision goes unreported"]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 pub(crate) struct WarmPolicyProposal {
     engine_id: &'static str,
     decision: WarmPolicyDecision,
@@ -948,7 +950,6 @@ pub(crate) fn plan_prefix_kv_cache<T>(
 ///
 /// Gated on the provider's declaration as well as its id, so a provider that stops declaring
 /// `Cached` stops being priced for it.
-#[allow(unused_variables)]
 pub(crate) fn prefix_kv_cache_surcharge_bytes(
     engine_id: &str,
     surface: &ExecutionSurface,
@@ -985,6 +986,7 @@ pub(crate) fn prefix_kv_cache_surcharge_bytes(
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
+        let _ = tier_quant;
         Some(
             runtime_cuda::providers::qwen_image_2_1::memory_strategy::prefix_kv_cache_demand_bytes(
                 width,
@@ -996,6 +998,7 @@ pub(crate) fn prefix_kv_cache_surcharge_bytes(
     }
     #[cfg(not(native_lane))]
     {
+        let _ = (tier_quant, width, height, reference_count, negative_branch);
         None
     }
 }
