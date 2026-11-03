@@ -21,7 +21,7 @@ const scanResult = vi.fn();
 const rescan = vi.fn();
 const update = vi.fn();
 
-vi.mock("../checkpointLibrary.js", async (importOriginal) => {
+vi.mock("../../checkpointLibrary.js", async (importOriginal) => {
   const actual = await importOriginal();
   return {
     ...actual,
@@ -33,10 +33,10 @@ vi.mock("../checkpointLibrary.js", async (importOriginal) => {
 });
 
 const appConfirm = vi.fn(async () => true);
-vi.mock("../appConfirm.jsx", () => ({ appConfirm: (...args) => appConfirm(...args) }));
+vi.mock("../../appConfirm.jsx", () => ({ appConfirm: (...args) => appConfirm(...args) }));
 
 const loadCredentials = vi.fn(async () => []);
-vi.mock("../credentials.js", async (importOriginal) => {
+vi.mock("../../credentials.js", async (importOriginal) => {
   const actual = await importOriginal();
   return { ...actual, loadCredentials: (...args) => loadCredentials(...args) };
 });
@@ -92,8 +92,8 @@ describe("ModelManagerScreen linked state and ownership-aware removal (sc-20650)
     deleteModel = vi.fn(async () => ({ removedManifestEntry: true }));
     window.__TAURI__ = { core: { invoke: vi.fn(async () => "/Volumes/Moved") } };
     vi.resetModules();
-    ({ AppContext } = await import("../context/AppContext.js"));
-    ({ ModelManagerScreen } = await import("./ModelManagerScreen.jsx"));
+    ({ AppContext } = await import("../../context/AppContext.js"));
+    ({ ModelManagerScreen } = await import("../ModelManagerScreen.jsx"));
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
