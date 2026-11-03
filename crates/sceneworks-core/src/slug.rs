@@ -27,6 +27,29 @@ pub fn slugify(value: &str, fallback: &str, max_length: Option<usize>) -> String
     slug
 }
 
+/// Worker routing identifiers preserve ASCII case, dots and underscores.
+pub fn slugify_worker_id_part(value: &str, fallback: &str) -> String {
+    let mut output = String::new();
+    let mut previous_dash = false;
+    for character in value.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
+            output.push(character);
+            previous_dash = false;
+        } else if !previous_dash && !output.is_empty() {
+            output.push('-');
+            previous_dash = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() {
+        fallback.to_owned()
+    } else {
+        output
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::slugify;
@@ -67,28 +90,5 @@ mod tests {
     fn truncation_shorter_than_the_full_slug_still_yields_a_clean_prefix() {
         assert_eq!(slugify("hello world", "fallback", Some(5)), "hello");
         assert_eq!(slugify("hello world", "fallback", Some(100)), "hello-world");
-    }
-}
-
-/// Worker routing identifiers preserve ASCII case, dots and underscores.
-pub fn slugify_worker_id_part(value: &str, fallback: &str) -> String {
-    let mut output = String::new();
-    let mut previous_dash = false;
-    for character in value.chars() {
-        if character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | '-') {
-            output.push(character);
-            previous_dash = false;
-        } else if !previous_dash && !output.is_empty() {
-            output.push('-');
-            previous_dash = true;
-        }
-    }
-    while output.ends_with('-') {
-        output.pop();
-    }
-    if output.is_empty() {
-        fallback.to_owned()
-    } else {
-        output
     }
 }
