@@ -1434,16 +1434,6 @@ button:focus-visible {
   gap: 2px;
 }
 
-.style-picker-group-label {
-  margin: 6px 0 2px;
-  padding: 0 10px;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
 /* ---------- Two-level (group → style) cascade (sc-13171) ---------- */
 .style-picker-level {
   display: grid;
@@ -2245,9 +2235,6 @@ label {
 .form-row button,
 .queue-chip,
 .job-composer button,
-.timeline-create button,
-.playback-bar button,
-.bin-actions button,
 .advanced-toggle,
 .detail-actions button,
 .asset-tag-form button,
@@ -2258,9 +2245,7 @@ label {
 .modal-close,
 .asset-picker-head button,
 .asset-picker-footer .detail-actions button,
-.hook-actions button,
 .version-list button,
-.bin-actions button,
 .secondary-action,
 .danger-action,
 .inline-create > button,
@@ -2286,9 +2271,6 @@ label {
 .form-row button:hover:not(:disabled),
 .queue-chip:hover:not(:disabled),
 .job-composer button:hover:not(:disabled),
-.timeline-create button:hover:not(:disabled),
-.playback-bar button:hover:not(:disabled),
-.bin-actions button:hover:not(:disabled),
 .advanced-toggle:hover:not(:disabled),
 .detail-actions button:hover:not(:disabled),
 .asset-tag-form button:hover:not(:disabled),
@@ -2298,7 +2280,6 @@ label {
 .file-upload-button:hover,
 .modal-close:hover:not(:disabled),
 .asset-picker-head button:hover:not(:disabled),
-.hook-actions button:hover:not(:disabled),
 .version-list button:hover:not(:disabled),
 .secondary-action:hover:not(:disabled),
 .inline-create > button:hover:not(:disabled),
@@ -2515,12 +2496,7 @@ label {
 .toolbar,
 .review-actions,
 .detail-actions,
-.preview-actions,
-.timeline-create,
-.playback-bar,
-.bin-actions,
-.export-strip,
-.editor-header {
+.preview-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -2535,11 +2511,6 @@ label {
 .toolbar input[type="number"] {
   width: auto;
   min-width: 140px;
-}
-
-.editor-header,
-.export-strip {
-  align-items: end;
 }
 
 .rating-control {
@@ -5179,10 +5150,6 @@ label {
 }
 
 /* Preset rail */
-.studio-controls.preset-rail {
-  padding: 16px;
-  align-content: start;
-}
 
 /* ---------- Training Studio ---------- */
 .training-studio-shell {
@@ -5777,37 +5744,6 @@ input.dataset-name-input.boxed:focus {
   width: auto;
 }
 
-.preset-rail-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.preset-rail-head h3 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.preset-rail-model-tag {
-  font-size: 12px;
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-}
-
-.style-preset-strip {
-  display: grid;
-  gap: 7px;
-}
-
-.style-preset-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-muted);
-  letter-spacing: 0.01em;
-}
-
 .preset-chips {
   display: flex;
   flex-wrap: wrap;
@@ -5847,26 +5783,12 @@ input.dataset-name-input.boxed:focus {
    the row element also carries (which appears later in the file at equal
    specificity). VideoStudio's `.render-rail .preset-rail-row` already wins this
    way; ImageStudio's rail needs the same. */
-.preset-rail .preset-rail-row,
-.render-rail .preset-rail-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
-}
 
 /* Uniform control height down the preset rail so the model picker, save-preset
    name + button, and the variations/aspect row all read as one consistent column
    of boxes. box-sizing is border-box globally, so a single height value aligns
    every control regardless of its own padding. The project-scope segment is left
    at its original height — it's a distinct two-option toggle, not a plain box. */
-.preset-rail > label select,
-.preset-rail .save-preset-name,
-.preset-rail .save-preset-btn,
-.preset-rail .preset-rail-row input,
-.preset-rail .preset-rail-row select {
-  height: 36px;
-  min-height: 36px;
-}
 
 /* "Save as preset" — an inline pair at the end of the style-preset chip row (studio-cleanup
    sc-15372): a fixed-width name field and a dropdown whose menu carries the scope. Both are
@@ -5970,45 +5892,6 @@ input.dataset-name-input.boxed:focus {
 
 /* ---------- Video Studio hero variants ---------- */
 /* Hero contains: mode tabs row, prompt + render CTA row, motion chips row. */
-.prompt-source-thumb {
-  display: block;
-  width: 140px;
-  height: 96px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--bg-2);
-  overflow: hidden;
-  padding: 0;
-  position: relative;
-}
-
-.prompt-source-thumb img,
-.prompt-source-thumb video {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
-}
-
-.prompt-source-thumb-empty {
-  display: grid;
-  place-items: center;
-  width: 100%;
-  height: 100%;
-  background:
-    repeating-linear-gradient(45deg, color-mix(in oklch, var(--text-faint) 10%, transparent) 0 8px, transparent 8px 16px),
-    var(--surface-2);
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  text-transform: lowercase;
-  letter-spacing: 0.04em;
-}
-
-.prompt-source-thumb:hover {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-glow);
-}
 
 .motion-row {
   display: flex;
@@ -6063,208 +5946,14 @@ input.dataset-name-input.boxed:focus {
 }
 
 @media (max-width: 720px) {
-  .prompt-source-thumb {
-    width: 100%;
-    height: 140px;
-  }
 }
 
 /* Video results: preview + render rail */
-.video-results {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
-  gap: 16px;
-  align-items: start;
-}
 
 @media (max-width: 1100px) {
-  .video-results {
-    grid-template-columns: 1fr;
-  }
-}
-
-.video-main-stack,
-.video-rail {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-  min-width: 0;
-}
-
-.video-preview-card,
-.render-rail,
-.tips-card,
-.keyboard-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-}
-
-.video-preview-card {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-}
-
-.video-preview-stage {
-  position: relative;
-  aspect-ratio: 16 / 9;
-  border-radius: var(--r-sm);
-  overflow: hidden;
-  background:
-    radial-gradient(140% 100% at 50% 0%, color-mix(in oklch, var(--accent) 10%, var(--bg-2)), var(--bg-2) 60%);
-  display: grid;
-  place-items: center;
-  color: var(--text-faint);
-}
-
-.video-preview-stage img,
-.video-preview-stage video {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.video-preview-empty {
-  display: grid;
-  place-items: center;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  letter-spacing: 0.04em;
-  text-transform: lowercase;
-  color: var(--text-faint);
-  padding: 24px;
-  text-align: center;
-}
-
-.video-playback-bar {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 4px 4px;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-
-.video-playback-bar .play-btn {
-  width: 32px;
-  height: 32px;
-  display: grid;
-  place-items: center;
-  border-radius: var(--r-sm);
-  color: var(--text-muted);
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-}
-
-.video-playback-bar .play-btn:hover {
-  color: var(--text);
-  border-color: var(--border-strong);
-}
-
-.video-playback-bar .play-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.video-playback-scrub {
-  flex: 1;
-  height: 6px;
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--r-pill);
-  position: relative;
-  min-width: 80px;
-}
-
-.video-playback-scrub-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 0%;
-  background: var(--accent);
-  border-radius: var(--r-pill);
-}
-
-.video-playback-time {
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.video-playback-estimate {
-  font-size: 12px;
-  color: var(--text-faint);
-  white-space: nowrap;
-}
-
-.video-playback-bar .send-editor-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 12px;
-  border-radius: var(--r-sm);
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.video-playback-bar .send-editor-btn:hover:not(:disabled) {
-  background: var(--surface-hover);
-}
-
-.video-playback-bar .send-editor-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.recent-clips-card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 14px;
-  display: grid;
-  gap: 10px;
-}
-
-.recent-clips-head {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.recent-clips-head h3 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.recent-clips-head .meta {
-  font-size: 12px;
-  color: var(--text-muted);
-}
-
-.recent-clips-strip {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 10px;
 }
 
 /* Render rail (right column) */
-.render-rail {
-  padding: 16px;
-  display: grid;
-  gap: 14px;
-  align-content: start;
-}
-
-.render-rail .preset-rail-head h3 {
-  font-size: 15px;
-}
 
 .quality-segment {
   display: grid;
@@ -6298,69 +5987,7 @@ input.dataset-name-input.boxed:focus {
   box-shadow: var(--shadow-sm);
 }
 
-.render-rail .preset-rail-row {
-  grid-template-columns: 1fr 1fr;
-}
-
 /* Tips + Keyboard side-panel cards */
-.tips-card,
-.keyboard-card {
-  padding: 14px 16px;
-  display: grid;
-  gap: 10px;
-}
-
-.tips-card h3,
-.keyboard-card h3 {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.tips-card ul {
-  margin: 0;
-  padding-left: 18px;
-  display: grid;
-  gap: 6px;
-  color: var(--text-muted);
-  font-size: 12.5px;
-  line-height: 1.45;
-}
-
-.keyboard-card dl {
-  margin: 0;
-  display: grid;
-  gap: 8px;
-}
-
-.keyboard-card .kbd-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 12.5px;
-  color: var(--text-muted);
-}
-
-.keyboard-card .kbd-row .kbd-keys {
-  display: inline-flex;
-  gap: 4px;
-}
-
-.keyboard-card .kbd-row .kbd-keys kbd {
-  display: inline-grid;
-  place-items: center;
-  min-width: 22px;
-  height: 22px;
-  padding: 0 5px;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  background: var(--surface-2);
-  border: 1px solid var(--border);
-  border-bottom-width: 2px;
-  border-radius: 5px;
-  color: var(--text-muted);
-}
 
 .checkline {
   display: inline-flex;
@@ -6403,7 +6030,6 @@ input.dataset-name-input.boxed:focus {
 .review-card,
 .asset-detail,
 .preview-button,
-.studio-controls,
 .review-panel {
   border: 1px solid var(--border);
   background: var(--surface);
@@ -6763,37 +6389,6 @@ input.dataset-name-input.boxed:focus {
 }
 
 /* Type-grouped model sections (Image / Video / Utility) + family-grouped LoRAs. */
-.model-type-group {
-  display: grid;
-  gap: 12px;
-}
-
-.model-type-group + .model-type-group {
-  margin-top: var(--gap-3);
-}
-
-.model-type-group-heading,
-.lora-family-group-heading {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
-}
-
-.model-type-group-heading h3,
-.lora-family-group-heading h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.model-type-group-heading > span,
-.lora-family-group-heading > span {
-  font-size: 12px;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-}
 
 .model-capabilities {
   list-style: none;
@@ -6833,107 +6428,10 @@ input.dataset-name-input.boxed:focus {
   color: var(--accent);
 }
 
-.lora-family-groups {
-  display: grid;
-  gap: var(--gap-3);
-}
-
-.lora-family-group {
-  display: grid;
-  gap: 10px;
-}
-
 /* Collapsible model type sections + LoRA scope sections (sc-5943). The type group,
    the "Additional Supported" subgroup, and the Built-In/User LoRA sections are native
    <details>; we hide the default disclosure marker and draw our own rotating caret. */
-details.model-type-group,
-details.lora-scope-group,
-details.model-subgroup-additional {
-  display: grid;
-  gap: 12px;
-}
 
-details.model-type-group > summary,
-details.lora-scope-group > summary,
-details.model-subgroup-additional > summary {
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-
-details.model-type-group > summary::-webkit-details-marker,
-details.lora-scope-group > summary::-webkit-details-marker,
-details.model-subgroup-additional > summary::-webkit-details-marker {
-  display: none;
-}
-
-summary.model-type-group-heading::before,
-summary.lora-scope-group-heading::before,
-.model-subgroup-additional > summary.model-subgroup-heading::before {
-  content: "▸";
-  font-size: 11px;
-  color: var(--text-faint);
-  transition: transform 0.15s ease;
-}
-
-details[open] > summary.model-type-group-heading::before,
-details[open] > summary.lora-scope-group-heading::before,
-.model-subgroup-additional[open] > summary.model-subgroup-heading::before {
-  transform: rotate(90deg);
-}
-
-.lora-scope-group + .lora-scope-group {
-  margin-top: var(--gap-3);
-}
-
-.lora-scope-group-heading {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--border);
-}
-
-.lora-scope-group-heading h3 {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-}
-
-.lora-scope-group-heading > span {
-  font-size: 12px;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-}
-
-.model-subgroup {
-  display: grid;
-  gap: 10px;
-}
-
-.model-subgroup-heading {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-}
-
-.model-subgroup-heading h4 {
-  margin: 0;
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.model-subgroup-heading > span {
-  font-size: 12px;
-  color: var(--text-faint);
-  font-variant-numeric: tabular-nums;
-}
-
-.model-row,
-.lora-panel,
 .lora-row,
 .character-editor,
 .character-section,
@@ -7000,124 +6498,6 @@ details[open] > summary.lora-scope-group-heading::before,
 
 /* Expandable model rows (UI-refinement 1c): a collapsed summary line (caret · name ·
    family/capability · status · size) over an expandable body of details + actions. */
-.model-row {
-  overflow: hidden;
-}
-
-.model-row-summary {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  width: 100%;
-  padding: 11px 14px;
-  background: none;
-  border: 0;
-  text-align: left;
-  color: var(--text);
-  cursor: pointer;
-}
-
-.model-row-summary:hover {
-  background: var(--surface-hover);
-}
-
-.model-row-caret {
-  flex: 0 0 auto;
-  width: 10px;
-  font-size: 10px;
-  color: var(--text-faint);
-  transition: transform var(--t-fast);
-}
-
-.model-row-caret.open {
-  transform: rotate(90deg);
-}
-
-.model-row-heading {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-
-.model-row-heading strong {
-  font-size: 13.5px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.model-row-heading small {
-  font-size: 11.5px;
-  color: var(--text-muted);
-}
-
-.model-row-size {
-  flex: 0 0 auto;
-  min-width: 64px;
-  text-align: right;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.model-row-body {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-  padding: 12px 16px 14px 36px;
-  border-top: 1px solid var(--border);
-}
-
-.model-row-body[hidden] {
-  display: none;
-}
-
-.model-row-body h3,
-.model-row-body p,
-.model-row-body dl {
-  margin: 0;
-}
-
-.model-row-body p {
-  color: var(--text-muted);
-  line-height: 1.5;
-  font-size: 13px;
-}
-
-.model-row-body dl {
-  display: grid;
-  gap: 8px;
-}
-
-.model-row-body dt {
-  color: var(--text-faint);
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.model-row-body dd {
-  margin: 0;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  overflow-wrap: anywhere;
-}
-
-.model-card-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
-
-.model-card-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
-}
 
 .model-gated-notice {
   display: grid;
@@ -7575,24 +6955,6 @@ details[open] > summary.lora-scope-group-heading::before,
   border-color: transparent;
   background: var(--warn-soft);
   color: color-mix(in oklch, var(--warn) 78%, var(--text));
-}
-
-.lora-panel {
-  display: grid;
-  gap: 12px;
-  padding: 14px;
-}
-
-.lora-panel-header {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  align-items: flex-end;
-}
-
-.lora-panel-header > span {
-  color: var(--text-muted);
-  font-size: 13px;
 }
 
 .models-import-panel label {
@@ -9594,30 +8956,13 @@ details[open] > summary.lora-scope-group-heading::before,
   align-content: start;
 }
 
-.studio-layout {
-  display: grid;
-  grid-template-columns: minmax(300px, 420px) minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-}
-
-.video-layout {
-  grid-template-columns: minmax(320px, 460px) minmax(0, 1fr);
-}
-
-.studio-controls,
 .review-panel {
   display: grid;
   gap: 14px;
   padding: 16px;
 }
 
-.studio-controls label,
-.prompt-field,
-.editor-inspector label,
-.timeline-create label,
-.export-strip label,
-.bin-controls label {
+.prompt-field {
   display: grid;
   gap: 7px;
 }
@@ -9627,10 +8972,6 @@ details[open] > summary.lora-scope-group-heading::before,
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
-}
-
-.generation-primary-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 /* Every Advanced panel now renders inside an `.advanced-section` disclosure, which
@@ -9652,7 +8993,6 @@ details[open] > summary.lora-scope-group-heading::before,
    stacked label-over-control grid every other field uses — without overriding
    the more-specific `.studio-controls label` grid rule they stack vertically and
    stretch inline children (the PiD NC badge) to full column width. */
-.studio-controls label.checkline,
 .advanced-panel label.checkline {
   display: flex;
   align-items: center;
@@ -9670,11 +9010,6 @@ details[open] > summary.lora-scope-group-heading::before,
 .advanced-panel .prompt-field,
 .advanced-panel .lora-picker {
   grid-column: 1 / -1;
-}
-
-
-.video-preset-grid {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .guidance-strip,
@@ -9965,14 +9300,6 @@ details[open] > summary.lora-scope-group-heading::before,
 
 .mode-control {
   max-width: min(720px, 100%);
-}
-
-.video-review {
-  align-content: start;
-}
-
-.video-review-grid {
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
 }
 
 .replace-person-panel,
@@ -10669,8 +9996,6 @@ details[open] > summary.lora-scope-group-heading::before,
 
 /* LoRA / reference rows */
 .ie-lora { display: flex; flex-direction: column; gap: 8px; padding: 10px 11px; border: 1px solid var(--ie-border); border-radius: var(--r-md); background: var(--ie-surface2); }
-.ie-lora-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.ie-lora-name { font-weight: 600; font-size: 12.5px; }
 .ie-refs { display: flex; gap: 8px; flex-wrap: wrap; }
 .ie-ref { width: 52px; height: 52px; border-radius: 9px; border: 1px solid var(--ie-border); position: relative; overflow: hidden; display: grid; place-items: center; color: var(--ie-faint); background: repeating-linear-gradient(45deg, var(--ie-surface2), var(--ie-surface2) 6px, var(--ie-surface-hover) 6px, var(--ie-surface-hover) 12px); }
 .ie-ref img { width: 100%; height: 100%; object-fit: cover; }
@@ -10918,102 +10243,10 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 8px;
 }
 
-.timeline-create {
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background: var(--surface-2);
-}
-
-.editor-layout {
-  display: grid;
-  grid-template-columns: minmax(320px, 1.25fr) minmax(260px, 0.75fr);
-  gap: 14px;
-}
-
-.editor-preview,
-.editor-inspector,
-.timeline-panel,
-.asset-bin,
-.export-strip {
-  border: 1px solid var(--border);
-  background: var(--surface);
-  border-radius: var(--r-md);
-}
-
-.editor-preview,
-.editor-inspector,
-.asset-bin,
-.export-strip {
-  display: grid;
-  gap: 12px;
-  align-content: start;
-  padding: 14px;
-}
-
-.preview-canvas {
-  display: grid;
-  place-items: center;
-  width: min(100%, 760px);
-  max-height: 58vh;
-  overflow: hidden;
-  background:
-    radial-gradient(120% 80% at 50% 0%, color-mix(in oklch, var(--accent) 8%, var(--bg-2)), var(--bg-2));
-  border-radius: var(--r-md);
-  color: var(--text-muted);
-}
-
-.preview-canvas.aspect-16-9 {
-  aspect-ratio: 16 / 9;
-}
-
-.preview-canvas.aspect-9-16 {
-  aspect-ratio: 9 / 16;
-  width: min(54vh, 100%);
-  justify-self: center;
-}
-
-.preview-canvas.aspect-1-1 {
-  aspect-ratio: 1;
-  width: min(58vh, 100%);
-  justify-self: center;
-}
-
-.preview-canvas img,
-.preview-canvas video {
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.playback-bar {
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 12px;
-}
-
-.editor-inspector {
-  grid-template-columns: 1fr;
-}
-
 .compact-controls {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
-.generation-hook-panel {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--surface-2);
-}
-
-.generation-hook-panel textarea {
-  min-height: 84px;
-}
-
-.hook-actions,
 .version-list {
   display: flex;
   flex-wrap: wrap;
@@ -11037,160 +10270,6 @@ details[open] > summary.lora-scope-group-heading::before,
 
 [data-theme="dark"] .version-list button.active {
   color: var(--accent);
-}
-
-.timeline-panel,
-.export-strip {
-  grid-column: 1 / -1;
-}
-
-.timeline-panel {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  overflow-x: auto;
-}
-
-.timeline-ruler {
-  display: flex;
-  justify-content: space-between;
-  min-width: 680px;
-  color: var(--text-faint);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  border-bottom: 1px solid var(--border);
-  padding-bottom: 6px;
-}
-
-.timeline-tracks {
-  display: grid;
-  gap: 8px;
-  min-width: 680px;
-}
-
-.timeline-track {
-  display: grid;
-  grid-template-columns: 84px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
-}
-
-.timeline-track strong {
-  color: var(--text-muted);
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.track-lane {
-  position: relative;
-  min-height: 58px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background:
-    repeating-linear-gradient(90deg, transparent 0 79px, color-mix(in oklch, var(--text-faint) 8%, transparent) 80px),
-    var(--bg-2);
-}
-
-.timeline-item {
-  position: absolute;
-  top: 6px;
-  display: grid;
-  gap: 2px;
-  align-content: center;
-  height: 46px;
-  min-width: 52px;
-  overflow: hidden;
-  border: 0;
-  border-radius: 6px;
-  background: linear-gradient(135deg, var(--accent), color-mix(in oklch, var(--accent) 70%, var(--warm)));
-  color: var(--accent-fg);
-  padding: 6px 10px;
-  text-align: left;
-  cursor: pointer;
-  transition: transform var(--t-fast), box-shadow var(--t-fast);
-}
-
-.timeline-item:hover {
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-md);
-}
-
-.timeline-item.active {
-  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
-}
-
-.timeline-item span,
-.timeline-item small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.timeline-item span {
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.timeline-item small {
-  color: color-mix(in oklch, var(--accent-fg) 78%, transparent);
-  font-size: 11px;
-}
-
-.asset-bin {
-  max-height: 650px;
-  overflow: auto;
-}
-
-.asset-bin-list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
-  gap: 10px;
-}
-
-.bin-asset {
-  display: grid;
-  gap: 7px;
-  align-content: start;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  border-radius: var(--r-sm);
-  padding: 8px;
-}
-
-.bin-asset > button {
-  min-height: 80px;
-  border: 0;
-  background: var(--bg-2);
-  border-radius: var(--r-xs);
-  padding: 0;
-}
-
-.bin-asset img,
-.bin-asset video {
-  display: block;
-  width: 100%;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
-  border-radius: var(--r-xs);
-}
-
-.bin-asset strong {
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.bin-actions {
-  gap: 6px;
-}
-
-.bin-actions button {
-  min-height: 30px;
-  padding: 5px 10px;
-  font-size: 12px;
 }
 
 /* ═══════════════ Video Editor redesign — design 2a (epic 12798) ═══════════════
@@ -11462,7 +10541,6 @@ details[open] > summary.lora-scope-group-heading::before,
   .ve-film-step-status { display: none; }
   .ve-film-start-cards { grid-template-columns: 1fr; }
 }
-.ve-film-toolbar,
 .ve-film-actions { display: flex; align-items: end; gap: 10px; margin-top: 10px; }
 .ve-film-form {
   display: grid;
@@ -11470,13 +10548,11 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 10px;
   margin-top: 10px;
 }
-.ve-film-form label,
-.ve-film-toolbar label { display: grid; gap: 4px; font-size: 12px; }
+.ve-film-form label { display: grid; gap: 4px; font-size: 12px; }
 .ve-film-prompt { grid-column: span 2; }
 .ve-film-form input,
 .ve-film-form textarea,
 .ve-film-form select,
-.ve-film-toolbar select,
 .ve-film-section input,
 .ve-film-section textarea,
 .ve-film-section select {
@@ -12961,17 +12037,6 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 /* ---------- Asset tray, picker modal ---------- */
-.asset-tray {
-  display: grid;
-  gap: 12px;
-  margin-top: 8px;
-}
-
-.tray-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 10px;
-}
 
 .tray-item {
   display: grid;
@@ -14765,13 +13830,6 @@ details[open] > summary.lora-scope-group-heading::before,
   gap: 16px;
 }
 
-.queue-header {
-  display: grid;
-  grid-template-columns: minmax(220px, 0.8fr) minmax(360px, 1.4fr);
-  gap: 18px;
-  align-items: end;
-}
-
 .queue-tools {
   display: flex;
   align-items: center;
@@ -15107,50 +14165,9 @@ details[open] > summary.lora-scope-group-heading::before,
 }
 
 /* ---------- Misc ---------- */
-.media-grid {
-  display: grid;
-  grid-template-columns: 1.35fr 1fr 1fr;
-  gap: 12px;
-  min-height: 240px;
-}
-
-.media-tile {
-  display: grid;
-  place-items: end start;
-  min-height: 220px;
-  padding: 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  background:
-    linear-gradient(135deg, color-mix(in oklch, var(--accent) 18%, transparent), transparent 42%),
-    var(--surface);
-  color: var(--text);
-  font-weight: 700;
-}
-
-.media-tile.wide {
-  background:
-    linear-gradient(135deg, color-mix(in oklch, var(--warm) 22%, transparent), transparent 48%),
-    var(--surface);
-}
-
-.media-tile.accent {
-  background:
-    linear-gradient(135deg, color-mix(in oklch, oklch(0.7 0.13 250) 18%, transparent), transparent 48%),
-    var(--surface);
-}
-
-.media-tile.warm {
-  background:
-    linear-gradient(135deg, color-mix(in oklch, var(--warm) 20%, transparent), transparent 48%),
-    var(--surface);
-}
 
 /* ---------- Responsive ---------- */
 @media (max-width: 1100px) {
-  .editor-layout {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 860px) {
@@ -15168,20 +14185,17 @@ details[open] > summary.lora-scope-group-heading::before,
   }
 
   .nav-list,
-  .media-grid,
-  .library-layout,
-  .studio-layout,
-  .training-health-grid,
-  .training-caption-card,
-  .training-config-grid,
-  .training-advanced-grid,
-  .character-layout,
-  .queue-header,
-  .job-composer,
-  .job-composer.compact,
-  .inline-create,
-  .models-import-grid,
-  .look-composer {
+.library-layout,
+.training-health-grid,
+.training-caption-card,
+.training-config-grid,
+.training-advanced-grid,
+.character-layout,
+.job-composer,
+.job-composer.compact,
+.inline-create,
+.models-import-grid,
+.look-composer {
     grid-template-columns: 1fr;
   }
 
@@ -15192,11 +14206,6 @@ details[open] > summary.lora-scope-group-heading::before,
 
   .topbar-status {
     flex-wrap: wrap;
-  }
-
-  .lora-panel-header {
-    align-items: flex-start;
-    flex-direction: column;
   }
 
   .control-grid,
@@ -15211,8 +14220,6 @@ details[open] > summary.lora-scope-group-heading::before,
     overflow: visible;
   }
 
-  .timeline-panel,
-  .export-strip,
   .reference-checks {
     grid-column: auto;
   }
@@ -16338,13 +15345,6 @@ details[open] > summary.lora-scope-group-heading::before,
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 240px;
-}
-
-.worker-progress-card__hw-note {
-  font-size: 10.5px;
-  font-style: italic;
-  color: var(--text-muted);
-  white-space: nowrap;
 }
 
 .worker-progress-card__pill {
@@ -19317,7 +18317,6 @@ button.audio-wave {
    offset by half a tile. Kept as a variable-driven block so a 36x30 layer thumbnail
    can use a smaller tile than a full-bleed grid tile without restating the
    gradients. */
-.checker-backdrop,
 .asset-tile img,
 .preview-button img,
 .review-card img,
