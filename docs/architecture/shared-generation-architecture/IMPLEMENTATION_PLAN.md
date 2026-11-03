@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1 was approved by Michael on 2026-11-03; DEC-2…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
+| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1 and DEC-2 were approved by Michael on 2026-11-03; DEC-3…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -28,6 +28,8 @@
 ---
 
 ## 1. Target architecture
+
+**Approved DEC-2:** audio, LLM-based encoders and training are all in scope. Shared interfaces accommodate them from the start; adoption is staged around the image/video core. ENG-4a includes media/LLM projections and preserves trainable variants, ENG-8 delivers differentiable primitives and removes training graph copies, ENG-11 consolidates encoders, and ENG-14 completes audio/LLM runtime adoption. Diffusion/flow audio uses the denoising runner; autoregressive audio keeps its token driver. Training shares model modules while retaining optimizer/loss/data orchestration. Existing platform partitions remain. This is design sequencing, not authorization to implement.
 
 ### 1.1 Layers and dependency direction
 

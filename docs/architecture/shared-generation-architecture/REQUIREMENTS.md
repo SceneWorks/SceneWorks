@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** All four round-5 findings are addressed. Michael approved DEC-1 on 2026-11-03; DEC-2…19 remain open. This is not overall design approval or implementation evidence. Design-only: no program tracker items, pilots or implementation start from an individual decision approval. |
+| **Status** | **Draft 0.5, decision review in progress.** All four round-5 findings are addressed. Michael approved DEC-1 and DEC-2 on 2026-11-03; DEC-3…19 remain open. This is not overall design approval or implementation evidence. Design-only: no program tracker items, pilots or implementation start from an individual decision approval. |
 | **Date** | 2026-11-03 |
 | **Repositories** | SceneWorks (`main` @ `a1d95e2c4`) and inference (`origin/main` @ `a43724b82`). All citations refer to those revisions. |
 | **Companion** | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): target design, migration strategy and phased roadmap. |
@@ -104,13 +104,15 @@ A cross-cutting capability costs roughly **families × backends × routes** of h
 |---|---|---|
 | Image generation, all families, both backends | Yes | |
 | Video and audio-video (Wan, LTX, MiniMax-H3, Mochi, SVD, SCAIL-2, Bernini, Krea-realtime, SeedVR2) | Yes | All axes are designed from day one. Image-only abstractions have been rebuilt for video twice [H §7.7]. |
-| Audio generation (`candle-audio-*`) | Yes: weights, Linear, adapters, runtime contracts, residency vocabulary, and the runner where a flow/diffusion loop exists | ⟂DEC-2 |
+| Audio generation (`candle-audio-*`) | Yes: weights, Linear, adapters, runtime contracts, residency vocabulary, and the runner where a flow/diffusion loop exists | DEC-2 approved; autoregressive routes retain their token driver |
 | LLM crates | Yes, as the shared decoder-block and encoder library, and for unified runtime contracts | Chat-product features are out of scope |
-| Training (LoRA trainers, Iris curricula, control training) | Yes, via a differentiable mode of shared modules | ⟂DEC-2 |
+| Training (LoRA trainers, Iris curricula, control training) | Yes, via a differentiable mode of shared modules | DEC-2 approved; trainers retain optimizer, loss and data orchestration |
 | iOS (`mlx-gen-ios-catalog`, `runtime-ios`, engine-side iOS admission) | Yes | MEM-6, XL-3 |
 | SceneWorks web, API, core, worker, memory-adapter, scripts, config, MCP | Yes | |
 | Film harness, training plans, desktop seeding | Where they carry options or model facts (OPT-6, APPREG-5) | |
 | External consumers: ChatWorks (pins inference runtime tags), SceneWorks-mobile (future `runtime-ios` consumer), SceneWorks-Art (consumes share envelopes and recipes) | Their contracts must keep working | XL-4 |
+
+**Approved DEC-2 scope and sequencing:** audio, LLM-based encoders and training are all program deliverables. Design their shared interfaces from the start, with adoption staged around the image/video core. Early primitive extraction includes LLM projections and training-compatible variants; broader adoption follows the named roadmap features. Sharing preserves the distinct denoising, token-generation and training drivers and the existing platform partitions.
 
 ---
 
@@ -385,7 +387,7 @@ Kit replacements that change operation order declare class (b) or (c). **Accept:
 
 **Accept:** per-phase adapter Features work on every route that is residual-capable or can switch to residual; merge-only routes refuse structurally.
 
-**WGT-4 — Training reuses inference modules in differentiable mode.** The backend switches from fused to composable kernels. Trainers get adapter injection, frozen-stage caching, x0 decode and checkpoint boundaries from the shared layers. ⟂DEC-2. **Accept:** no trainer-specific model-graph copy remains (`dit_train`, `train_dit` and kin).
+**WGT-4 — Training reuses inference modules in differentiable mode (DEC-2 approved).** The backend switches from fused to composable kernels. Trainers get adapter injection, frozen-stage caching, x0 decode and checkpoint boundaries from the shared layers; optimizer, loss and data orchestration remain trainer-owned. **Accept:** no trainer-specific model-graph copy remains (`dit_train`, `train_dit` and kin).
 
 **WGT-5 — Loads and model-slot swaps are cancellable** at component and batch boundaries, with cleanup. For example, a Wan expert swap reloads 14B parameters mid-run. **Accept:** a Tier 0 cancellation test at each lifecycle stage passes.
 
@@ -596,7 +598,7 @@ Rules:
 
 ### 6.13 Cross-lane and external adoption (XL)
 
-**XL-1 — Audio adopts** the weight plan, the Linear spine, adapters (ordered fold for DoRA and BoRA), runtime contracts and the residency vocabulary. It adopts the runner wherever a flow or diffusion loop exists. ⟂DEC-2.
+**XL-1 — Audio adopts** the weight plan, the Linear spine, adapters (ordered fold for DoRA and BoRA), runtime contracts and the residency vocabulary (DEC-2 approved). It adopts the runner wherever a flow or diffusion loop exists; autoregressive audio retains its token-generation driver.
 
 **XL-2 — LLM runtime contracts unify with gen-core:** cancel, progress, load activity, weight source and pins.
 
@@ -767,12 +769,12 @@ These are measured at baseline and again at every feature end. They are **goals,
 
 ## 10. Decisions and approval status
 
-**DEC-1 approved by Michael on 2026-11-03. DEC-2…19 remain open.** Approvals here select the design direction; they do not approve the whole design or authorize implementation during this design-only discussion.
+**DEC-1 and DEC-2 approved by Michael on 2026-11-03. DEC-3…19 remain open.** Approvals here select the design direction; they do not approve the whole design or authorize implementation during this design-only discussion.
 
 | ID | Decision | Options | Recommendation / decision (confidence) | Affects |
 |---|---|---|---|---|
 | **DEC-1 — Approved** | **Backend strategy.** The conditional generic-model path reverses the former non-goal only within the pilot gates (`inference-rearchitecture.md:81`). | (a) status quo; (b) shared host math + identical layer-kit API; (c) generic model graphs over a layer-level trait; (d) Burn; (f) Candle on Mac | **Michael approved (b) as the baseline, with (c) conditional on both pilots passing (2026-11-03).** Pilot A: a small representative model. Pilot B: FLUX.3 end to end, including LoRA training. Preserve capabilities and per-backend fidelity, speed, memory and binary-size bounds. If either fails, stay at (b). Backend kernels/execution policy remain specialized; shared pipeline and low-res work are not blocked by generic rollout. No framework/backend replacement selected. Design-only, not permission to execute pilots. (High confidence in the approved choice/baseline; medium in unproven generic feasibility.) | BACK-1…5, G5, §8 |
-| **DEC-2** | **Lane scope.** | Include audio, LLM-as-encoder and training: now, later, or never | **Include all three, after the image/video core.** They hold the largest remaining copy sources. (Medium-high.) | XL-1/2, WGT-4, COMP-1 |
+| **DEC-2 — Approved** | **Lane scope.** | Include audio, LLM-as-encoder and training immediately; staged adoption; exclude | **Michael approved all three as program deliverables (2026-11-03): design shared interfaces from the start and stage adoption around the image/video core.** Share weights, layers, adapters, encoders and lifecycle contracts. Diffusion/flow audio uses the runner; autoregressive audio retains its token driver. Training shares differentiable model modules and retains optimizer/loss/data orchestration. No new chat-product scope. Early primitive consumers and broader adoption remain named roadmap obligations. Design-only. (Medium-high.) | XL-1/2, WGT-4, COMP-1; ENG-4a/8/11/14 |
 | **DEC-3** | **Schedule source kinds.** | Global-sliced; fresh-per-pass; explicit table; all three | **All three.** Sources resolve per pass; phase ranges use that pass's executed outer-step coordinates and stream coupling. LTX needs explicit tables; Krea and low-res need slicing; chained recipes need fresh passes. (High.) | PIPE-1/3/4, HOOK-3 |
 | **DEC-4** | **sc-20414** (4,212 commits behind). | Port the executor; salvage parts; abandon | **Salvage its invariants, conformance testkit and ComfyUI pass-schedule math. Do not port `denoise_passes.rs` as a wire contract.** Separately decide whether `denoisePasses` becomes a fresh-per-pass Feature whose schema is derived from that contract (recommend yes, after APP-2). Review `sc-19048` and `sc-25327` for salvage. (High.) | PIPE-3/4 |
 | **DEC-5** | **SW-F327 coordination.** | Program waits for SW-F327; engine-only work now with SceneWorks halves gated; full parallel | **Inference-only (`[INF]`) items start now, behind unchanged worker-facing APIs. Every SceneWorks (`[SW]`) half waits for the SW-F327 PRs on the same files to merge.** Those PRs today are #3258, #3260, #3264, #3268 and #3270. Cards already in review land first; SGA re-baselines after them. No absorbing in-review cards. (High.) | MIG-7, all `[SW]` items |
