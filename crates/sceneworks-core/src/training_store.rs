@@ -2517,7 +2517,8 @@ fn index_dataset(
 ) -> ProjectStoreResult<()> {
     ensure_training_dataset_table(project_path)?;
     let rel_path = relative_string(project_path, manifest_path)?;
-    let connection = connect_project_db_migrated(project_path)?;
+    let mut db = connect_project_db_migrated(project_path)?;
+    let connection = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     connection.execute(
         "
         insert or replace into training_datasets (
@@ -2538,16 +2539,19 @@ fn index_dataset(
             dataset.updated_at,
         ],
     )?;
+    connection.commit()?;
     Ok(())
 }
 
 fn remove_dataset_index(project_path: &Path, dataset_id: &str) -> ProjectStoreResult<()> {
     ensure_training_dataset_table(project_path)?;
-    let connection = connect_project_db_migrated(project_path)?;
+    let mut db = connect_project_db_migrated(project_path)?;
+    let connection = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     connection.execute(
         "delete from training_datasets where id = ?1",
         params![dataset_id],
     )?;
+    connection.commit()?;
     Ok(())
 }
 
@@ -3693,7 +3697,8 @@ mod tests {
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))
             .expect("busy_timeout pragma reads");
         assert_eq!(
-            busy_timeout, 5000,
+            busy_timeout,
+            crate::store_util::SQLITE_BUSY_TIMEOUT.as_millis() as i64,
             "training-path project.db connections get the shared 5s busy_timeout"
         );
 

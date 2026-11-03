@@ -3281,6 +3281,8 @@ export function App() {
         setError(error.message);
         return;
       }
+      const projectId = activeProject.id;
+      const isCurrent = () => !options.signal?.aborted && activeProjectRef.current?.id === projectId;
       const body = new FormData();
       body.append("file", file);
       // Optional lineage for derived imports (Image Editor Save, sc-2434): link the
@@ -3288,10 +3290,12 @@ export function App() {
       if (options.sourceAssetId) body.append("sourceAssetId", options.sourceAssetId);
       if (options.provenance) body.append("provenance", JSON.stringify(options.provenance));
       try {
-        const imported = await apiFetch(`/api/v1/projects/${activeProject.id}/assets`, token, {
+        const imported = await apiFetch(`/api/v1/projects/${projectId}/assets`, token, {
           method: "POST",
           body,
+          signal: options.signal,
         });
+        if (!isCurrent()) return null;
         setAssets((items) => [imported, ...items.filter((item) => item.id !== imported.id)]);
         // Field-scoped pickers select the imported asset in their own local value. Let them opt
         // out of changing the app-wide Library selection, which studios also observe as a request
@@ -3302,6 +3306,7 @@ export function App() {
         setError("");
         return imported;
       } catch (err) {
+        if (!isCurrent()) return null;
         if (options.throwOnError) {
           throw err;
         }

@@ -9,7 +9,6 @@ export function FileDropzone({
   hint,
   multiple = false,
   onActiveChange,
-  onDrop,
   onFiles,
 }) {
   return (
@@ -20,7 +19,11 @@ export function FileDropzone({
         event.preventDefault();
         onActiveChange?.(true);
       }}
-      onDrop={onDrop}
+      onDrop={(event) => {
+        event.preventDefault();
+        onActiveChange?.(false);
+        if (!busy && event.dataTransfer?.files?.length) onFiles?.(event.dataTransfer.files);
+      }}
     >
       <p>{hint}</p>
       <label className="file-upload-button">
