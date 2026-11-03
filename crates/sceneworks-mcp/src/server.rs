@@ -121,6 +121,12 @@ impl JobWaitConfig {
     }
 }
 
+/// A domain failure remains an MCP tool result; transport failures remain JSON-RPC errors.
+enum JobWaitOutcome {
+    Completed(Value),
+    Stopped(CallToolResult),
+}
+
 #[derive(Clone)]
 pub struct SceneWorksMcp {
     api: ApiClient,
@@ -130,6 +136,104 @@ pub struct SceneWorksMcp {
 }
 
 impl SceneWorksMcp {
+    /// Await one submitted job using the existing cancellation, outage and deadline policy.
+    async fn wait_for_job(
+        &self,
+        job_id: &str,
+        ctx: &RequestContext<RoleServer>,
+        reporter: &mut ProgressReporter,
+    ) -> Result<JobWaitOutcome, ErrorData> {
+        let started = tokio::time::Instant::now();
+        let mut poll_outage_started: Option<tokio::time::Instant> = None;
+        let job = loop {
+            // Cooperative cancellation (sc-10276): rmcp cancels `ctx.ct` when the
+            // client sends `notifications/cancelled` (it does NOT abort the tool
+            // future, so a drop-guard would never fire). Catch it at the top of the
+            // wait and ask the job to stop, freeing the worker/GPU instead of
+            // letting a canceled render run to completion.
+            tokio::select! {
+                biased;
+                () = ctx.ct.cancelled() => {
+                    // Best-effort: the job may already be terminal, in which case the
+                    // cancel route is a harmless no-op.
+                    let _ = self
+                        .api
+                        .post_json(&format!("/api/v1/jobs/{job_id}/cancel"), &json!({}))
+                        .await;
+                    return tool_error(format!(
+                        "Image job {job_id} was canceled: the client canceled the \
+                         request, so the job was asked to stop."
+                    )).map(JobWaitOutcome::Stopped);
+                }
+                () = tokio::time::sleep(self.job_wait.poll_interval) => {}
+            }
+            // Tolerate transient poll failures (sc-10279): the render keeps running
+            // server-side, so a single blip must not abort the whole tool call.
+            let job = match self
+                .api
+                .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
+                .await
+            {
+                Ok(job) => {
+                    poll_outage_started = None;
+                    job
+                }
+                Err(error) => {
+                    let now = tokio::time::Instant::now();
+                    let outage_started = *poll_outage_started.get_or_insert(now);
+                    if poll_outage_exceeded(outage_started, now) {
+                        return Err(api_error(error));
+                    }
+                    if started.elapsed() >= self.job_wait.timeout {
+                        return tool_error(format!(
+                            "Image job {job_id} status polling kept failing (last error: \
+                             {error}) and the {}s deadline elapsed. The job may still be \
+                             running; it was not canceled.",
+                            self.job_wait.timeout.as_secs()
+                        ))
+                        .map(JobWaitOutcome::Stopped);
+                    }
+                    continue;
+                }
+            };
+            reporter.report(&job).await;
+            let status = job.get("status").and_then(Value::as_str).unwrap_or("");
+            match status {
+                "completed" => break job,
+                "failed" => {
+                    let detail = job_error_detail(&job);
+                    return tool_error(format!("Image job {job_id} failed: {detail}"))
+                        .map(JobWaitOutcome::Stopped);
+                }
+                "canceled" => {
+                    return tool_error(format!(
+                        "Image job {job_id} was canceled before it finished."
+                    ))
+                    .map(JobWaitOutcome::Stopped);
+                }
+                "interrupted" => {
+                    return tool_error(format!(
+                        "Image job {job_id} was interrupted (worker restarted mid-run); \
+                         call generate_image again to retry."
+                    ))
+                    .map(JobWaitOutcome::Stopped);
+                }
+                _ => {}
+            }
+            if started.elapsed() >= self.job_wait.timeout {
+                return tool_error(format!(
+                    "Image job {job_id} did not reach a terminal state within {}s \
+                     (last status: {status}). The job may still be running; it was \
+                     not canceled.",
+                    self.job_wait.timeout.as_secs()
+                ))
+                .map(JobWaitOutcome::Stopped);
+            }
+        };
+
+        Ok(JobWaitOutcome::Completed(job))
+    }
+
     pub fn new(api: ApiClient) -> Self {
         Self {
             api,
@@ -630,87 +734,9 @@ impl SceneWorksMcp {
         let mut reporter = ProgressReporter::new(ctx.peer.clone(), progress_token);
         reporter.report(&submitted).await;
 
-        let started = tokio::time::Instant::now();
-        let mut poll_outage_started: Option<tokio::time::Instant> = None;
-        let job = loop {
-            // Cooperative cancellation (sc-10276): rmcp cancels `ctx.ct` when the
-            // client sends `notifications/cancelled` (it does NOT abort the tool
-            // future, so a drop-guard would never fire). Catch it at the top of the
-            // wait and ask the job to stop, freeing the worker/GPU instead of
-            // letting a canceled render run to completion.
-            tokio::select! {
-                biased;
-                () = ctx.ct.cancelled() => {
-                    // Best-effort: the job may already be terminal, in which case the
-                    // cancel route is a harmless no-op.
-                    let _ = self
-                        .api
-                        .post_json(&format!("/api/v1/jobs/{job_id}/cancel"), &json!({}))
-                        .await;
-                    return tool_error(format!(
-                        "Image job {job_id} was canceled: the client canceled the \
-                         request, so the job was asked to stop."
-                    ));
-                }
-                () = tokio::time::sleep(self.job_wait.poll_interval) => {}
-            }
-            // Tolerate transient poll failures (sc-10279): the render keeps running
-            // server-side, so a single blip must not abort the whole tool call.
-            let job = match self
-                .api
-                .get_json(&format!("/api/v1/jobs/{job_id}"), &[])
-                .await
-            {
-                Ok(job) => {
-                    poll_outage_started = None;
-                    job
-                }
-                Err(error) => {
-                    let now = tokio::time::Instant::now();
-                    let outage_started = *poll_outage_started.get_or_insert(now);
-                    if poll_outage_exceeded(outage_started, now) {
-                        return Err(api_error(error));
-                    }
-                    if started.elapsed() >= self.job_wait.timeout {
-                        return tool_error(format!(
-                            "Image job {job_id} status polling kept failing (last error: \
-                             {error}) and the {}s deadline elapsed. The job may still be \
-                             running; it was not canceled.",
-                            self.job_wait.timeout.as_secs()
-                        ));
-                    }
-                    continue;
-                }
-            };
-            reporter.report(&job).await;
-            let status = job.get("status").and_then(Value::as_str).unwrap_or("");
-            match status {
-                "completed" => break job,
-                "failed" => {
-                    let detail = job_error_detail(&job);
-                    return tool_error(format!("Image job {job_id} failed: {detail}"));
-                }
-                "canceled" => {
-                    return tool_error(format!(
-                        "Image job {job_id} was canceled before it finished."
-                    ));
-                }
-                "interrupted" => {
-                    return tool_error(format!(
-                        "Image job {job_id} was interrupted (worker restarted mid-run); \
-                         call generate_image again to retry."
-                    ));
-                }
-                _ => {}
-            }
-            if started.elapsed() >= self.job_wait.timeout {
-                return tool_error(format!(
-                    "Image job {job_id} did not reach a terminal state within {}s \
-                     (last status: {status}). The job may still be running; it was \
-                     not canceled.",
-                    self.job_wait.timeout.as_secs()
-                ));
-            }
+        let job = match self.wait_for_job(&job_id, &ctx, &mut reporter).await? {
+            JobWaitOutcome::Completed(job) => job,
+            JobWaitOutcome::Stopped(response) => return Ok(response),
         };
 
         // The job row is authoritative for the project id (mirrors the API).
@@ -773,6 +799,13 @@ impl SceneWorksMcp {
             let Some(media_path) = asset_media_path(asset) else {
                 continue;
             };
+            // F-041 (sc-11236): an over-cap result must not be inlined — the
+            // base64 JSON-RPC payload (held twice in memory) would exceed MCP
+            // client message limits / the model context. Above EITHER the
+            // per-image or running-total cap, switch the WHOLE response to the
+            // get_job_result ticketed-link shape (bytes downloaded so far are
+            // simply dropped). The ticket links reach the same media without
+            // inlining, so no result is lost.
             let remaining_total = MAX_INLINE_TOTAL_BYTES.saturating_sub(total_bytes);
             let body_limit = MAX_INLINE_IMAGE_BYTES.min(remaining_total);
             let media_url = format!(
@@ -800,13 +833,6 @@ impl SceneWorksMcp {
                 asset.pointer("/file/mimeType").and_then(Value::as_str),
                 header_mime.as_deref(),
             );
-            // F-041 (sc-11236): an over-cap result must not be inlined — the
-            // base64 JSON-RPC payload (held twice in memory) would exceed MCP
-            // client message limits / the model context. Above EITHER the
-            // per-image or running-total cap, switch the WHOLE response to the
-            // get_job_result ticketed-link shape (bytes downloaded so far are
-            // simply dropped). The ticket links reach the same media without
-            // inlining, so no result is lost.
             total_bytes += bytes.len();
             summary_assets.push(json!({
                 "id": asset.get("id").cloned().unwrap_or(Value::Null),

@@ -3512,7 +3512,7 @@ fn run_with(
     // arm — measured by reverting this match, capturing `flux2_dev` reported
     // `planned.target.overlay must be a string`, which reads as a malformed plan entry and sends the
     // operator off fixing fixtures or provisioning weights for the wrong model. Refuse by name
-    // instead, mirroring the Candle adapter's `plain_execution_path` (candle.rs:540-548).
+    // instead, mirroring the Candle adapter's `candle_runtime_family::plain_execution_path`.
     match provider {
         FLUX3_PROVIDER | FLUX3_BASE_PROVIDER => mlx_flux3::run(request),
         Z_IMAGE_PROVIDER => run_z_image_reference(request),
