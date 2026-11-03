@@ -17,7 +17,7 @@ function runStatus(run) {
   return run.record.stop?.reason || run.record.outcome || run.record.state;
 }
 
-export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, projectId, selectedRunId = "", runActive = false, screenActive = true, token, setNotice }) {
+export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, feedFence, feedPaused = false, feedEpoch = 0, projectId, selectedRunId = "", runActive = false, screenActive = true, token, setNotice }) {
   const [runs, setRuns] = useState([]);
   const [projectRunsActive, setProjectRunsActive] = useState(false);
   const [planning, setPlanning] = useState(null);
@@ -31,11 +31,14 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
   }, [projectId, draftId]);
 
   const refresh = useCallback(async (ownerSignal) => {
-    if (!projectId || !draftId || ownerSignal?.aborted) return;
+    if (!projectId || !draftId || ownerSignal?.aborted || feedFence?.current.pending) return;
+    const generation = feedFence?.current.generation;
+    const stale = () => feedFence && (feedFence.current.pending || feedFence.current.generation !== generation);
     feedController.current?.abort();
     const controller = new AbortController();
     feedController.current = controller;
     const abort = () => controller.abort();
+    if (feedFence) feedFence.current.abort = abort;
     ownerSignal?.addEventListener("abort", abort, { once: true });
     const signal = controller.signal;
     const requestId = ++refreshRequest.current;
@@ -44,11 +47,11 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
         listFilmRuns(projectId, token, { signal }),
         getFilmPlanning(projectId, draftId, token, { signal }),
       ]);
-      if (signal.aborted || refreshRequest.current !== requestId) return;
+      if (signal.aborted || refreshRequest.current !== requestId || stale()) return;
       if (runResult.status === "fulfilled") {
         const listed = Array.isArray(runResult.value) ? runResult.value : [];
         await onRuns?.(listed, signal);
-        if (signal.aborted || refreshRequest.current !== requestId) return;
+        if (signal.aborted || refreshRequest.current !== requestId || stale()) return;
         setProjectRunsActive(listed.some((run) => run.controllerActive));
         const scoped = listed.filter((run) => run.locator.draftId === draftId);
         setRuns(scoped);
@@ -58,9 +61,10 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
       }
       if (planningResult.status === "fulfilled") setPlanning(planningResult.value);
     } finally {
+      if (feedFence?.current.abort === abort) feedFence.current.abort = null;
       ownerSignal?.removeEventListener("abort", abort);
     }
-  }, [draftId, onRunChange, onRuns, projectId, setNotice, token]);
+  }, [draftId, feedFence, onRunChange, onRuns, projectId, setNotice, token]);
 
   const [visible, setVisible] = useState(() => !document.hidden);
   const visibleRef = useRef(screenActive && visible);
@@ -78,15 +82,15 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
   }, []);
 
   useEffect(() => {
-    if (!screenActive || !visible) return undefined;
+    if (!screenActive || !visible || feedPaused) return undefined;
     const controller = new AbortController();
     refresh(controller.signal);
     return () => { controller.abort(); refreshRequest.current += 1; };
-  }, [refresh, screenActive, visible, selectedRunId]);
+  }, [refresh, screenActive, visible, selectedRunId, feedPaused, feedEpoch]);
 
   const active = runActive || projectRunsActive;
   useEffect(() => {
-    if (!screenActive || !visible || !active || pending) return undefined;
+    if (!screenActive || !visible || !active || pending || feedPaused) return undefined;
     const controller = new AbortController();
     let timer;
     async function poll() {
@@ -95,7 +99,7 @@ export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, 
     }
     timer = window.setTimeout(poll, 1000);
     return () => { controller.abort(); refreshRequest.current += 1; window.clearTimeout(timer); };
-  }, [active, pending, refresh, screenActive, visible]);
+  }, [active, pending, refresh, screenActive, visible, feedPaused]);
 
   async function mutate(runId, action) {
     // A list read started before this mutation cannot overwrite the accepted controller snapshot.

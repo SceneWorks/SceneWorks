@@ -97,7 +97,7 @@ export function normalizedPlan(draft) {
   };
 }
 
-export function FilmReview({ active = true, draft, focusShotId = "", onChange, projectId, refreshTimelines, runControllerActive = false, runLocatorId = "", runSnapshot = null, onRunChange, setNotice, setSelectedTimelineId, token }) {
+export function FilmReview({ active = true, draft, focusShotId = "", onChange, projectId, refreshTimelines, runControllerActive = false, runLocatorId = "", runSnapshot = null, onRunChange, beginRunMutation, endRunMutation, setNotice, setSelectedTimelineId, token }) {
   const [runId, setRunId] = useState("");
   const [visible, setVisible] = useState(() => !document.hidden);
   useEffect(() => {
@@ -112,10 +112,17 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
   const refreshRequest = useRef(0);
   const actionController = useRef(null);
   const reviewController = useRef(null);
+  const actionLease = useRef(null);
+  const selectionRef = useRef(runLocatorId);
+  selectionRef.current = runLocatorId;
   useEffect(() => {
     setPending(false);
-    return () => { actionController.current?.abort(); };
-  }, [projectId, draft.id]);
+    return () => {
+      actionController.current?.abort();
+      if (actionLease.current != null) endRunMutation?.(actionLease.current);
+      actionLease.current = null;
+    };
+  }, [projectId, draft.id, runLocatorId, endRunMutation]);
   const plan = useMemo(() => normalizedPlan(draft), [draft]);
 
   const refresh = useCallback(async (signal) => {
@@ -171,6 +178,10 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
   async function mutate(action, message) {
     if (!runId) return;
     actionController.current?.abort();
+    if (actionLease.current != null) endRunMutation?.(actionLease.current);
+    const selection = selectionRef.current;
+    const lease = beginRunMutation?.();
+    actionLease.current = lease ?? null;
     reviewController.current?.abort();
     refreshRequest.current += 1;
     const controller = new AbortController();
@@ -178,14 +189,16 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
     setPending(true);
     try {
       const next = await action(controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || selectionRef.current !== selection) return;
+      if (next?.run && onRunChange?.(next.run, { select: true, actionSelection: selection }) === false) return;
       setView(next);
-      if (next?.run) onRunChange?.(next.run, { select: true });
       setNotice(message);
     } catch (error) {
-      if (!controller.signal.aborted) setNotice(error.message);
+      if (!controller.signal.aborted && selectionRef.current === selection) setNotice(error.message);
     } finally {
-      if (!controller.signal.aborted) setPending(false);
+      if (lease != null) endRunMutation?.(lease);
+      if (actionLease.current === lease) actionLease.current = null;
+      if (!controller.signal.aborted && selectionRef.current === selection) setPending(false);
     }
   }
 

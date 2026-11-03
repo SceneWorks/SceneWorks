@@ -110,6 +110,73 @@ function changeValue(element, value) {
 }
 
 describe("FilmWorkspace", () => {
+  it("does not let a pre-review feed overwrite the accepted running receipt", async () => {
+    const film = draft();
+    const idle = { locator: { id: "run_a", draftId: film.id }, controllerActive: false, record: { state: "finished", shots: [] } };
+    const running = { ...idle, controllerActive: true, controllerOwner: "api-review:run_a" };
+    const view = (run) => ({ run, takeAssets: [], observations: [], selections: [] });
+    let releaseOldFeed;
+    let held = false;
+    let accepted = false;
+    const snapshots = [];
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/film-runs")) return Promise.resolve([accepted ? running : idle]);
+      if (path.endsWith("/planning")) return Promise.resolve(null);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/review") && options.method === "POST") { accepted = true; return Promise.resolve(view(running)); }
+      if (path.endsWith("/review")) return Promise.resolve(view(accepted ? running : idle));
+      return Promise.resolve({});
+    });
+    const onRuns = vi.fn(() => {
+      if (!held) { held = true; return new Promise((resolve) => { releaseOldFeed = resolve; }); }
+      return undefined;
+    });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<AppContext.Provider value={{ activeProject: { id: "project_1" }, token: "", refreshTimelines: vi.fn(), refreshFilmTimeline: onRuns, setSelectedTimelineId: vi.fn() }}>
+        <FilmWorkspace onFilmChange={(value) => snapshots.push(value.run)} />
+      </AppContext.Provider>);
+    });
+    await act(async () => [...container.querySelectorAll('[role="tab"]')].find((item) => item.textContent === "Review").click());
+    await act(async () => [...container.querySelectorAll("button")].find((item) => item.textContent === "Analyze selected takes").click());
+    expect(snapshots.at(-1)?.controllerActive).toBe(true);
+    await act(async () => releaseOldFeed());
+    expect(snapshots.at(-1)?.controllerActive).toBe(true);
+  });
+
+  it("does not reselect a previous run when its delayed review action resolves", async () => {
+    const film = draft();
+    const run = (id) => ({ locator: { id, draftId: film.id }, controllerActive: false, record: { state: "finished", shots: [] } });
+    const a = run("run_a");
+    const b = run("run_b");
+    const view = (value) => ({ run: value, takeAssets: [], observations: [], selections: [] });
+    let resolveAction;
+    let actionSignal;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (path === "/api/v1/projects/project_1/films") return Promise.resolve([film]);
+      if (path.endsWith("/film-runs")) return Promise.resolve([a, b]);
+      if (path.endsWith("/planning")) return Promise.resolve(null);
+      if (path.endsWith("/planners")) return Promise.resolve({ providers: [] });
+      if (path.endsWith("/render-options")) return Promise.resolve(renderOptions());
+      if (path.endsWith("/review") && options.method === "POST") { actionSignal = options.signal; return new Promise((resolve) => { resolveAction = resolve; }); }
+      if (path.includes("/run_a/review")) return Promise.resolve(view(a));
+      if (path.includes("/run_b/review")) return Promise.resolve(view(b));
+      return Promise.resolve({});
+    });
+    await renderWorkspace();
+    await act(async () => [...container.querySelectorAll('[role="tab"]')].find((item) => item.textContent === "Review").click());
+    await act(async () => [...container.querySelectorAll("button")].find((item) => item.textContent === "Analyze selected takes").click());
+    const selector = container.querySelector('select[aria-label="Review run"]');
+    await act(async () => {
+      changeValue(selector, "run_b");
+      resolveAction(view({ ...a, controllerActive: true }));
+    });
+    expect(actionSignal.aborted).toBe(true);
+    expect(selector.value).toBe("run_b");
+  });
+
   it("offers both start paths when the project has no film draft, and hides in Timeline mode", async () => {
     apiFetchMock.mockImplementation((path) => {
       if (path === "/api/v1/projects/project_1/films") return Promise.resolve([]);

@@ -77,9 +77,9 @@ export function useTimelines({
     if (working?.id !== stored.id || !base || base.id !== stored.id) {
       setActiveTimeline(stored);
       savedTimelineSnapshotRef.current = serializeTimeline(stored);
-      return;
+      return true;
     }
-    if ((stored.revision ?? 0) < (base.revision ?? 0)) return;
+    if ((stored.revision ?? 0) < (base.revision ?? 0)) return false;
     const rebased = rebaseTimeline(base, working, stored);
     if (rebased.conflicts.length) {
       // Keep the local edits and their old base until Save opens the resolver. Never silently
@@ -87,20 +87,21 @@ export function useTimelines({
       pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE,
         `A generation or stored edit changed clips: ${rebased.conflicts.map((c) => c.label).join(", ")}. Save to choose your edits or the stored versions.`);
       setActiveTimeline(rebaseTimeline(base, working, stored, { force: true }).timeline);
-      return;
+      return true;
     }
     setActiveTimeline(rebased.timeline);
     savedTimelineSnapshotRef.current = serializeTimeline(stored);
+    return true;
   }
 
   // FilmLifecycle owns the run feed. Refresh the selected film timeline only while one of
   // its runs is active, and once more when that run becomes terminal.
   const adoptStoredTimelineRef = useRef(adoptStoredTimeline);
   useLayoutEffect(() => { adoptStoredTimelineRef.current = adoptStoredTimeline; });
-  const filmRefreshRef = useRef({ controller: null, key: "", active: false });
+  const filmRefreshRef = useRef({ controller: null, key: "", debt: false });
   useEffect(() => () => {
     filmRefreshRef.current.controller?.abort();
-    filmRefreshRef.current = { controller: null, key: "", active: false };
+    filmRefreshRef.current = { controller: null, key: "", debt: false };
   }, [activeProject?.id, selectedTimelineId]);
   const refreshFilmTimeline = useCallback((runs, signal) => {
     const projectId = activeProjectRef.current?.id;
@@ -110,16 +111,18 @@ export function useTimelines({
     const previous = filmRefreshRef.current;
     const ids = new Set(Object.keys(timeline.filmAssembly.runs ?? {}));
     const active = runs.some((run) => run.controllerActive && (ids.has(run.locator?.id) || run.record?.timeline?.timelineId === timeline.id));
-    const shouldRefresh = active || (previous.key === key && previous.active);
+    const debt = active || (previous.key === key && previous.debt);
+    const shouldRefresh = debt;
     previous.controller?.abort();
     const controller = new AbortController();
-    filmRefreshRef.current = { controller, key, active };
+    filmRefreshRef.current = { controller, key, debt };
     if (!shouldRefresh || signal?.aborted) return;
     const abort = () => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
     return timelineRequest(projectId, timeline.id, token, { signal: controller.signal }).then((stored) => {
       if (!controller.signal.aborted && activeProjectRef.current?.id === projectId && selectedTimelineIdRef.current === timeline.id) {
-        adoptStoredTimelineRef.current(stored);
+        const adopted = adoptStoredTimelineRef.current(stored);
+        if (adopted && !active && filmRefreshRef.current.controller === controller) filmRefreshRef.current.debt = false;
       }
     }).catch((error) => {
       if (!controller.signal.aborted && !isAbortError(error)) setError(error.message);

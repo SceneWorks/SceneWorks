@@ -125,6 +125,26 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
   const activeTimelineId = useRef("");
   const discoveredTimeline = useRef("");
   const selectedRunExplicit = useRef(false);
+  // Review actions and lifecycle reads share a generation so a pre-action list cannot
+  // overwrite a newer accepted controller receipt.
+  const runFeedFence = useRef({ generation: 0, pending: false });
+  const [reviewMutationPending, setReviewMutationPending] = useState(false);
+  const [runFeedEpoch, setRunFeedEpoch] = useState(0);
+  const beginReviewMutation = useCallback(() => {
+    const fence = runFeedFence.current;
+    fence.generation += 1;
+    fence.pending = true;
+    fence.abort?.();
+    setReviewMutationPending(true);
+    return fence.generation;
+  }, []);
+  const endReviewMutation = useCallback((generation) => {
+    const fence = runFeedFence.current;
+    if (fence.generation !== generation || !fence.pending) return;
+    fence.pending = false;
+    setReviewMutationPending(false);
+    setRunFeedEpoch((epoch) => epoch + 1);
+  }, []);
   const plannerAvailabilityRequest = useRef(0);
   const operationScope = useRef({ projectId: activeProject?.id, mounted: true });
   const runActionController = useRef(null);
@@ -144,14 +164,16 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
   activeTimelineId.current = activeTimeline?.id ?? "";
   lastRunId.current = lastRun?.locator?.id ?? "";
 
-  const acceptRunSnapshot = useCallback((run, { latest = false, select = false } = {}) => {
+  const acceptRunSnapshot = useCallback((run, { latest = false, select = false, actionSelection } = {}) => {
     const draftId = selectedDraftId.current;
-    if (!draftId || run?.locator?.draftId !== draftId) return;
-    if (select) selectedRunExplicit.current = true;
+    if (!draftId || run?.locator?.draftId !== draftId) return false;
+    if (actionSelection !== undefined && lastRunId.current !== actionSelection) return false;
+    if (select) { selectedRunExplicit.current = true; lastRunId.current = run.locator.id; }
     setLastRun((current) => {
       if (select || (latest && !selectedRunExplicit.current) || !current || current.locator?.draftId !== draftId || current.locator?.id === run.locator.id) return run;
       return current;
     });
+    return true;
   }, []);
 
   useEffect(() => {
@@ -656,7 +678,7 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
         </div>
       </div>
       {draft && !engaged && showStart ? <div hidden><FilmLifecycle
-        draftId={draft.id} onRunChange={acceptRunSnapshot} onRuns={refreshFilmTimeline} planningSnapshot={planningOperation}
+        draftId={draft.id} onRunChange={acceptRunSnapshot} onRuns={refreshFilmTimeline} planningSnapshot={planningOperation} feedFence={runFeedFence} feedPaused={reviewMutationPending} feedEpoch={runFeedEpoch}
         projectId={activeProject.id} selectedRunId={lastRun?.locator?.id}
         runActive={Boolean(lastRun?.controllerActive)} screenActive={screenActive && !busy}
         setNotice={setNotice} token={token}
@@ -692,6 +714,9 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
               draftId={draft.id}
               onRunChange={acceptRunSnapshot}
               onRuns={refreshFilmTimeline}
+              feedFence={runFeedFence}
+              feedPaused={reviewMutationPending}
+              feedEpoch={runFeedEpoch}
               planningSnapshot={planningOperation}
               projectId={activeProject.id}
               selectedRunId={lastRun?.locator?.id}
@@ -775,6 +800,8 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
                   runControllerActive={Boolean(lastRun?.controllerActive)}
                   runSnapshot={lastRun}
                   onRunChange={acceptRunSnapshot}
+                  beginRunMutation={beginReviewMutation}
+                  endRunMutation={endReviewMutation}
                   runLocatorId={lastRun?.locator?.id}
                   setNotice={setNotice}
                   setSelectedTimelineId={setSelectedTimelineId}

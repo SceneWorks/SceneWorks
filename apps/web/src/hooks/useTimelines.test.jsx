@@ -256,6 +256,33 @@ describe("useTimelines film delivery feed", () => {
     expect(get().api.activeTimeline.name).toBe("Main");
   });
 
+  it("retries a terminal catch-up aborted by hiding before consuming the debt", async () => {
+    const get = mount();
+    const timeline = makeTimeline({ revision: 1, filmAssembly: { runs: { run_1: {} } } });
+    await loadSelected(get, timeline);
+    const running = [{ locator: { id: "run_1" }, controllerActive: true }];
+    const terminal = [{ locator: { id: "run_1" }, controllerActive: false }];
+    const owner = new AbortController();
+    apiRouter = () => timeline;
+    await act(async () => get().api.refreshFilmTimeline(running, owner.signal));
+    let resolveTerminal;
+    apiRouter = () => new Promise((resolve) => { resolveTerminal = resolve; });
+    act(() => { get().api.refreshFilmTimeline(terminal, owner.signal); });
+    owner.abort();
+    await act(async () => resolveTerminal({ ...timeline, revision: 2, name: "stale" }));
+    expect(get().api.activeTimeline.revision).toBe(1);
+    apiRouter = () => ({ ...timeline, revision: 2, name: "delivered" });
+    await act(async () => get().api.refreshFilmTimeline(terminal, new AbortController().signal));
+    expect(get().api.activeTimeline.name).toBe("delivered");
+    expect(get().api.activeTimeline.revision).toBe(2);
+    await act(async () => get().api.refreshFilmTimeline(running, new AbortController().signal));
+    apiRouter = () => Promise.reject(new Error("temporary failure"));
+    await act(async () => get().api.refreshFilmTimeline(terminal, new AbortController().signal));
+    apiRouter = () => ({ ...timeline, revision: 3, name: "retried" });
+    await act(async () => get().api.refreshFilmTimeline(terminal, new AbortController().signal));
+    expect(get().api.activeTimeline.name).toBe("retried");
+  });
+
   it("adopts a later clip on the same timeline revision stream without losing dirty edits or selection", async () => {
     vi.useFakeTimers();
     const get = mount();
