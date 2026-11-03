@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { discoverRootTests, rootTestConcurrency } from "./run-root-tests.mjs";
 
+const portableInventory = (files) => files.map((file) => file.replaceAll("\\", "/")).sort();
+
 test("root discovery includes nested tests and leaves desktop to its suite", () => {
   const files = discoverRootTests();
   assert.ok(files.includes("scripts/test-list-coverage.test.mjs"));
@@ -29,7 +31,7 @@ test("desktop's separately owned suite lists every desktop Node test", () => {
     if (entry.isDirectory() && !["node_modules", "target", "dist"].includes(entry.name)) return walk(file);
     return entry.isFile() && entry.name.endsWith(".test.mjs") ? [file] : [];
   });
-  assert.deepEqual(listed, walk("").sort());
+  assert.deepEqual(portableInventory(listed), portableInventory(walk("")));
 });
 
 
@@ -44,4 +46,16 @@ test("root discovery excludes named Cargo build caches while retaining nested so
     assert.equal(files.length, 1);
     assert.ok(files[0].endsWith(path.join("nested", "source", "fixture.test.mjs").split(path.sep).join("/")));
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+
+test("desktop inventories compare portable paths without hiding missing or extra tests", () => {
+  const listed = ["scripts/build-sidecar-platform.test.mjs", "scripts/nested/runtime.test.mjs"];
+  const discovered = listed.map((file) => path.win32.join(...file.split("/")));
+  assert.notDeepEqual(discovered, listed, "fixture must exercise Windows-shaped discovery");
+  assert.deepEqual(portableInventory(listed), portableInventory(discovered));
+  assert.deepEqual(portableInventory(discovered), portableInventory(listed));
+  assert.notDeepEqual(portableInventory(listed), portableInventory(discovered.slice(1)));
+  assert.notDeepEqual(portableInventory([...listed, "scripts/extra.test.mjs"]), portableInventory(discovered));
+  assert.notDeepEqual(portableInventory([...listed, listed[0]]), portableInventory(discovered));
 });
