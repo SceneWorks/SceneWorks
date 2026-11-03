@@ -101,13 +101,7 @@ pub(super) fn validate_minimax_geometry(
 /// than asserting it away, and pins `batch` to 1 before anything derived is computed.
 pub(super) fn minimax_target_geometry(request: &Value) -> Result<MinimaxGeometry, String> {
     let geometry = protocol::planned_object(request, "/target/geometry")?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
     let batch = axis("batch")?;
     if batch != 1 {
         return Err(format!(

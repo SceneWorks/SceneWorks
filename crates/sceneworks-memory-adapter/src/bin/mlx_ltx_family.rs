@@ -301,13 +301,7 @@ pub(super) fn validate_ltx_geometry(
 /// `max_count: 1` and the arm renders exactly one clip.
 pub(super) fn ltx_target_geometry(request: &Value) -> Result<LtxGeometry, String> {
     let geometry = protocol::planned_object(request, "/target/geometry")?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
     let batch = axis("batch")?;
     if batch != 1 {
         return Err(format!(
@@ -1764,7 +1758,7 @@ pub(super) fn validate_ltx_canary_plan_for(
         ));
     }
     let planned = protocol::planned(request)?;
-    if planned.get("_diagnosticOnly").and_then(Value::as_bool) != Some(true) {
+    if protocol::plan_optional_bool(planned, "/_diagnosticOnly") != Some(true) {
         return Err("LTX safety canary requires planned._diagnosticOnly == true".to_owned());
     }
     if protocol::plan_optional_str(planned, "/evidenceScope") != Some("fixture") {
@@ -1790,7 +1784,7 @@ pub(super) fn validate_ltx_canary_plan_for(
     protocol::validate_plain_overlay_target(request, LTX_PLAIN_EXECUTION_PATH)?;
     let target = protocol::plan_object(planned, "/target")?;
     for field in ["provider", "modelId"] {
-        if target.get(field).and_then(Value::as_str) != Some(LTX_PROVIDER) {
+        if protocol::target_optional_str(target, field) != Some(LTX_PROVIDER) {
             return Err(format!(
                 "LTX safety canary target.{field} must be {LTX_PROVIDER:?}"
             ));

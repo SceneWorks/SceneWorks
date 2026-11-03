@@ -87,13 +87,7 @@ pub(super) fn krea_realtime_target_geometry(
     request: &Value,
 ) -> Result<KreaRealtimeGeometry, String> {
     let geometry = protocol::planned_object(request, "/target/geometry")?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
     let max_count = mlx_gen_krea_realtime::descriptor().capabilities.max_count;
     let batch = axis("batch")?;
     if batch != max_count {

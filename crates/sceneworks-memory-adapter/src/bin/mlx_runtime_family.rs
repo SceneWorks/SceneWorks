@@ -908,7 +908,7 @@ pub(super) fn exceeded_bound_capture_refusal_in(
     let target = planned
         .get("target")
         .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let text = |pointer: &str| target.get(pointer).and_then(Value::as_str);
+    let text = |field: &str| protocol::plan_optional_str(target, &format!("/{field}"));
     let (Some(model_id), Some(provider), Some(tier), Some(mode)) = (
         text("modelId"),
         text("provider"),

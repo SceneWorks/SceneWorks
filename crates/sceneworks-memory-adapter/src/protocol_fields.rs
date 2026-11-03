@@ -20,6 +20,19 @@ pub fn planned_str<'a>(request: &'a Value, path: &str) -> Result<&'a str, String
 pub fn plan_optional_u64(plan: &Value, path: &str) -> Option<u64> {
     plan.pointer(path).and_then(Value::as_u64)
 }
+pub fn plan_optional_bool(plan: &Value, path: &str) -> Option<bool> {
+    plan.pointer(path).and_then(Value::as_bool)
+}
+
+/// A declared geometry axis retains the capture protocol's integer range and error spelling.
+pub fn geometry_axis_u32(geometry: &Map<String, Value>, name: &str) -> Result<u32, String> {
+    geometry
+        .get(name)
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
+}
+
 pub fn plan_object<'a>(plan: &'a Value, path: &str) -> Result<&'a Map<String, Value>, String> {
     plan.pointer(path)
         .and_then(Value::as_object)
@@ -98,5 +111,19 @@ mod tests {
         );
         assert_eq!(planned_object(&value, "/target").unwrap().len(), 4);
         assert_eq!(planned_optional_str(&value, "/absent").unwrap(), None);
+        assert_eq!(
+            plan_optional_bool(&json!({"flag":false}), "/flag"),
+            Some(false)
+        );
+        assert_eq!(plan_optional_bool(&json!({"flag":"false"}), "/flag"), None);
+        let axes = json!({"width":u32::MAX,"height":u64::from(u32::MAX)+1,"frames":1.5});
+        let axes = axes.as_object().unwrap();
+        assert_eq!(geometry_axis_u32(axes, "width").unwrap(), u32::MAX);
+        for field in ["height", "frames", "missing"] {
+            assert_eq!(
+                geometry_axis_u32(axes, field).unwrap_err(),
+                format!("planned.target.geometry.{field} must fit u32")
+            );
+        }
     }
 }

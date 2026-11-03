@@ -343,13 +343,7 @@ pub struct Geometry {
 
 pub fn wan_target_geometry(request: &Value, label: &str) -> Result<Geometry, String> {
     let geometry = crate::planned_object(request, "/target/geometry")?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let axis = |name: &str| crate::geometry_axis_u32(geometry, name);
     if axis("batch")? != 1 {
         return Err(format!(
             "{label} requires geometry.batch == 1 (these engines render one clip per request)"

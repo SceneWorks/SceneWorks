@@ -204,13 +204,7 @@ fn validate_target(request: &Value) -> Result<Target, String> {
         .get("geometry")
         .and_then(Value::as_object)
         .ok_or_else(|| "planned.target.geometry must be an object".to_owned())?;
-    let axis = |name: &str| {
-        geometry
-            .get(name)
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| format!("planned.target.geometry.{name} must fit u32"))
-    };
+    let axis = |name: &str| protocol::geometry_axis_u32(geometry, name);
     if axis("batch")? != 1 {
         return Err(format!("{LABEL} requires geometry.batch == 1"));
     }
@@ -238,7 +232,7 @@ fn validate_target(request: &Value) -> Result<Target, String> {
         ));
     }
     if protocol::plan_optional_str(planned, "/expectedResult") != Some("passed")
-        || planned.get("negative").and_then(Value::as_bool) != Some(false)
+        || protocol::plan_optional_bool(planned, "/negative") != Some(false)
         || protocol::plan_optional_str(planned, "/modelLoadPolicy") != Some("fresh_per_case")
         || !planned.get("modelLoadGroup").is_some_and(Value::is_null)
     {
