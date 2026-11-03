@@ -131,14 +131,22 @@ function DocumentReader({ asset }) {
     }
   }, [ticket, unauthorizedTicket]);
   const url = assetUrl(asset);
-  const urlRef = React.useRef(url);
-  React.useLayoutEffect(() => { urlRef.current = url; }, [url]);
   const resourceKey = React.useMemo(() => {
     if (!url) return "";
     const parsed = new URL(url, "http://sceneworks.invalid");
     parsed.searchParams.delete("ticket");
     return parsed.href;
   }, [url]);
+  const committed = React.useRef({ url, resourceKey, generation: 0 });
+  React.useLayoutEffect(() => {
+    const previous = committed.current;
+    committed.current = {
+      url,
+      resourceKey,
+      generation: previous.generation + (previous.resourceKey === resourceKey ? 0 : 1),
+    };
+  }, [url, resourceKey]);
+  React.useLayoutEffect(() => () => { committed.current.generation += 1; }, []);
   const [segments, setSegments] = React.useState(null);
   const [error, setError] = React.useState("");
 
@@ -148,7 +156,8 @@ function DocumentReader({ asset }) {
       return undefined;
     }
     const controller = new AbortController();
-    const initialUrl = urlRef.current;
+    const { url: initialUrl, generation } = committed.current;
+    const ownsRequest = () => !controller.signal.aborted && committed.current.generation === generation;
     let requestTicket = getMediaTicket();
     setUnauthorizedTicket(null);
     setSegments(null);
@@ -157,17 +166,17 @@ function DocumentReader({ asset }) {
       let response = await mediaResponse(initialUrl, { signal: controller.signal });
       // Do not restart a live or already completed read solely for rotation.
       // If the old credential expired during this read, retry once with the new one.
-      if (response.status === 401 && urlRef.current !== initialUrl && !controller.signal.aborted) {
+      if (response.status === 401 && ownsRequest() && committed.current.url !== initialUrl) {
         requestTicket = getMediaTicket();
-        response = await mediaResponse(urlRef.current, { signal: controller.signal });
+        response = await mediaResponse(committed.current.url, { signal: controller.signal });
       }
-      if (response.status === 401 && !controller.signal.aborted) setUnauthorizedTicket(requestTicket);
+      if (response.status === 401 && ownsRequest()) setUnauthorizedTicket(requestTicket);
       if (!response.ok) throw new Error(`Request failed (${response.status})`);
       const document = await response.json();
-      if (!controller.signal.aborted) setSegments(Array.isArray(document?.segments) ? document.segments : []);
+      if (ownsRequest()) setSegments(Array.isArray(document?.segments) ? document.segments : []);
     };
     load().catch((err) => {
-      if (!controller.signal.aborted && !isAbortError(err)) setError(String(err?.message ?? err));
+      if (ownsRequest() && !isAbortError(err)) setError(String(err?.message ?? err));
     });
     return () => controller.abort();
   }, [resourceKey, retryGeneration]);
