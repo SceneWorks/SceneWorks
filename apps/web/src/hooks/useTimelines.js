@@ -1,6 +1,7 @@
 import { appConfirm } from "../appConfirm.jsx";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { apiFetch, isAbortError } from "../api.js";
+import { isAbortError } from "../api.js";
+import { timelineRequest } from "../api/timelines.js";
 import { isCurrentProjectRequest } from "../appStateHelpers.js";
 import { refreshFailure, refreshSuccess } from "../refreshResult.js";
 import { rebaseTimeline, timelineEdit } from "../timelineEdits.js";
@@ -76,9 +77,9 @@ export function useTimelines({
     if (working?.id !== stored.id || !base || base.id !== stored.id) {
       setActiveTimeline(stored);
       savedTimelineSnapshotRef.current = serializeTimeline(stored);
-      return;
+      return true;
     }
-    if ((stored.revision ?? 0) < (base.revision ?? 0)) return;
+    if ((stored.revision ?? 0) < (base.revision ?? 0)) return false;
     const rebased = rebaseTimeline(base, working, stored);
     if (rebased.conflicts.length) {
       // Keep the local edits and their old base until Save opens the resolver. Never silently
@@ -86,33 +87,65 @@ export function useTimelines({
       pushNotice?.(TIMELINE_GENERATION_CONFLICT_NOTICE,
         `A generation or stored edit changed clips: ${rebased.conflicts.map((c) => c.label).join(", ")}. Save to choose your edits or the stored versions.`);
       setActiveTimeline(rebaseTimeline(base, working, stored, { force: true }).timeline);
-      return;
+      return true;
     }
     setActiveTimeline(rebased.timeline);
     savedTimelineSnapshotRef.current = serializeTimeline(stored);
+    return true;
   }
 
-  const isFilmTimeline = Boolean(activeTimeline?.filmAssembly);
-
-  // Film delivery is server-owned and can finish without an editor SSE subscriber. A bounded
-  // read refresh discovers it while preserving pending edits; navigation does not own the run.
-  useEffect(() => {
-    if (!activeProject?.id || !selectedTimelineId || !isFilmTimeline) return;
-    let disposed = false;
-    let inFlight = false;
-    const timer = window.setInterval(async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const stored = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${selectedTimelineId}`, token);
-        if (!disposed && activeProjectRef.current?.id === activeProject.id && selectedTimelineIdRef.current === selectedTimelineId) adoptStoredTimeline(stored);
-      } catch (err) { if (!disposed) setError(err.message); }
-      finally { inFlight = false; }
-    }, 1000);
-    return () => { disposed = true; window.clearInterval(timer); };
-    // Ref-backed adoption reads current pending edits, never the timer's initial snapshot.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProject?.id, selectedTimelineId, isFilmTimeline, token]);
+  // FilmLifecycle owns the run feed. Refresh the selected film timeline only while one of
+  // its runs is active, and once more when that run becomes terminal.
+  const adoptStoredTimelineRef = useRef(adoptStoredTimeline);
+  useLayoutEffect(() => { adoptStoredTimelineRef.current = adoptStoredTimeline; });
+  const filmRefreshRef = useRef({ controller: null, key: "", debt: false });
+  useEffect(() => () => {
+    filmRefreshRef.current.controller?.abort();
+    filmRefreshRef.current = { controller: null, key: "", debt: false };
+  }, [activeProject?.id, selectedTimelineId]);
+  const refreshFilmTimeline = useCallback(async (runs, signal, { force = false, timelineId } = {}) => {
+    const projectId = activeProjectRef.current?.id;
+    const timeline = activeTimelineRef.current;
+    if (!projectId || !timeline || timeline.id !== selectedTimelineIdRef.current || (timelineId && timelineId !== timeline.id)) return;
+    const key = `${projectId}:${timeline.id}`;
+    const previous = filmRefreshRef.current;
+    if (!force && !timeline.filmAssembly && !(previous.key === key && previous.debt)) return;
+    const ids = new Set(Object.keys(timeline.filmAssembly?.runs ?? {}));
+    const active = runs.some((run) => run.controllerActive && (ids.has(run.locator?.id) || run.record?.timeline?.timelineId === timeline.id));
+    const debt = force || active || (previous.key === key && previous.debt);
+    previous.controller?.abort();
+    const controller = new AbortController();
+    filmRefreshRef.current = { controller, key, debt };
+    if (!debt || signal?.aborted) return;
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      // A terminal read has no future polling tick to retry it. Bound retries so a
+      // transient failure does not lose the final cut or create endless polling.
+      for (let attempt = 0; attempt < 3 && !controller.signal.aborted; attempt += 1) {
+        try {
+          const stored = await timelineRequest(projectId, timeline.id, token, { signal: controller.signal });
+          if (controller.signal.aborted || activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timeline.id) return;
+          const adopted = adoptStoredTimelineRef.current(stored);
+          if (adopted) {
+            if (!active && filmRefreshRef.current.controller === controller) filmRefreshRef.current.debt = false;
+            return;
+          }
+          throw new Error("The film timeline response was older than the current saved revision.");
+        } catch (error) {
+          if (controller.signal.aborted || isAbortError(error)) return;
+          if (attempt === 2 || error.status === 401) { setError(error.message); return; }
+          await new Promise((resolve) => {
+            const timer = window.setTimeout(done, 250 * 2 ** attempt);
+            function done() { window.clearTimeout(timer); controller.signal.removeEventListener("abort", done); resolve(); }
+            controller.signal.addEventListener("abort", done, { once: true });
+          });
+        }
+      }
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
+  }, [activeProjectRef, token, setError]);
 
   // Compare a timeline against the last-persisted snapshot. Unknown baseline (nothing loaded
   // yet) or no working copy → not dirty, so a freshly loaded/empty editor never prompts.
@@ -154,7 +187,7 @@ export function useTimelines({
         return refreshFailure("stale");
       }
       try {
-        const items = await apiFetch(`/api/v1/projects/${projectId}/timelines`, token, { signal });
+        const items = await timelineRequest(projectId, null, token, { signal });
         if (!isCurrentProjectRequest(activeProjectRef.current?.id ?? null, projectId)) {
           return refreshFailure("stale");
         }
@@ -187,7 +220,7 @@ export function useTimelines({
       return;
     }
     try {
-      const timeline = await apiFetch(`/api/v1/projects/${projectId}/timelines/${timelineId}`, token);
+      const timeline = await timelineRequest(projectId, timelineId, token);
       if (activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timelineId) {
         return;
       }
@@ -214,7 +247,7 @@ export function useTimelines({
         return null;
       }
       try {
-        const created = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines`, token, {
+        const created = await timelineRequest(activeProject.id, null, token, {
           method: "POST",
           body: JSON.stringify(payload),
         });
@@ -242,18 +275,17 @@ export function useTimelines({
       const workingAtSave = activeTimelineRef.current;
       try {
         const projectId = activeProject.id;
-        const path = `/api/v1/projects/${projectId}/timelines/${timeline.id}`;
         const initialBase = savedTimelineSnapshotRef.current ? JSON.parse(savedTimelineSnapshotRef.current) : timeline;
         let base = initialBase?.id === timeline.id ? initialBase : timeline;
         let candidate = timeline;
         let saved;
         for (let attempt = 0; attempt < 4; attempt += 1) {
           try {
-            saved = await apiFetch(path, token, { method: "PUT", body: JSON.stringify({ timeline: candidate, expectedRevision: base.revision ?? 0 }) });
+            saved = await timelineRequest(projectId, timeline.id, token, { method: "PUT", body: JSON.stringify({ timeline: candidate, expectedRevision: base.revision ?? 0 }) });
             break;
           } catch (error) {
             if (error.code !== "timeline_revision_conflict") throw error;
-            const stored = await apiFetch(path, token);
+            const stored = await timelineRequest(projectId, timeline.id, token);
             let merged = rebaseTimeline(base, candidate, stored);
             if (merged.conflicts.length) {
               const names = merged.conflicts.map((c) => c.label).join(", ");
@@ -303,9 +335,9 @@ export function useTimelines({
       return;
     }
     try {
-      const stored = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${saved.id}/film-deliveries`, token, {
+      const stored = await timelineRequest(activeProject.id, saved.id, token, {
         method: "POST", body: JSON.stringify({ runId, resolveShotId: shotId, resolution, expectedRevision: saved.revision ?? 0 }),
-      });
+      }, "/film-deliveries");
       if (activeProjectRef.current?.id === activeProject.id && selectedTimelineIdRef.current === saved.id) adoptStoredTimeline(stored);
     } catch (error) { setError(error.message); }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -321,10 +353,10 @@ export function useTimelines({
         return;
       }
       try {
-        await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${saved.id}/exports`, token, {
+        await timelineRequest(activeProject.id, saved.id, token, {
           method: "POST",
           body: JSON.stringify({ ...options, requestedGpu }),
-        });
+        }, "/exports");
         setActiveView("Queue");
         setError("");
       } catch (err) {
@@ -340,10 +372,10 @@ export function useTimelines({
         return null;
       }
       try {
-        const job = await apiFetch(`/api/v1/projects/${activeProject.id}/timelines/${timeline.id}/items/${item.id}/frames`, token, {
+        const job = await timelineRequest(activeProject.id, timeline.id, token, {
           method: "POST",
           body: JSON.stringify({ playheadSeconds, intendedUse, requestedGpu }),
-        });
+        }, `/items/${encodeURIComponent(item.id)}/frames`);
         setError("");
         return job;
       } catch (err) {
@@ -390,16 +422,15 @@ export function useTimelines({
       return;
     }
     try {
-      const path = `/api/v1/projects/${projectId}/timelines/${timelineId}`;
       let saved;
       let applyTimelineGenerationResult;
       for (let attempt = 0; attempt < 4; attempt += 1) {
-        const timeline = await apiFetch(path, token);
+        const timeline = await timelineRequest(projectId, timelineId, token);
         ({ applyTimelineGenerationResult } = await loadTimelineGeneration());
         const updated = applyTimelineGenerationResult(timeline, job);
         if (serializeTimeline(updated) === serializeTimeline(timeline)) { saved = timeline; break; }
         try {
-          saved = await apiFetch(path, token, { method: "PUT", body: JSON.stringify({ timeline: updated, expectedRevision: timeline.revision ?? 0 }) });
+          saved = await timelineRequest(projectId, timelineId, token, { method: "PUT", body: JSON.stringify({ timeline: updated, expectedRevision: timeline.revision ?? 0 }) });
           break;
         } catch (error) { if (error.code !== "timeline_revision_conflict") throw error; }
       }
@@ -422,6 +453,7 @@ export function useTimelines({
     setActiveTimeline,
     isActiveTimelineDirty,
     refreshTimelines,
+    refreshFilmTimeline,
     createTimeline,
     saveTimeline,
     resolveTimelineTrim,

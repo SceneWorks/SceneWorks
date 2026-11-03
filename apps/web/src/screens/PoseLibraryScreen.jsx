@@ -4,7 +4,7 @@ import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../compon
 import { AssetThumbnail } from "../components/assetMedia.jsx";
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
-import { useAppContext, useAppStatic } from "../context/AppContext.js";
+import { useAppLive, useAppStatic } from "../context/AppContext.js";
 import { DEFAULT_MAC_CAPABILITIES, macFeatureBlock } from "../macGating.js";
 import { POSE_DETECT_MODEL_ID } from "../constants.js";
 import { downloadOffersFor, modelInstallComplete, poseDetectModelUsable } from "../modelEligibility.js";
@@ -127,13 +127,13 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
     assets = [],
     characters = [],
     requestedGpu,
-    jobs = [],
     models = [],
     macCapabilities = DEFAULT_MAC_CAPABILITIES,
     createModelDownloadJob,
     jobAction,
     setActiveView,
-  } = useAppContext();
+  } = useAppStatic();
+  const { jobs = [] } = useAppLive();
   const [dialogOpen, setDialogOpen] = useState(false);
   const [sources, setSources] = useState([]); // selected source asset records
   const [phase, setPhase] = useState("idle"); // idle | detecting | review

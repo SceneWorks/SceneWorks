@@ -447,12 +447,14 @@ describe("slugifyPresetId", () => {
 
   it("trims leading and trailing separators so the id starts alphanumeric", () => {
     expect(slugifyPresetId("  --Neon Noir--  ")).toBe("neon_noir");
-    expect(slugifyPresetId("neon-noir")).toBe("neon-noir");
+    expect(slugifyPresetId("neon-noir")).toBe("neon_noir");
   });
 
-  it("returns empty string for non-sluggable input", () => {
-    expect(slugifyPresetId("日本語")).toBe("");
-    expect(slugifyPresetId("")).toBe("");
+  it("uses the backend fallback for non-sluggable input and lora", () => {
+    expect(slugifyPresetId("日本語")).toBe("preset");
+    expect(slugifyPresetId("")).toBe("preset");
+    expect(slugifyPresetId("LoRa")).toBe("preset");
+    expect(slugifyPresetId("Kelvin K")).toBe("kelvin");
   });
 });
 

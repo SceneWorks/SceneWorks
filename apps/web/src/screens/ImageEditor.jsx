@@ -1,3 +1,4 @@
+import { blobToImage } from "../imageDimensions.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Stage, Layer, Group, Image as KonvaImage, Line, Rect, Transformer } from "react-konva";
@@ -1029,18 +1030,6 @@ export function blankCanvasDims(aspectKey, longSide) {
 // this way (rather than an <img crossOrigin> against the file URL) guarantees the
 // Konva canvas is never tainted — later crop/export (sc-2430/sc-2434) need to read
 // pixels back. Resolves { image, objectUrl }; caller owns revoking objectUrl.
-function blobToImage(blob) {
-  return new Promise((resolve, reject) => {
-    const objectUrl = URL.createObjectURL(blob);
-    const image = new Image();
-    image.onload = () => resolve({ image, objectUrl });
-    image.onerror = () => {
-      URL.revokeObjectURL(objectUrl);
-      reject(new Error("Could not decode image"));
-    };
-    image.src = objectUrl;
-  });
-}
 
 function colorKeyMaskCanvasForImage(image, seed, options) {
   const canvas = document.createElement("canvas");
@@ -1305,7 +1294,7 @@ export function ImageEditor() {
   }, []);
   const [accCollapsed, setAccCollapsed] = useState(false);
   const [layersOpen, setLayersOpen] = useState(true);
-  // One undo checkpoint per opacity DRAG (mirrors LayersPanel): the first change of
+  // One undo checkpoint per opacity DRAG: the first change of
   // a gesture snapshots; subsequent ticks coalesce until pointer-up resets it.
   const layerOpacityGestureRef = useRef(false);
 
@@ -1868,8 +1857,8 @@ export function ImageEditor() {
   // Replace the whole working document with a fresh single-layer stack from one
   // decoded bitmap (open / blank / crop / color / AI result). Revokes the evicted
   // layers' object URLs first. The single-layer stack is the degenerate case that
-  // reproduces the pre-layers single-bitmap behavior; multi-layer creation is the
-  // layers panel (sc-6118).
+  // reproduces the pre-layers single-bitmap behavior; the layer controls rendered
+  // by this editor create and manage multi-layer stacks (sc-6118).
   const installWorkingImage = useCallback(
     (image, objectUrl, blob, source) => {
       revokeLayerUrls(workingRef.current?.layers);

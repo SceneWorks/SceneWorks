@@ -1,3 +1,4 @@
+import { downloadSizeText } from "../formatting.js";
 import React, { useMemo, useState } from "react";
 import { CheckpointImportPanel } from "../components/CheckpointImportPanel.jsx";
 import { Icon } from "../components/Icons.jsx";
@@ -92,7 +93,7 @@ export function SimpleModelManager() {
       return loras.map((lora) => ({
         id: lora.id,
         name: lora.name ?? lora.id,
-        meta: [sizeLabel(lora), lora.baseModel ?? lora.family].filter(Boolean).join(" · "),
+        meta: [downloadSizeText(lora), lora.baseModel ?? lora.family].filter(Boolean).join(" · "),
         manageOnly: lora.installState === "installed",
         entry: lora,
         kind: "lora",
@@ -107,7 +108,7 @@ export function SimpleModelManager() {
       .map((model) => ({
         id: model.id,
         name: model.name ?? model.id,
-        meta: [sizeLabel(model), needsLabel(model, tierOptions), importedCheckpointLabel(model)]
+        meta: [downloadSizeText(model), needsLabel(model, tierOptions), importedCheckpointLabel(model)]
           .filter(Boolean)
           .join(" · "),
         memoryTitle: needsLabel(model, tierOptions)?.startsWith("Q4 optimized ")
@@ -293,12 +294,6 @@ function importedCheckpointLabel(model) {
 
 // The catalog's own human-readable download size; `~` marks an estimate, exactly as the
 // advanced Models screen labels it.
-function sizeLabel(entry) {
-  if (!entry?.downloadSizeLabel) {
-    return null;
-  }
-  return entry.downloadSizeEstimated ? `~${entry.downloadSizeLabel}` : entry.downloadSizeLabel;
-}
 
 // The model's memory requirement, PREFERRING the per-tier measured peak over the blanket per-lane
 // `minMemoryGb` (sc-15400). Showing the blanket unconditionally over-warns every variant-matrix model

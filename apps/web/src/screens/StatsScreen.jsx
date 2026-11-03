@@ -190,9 +190,8 @@ function RunDetail({ row, onClose }) {
 
 function StatsCharts({ rows }) {
   const [groupBy, setGroupBy] = useState("quant");
-  const isDark =
-    typeof window !== "undefined" &&
-    window.matchMedia?.("(prefers-color-scheme: dark)")?.matches;
+  const { theme } = useAppStatic();
+  const isDark = theme === "dark";
   const gridColor = isDark ? "#2c2c2a" : "#e1e0d9";
   const tickColor = "#898781"; // legible in both light and dark
   const tooltipStyle = {

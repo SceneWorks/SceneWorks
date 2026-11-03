@@ -1,10 +1,3 @@
-export const aspectOptions = {
-  "16:9": { width: 1280, height: 720, label: "16:9" },
-  "9:16": { width: 720, height: 1280, label: "9:16" },
-  "1:1": { width: 1024, height: 1024, label: "1:1" },
-};
-export const transitionOptions = ["cut", "crossfade", "fade_from_black", "fade_to_black"];
-export const speedPresets = [0.25, 0.5, 1, 2];
 
 export function timelineDuration(timeline) {
   return Math.max(0, ...timeline.tracks.flatMap((track) => track.items.map((item) => Number(item.timelineEnd) || 0)));

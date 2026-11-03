@@ -1,3 +1,4 @@
+import { formatDecimalGb } from "../formatting.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAppContext } from "../context/AppContext.js";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
@@ -703,7 +704,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     selectedCaptionModel === joyCaptionModel;
   const captionModelSizeLabel = useMemo(() => {
     const bytes = Number(captionModel?.downloadSizeBytes);
-    return Number.isFinite(bytes) && bytes > 0 ? `${(bytes / 1e9).toFixed(1)} GB` : "";
+    return formatDecimalGb(bytes, "");
   }, [captionModel?.downloadSizeBytes]);
   const onDownloadCaptionModel = captionModel && typeof createModelDownloadJob === "function"
     ? () => createModelDownloadJob(captionModel)

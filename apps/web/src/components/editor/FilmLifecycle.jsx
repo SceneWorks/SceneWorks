@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch } from "../../api.js";
+import { getFilmPlanning, listFilmRuns, startFilmRun } from "../../api/films.js";
 
 function operationLabel(run) {
   const owner = run.controllerOwner || "";
@@ -17,61 +17,113 @@ function runStatus(run) {
   return run.record.stop?.reason || run.record.outcome || run.record.state;
 }
 
-export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId = "", token, setNotice }) {
+export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, feedFence, feedPaused = false, feedEpoch = 0, projectId, selectedRunId = "", runActive = false, screenActive = true, token, setNotice }) {
   const [runs, setRuns] = useState([]);
+  const [projectRunsActive, setProjectRunsActive] = useState(false);
   const [planning, setPlanning] = useState(null);
   const [pending, setPending] = useState("");
   const refreshRequest = useRef(0);
+  const feedController = useRef(null);
+  const actionController = useRef(null);
+  useEffect(() => {
+    setPending("");
+    return () => { actionController.current?.abort(); };
+  }, [projectId, draftId]);
 
-  const refresh = useCallback(async () => {
-    if (!projectId || !draftId) return;
+  const refresh = useCallback(async (ownerSignal) => {
+    if (!projectId || !draftId || ownerSignal?.aborted || feedFence?.current.pending) return;
+    const generation = feedFence?.current.generation;
+    const stale = () => feedFence && (feedFence.current.pending || feedFence.current.generation !== generation);
+    feedController.current?.abort();
+    const controller = new AbortController();
+    feedController.current = controller;
+    const abort = () => controller.abort();
+    if (feedFence) feedFence.current.abort = abort;
+    ownerSignal?.addEventListener("abort", abort, { once: true });
+    const signal = controller.signal;
     const requestId = ++refreshRequest.current;
-    const [runResult, planningResult] = await Promise.allSettled([
-      apiFetch(`/api/v1/projects/${projectId}/film-runs`, token),
-      apiFetch(`/api/v1/projects/${projectId}/films/${draftId}/planning`, token),
-    ]);
-    if (refreshRequest.current !== requestId) return;
-    if (runResult.status === "fulfilled") {
-      const listed = Array.isArray(runResult.value) ? runResult.value : [];
-      const scoped = listed.filter((run) => run.locator.draftId === draftId);
-      setRuns(scoped);
-      for (const [index, run] of scoped.entries()) onRunChange?.(run, { latest: index === 0, select: false });
-    } else {
-      setNotice(runResult.reason.message);
+    try {
+      const [runResult, planningResult] = await Promise.allSettled([
+        listFilmRuns(projectId, token, { signal }),
+        getFilmPlanning(projectId, draftId, token, { signal }),
+      ]);
+      if (signal.aborted || refreshRequest.current !== requestId || stale()) return;
+      if (runResult.status === "fulfilled") {
+        const listed = Array.isArray(runResult.value) ? runResult.value : [];
+        await onRuns?.(listed, signal);
+        if (signal.aborted || refreshRequest.current !== requestId || stale()) return;
+        setProjectRunsActive(listed.some((run) => run.controllerActive));
+        const scoped = listed.filter((run) => run.locator.draftId === draftId);
+        setRuns(scoped);
+        for (const [index, run] of scoped.entries()) onRunChange?.(run, { latest: index === 0, select: false });
+      } else {
+        setNotice(runResult.reason.message);
+      }
+      if (planningResult.status === "fulfilled") setPlanning(planningResult.value);
+    } finally {
+      if (feedFence?.current.abort === abort) feedFence.current.abort = null;
+      ownerSignal?.removeEventListener("abort", abort);
     }
-    if (planningResult.status === "fulfilled") setPlanning(planningResult.value);
-  }, [draftId, onRunChange, projectId, setNotice, token]);
+  }, [draftId, feedFence, onRunChange, onRuns, projectId, setNotice, token]);
+
+  const [visible, setVisible] = useState(() => !document.hidden);
+  const visibleRef = useRef(screenActive && visible);
+  visibleRef.current = screenActive && visible;
+  useEffect(() => {
+    if (!screenActive || !visible) {
+      actionController.current?.abort();
+      setPending("");
+    }
+  }, [screenActive, visible]);
+  useEffect(() => {
+    const changed = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
 
   useEffect(() => {
-    let canceled = false;
-    refresh();
-    const interval = window.setInterval(() => {
-      if (!canceled) refresh();
-    }, 2000);
-    return () => {
-      canceled = true;
-      refreshRequest.current += 1;
-      window.clearInterval(interval);
-    };
-  }, [refresh]);
+    if (!screenActive || !visible || feedPaused) return undefined;
+    const controller = new AbortController();
+    refresh(controller.signal);
+    return () => { controller.abort(); refreshRequest.current += 1; };
+  }, [refresh, screenActive, visible, selectedRunId, feedPaused, feedEpoch]);
+
+  const active = runActive || projectRunsActive;
+  useEffect(() => {
+    if (!screenActive || !visible || !active || pending || feedPaused) return undefined;
+    const controller = new AbortController();
+    let timer;
+    async function poll() {
+      if (visibleRef.current) await refresh(controller.signal);
+      if (!controller.signal.aborted) timer = window.setTimeout(poll, 1000);
+    }
+    timer = window.setTimeout(poll, 1000);
+    return () => { controller.abort(); refreshRequest.current += 1; window.clearTimeout(timer); };
+  }, [active, pending, refresh, screenActive, visible, feedPaused]);
 
   async function mutate(runId, action) {
     // A list read started before this mutation cannot overwrite the accepted controller snapshot.
     refreshRequest.current += 1;
+    feedController.current?.abort();
+    actionController.current?.abort();
+    const controller = new AbortController();
+    actionController.current = controller;
     setPending(`${runId}:${action}`);
     try {
-      const updated = await apiFetch(`/api/v1/projects/${projectId}/film-runs/${runId}/${action}`, token, { method: "POST" });
+      const updated = await startFilmRun(projectId, runId, action, token, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       if (updated?.locator?.draftId === draftId) onRunChange?.(updated, { select: true });
       setNotice(action === "cancel" ? "Cancellation requested. Completed takes and spent attempts are preserved." : action === "start" ? "Start requested. Checking saved inputs and worker availability." : "Resume requested. Checking saved attempts and worker availability.");
-      await refresh();
+      if (visibleRef.current) await refresh(controller.signal);
     } catch (error) {
-      setNotice(error.message);
+      if (!controller.signal.aborted) setNotice(error.message);
     } finally {
-      setPending("");
+      if (!controller.signal.aborted) setPending("");
     }
   }
 
-  const planningActive = planning && ["running", "canceling"].includes(planning.status);
+  const effectivePlanning = planningSnapshot ?? planning;
+  const planningActive = effectivePlanning && ["running", "canceling"].includes(effectivePlanning.status);
   if (!planningActive && runs.length === 0) return null;
 
   return (
@@ -97,8 +149,8 @@ export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId =
       ) : null}
       {planningActive ? (
         <div className="ve-film-lifecycle-row">
-          <span><strong>Planning</strong> · {planning.stage}</span>
-          <span>{planning.detail || `${Math.round((planning.progress || 0) * 100)}%`}</span>
+          <span><strong>Planning</strong> · {effectivePlanning.stage}</span>
+          <span>{effectivePlanning.detail || `${Math.round((effectivePlanning.progress || 0) * 100)}%`}</span>
         </div>
       ) : null}
       {runs.map((run) => {
