@@ -240,6 +240,9 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
     // entry points above, which do. They leave this list when the lanes they route to are migrated.
     ("image_jobs.rs", DownloadRole::JobTime),
     ("video_jobs/mod.rs", DownloadRole::JobTime),
+    // F16 moves the same exhaustive route calls into these two explicit executor owners.
+    ("image_jobs/dispatch.rs", DownloadRole::JobTime),
+    ("video_jobs/dispatch.rs", DownloadRole::JobTime),
 ];
 
 /// How many [`DownloadSites`](DOWNLOAD_SITES) entries are still `JobTime` — epic 17625's
@@ -250,7 +253,8 @@ const DOWNLOAD_SITES: &[(&str, DownloadRole)] = &[
 /// commit. F17/F93's structural partition changes physical files41→44 without adding a fetch:
 /// the former image base's existing calls now reside in artifact_resolution/conditioning/mlx/candle.
 /// The exact current file set and role ratchet remain enforced; there is no logical-owner alias.
-const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 44;
+// F16 adds two physical executor files (44→46), with identical route/fetch call edges.
+const JOB_TIME_DOWNLOAD_SITES_REMAINING: usize = 46;
 
 /// What a `<data_dir>/cache/<subdir>` destination holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

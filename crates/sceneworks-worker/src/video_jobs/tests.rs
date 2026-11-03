@@ -5220,8 +5220,12 @@ fn generate_candle_video_using_hands_the_engine_the_mochi_lattice_frame_count() 
         },
     );
 
-    let (_decoded, adapter, _raw_settings, status) =
-        out.expect("the candle mochi arm runs to completion");
+    let VideoRouteOutcome {
+        decoded: _decoded,
+        adapter,
+        raw_settings: _raw_settings,
+        replacement_status: status,
+    } = out.expect("the candle mochi arm runs to completion");
     assert!(status.is_none(), "plain generation has no mode status");
     assert_eq!(
         probe.engine_frames(),

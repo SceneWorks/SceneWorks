@@ -467,7 +467,7 @@ mod tests {
                     None,
                 );
                 let mut asset_writes = Vec::new();
-                let outcome = super::super::super::generate_stream(
+                let outcome = crate::image_jobs::mlx::generate_stream(
                     &api,
                     &settings,
                     &job,
@@ -540,7 +540,7 @@ mod tests {
             let plan =
                 super::super::super::ImagePlan::with_count(&request, request.image_count(), None);
             let mut asset_writes = Vec::new();
-            let outcome = super::super::super::generate_stream(
+            let outcome = crate::image_jobs::mlx::generate_stream(
                 &api,
                 &settings,
                 &job,
