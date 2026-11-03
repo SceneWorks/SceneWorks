@@ -532,6 +532,8 @@ async fn materialize_candidate(
         .map_err(|error| {
             WorkerError::InvalidPayload(format!("dataset image decode failed: {error}"))
         })?;
+        // The previous owned reader freed the encoded input before PNG encoding too.
+        drop(bytes);
         let (width, height) = image.dimensions();
         if width < min_edge || height < min_edge {
             return Err(WorkerError::InvalidPayload(format!(
