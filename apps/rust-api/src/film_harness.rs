@@ -60,6 +60,7 @@ use sceneworks_core::film_plan::{
     TimelineRecord, TimelineTrackRecord, RUN_RECORD_SCHEMA_VERSION,
 };
 use sceneworks_core::film_planner::{capabilities_for, PlannerCapabilities};
+use sceneworks_core::jobs_store::TERMINAL_STATUSES;
 use sceneworks_core::time::{parse_utc_seconds, utc_now};
 use serde_json::{json, Map as JsonObject, Value};
 use sha2::{Digest, Sha256};
@@ -127,9 +128,6 @@ pub(crate) async fn record_action<T>(
     persist(&receipt)?;
     result
 }
-
-/// Statuses the job store treats as terminal.
-const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "canceled", "interrupted"];
 
 /// How long to wait for a canceled job to reach a terminal state before the harness gives up on it.
 /// The worker cancels cooperatively between stages, so this bounds the wait rather than the worker.
