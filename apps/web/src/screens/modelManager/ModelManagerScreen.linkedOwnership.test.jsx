@@ -106,7 +106,7 @@ describe("ModelManagerScreen linked state and ownership-aware removal (sc-20650)
     vi.restoreAllMocks();
   });
 
-  async function render(models) {
+  async function render(models, token = "tok") {
     await act(async () => {
       root.render(
         <AppContext.Provider
@@ -116,7 +116,7 @@ describe("ModelManagerScreen linked state and ownership-aware removal (sc-20650)
             loras: [],
             models,
             presets: [],
-            token: "tok",
+            token,
             jobAction: () => {},
             setActiveView: () => {},
             deleteLora: () => {},
@@ -146,6 +146,20 @@ describe("ModelManagerScreen linked state and ownership-aware removal (sc-20650)
     expect(node, "the control under test exists").toBeTruthy();
     await act(async () => node.dispatchEvent(new MouseEvent("click", { bubbles: true })));
   }
+
+  it("ignores linked scans from an old token after a replacement scan", async () => {
+    let resolveOld;
+    let resolveNew;
+    scanResult.mockReturnValueOnce(new Promise((resolve) => { resolveOld = resolve; }))
+      .mockReturnValueOnce(new Promise((resolve) => { resolveNew = resolve; }));
+    await render([LINKED_MODEL], "old");
+    await render([LINKED_MODEL], "new");
+    const scan = (state) => ({ root: { rootId: "root-a" }, candidates: [], unmatched: [statusFor(state, "")], diagnostics: [] });
+    await act(async () => resolveNew(scan("needs_relink")));
+    expect(card("My SDXL").textContent).toContain("Needs relink");
+    await act(async () => resolveOld(scan("needs_rescan")));
+    expect(card("My SDXL").textContent).toContain("Needs relink");
+  });
 
   it("renders Needs relink with a relink button instead of the missing badge", async () => {
     scanResult.mockReturnValue({
