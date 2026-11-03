@@ -2037,11 +2037,7 @@ pub(crate) fn prepared_adapter_selection_for_test(
     Ok((prepared.specs, prepared.pins))
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle"),
-    test
-))]
+#[cfg(any(test, native_lane))]
 fn existing_lora_install_marker(lora: &Value, settings: &Settings, file: &Path) -> Option<PathBuf> {
     // Explicit HF catalog downloads execute from the shared hub cache, while their durable receipt
     // lives under data/loras/<catalog-id>. Prefer that trusted app-owned receipt when it names the
