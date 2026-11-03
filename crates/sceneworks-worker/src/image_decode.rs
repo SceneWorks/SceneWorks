@@ -24,12 +24,7 @@ use sceneworks_core::media_convert::{sniff_image_kind, transcode_to_png};
 
 /// Decode an image file, transcoding a valid-but-unsupported format to PNG on the fly. Drop-in for
 /// `image::open`.
-// Used on every always-compiled decode path (video/caption); the conditional allow only silences
-// the bare (non-macOS, non-candle) lib build where the remaining callers are cfg'd out.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+// Shared with all-target control dataset / restore metadata callers.
 pub(crate) fn decode_image_any(path: impl AsRef<Path>) -> ImageResult<DynamicImage> {
     let path = path.as_ref();
     match image::open(path) {
@@ -55,10 +50,7 @@ pub(crate) fn decode_image_any(path: impl AsRef<Path>) -> ImageResult<DynamicIma
 /// Decode image bytes, transcoding a valid-but-unsupported format to PNG on the fly. Drop-in for
 /// `image::load_from_memory` (used where the worker already holds the bytes — e.g. a no-extension
 /// temp upload sniffed from memory).
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg(any(test, native_lane))]
 pub(crate) fn decode_image_bytes_any(bytes: &[u8]) -> ImageResult<DynamicImage> {
     match image::load_from_memory(bytes) {
         Ok(image) => Ok(image),
@@ -79,6 +71,7 @@ fn transcode_then_decode(src: &Path, bytes: &[u8]) -> Option<ImageResult<Dynamic
     Some(run_transcode_decode(|out| transcode_to_png(src, out)))
 }
 
+#[cfg(any(test, native_lane))]
 fn transcode_then_decode_bytes(bytes: &[u8]) -> Option<ImageResult<DynamicImage>> {
     let kind = sniff_image_kind(bytes)?;
     if kind.is_natively_supported() {

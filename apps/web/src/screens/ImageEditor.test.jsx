@@ -94,8 +94,8 @@ import {
   leaveGuardArming,
   closeConfirmMessage,
   saveStatusIndicator,
-  consumeEditorLaunch,
   createEditorLaunchGuard,
+  collectCropLayers,
   InlineLayerName,
 } from "./ImageEditor.jsx";
 import { verifyCaption, serializeCaption, ELEMENT_KEY_ORDER_OBJ } from "../ideogramCaption.js";
@@ -315,6 +315,57 @@ describe("ImageEditor scaffold", () => {
       expect(clearEditorLaunch).not.toHaveBeenCalled();
     });
 
+    it("aborts an older asset fetch when a newer launch opens", async () => {
+      const pending = [];
+      fetchSpy.mockImplementation((_url, options) => new Promise((resolve) => pending.push({ resolve, signal: options.signal })));
+      const nextAsset = { ...IMAGE_ASSET, id: "asset-next", file: { path: "assets/images/next.png" } };
+      const context = baseContext({ assets: [IMAGE_ASSET, nextAsset], editorLaunch: { id: "first", assetId: IMAGE_ASSET.id }, clearEditorLaunch: vi.fn() });
+      await render(context);
+      await render({ ...context, editorLaunch: { id: "second", assetId: nextAsset.id } });
+      expect(pending).toHaveLength(2);
+      expect(pending[0].signal.aborted).toBe(true);
+      expect(pending[1].signal.aborted).toBe(false);
+      await act(async () => pending[0].resolve({ ok: false, status: 500 }));
+      expect(container.textContent).not.toContain("Failed to load asset");
+    });
+
+    it("aborts a pending fetch on project switch and unmount", async () => {
+      const signals = [];
+      fetchSpy.mockImplementation((_url, options) => { signals.push(options.signal); return new Promise(() => {}); });
+      const context = baseContext({ activeProject: { id: "project_1" }, assets: [IMAGE_ASSET], editorLaunch: { id: "first", assetId: IMAGE_ASSET.id }, clearEditorLaunch: vi.fn() });
+      await render(context);
+      await render({ ...context, activeProject: { id: "project_2" }, editorLaunch: null });
+      expect(signals[0].aborted).toBe(true);
+      await render({ ...context, activeProject: { id: "project_2" }, editorLaunch: { id: "second", assetId: IMAGE_ASSET.id } });
+      await act(async () => root.unmount());
+      expect(signals[1].aborted).toBe(true);
+      root = createRoot(container);
+    });
+
+    it("cancels an in-flight decode and releases its URL when a newer image opens", async () => {
+      const images = [];
+      const OriginalImage = global.Image;
+      global.Image = class { constructor() { this.naturalWidth = 20; this.naturalHeight = 20; images.push(this); } };
+      const create = vi.spyOn(URL, "createObjectURL").mockReturnValueOnce("blob:first").mockReturnValueOnce("blob:second");
+      const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+      try {
+        const nextAsset = { ...IMAGE_ASSET, id: "asset-next", file: { path: "assets/images/next.png" } };
+        const context = baseContext({ assets: [IMAGE_ASSET, nextAsset], editorLaunch: { id: "first", assetId: IMAGE_ASSET.id }, clearEditorLaunch: vi.fn() });
+        await render(context);
+        expect(images).toHaveLength(1);
+        await render({ ...context, editorLaunch: { id: "second", assetId: nextAsset.id } });
+        expect(revoke).toHaveBeenCalledWith("blob:first");
+        expect(images[0].src).toBe("");
+        expect(images).toHaveLength(2);
+        await act(async () => images[1].onload());
+        expect(revoke).not.toHaveBeenCalledWith("blob:second");
+      } finally {
+        global.Image = OriginalImage;
+        create.mockRestore();
+        revoke.mockRestore();
+      }
+    });
+
     it("ignores a launch whose asset isn't a renderable image in the project", async () => {
       const clearEditorLaunch = vi.fn();
       await render(
@@ -335,9 +386,11 @@ describe("ImageEditor scaffold", () => {
       const clearLaunch = vi.fn();
       const launch = { id: "launch-dirty", assetId: IMAGE_ASSET.id };
 
+      const guard = createEditorLaunchGuard();
       expect(
-        await consumeEditorLaunch({
+        await guard.consume({
           launch,
+          isCurrent: () => true,
           confirmDiscard: vi.fn(async () => false),
           openAsset,
           clearLaunch,
@@ -347,8 +400,9 @@ describe("ImageEditor scaffold", () => {
       expect(clearLaunch).not.toHaveBeenCalled();
 
       expect(
-        await consumeEditorLaunch({
+        await guard.consume({
           launch,
+          isCurrent: () => true,
           confirmDiscard: vi.fn(async () => true),
           openAsset,
           clearLaunch,
@@ -657,6 +711,33 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
     expect([...new Uint8Array(await downloaded.arrayBuffer())]).toEqual(payload.imageBytes);
     expect(payload.suggestedFilename).toBe(file.name);
     expect(document.querySelector("a[download]")).toBeNull();
+  });
+});
+
+describe("crop decoded URL ownership", () => {
+  it("waits for every decode and revokes successful URLs on partial failure", async () => {
+    let resolveLate;
+    const late = new Promise((resolve) => { resolveLate = resolve; });
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    const operation = collectCropLayers([0, 1], (index) => index ? late : Promise.reject(new Error("bad crop")), () => true);
+    resolveLate({ objectUrl: "blob:late" });
+    await expect(operation).rejects.toThrow("bad crop");
+    expect(revoke).toHaveBeenCalledWith("blob:late");
+    revoke.mockRestore();
+  });
+
+  it("drops stale decoded layers and retains current successful layers", async () => {
+    const revoke = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    let current = true;
+    let resolve;
+    const operation = collectCropLayers([1], () => new Promise((done) => { resolve = done; }), () => current);
+    current = false;
+    resolve({ objectUrl: "blob:stale" });
+    await expect(operation).resolves.toBeNull();
+    expect(revoke).toHaveBeenCalledWith("blob:stale");
+    await expect(collectCropLayers([1], async () => ({ objectUrl: "blob:current" }), () => true)).resolves.toEqual([{ objectUrl: "blob:current" }]);
+    expect(revoke).not.toHaveBeenCalledWith("blob:current");
+    revoke.mockRestore();
   });
 });
 

@@ -161,7 +161,6 @@ const MODEL_TAB_TYPES = [
 // typed reason (unsupported family/quant/unrecognized) inline rather than a generic error;
 // an accepted one queues a `model_import` job whose completion refetches the catalog and
 // surfaces the new `catalogScope:"user"` model (a Krea 2 base checkpoint today).
-const MODEL_IMPORT_ENABLED = true;
 
 // Audio capability chips (epic 13400 / sc-13406): audio-type models describe what they
 // do through the manifest `audio` sub-block rather than the generic `capabilities[]`, so
@@ -760,7 +759,6 @@ export function ModelManagerScreen() {
   // whether to make the `list_credentials` keychain call at all. A licence-acknowledgment model
   // on a public repo has no credential to look up, and asking would be a pointless keychain
   // call on a deployment whose catalog has no gated model.
-  const hasGatedModel = models.some((model) => model.gated);
   const visibleLoras = useMemo(
     () => loras.filter((lora) => matchesFamily(lora, familyFilter)),
     [familyFilter, loras],
@@ -805,9 +803,6 @@ export function ModelManagerScreen() {
   // read on `hasGatedModel` alone made the panel report "no credential is stored" on an ordinary
   // catalog even when one was — so the read also runs whenever the panel is mounted.
   useEffect(() => {
-    if (!hasGatedModel && !MODEL_IMPORT_ENABLED) {
-      return undefined;
-    }
     let cancelled = false;
     loadCredentials()
       .then((list) => {
@@ -824,7 +819,7 @@ export function ModelManagerScreen() {
     return () => {
       cancelled = true;
     };
-  }, [hasGatedModel]);
+  }, []);
 
   // Second half of the "Update" flow: when the tracked source re-download completes, kick the
   // re-convert (the convert reads the now-current `convertSourceFile` from the cache). We watch the
@@ -2149,9 +2144,6 @@ export function ModelManagerScreen() {
   // The existing Add workflow serves both image checkpoints and explicitly declared H3 video
   // fine-tunes. Both tabs share its source, compatibility, refusal, and progress surfaces.
   function renderModelImportPanel() {
-    if (!MODEL_IMPORT_ENABLED && pendingModelImportJobs.length === 0) {
-      return null;
-    }
     return (
       <section className="model-import-panel-section models-accent-band">
         <CheckpointImportPanel

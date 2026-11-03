@@ -10386,7 +10386,7 @@ mod tests {
     }
 
     /// SC-24114: the restated reference bound is the linked provider's own.
-    #[cfg(any(target_os = "macos", feature = "backend-candle"))]
+    #[cfg(native_lane)]
     #[test]
     fn qwen_image_2_1_reference_bound_matches_the_linked_provider() {
         #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

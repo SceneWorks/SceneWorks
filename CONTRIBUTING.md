@@ -104,27 +104,30 @@ Clippy warnings **fail** the build, so keep it clean.
 default features (no `backend-candle`)**. The worker's generation harness
 (`crates/sceneworks-worker/src/image_jobs/base.rs`) is compiled only on macOS **or** the
 `backend-candle` lane, so anything used *only* by that gated code is dead on this "neither
-backend" build and fails `-D warnings`. Reproduce it locally with:
+backend" build and fails `-D warnings`. On Linux/Windows, run the native check with:
 
 ```bash
 npm run rust:check:neither
 ```
 
-On Linux/Windows that's a native clippy — the host already *is* the neither build. On
-macOS it runs the same clippy inside a Linux Docker container, because a native macOS
-clippy always compiles `base.rs` and can never see the trap. The neither and candle checks
-are manual local commands; pushes do not run a Rust preflight gate.
+On macOS, use the Linux `parity` CI lane for this check: native macOS clippy always
+compiles `base.rs` and cannot exercise the neither backend. The manual command's Docker
+wrapper on macOS requires an explicit request to validate in a container. The neither and candle
+checks remain manual local commands; pushes do not run a Rust preflight hook.
 
 > **The base.rs / candle cfg rule.** Any `sceneworks-worker` item — a `use`, struct, or
 > helper fn — used **only** by `base.rs` or other candle-only code MUST carry the same cfg
 > as `base.rs`, or it's dead code on the neither build:
 >
 > ```rust
-> #[cfg(any(target_os = "macos", all(not(target_os = "macos"), feature = "backend-candle")))]
+> #[cfg(native_lane)]
 > ```
 >
+> The worker build script declares `native_lane` with `rustc-check-cfg` and enables it for
+> macOS or off-Mac `backend-candle`. Use `any(test, native_lane)` for helpers with portable tests.
+>
 > `npm run rust:check` on **macOS cannot catch a violation** (there `target_os` is always
-> `macos`, so `base.rs` always compiles) — use `npm run rust:check:neither` or the CI parity
+> `macos`, so `base.rs` always compiles) — use the native neither check or the CI parity
 > lane. This trap has bitten sc-10404 (`PhaseTimer`) and sc-8390
 > (`run_blocking_with_heartbeat`).
 
@@ -171,6 +174,17 @@ So the three Rust configurations each have a local command:
 > exact opposite of its intent, and it compiled perfectly. Green here means "it compiles under
 > the cfg CI compiles it under" — which is precisely the class (E0425 from a cfg-gated symbol,
 > dead code under `-D warnings`) that used to cost a full round-trip on a self-hosted runner.
+
+**SQLite stores:** `store_util::configure_connection` owns connection pragmas and
+`SQLITE_BUSY_TIMEOUT` (five seconds). Project indexes retain rollback journaling;
+jobs attempt WAL with a warning on failure; the catalog requires WAL, NORMAL
+synchronization, disk-backed temporary sorts, a 64 MiB cache and its configured
+checkpoint interval. Character, voice and training indexes use the project profile.
+Run schema setup before any mutator transaction, then take `BEGIN IMMEDIATE`
+before reading mutation predicates. Project migrations acquire their own immediate
+transaction and re-read `user_version` under that lock; never run them inside a
+mutator transaction. This allows cross-process writers to wait within the timeout
+rather than fail immediately while upgrading a deferred read lock.
 
 **Web** (from the repo root):
 

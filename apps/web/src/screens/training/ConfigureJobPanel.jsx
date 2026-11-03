@@ -335,7 +335,7 @@ export function ConfigureJobPanel({
   // same coverage readout and "Generate subject masks" action (once — under subject-masked loss
   // when that is on too).
   const restrictedNormalsOn =
-    selectedTarget?.baseModel !== "ltx_2_5" &&
+    selectedTarget?.ui?.subjectRestrictedNormalLoss !== false &&
     Boolean(configDraft.normalRestrictToSubject) &&
     bodyLosses.some((loss) => loss.prefix === "normal" && bodyLossEnabled(configDraft, loss));
   const subjectMaskCoverageAffordance = (
@@ -450,7 +450,7 @@ export function ConfigureJobPanel({
         ),
         normal: (
           <>
-            {selectedTarget?.baseModel !== "ltx_2_5" ? (
+            {selectedTarget?.ui?.subjectRestrictedNormalLoss !== false ? (
               <TechniqueToggle
                 checked={Boolean(configDraft.normalRestrictToSubject)}
                 invalid={invalidProps(configValidity, "normalRestrictToSubject")}
@@ -585,11 +585,12 @@ export function ConfigureJobPanel({
     objective === "restoration" && isFullFinetune && (networkTypeOptions ?? []).includes("lora")
       ? irisMemoryFloors(selectedTarget, "lora", floorSize, irisContext.trainingLane ?? null)
       : [];
-  const ltxWorkflows = selectedTarget?.baseModel === "ltx_2_5"
+  const ltxWorkflows = selectedTarget?.ui?.ltxWorkflowPlans
     ? (selectedTarget?.limits?.ltxWorkflows ?? [])
     : [];
   const updateLtxWorkflow = (workflow) => {
-    const plan = ltx25WorkflowPlan(workflow);
+    const plan = ltx25WorkflowPlan(selectedTarget, workflow);
+    if (!plan) return;
     updateConfigDraft("ltxWorkflow", workflow);
     updateConfigDraft("ltxVideo", plan.video);
     updateConfigDraft("ltxAudio", plan.audio);

@@ -143,29 +143,20 @@ impl ControlPreprocessor for CannyPreprocessor {
 
 /// Depth-map preprocessor ([`ControlKind::Depth`]). Runs the Depth-Anything V2 (Small) estimator,
 /// so it exists only on the neural-inference builds (macOS MLX / off-Mac candle).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct DepthPreprocessor {
     /// Snapshot dir holding `model.safetensors` (what [`crate::depth::depth_control_image`] loads).
     weights_dir: std::path::PathBuf,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl DepthPreprocessor {
     pub(crate) fn new(weights_dir: std::path::PathBuf) -> Self {
         Self { weights_dir }
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl ControlPreprocessor for DepthPreprocessor {
     fn kind(&self) -> ControlKind {
         ControlKind::Depth
@@ -183,10 +174,7 @@ impl ControlPreprocessor for DepthPreprocessor {
 /// Unlike the strict-control inference pose path (which renders a caller-supplied skeleton from
 /// request keypoints), this DETECTS keypoints from the source image — the direction folder-ingest
 /// train-prep needs. Both render through the same `draw_wholebody`, so the conventions match.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) struct PosePreprocessor {
     det_path: std::path::PathBuf,
     pose_path: std::path::PathBuf,
@@ -194,10 +182,7 @@ pub(crate) struct PosePreprocessor {
     min_conf: f64,
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl PosePreprocessor {
     /// Build from the two resolved DWPose onnx weight paths (detector + pose model). `components`
     /// selects the rendered groups (studio default [`PoseComponents::Body`]); `min_conf` is the
@@ -217,10 +202,7 @@ impl PosePreprocessor {
     }
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 impl ControlPreprocessor for PosePreprocessor {
     fn kind(&self) -> ControlKind {
         ControlKind::Pose
@@ -285,20 +267,14 @@ impl PreprocessResources {
 ///   without neural inference) → [`WorkerError::InvalidPayload`].
 // `resources` is consumed only by the depth/pose arms, which are compiled out on a build with no
 // neural inference (off-Mac, no candle) — where the parameter is genuinely unused.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(unused_variables)
-)]
+#[cfg_attr(not(native_lane), allow(unused_variables))]
 pub(crate) fn preprocessor_for(
     kind: &ControlKind,
     resources: &PreprocessResources,
 ) -> WorkerResult<Box<dyn ControlPreprocessor>> {
     match kind {
         ControlKind::Canny => Ok(Box::new(CannyPreprocessor::new_default())),
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
+        #[cfg(native_lane)]
         ControlKind::Depth => {
             let dir = resources.depth_weights_dir.clone().ok_or_else(|| {
                 WorkerError::Engine(
@@ -309,10 +285,7 @@ pub(crate) fn preprocessor_for(
             })?;
             Ok(Box::new(DepthPreprocessor::new(dir)))
         }
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
+        #[cfg(native_lane)]
         ControlKind::Pose => {
             let (det, pose) = resources.dwpose.clone().ok_or_else(|| {
                 WorkerError::Engine(
@@ -405,10 +378,7 @@ mod tests {
 
     /// On the neural-inference builds, pose/depth without resolved weights fail with a typed
     /// resource error rather than panicking or silently rendering nothing.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn registry_reports_missing_pose_and_depth_weights() {
         let res = PreprocessResources::new();

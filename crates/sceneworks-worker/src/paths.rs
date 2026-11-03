@@ -26,10 +26,7 @@ pub(crate) fn safe_join(base: &Path, relative: &str) -> WorkerResult<PathBuf> {
 /// Callers all live in `image_jobs` lanes gated macOS or off-Mac + `backend-candle`
 /// (`image_jobs/{*_control,pid,*_candle}`), so the bare (non-macOS, non-candle) lib
 /// build has none — silence dead_code only there, like `decode_image_any`.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn safe_weight_filename(filename: &str, label: &str) -> WorkerResult<String> {
     let filename = filename.trim();
     if sceneworks_core::safe_path::relative_normal_components(filename).is_ok()
@@ -269,10 +266,7 @@ pub(crate) fn normalize_app_managed_model_file_entry_path(
 /// target captured by that same pin. This is the file trust-boundary primitive for prepared
 /// [`gen_core::LoadSpec`]s: there is no authorize-then-re-resolve gap, and the extension-bearing
 /// loader path is preserved for format dispatch.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn pin_app_managed_model_file(
     settings: &Settings,
     raw_path: &Path,
@@ -315,10 +309,7 @@ pub(crate) fn pin_operator_model_file(
 /// Atomically finalize a complete prepared token set, deduplicating repeated lexical File slots
 /// (for example the same adapter selected twice at different scales) before calling the strict
 /// gen-core preparation API.
-#[cfg_attr(
-    all(not(target_os = "macos"), not(feature = "backend-candle")),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn prepare_load_spec_with_file_pins(
     spec: &mut gen_core::LoadSpec,
     pins: impl IntoIterator<Item = gen_core::PinnedWeightsFile>,
@@ -624,10 +615,7 @@ pub fn latest_moss_training_resume_step(
 
 /// Prepare only the job-owned MOSS recovery bundles. Native verification and bounded
 /// removal own their layout; ordinary adapter checkpoints and other runs stay intact.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) fn prepare_moss_training_resume_dir(
     resume: bool,
     output_dir: &Path,
@@ -680,13 +668,7 @@ pub fn remove_training_resume_bundles(output_dir: &Path, stem: &str) -> std::io:
 /// checkpoints and never from a stale higher-step one; a removal failure fails the run rather than
 /// leaving that hazard in place.
 // Only the training execution path (macOS, or off-Mac with backend-candle) calls this.
-#[cfg_attr(
-    not(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    )),
-    allow(dead_code)
-)]
+#[cfg_attr(not(native_lane), allow(dead_code))]
 pub(crate) fn prepare_training_resume_dir(
     resume: bool,
     output_dir: &Path,

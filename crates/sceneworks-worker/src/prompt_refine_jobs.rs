@@ -20,9 +20,9 @@
 //! see `DEFAULT_REFINE_MAX_NEW_TOKENS`.
 
 use super::*;
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 pub(crate) use crate::text_clean::clean_json_output;
-#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+#[cfg(any(test, native_lane))]
 use crate::text_clean::{first_ci, strip_reasoning_and_fence};
 
 // The prompt-refinement / magic-prompt checkpoint — the coherent Anubis-8B (sc-6550 bake-off). It
@@ -31,15 +31,9 @@ use crate::text_clean::{first_ci, strip_reasoning_and_fence};
 // SEMANTICALLY-DEGENERATE captions (subject as a `text` element, a reflexive transparent background)
 // that placeholder Ideogram 4 at 1024²/48, while Anubis avoids them. Loads on this same config-driven
 // Llama seam with no conversion (stock bf16, ~16GB). Overridable per-job via `payload.model`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const DEFAULT_REFINE_MODEL: &str = "TheDrummer/Anubis-Mini-8B-v1";
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
 // Output-length cap. The two caption tasks (magic-prompt + image_caption) emit a full Ideogram JSON
 // caption — multi-element, with bboxes, #RRGGBB palettes and (since sc-8199) optional per-element
@@ -47,11 +41,7 @@ const CANCEL_MESSAGE: &str = "Prompt refinement canceled by user.";
 // list` mid-`elements`). 4096 ≈ ~11.6k chars of headroom; a well-formed caption emits EOS far below
 // the cap, so a higher ceiling only rescues the truncating cases. Callers may still override via the
 // `maxNewTokens` payload field.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
 // The free-text rewrite was budgeted as a one-liner (512 tokens) when its only caller refined a
 // single sentence. It is now also the per-shot film refine (`film_planner.rs` sends no `task`, so a
@@ -71,37 +61,21 @@ const DEFAULT_CAPTION_MAX_NEW_TOKENS: u32 = 4096;
 // is deliberately NOT the prose ratio above: it is the conservative floor the JSON-caption path
 // implies (4096 ≈ ~11.6k chars), so the assertion holds even for the densest output this task can
 // emit. 1536 clears that floor too (~4350 chars).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const DEFAULT_REFINE_MAX_NEW_TOKENS: u32 = 1536;
 // The prose/tags `image_describe` task (epic 8203) is shorter than a full structured JSON caption but
 // longer than a one-line rewrite; give it a generous budget so a detailed paragraph is never truncated.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const DEFAULT_DESCRIBE_MAX_NEW_TOKENS: u32 = 1024;
 // A whole shot plan is the longest reply this job ever emits — one JSON object carrying every shot's
 // prompt, states, framing and sound (sc-22713). Truncation there is not a degraded plan but an
 // unparseable one, so it takes the same generous ceiling the captions take.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const DEFAULT_FILM_PLAN_MAX_NEW_TOKENS: u32 = 4096;
 // Resolve the output token budget: an explicit positive `maxNewTokens` override wins; otherwise the
 // per-task default (the JSON tasks need the larger cap so the object closes; the prose-describe task
 // sits in between). Keyed on the task value itself rather than on booleans re-derived per call site.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn resolve_max_new_tokens(
     payload: &serde_json::Map<String, Value>,
     task: RefineTask,
@@ -133,11 +107,7 @@ fn resolve_max_new_tokens(
 /// `TextLlmOutput::thinking` and the final-answer text is empty. A no-think request renders a closed
 /// reasoning block before generation and remains safe to constrain. Models without a thinking mode
 /// (including the default Anubis refiner) also keep the existing JSON constraint in every mode.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn json_decode_constraint(
     emits_json: bool,
     supports_thinking: bool,
@@ -161,11 +131,7 @@ fn json_decode_constraint(
 /// - [`MagicPrompt`](RefineTask::MagicPrompt): a text idea → JSON Ideogram caption (sc-5997).
 /// - [`ImageCaption`](RefineTask::ImageCaption): a reference image → JSON Ideogram caption (sc-8105).
 /// - [`ImageDescribe`](RefineTask::ImageDescribe): a reference image → NL prose/tags description (sc-8204).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RefineTask {
     Rewrite,
@@ -187,11 +153,7 @@ pub(crate) enum RefineTask {
     QwenImageRewrite,
 }
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 impl RefineTask {
     /// Classify the payload's `task` discriminator (case-insensitive). Any unknown/absent value is the
     /// default free-text [`Rewrite`](RefineTask::Rewrite) — the pre-refactor behavior.
@@ -293,11 +255,7 @@ impl RefineTask {
 /// the sole image carriers. The Qwen rewrite carries images with `is_vision()` FALSE — it is driven
 /// by the user's text and merely accepts pictures — so the equality panicked every I2I rewrite in a
 /// debug build.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn image_carrier_invariant_holds(
     carries_image: bool,
     takes_reference_images: bool,
@@ -317,10 +275,7 @@ const REFINE_BACKEND: &str = "candle";
 // this tick, so a 4096-token caption emits at most a handful of `update_job` POSTs per second instead
 // of thousands of sequential per-token POSTs. 250 ms keeps the progress bar visibly smooth while
 // bounding API load and fully decoupling decode speed from API latency (worse over epic-4484 LAN).
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
 
 // ----------------------------------------------------------------------------------------------
@@ -333,11 +288,7 @@ const PROGRESS_POST_INTERVAL: Duration = Duration::from_millis(250);
 /// The base rewrite rules with the `{medium}` placeholders filled (`image` / `video` / `audio`).
 /// Image-only photographic guidance is attached only to the image medium; audio adds protection for
 /// script/lyric text so a generic rewrite cannot silently change words intended to be spoken or sung.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn base_rules(medium: &str) -> String {
     let mut rules = vec![
         format!("You are a prompt rewriter for a generative {medium} model."),
@@ -400,11 +351,7 @@ fn base_rules(medium: &str) -> String {
 
 /// Build the `system` message for the refiner: the rewrite rules (medium chosen from the workflow)
 /// plus the model's prompt guide when one is supplied. Port of the Python `build_system_prompt`.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> String {
     let medium = match workflow.map(str::trim) {
         Some(value) if value.eq_ignore_ascii_case("video") => "video",
@@ -437,11 +384,7 @@ fn build_refine_system_prompt(guide: Option<&str>, workflow: Option<&str>) -> St
 /// `overall_soundscape:` / `non_diegetic_music:` plus `[Shot N] At MM:SS.mmm` timed-shot labels —
 /// so the local refiner emits what the withheld hosted component would have. There is no `[USER]`
 /// block: like the generic rewrite, the user turn is the user's own prompt.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const MINIMAX_H3_REFINE_V1: &str = include_str!("minimax_h3_refine_v1.txt");
 
 /// The seven markers MiniMax declares in H3's `tokenizer_config.json` `additional_special_tokens`
@@ -452,11 +395,7 @@ const MINIMAX_H3_REFINE_V1: &str = include_str!("minimax_h3_refine_v1.txt");
 /// untrained vector to the text encoder and spends prompt space for nothing, so the H3 rewrite is
 /// both INSTRUCTED not to write them (the embedded asset) and post-filtered so it cannot
 /// (`strip_untrained_markers`) — the instruction is advisory, the filter is the guarantee.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) const MINIMAX_H3_UNTRAINED_MARKERS: [&str; 7] = [
     "<d>",
     "</d>",
@@ -475,11 +414,7 @@ pub(crate) const MINIMAX_H3_UNTRAINED_MARKERS: [&str; 7] = [
 /// Deliberately keyed on the model ALONE, not on `(model, task)`: the ban is a property of what the
 /// text encoder can represent, so a task added later cannot route around it. Every other model is
 /// untouched.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn refines_for_minimax_h3(model_id: Option<&str>) -> bool {
     model_id
         .map(str::trim)
@@ -492,11 +427,7 @@ fn refines_for_minimax_h3(model_id: Option<&str>) -> bool {
 /// `/prompt-guides/minimax-h3.md` and forwards it, exactly as it does for the generic path). The
 /// guide is appended under the SAME `# Model prompt guide` heading [`build_refine_system_prompt`]
 /// uses, so the two paths present a guide identically.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn build_minimax_h3_refine_system_prompt(guide: Option<&str>) -> String {
     let rules = magic_section_from(MINIMAX_H3_REFINE_V1, "SYSTEM");
     let guide = guide.unwrap_or("").trim();
@@ -519,20 +450,12 @@ fn build_minimax_h3_refine_system_prompt(guide: Option<&str>) -> String {
 /// The film-plan system prompt, embedded verbatim and parsed for its `[SYSTEM]` block by the same
 /// [`magic_section_from`] the other assets use. There is no `[USER]` block: the user turn is the
 /// request the harness composed.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const FILM_PLAN_V1: &str = include_str!("film_plan_v1.txt");
 
 /// The `(system, user)` pair for a film-plan request: the embedded contract, plus the caller's
 /// composed brief as the user turn.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn build_film_plan_messages(request: &str) -> (String, String) {
     (
         magic_section_from(FILM_PLAN_V1, "SYSTEM"),
@@ -543,11 +466,7 @@ pub(crate) fn build_film_plan_messages(request: &str) -> (String, String) {
 /// Select the rewrite `system` message: the tailored MiniMax-H3 prompt for an H3 target model, the
 /// generic medium-keyed rewrite rules for everything else. The generic
 /// [`build_refine_system_prompt`] is untouched, so no other model's refinement changes.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn build_rewrite_system_prompt(
     guide: Option<&str>,
     workflow: Option<&str>,
@@ -570,11 +489,7 @@ fn build_rewrite_system_prompt(
 /// Each marker becomes a SPACE, not nothing, so `word<d>word` cannot be glued into one token; the
 /// runs of spaces that produces are collapsed per line. Text with no marker is returned byte for
 /// byte — the collapse never runs on an untouched reply.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn strip_untrained_markers(text: &str) -> String {
     let mut stripped = text.to_owned();
     let mut found = false;
@@ -606,11 +521,7 @@ fn strip_untrained_markers(text: &str) -> String {
 /// here rather than only asking for it in the system prompt is the point: the refiner has just been
 /// handed a prompt guide that quotes `<d>[English] …</d>` verbatim, so an instruction is a request
 /// and this is the guarantee.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn finalize_refined_output(raw: &str, emits_json: bool, model_id: Option<&str>) -> String {
     let cleaned = if emits_json {
         clean_json_output(raw)
@@ -627,11 +538,7 @@ fn finalize_refined_output(raw: &str, emits_json: bool, model_id: Option<&str>) 
 /// Strip `<think>…</think>` reasoning blocks, a wrapping code fence, and matching surrounding quotes
 /// from the model reply. Port of the Python `clean_output` (regex-free: the tags are ASCII, matched
 /// case-insensitively without lowercasing the whole — Unicode-safe — string).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn clean_refine_output(text: &str) -> String {
     let mut text = strip_reasoning_and_fence(text);
     // Matching surrounding single/double quotes.
@@ -661,11 +568,7 @@ fn clean_refine_output(text: &str) -> String {
 /// Ideogram 4's magic-prompt system-prompt file, embedded verbatim. Source (Apache-2.0):
 /// github.com/ideogram-oss/ideogram4 `src/ideogram4/magic_prompt_system_prompts/v1.txt`. Parsed for
 /// its `[SYSTEM]` + `[USER]` sections at runtime (the `[META]` block is ignored).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const MAGIC_PROMPT_V1: &str = include_str!("ideogram_magic_prompt_v1.txt");
 
 /// Ideogram 4's image-grounded caption system prompt (epic 8102, sc-8105), embedded verbatim and
@@ -674,11 +577,7 @@ const MAGIC_PROMPT_V1: &str = include_str!("ideogram_magic_prompt_v1.txt");
 /// caption (style + grounded composition, bboxes kept) instead of expanding a text idea. Parsed for its
 /// `[SYSTEM]` + `[USER]` sections at runtime by the same [`magic_section_from`] parser (the `[META]`
 /// block is ignored).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const IMAGE_CAPTION_V1: &str = include_str!("ideogram_image_caption_v1.txt");
 
 /// Plain-text PROSE image-description system prompt (epic 8203, sc-8204), embedded verbatim and
@@ -686,22 +585,14 @@ const IMAGE_CAPTION_V1: &str = include_str!("ideogram_image_caption_v1.txt");
 /// `image_caption`, but for NON-structured text-to-image models: the model EXAMINES a reference image
 /// and emits a detailed natural-language description usable directly as a t2i prompt — NO JSON, NO
 /// bboxes, NO output constraint. Parsed for its `[SYSTEM]` + `[USER]` sections by [`magic_section_from`].
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const IMAGE_DESCRIBE_V1: &str = include_str!("image_describe_v1.txt");
 
 /// TAG-STYLE image-description system prompt (epic 8203, sc-8205), the booru/danbooru variant of
 /// [`IMAGE_DESCRIBE_V1`]. Selected when the job payload carries `captionStyle:"tags"` — for anime/booru
 /// SDXL checkpoints that consume comma-separated tags rather than prose. Same vision path, same prose
 /// cleanup (a flat tag string, no JSON).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const IMAGE_DESCRIBE_TAGS_V1: &str = include_str!("image_describe_tags_v1.txt");
 
 /// Multi-image "mood board" PROSE synthesis system prompt (epic 8588, sc-8595) — the N>1 sibling of
@@ -709,22 +600,14 @@ const IMAGE_DESCRIBE_TAGS_V1: &str = include_str!("image_describe_tags_v1.txt");
 /// them together and synthesizes ONE prose prompt capturing the mood/style/composition they SHARE
 /// (rather than describing a single picture). Same `core_llm` vision path, same unconstrained-prose
 /// cleanup; only the instruction differs. Selected by [`build_image_describe_messages`] when `multi`.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const IMAGE_DESCRIBE_MOODBOARD_V1: &str = include_str!("image_describe_moodboard_v1.txt");
 
 /// Multi-image "mood board" TAG-STYLE synthesis system prompt (epic 8588, sc-8595) — the N>1, booru
 /// sibling of [`IMAGE_DESCRIBE_TAGS_V1`]. Synthesizes the SHARED style across several references into
 /// one comma-separated tag list for an anime/booru SDXL checkpoint. Selected by
 /// [`build_image_describe_messages`] when `multi` and the style is [`DescribeStyle::Tags`].
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const IMAGE_DESCRIBE_MOODBOARD_TAGS_V1: &str = include_str!("image_describe_moodboard_tags_v1.txt");
 
 /// Multi-image "mood board" Ideogram JSON synthesis system prompt (epic 8588, sc-8595) — the N>1
@@ -732,20 +615,12 @@ const IMAGE_DESCRIBE_MOODBOARD_TAGS_V1: &str = include_str!("image_describe_mood
 /// composes a coherent NEW scene in that style (the composition is synthesized, like `magic_prompt` from
 /// a text idea — so the caption stays schema-valid without per-image grounded bboxes). Same JSON
 /// constraint + `is_caption` validation. Selected by [`build_image_caption_messages`] when `multi`.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 const IMAGE_CAPTION_MOODBOARD_V1: &str = include_str!("ideogram_image_caption_moodboard_v1.txt");
 
 /// Body of a `[NAME]` section in the magic-prompt file (port of the reference `_load_sections`):
 /// section markers are a bracketed single word alone on a line. Returns the trimmed body, or empty.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn magic_section(name: &str) -> String {
     magic_section_from(MAGIC_PROMPT_V1, name)
 }
@@ -754,11 +629,7 @@ fn magic_section(name: &str) -> String {
 /// image-caption asset). Section markers are a bracketed single word alone on a line. Returns the
 /// trimmed body, or empty. Generalized from `magic_section` so the sc-8105 image-caption asset reuses
 /// the same parser.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn magic_section_from(source: &str, name: &str) -> String {
     let mut capturing = false;
     let mut body: Vec<&str> = Vec::new();
@@ -785,11 +656,7 @@ fn magic_section_from(source: &str, name: &str) -> String {
 /// The `(system, user)` chat messages for a magic-prompt expansion: the `[SYSTEM]` block, and the
 /// `[USER]` template with `{{aspect_ratio}}` / `{{original_prompt}}` substituted (port of the
 /// reference `build_messages`). `aspect_ratio` is `"W:H"`.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (String, String) {
     let system = magic_section("SYSTEM");
     let mut user = magic_section("USER");
@@ -824,11 +691,7 @@ pub(crate) fn build_magic_prompt_messages(prompt: &str, aspect_ratio: &str) -> (
 /// The `(system, user)` chat text for an image-caption run: the `[SYSTEM]` + `[USER]` blocks of the
 /// embedded `ideogram_image_caption_v1.txt`. The reference image is attached to the user turn as a
 /// separate `Content::Image` block by the caller (this only supplies the text).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn build_image_caption_messages(multi: bool) -> (String, String) {
     // With more than one reference image the model synthesizes ONE caption for a new image in the
     // aesthetic the board SHARES (mood board, sc-8595); the single-image asset is unchanged for N==1.
@@ -856,22 +719,14 @@ pub(crate) fn build_image_caption_messages(multi: bool) -> (String, String) {
 /// The plain-text describe style selected by the job payload's `captionStyle` field (epic 8203):
 /// `Prose` (default — natural-language sentences, sc-8204) or `Tags` (booru/danbooru comma-tags for
 /// anime/booru SDXL checkpoints, sc-8205). Any unknown/absent value falls back to `Prose` (defensive).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum DescribeStyle {
     Prose,
     Tags,
 }
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 impl DescribeStyle {
     /// Parse the `captionStyle` payload value; only `"tags"` (case-insensitive) selects tags, everything
     /// else — including absent/empty/unknown — is prose.
@@ -888,11 +743,7 @@ impl DescribeStyle {
 /// (prose, sc-8204) or [`IMAGE_DESCRIBE_TAGS_V1`] (tags, sc-8205). Like [`build_image_caption_messages`]
 /// the reference image is attached to the user turn as a separate `Content::Image` block by the caller;
 /// this only supplies the text. Unlike the caption path the model emits plain text (no JSON constraint).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn build_image_describe_messages(style: DescribeStyle, multi: bool) -> (String, String) {
     // With more than one reference image the model synthesizes ONE prompt from the mood/style the board
     // SHARES (mood board, sc-8595) instead of describing a single picture; N==1 keeps the sc-8204/8205
@@ -990,10 +841,7 @@ pub(crate) fn load_caption_image_ref(path: &Path) -> WorkerResult<gen_core::core
 // A build with neither native provider never advertises the capability, so the job never arrives.
 // ----------------------------------------------------------------------------------------------
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 pub(crate) async fn run_prompt_refine_job(
     api: &ApiClient,
     settings: &Settings,
@@ -1619,10 +1467,7 @@ pub(crate) async fn run_prompt_refine_job(
 /// candle build — e.g. a candle-less Linux worker), the `prompt_refine` capability is never
 /// advertised, so this arm is unreachable in practice. Kept so the `run_utility_job` dispatch
 /// compiles on all targets.
-#[cfg(not(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-)))]
+#[cfg(not(native_lane))]
 pub(crate) async fn run_prompt_refine_job(
     _api: &ApiClient,
     _settings: &Settings,
@@ -1641,11 +1486,7 @@ pub(crate) async fn run_prompt_refine_job(
 /// ticks, so we don't re-POST identical progress). Pure so the coalescing invariant — intermediate
 /// repeats dropped, every distinct value (including the terminal one) posted exactly once — is unit
 /// testable without an API or real weights.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn next_progress_post(latest: (u32, u32), last_posted: Option<(u32, u32)>) -> Option<(u32, u32)> {
     (last_posted != Some(latest)).then_some(latest)
 }
@@ -1653,10 +1494,7 @@ fn next_progress_post(latest: (u32, u32), last_posted: Option<(u32, u32)>) -> Op
 /// Post one coalesced running-progress update (sc-8840, F-038). Maps a `(current, total)` token
 /// count to the same `0.4 + 0.5 * within` fraction the old per-token loop used, so the only behavior
 /// change is HOW OFTEN it fires (coalesced tick vs. per token), not the reported value.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 async fn post_refine_progress(
     api: &ApiClient,
     job_id: &str,
@@ -1686,10 +1524,7 @@ async fn post_refine_progress(
     Ok(())
 }
 
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn refine_progress(
     status: JobStatus,
     stage: ProgressStage,
@@ -1704,11 +1539,7 @@ fn refine_progress(
 /// The prompt-refine generation request: the task's turn, sampler, budget and decode constraint,
 /// the job's cancel flag and reasoning mode, and its compressed-KV opt-in (sc-20682). Every other
 /// field keeps the contract default (no seed, no MTP).
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn refine_text_request(
     messages: Vec<gen_core::core_llm::Message>,
     sampling: gen_core::core_llm::Sampling,
@@ -1735,10 +1566,7 @@ fn refine_text_request(
 /// Run the refine decode on `refiner` and record the generation's `llm_kv_cache` event whichever
 /// way it ends — completed, or refused, canceled or failed by the engine (sc-20682, sc-20688). A
 /// completed decode returns its output with the block its result carries: the event's own block.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 fn generate_refined(
     refiner: &dyn gen_core::core_llm::TextLlm,
     request: &gen_core::core_llm::TextLlmRequest,
@@ -1769,11 +1597,7 @@ fn generate_refined(
 ///
 /// sc-20682 adds `kvCache`: the KV cache the generation asked for and ran on
 /// ([`crate::llm_kv_cache::kv_cache_block`]) — whether it ran compressed and, if not, why.
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn generation_block(
     finish_reason: Option<gen_core::core_llm::FinishReason>,
     usage: gen_core::core_llm::Usage,
@@ -1792,10 +1616,7 @@ fn generation_block(
 }
 
 /// The `prompt_refine` result payload, parity with the Python `run_prompt_refine_job`.
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(native_lane)]
 #[allow(clippy::too_many_arguments)]
 fn refine_result(
     original_prompt: &str,
@@ -1831,11 +1652,7 @@ fn refine_result(
     result
 }
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn finish_reason_name(reason: Option<gen_core::core_llm::FinishReason>) -> &'static str {
     use gen_core::core_llm::FinishReason;
 
@@ -1848,11 +1665,7 @@ fn finish_reason_name(reason: Option<gen_core::core_llm::FinishReason>) -> &'sta
     }
 }
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 fn empty_refine_failure_detail(
     task: RefineTask,
     finish_reason: Option<gen_core::core_llm::FinishReason>,
@@ -1871,11 +1684,7 @@ fn empty_refine_failure_detail(
     "The prompt-refinement model returned an empty prompt.".to_owned()
 }
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 #[allow(clippy::too_many_arguments)]
 fn refine_failure_result(
     thinking: Option<&str>,
@@ -1911,10 +1720,7 @@ fn refine_failure_result(
 mod tests {
     use super::*;
 
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     /// sc-24113: the Qwen rewrite's reply travels the SAME cleanup the other JSON tasks take, and
     /// then parses into an editable prompt plus an aspect suggestion.
     ///
@@ -2149,10 +1955,7 @@ mod tests {
 
     // `refine_result` exists only on a backend build; this gate was on this test before sc-24113's
     // tests were inserted above it and captured it.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn planner_result_keeps_thinking_separate_and_records_actual_execution_identity() {
         let result = refine_result(
@@ -2186,10 +1989,7 @@ mod tests {
     /// and the caller that must not compile truncated prose (the film planner's per-shot rewrite)
     /// could not tell, because `finishReason` was recorded only on the failure result. The success
     /// result now carries the same additive `generation` object.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn a_truncated_but_non_empty_rewrite_reports_its_length_finish_on_the_success_result() {
         use gen_core::core_llm::{FinishReason, Usage};
@@ -2221,10 +2021,7 @@ mod tests {
 
     /// sc-20688: a refine decode the engine refuses still records its `llm_kv_cache` event, with
     /// the job's requested policy, the outcome and the refusal, under the refine engine lane.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn a_refused_refine_generation_records_its_kv_cache_event() {
         use crate::llm_kv_cache::test_support::{events_for, refusal, RefusingLlm};
@@ -2248,10 +2045,7 @@ mod tests {
 
     /// sc-20682: both the success and the failure result carry the KV cache the generation asked
     /// for and ran on under `generation.kvCache`, beside the keys every existing reader uses.
-    #[cfg(any(
-        target_os = "macos",
-        all(not(target_os = "macos"), feature = "backend-candle")
-    ))]
+    #[cfg(native_lane)]
     #[test]
     fn refine_results_record_the_kv_cache_the_generation_ran_on() {
         use gen_core::core_llm::{

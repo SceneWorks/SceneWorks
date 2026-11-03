@@ -34,7 +34,7 @@ use crate::ladder_margin_policy::{admission_allowance, AdmissionSubject};
 
 /// Provider-owned reference demand, resolved BEFORE derive/fit and recomputed on warm cache hits.
 /// No-reference callers preserve the legacy zero surcharge without probing a provider or its files.
-#[cfg(any(target_os = "macos", feature = "backend-candle", test))]
+#[cfg(any(test, native_lane))]
 pub(crate) fn reference_workspace_bytes(
     provider_id: &str,
     spec: &gen_core::LoadSpec,

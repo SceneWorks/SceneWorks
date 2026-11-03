@@ -4,7 +4,6 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::Arc;
-use std::time::Duration;
 
 use rusqlite::types::Value as SqlValue;
 use rusqlite::{
@@ -3548,39 +3547,13 @@ fn configure_connection(connection: &Connection, database_path: &Path) -> Catalo
             },
         )
         .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    let journal_mode: String = connection
-        .pragma_query_value(None, "journal_mode", |row| row.get(0))
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    if !journal_mode.eq_ignore_ascii_case("wal") {
-        connection
-            .pragma_update(None, "journal_mode", "wal")
-            .map_err(|error| map_sqlite_error(database_path, error))?;
-    }
-    connection
-        .pragma_update(None, "synchronous", "normal")
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        .pragma_update(None, "foreign_keys", true)
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        // A facet may encounter millions of distinct values. Spill SQLite's
-        // transient GROUP BY sorter to disk instead of growing the API heap
-        // with catalog cardinality.
-        .pragma_update(None, "temp_store", "file")
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        .pragma_update(None, "cache_size", -65_536)
-        .map_err(|error| map_sqlite_error(database_path, error))?;
-    connection
-        // Projection-heavy scanner batches dirty several indexes at once.
-        // Keep automatic checkpoints bounded (about 80 MiB at SQLite's
-        // default page size) without forcing checkpoint work into every few
-        // small scanner commits.
-        .pragma_update(None, "wal_autocheckpoint", CATALOG_WAL_AUTOCHECKPOINT_PAGES)
-        .map_err(|error| map_sqlite_error(database_path, error))?;
+    crate::store_util::configure_connection(
+        connection,
+        crate::store_util::Profile::Catalog {
+            wal_autocheckpoint_pages: CATALOG_WAL_AUTOCHECKPOINT_PAGES,
+        },
+    )
+    .map_err(|error| map_sqlite_error(database_path, error))?;
     Ok(())
 }
 
@@ -4484,6 +4457,7 @@ mod tests {
     }
 
     use super::*;
+    use std::time::Duration;
     use tempfile::tempdir;
 
     fn replace_curation_indexes_with_dense_v2(connection: &Connection) {

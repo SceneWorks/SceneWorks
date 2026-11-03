@@ -254,16 +254,13 @@ function WorkerCard({ worker }) {
 }
 
 export function QueueScreen() {
-  const [jobPrompt, setJobPrompt] = useState("Placeholder generation");
   const [selectedJobIds, setSelectedJobIds] = useState(() => new Set());
   const [prioritizing, setPrioritizing] = useState(false);
   const {
-    activeProject,
     assets = [],
     cancelPendingJobs,
     clearCompletedJobs,
     clearJob,
-    createPlaceholderJob,
     filteredJobs,
     gpuOptions,
     jobAction,
@@ -277,7 +274,6 @@ export function QueueScreen() {
     setRequestedGpu,
     visibleWorkers,
   } = useAppContext();
-  const createJob = (event) => createPlaceholderJob(event, jobPrompt);
   const workers = visibleWorkers;
   // Prefer the shared index from context (sc-2082); fall back for legacy
   // contexts that may not yet expose it (test harnesses, etc.).
@@ -339,13 +335,8 @@ export function QueueScreen() {
   };
   return (
     <section className="page-frame queue-surface">
-      <WorkPanel
-        eyebrow="Add a job"
-        hint="Queue a prompt to a GPU — or Auto to route to the first free worker."
-      >
-        <form className="job-composer" onSubmit={createJob}>
-          <label htmlFor="queue-job-prompt">Prompt</label>
-          <input id="queue-job-prompt" onChange={(event) => setJobPrompt(event.target.value)} value={jobPrompt} />
+      <WorkPanel>
+        <div className="queue-tools">
           <label htmlFor="queue-gpu">GPU</label>
           <select id="queue-gpu" onChange={(event) => setRequestedGpu(event.target.value)} value={requestedGpu}>
             {gpuOptions.map((gpu) => (
@@ -354,12 +345,7 @@ export function QueueScreen() {
               </option>
             ))}
           </select>
-          <button disabled={!activeProject} type="submit">
-            Add job
-          </button>
-        </form>
-        <div className="work-panel-divider" />
-        <div className="queue-tools">
+
         <label htmlFor="project-filter">Project</label>
         <select id="project-filter" onChange={(event) => setProjectFilter(event.target.value)} value={projectFilter}>
           <option value="all">All projects</option>

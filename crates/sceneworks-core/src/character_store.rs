@@ -3,7 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 
@@ -198,7 +198,7 @@ impl<'a> CharacterStore<'a> {
             "trainedLoras": []
         });
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, false)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -242,7 +242,7 @@ impl<'a> CharacterStore<'a> {
         }
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -266,7 +266,7 @@ impl<'a> CharacterStore<'a> {
             .insert("archived".to_owned(), Value::Bool(true));
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -284,7 +284,7 @@ impl<'a> CharacterStore<'a> {
     ) -> ProjectStoreResult<CharacterMutationResult> {
         let path = find_character_file(&self.project_path, character_id)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         purge_character_on_connection(&transaction, character_id)?;
         fs::remove_file(path)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -318,7 +318,7 @@ impl<'a> CharacterStore<'a> {
 
         let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         update_asset_character_link(
             &transaction,
             project_id,
@@ -399,7 +399,7 @@ impl<'a> CharacterStore<'a> {
 
         let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         update_asset_character_link(
             &transaction,
             project_id,
@@ -436,7 +436,7 @@ impl<'a> CharacterStore<'a> {
 
         let asset_index_mutation = AssetIndexMutation::begin(&self.project_path)?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         update_asset_character_link(
             &transaction,
             project_id,
@@ -466,7 +466,7 @@ impl<'a> CharacterStore<'a> {
     pub fn remove_asset_references(&self, asset_id: &str) -> ProjectStoreResult<u32> {
         validate_required_text(asset_id, "assetId")?;
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let mut changed_count = 0;
 
         for sidecar_path in character_sidecars(&self.project_path)? {
@@ -517,7 +517,7 @@ impl<'a> CharacterStore<'a> {
         prepend_array_field(&mut character, "looks", look)?;
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -568,7 +568,7 @@ impl<'a> CharacterStore<'a> {
         object.insert("updatedAt".to_owned(), Value::String(utc_now()));
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -600,7 +600,7 @@ impl<'a> CharacterStore<'a> {
         );
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -644,7 +644,7 @@ impl<'a> CharacterStore<'a> {
         prepend_array_field(&mut character, "loras", link)?;
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -693,7 +693,7 @@ impl<'a> CharacterStore<'a> {
         object.insert("updatedAt".to_owned(), Value::String(utc_now()));
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -725,7 +725,7 @@ impl<'a> CharacterStore<'a> {
         );
 
         let mut connection = connect_project_db_migrated(&self.project_path)?;
-        let transaction = connection.transaction()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         write_character(&self.project_path, &mut character, true)?;
         index_character_on_connection(&transaction, &self.project_path, &character)?;
         store_character_index_fingerprint(&transaction, &self.project_path)?;
@@ -838,10 +838,11 @@ pub fn write_character_sidecar(project_path: &Path, character: &Value) -> Projec
 fn ensure_character_index(project_path: &Path) -> ProjectStoreResult<()> {
     let (fingerprint, sidecar_count) = character_index_fingerprint(project_path)?;
     let mut connection = connect_project_db_migrated(project_path)?;
-    let indexed_count = connection.query_row("select count(*) from characters", [], |row| {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let indexed_count = transaction.query_row("select count(*) from characters", [], |row| {
         row.get::<_, u64>(0)
     })?;
-    let stored_fingerprint = connection
+    let stored_fingerprint = transaction
         .query_row(
             "select value from project_metadata where key = ?1",
             params![CHARACTER_INDEX_FINGERPRINT_KEY],
@@ -855,7 +856,6 @@ fn ensure_character_index(project_path: &Path) -> ProjectStoreResult<()> {
 
     // Sidecars are authoritative. If a previous commit failed after an atomic sidecar write,
     // or files changed outside the DB path, rebuild only when the sidecar fingerprint changes.
-    let transaction = connection.transaction()?;
     clear_character_tables(&transaction)?;
     reindex_characters_with_fingerprint(&transaction, project_path, &fingerprint)?;
     transaction.commit()?;

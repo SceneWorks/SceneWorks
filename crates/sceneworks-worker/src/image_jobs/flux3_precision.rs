@@ -94,18 +94,10 @@ pub(super) fn flux3_requested_tier_for_lane(
     Ok(Some(tier))
 }
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 pub(crate) use native::*;
 
-#[cfg(any(
-    test,
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
+#[cfg(any(test, native_lane))]
 mod native {
     use std::path::{Component, Path, PathBuf};
 
