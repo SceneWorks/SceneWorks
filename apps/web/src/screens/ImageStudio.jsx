@@ -502,6 +502,7 @@ export function ImageStudio() {
       const owner = batchOwnerRef.current;
       if (!owner) return;
       owner.stopped = true;
+      owner.controller.abort();
       owner.disposed = true;
       for (const resolve of waiters.splice(0)) resolve();
       // Project changes and unmount use the same policy as Stop: cancel jobs
@@ -3010,7 +3011,7 @@ export function ImageStudio() {
     }
     setBatchError("");
     setBatchConfirmPending(false);
-    const owner = { stopped: false, projectId: activeProject.id, jobs: new Map() };
+    const owner = { stopped: false, projectId: activeProject.id, jobs: new Map(), controller: new AbortController() };
     batchOwnerRef.current = owner;
     const stopped = () => owner.stopped || batchProjectRef.current !== owner.projectId || batchOwnerRef.current !== owner;
     batchObservedJobsRef.current.clear();
@@ -3105,7 +3106,7 @@ export function ImageStudio() {
         }
         if (stopped()) break;
         const result = createImageJob.withResult
-          ? await createImageJob.withResult([request], { shouldContinue: () => !stopped() })
+          ? await createImageJob.withResult([request], { shouldContinue: () => !stopped(), signal: owner.controller.signal })
           : { job: await createImageJob(request) };
         if (result.cancelled) break;
         const { job } = result;
@@ -3139,6 +3140,7 @@ export function ImageStudio() {
               }
             : recordBatchEnqueueFailure(current, n, failure),
         );
+        if (result.stop) break;
       } catch (error) {
         if (owner.disposed || batchOwnerRef.current !== owner || batchProjectRef.current !== owner.projectId) break;
         const current = batchRunRef.current;
@@ -3155,7 +3157,10 @@ export function ImageStudio() {
   // Stop the enqueue loop (if still running) and cancel every still-pending job in the run;
   // completed/failed items are left as-is.
   function cancelBatchRun() {
-    if (batchOwnerRef.current) batchOwnerRef.current.stopped = true;
+    if (batchOwnerRef.current) {
+      batchOwnerRef.current.stopped = true;
+      batchOwnerRef.current.controller.abort();
+    }
     releaseBatchSlotWaiters();
     const current = batchRunRef.current;
     if (!current) {

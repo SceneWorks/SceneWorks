@@ -15,6 +15,7 @@ vi.mock("../api.js", async (importOriginal) => {
 import { AppContext } from "../context/AppContext.js";
 import { apiFetch } from "../api.js";
 import { CREATE_JOB_DEFINITIONS, makeCreateJob } from "../createJob.js";
+import { createModelLibraryGate, setModelLibraryHandler, MODEL_LIBRARY_UNAVAILABLE_CODE } from "../modelLibrary.js";
 import {
   buildStructuredPromptRecipe,
   parseMagicPromptCaption,
@@ -421,6 +422,47 @@ describe("Image Studio batch cardinality admission", () => {
     expect(container.querySelector(".batch-run-progress").textContent).toContain("2/3 done · 2 failed");
     expect(container.querySelector(".batch-run-progress").textContent).toContain("admission rejected");
     expect(container.querySelector(".batch-run-progress").textContent).toContain("network unavailable");
+  });
+
+  it.each(["resume", "stop", "project switch", "unmount"])("keeps the failed batch chunk owned through library recovery: %s", async (action) => {
+    window.localStorage.setItem("sceneworks-studio-image-project_1", JSON.stringify({
+      model: Z_IMAGE.id, count: 1, batchMode: true, batchPromptsText: "one\ntwo\nthree",
+    }));
+    const rejection = { code: MODEL_LIBRARY_UNAVAILABLE_CODE, message: "Library disconnected",
+      context: { availability: "installed_external_unavailable", modelId: "z_image" } };
+    const prompts = [];
+    vi.mocked(apiFetch).mockImplementation(async (path, _token, options) => {
+      if (path !== "/api/v1/image/jobs") return {};
+      const { prompt } = JSON.parse(options.body);
+      prompts.push(prompt);
+      if (prompts.length === 2) throw rejection;
+      return { id: `job-${prompts.length}`, status: "queued" };
+    });
+    const gate = createModelLibraryGate({ probe: async () => ({ available: true }) });
+    const unregister = setModelLibraryHandler(gate.block);
+    try {
+      const createImageJob = makeCreateJob({ definition: CREATE_JOB_DEFINITIONS.image,
+        project: { id: "project_1", name: "My Project" }, token: "token", requestedGpu: "",
+        setJobs: vi.fn(), setError: vi.fn() });
+      const context = baseContext({ createImageJob });
+      await render(context);
+      await click([...container.querySelectorAll("button")].find((button) => button.textContent.includes("Run batch")));
+      await vi.waitFor(() => expect(gate.getState().status).toBe("blocked"));
+      expect(prompts).toEqual(["one", "two"]);
+      if (action === "stop") await click(container.querySelector(".batch-run-progress button"));
+      if (action === "project switch") await render({ ...context, activeProject: { id: "project_2", name: "Other" } });
+      if (action === "unmount") await act(async () => root.render(null));
+      await act(async () => { await Promise.all([gate.retry(), gate.retry()]); });
+      if (action === "resume") {
+        await vi.waitFor(() => expect(prompts).toEqual(["one", "two", "two", "three"]));
+        expect(container.querySelector(".batch-run-progress").textContent).toContain("0/3 done");
+      } else {
+        expect(prompts).toEqual(["one", "two"]);
+      }
+    } finally {
+      unregister();
+      vi.mocked(apiFetch).mockReset().mockResolvedValue({});
+    }
   });
 
   it("does not post after a project switch while creator confirmation is pending", async () => {

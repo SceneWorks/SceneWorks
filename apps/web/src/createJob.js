@@ -73,7 +73,7 @@ export function makeCreateJob({
   afterCreate,
 }) {
   async function execute(args, options = {}) {
-    const { shouldContinue = () => true, detailed = false } = options;
+    const { shouldContinue = () => true, detailed = false, signal } = options;
     if (!shouldContinue()) return { cancelled: true };
     if (!project) {
       const message = "Create or open a project first.";
@@ -81,8 +81,19 @@ export function makeCreateJob({
       return { error: message };
     }
     try {
-      if (beforeCreate && (await beforeCreate(...args)) === false) {
-        return { error: "Job creation was canceled before submission." };
+      if (beforeCreate) {
+        let abort;
+        const confirmation = Promise.resolve(beforeCreate(...args));
+        const cancelled = Symbol("cancelled");
+        const decision = signal
+          ? await Promise.race([confirmation, new Promise((resolve) => {
+              abort = () => resolve(cancelled);
+              if (signal.aborted) abort();
+              else signal.addEventListener("abort", abort, { once: true });
+            })]).finally(() => signal.removeEventListener("abort", abort))
+          : await confirmation;
+        if (decision === cancelled) return { cancelled: true };
+        if (decision === false) return { error: "Job creation was canceled before submission." };
       }
       // A batch may be stopped while its shared confirmation is open.
       if (!shouldContinue()) return { cancelled: true };
@@ -95,13 +106,39 @@ export function makeCreateJob({
       setError("");
       return { job };
     } catch (err) {
-      // A batch accounts for each submission itself. A detached recovery retry could
-      // enqueue after it stops and would escape that accounting, so detailed callers
-      // receive the reason and may start a new run after resolving the library issue.
       const message = err?.message || (typeof err === "string" ? err : "Could not create job.");
-      const prompted = handleModelLibraryRejection(err, detailed ? null : () => createJob(...args));
-      if (!prompted) setError(message);
-      return detailed ? { error: message } : {};
+      if (detailed) {
+        // Keep the failed chunk owned by its batch while the recovery dialog is open.
+        // Cancel, relocation, a competing dialog, and batch teardown release the wait.
+        let resolveRecovery;
+        const recovery = new Promise((resolve) => { resolveRecovery = resolve; });
+        let waiting = true;
+        const finish = (result) => {
+          if (!waiting) return;
+          waiting = false;
+          signal?.removeEventListener("abort", abort);
+          resolveRecovery(result);
+        };
+        const abort = () => finish({ cancelled: true });
+        const resume = async () => {
+          if (!waiting) return null;
+          waiting = false;
+          signal?.removeEventListener("abort", abort);
+          const result = await execute(args, options);
+          resolveRecovery(result);
+          return result.job ?? null;
+        };
+        resume.onAbandon = () => finish({ error: message, stop: true });
+        if (handleModelLibraryRejection(err, resume)) {
+          if (signal?.aborted || !shouldContinue()) abort();
+          else if (waiting) signal?.addEventListener("abort", abort, { once: true });
+          return recovery;
+        }
+      } else if (handleModelLibraryRejection(err, () => createJob(...args))) {
+        return {};
+      }
+      setError(message);
+      return { error: message };
     }
   }
 
