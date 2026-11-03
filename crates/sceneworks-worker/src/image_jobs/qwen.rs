@@ -25,17 +25,7 @@ const QWEN_CONTROL_FILE: &str = "model.safetensors";
 /// an absent `snapshot` (nothing cached yet) falls back to `q8`, the fresh-install co-requisite the base
 /// download brings. Mirrors the candle `qwen_control_tier_subdir` (`qwen_control.rs`).
 fn qwen_control_tier_subdir(request: &ImageRequest, snapshot: Option<&Path>) -> &'static str {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
-    match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        Some(_) => "q4",
-        // Default: the app-wide Q8 default CLAMPED to the installed overlay — never a new fetch.
-        None => qwen_control_installed_default_tier(snapshot),
-    }
+    crate::payload::tier_for_bits(request.quant_bits(), qwen_control_installed_default_tier(snapshot))
 }
 
 /// The highest CLEAN control overlay tier (q8 → bf16 → q4) whose `<tier>/model.safetensors` is present
@@ -88,9 +78,7 @@ fn resolve_qwen_control_weights(
     let override_field = |key: &str| -> Option<String> {
         control
             .and_then(|control| control.get(key))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .map(str::to_owned)
     };
     let repo =

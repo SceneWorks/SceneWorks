@@ -1465,11 +1465,11 @@ fn to_json_string(value: &Value) -> ProjectStoreResult<String> {
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
-    optional_str(value, key).ok_or_else(|| {
-        ProjectStoreError::BadRequest(format!(
+    crate::store_util::required_str_with(value, key, || {
+        format!(
             "{} is required",
             camel_to_title(key).unwrap_or_else(|| key.to_owned())
-        ))
+        )
     })
 }
 

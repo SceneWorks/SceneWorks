@@ -1337,9 +1337,7 @@ async fn resolve_convert_plan(
             // VAE/text-encoder/tokenizer are dense and identical across tiers, so the manifest's
             // `convertBaseSubdir` names the preferred tier and any installed tier serves. A base with a
             // plain root diffusers layout (no `baseSubdir`) borrows from the snapshot root (sc-14978).
-            let base_subdir = optional_payload_string(&job.payload, "baseSubdir")
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
+            let base_subdir = optional_payload_string(&job.payload, "baseSubdir");
             let Some(base_dir) = resolve_flux2_klein_base_dir(&base_snapshot, base_subdir) else {
                 return Ok(Err(ConvertPlanError {
                     message: "Base FLUX.2-klein model is installed but incomplete.",
@@ -1365,7 +1363,6 @@ async fn resolve_convert_plan(
             }
             let upscaler_repo = required_payload_string(&job.payload, "baseRepo")?.to_owned();
             let upscaler_file = optional_payload_string(&job.payload, "upscalerFile")
-                .filter(|value| !value.trim().is_empty())
                 .unwrap_or(LTX_SPATIAL_UPSCALER_FILE)
                 .to_owned();
             let Some(upscaler_dir) =
@@ -2727,12 +2724,7 @@ pub(crate) fn resolve_co_requisites_for_tier(
 /// the same reason `files` and `revision` are (sc-13583 / sc-13842): a `..`/absolute entry would
 /// otherwise stage an arbitrary host directory as this component's weights.
 fn component_dir(snapshot: &Path, download: &Value, model_id: &str) -> WorkerResult<PathBuf> {
-    let Some(subdir) = download
-        .get("subdir")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let Some(subdir) = crate::payload::trimmed_string(download.get("subdir")) else {
         return Ok(snapshot.to_path_buf());
     };
     let dir = safe_join(snapshot, subdir)?;
@@ -4359,11 +4351,7 @@ fn receipt_weights_dir_from_marker(
         let repo_dir = huggingface_repo_cache_path(data_dir, repo)?;
         let snapshots = repo_dir.join("snapshots");
         let snapshot_entries = std::fs::read_dir(&snapshots).ok()?;
-        let recorded_revision = receipt
-            .get("snapshotRevision")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|revision| !revision.is_empty());
+        let recorded_revision = crate::payload::trimmed_string(receipt.get("snapshotRevision"));
         let matching = snapshot_entries
             .flatten()
             .map(|entry| entry.path())
@@ -5628,9 +5616,7 @@ fn ltx_import_base_model_error(
             .get("manifestEntry")
             .and_then(Value::as_object)
             .and_then(|entry| entry.get("baseModel"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|base| !base.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
     });
     match recorded {
         None => Some(
@@ -6512,14 +6498,7 @@ fn managed_provenance_from_payload(payload: &JsonObject) -> WorkerResult<Managed
     let Some(object) = payload.get("importProvenance").and_then(Value::as_object) else {
         return Ok(ManagedProvenanceV1::of_source("legacy-import"));
     };
-    let field = |key: &str| {
-        object
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    };
+    let field = |key: &str| crate::payload::trimmed_string(object.get(key)).map(str::to_owned);
     let provenance = ManagedProvenanceV1 {
         source: field("source").unwrap_or_else(|| "legacy-import".to_owned()),
         reference: field("reference"),

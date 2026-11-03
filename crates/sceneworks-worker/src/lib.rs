@@ -1199,6 +1199,7 @@ pub(crate) use manifest::*;
 mod paths;
 pub use paths::*;
 mod payload;
+mod text_clean;
 pub(crate) use payload::*;
 mod settings;
 pub use settings::*;

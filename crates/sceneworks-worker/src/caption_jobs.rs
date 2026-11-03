@@ -235,12 +235,7 @@ async fn run_training_caption_job_using(
             .await;
     }
     let options = caption_job_options(&job.payload);
-    let model_name_or_path = job
-        .payload
-        .get("modelNameOrPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let model_name_or_path = crate::payload::trimmed_string(job.payload.get("modelNameOrPath"))
         .unwrap_or(JOY_CAPTION_MODEL)
         .to_owned();
     let weights_dir = resolve_caption_weights_dir(settings, &model_name_or_path)?;

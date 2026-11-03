@@ -69,9 +69,7 @@ fn validate_sdxl_control_candle_tier(request: &ImageRequest) -> WorkerResult<()>
     };
     let quant_bits_are_q4 = match request.advanced.get("mlxQuantize") {
         None | Some(Value::Null) => true,
-        Some(value) => value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse::<i64>().ok())
+        Some(value) => crate::payload::quant_int(value)
             == Some(4),
     };
     if quant_tier_is_q4 && quant_bits_are_q4 {

@@ -107,26 +107,15 @@ fn mochi_shared_is_complete(root: &Path) -> bool {
         .all(|component| root.join(component).is_dir())
 }
 
-/// Parse `advanced.mlxQuantize` (int or numeric string) → the requested bit width, if present.
-/// Mirrors [`ltx_quant_bits`].
-#[cfg(any(
-    target_os = "macos",
-    all(not(target_os = "macos"), feature = "backend-candle")
-))]
-fn mochi_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-}
-
 /// Whether the request opts into the Q8 tier (`advanced.mlxQuantize >= 8`, int or string).
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn mochi_wants_q8(request: &VideoRequest) -> bool {
-    mochi_quant_bits(request).is_some_and(|bits| (8..=15).contains(&bits))
+    request
+        .quant_bits()
+        .is_some_and(|bits| (8..=15).contains(&bits))
 }
 
 /// Whether the request opts into the dense **bf16** tier (`advanced.mlxQuantize <= 0`, or an explicit
@@ -138,7 +127,9 @@ pub(super) fn mochi_wants_q8(request: &VideoRequest) -> bool {
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(super) fn mochi_wants_bf16(request: &VideoRequest) -> bool {
-    mochi_quant_bits(request).is_some_and(|bits| bits <= 0 || bits >= 16)
+    request
+        .quant_bits()
+        .is_some_and(|bits| bits <= 0 || bits >= 16)
 }
 
 /// The Mochi tier search order — preferred tier first, then the always-SMALLER fallback tiers so a

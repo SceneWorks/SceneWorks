@@ -162,11 +162,7 @@ fn catalog_id_for(component: &str) -> &'static str {
 fn sw_config_to_engine(config: &sceneworks_core::training::TrainingConfig) -> TrainingConfig {
     let advanced = &config.advanced;
     let string = |key: &str, default: &str| {
-        advanced
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        crate::payload::trimmed_string(advanced.get(key))
             .unwrap_or(default)
             .to_owned()
     };

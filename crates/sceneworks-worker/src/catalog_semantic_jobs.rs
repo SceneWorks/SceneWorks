@@ -9,6 +9,7 @@
     allow(dead_code)
 )]
 
+use crate::text_clean::clean_fenced_json_output as clean_json_output;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
@@ -225,26 +226,6 @@ pub fn parse_normalized_vision_result(text: &str) -> Result<NormalizedVisionResu
             .map(|(value, confidence)| ConfidentTag { value, confidence })
             .collect(),
     })
-}
-
-fn clean_json_output(text: &str) -> String {
-    let trimmed = text.trim();
-    let unfenced = if trimmed.starts_with("```") && trimmed.ends_with("```") {
-        let after_header = trimmed
-            .find('\n')
-            .map(|index| &trimmed[index + 1..])
-            .unwrap_or(trimmed);
-        after_header
-            .strip_suffix("```")
-            .unwrap_or(after_header)
-            .trim()
-    } else {
-        trimmed
-    };
-    match (unfenced.find('{'), unfenced.rfind('}')) {
-        (Some(start), Some(end)) if end >= start => unfenced[start..=end].to_owned(),
-        _ => unfenced.to_owned(),
-    }
 }
 
 fn normalize_token(value: &str) -> String {
@@ -1314,12 +1295,7 @@ pub(crate) async fn run_catalog_analysis_job(
 ) -> WorkerResult<()> {
     use sceneworks_core::contracts::{JobStatus, ProgressStage, WorkerStatus};
 
-    let catalog_id = job
-        .payload
-        .get("catalogId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let catalog_id = crate::payload::trimmed_string(job.payload.get("catalogId"))
         .ok_or_else(|| {
             WorkerError::InvalidPayload("catalog analysis requires catalogId".to_owned())
         })?
