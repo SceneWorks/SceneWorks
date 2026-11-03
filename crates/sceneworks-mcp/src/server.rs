@@ -1977,6 +1977,10 @@ pub(crate) fn asset_media_path(asset: &Value) -> Option<String> {
         .pointer("/file/path")
         .and_then(Value::as_str)
         .or_else(|| asset.get("path").and_then(Value::as_str))?;
+    // Legacy Windows sidecars may use native separators; preserve relative nested filenames,
+    // while refusing leading roots, drive prefixes and parent components after normalization.
+    let normalized = path.replace('\\', "/");
+    let path = normalized.as_str();
     sceneworks_core::safe_path::portable_relative_path_parts(path).ok()?;
     // Decode nested percent escapes with a stack: each reduction removes two bytes, so even
     // deeply encoded hostile paths are checked in linear time. Retain the original filename.
@@ -2784,12 +2788,17 @@ mod tests {
             Some("assets/images/nested.png")
         );
         assert_eq!(
+            asset_media_path(&json!({"path": "assets\\images\\nested.png"})).as_deref(),
+            Some("assets/images/nested.png")
+        );
+        assert_eq!(
             asset_media_path(&json!({"path": "assets/50% done.png"})).as_deref(),
             Some("assets/50% done.png")
         );
         for path in [
             "../secret",
             "a/../secret",
+            "a\\..\\secret",
             "/assets/x.png",
             "\\assets\\x.png",
             "C:/secret",
