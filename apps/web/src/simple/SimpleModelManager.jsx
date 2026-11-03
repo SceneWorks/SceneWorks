@@ -25,7 +25,7 @@ import {
   lightestInstallableTier,
   sdxlCudaMemoryEstimate,
 } from "../tierSuggestion.js";
-import { workerAdvertises } from "./simpleJobs.js";
+import { nativeTierEligibility } from "../quantTier.js";
 import { useSimpleUi } from "./SimpleUiContext.js";
 
 // Simple Model Manager (design handoff): a tabbed catalog (Image / Video / Utility /
@@ -76,20 +76,7 @@ export function SimpleModelManager() {
   // the memory numbers are per-backend and must not be crossed (see `needsLabel`).
   const backend = macCapabilities?.macGatingActive ? "mlx" : "candle";
   const hostMemoryGb = hostMemoryGbForBackend(hostMemory, backend);
-  // The candle-only tiers' host-eligibility gates, derived exactly as SimpleImageStudio derives them for
-  // tier RESOLUTION (sc-9300 / sc-11042). The memory floor has to agree with the picker: a host where no
-  // live worker advertises `int8_convrot` will never be offered that tier, so its measured row must not
-  // set this row's number. Defaulting them to true — as `installedTiers` does for callers that pass
-  // nothing — would size an ineligible host against a tier it cannot run.
-  const tierOptions = useMemo(
-    () => ({
-      backend,
-      hostMemoryGb,
-      convRotEligible: workerAdvertises(visibleWorkers, "int8_convrot"),
-      nvfp4Eligible: workerAdvertises(visibleWorkers, "nvfp4"),
-    }),
-    [backend, hostMemoryGb, visibleWorkers],
-  );
+  const tierOptions = useMemo(() => ({ backend, hostMemoryGb }), [backend, hostMemoryGb]);
 
   const rows = useMemo(() => {
     if (tab === "loras") {
@@ -108,19 +95,24 @@ export function SimpleModelManager() {
     const wanted = tab === "utility" ? (type) => type !== "image" && type !== "video" : (type) => type === tab;
     return models
       .filter((model) => wanted(model.type))
-      .map((model) => ({
-        id: model.id,
-        name: model.name ?? model.id,
-        meta: [downloadSizeText(model), needsLabel(model, tierOptions), importedCheckpointLabel(model)]
-          .filter(Boolean)
-          .join(" · "),
-        memoryTitle: needsLabel(model, tierOptions)?.startsWith("Q4 optimized ")
-          ? sdxlCudaMemoryEstimate(model, "q4", tierOptions.backend)?.description : undefined,
-        manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
-        entry: model,
-        kind: "model",
-      }));
-  }, [tab, models, loras, tierOptions]);
+      .map((model) => {
+        // Match the generation picker's per-model native format contract. In particular,
+        // generic nvfp4 workers cannot supply FLUX.3 packed-provider measurements.
+        const options = { ...tierOptions, ...nativeTierEligibility(model, visibleWorkers) };
+        return {
+          id: model.id,
+          name: model.name ?? model.id,
+          meta: [downloadSizeText(model), needsLabel(model, options), importedCheckpointLabel(model)]
+            .filter(Boolean)
+            .join(" · "),
+          memoryTitle: needsLabel(model, options)?.startsWith("Q4 optimized ")
+            ? sdxlCudaMemoryEstimate(model, "q4", options.backend)?.description : undefined,
+          manageOnly: model.installState === "installed" || model.platformCleanupOnly === true,
+          entry: model,
+          kind: "model",
+        };
+      });
+  }, [tab, models, loras, tierOptions, visibleWorkers]);
 
   const activeDownloads = useMemo(
     () =>

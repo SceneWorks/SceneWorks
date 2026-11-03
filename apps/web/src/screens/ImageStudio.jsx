@@ -1,3 +1,4 @@
+import { preferredOption, preferredResolution, formatResolutionLabel } from "../studioDefaults.js";
 import { ImageAdvancedPanel } from "./imageStudio/ImageAdvancedPanel.jsx";
 import { ImagePromptComposer } from "./imageStudio/ImagePromptComposer.jsx";
 import { ImageGenerationSettings } from "./imageStudio/ImageGenerationSettings.jsx";
@@ -193,24 +194,6 @@ const BATCH_ACTIVE_JOB_LIMIT = MAX_LISTED_JOBS;
 // Yield after this many preflight prompts so the run state commits and Stop can interrupt
 // a clean (no-overage) stream before we ever reach its Cartesian suffix.
 const BATCH_PREFLIGHT_YIELD_INTERVAL = BATCH_RENDER_CAP;
-
-function preferredOption(defaultValue, options) {
-  return options.includes(defaultValue) ? defaultValue : options[0] ?? "default";
-}
-
-function preferredResolution(model, options) {
-  const modelDefault = model?.defaults?.resolution;
-  return options.includes(modelDefault)
-    ? modelDefault
-    : options.includes("1024x1024")
-      ? "1024x1024"
-      : options[0];
-}
-
-function formatResolutionLabel(value) {
-  const [width, height] = String(value).split("x");
-  return height ? `${width} × ${height}` : value;
-}
 
 // Fold any mode the tabs no longer expose (a legacy `style_variations` snapshot,
 // an unknown value) back to text_to_image so a restored studio never lands on a
@@ -1580,13 +1563,13 @@ export function ImageStudio() {
     if (mossEdit && isMossImage(previousModel)) return;
     setMossImage(mossDefaults());
     setMossDmdSteps(8);
-    setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
-    setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
+    setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions, [], { empty: "default" }));
+    setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions, [], { empty: "default" }));
     setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
     setCfgInterval("");
     setCaptionOverflow("default");
     setGuidanceMethod(
-      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
+      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
     setStepsOverride("");
     setGuidanceOverride("");
@@ -1627,7 +1610,7 @@ export function ImageStudio() {
     if (samplerOptions.includes(sampler)) {
       return;
     }
-    setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions));
+    setSampler(preferredOption(samplerDefaultFromModel(selectedModel), samplerOptions, [], { empty: "default" }));
   }, [samplerOptions, sampler, selectedModel]);
   useEffect(() => {
     if (!selectedModel) {
@@ -1636,7 +1619,7 @@ export function ImageStudio() {
     if (schedulerOptions.includes(scheduler)) {
       return;
     }
-    setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions));
+    setScheduler(preferredOption(schedulerDefaultFromModel(selectedModel), schedulerOptions, [], { empty: "default" }));
   }, [schedulerOptions, scheduler, selectedModel]);
   // Snap the guidance method back to "cfg" when the current choice isn't honored by
   // the active backend for this model (e.g. switching off the SDXL family drops
@@ -1649,7 +1632,7 @@ export function ImageStudio() {
       return;
     }
     setGuidanceMethod(
-      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions),
+      preferredOption(guidanceMethodDefaultFromModel(selectedModel), guidanceMethodOptions, [], { empty: "default" }),
     );
   }, [guidanceMethodOptions, guidanceMethod, selectedModel]);
   // A sticky or replayed `true` must not survive a route change that hides the control. This keeps
