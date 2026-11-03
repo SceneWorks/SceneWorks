@@ -447,7 +447,8 @@ async fn abandoned_async_waiter_trips_copy_flag_and_retains_cleanup_owner_until_
 #[test]
 fn unclaimed_completed_preflight_handoff_explicitly_releases_snapshots() {
     let (_dir, settings, plan, bytes) = fixture();
-    let prepared = inert_preflight(&settings, &plan, PreparedTrainingInputs::default(), &bytes)
+    let handoff = inert_preflight(&settings, &plan, PreparedTrainingInputs::default(), &bytes)
+        .map(|prepared| Arc::new(TrainingPreflightHandoff(Mutex::new(Some(prepared)))))
         .expect("descriptor-only preparation");
     let parent = settings.data_dir.join("cache/training-inputs");
     let roots = || {
@@ -467,7 +468,6 @@ fn unclaimed_completed_preflight_handoff_explicitly_releases_snapshots() {
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
     assert_eq!(roots(), 1);
-    let handoff = Arc::new(TrainingPreflightHandoff(Mutex::new(Some(prepared))));
     let worker = handoff.clone();
     drop(handoff);
     drop(worker);

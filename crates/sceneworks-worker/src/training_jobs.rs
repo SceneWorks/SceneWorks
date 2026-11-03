@@ -1123,24 +1123,25 @@ async fn preflight_training_run_async_using(
     let task_handoff = handoff.clone();
     let task_cancel = cancel.clone();
     let task = crate::load_progress::spawn_blocking(move || {
-        let prepared = prepare(task_cancel.clone())?;
-        if let Err(error) = check_prepared_input_cancel(Some(&task_cancel)) {
-            return finish_training_preflight(prepared, Err(error));
-        }
-        #[cfg(any(
-            target_os = "macos",
-            all(not(target_os = "macos"), feature = "backend-candle")
-        ))]
-        let prepared = {
-            let mut prepared = prepared;
-            prepared.request.cancel = task_cancel;
-            prepared
-        };
-        *task_handoff
-            .0
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(prepared);
-        Ok(())
+        prepare(task_cancel.clone()).and_then(|prepared| {
+            if let Err(error) = check_prepared_input_cancel(Some(&task_cancel)) {
+                return finish_training_preflight(prepared, Err(error));
+            }
+            #[cfg(any(
+                target_os = "macos",
+                all(not(target_os = "macos"), feature = "backend-candle")
+            ))]
+            let prepared = {
+                let mut prepared = prepared;
+                prepared.request.cancel = task_cancel;
+                prepared
+            };
+            *task_handoff
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(prepared);
+            Ok(())
+        })
     });
     let outcome = run_blocking_with_heartbeat(
         api,
@@ -2453,18 +2454,18 @@ async fn run_training_dry_run(
         ),
     )
     .await?;
-    let prepared =
-        preflight_training_run_async(api, settings, &job.id, plan, masks_pending).await?;
     #[cfg(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     ))]
-    prepared.close()?;
+    preflight_training_run_async(api, settings, &job.id, plan, masks_pending)
+        .await?
+        .close()?;
     #[cfg(not(any(
         target_os = "macos",
         all(not(target_os = "macos"), feature = "backend-candle")
     )))]
-    let () = prepared;
+    preflight_training_run_async(api, settings, &job.id, plan, masks_pending).await?;
     let item_count = plan.dataset.items.len();
     update_job(
         api,
