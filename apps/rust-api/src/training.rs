@@ -3808,5 +3808,6 @@ pub(crate) fn trusted_adapter_files(
 /// (no `..`, root, drive prefix, or `.`), so joining it to an output dir cannot
 /// escape that dir.
 pub(crate) fn is_plain_relative_file(name: &str) -> bool {
-    sceneworks_core::safe_path::relative_normal_components(name).is_ok()
+    // Export filenames originate on the native trainer, so keep Windows native separators.
+    sceneworks_core::safe_path::path_normal_components(FsPath::new(name)).is_ok()
 }
