@@ -31,7 +31,6 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 use gen_core::{
     GenerationMemory, LoadShapeDeclarationResult, LoadSpec, MemoryBackend,
@@ -5394,17 +5393,7 @@ fn predicted_peak_gb_with_headroom(weight_bytes: u64, headroom_gb: f64) -> Optio
 /// Decide whether the predicted peak fits the budget. Missing either input ⇒ `Unknown` (never
 /// block), exactly like the flux2 guard and the candle gate.
 pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<MlxMemoryBudget>) -> FitDecision {
-    let (Some(needed_gb), Some(budget)) = (needed_gb, budget) else {
-        return FitDecision::Unknown;
-    };
-    if budget.total_gb + f64::EPSILON < needed_gb {
-        FitDecision::TooBig {
-            needed_gb,
-            available_gb: budget.total_gb,
-        }
-    } else {
-        FitDecision::Fits
-    }
+    crate::fit_gate::fit_decision(needed_gb, budget.map(|budget| budget.total_gb))
 }
 
 /// Predicted SEQUENTIAL peak (GiB) = the largest single working set + [`HEADROOM_GB`] (sc-10839). The
@@ -5443,8 +5432,10 @@ pub(crate) fn sequential_overflow_gb(
     sequential_needed_gb: Option<f64>,
     budget: Option<MlxMemoryBudget>,
 ) -> Option<f64> {
-    let (needed_gb, budget) = (sequential_needed_gb?, budget?);
-    (budget.total_gb + f64::EPSILON < needed_gb).then_some(needed_gb)
+    crate::fit_gate::sequential_overflow_gb(
+        sequential_needed_gb,
+        budget.map(|budget| budget.total_gb),
+    )
 }
 
 /// Sum the on-disk bytes of every `.safetensors` weight file under `dir` (recursively), following
@@ -5726,39 +5717,21 @@ pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
     total
 }
 
-/// Total unified memory (GiB) via a blocking `sysctl hw.memsize`, cached process-wide (physical RAM
+/// Total unified memory (GiB) via the shared bounded physical-memory probe, cached process-wide (physical RAM
 /// never changes at runtime). The blocking sibling of `gpu::total_unified_memory_gb` — the gate runs
-/// on the generator-cache thread, which is already blocking on the weight load, so a one-shot
-/// subprocess probe there is free. `None` off macOS or when the probe fails ⇒ the gate no-ops (a
-/// cached `None` is a deliberate fail-open, consistent with `Unknown` never blocking).
+/// on the generator-cache thread, which is already blocking on the weight load, so the bounded
+/// subprocess read does not require a Tokio runtime. `None` off macOS or on probe failure retains
+/// fail-open admission; failures are retried so a transient launch failure cannot disable the gate.
 pub(crate) fn probe_total_unified_memory_gib() -> Option<f64> {
     probe_total_unified_memory_bytes().map(|bytes| bytes as f64 / BYTES_PER_GIB)
 }
 
 /// Total unified memory (bytes) — the raw probe [`probe_total_unified_memory_gib`] scales. Cached
-/// process-wide behind one `OnceLock`, so the `sysctl` subprocess runs at most once however many
+/// process-wide after a successful bounded read, so the `sysctl` subprocess is shared however many
 /// callers ask. Also read by [`crate::generator_cache::apply_gpu_memory_limit`] at worker startup,
 /// which needs the byte figure rather than the GiB one.
 pub(crate) fn probe_total_unified_memory_bytes() -> Option<u64> {
-    static TOTAL_BYTES: OnceLock<Option<u64>> = OnceLock::new();
-    *TOTAL_BYTES.get_or_init(sysctl_total_unified_memory_bytes)
-}
-
-#[cfg(target_os = "macos")]
-fn sysctl_total_unified_memory_bytes() -> Option<u64> {
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sysctl_total_unified_memory_bytes() -> Option<u64> {
-    None
+    crate::gpu::total_unified_memory_bytes()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5832,7 +5805,7 @@ pub(crate) fn mochi_fit_error(
     let budget = budget?;
     let reserve = crate::fit_gate::legacy_unified_reserve(budget.total_gb);
     let needed_gb = mochi_needed_gb(weight_bytes, frames, width, height, reserve.gb)?;
-    (budget.total_gb + f64::EPSILON < needed_gb).then(|| {
+    crate::fit_gate::exceeds_budget(needed_gb, budget.total_gb).then(|| {
         mochi_too_big_error(
             model_label,
             needed_gb,
@@ -6810,7 +6783,7 @@ fn full_finetune_fit_message(
         full_finetune_peak_gb(dit_bytes, resolution, gradient_accumulation)?,
         budget?,
     );
-    (budget.total_gb + f64::EPSILON < needed_gb).then(|| {
+    crate::fit_gate::exceeds_budget(needed_gb, budget.total_gb).then(|| {
         full_finetune_too_big_message(
             model_label,
             needed_gb,

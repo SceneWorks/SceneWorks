@@ -887,10 +887,7 @@ pub(super) async fn generate_candle_qwen_edit_stream(
             tier,
             user_adapter_bytes,
         );
-        let raw_budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-            crate::vram_gate::cuda_vram_cap_gb(),
-        );
+        let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
         let quant = match tier {
             "q4" => Some(gen_core::Quant::Q4),
             "q8" => Some(gen_core::Quant::Q8),

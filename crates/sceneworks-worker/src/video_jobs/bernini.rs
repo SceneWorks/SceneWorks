@@ -6,7 +6,7 @@ use super::ltx::extract_clip_frames;
 #[allow(unused_imports)]
 use super::prelude::*;
 #[cfg(target_os = "macos")]
-use super::wan::local_mlx_dir;
+use super::wan::resolve_mlx_family_dir;
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 use super::wan::resolve_wan_adapters;
 #[cfg(any(
@@ -51,22 +51,12 @@ pub(super) fn bernini_available(_request: &VideoRequest, settings: &Settings) ->
 /// (mirrors `resolve_wan_model_dir`). Errors clearly if none is present (no stub fallback).
 #[cfg(target_os = "macos")]
 pub(crate) fn resolve_bernini_model_dir(settings: &Settings) -> WorkerResult<PathBuf> {
-    if let Some(dir) = local_mlx_dir(settings, "SCENEWORKS_MLX_BERNINI_DIR", "bernini") {
-        return Ok(dir);
-    }
-    if let Some(dir) = huggingface_snapshot_dir(&settings.data_dir, "SceneWorks/bernini-mlx") {
-        return Ok(dir);
-    }
-    Err(WorkerError::InvalidPayload(format!(
-        "bernini: no MLX weights found. Download the turnkey SceneWorks/bernini-mlx snapshot via the \
-         Model Manager, set $SCENEWORKS_MLX_BERNINI_DIR, or place a converted snapshot at {}.",
-        settings
-            .data_dir
-            .join("models")
-            .join("mlx")
-            .join("bernini")
-            .display(),
-    )))
+    resolve_mlx_family_dir(
+        settings,
+        "SCENEWORKS_MLX_BERNINI_DIR",
+        "bernini",
+        "SceneWorks/bernini-mlx",
+    )
 }
 
 /// MLX quantization for a Bernini load: Q4 default (the validated 128 GB-fitting tier, sc-4709 ~44 GB

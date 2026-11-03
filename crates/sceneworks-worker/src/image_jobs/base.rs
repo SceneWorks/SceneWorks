@@ -12797,10 +12797,7 @@ pub(super) async fn admit_sdxl_bespoke_memory(
     let runtime_overlay_bytes = contract.asset_facts.overlay_bytes;
     let artifact_is_certified = additional_artifacts_certified
         && candle_certified_load_spec("sdxl", settings, &spec, &request.model_manifest_entry, tier);
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb_with_adapter_bytes(
         &request.model_manifest_entry,
         tier,
@@ -13874,10 +13871,7 @@ async fn generate_candle_registry_stream_using(
             model = %request.model,
         );
     }
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     // sc-11023: the single-slot generator cache evicts its current occupant BEFORE the incoming load.
     // This gate reads `free` while that occupant is still resident (so raw `free` still counts the model
     // it is about to replace); crediting the reclaimable pool predicts the `free` the imminent evict will

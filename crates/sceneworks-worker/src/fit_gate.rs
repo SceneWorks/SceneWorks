@@ -279,6 +279,166 @@ pub(crate) fn svd_profile_needs_larger_card(
         || (exceeds_validated_profile && physical_card_gb <= SVD_VALIDATED_VRAM_GB + f64::EPSILON)
 }
 
+/// Compare against the lane-selected scalar: MLX total or CUDA allocatable free memory.
+pub(crate) fn fit_decision(needed_gb: Option<f64>, available_gb: Option<f64>) -> FitDecision {
+    let (Some(needed_gb), Some(available_gb)) = (needed_gb, available_gb) else {
+        return FitDecision::Unknown;
+    };
+    if exceeds_budget(needed_gb, available_gb) {
+        FitDecision::TooBig {
+            needed_gb,
+            available_gb,
+        }
+    } else {
+        FitDecision::Fits
+    }
+}
+
+pub(crate) fn sequential_overflow_gb(
+    needed_gb: Option<f64>,
+    available_gb: Option<f64>,
+) -> Option<f64> {
+    let (needed_gb, available_gb) = (needed_gb?, available_gb?);
+    exceeds_budget(needed_gb, available_gb).then_some(needed_gb)
+}
+
+/// YuE and YuE2 use the same weight tier vocabulary; their estimates remain model-specific.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum AudioWeightTier {
+    Bf16,
+    Q8,
+    Q4,
+}
+impl AudioWeightTier {
+    pub(crate) const ALL: [Self; 3] = [Self::Bf16, Self::Q8, Self::Q4];
+    pub(crate) fn key(self) -> &'static str {
+        match self {
+            Self::Bf16 => "bf16",
+            Self::Q8 => "q8",
+            Self::Q4 => "q4",
+        }
+    }
+    pub(crate) fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|tier| tier.key() == key)
+    }
+}
+
+/// Cap a recommended working set, falling back to the caller's lane-specific capacity.
+/// Callers retain their float versus saturating-byte reserve arithmetic.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn working_set_capacity_gb(
+    working_set_gb: Option<f64>,
+    fallback: impl FnOnce() -> Option<f64>,
+    cap: Option<f64>,
+) -> Option<f64> {
+    let capacity = working_set_gb.or_else(fallback)?;
+    Some(cap.map_or(capacity, |cap| cap.min(capacity)))
+}
+
+/// Unified-memory total under the existing small-device emulation policy.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn unified_total_gb() -> Option<f64> {
+    crate::mlx_fit_gate::resolve_budget(
+        crate::mlx_fit_gate::probe_total_unified_memory_gib(),
+        crate::mlx_fit_gate::mlx_memory_cap_gb(),
+    )
+    .map(|budget| budget.total_gb)
+}
+
+/// Reserve-adjusted unified capacity. Kept signed for legacy callers that refuse a tiny machine.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn unified_available_gb(total_gb: f64) -> f64 {
+    total_gb - legacy_unified_reserve(total_gb).gb
+}
+
+/// Saturating byte form used for runtime allocation ceilings, with no cap applied to physical RAM.
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn unified_available_bytes(total: u64) -> u64 {
+    let reserve = (legacy_unified_reserve(total as f64 / BYTES_PER_GIB).gb * BYTES_PER_GIB) as u64;
+    total.saturating_sub(reserve)
+}
+
+#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+pub(crate) async fn lane_total_gb(gpu_id: &str) -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = gpu_id;
+        unified_total_gb()
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        crate::vram_gate::live_capped_budget(gpu_id)
+            .await
+            .map(|budget| budget.total_gb)
+    }
+    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+    {
+        let _ = gpu_id;
+        None
+    }
+}
+
+#[cfg(any(test, target_os = "macos", feature = "backend-candle"))]
+pub(crate) async fn lane_available_gb(gpu_id: &str) -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = gpu_id;
+        unified_total_gb().map(unified_available_gb)
+    }
+    #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
+    {
+        crate::vram_gate::live_capped_budget(gpu_id)
+            .await
+            .map(|budget| budget.free_gb - dedicated_vram_reserve().gb)
+    }
+    #[cfg(all(not(target_os = "macos"), not(feature = "backend-candle")))]
+    {
+        let _ = gpu_id;
+        None
+    }
+}
+
+#[cfg(any(test, target_os = "macos"))]
+pub(crate) fn working_set_capacity_bytes(
+    working_set: Option<u64>,
+    fallback: impl FnOnce() -> Option<u64>,
+    cap_gb: Option<f64>,
+) -> Option<u64> {
+    let capacity = working_set.or_else(fallback)?;
+    Some(cap_gb.map_or(capacity, |cap| capacity.min((cap * BYTES_PER_GIB) as u64)))
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn working_set_ceiling_bytes() -> Option<u64> {
+    Some(crate::generator_cache::device_wired_ceiling_bytes() as u64).filter(|&bytes| bytes > 0)
+}
+
+/// A live dedicated-memory reading; its total and allocatable free capacity are distinct.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct VramBudget {
+    pub free_gb: f64,
+    pub total_gb: f64,
+}
+
+/// Credit only the pool an imminent eviction will release, clamped to physical capacity.
+/// Re-exported by the CUDA gate; audio admission also uses it on unified-memory builds.
+pub(crate) fn with_reclaimable(budget: VramBudget, reclaimable_gb: f64) -> VramBudget {
+    VramBudget {
+        free_gb: (budget.free_gb + reclaimable_gb.max(0.0)).min(budget.total_gb),
+        total_gb: budget.total_gb,
+    }
+}
+
+/// Byte-native counterpart; keep exact large counters without a float round trip.
+pub(crate) fn with_reclaimable_bytes(free: u64, total: u64, reclaimable: u64) -> u64 {
+    free.saturating_add(reclaimable).min(total)
+}
+
+/// The shared comparison tolerance for generic, staged, and model-specific admission gates.
+pub(crate) fn exceeds_budget(needed_gb: f64, available_gb: f64) -> bool {
+    available_gb + f64::EPSILON < needed_gb
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -405,5 +565,89 @@ mod tests {
         assert!(svd_profile_needs_larger_card(25, 8, 26, 1024, 576, 32.0));
         assert!(svd_profile_needs_larger_card(25, 8, 25, 1025, 576, 32.0));
         assert!(!svd_profile_needs_larger_card(26, 9, 26, 1025, 577, 48.0));
+    }
+}
+
+#[cfg(test)]
+mod shared_device_helpers_tests {
+    use super::*;
+    #[test]
+    fn gates_keep_unknown_equal_and_overflow_contracts() {
+        assert_eq!(fit_decision(None, Some(8.0)), FitDecision::Unknown);
+        assert_eq!(fit_decision(Some(8.0), None), FitDecision::Unknown);
+        assert_eq!(fit_decision(Some(8.0), Some(8.0)), FitDecision::Fits);
+        assert_eq!(sequential_overflow_gb(Some(8.0), Some(8.0)), None);
+        assert_eq!(sequential_overflow_gb(Some(9.0), Some(8.0)), Some(9.0));
+        assert_eq!(
+            fit_decision(Some(9.0), Some(8.0)),
+            FitDecision::TooBig {
+                needed_gb: 9.0,
+                available_gb: 8.0
+            }
+        );
+        let mlx = crate::mlx_fit_gate::MlxMemoryBudget { total_gb: 16.0 };
+        let cuda = VramBudget {
+            total_gb: 16.0,
+            free_gb: 8.0,
+        };
+        assert_eq!(
+            crate::mlx_fit_gate::fit_decision(Some(12.0), Some(mlx)),
+            FitDecision::Fits
+        );
+        assert!(matches!(
+            fit_decision(Some(12.0), Some(cuda.free_gb)),
+            FitDecision::TooBig {
+                available_gb: 8.0,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn capacities_keep_units_caps_reserves_and_missing_signals() {
+        assert_eq!(BYTES_PER_GIB, sceneworks_core::memory_anchor::BYTES_PER_GIB);
+        assert_eq!(
+            dedicated_vram_reserve().gb,
+            f64::from(sceneworks_core::training::iris::floors::CANDLE_RESERVE_GIB)
+        );
+        assert_eq!(
+            crate::iris_restore::MLX_RESERVE_GB,
+            LEGACY_UNIFIED_FALLBACK_RESERVE_GB
+        );
+        assert_eq!(unified_available_gb(1.0), -1.0);
+        assert_eq!(unified_available_bytes(1), 0);
+        assert_eq!(unified_available_bytes(8 << 30), 6 << 30);
+        assert_eq!(
+            working_set_capacity_gb(Some(10.0), || panic!("must not probe fallback"), Some(8.0)),
+            Some(8.0)
+        );
+        assert_eq!(
+            working_set_capacity_gb(None, || Some(-1.0), None),
+            Some(-1.0)
+        );
+        assert_eq!(working_set_capacity_gb(None, || None, Some(8.0)), None);
+        let exact = (1_u64 << 54) + 3;
+        assert_eq!(
+            working_set_capacity_bytes(Some(exact), || None, None),
+            Some(exact)
+        );
+        assert_eq!(
+            working_set_capacity_bytes(Some(16 << 30), || None, Some(8.0)),
+            Some(8 << 30)
+        );
+        assert_eq!(with_reclaimable_bytes(exact, exact + 7, 9), exact + 7);
+    }
+    #[test]
+    fn audio_tiers_are_one_vocabulary_and_fail_closed() {
+        for tier in AudioWeightTier::ALL {
+            assert_eq!(
+                crate::yue_admission::YueTier::from_key(tier.key()),
+                Some(tier)
+            );
+            assert_eq!(
+                crate::yue2_admission::Yue2Tier::from_key(tier.key()),
+                Some(tier)
+            );
+        }
+        assert_eq!(AudioWeightTier::from_key("q3"), None);
     }
 }

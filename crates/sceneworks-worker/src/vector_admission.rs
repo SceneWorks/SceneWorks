@@ -38,7 +38,7 @@ const TERMINAL_8B_FILES: &[&str] = &[
     "tokenizer_config.json",
     "vocab.json",
 ];
-const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

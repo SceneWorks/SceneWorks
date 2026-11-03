@@ -164,48 +164,13 @@ pub(crate) fn seedvr2_estimated_scratch_bytes(
         .saturating_add(seedvr2_estimated_output_bytes(frame_count, out_w, out_h))
 }
 
-/// Bytes currently AVAILABLE on the volume backing `path`, best-effort and portable with NO new crate
-/// dependency: macOS + Linux run POSIX `df -k -P <path>` and read the 4th column (available 1K
-/// blocks); Windows (candle lane) uses `fs2::available_space` (a safe wrapper over the Win32
-/// `GetDiskFreeSpaceExW`) for the free bytes available to this process. Returns `None` if the probe
-/// fails; the caller then skips the guard rather than falsely rejecting a job.
+/// Available bytes on the scratch volume, honoring quotas. Probe failure retains fail-open admission.
 #[cfg(any(
     target_os = "macos",
     all(not(target_os = "macos"), feature = "backend-candle")
 ))]
 pub(crate) fn available_disk_bytes(path: &Path) -> Option<u64> {
-    #[cfg(unix)]
-    {
-        // `df -k -P` forces POSIX one-line-per-filesystem output in 1024-byte blocks, so the columns
-        // are stable regardless of locale/long device names:
-        //   Filesystem 1024-blocks Used Available Capacity Mounted on
-        let out = std::process::Command::new("df")
-            .args(["-k", "-P"])
-            .arg(path)
-            .output()
-            .ok()?;
-        if !out.status.success() {
-            return None;
-        }
-        let text = String::from_utf8_lossy(&out.stdout);
-        // The data row is the 2nd line (after the header); `-P` guarantees it is a single line.
-        let row = text.lines().nth(1)?;
-        let available_kib = row.split_whitespace().nth(3)?.parse::<u64>().ok()?;
-        Some(available_kib.saturating_mul(1024))
-    }
-    #[cfg(not(unix))]
-    {
-        // Windows (candle lane): `fs2::available_space` wraps `GetDiskFreeSpaceExW`, returning the
-        // free bytes available to this process on the volume backing `path` (honoring any per-user
-        // quota — the same figure the old code's "avail" line meant to read). Safe (the crate forbids
-        // `unsafe` and fs2 is already a worker dependency) and — unlike scraping localized `fsutil`
-        // text — locale-independent, so the sc-9646 guard is armed on every Windows install (sc-13585:
-        // the old branch matched an `fsutil` line with both "avail" and "free bytes", which no modern
-        // Windows 11 layout — "Total free bytes" / "Total quota free bytes" — prints, so the probe
-        // returned `None` and the guard silently fail-opened into a no-op). A probe error (e.g. the
-        // path does not exist) becomes `None`, so the guard fail-opens rather than falsely rejecting.
-        fs2::available_space(path).ok()
-    }
+    sceneworks_core::disk::disk_free_bytes(path).ok()
 }
 
 /// Fail loud (before the window loop / before any GPU work) when the estimated streamed-output PNG
@@ -273,7 +238,7 @@ fn check_seedvr2_scratch_disk(
     let needed = seedvr2_estimated_scratch_bytes(frame_count, src_w, src_h, out_w, out_h);
     let budget = ((available as f64) * SEEDVR2_DISK_OUTPUT_FRACTION) as u64;
     if needed > budget {
-        const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
         let per_frame = seedvr2_estimated_scratch_bytes(1, src_w, src_h, out_w, out_h).max(1);
         let max_frames = budget / per_frame;
         return Err(WorkerError::InvalidPayload(format!(
@@ -2050,4 +2015,27 @@ pub(crate) async fn run_video_upscale_job(
     .await?;
     output_guard.disarm();
     Ok(())
+}
+
+#[cfg(all(test, any(target_os = "macos", feature = "backend-candle")))]
+mod disk_probe_tests {
+    use super::*;
+    #[test]
+    fn production_scratch_guard_uses_portable_probe_and_preserves_fail_open() {
+        let scratch = tempfile::tempdir().unwrap();
+        assert!(available_disk_bytes(scratch.path()).unwrap() > 0);
+        assert!(check_seedvr2_scratch_disk(scratch.path(), 1, 16, 16, 32, 32).is_ok());
+        let error = check_seedvr2_scratch_disk(scratch.path(), u64::MAX, 1920, 1080, 3840, 2160)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("source frames")
+                && error.contains("output frames")
+                && error.contains("disk space")
+        );
+        let missing = scratch.path().join("missing");
+        assert!(available_disk_bytes(&missing).is_none());
+        assert!(check_seedvr2_scratch_disk(&missing, u64::MAX, 1920, 1080, 3840, 2160).is_ok());
+        assert!(check_seedvr2_scratch_disk(&missing, 0, 1920, 1080, 3840, 2160).is_ok());
+    }
 }
