@@ -1380,6 +1380,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         for extension in ["png", "jpg", "webp", "bmp", "gif", "tiff", "avif"] {
             let src = dir.path().join(format!("source.{extension}"));
+            // The supported host's SVT-AV1 encoder rejects 16x12; use a small valid AVIF canvas.
+            let (width, height, source) = if extension == "avif" {
+                (64, 64, "testsrc=size=64x64:rate=1")
+            } else {
+                (16, 12, "testsrc=size=16x12:rate=1")
+            };
             if extension == "webp" {
                 image::RgbImage::from_pixel(16, 12, image::Rgb([20, 80, 140]))
                     .save_with_format(&src, image::ImageFormat::WebP)
@@ -1393,8 +1399,10 @@ mod tests {
                         "-f",
                         "lavfi",
                         "-i",
-                        "testsrc=size=16x12:rate=1",
+                        source,
                         "-frames:v",
+                        "1",
+                        "-threads",
                         "1",
                         "-y",
                     ])
@@ -1403,7 +1411,9 @@ mod tests {
                     .unwrap();
                 if !built.status.success() {
                     let message = String::from_utf8_lossy(&built.stderr);
-                    if message.contains("Encoder") || message.contains("encoder") {
+                    if (message.contains("Encoder") || message.contains("encoder"))
+                        && std::env::var("SCENEWORKS_REQUIRE_FFMPEG").as_deref() != Ok("1")
+                    {
                         eprintln!("SKIPPED optional {extension} encoder fixture: {message}");
                         continue;
                     }
@@ -1413,15 +1423,15 @@ mod tests {
             let dst = dir.path().join(format!("from-{extension}.png"));
             run_ffmpeg_to_png(&src, &dst).unwrap_or_else(|error| panic!("{extension}: {error}"));
             let image = image::open(&dst).unwrap();
-            assert_eq!((image.width(), image.height()), (16, 12));
+            assert_eq!((image.width(), image.height()), (width, height));
             let backstop = crate::image_decode::decode_image_any(&src).unwrap();
-            assert_eq!((backstop.width(), backstop.height()), (16, 12));
+            assert_eq!((backstop.width(), backstop.height()), (width, height));
             let source_bytes = std::fs::read(&src).unwrap();
             assert_eq!(
                 crate::image_decode::decode_image_bytes_any(&source_bytes)
                     .unwrap()
                     .width(),
-                16
+                width
             );
         }
     }
