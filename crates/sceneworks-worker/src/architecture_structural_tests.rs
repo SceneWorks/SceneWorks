@@ -1054,6 +1054,10 @@ fn new_copies_of_shared_core_helpers_are_rejected_even_when_renamed() {
         ),
         ("crates/sceneworks-core/src/slug.rs", "slugify"),
         ("crates/sceneworks-core/src/slug.rs", "slugify_with"),
+        (
+            "crates/sceneworks-core/src/api_control.rs",
+            "post_json_with_client",
+        ),
         ("crates/sceneworks-core/src/safetensors.rs", "read_header"),
         (
             "crates/sceneworks-core/src/safetensors.rs",
