@@ -132,7 +132,7 @@ function DocumentReader({ asset }) {
   }, [ticket, unauthorizedTicket]);
   const url = assetUrl(asset);
   const urlRef = React.useRef(url);
-  urlRef.current = url;
+  React.useLayoutEffect(() => { urlRef.current = url; }, [url]);
   const resourceKey = React.useMemo(() => {
     if (!url) return "";
     const parsed = new URL(url, "http://sceneworks.invalid");

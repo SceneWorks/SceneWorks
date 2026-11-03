@@ -3,7 +3,7 @@
 // so every media-URL producer appends the short-lived media ticket minted from
 // POST /api/v1/files/ticket. These tests pin the central helper and the
 // producers that ride on it (assetUrl/posterUrl, DocumentReader's fetch).
-import React, { act } from "react";
+import React, { act, startTransition, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API_BASE_URL, getMediaTicket, setMediaTicket, withMediaTicket } from "./api.js";
@@ -188,6 +188,27 @@ describe("DocumentReader authenticates its document fetch (sc-8810)", () => {
     expect(container.textContent).toContain("current");
     await act(async () => setMediaTicket("next-ticket"));
     expect(global.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry an in-flight read against a suspended replacement document", async () => {
+    let release;
+    const never = new Promise(() => {});
+    global.fetch = vi.fn()
+      .mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }))
+      .mockResolvedValueOnce({ ok: true, json: async () => ({ segments: [] }) });
+    const asset = (name) => ({ id: name, type: "document", projectId: "p1", file: { path: `assets/${name}.json`, mimeType: "application/json" } });
+    function Block({ pending }) { if (pending) throw never; return null; }
+    function Tree({ name, pending }) {
+      return <Suspense fallback={null}><AssetDetail asset={asset(name)} availableTags={[]} /><Block pending={pending} /></Suspense>;
+    }
+    setMediaTicket("old-ticket");
+    await act(async () => root.render(<Tree name="first" pending={false} />));
+    await act(async () => setMediaTicket("new-ticket"));
+    await act(async () => { startTransition(() => root.render(<Tree name="second" pending />)); });
+    await act(async () => { release({ ok: false, status: 401 }); });
+    expect(global.fetch).toHaveBeenCalledTimes(2);
+    expect(global.fetch.mock.calls[1][0]).toContain("/assets/first.json?ticket=new-ticket");
+    expect(global.fetch.mock.calls[1][0]).not.toContain("second.json");
   });
 
   it("fetches the document through a ticketed URL", async () => {
