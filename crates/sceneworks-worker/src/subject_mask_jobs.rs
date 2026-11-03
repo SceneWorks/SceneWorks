@@ -598,62 +598,20 @@ fn subject_mask_items(
     settings: &Settings,
     payload: &JsonObject,
 ) -> WorkerResult<Vec<SubjectMaskItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Subject mask payload.datasetRoot must be an app-managed dataset path.".to_owned(),
-            )
-        })?;
-    let items = payload
-        .get("items")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload("Subject mask payload.items must be an array.".to_owned())
-        })?;
-    items
-        .iter()
-        .map(|item| {
-            let object = item.as_object().ok_or_else(|| {
-                WorkerError::InvalidPayload("Subject mask item must be an object.".to_owned())
-            })?;
-            let field = |key: &str| {
-                object
-                    .get(key)
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-            };
-            let item_id = field("itemId").ok_or_else(|| {
-                WorkerError::InvalidPayload("Subject mask item is missing itemId.".to_owned())
-            })?;
-            let content_hash = field("contentHash")
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(format!(
-                        "Subject mask item {item_id} is missing contentHash."
-                    ))
-                })?
-                .to_owned();
-            let image_path = field("imagePath").ok_or_else(|| {
-                WorkerError::InvalidPayload(format!(
-                    "Subject mask item {item_id} is missing imagePath."
-                ))
-            })?;
-            let image_path = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Subject mask item {item_id} imagePath"),
-            )?;
+    parse_dataset_items(
+        settings,
+        payload,
+        "Subject mask",
+        DatasetItemPolicy::Strict,
+        |item| {
+            let content_hash = item.required("contentHash")?.to_owned();
+            let image_path = item.image_path()?;
             Ok(SubjectMaskItem {
                 image_path,
                 content_hash,
             })
-        })
-        .collect()
+        },
+    )
 }
 
 #[cfg(not(any(

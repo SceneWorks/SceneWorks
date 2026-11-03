@@ -1934,8 +1934,7 @@ pub(crate) async fn run_person_track(
         tracker_meta,
     } = outcome;
 
-    let track_name =
-        optional_payload_string(&job.payload, "trackName").unwrap_or("Selected person");
+    let track_name = optional_payload_text(&job.payload, "trackName").unwrap_or("Selected person");
     let representative_frame_asset_id = job
         .payload
         .get("representativeFrameAssetId")
@@ -2572,7 +2571,7 @@ pub(crate) fn export_request_from_job(job: &JobSnapshot) -> WorkerResult<Timelin
     Ok(TimelineExportRequest {
         project_id: required_payload_string(&job.payload, "projectId")?.to_owned(),
         timeline_id: required_payload_string(&job.payload, "timelineId")?.to_owned(),
-        timeline_name: optional_payload_string(&job.payload, "timelineName")
+        timeline_name: optional_payload_text(&job.payload, "timelineName")
             .unwrap_or("Timeline")
             .to_owned(),
         timeline_path: required_payload_string(&job.payload, "timelinePath")?.to_owned(),

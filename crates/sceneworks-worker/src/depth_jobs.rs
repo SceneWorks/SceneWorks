@@ -525,9 +525,7 @@ impl DepthAdmission {
         // the release `iris_3b_depth` entry.
         let model = payload
             .get(sceneworks_core::image_restoration::IRIS_MODEL_KEY)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|model| !model.is_empty())
+            .and_then(crate::payload::trimmed_value_str)
             .unwrap_or(DEPTH_MODEL_ID);
         let entry = payload
             .get("modelManifestEntries")

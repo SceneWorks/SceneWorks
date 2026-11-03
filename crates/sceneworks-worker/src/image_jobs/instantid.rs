@@ -507,20 +507,13 @@ fn resolve_instantid_sdxl_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "InstantID SDXL modelPath")
             .map(Some);
     }
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(INSTANTID_SDXL_REPO);
     Ok(huggingface_snapshot_dir(&settings.data_dir, repo)
         .map(|root| instantid_tier_subdir(&root, request)))
@@ -668,10 +661,7 @@ fn instantid_guidance(request: &ImageRequest) -> f32 {
 /// manifest opt-in (identity drops to ~0.64 @512² and full-res quant is unvalidated). Returns
 /// the engine `bits` (`Some(4)`/`Some(8)`/`None`) + the recipe bit count.
 fn instantid_quant(request: &ImageRequest) -> (Option<i32>, Option<i64>) {
-    let raw = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(quant_int)
+    let raw = request.quant_bits()
         .or_else(|| {
             request
                 .model_manifest_entry
@@ -1037,12 +1027,7 @@ async fn generate_instantid_stream(
         controlnet_default,
         0.0..=2.0,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or(INSTANTID_SDXL_REPO)
         .to_owned();
     // The active Key Point Library collection drives the angle set (sc-4450): per-generation

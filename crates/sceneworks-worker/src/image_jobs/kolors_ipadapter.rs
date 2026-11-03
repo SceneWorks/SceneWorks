@@ -73,9 +73,7 @@ fn resolve_kolors_ipadapter_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Kolors IP-Adapter modelPath")
@@ -293,12 +291,7 @@ pub(super) async fn generate_candle_kolors_ipadapter_stream(
         &job.id,
         backend,
     );
-    let repo = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let repo = crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .unwrap_or_else(|| {
             crate::engines::default_repo_for(&request.model)
                 .unwrap_or(KOLORS_IPADAPTER_DEFAULT_REPO)

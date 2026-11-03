@@ -160,13 +160,7 @@ pub(super) fn candle_video_default_repo(engine_id: &str) -> &'static str {
 /// fetches — so a candle Wan-14B job errored "snapshot not found" even with the q4 tier present (sc-10539).
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_video_repo(request: &VideoRequest, engine_id: &str) -> String {
-    if let Some(repo) = request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(repo) = crate::payload::trimmed_string(request.model_manifest_entry.get("repo")) {
         return repo.to_owned();
     }
     if let Some(repo) = candle_wan_tier_repo_from_downloads(request, engine_id) {
@@ -194,7 +188,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
     } else {
         "linux"
     };
-    let order: &[&str] = match candle_wan_quant_bits(request) {
+    let order: &[&str] = match request.quant_bits() {
         None => &["q8", "q4"],
         Some(bits) if bits <= 0 => &["bf16", "q8", "q4"],
         Some(bits) if bits >= 8 => &["q8", "q4"],
@@ -214,12 +208,7 @@ fn candle_wan_tier_repo_from_downloads(request: &VideoRequest, engine_id: &str) 
             if !on_platform {
                 return None;
             }
-            download
-                .get("repo")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
+            crate::payload::trimmed_string(download.get("repo")).map(str::to_owned)
         })
     })
 }
@@ -233,16 +222,6 @@ fn candle_video_snapshot_dir(settings: &Settings, repo: &str) -> WorkerResult<Pa
             "candle video weights snapshot not found for {repo}"
         ))
     })
-}
-
-/// (sc-10027) The `advanced.mlxQuantize` bits for a candle wan tier-select — a number or numeric string;
-/// `None` when unset.
-#[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
-fn candle_wan_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
 }
 
 /// (sc-10027) Whether `dir` is a complete candle wan tier — a diffusers-layout snapshot with the DiT
@@ -313,9 +292,7 @@ fn candle_ltx_requested_tier(request: &VideoRequest) -> Option<CandleLtxTier> {
     let Some(value) = request.advanced.get("mlxQuantize") else {
         return Some(CandleLtxTier::Q4);
     };
-    let bits = value
-        .as_i64()
-        .or_else(|| value.as_str()?.trim().parse::<i64>().ok())?;
+    let bits = crate::payload::quant_int(value)?;
     match bits {
         i64::MIN..=0 => Some(CandleLtxTier::Bf16),
         4 => Some(CandleLtxTier::Q4),
@@ -442,7 +419,7 @@ pub(super) fn candle_wan_tier_subdir(
     // Tier preference by requested bits (mirrors the macOS `wan_tier_order`): no explicit pick → q8
     // (the app-wide default, clamped to the installed tier, so q4-only installs still resolve q4);
     // explicit ≤4 → q4. `bf16` stays out of the default order (never auto-loaded on a default job).
-    let order: &[&str] = match candle_wan_quant_bits(request) {
+    let order: &[&str] = match request.quant_bits() {
         None => &["q8", "q4"],
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
@@ -2019,15 +1996,12 @@ pub(super) fn resolve_candle_scail2_tier(
         // packed weights merely because they happen to be installed.
         None | Some(Value::Null) => Scail2CandleTier::Bf16,
         Some(value) => {
-            let bits = value
-                .as_i64()
-                .or_else(|| value.as_str()?.trim().parse().ok())
-                .ok_or_else(|| {
-                    WorkerError::InvalidPayload(
-                        "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
-                            .to_owned(),
-                    )
-                })?;
+            let bits = crate::payload::quant_int(value).ok_or_else(|| {
+                WorkerError::InvalidPayload(
+                    "scail2 (candle): advanced.mlxQuantize must be exactly 4, 8, or <= 0 for bf16."
+                        .to_owned(),
+                )
+            })?;
             match bits {
                 ..=0 => Scail2CandleTier::Bf16,
                 4 => Scail2CandleTier::Q4,

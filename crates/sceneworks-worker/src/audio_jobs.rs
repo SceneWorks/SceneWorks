@@ -147,12 +147,7 @@ struct AudioRequest {
 fn parse_speech_segments(value: Option<&Value>) -> Option<Vec<SpeechSegment>> {
     let array = value.and_then(Value::as_array)?;
     let opt_string = |segment: &Value, key: &str| {
-        segment
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
+        crate::payload::trimmed_string(segment.get(key)).map(str::to_owned)
     };
     let segments: Vec<SpeechSegment> = array
         .iter()
@@ -199,14 +194,8 @@ fn script_to_json(script: &Option<Vec<SpeechSegment>>) -> Value {
 
 impl AudioRequest {
     fn from_payload(payload: &JsonObject) -> Self {
-        let string = |key: &str| {
-            payload
-                .get(key)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_owned)
-        };
+        let string =
+            |key: &str| crate::payload::trimmed_string(payload.get(key)).map(str::to_owned);
         let model = string("model");
         let base_model = string("baseModel");
         Self {
@@ -421,11 +410,7 @@ impl AudioRequest {
     /// The asset's audio family, from the resolved manifest entry when present (Kokoro's `"kokoro"`),
     /// else a neutral fallback — parity with `resolve_family` on the video path.
     fn family(&self) -> String {
-        self.model_manifest_entry
-            .get("family")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+        crate::payload::trimmed_string(self.model_manifest_entry.get("family"))
             .map(str::to_owned)
             .unwrap_or_else(|| "audio".to_owned())
     }
@@ -529,12 +514,7 @@ fn audio_model_repo(entry: &Value) -> Option<String> {
                 None => true,
             };
             if is_hf {
-                if let Some(repo) = download
-                    .get("repo")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|repo| !repo.is_empty())
-                {
+                if let Some(repo) = crate::payload::trimmed_string(download.get("repo")) {
                     return Some(repo.to_owned());
                 }
             }
@@ -663,12 +643,8 @@ fn audio_tier_rows(entry: &Value) -> Vec<(String, String, bool)> {
                     if variant.is_empty() {
                         return None;
                     }
-                    let subdir = download
-                        .get("subdir")
-                        .and_then(Value::as_str)
-                        .map(str::trim)
-                        .filter(|subdir| !subdir.is_empty())
-                        .unwrap_or(variant);
+                    let subdir =
+                        crate::payload::trimmed_string(download.get("subdir")).unwrap_or(variant);
                     Some((
                         variant.to_lowercase(),
                         subdir.to_owned(),
@@ -2400,12 +2376,7 @@ fn audio_asset_fact(
     } else {
         title.to_owned()
     };
-    let adapter = request
-        .model_manifest_entry
-        .get("family")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let adapter = crate::payload::trimmed_string(request.model_manifest_entry.get("family"))
         .unwrap_or(AUDIO_ADAPTER_FALLBACK);
     // Build the `rawAdapterSettings` sub-object separately (not inline in the outer `json!`): the audio
     // knob set has grown wide enough (TTS + SFX + the sc-13410 music/edit fields) that a single nested
@@ -2526,20 +2497,7 @@ fn audio_progress(
     result: Option<JsonObject>,
     backend: &str,
 ) -> ProgressRequest {
-    ProgressRequest {
-        status,
-        stage,
-        progress: number_from_f64(progress),
-        message: message.to_owned(),
-        error: None,
-        result,
-        eta_seconds: None,
-        peak_gpu_memory_pct: None,
-        peak_gpu_load_pct: None,
-        backend: Some(backend.to_owned()),
-        worker_id: None,
-        extra: BTreeMap::new(),
-    }
+    progress_payload_for_backend(status, stage, progress, message, result, backend)
 }
 
 #[cfg(test)]

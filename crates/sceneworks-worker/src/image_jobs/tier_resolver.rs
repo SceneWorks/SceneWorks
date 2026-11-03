@@ -250,15 +250,13 @@ pub(super) fn preferred_tier(bits: Option<i64>, floor: Option<&str>, nvfp4: bool
     if nvfp4 {
         return NVFP4_TIER;
     }
-    match bits {
-        Some(b) if b <= 0 => "bf16",
-        Some(b) if b > 4 => "q8",
-        Some(_) => "q4",
-        None => match floor {
+    crate::payload::tier_for_bits(
+        bits,
+        match floor {
             Some(f) if tier_quality_rank(f) > tier_quality_rank("q8") => tier_static_name(f),
             _ => "q8",
         },
-    }
+    )
 }
 
 /// The model's per-model quality FLOOR (`mlx.minQualityTier`, sc-10731): the MINIMUM-fidelity tier a
@@ -439,10 +437,7 @@ pub(super) fn standard_tier_subdir_gated(
     request: &ImageRequest,
     nvfp4_host: bool,
 ) -> PathBuf {
-    let bits = request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()));
+    let bits = request.quant_bits();
     // A component dir "has weights" when it holds a packed/dense safetensors or a shard index.
     // Hidden entries don't count: a dir holding only a `._model.safetensors` AppleDouble sidecar has
     // no weights, and reporting otherwise routes the loader at a tier it cannot load

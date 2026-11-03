@@ -440,12 +440,7 @@ fn qwen_edit_candle_reference_ids(request: &ImageRequest) -> Vec<String> {
 /// Reading the row keeps this catalog-driven: `MODEL_TABLE` already points all four edit ids at the
 /// turnkey (the same repo the MLX lane loads), so the two lanes cannot drift apart again.
 fn qwen_edit_candle_repo(request: &ImageRequest) -> String {
-    request
-        .model_manifest_entry
-        .get("repo")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    crate::payload::trimmed_string(request.model_manifest_entry.get("repo"))
         .map(str::to_owned)
         .or_else(|| {
             crate::engines::MODEL_TABLE
@@ -480,9 +475,7 @@ pub(crate) fn resolve_qwen_edit_candle_base(
         .advanced
         .get("modelPath")
         .or_else(|| request.model_manifest_entry.get("modelPath"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .and_then(crate::payload::trimmed_value_str)
         .map(str::to_owned)
     {
         return resolve_app_managed_model_dir(settings, &path, "Qwen edit modelPath").map(Some);

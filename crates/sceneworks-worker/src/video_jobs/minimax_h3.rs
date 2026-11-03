@@ -1685,16 +1685,10 @@ pub(super) async fn generate_minimax_h3_using(
 /// manifest default is q4; non-positive values explicitly select the dense upstream bf16 route.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(super) fn candle_minimax_h3_tier(request: &VideoRequest) -> (&'static str, Option<Quant>) {
-    let bits = request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    });
-    match bits {
-        Some(bits) if bits <= 0 => ("bf16", None),
-        Some(bits) if bits <= 4 => ("q4", Some(Quant::Q4)),
-        Some(_) => ("q8", Some(Quant::Q8)),
-        None => ("q4", Some(Quant::Q4)),
+    match crate::payload::tier_for_bits(request.quant_bits(), "q4") {
+        "bf16" => ("bf16", None),
+        "q4" => ("q4", Some(Quant::Q4)),
+        _ => ("q8", Some(Quant::Q8)),
     }
 }
 
@@ -2810,19 +2804,10 @@ fn resolve_imported_h3_components(
         serde_json::from_slice(&std::fs::read(dit.transformer_dir.join("config.json"))?)
             .map_err(|error| refuse(format!("bound transformer config: {error}")))?;
     if let Some(value) = request.advanced.get("mlxQuantize") {
-        let bits = value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-            .ok_or_else(|| {
-                refuse("explicit mlxQuantize must name the bound shared component precision".into())
-            })?;
-        let explicit = if bits <= 0 {
-            "bf16"
-        } else if bits <= 4 {
-            "q4"
-        } else {
-            "q8"
-        };
+        let bits = crate::payload::quant_int(value).ok_or_else(|| {
+            refuse("explicit mlxQuantize must name the bound shared component precision".into())
+        })?;
+        let explicit = crate::payload::tier_for_bits(Some(bits), "q4");
         if explicit != tier {
             return Err(refuse(format!("explicit {explicit} shared precision differs from the imported checkpoint's bound {tier} closure; no component substitution is permitted")));
         }

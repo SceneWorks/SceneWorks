@@ -24,12 +24,7 @@ use std::path::PathBuf;
 
 /// The display name a message should use: the catalog `name`, else the model id.
 pub(crate) fn model_display_name<'a>(entry: &'a JsonObject, model_id: &'a str) -> &'a str {
-    entry
-        .get("name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(model_id)
+    crate::payload::trimmed_string(entry.get("name")).unwrap_or(model_id)
 }
 
 /// The refusal for damaged converted files: what is wrong, and the two remedies in order.

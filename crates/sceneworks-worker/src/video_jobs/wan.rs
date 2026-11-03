@@ -441,15 +441,6 @@ pub(super) fn wan_tier_repo(model: &str) -> Option<(&'static str, &'static str)>
     }
 }
 
-/// Parse `advanced.mlxQuantize` (int or numeric string) for the Wan quant-matrix tier selector.
-#[cfg(target_os = "macos")]
-fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
-    request
-        .advanced
-        .get("mlxQuantize")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str()?.trim().parse().ok()))
-}
-
 /// The Wan2.2 quant-matrix tier search order for a request — preferred tier first, then the
 /// always-smaller fallback tiers so a repo missing the preferred subdir still loads (mirrors
 /// [`ltx_bundle_tier_order`]): `mlxQuantize <= 0` ⇒ `bf16`, `>= 8` ⇒ `q8`, an explicit `1..=4` ⇒
@@ -465,7 +456,7 @@ fn wan_quant_bits(request: &VideoRequest) -> Option<i64> {
 /// precise "highest tier that fits the video-runtime budget" default is the deferred sc-10733 (S8).
 #[cfg(target_os = "macos")]
 pub(super) fn wan_tier_order(request: &VideoRequest) -> &'static [&'static str] {
-    match wan_quant_bits(request) {
+    match request.quant_bits() {
         Some(b) if b <= 0 => &["bf16", "q8", "q4"],
         Some(b) if b >= 8 => &["q8", "q4"],
         // No explicit pick (`None`) OR an explicit `1..=4` ⇒ q4-first (sc-10859 video carve-out).
@@ -557,7 +548,7 @@ pub(super) async fn ensure_wan_tier_present(
     let Some((repo, revision)) = wan_tier_repo(&request.model) else {
         return Ok(());
     };
-    let tier = match wan_quant_bits(request) {
+    let tier = match request.quant_bits() {
         Some(b) if b <= 0 => "bf16",
         Some(b) if b >= 8 => "q8",
         // q4 default — ships with the base install, nothing to fetch on demand.
@@ -1126,14 +1117,9 @@ async fn extract_clip_boundary_frame(
 /// `None`: dense bf16, or the engine builds it quantized from a pre-quantized snapshot.
 #[cfg(target_os = "macos")]
 pub(super) fn resolve_wan_quant(request: &VideoRequest) -> Option<Quant> {
-    let bits = request.advanced.get("mlxQuantize").and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str()?.trim().parse().ok())
-    })?;
-    match bits {
-        b if b <= 0 => None,
-        b if b <= 4 => Some(Quant::Q4),
+    match crate::payload::tier_for_bits(request.quant_bits(), "bf16") {
+        "bf16" => None,
+        "q4" => Some(Quant::Q4),
         _ => Some(Quant::Q8),
     }
 }

@@ -43,7 +43,7 @@ use crate::film_workspace::{FilmDraft, FilmRunLocator};
 use crate::slug::slugify;
 use crate::store_util::{
     ensure_column, is_safe_id, is_safe_relative_path, lock_project_files, optional_f64,
-    optional_str, optional_u64, random_hex, read_json, relative_string, write_json,
+    optional_str, optional_u64, random_hex, read_json, relative_string, required_str, write_json,
 };
 use crate::time::utc_now;
 use crate::training::TrainingDataset;
@@ -7782,11 +7782,6 @@ fn is_safe_track_id(track_id: &str) -> bool {
         && track_id
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-}
-
-fn required_str<'a>(payload: &'a Value, key: &str) -> ProjectStoreResult<&'a str> {
-    optional_str(payload, key)
-        .ok_or_else(|| ProjectStoreError::BadRequest(format!("Missing required field: {key}")))
 }
 
 fn normalize_asset_tags(tags: &[String]) -> ProjectStoreResult<Vec<String>> {

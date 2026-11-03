@@ -66,8 +66,8 @@ use ort::value::Tensor;
 use serde_json::{json, Value};
 
 use crate::{
-    heartbeat, progress_payload, resolve_dataset_item_path, safe_project_path, task_join_error,
-    update_job, ApiClient, Settings, WorkerError, WorkerResult,
+    heartbeat, parse_dataset_items, progress_payload, safe_project_path, task_join_error,
+    update_job, ApiClient, DatasetItemPolicy, Settings, WorkerError, WorkerResult,
 };
 use sceneworks_core::contracts::{JobSnapshot, JobStatus, JsonObject, ProgressStage, WorkerStatus};
 use sceneworks_core::project_store::ProjectStore;
@@ -1017,11 +1017,7 @@ pub(crate) async fn run_image_upscale_job(
     // mirroring the video path). A missing factor still defaults to 2x.
     let factor: u8 =
         resolve_image_upscale_factor(payload.get("factor").and_then(Value::as_u64).unwrap_or(2))?;
-    let engine = payload
-        .get("engine")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    let engine = crate::payload::trimmed_string(payload.get("engine"))
         .unwrap_or("real-esrgan")
         .to_lowercase();
     // Canonical engine id. The Rust upscaler serves Real-ESRGAN (`ort`: CoreML on Mac / CUDA off-Mac,
@@ -1678,40 +1674,18 @@ fn parse_dataset_upscale_items(
     settings: &Settings,
     payload: &JsonObject,
 ) -> WorkerResult<Vec<DatasetUpscaleItem>> {
-    let dataset_root = payload
-        .get("datasetRoot")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            WorkerError::InvalidPayload(
-                "Dataset upscale payload.datasetRoot must be an app-managed dataset path."
-                    .to_owned(),
-            )
-        })?;
-    let Some(items) = payload.get("items").and_then(Value::as_array) else {
-        return Ok(Vec::new());
-    };
-    items
-        .iter()
-        .filter_map(|item| {
-            let item_id = item.get("itemId").and_then(Value::as_str)?;
-            let image_path = item.get("imagePath").and_then(Value::as_str)?;
-            if item_id.is_empty() || image_path.is_empty() {
-                return None;
-            }
-            let resolved = resolve_dataset_item_path(
-                settings,
-                dataset_root,
-                image_path,
-                &format!("Dataset upscale item {item_id} imagePath"),
-            );
-            Some(resolved.map(|image_path| DatasetUpscaleItem {
-                item_id: item_id.to_owned(),
-                image_path,
-            }))
-        })
-        .collect()
+    parse_dataset_items(
+        settings,
+        payload,
+        "Dataset upscale",
+        DatasetItemPolicy::SkipMalformed,
+        |item| {
+            Ok(DatasetUpscaleItem {
+                item_id: item.item_id.to_owned(),
+                image_path: item.image_path()?,
+            })
+        },
+    )
 }
 
 /// Build the `/repoint` request body from `(item_id, project-relative source path)` results (pure).
