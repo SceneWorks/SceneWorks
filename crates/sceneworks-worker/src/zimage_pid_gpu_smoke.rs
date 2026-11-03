@@ -25,15 +25,13 @@
 //! ```
 
 use super::smoke_support::{env_or_allow_empty as env_or, image_std, save_png};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gen_core::{GenerationOutput, GenerationRequest, Image, LoadSpec, WeightsSource};
 
 fn env_path(key: &str) -> PathBuf {
     super::smoke_support::env_path(key)
 }
-
-/// Mean per-pixel std-dev — the cheap non-degenerate floor (an all-black / NaN decode collapses to ~0).
 
 fn render(spec: &LoadSpec, w: u32, h: u32, steps: u32, use_pid: bool) -> Image {
     let generator = crate::inference_runtime::load("z_image_turbo", spec)

@@ -59,8 +59,6 @@ fn env_path(key: &str) -> PathBuf {
     super::smoke_support::env_path(key)
 }
 
-/// Mean per-pixel std-dev — the cheap non-degenerate floor (an all-black / NaN decode collapses to ~0).
-
 /// ArcFace cosine similarity between two 512-d identity embeddings (both come off the same face stack,
 /// so this is the InstantID identity-preservation metric: 1.0 = same face, ~0 = unrelated).
 fn cosine(a: &[f32], b: &[f32]) -> f64 {

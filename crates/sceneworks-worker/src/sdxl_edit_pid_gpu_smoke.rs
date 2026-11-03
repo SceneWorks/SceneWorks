@@ -22,7 +22,7 @@
 //! ```
 
 use super::smoke_support::{env_or_allow_empty as env_or, image_std, save_png};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gen_core::runtime::CancelFlag;
 use gen_core::{Image, PidWeights, WeightsSource};
@@ -31,8 +31,6 @@ use runtime_cuda::providers::sdxl::{SdxlEdit, SdxlEditPaths, SdxlEditRequest};
 fn env_path(key: &str) -> PathBuf {
     super::smoke_support::env_path(key)
 }
-
-/// Mean per-pixel std-dev — the cheap non-degenerate floor (an all-black / NaN decode collapses to ~0).
 
 /// A deterministic non-flat source: a smooth RGB gradient (so the VAE-encode has real structure to keep
 /// in the black region and the smoke isn't decoding a constant).
