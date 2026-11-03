@@ -1,3 +1,4 @@
+import { backoffDelay } from "../retry.js";
 import { useEffect } from "react";
 import { apiFetch, eventUrl, isReauthenticating } from "../api.js";
 import {
@@ -435,7 +436,7 @@ export function useJobEvents({
         }
         setError(err.message);
         if (!closed) {
-          const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
+          const delay = backoffDelay(reconnectAttempt, { baseMs: 1000, maxMs: 30000 });
           reconnectAttempt += 1;
           reconnectTimer = window.setTimeout(connect, delay);
         }
@@ -466,7 +467,7 @@ export function useJobEvents({
           return;
         }
         refreshHealth();
-        const delay = Math.min(30000, 1000 * 2 ** reconnectAttempt);
+        const delay = backoffDelay(reconnectAttempt, { baseMs: 1000, maxMs: 30000 });
         reconnectAttempt += 1;
         reconnectTimer = window.setTimeout(connect, delay);
       };

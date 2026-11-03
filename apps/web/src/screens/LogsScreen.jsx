@@ -1,3 +1,4 @@
+import { backoffDelay } from "../retry.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiFetch } from "../api.js";
@@ -274,7 +275,7 @@ export function LogsScreen() {
         attempt = 0;
         schedule(POLL_MS);
       } else {
-        const delay = Math.min(POLL_BACKOFF_MAX_MS, POLL_MS * 2 ** attempt);
+        const delay = backoffDelay(attempt, { baseMs: POLL_MS, maxMs: POLL_BACKOFF_MAX_MS });
         attempt += 1;
         schedule(delay);
       }

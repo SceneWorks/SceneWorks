@@ -1,3 +1,5 @@
+import { downloadSizeText } from "../formatting.js";
+import { slugifyPresetId } from "../presetUtils.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { LoraKeywordSummary } from "../components/LoraKeywordSummary.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
@@ -196,9 +198,7 @@ function modelHelperLine(model) {
   }
   const caps = modelCapabilities(model);
   const flags = CAPABILITY_FLAGS.filter(([id]) => caps.includes(id)).map(([, label]) => label);
-  const size = model.downloadSizeLabel
-    ? `${model.downloadSizeEstimated ? "~" : ""}${model.downloadSizeLabel}`
-    : null;
+  const size = downloadSizeText(model);
   return [...flags, size].filter(Boolean).join(" · ");
 }
 
@@ -206,13 +206,6 @@ function qualityLabel(value) {
   return qualityChoices.find(([id]) => id === value)?.[1] ?? null;
 }
 
-function slugify(value) {
-  return String(value ?? "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "_")
-    .replace(/^_+|_+$/g, "");
-}
 
 function formLorasFromPreset(preset) {
   return presetLoras(preset)
@@ -439,7 +432,7 @@ export function PresetManagerScreen() {
   function updateField(field, value) {
     setForm((current) => {
       if (field === "name" && !selectedPreset) {
-        return { ...current, name: value, id: slugify(value) };
+        return { ...current, name: value, id: slugifyPresetId(value) };
       }
       if (field === "model") {
         const nextModel = allModels.find((item) => item.id === value);
@@ -540,7 +533,7 @@ export function PresetManagerScreen() {
       prompt.suffix = form.promptSuffix.trim();
     }
     const payload = {
-      id: slugify(form.id || form.name),
+      id: slugifyPresetId(form.id || form.name),
       name: form.name.trim(),
       kind: "general",
       scope: form.scope,
@@ -594,7 +587,7 @@ export function PresetManagerScreen() {
       prompt.suffix = form.promptSuffix.trim();
     }
     const payload = {
-      id: slugify(form.id || form.name),
+      id: slugifyPresetId(form.id || form.name),
       name: form.name.trim(),
       scope: form.scope,
       workflow: segment.workflow,

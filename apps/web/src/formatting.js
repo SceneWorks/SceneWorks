@@ -49,9 +49,9 @@ export function formatMs(ms) {
 }
 
 // Human byte size (epic 10402), binary units. "—" when absent, "0 B" for zero.
-export function formatBytes(bytes) {
+export function formatBytes(bytes, { fallback = "—" } = {}) {
   if (bytes === null || bytes === undefined || !Number.isFinite(Number(bytes))) {
-    return "—";
+    return fallback;
   }
   const value = Number(bytes);
   if (value <= 0) {
@@ -148,4 +148,26 @@ export function liveElapsedSeconds(job, nowMs = Date.now()) {
   }
   const elapsed = Math.max(0, Math.floor((nowMs - startedMs) / 1000));
   return Math.max(Number(job.elapsedSeconds) || 0, elapsed);
+}
+
+export function downloadSizeText(model, fallback = null) {
+  if (!model?.downloadSizeLabel) return fallback;
+  return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
+}
+
+// Memory telemetry and tier sizes use MiB as their minimum display unit.
+export function formatMiB(mb, { fallback = "Unknown", positiveOnly = false } = {}) {
+  if (typeof mb !== "number" || !Number.isFinite(mb) || (positiveOnly && mb <= 0)) return fallback;
+  return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GiB` : `${Math.round(mb)} MiB`;
+}
+
+export function formatTierBytes(bytes) {
+  if (typeof bytes !== "number") return "Size unavailable";
+  return formatMiB(bytes / (1024 * 1024), { fallback: "Size unavailable", positiveOnly: true });
+}
+
+// Catalog byte counts shown in decimal GB on refinement and caption controls.
+export function formatDecimalGb(bytes, fallback = null) {
+  return typeof bytes === "number" && Number.isFinite(bytes) && bytes > 0
+    ? `${(bytes / 1e9).toFixed(1)} GB` : fallback;
 }

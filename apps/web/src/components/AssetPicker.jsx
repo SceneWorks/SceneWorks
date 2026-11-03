@@ -1,3 +1,4 @@
+import { titleForAsset } from "../assetTitle.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AssetThumbnail,
@@ -48,9 +49,6 @@ function compactDate(value) {
   }).format(date);
 }
 
-function titleFor(asset) {
-  return asset?.displayName ?? asset?.title ?? asset?.name ?? asset?.id ?? "Untitled asset";
-}
 
 function typeLabel(asset) {
   if (assetCanRenderAsImage(asset)) {
@@ -114,7 +112,7 @@ function categoryMatches(asset, category) {
 
 function searchableText(asset) {
   return [
-    titleFor(asset),
+    titleForAsset(asset),
     asset?.id,
     asset?.type,
     asset?.file?.mimeType,
@@ -192,7 +190,7 @@ function PickerCardGrid({ assets, isSelected, onSelect, onActivate, ariaMultisel
           >
             <AssetThumbnail asset={asset} />
             <span className="asset-picker-card-copy">
-              <strong>{titleFor(asset)}</strong>
+              <strong>{titleForAsset(asset)}</strong>
               <small>
                 {typeLabel(asset)} | {sourceLabel(asset)}
               </small>
@@ -220,7 +218,7 @@ export function AssetPreviewChips({ assets, emptyLabel = "No asset selected" }) 
         <div className="asset-preview-chip" key={asset.id}>
           <AssetThumbnail asset={asset} />
           <span>
-            <strong>{titleFor(asset)}</strong>
+            <strong>{titleForAsset(asset)}</strong>
             <small title={asset.id}>
               {typeLabel(asset)} | {compactDate(asset.createdAt ?? asset.updatedAt)} | ID {assetIdentity(asset)}
             </small>

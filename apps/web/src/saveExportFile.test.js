@@ -39,6 +39,7 @@ describe("saveJsonExport", () => {
     expect(anchor.download).toBe("plan.json");
     expect(anchor.href).toBe("blob:plan");
     expect(anchor.click).toHaveBeenCalledTimes(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
     expect(urlApi.revokeObjectURL).toHaveBeenCalledWith("blob:plan");
   });
 });
