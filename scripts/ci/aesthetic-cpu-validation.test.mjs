@@ -122,6 +122,7 @@ test('API readiness and caption coverage retain ordinary refusal fixtures; only 
   assert.match(attrs, /#\[ignore = "learned CPU MLP execution; explicit aesthetic-cpu manual validation only"\]/);
   assert.match(proof, /training_dataset_readiness_fixture\(true\)/);
   assert.equal([...api.matchAll(/training_dataset_readiness_fixture\(true\)/g)].length, 1);
+  assert.match(api, /"textEmbedding": \[1.0\]/, 'the wrong-length refusal remains wrong for both 2-d and 768-d embeddings');
   assert.match(api, /vec!\[0.0; if execute_aesthetic \{ 768 \} else \{ 2 \}\]/);
   assert.match(body(api, 'training_dataset_caption_alignment_requires_current_text_embedding_coverage'), /let embedding: Vec<f64> = vec!\[1.0, 0.0\];/);
   // Other endpoint calls use only face sidecars (Person path or empty image sidecar), never MLP.

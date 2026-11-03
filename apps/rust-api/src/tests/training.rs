@@ -2035,7 +2035,7 @@ async fn training_dataset_readiness_fixture(execute_aesthetic: bool) -> Option<f
                 "contentHash": upload_hash.clone(),
                 "embedding": embedding.clone(),
                 "captionHash": sceneworks_core::dataset_quality::caption_hash("tiny test image"),
-                "textEmbedding": [1.0, 0.0]
+                "textEmbedding": [1.0]
             }]
         }),
     )
