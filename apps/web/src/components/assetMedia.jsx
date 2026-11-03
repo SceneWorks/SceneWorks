@@ -292,7 +292,7 @@ function withoutTicket(src) {
 
 // Capture playback before React changes src. A finite credential must rotate,
 // but renewing authorization for the same file must not restart a long clip.
-class TicketedPlayback extends React.Component {
+export class TicketedPlayback extends React.Component {
   node = null;
   resume = null;
 

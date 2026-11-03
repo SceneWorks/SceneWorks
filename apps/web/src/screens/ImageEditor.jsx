@@ -1,5 +1,6 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { JOB_PATHS, submitJobRequest } from "../api/jobs.js";
-import { mediaResponse } from "../api/media.js";
+import { mediaResponseWithTicketRetry } from "../api/media.js";
 import { blobToImage } from "../imageDimensions.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -1208,6 +1209,7 @@ export async function collectCropLayers(layers, decode, isCurrent) {
 }
 
 export function ImageEditor() {
+  useMediaTicket();
   const {
     activeProject,
     assets,
@@ -2237,7 +2239,7 @@ export function ImageEditor() {
       }
       setStatus({ loading: true, error: "" });
       try {
-        const res = await mediaResponse(url, { signal: controller.signal });
+        const res = await mediaResponseWithTicketRetry(() => assetUrl(asset), { signal: controller.signal });
         if (!res.ok) throw new Error(`Failed to load asset (${res.status})`);
         const blob = await res.blob();
         if (!isCurrent()) return;
@@ -3211,7 +3213,7 @@ export function ImageEditor() {
           await onComplete(resultAsset);
           return;
         }
-        const res = await mediaResponse(assetUrl(resultAsset));
+        const res = await mediaResponseWithTicketRetry(() => assetUrl(resultAsset));
         if (!res.ok) throw new Error(`Failed to load result (${res.status})`);
         const blob = await res.blob();
         const prepared = await blobToEditorImage(blob);
