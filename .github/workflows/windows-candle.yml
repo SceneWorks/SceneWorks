@@ -182,6 +182,11 @@ on:
         required: false
         type: boolean
         default: false
+      skip_manual_h3_import_smoke:
+        description: "Skip only the implicit manual MiniMax-H3 ConvRot smoke; other explicit profiles and their existing admission rules are unchanged"
+        required: false
+        type: boolean
+        default: false
       run_five_rung_reference:
         description: "Capture the Candle Krea q4 anchor (krea_2_turbo:q4:candle in the anchor plan)"
         required: false
@@ -899,7 +904,7 @@ jobs:
       # sc-26683: exercise the consumer's real managed-import -> native projection seam.
       # Plain manual dispatch only: no weights, provisioning or measurement campaign.
       - name: Run the synthetic MiniMax-H3 ConvRot CUDA import projection
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.capability_facts_only && !inputs.provision_snapshot && !inputs.run_five_rung_reference && !inputs.run_ltx_eros_acceptance && !inputs.run_epic_20738_terminal_cuda && !inputs.run_iris_worker_smoke && !inputs.run_supra2_worker_smoke && !inputs.skip_manual_h3_import_smoke }}
         timeout-minutes: 3
         shell: cmd
         run: |
