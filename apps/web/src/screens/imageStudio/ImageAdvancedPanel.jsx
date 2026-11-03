@@ -1,3 +1,4 @@
+import { SamplerSchedulerFields, SamplingSeedField, SamplingStepsField } from "../../components/SamplerSchedulerFields.jsx";
 import { MossOrdinaryControls } from "./MossOrdinaryControls.jsx";
 import React from "react";
 import { AdvancedSection } from "../../components/AdvancedSection.jsx";
@@ -7,7 +8,7 @@ import { CAPTION_OVERFLOW_LABELS } from "./samplingControls.js";
 import { upscaleEngineHasSoftness, upscaleEngineIsRestoration, upscaleFactorsForEngine } from "../../upscaleEngines.js";
 import { irisRestoreControls } from "../../irisRestore.js";
 import { IrisRestoreControls } from "../../components/IrisRestoreControls.jsx";
-import { GUIDANCE_METHOD_LABELS, SAMPLER_LABELS, SCHEDULER_LABELS, guidanceDefaultFromModel, maxStepsForModel, stepsDefaultFromModel } from "../../samplerOptions.js";
+import { GUIDANCE_METHOD_LABELS, guidanceDefaultFromModel, maxStepsForModel, stepsDefaultFromModel } from "../../samplerOptions.js";
 
 export function ImageAdvancedPanel({
   setAdvancedOpen,
@@ -32,11 +33,9 @@ export function ImageAdvancedPanel({
   mossDmd,
   mossImage,
   setMossField,
-  showSamplerPicker,
   setSampler,
   sampler,
   samplerOptions,
-  showSchedulerPicker,
   setScheduler,
   scheduler,
   schedulerOptions,
@@ -129,7 +128,7 @@ export function ImageAdvancedPanel({
   supportsNegativePrompt,
   negativePromptCfgOff,
   setNegativePrompt,
-  negativePrompt,
+  negativePrompt
 }) {
   return (
 <AdvancedSection
@@ -148,10 +147,15 @@ export function ImageAdvancedPanel({
                   ))}
                 </select>
               </label>
-              <label>
-                Seed
-                <input disabled={mossEdit && Boolean(mossImageAdvanced.noise)} onChange={(event) => setSeed(event.target.value)} placeholder={mossEdit && mossImageAdvanced.noise ? "Supplied noise (seed null)" : "Random"} type="number" value={seed} />
-              </label>
+              <SamplingSeedField
+                value={seed}
+                onChange={(value) => setSeed(value)}
+                inputProps={{
+                  disabled: mossEdit && Boolean(mossImageAdvanced.noise),
+                  placeholder: mossEdit && mossImageAdvanced.noise ? "Supplied noise (seed null)" : "Random",
+                  type: "number"
+                }}
+              />
               <label>
                 Width override
                 <input
@@ -195,30 +199,15 @@ export function ImageAdvancedPanel({
                   {!mossEdit ? <MossOrdinaryControls options={mossImage} disabled={Boolean(mossDmd)} onChange={setMossField} /> : null}
                 </>
               ) : null}
-              {showSamplerPicker && !mossDmd ? (
-                <label>
-                  Sampler
-                  <select onChange={(event) => setSampler(event.target.value)} value={sampler}>
-                    {samplerOptions.map((key) => (
-                      <option key={key} value={key}>
-                        {SAMPLER_LABELS[key] ?? key}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
-              {showSchedulerPicker && !mossDmd ? (
-                <label>
-                  Scheduler
-                  <select onChange={(event) => setScheduler(event.target.value)} value={scheduler}>
-                    {schedulerOptions.map((key) => (
-                      <option key={key} value={key}>
-                        {SCHEDULER_LABELS[key] ?? key}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              ) : null}
+              <SamplerSchedulerFields
+                sampler={sampler}
+                scheduler={scheduler}
+                samplerOptions={samplerOptions}
+                schedulerOptions={schedulerOptions}
+                onSamplerChange={setSampler}
+                onSchedulerChange={setScheduler}
+                hidden={mossDmd}
+              />
               {showSchedulerShift ? (
                 <label>
                   Schedule shift
@@ -233,23 +222,16 @@ export function ImageAdvancedPanel({
                   />
                 </label>
               ) : null}
-              <label>
-                Steps
-                {/* sc-24113: the floor is the MODEL's, not a hardcoded 1. `limits.hardMinSteps`
-                    already had an enqueue gate (sc-24108) but no client reader on this screen, so
-                    the form cheerfully offered `1` to a model whose engine refuses anything below
-                    2 and the user met the rule as a 400 after pressing Generate. `minStepsForModel`
-                    returns 1 for every model that declares nothing, so every other model's control
-                    is byte-identical. Mirrors VideoStudio, which has read this key since sc-19426. */}
-                <input
-                  min={String(mossDmd ? 1 : minStepsForModel(selectedModel))}
-                  max={mossDmd ? "8" : moss ? undefined : String(maxStepsForModel(selectedModel))}
-                  onChange={(event) => mossDmd ? setMossDmdSteps(event.target.value) : setStepsOverride(event.target.value)}
-                  placeholder={String(mossDmd ? 8 : stepsDefaultFromModel(selectedModel) ?? "")}
-                  type="number"
-                  value={mossDmd ? mossDmdSteps : stepsOverride}
-                />
-              </label>
+              <SamplingStepsField
+                value={mossDmd ? mossDmdSteps : stepsOverride}
+                onChange={(value) => mossDmd ? setMossDmdSteps(value) : setStepsOverride(value)}
+                inputProps={{
+                  min: String(mossDmd ? 1 : minStepsForModel(selectedModel)),
+                  max: mossDmd ? "8" : moss ? undefined : String(maxStepsForModel(selectedModel)),
+                  placeholder: String(mossDmd ? 8 : stepsDefaultFromModel(selectedModel) ?? ""),
+                  type: "number"
+                }}
+              />
               {supportsGuidance ? (
                 <label>
                   Guidance

@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatResolutionLabel,
   preferredDuration,
   preferredOption,
   preferredResolution,
   preferredVideoResolution,
-} from "./modelDefaults.js";
+} from "./studioDefaults.js";
 
 // These pin the exact trap the audit found: `limits.<thing>[0]` is the first ALLOWED value,
 // not the model's chosen default, and for most shipped models the two differ. The fixtures
@@ -102,5 +103,17 @@ describe("preferredVideoResolution / preferredDuration", () => {
   it("falls back to the first allowed value when the model declares none", () => {
     expect(preferredDuration({}, [3, 5])).toBe(3);
     expect(preferredVideoResolution({}, ["832x480"])).toBe("832x480");
+  });
+});
+
+
+describe("explicit studio presentation policies", () => {
+  it("preserves the advanced default sentinel without inventing a Simple option", () => {
+    expect(preferredOption("missing", [], [], { empty: "default" })).toBe("default");
+    expect(preferredOption("missing", [])).toBeUndefined();
+  });
+  it("formats declared geometry without changing non-resolution choices", () => {
+    expect(formatResolutionLabel("1024x768")).toBe("1024 × 768");
+    expect(formatResolutionLabel("native")).toBe("native");
   });
 });
