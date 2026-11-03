@@ -2961,7 +2961,7 @@ fn mlx_selected_phase_peak(
         let windows = conditioning_windows.filter(|windows| *windows > 0)?;
         // Retained SDXL UNet-only seam: CFG batch 2, 77 tokens, 1024², dense fp16.
         // The exact selected reference tensor shapes total 5,134,927,368 bytes.
-        let seam_workspace = (6.58685 * 1_073_741_824.0_f64).ceil() as u64 - 5_134_927_368;
+        let seam_workspace = (6.58685 * BYTES_PER_GIB).ceil() as u64 - 5_134_927_368;
         workspace.conditioning = crate::mlx_phase_estimate::dual_clip_workspace(windows);
         // Scaling the whole workspace by padded context windows is conservative: only the
         // cross-attention and carried conditioning actually grow with prompt length.
