@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { rootTestGroups } from "./run-root-tests.mjs";
 import { proofSelection, requireManualSelection, verifyProofResult, cudaDeviceEvidence, requireMetalHeadroom, observeMetalCase, streamProofBuild } from "./ci/h3-import-native-proof.mjs";
 import { writeFileSync } from "node:fs";
 
@@ -1844,7 +1845,7 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
 
 test("ordinary scaffold CI explicitly runs the CPU-only imported NVFP4 proof policy suite", async () => {
   const scripts = JSON.parse(await source("package.json")).scripts;
-  assert.equal(scripts.check.split(" ").filter((arg) => arg === "scripts/ci/imported-nvfp4-proof.test.mjs").length, 1);
+  assert.equal(rootTestGroups().flat().filter((arg) => arg === "scripts/ci/imported-nvfp4-proof.test.mjs").length, 1);
   assert.doesNotMatch(scripts.check, /node scripts\/ci\/imported-nvfp4-proof\.mjs|imported-nvfp4-cuda-guard\.py/);
   assert.match(await source(".github/workflows/check.yml"), /npm run check/);
 });
@@ -2835,7 +2836,10 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     workflow,
     /"\$RUNNER_TEMP\/qwen-provision-venv\/bin\/python" -m pip install/,
   );
-  assert.match(workflow, /huggingface_hub==0\.36\.0/);
+  assert.match(await source(".github/requirements-hf.txt"), /^huggingface_hub==0\.36\.0$/m);
+  assert.equal((workflow.match(/-r \.github\/requirements-hf\.txt/g) ?? []).length, 2);
+  const windows = await source(".github/workflows/windows-candle.yml");
+  assert.equal((windows.match(/-r \.github\/requirements-hf\.txt/g) ?? []).length, 3);
   assert.match(workflow, /from huggingface_hub import snapshot_download/);
   assert.match(workflow, /repo_id="SceneWorks\/qwen-image-mlx"/);
   assert.match(workflow, /revision=os\.environ\["QWEN_REVISION"\]/);
@@ -6280,4 +6284,55 @@ test("hosted macOS aligns dev/test and proc-macro debug settings", async () => {
   for (const profile of ["DEV", "TEST", "DEV_BUILD_OVERRIDE", "TEST_BUILD_OVERRIDE"]) {
     assert.ok(hosted.includes(`CARGO_PROFILE_${profile}_DEBUG: line-tables-only`), profile);
   }
+});
+
+
+test("hosted parity Rust keeps lean profiles and cache restores compatible without weakening checks", async () => {
+  const job = workflowJob(await source(".github/workflows/check.yml"), "parity-rust");
+  const expected = {
+    CARGO_PROFILE_DEV_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_DEBUG: "line-tables-only",
+    CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "line-tables-only",
+    CARGO_INCREMENTAL: "0", CARGO_BUILD_JOBS: "2", CARGO_NET_OFFLINE: "true", SCENEWORKS_REQUIRE_FFMPEG: "1",
+  };
+  function validate(candidate) {
+    const settings = Object.fromEntries([...candidate.slice(0, candidate.indexOf("\n    steps:")).matchAll(/^      ([A-Z_]+): (.+)$/gm)]
+      .map(([, key, value]) => [key, value.replace(/^"|"$/g, "")]));
+    for (const [key, value] of Object.entries(expected)) assert.equal(settings[key], value, key);
+    const cache = candidate.match(/      - uses: Swatinem\/rust-cache@[^\n]+[\s\S]*?(?=\n      - )/)?.[0];
+    assert.ok(cache, "existing Rust cache remains selected");
+    assert.match(cache, /prefix-key: v1-rust-parity-lean/);
+    assert.match(cache, /add-rust-environment-hash-key: true/);
+    assert.match(cache, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+    assert.doesNotMatch(cache, /v0-rust/);
+    assert.match(candidate, /run: cargo fetch --locked/);
+    assert.match(candidate, /run: bash scripts\/ensure-ci-ffmpeg\.sh/);
+    assert.match(candidate, /run: node scripts\/unit-hf-sandbox\.mjs -- npm run rust:check/);
+    assert.match(candidate, /run: python -m pytest -q -m e2e --strict-markers/);
+    assert.match(candidate, /run: python -m pytest -q -m parity --strict-markers/);
+    return settings;
+  }
+  const settings = validate(job);
+  for (const [before, after] of [
+    ["CARGO_PROFILE_DEV_DEBUG: line-tables-only", 'CARGO_PROFILE_DEV_DEBUG: "2"'],
+    ["CARGO_PROFILE_TEST_DEBUG: line-tables-only", 'CARGO_PROFILE_TEST_DEBUG: "2"'],
+    ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only", 'CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "2"'],
+    ["CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only", 'CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "2"'],
+    ['CARGO_INCREMENTAL: "0"', 'CARGO_INCREMENTAL: "1"'],
+    ["prefix-key: v1-rust-parity-lean", "prefix-key: v0-rust"],
+    ["add-rust-environment-hash-key: true", "add-rust-environment-hash-key: false"],
+  ]) assert.throws(() => validate(job.replace(before, after)), before);
+
+  // Execute only the assembled environment wrapper with a metadata-only Node child.
+  // This checks inheritance into the actual command boundary, never invoking Cargo/models.
+  const temporary = await mkdtemp(path.join(await realpath(tmpdir()), "parity-rust-profile-"));
+  try {
+    const executable = fileURLToPath(new URL("./unit-hf-sandbox.mjs", import.meta.url));
+    const program = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(expected))}.map(key => [key, process.env[key]]))))`;
+    const { stdout } = await promisify(execFile)(process.execPath, [executable, "--", process.execPath, "-e", program], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      env: { ...process.env, ...settings, RUNNER_TEMP: temporary, GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", GITHUB_JOB: "parity-rust" },
+      timeout: 5000,
+    });
+    assert.deepEqual(JSON.parse(stdout), expected);
+  } finally { await rm(temporary, { recursive: true, force: true }); }
 });

@@ -1,10 +1,12 @@
 #!/usr/bin/env node
+import { sha256 as sha256Bytes, fileSha256 as sha256File } from "./lib/file-sha256.mjs";
+import { legacySortedJson } from "./lib/canonical-json.mjs";
 
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { cp, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -568,18 +570,9 @@ function fail(message) {
   throw new Error(`KV baseline receipt: ${message}`);
 }
 
-function stable(value) {
-  if (Array.isArray(value)) return value.map(stable);
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.keys(value).sort().map((key) => [key, stable(value[key])]),
-    );
-  }
-  return value;
-}
 
 export function canonicalJson(value) {
-  return JSON.stringify(stable(value), null, 2);
+  return legacySortedJson(value, { space: 2 });
 }
 
 function f64SemanticValue(value) {
@@ -609,7 +602,7 @@ export function sha256(value) {
   const input = typeof value === "string" || Buffer.isBuffer(value)
     ? value
     : canonicalJson(value);
-  return createHash("sha256").update(input).digest("hex");
+  return sha256Bytes(input);
 }
 
 function object(value, name) {
@@ -2067,16 +2060,6 @@ export function buildReceipt(input) {
   return validateReceipt(receipt);
 }
 
-async function sha256File(file) {
-  const hash = createHash("sha256");
-  await new Promise((resolve, reject) => {
-    const stream = createReadStream(file);
-    stream.on("data", (chunk) => hash.update(chunk));
-    stream.on("error", reject);
-    stream.on("end", resolve);
-  });
-  return hash.digest("hex");
-}
 
 export async function inventoryModelArtifact(artifactPath) {
   let metadata;

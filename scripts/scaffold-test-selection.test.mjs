@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { rootTestGroups } from "./run-root-tests.mjs";
 import { HISTORICAL_TESTS, scaffoldTestFiles, scaffoldTestGroups } from "./scaffold-test-selection.mjs";
 const command = JSON.parse(readFileSync("package.json", "utf8")).scripts.check;
 test("portable and historical suites partition the entire existing npm check inventory", () => {
@@ -8,12 +9,15 @@ test("portable and historical suites partition the entire existing npm check inv
   const history = scaffoldTestFiles(command, "history");
   assert.deepEqual(history.sort(), [...HISTORICAL_TESTS].sort());
   assert.equal(portable.filter((file) => history.includes(file)).length, 0);
-  assert.equal(portable.length + history.length, command.match(/scripts\/[\w/.-]+\.test\.mjs/g).length);
+  assert.equal(portable.length + history.length, rootTestGroups().flat().length);
 });
 test("inventory changes cannot silently omit external-source tests or shell commands", () => {
-  for (const bad of [command.replace(HISTORICAL_TESTS[0], ""), `${command} && echo unreviewed`, command.replace("node --test", "node --test --test-name-pattern=fast"), `${command} ${HISTORICAL_TESTS[0]}`]) {
+  for (const bad of [`${command} && echo unreviewed`, `${command} --test-name-pattern=fast`, `${command} ${HISTORICAL_TESTS[0]}`]) {
     assert.throws(() => scaffoldTestFiles(bad, "portable"));
   }
+  const groups = rootTestGroups();
+  assert.throws(() => scaffoldTestGroups(command, "portable", groups.map((group) => group.filter((file) => file !== HISTORICAL_TESTS[0]))));
+  assert.throws(() => scaffoldTestGroups(command, "portable", [...groups, [HISTORICAL_TESTS[0]]]));
   assert.throws(() => scaffoldTestFiles(command, "unknown"));
 });
 
