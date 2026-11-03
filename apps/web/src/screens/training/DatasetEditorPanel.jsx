@@ -798,14 +798,20 @@ export function DatasetEditorPanel({
           memberIds={[referencePickerFor.selectionId, ...(referenceDraftById[referencePickerFor.selectionId] ?? [])]}
           onAdd={(ids) => {
             const result = addItemReferences?.(referencePickerFor.selectionId, ids);
-            if (!result?.dropped) setReferencePickerFor(null);
+            if (!result?.dropped) {
+              if (importingAssets) onCancelImport?.();
+              setReferencePickerFor(null);
+            }
             return result;
           }}
-          onClose={() => setReferencePickerFor(null)}
+          onClose={() => {
+            if (importingAssets) onCancelImport?.();
+            setReferencePickerFor(null);
+          }}
           onImport={async (files) => {
-            const { selectionId } = referencePickerFor;
-            const result = await importItemReferences?.(selectionId, files);
-            if (result?.complete) setReferencePickerFor(null);
+            const picker = referencePickerFor;
+            const result = await importItemReferences?.(picker.selectionId, files);
+            if (result?.complete) setReferencePickerFor((current) => current === picker ? null : current);
             return result;
           }}
           title={`Add reference images to ${referencePickerFor.name}`}
