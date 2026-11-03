@@ -101,11 +101,11 @@ jobs:
         if: ${{ inputs.backend == 'mlx' && !inputs.build_only }}
         shell: bash
         run: bash scripts/select-cv-python.sh
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        id: python
+      - name: Select verified native Windows CPython without privileged installation
         if: ${{ inputs.backend == 'cuda' && !inputs.build_only }}
-        with:
-          python-version: "3.12"
+        shell: node {0}
+        run: |
+          require('node:child_process').execFileSync(process.execPath, ['scripts/select-cv-python.mjs'], {stdio: 'inherit'});
       - name: Select run-private provisioning paths
         if: ${{ !inputs.build_only }}
         shell: node {0}
@@ -119,8 +119,6 @@ jobs:
           path: ${{ env.CV_ORACLE_ARTIFACT }}
       - name: Provision pinned model fixtures and verified native runtime
         if: ${{ !inputs.build_only }}
-        env:
-          CV_NATIVE_PYTHON: ${{ inputs.backend == 'cuda' && steps.python.outputs.python-path || env.CV_NATIVE_PYTHON }}
         shell: node {0}
         run: |
           require('node:child_process').execFileSync(process.execPath, ['scripts/cv-provision-entry.mjs', 'proof'], {stdio: 'inherit'});
@@ -179,5 +177,6 @@ jobs:
             ${{ runner.temp }}/cv-validation-${{ github.run_id }}-${{ github.run_attempt }}/
             ${{ runner.temp }}/cv-provision-${{ github.run_id }}-${{ github.run_attempt }}/*.json
             ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-cv-provider-validation/
+            ${{ runner.temp }}/cv-python-selection-${{ github.run_id }}-${{ github.run_attempt }}.json
           if-no-files-found: error
           retention-days: 30

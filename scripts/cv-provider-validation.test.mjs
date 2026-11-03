@@ -2,9 +2,47 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {admission,proofCases,validateReceipt,requiredFixtures,validateProvisioning} from './cv-provider-validation.mjs';
+import {windowsCandidates,selectWindowsPython} from './select-cv-python.mjs';
 const source='a'.repeat(40), inference='b'.repeat(40);
 const mac={CV_SOURCE_SHA:source,CV_INFERENCE_SHA:inference,DISPATCH_SHA:source,CV_BACKEND:'mlx',CV_BUILD_ONLY:'false',CV_MAC_GO:'true',CV_OUTPUT:'/tmp/cv-proof',CARGO_TARGET_DIR:'/tmp/cv-target',CV_FIXTURE_DIR:'/tmp/fixtures',ORT_DYLIB_PATH:'/tmp/libonnxruntime.dylib'};
 const cuda={...mac,CV_BACKEND:'cuda',CV_OUTPUT:'C:/cv-proof',CARGO_TARGET_DIR:'C:/cv-target',CV_FIXTURE_DIR:'C:/fixtures',ORT_DYLIB_PATH:'C:/onnxruntime.dll',SCENEWORKS_GPU_ID:'1',CUDA_VISIBLE_DEVICES:'1',NVIDIA_VISIBLE_DEVICES:'1',CUDA_DEVICE_ORDER:'PCI_BUS_ID'};
+test('Windows Python selection uses verified existing native interpreters, including sibling listener caches',()=>{
+  const env={RUNNER_TOOL_CACHE:'D:\\actions-runner\\_work\\_tool'};
+  const read=(directory)=>{
+    const entries={
+      'D:\\':['actions-runner','actions-runner-2','actions-runner-unrelated'],
+      'D:\\actions-runner\\_work\\_tool\\Python':['3.11.9','3.12.9'],
+      'D:\\actions-runner-2\\_work\\_tool\\Python':['3.12.10'],
+    };
+    return (entries[directory]??[]).map(name=>({name,isDirectory:()=>true}));
+  };
+  const commands=windowsCandidates(env,read);
+  assert(commands.some(row=>row.command==='D:\\actions-runner-2\\_work\\_tool\\Python\\3.12.10\\x64\\python.exe'));
+  assert(!commands.some(row=>/3\.11|unrelated/.test(row.command)));
+  const native={executable:'D:\\actions-runner-2\\_work\\_tool\\Python\\3.12.10\\x64\\python.exe',implementation:'cpython',version:[3,12,10],platform:'win32',machine:'AMD64',bits:64};
+  const seen=[];
+  const selected=selectWindowsPython(env,(command,args,options)=>{
+    seen.push(command);
+    assert.equal(options.shell,false);assert.equal(options.timeout,15000);
+    assert(args.includes('-I')&&args.includes('-B')&&args.at(-1).includes('ensurepip'));
+    return command===native.executable?{status:0,stdout:JSON.stringify(native)}:{status:null,error:{code:'ENOENT'}};
+  },read);
+  assert.deepEqual(selected.identity,native);
+  assert(seen.length>1);
+});
+test('Windows Python selection fails closed on unsupported, broken and malicious interpreter identities',()=>{
+  const valid={executable:'C:\\Python312\\python.exe',implementation:'cpython',version:[3,12,10],platform:'win32',machine:'AMD64',bits:64};
+  for(const change of [{implementation:'pypy'},{version:[3,13,0]},{platform:'darwin'},{machine:'ARM64'},{bits:32},{executable:'relative.exe'},{executable:'C:\\Python312\\python.exe\nFORGED=value'}]) {
+    assert.throws(()=>selectWindowsPython({},()=>({status:0,stdout:JSON.stringify({...valid,...change})}),()=>[]),/required/);
+  }
+  for(const result of [{status:1,stdout:JSON.stringify(valid)},{status:0,signal:'SIGTERM',stdout:JSON.stringify(valid)},{status:0,stdout:'not json'},{status:null,error:{code:'ETIMEDOUT'}}]) assert.throws(()=>selectWindowsPython({},()=>result,()=>[]),/required/);
+});
+test('Windows Python provisioning never invokes the privileged installer and retains an early receipt',async()=>{
+  const workflow=await readFile(new URL('../.github/workflows/cv-provider-validation.yml',import.meta.url),'utf8');
+  assert.match(workflow,/scripts\/select-cv-python\.mjs/);
+  assert.doesNotMatch(workflow,/actions\/setup-python|steps\.python\.outputs/);
+  assert.match(workflow,/cv-python-selection-\$\{\{ github\.run_id \}\}/);
+});
 test('selected provider proofs cover both factors and preserve physical admission',()=>{
   assert.equal(admission(mac,'darwin').length,6);
   assert.equal(admission(cuda,'win32').length,4);
@@ -108,7 +146,7 @@ test('native provisioning startup preserves Windows paths and passes arguments w
       assert.doesNotMatch(text,/actions\/setup-python/);
       assert.match(text,/scripts\/cv_provision.py --mode oracle-input --backend mlx --public-only/);
     }
-    else assert.match(text,/id: python\n        if: \$\{\{ inputs.backend == 'cuda' && !inputs.build_only \}\}/);
+    else assert.match(text,/name: Select verified native Windows CPython without privileged installation\n        if: \$\{\{ inputs.backend == 'cuda' && !inputs.build_only \}\}/);
   }
 });
 
