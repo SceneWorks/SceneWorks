@@ -1,5 +1,7 @@
+mod common;
+use common::fixture_path;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use sceneworks_core::training::target_supports_resolution_buckets;
 use sceneworks_core::training::{
@@ -19,17 +21,6 @@ use sceneworks_core::training::{target_supports_gradient_noise, target_supports_
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
-
-fn fixture_path(relative_path: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .join("tests")
-        .join("fixtures")
-        .join("rust_migration_contracts")
-        .join("training")
-        .join(relative_path)
-}
 
 fn load_fixture(relative_path: &str) -> Value {
     let path = fixture_path(relative_path);
