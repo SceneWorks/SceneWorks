@@ -1130,8 +1130,8 @@ export function configValidation(
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
       issues.push(issue.error(field, `${label} must be greater than zero`));
-    } else if ((["rank", "steps", "resolution", "batchSize", "gradientAccumulation", "saveEvery"].includes(field) || (field === "alpha" && Array.isArray(selectedTarget?.limits?.alpha))) && !Number.isSafeInteger(value)) {
-      issues.push(issue.error(field, `${label} must be a whole number`));
+    } else if ((["rank", "steps", "resolution", "batchSize", "gradientAccumulation", "saveEvery"].includes(field) || (field === "alpha" && Array.isArray(selectedTarget?.limits?.alpha))) && (!Number.isSafeInteger(value) || value > 0xffffffff)) {
+      issues.push(issue.error(field, `${label} must be a whole number no greater than 4294967295`));
     } else if (Array.isArray(selectedTarget?.limits?.[field]) && ["rank", "alpha", "steps", "batchSize"].includes(field) && (value < selectedTarget.limits[field][0] || value > selectedTarget.limits[field][1])) {
       issues.push(issue.error(field, `${label} must be between ${selectedTarget.limits[field][0]} and ${selectedTarget.limits[field][1]}`));
     } else if (field === "resolution" && Array.isArray(selectedTarget?.limits?.resolutions) && !selectedTarget.limits.resolutions.includes(value)) {

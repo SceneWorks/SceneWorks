@@ -519,6 +519,7 @@ describe("configValidation", () => {
     const errors = (draft, selectedTarget = advertised) => configValidation({ ...wholeDraft, ...draft }, { ...ctx, selectedTarget }).filter((entry) => entry.kind === "error");
     expect(errors({ rank: 3 }).some((entry) => entry.field === "rank")).toBe(true);
     expect(errors({ steps: 100.5 }).some((entry) => entry.field === "steps")).toBe(true);
+    expect(errors({ saveEvery: 4294967296 }).some((entry) => entry.field === "saveEvery")).toBe(true);
     expect(errors({ resolution: 768 }).some((entry) => entry.field === "resolution")).toBe(true);
     expect(errors({ alpha: 1.5 }).some((entry) => entry.field === "alpha")).toBe(true);
     expect(errors({ alpha: 1.5, learningRate: 0.00001 }, { ...advertised, limits: { ...advertised.limits, alpha: undefined } })).toEqual([]);
