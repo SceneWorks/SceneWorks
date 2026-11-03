@@ -103,30 +103,48 @@ export function useTimelines({
     filmRefreshRef.current.controller?.abort();
     filmRefreshRef.current = { controller: null, key: "", debt: false };
   }, [activeProject?.id, selectedTimelineId]);
-  const refreshFilmTimeline = useCallback((runs, signal) => {
+  const refreshFilmTimeline = useCallback(async (runs, signal, { force = false, timelineId } = {}) => {
     const projectId = activeProjectRef.current?.id;
     const timeline = activeTimelineRef.current;
-    if (!projectId || !timeline?.filmAssembly || timeline.id !== selectedTimelineIdRef.current) return;
+    if (!projectId || !timeline || timeline.id !== selectedTimelineIdRef.current || (timelineId && timelineId !== timeline.id)) return;
     const key = `${projectId}:${timeline.id}`;
     const previous = filmRefreshRef.current;
-    const ids = new Set(Object.keys(timeline.filmAssembly.runs ?? {}));
+    if (!force && !timeline.filmAssembly && !(previous.key === key && previous.debt)) return;
+    const ids = new Set(Object.keys(timeline.filmAssembly?.runs ?? {}));
     const active = runs.some((run) => run.controllerActive && (ids.has(run.locator?.id) || run.record?.timeline?.timelineId === timeline.id));
-    const debt = active || (previous.key === key && previous.debt);
-    const shouldRefresh = debt;
+    const debt = force || active || (previous.key === key && previous.debt);
     previous.controller?.abort();
     const controller = new AbortController();
     filmRefreshRef.current = { controller, key, debt };
-    if (!shouldRefresh || signal?.aborted) return;
+    if (!debt || signal?.aborted) return;
     const abort = () => controller.abort();
     signal?.addEventListener("abort", abort, { once: true });
-    return timelineRequest(projectId, timeline.id, token, { signal: controller.signal }).then((stored) => {
-      if (!controller.signal.aborted && activeProjectRef.current?.id === projectId && selectedTimelineIdRef.current === timeline.id) {
-        const adopted = adoptStoredTimelineRef.current(stored);
-        if (adopted && !active && filmRefreshRef.current.controller === controller) filmRefreshRef.current.debt = false;
+    try {
+      // A terminal read has no future polling tick to retry it. Bound retries so a
+      // transient failure does not lose the final cut or create endless polling.
+      for (let attempt = 0; attempt < 3 && !controller.signal.aborted; attempt += 1) {
+        try {
+          const stored = await timelineRequest(projectId, timeline.id, token, { signal: controller.signal });
+          if (controller.signal.aborted || activeProjectRef.current?.id !== projectId || selectedTimelineIdRef.current !== timeline.id) return;
+          const adopted = adoptStoredTimelineRef.current(stored);
+          if (adopted) {
+            if (!active && filmRefreshRef.current.controller === controller) filmRefreshRef.current.debt = false;
+            return;
+          }
+          throw new Error("The film timeline response was older than the current saved revision.");
+        } catch (error) {
+          if (controller.signal.aborted || isAbortError(error)) return;
+          if (attempt === 2 || error.status === 401) { setError(error.message); return; }
+          await new Promise((resolve) => {
+            const timer = window.setTimeout(done, 250 * 2 ** attempt);
+            function done() { window.clearTimeout(timer); controller.signal.removeEventListener("abort", done); resolve(); }
+            controller.signal.addEventListener("abort", done, { once: true });
+          });
+        }
       }
-    }).catch((error) => {
-      if (!controller.signal.aborted && !isAbortError(error)) setError(error.message);
-    }).finally(() => signal?.removeEventListener("abort", abort));
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
   }, [activeProjectRef, token, setError]);
 
   // Compare a timeline against the last-persisted snapshot. Unknown baseline (nothing loaded

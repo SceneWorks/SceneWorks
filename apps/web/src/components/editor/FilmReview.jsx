@@ -97,7 +97,7 @@ export function normalizedPlan(draft) {
   };
 }
 
-export function FilmReview({ active = true, draft, focusShotId = "", onChange, projectId, refreshTimelines, runControllerActive = false, runLocatorId = "", runSnapshot = null, onRunChange, beginRunMutation, endRunMutation, setNotice, setSelectedTimelineId, token }) {
+export function FilmReview({ active = true, draft, focusShotId = "", onChange, projectId, refreshTimelines, refreshFilmTimeline, runControllerActive = false, runLocatorId = "", runSnapshot = null, onRunChange, beginRunMutation, endRunMutation, setNotice, setSelectedTimelineId, token }) {
   const [runId, setRunId] = useState("");
   const [visible, setVisible] = useState(() => !document.hidden);
   useEffect(() => {
@@ -175,7 +175,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
     });
   }
 
-  async function mutate(action, message) {
+  async function mutate(action, message, { refreshCut = false } = {}) {
     if (!runId) return;
     actionController.current?.abort();
     if (actionLease.current != null) endRunMutation?.(actionLease.current);
@@ -189,6 +189,10 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
     setPending(true);
     try {
       const next = await action(controller.signal);
+      if (controller.signal.aborted || selectionRef.current !== selection) return;
+      if (refreshCut && next?.run?.record?.timeline?.timelineId) {
+        await refreshFilmTimeline?.([], controller.signal, { force: true, timelineId: next.run.record.timeline.timelineId });
+      }
       if (controller.signal.aborted || selectionRef.current !== selection) return;
       if (next?.run && onRunChange?.(next.run, { select: true, actionSelection: selection }) === false) return;
       setView(next);
@@ -301,7 +305,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
                         <div className="ve-film-actions">
                           <button disabled={!canDecide || Boolean(disabledReason)} onClick={() => mutate((signal) => decideFilmTake(projectId, runId, shot.shotId, "accept", reasons[shot.shotId] || "Human accepted.", token, { signal }), `${shot.shotId} accepted.`)} title={decisionTitle} type="button">Accept</button>
                           <button disabled={!canDecide || Boolean(disabledReason)} onClick={() => mutate((signal) => decideFilmTake(projectId, runId, shot.shotId, "reject", reasons[shot.shotId] || "Human rejected.", token, { signal }), `${shot.shotId} rejected; history kept.`)} title={decisionTitle} type="button">Reject</button>
-                          <button disabled={Boolean(disabledReason) || (isSavedCut && isGenerationSelected)} onClick={() => mutate((signal) => swapFilmTake(projectId, runId, shot.shotId, attempt.take.assetId, token, { signal }), `${shot.shotId} saved cut now uses attempt ${attempt.attempt}.`)} title={disabledReason || (isSavedCut && isGenerationSelected ? "Already selected in the saved cut." : "")} type="button">Use in saved cut</button>
+                          <button disabled={Boolean(disabledReason) || (isSavedCut && isGenerationSelected)} onClick={() => mutate((signal) => swapFilmTake(projectId, runId, shot.shotId, attempt.take.assetId, token, { signal }), `${shot.shotId} saved cut now uses attempt ${attempt.attempt}.`, { refreshCut: true })} title={disabledReason || (isSavedCut && isGenerationSelected ? "Already selected in the saved cut." : "")} type="button">Use in saved cut</button>
                         </div>
                       </article>
                     );

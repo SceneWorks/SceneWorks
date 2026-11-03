@@ -797,6 +797,7 @@ export function FilmWorkspace({ screenActive = true, blankTimelineLabel = "New t
                   onChange={updateDraft}
                   projectId={activeProject.id}
                   refreshTimelines={refreshTimelines}
+                  refreshFilmTimeline={refreshFilmTimeline}
                   runControllerActive={Boolean(lastRun?.controllerActive)}
                   runSnapshot={lastRun}
                   onRunChange={acceptRunSnapshot}
