@@ -210,7 +210,7 @@ pub(crate) async fn get_film_planning_operation(
     Path((project_id, draft_id)): Path<(String, String)>,
 ) -> Result<Json<FilmPlanningOperation>, ApiError> {
     let root = planning_root(state, &project_id, &draft_id).await?;
-    Ok(Json(read_operation(&root.join("latest.json"))?))
+    Ok(Json(load_operation(&root.join("latest.json")).await?))
 }
 
 pub(crate) async fn start_film_planning(
@@ -255,11 +255,20 @@ pub(crate) async fn start_film_planning(
         )));
     }
     let root = planning_root(state.clone(), &project_id, &draft_id).await?;
-    std::fs::create_dir_all(root.join("operations"))
+    tokio::fs::create_dir_all(root.join("operations"))
+        .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
-    let lease = ControllerLease::acquire(&root, format!("api:planning:{draft_id}"))
-        .map_err(|error| ApiError::conflict(error.to_string()))?;
-    let _ = std::fs::remove_file(root.join(crate::film_harness::CANCEL_SENTINEL_FILE));
+    let lease = planning_io({
+        let root = root.clone();
+        let draft_id = draft_id.clone();
+        move || {
+            let lease = ControllerLease::acquire(&root, format!("api:planning:{draft_id}"))
+                .map_err(|error| ApiError::conflict(error.to_string()))?;
+            let _ = std::fs::remove_file(root.join(crate::film_harness::CANCEL_SENTINEL_FILE));
+            Ok(lease)
+        }
+    })
+    .await?;
 
     let structured = if draft.structured_brief.beats.is_empty() {
         parse_film_script(&draft.original_script)
@@ -305,7 +314,8 @@ pub(crate) async fn start_film_planning(
 
     let operation_id = format!("filmplan_{}", Uuid::new_v4().simple());
     let operation_dir = root.join("operations").join(&operation_id);
-    std::fs::create_dir_all(&operation_dir)
+    tokio::fs::create_dir_all(&operation_dir)
+        .await
         .map_err(|error| ApiError::internal(error.to_string()))?;
     let now = sceneworks_core::time::utc_now();
     let mut operation = FilmPlanningOperation {
@@ -354,7 +364,7 @@ pub(crate) async fn start_film_planning(
             ));
             operation.detail =
                 Some("The draft and its current shot plan were not changed.".to_owned());
-            write_latest_operation(&root, &operation)?;
+            persist_operation(&root, &operation).await?;
             drop(lease);
             return Ok((StatusCode::ACCEPTED, Json(operation)));
         }
@@ -373,7 +383,7 @@ pub(crate) async fn start_film_planning(
                 "The draft and current shot plan were preserved; no provider request was sent."
                     .to_owned(),
             );
-            write_latest_operation(&root, &operation)?;
+            persist_operation(&root, &operation).await?;
             drop(lease);
             return Ok((StatusCode::ACCEPTED, Json(operation)));
         }
@@ -398,16 +408,22 @@ pub(crate) async fn start_film_planning(
     })
     .await;
     if let Err(error) = stage_result {
-        let _ = std::fs::remove_dir_all(&operation_dir);
+        let _ = tokio::fs::remove_dir_all(&operation_dir).await;
         return Err(error);
     }
     let brief = production_brief(&draft, &structured);
-    write_json_file(&operation_dir.join("brief.json"), &brief)?;
-    write_json_file(
-        &operation_dir.join("references.json"),
-        &draft.reference_pack,
-    )?;
-    write_latest_operation(&root, &operation)?;
+    planning_io({
+        let operation_dir = operation_dir.clone();
+        let root = root.clone();
+        let operation = operation.clone();
+        let references = draft.reference_pack.clone();
+        move || {
+            write_json_file(&operation_dir.join("brief.json"), &brief)?;
+            write_json_file(&operation_dir.join("references.json"), &references)?;
+            write_latest_operation(&root, &operation)
+        }
+    })
+    .await?;
 
     let base_url = state.settings.mcp_api_url.clone();
     let token = state.settings.access_token.clone();
@@ -513,7 +529,7 @@ pub(crate) async fn start_film_planning(
             }
         }
         .await;
-        finish_planning_operation(&root, &latest_path, &operation_id, result);
+        finish_planning_operation_async(root, latest_path, operation_id, result).await;
         drop(lease);
     });
 
@@ -559,20 +575,26 @@ pub(crate) async fn cancel_film_planning(
 ) -> Result<Json<FilmPlanningOperation>, ApiError> {
     let root = planning_root(state.clone(), &project_id, &draft_id).await?;
     let path = root.join("latest.json");
-    let operation = read_operation(&path)?;
+    let operation = load_operation(&path).await?;
     if !matches!(operation.status.as_str(), "running" | "canceling") {
         return Ok(Json(operation));
     }
-    std::fs::write(
+    tokio::fs::write(
         root.join(crate::film_harness::CANCEL_SENTINEL_FILE),
         b"cancel\n",
     )
+    .await
     .map_err(|error| ApiError::internal(error.to_string()))?;
     if let Some(job_id) = operation.active_job_id.clone() {
         let _ = crate::jobs::cancel_job(State(state), Path(job_id)).await;
     }
-    mark_planning_canceling(&path, &operation.id)?;
-    Ok(Json(read_operation(&path)?))
+    planning_io({
+        let path = path.clone();
+        let operation_id = operation.id.clone();
+        move || mark_planning_canceling(&path, &operation_id)
+    })
+    .await?;
+    Ok(Json(load_operation(&path).await?))
 }
 
 fn mark_planning_canceling(path: &FsPath, operation_id: &str) -> Result<(), ApiError> {
@@ -593,7 +615,7 @@ pub(crate) async fn apply_film_planning_candidate(
     ApiJson(payload): ApiJson<ApplyFilmPlanningRequest>,
 ) -> Result<Json<sceneworks_core::film_workspace::FilmDraft>, ApiError> {
     let root = planning_root(state.clone(), &project_id, &draft_id).await?;
-    let operation = read_operation(&root.join("latest.json"))?;
+    let operation = load_operation(&root.join("latest.json")).await?;
     if operation.id != payload.operation_id || operation.status != "ready" {
         return Err(ApiError::conflict(
             "That planning candidate is no longer ready to apply",
@@ -789,7 +811,7 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                     .join("films/planning")
                     .join(&draft.id);
                 let latest_path = root.join("latest.json");
-                let operation = match read_operation(&latest_path) {
+                let operation = match load_operation(&latest_path).await {
                     Ok(operation)
                         if matches!(operation.status.as_str(), "running" | "canceling") =>
                     {
@@ -797,10 +819,19 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                     }
                     _ => continue,
                 };
-                let lease = match ControllerLease::acquire(
-                    &root,
-                    format!("startup-adopt:planning:{}", draft.id),
-                ) {
+                let lease = match crate::film_planner::planner_blocking({
+                    let root = root.clone();
+                    let draft_id = draft.id.clone();
+                    move || {
+                        ControllerLease::acquire(
+                            &root,
+                            format!("startup-adopt:planning:{draft_id}"),
+                        )
+                    }
+                })
+                .await
+                .and_then(std::convert::identity)
+                {
                     Ok(lease) => lease,
                     Err(HarnessError::Refused(_)) => continue,
                     Err(error) => {
@@ -811,22 +842,29 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                 let state = state.clone();
                 tokio::spawn(async move {
                     if operation.status == "canceling"
-                        || root
-                            .join(crate::film_harness::CANCEL_SENTINEL_FILE)
-                            .exists()
+                        || tokio::fs::try_exists(
+                            root.join(crate::film_harness::CANCEL_SENTINEL_FILE),
+                        )
+                        .await
+                        .unwrap_or(false)
                     {
                         reconcile_canceled_planning(&state, &root, &latest_path, &operation).await;
                         drop(lease);
                         return;
                     }
                     let external_compile = operation.provider == "openai_compatible"
-                        && root
-                            .join("operations")
-                            .join(&operation.id)
-                            .join("plan.json")
-                            .is_file();
+                        && tokio::fs::metadata(
+                            root.join("operations")
+                                .join(&operation.id)
+                                .join("plan.json"),
+                        )
+                        .await
+                        .is_ok_and(|metadata| metadata.is_file());
                     if operation.provider == "openai_compatible" && !external_compile {
-                        interrupt_external_planning(&latest_path, &operation);
+                        let _ = crate::film_planner::planner_blocking(move || {
+                            interrupt_external_planning(&latest_path, &operation)
+                        })
+                        .await;
                         drop(lease);
                         return;
                     }
@@ -927,7 +965,7 @@ pub(crate) fn spawn_film_planning_startup_reconciliation(
                         }
                     }
                     .await;
-                    finish_planning_operation(&root, &latest_path, &operation.id, result);
+                    finish_planning_operation_async(root, latest_path, operation.id, result).await;
                     drop(lease);
                 });
             }
@@ -1005,7 +1043,11 @@ async fn reconcile_canceled_planning(
             }
         }
     }
-    let _ = update_operation(latest_path, &operation.id, |current| {
+    let latest_path = latest_path.to_owned();
+    let operation_id = operation.id.clone();
+    let root = root.to_owned();
+    let _ = crate::film_planner::planner_blocking(move || {
+    let _ = update_operation(&latest_path, &operation_id, |current| {
         for execution in &mut current.executions {
             if execution.failure_code.as_deref() == Some("dispatch_started") {
                 execution.failure_code = Some("canceled".to_owned());
@@ -1020,6 +1062,7 @@ async fn reconcile_canceled_planning(
         );
     });
     let _ = std::fs::remove_file(root.join(crate::film_harness::CANCEL_SENTINEL_FILE));
+    }).await;
 }
 
 async fn planning_root(
@@ -1046,6 +1089,45 @@ fn findings_from_error(error: HarnessError) -> Vec<PlanDiagnostic> {
             "planning.operation",
             other.to_string(),
         )],
+    }
+}
+
+async fn planning_io<T, F>(operation: F) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+{
+    crate::film_planner::planner_blocking(operation)
+        .await
+        .map_err(|error| ApiError::internal(error.to_string()))?
+}
+
+async fn load_operation(path: &FsPath) -> Result<FilmPlanningOperation, ApiError> {
+    let path = path.to_owned();
+    planning_io(move || read_operation(&path)).await
+}
+
+async fn persist_operation(
+    root: &FsPath,
+    operation: &FilmPlanningOperation,
+) -> Result<(), ApiError> {
+    let root = root.to_owned();
+    let operation = operation.clone();
+    planning_io(move || write_latest_operation(&root, &operation)).await
+}
+
+async fn finish_planning_operation_async(
+    root: PathBuf,
+    latest_path: PathBuf,
+    operation_id: String,
+    result: Result<crate::film_planner::PlannerArtifacts, HarnessError>,
+) {
+    if let Err(error) = crate::film_planner::planner_blocking(move || {
+        finish_planning_operation(&root, &latest_path, &operation_id, result);
+    })
+    .await
+    {
+        tracing::warn!(%error, "film planning final journal task failed");
     }
 }
 

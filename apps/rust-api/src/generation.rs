@@ -757,10 +757,10 @@ async fn validate_vector_source_asset(
     project_id: String,
     source_asset_id: String,
 ) -> Result<(), ApiError> {
-    let (asset, media_path) = project_call(state, move |store| {
+    let (asset, media_exists) = project_call(state, move |store| {
         let asset = store.get_asset(&project_id, &source_asset_id)?;
         let media_path = store.resolve_asset_media_path(&project_id, &source_asset_id)?;
-        Ok((asset, media_path))
+        Ok((asset, media_path.is_file()))
     })
     .await?;
     let media_type = asset
@@ -776,7 +776,7 @@ async fn validate_vector_source_asset(
             "sourceAssetId must name a raster image owned by projectId",
         ));
     }
-    if !media_path.is_file() {
+    if !media_exists {
         return Err(ApiError::bad_request(
             "sourceAssetId media is missing from its project",
         ));
@@ -840,10 +840,10 @@ pub(crate) async fn validate_ordered_image_references(
         let ordinal = index + 1;
         let project = project_id.clone();
         let id = asset_id.clone();
-        let (asset, media_path) = project_call(state.clone(), move |store| {
+        let (asset, media_exists) = project_call(state.clone(), move |store| {
             let asset = store.get_asset(&project, &id)?;
             let media_path = store.resolve_asset_media_path(&project, &id)?;
-            Ok((asset, media_path))
+            Ok((asset, media_path.is_file()))
         })
         .await
         .map_err(|_| {
@@ -864,7 +864,7 @@ pub(crate) async fn validate_ordered_image_references(
                 "reference {ordinal} ({asset_id}) must name a raster image owned by projectId"
             )));
         }
-        if !media_path.is_file() {
+        if !media_exists {
             return Err(ApiError::bad_request(format!(
                 "reference {ordinal} ({asset_id}) media is missing from its project"
             )));
