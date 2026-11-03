@@ -1,8 +1,9 @@
+import { useImageEditorPanels } from "./imageEditor/useImageEditorPanels.js";
 import { useEditorSave } from "./imageEditor/useEditorSave.js";
 import { useEditorAiOps } from "./imageEditor/useEditorAiOps.js";
 import { useLayerOps } from "./imageEditor/useLayerOps.js";
 import { useEditorHistory } from "./imageEditor/useEditorHistory.js";
-import { UPSCALE_ENGINE_DESC, MIN_SCALE, MAX_SCALE, ZOOM_STEP, MIN_CROP_PX, EDITOR_LAYOUT_KEY, readStoredEditorLayout, EDITOR_TOOL_ORDER, EDITOR_TOOL_META, EDITOR_TOOL_ICONS, IeChevron, IeEyeOpen, IeEyeOff, EDITOR_SHORTCUTS } from "./imageEditor/metadata.jsx";
+import { MIN_SCALE, MAX_SCALE, ZOOM_STEP, MIN_CROP_PX, EDITOR_LAYOUT_KEY, readStoredEditorLayout, EDITOR_TOOL_ORDER, EDITOR_TOOL_META, EDITOR_TOOL_ICONS, IeChevron, IeEyeOpen, IeEyeOff, EDITOR_SHORTCUTS } from "./imageEditor/metadata.jsx";
 export { EDITOR_LAYOUTS, readStoredEditorLayout, EDITOR_TOOL_ORDER, EDITOR_TOOL_META, EDITOR_TOOL_ICONS } from "./imageEditor/metadata.jsx";
 import { leaveGuardArming, closeConfirmMessage, saveStatusIndicator } from "./imageEditor/leaveGuard.js";
 export { leaveGuardMessage, leaveGuardArming, closeConfirmMessage, saveStatusIndicator } from "./imageEditor/leaveGuard.js";
@@ -12,7 +13,7 @@ import { MAX_EDIT_REFERENCES, importEditorReferenceFiles, modelIsInpaintCapable 
 export { MAX_EDIT_REFERENCES, editReferenceIds, importEditorReferenceFiles, modelIsInpaintCapable } from "./imageEditor/references.js";
 
 export { editedFilename, buildSaveProvenance } from "./imageEditor/provenance.js";
-import { EDIT_OUTPUT_ASPECTS, CROP_RATIOS, clamp, cropRatioForKey, centeredCropRect, cropOverlayRects, BLANK_CANVAS_SIZES, blankCanvasDims } from "./imageEditor/geometry.js";
+import { EDIT_OUTPUT_ASPECTS, clamp, cropRatioForKey, centeredCropRect, cropOverlayRects, BLANK_CANVAS_SIZES, blankCanvasDims } from "./imageEditor/geometry.js";
 export { EDIT_OUTPUT_ASPECTS, editOutputAspectRatio, editOutputDims, cropRatioForKey, centeredCropRect, BLANK_CANVAS_MIN, BLANK_CANVAS_MAX, BLANK_CANVAS_SIZES, blankCanvasDims } from "./imageEditor/geometry.js";
 import { compositeWorkingToCanvas, downloadSizeSentence, colorKeyMaskCanvasForImage, maskCutoutCanvasForImage, canvasToPngBlob, blobToEditorImage, revokeLayerUrls, collectCropLayers } from "./imageEditor/export.js";
 export { EDITOR_CANVAS_MAX_SIDE, EDITOR_CANVAS_MAX_AREA, boundedEditorCanvasDimensions, compositeWorkingToCanvas, workingToPngFile, exportEditorFile, MAX_DESKTOP_EXPORT_BYTES, RASTER_REASON_EDITED, RASTER_REASON_DESKTOP_CAP, editorDownloadPlan, downloadSizeSentence, editorDownloadNote, collectCropLayers } from "./imageEditor/export.js";
@@ -39,41 +40,25 @@ import { maxReferencesForModel } from "../imageReferenceLimits.js";
 import { describeOpenedImage } from "../editorSourceWorkflow.js";
 
 import { DatasetAddDialog } from "../components/DatasetAddDialog.jsx";
-import { FitModeControl, effectiveFitMode } from "../components/FitModeControl.jsx";
+
 import { useLoraSelection } from "../components/LoraPickerField.jsx";
 import { findModelEditLora, loraIsInstalled } from "../presetUtils.js";
-import { guidanceDefaultFromModel } from "../samplerOptions.js";
+
 import { mossAdvancedDefaults } from "../mossImageAdvanced.js";
 import { mossAdvancedIssue } from "../mossImageAdvancedValidation.js";
 import { isMossImage, mossEditDefaults, mossEditGenerationDefaults, mossComponentState, mossEditWireOptions, mossEditControlsError } from "../mossImage.js";
 import { BLEND_MODES, activeLayerOf, drawLayerIntoCrop, identityTransform, layerById, replaceLayerBitmap, replaceLayerWithCroppedBitmap, singleLayerWorking } from "../imageLayers.js";
-import { CurveEditor } from "../components/CurveEditor.jsx";
-import { StudioUpdateBadge, StudioUpdateNotice, updateOptionLabel } from "../components/StudioUpdateNotice.jsx";
+
 // Pure job builders + model/engine helpers (sc-6112) — extracted to a konva-free module
 // so the Library batch flow can reuse them; imported for internal use and re-exported
 // below to keep this module's public surface (and its tests) unchanged.
-import {
-  buildDetailJobBody,
-  buildEditJobBody,
-  buildUpscaleJobBody,
-  detailCapableModels,
-  editCapableModels,
-  tileControlNetInstalled,
-  tileControlNetModel,
-  TILE_CONTROLNET_MODEL_ID,
-  sam3SegmentInstalled,
-  sam3SegmentModel,
-  SAM3_SEGMENT_MODEL_ID,
-  upscaleEngineHasSoftness,
-  upscaleEngineIsRestoration,
-  upscaleFactorsForEngine,
-} from "../imageJobs.js";
+import { buildDetailJobBody, buildEditJobBody, buildUpscaleJobBody, detailCapableModels, editCapableModels, tileControlNetInstalled, tileControlNetModel, TILE_CONTROLNET_MODEL_ID, sam3SegmentInstalled, sam3SegmentModel, SAM3_SEGMENT_MODEL_ID, upscaleEngineHasSoftness, upscaleFactorsForEngine } from "../imageJobs.js";
 import {
   availableUpscaleEngines as upscaleEnginesForPlatform,
   useUpscaleEngineFallback,
 } from "../upscaleEngines.js";
 import { IRIS_RESTORE_DEFAULTS } from "../irisRestore.js";
-import { IrisRestoreControls } from "../components/IrisRestoreControls.jsx";
+
 // Per-tool logic extracted to dedicated hooks + pure helper modules (sc-9752, F-052
 // follow-up). Each hook owns its tool's state/refs/handlers and is wired below; the pure
 // helpers are re-exported here so this module's public surface (and ImageEditor.test.jsx's
@@ -125,10 +110,9 @@ import {
 import { applyColorKeyToRgba, colorKeySelectionMaskRgba, documentPointToLayerPoint } from "./imageEditor/colorKeyMath.js";
 import {
   ImageEditorToolPanel,
-  useStableImageEditorToolPanelScope,
 } from "./imageEditor/ImageEditorToolPanel.jsx";
 import { EditorDepthPanel } from "./imageEditor/EditorDepthPanel.jsx";
-import { EditorLoraPanel } from "./imageEditor/EditorLoraPanel.jsx";
+
 import { editTransparencyFor, imageBytesCarryAlpha } from "../qwenAlpha.js";
 
 export {
@@ -1891,185 +1875,49 @@ export function ImageEditor() {
     });
   }, [cropRect, working]);
 
-  const toolPanelScope = {
-    BOX_PALETTE,
-    COLOR_ADJUSTMENTS,
-    CROP_RATIOS,
-    CurveEditor,
-    EDIT_OUTPUT_ASPECTS,
-    EditorLoraPanel,
-    FitModeControl,
-    MAX_BOX_PALETTE,
-    MAX_EDIT_REFERENCES,
-    maxEditReferences,
-    StudioUpdateBadge,
-    StudioUpdateNotice,
-    UPSCALE_ENGINE_DESC,
-    IrisRestoreControls,
-    irisPlanStatus,
-    irisRestore,
-    setIrisPlanStatus,
-    setIrisRestore,
-    token,
-    upscaleEngineIsRestoration,
-    activeGradeIsIdentity,
-    activeLayerOf,
-    actualSize,
-    addPaletteColor,
-    aiOp,
-    applyColorGrade,
-    applyMaskCutout,
-    applyCrop,
-    assetUrl,
-    availableUpscaleEngines,
-    boxColor,
-    boxMetadataGaps,
-    boxes,
-    canMask,
-    cancelCrop,
-    channelStroke,
-    chooseBoxColor,
-    chooseRatio,
-    clearBoxes,
-    clearMask,
-    colorAdjust,
-    colorChannel,
-    colorKeyGlobal,
-    colorKeySeed,
-    colorKeySoftness,
-    colorKeyTolerance,
-    colorMode,
-    composedPrompt,
-    createLoraDownloadJob,
-    createModelDownloadJob,
-    cropRect,
-    cutoutKeepSelected,
-    curves,
-    deleteBox,
-    detailCnScale,
-    detailModel,
-    detailModels,
-    detailStrength,
-    editAspect,
-    editFitMode,
-    editGuidance,
-    mossEdit, mossEditReady, mossEditError, mossImageEdit, setMossImageEdit, mossEditSettings, setMossEditSettings, tensorAssets: assets, importTensorAsset: importAsset, characters, projectId: activeProject?.id,
-    jobs,
-    editLora,
-    editLoraDownloadRequested,
-    editLoraInstalled,
-    editLoraRequiredMissing,
-    editLoraSelection,
-    editModel,
-    editModels,
-    editPrompt,
-    editSeed,
-    editorPickerLoras,
-    effectiveFitMode,
-    endTransformGesture,
-    fitToView,
-    flipActiveLayer,
-    guidanceDefaultFromModel,
-    histogramRef,
-    identityTransform,
-    imageAssets,
-    layerCount,
-    levels,
-    maskActive,
-    maskBaseImage,
-    maskBrush,
-    maskErase,
-    maskHasContent,
-    maskLines,
-    maskMode,
-    maskRefineRadius,
-    maskSource,
-    maskSubTool,
-    multiRefCapable,
-    editTransparent,
-    setEditTransparent: setEditTransparentChoice,
-    onTransformSlider,
-    ratioKey,
-    refAssetIds,
-    refineMask,
-    removePaletteColor,
-    requestEditLoraDownload,
-    requestSmartSelectDownload,
-    requestTileControlNetDownload,
-    resetActiveColorMode,
-    resetActiveLayerTransform,
-    resetAdjust,
-    rotated,
-    runBoxEdit,
-    runDetail,
-    runEdit,
-    runUpscale,
-    selectedBox,
-    selectedBoxGaps,
-    selectedBoxId,
-    selectedDetailModel,
-    selectedEditLoras,
-    selectedEditModel,
-    setActiveTransform,
-    setAdjustValue,
-    setColorChannel,
-    setColorKeyGlobal,
-    setColorKeySeed,
-    setColorKeySoftness,
-    setColorKeyTolerance,
-    setColorMode,
-    setCropDim,
-    setCurves,
-    setCutoutKeepSelected,
-    setDetailCnScale,
-    setDetailModel,
-    setDetailStrength,
-    setEditAspect,
-    setEditFitMode,
-    setEditGuidance,
-    setEditModel,
-    setEditPrompt,
-    setEditSeed,
-    setLevelsValue,
-    setMaskBrush,
-    setMaskErase,
-    setMaskMode,
-    setMaskRefineRadius,
-    setMaskSubTool,
-    setRefAssetIds,
-    setRefPickerOpen,
-    setSelectedBoxId,
-    setShowIncompatibleEditLoras,
-    setStraighten,
-    setTool,
-    setUpscaleEngine,
-    setUpscaleFactor,
-    setUpscaleSoftness,
-    showIncompatibleEditLoras,
-    smartSelectCapabilitySupported,
-    smartSelectDownloadRequested,
-    smartSelectModel,
-    smartSelectSupported,
-    straighten,
-    tileControlNet,
-    tileControlNetDownloadRequested,
-    tileControlNetReady,
-    toggleRotate,
-    updateBox,
-    updateOptionLabel,
-    upscaleEngine,
-    upscaleEngineHasSoftness,
-    upscaleFactor,
-    upscaleFactorsForEngine,
-    upscaleSoftness,
-    working,
-  };
-  const stableToolPanelScope = useStableImageEditorToolPanelScope(toolPanelScope);
+  const toolPanels = useImageEditorPanels({
+    move: {
+      state: { working, layerCount },
+      actions: { fitToView, actualSize },
+    },
+    transform: {
+      state: { working },
+      actions: { setActiveTransform, endTransformGesture, onTransformSlider, flipActiveLayer, resetActiveLayerTransform, setTool },
+    },
+    crop: {
+      state: { ratioKey, rotated, cropRect, straighten },
+      actions: { chooseRatio, toggleRotate, setCropDim, setStraighten, applyCrop, cancelCrop },
+    },
+    upscale: {
+      state: { availableUpscaleEngines, upscaleEngine, upscaleFactor, aiOp, working, token, irisRestore, upscaleSoftness, irisPlanStatus },
+      actions: { setUpscaleEngine, setUpscaleFactor, setIrisRestore, setIrisPlanStatus, setUpscaleSoftness, runUpscale, setTool },
+    },
+    detail: {
+      state: { detailModels, detailModel, selectedDetailModel, detailStrength, detailCnScale, tileControlNetReady, tileControlNet, tileControlNetDownloadRequested, aiOp },
+      actions: { createModelDownloadJob, setDetailModel, setDetailStrength, setDetailCnScale, requestTileControlNetDownload, runDetail, setTool },
+    },
+    color: {
+      state: { colorMode, colorAdjust, colorChannel, histogramRef, levels, curves, channelStroke, activeGradeIsIdentity },
+      actions: { setColorMode, setAdjustValue, resetAdjust, setColorChannel, setLevelsValue, setCurves, resetActiveColorMode, applyColorGrade },
+    },
+    cutout: {
+      state: { colorKeySeed, colorKeyGlobal, colorKeyTolerance, colorKeySoftness, smartSelectSupported, maskMode, maskSubTool, aiOp, smartSelectCapabilitySupported, smartSelectModel, smartSelectDownloadRequested, maskBrush, maskErase, maskRefineRadius, maskLines, maskBaseImage, cutoutKeepSelected, maskSource },
+      actions: { setColorKeyGlobal, setColorKeyTolerance, setColorKeySoftness, setColorKeySeed, clearMask, setCutoutKeepSelected, setMaskMode, setMaskSubTool, setMaskErase, requestSmartSelectDownload, setMaskBrush, setMaskRefineRadius, refineMask, applyMaskCutout, setTool },
+    },
+    edit: {
+      state: { mossEdit, mossEditReady, mossEditError, mossImageEdit, mossEditSettings, token, jobs, maxEditReferences, aiOp, canMask, editAspect, editFitMode, editGuidance, editLora, editLoraDownloadRequested, editLoraInstalled, editLoraRequiredMissing, editLoraSelection, editModel, editModels, editPrompt, editSeed, editorPickerLoras, imageAssets, maskActive, maskBaseImage, maskBrush, maskErase, maskLines, maskMode, maskRefineRadius, maskSubTool, multiRefCapable, refAssetIds, editTransparent, selectedEditLoras, selectedEditModel, showIncompatibleEditLoras, smartSelectCapabilitySupported, smartSelectDownloadRequested, smartSelectModel, smartSelectSupported, tensorAssets: assets, characters, projectId: activeProject?.id },
+      actions: { createLoraDownloadJob, createModelDownloadJob, setMossImageEdit, setMossEditSettings, clearMask, refineMask, setEditTransparent: setEditTransparentChoice, requestEditLoraDownload, requestSmartSelectDownload, runEdit, setEditAspect, setEditFitMode, setEditGuidance, setEditModel, setEditPrompt, setEditSeed, setMaskBrush, setMaskErase, setMaskMode, setMaskRefineRadius, setMaskSubTool, setRefAssetIds, setRefPickerOpen, setShowIncompatibleEditLoras, importTensorAsset: importAsset },
+    },
+    boxes: {
+      state: { mossEdit, mossEditReady, mossEditError, mossImageEdit, mossEditSettings, token, jobs, imageAssets, refAssetIds, maxEditReferences, aiOp, boxColor, boxes, composedPrompt, editModel, editModels, editPrompt, selectedBox, selectedBoxGaps, selectedBoxId, selectedEditModel, tensorAssets: assets, characters, projectId: activeProject?.id },
+      actions: { createModelDownloadJob, updateBox, setMossImageEdit, setMossEditSettings, setRefAssetIds, chooseBoxColor, clearBoxes, deleteBox, runBoxEdit, setEditModel, setEditPrompt, setSelectedBoxId, importTensorAsset: importAsset },
+    }
+  });
   const renderToolPanel = (key) =>
     key === "depth" ? (
       <EditorDepthPanel dirty={dirty} working={working} />
     ) : (
-      <ImageEditorToolPanel panelKey={key} scope={stableToolPanelScope} />
+      <ImageEditorToolPanel panelKey={key} {...toolPanels[key]} />
     );
 
   const handleLayerOpacityInput = (id, raw) => {
