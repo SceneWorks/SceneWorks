@@ -260,8 +260,8 @@ export function describeEntryState(entry) {
 
 // ---- transport ------------------------------------------------------------------
 
-export function fetchModelCache() {
-  return modelCacheApi.modelCache(readAccessToken());
+export function fetchModelCache(token = readAccessToken()) {
+  return modelCacheApi.modelCache(token);
 }
 
 export function previewCacheRemoval(cacheKey) {

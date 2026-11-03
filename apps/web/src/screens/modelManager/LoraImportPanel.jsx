@@ -1,6 +1,24 @@
+import { equalItemProps } from "./memo.js";
 import React from "react";
 
-export function LoraImportPanel({ importLora, importForm, setImportForm, importingLora, activeProject, families, showBaseModelSelect, ltxBaseModelRequired, baseModelOptions, isFileImport, fileInputKey, showSecondaryFileSlot, importDisabled, moeMissingSecondary, importMessage, KeywordTagEditor }) {
+export const LoraImportPanel = React.memo(function LoraImportPanel({
+  importLora,
+  importForm,
+  setImportForm,
+  importingLora,
+  activeProject,
+  families,
+  showBaseModelSelect,
+  ltxBaseModelRequired,
+  baseModelOptions,
+  isFileImport,
+  fileInputKey,
+  showSecondaryFileSlot,
+  importDisabled,
+  moeMissingSecondary,
+  importMessage,
+  KeywordTagEditor,
+ }) {
   return (
           <form className="models-accent-band models-import-panel" aria-label="Import LoRA" onSubmit={importLora}>
             <div className="models-accent-band-head">
@@ -188,4 +206,4 @@ export function LoraImportPanel({ importLora, importForm, setImportForm, importi
             {importMessage.text ? <p className={importMessage.tone === "success" ? "inline-success" : "inline-warning"}>{importMessage.text}</p> : null}
           </form>
   );
-}
+}, equalItemProps);

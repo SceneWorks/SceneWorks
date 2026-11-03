@@ -1,6 +1,30 @@
+import { equalItemProps } from "./memo.js";
 import React from "react";
 
-export function LoraRow({ lora, cancelEditLora, deleteLora, deletingItem, editingLora, families, loraDownloadJobsFor, loraEditDraft, loraEditError, loraEditKey, loraEditSuggestions, loraHasResolvableFamily, onCancelJob, onDeleteLora, onDownloadLora, onOpenQueue, onUpdateLora, saveEditLora, savingLora, setLoraEditDraft, startEditLora, terminalStatuses, KeywordTagEditor, WorkerProgressCard }) {
+export const LoraRow = React.memo(function LoraRow({
+  lora,
+  cancelEditLora,
+  deleteLora,
+  deletingItem,
+  isEditing,
+  families,
+  downloadJob,
+  loraEditDraft,
+  loraEditError,
+  loraEditSuggestions,
+  loraHasResolvableFamily,
+  onCancelJob,
+  onDeleteLora,
+  onDownloadLora,
+  onOpenQueue,
+  onUpdateLora,
+  saveEditLora,
+  savingLora,
+  setLoraEditDraft,
+  startEditLora,
+  KeywordTagEditor,
+  WorkerProgressCard,
+ }) {
     const installed = lora.installState === "installed";
     const missing = lora.installState === "missing";
     const isBuiltin = lora.scope === "builtin";
@@ -15,10 +39,8 @@ export function LoraRow({ lora, cancelEditLora, deleteLora, deletingItem, editin
     // user LoRAs are installed via the import form, so they get no Download affordance.
     const hfSource = (lora.source?.provider ?? lora.provider) === "huggingface";
     const canDownload = Boolean(onDownloadLora) && lora.scope === "builtin" && (!installed || lora.updateAvailable) && hfSource;
-    const downloadJob = loraDownloadJobsFor(lora).find((job) => !terminalStatuses.has(job.status));
     const keywords = Array.isArray(lora.triggerWords) ? lora.triggerWords : [];
     const notes = typeof lora.notes === "string" ? lora.notes : "";
-    const isEditing = editingLora === loraEditKey(lora);
     // A LoRA whose architecture family couldn't be resolved (no manifest family, no
     // detected signature — e.g. an external ComfyUI adapter in a format we don't yet
     // recognize) is listed so the user sees the file was found, but flagged unusable:
@@ -149,4 +171,4 @@ export function LoraRow({ lora, cancelEditLora, deleteLora, deletingItem, editin
         ) : null}
       </article>
     );
-  }
+  }, equalItemProps);
