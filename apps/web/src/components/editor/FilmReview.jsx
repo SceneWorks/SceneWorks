@@ -111,6 +111,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
   const [reasons, setReasons] = useState({});
   const refreshRequest = useRef(0);
   const actionController = useRef(null);
+  const reviewController = useRef(null);
   useEffect(() => {
     setPending(false);
     return () => { actionController.current?.abort(); };
@@ -145,11 +146,12 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
   // Active snapshots refresh review progress; identical terminal snapshots do not restart reads.
   const reviewFeedRevision = runSnapshot?.controllerActive ? runSnapshot : JSON.stringify(runSnapshot);
   useEffect(() => {
-    if (!active || !visible) return undefined;
+    if (!active || !visible || pending) return undefined;
     const controller = new AbortController();
+    reviewController.current = controller;
     refresh(controller.signal);
     return () => { controller.abort(); refreshRequest.current += 1; };
-  }, [active, visible, refresh, runControllerActive, reviewFeedRevision]);
+  }, [active, visible, pending, refresh, runControllerActive, reviewFeedRevision]);
 
   // A hand-off from a timeline clip names its shot; bring that shot's takes into view.
   const focusedShotLoaded = Boolean(focusShotId && view?.run?.record?.shots?.some((shot) => shot.shotId === focusShotId));
@@ -169,6 +171,8 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
   async function mutate(action, message) {
     if (!runId) return;
     actionController.current?.abort();
+    reviewController.current?.abort();
+    refreshRequest.current += 1;
     const controller = new AbortController();
     actionController.current = controller;
     setPending(true);

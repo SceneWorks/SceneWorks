@@ -250,6 +250,30 @@ describe("FilmReview", () => {
     expect(current.reviewPlan.limits.maxQuestionsPerShot).toBe(8);
   });
 
+  it("aborts an obsolete review read before accepting an action", async () => {
+    const initial = reviewView();
+    await renderReview({ view: initial });
+    let resolveOld;
+    let oldSignal;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (options.method === "POST") return Promise.resolve(initial);
+      if (path.endsWith("/film-runs")) return Promise.resolve([{ locator: { id: "run_1", draftId: "film_1" }, record: {} }]);
+      if (!resolveOld) {
+        oldSignal = options.signal;
+        return new Promise((resolve) => { resolveOld = resolve; });
+      }
+      return Promise.resolve(initial);
+    });
+    await renderReviewVisibility({ active: true, runLocatorId: "run_1", runSnapshot: { ...initial.run } });
+    expect(oldSignal.aborted).toBe(false);
+    const analyze = button("Analyze selected takes");
+    expect(analyze.disabled).toBe(false);
+    await act(async () => analyze.click());
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => resolveOld({ ...initial, actionDisabledReason: "stale response" }));
+    expect(container.textContent).not.toContain("stale response");
+  });
+
   it("shows analysis progress after starting and unlocks take actions when polling completes", async () => {
     vi.useFakeTimers();
     const idle = reviewView({ selections: [{ shotId: "SH010", state: "aligned", timelineAssetId: "asset_2", timelineAttempt: 2 }] });
