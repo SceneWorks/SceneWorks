@@ -226,6 +226,12 @@ pub(crate) fn shape_task_config(
 }
 
 fn resolve_under(root: &Path, relative: &str, label: &str) -> Result<PathBuf, String> {
+    // Dataset sidecars store portable '/' paths, even when the trainer runs on Windows.
+    if sceneworks_core::safe_path::relative_normal_components(relative).is_err() {
+        return Err(format!(
+            "{label} {relative:?} is not a dataset-relative path."
+        ));
+    }
     sceneworks_core::safe_path::resolve_local_file(root, relative)
         .map_err(|error| format!("{label} {relative:?} is not a confined dataset file: {error}"))
 }
