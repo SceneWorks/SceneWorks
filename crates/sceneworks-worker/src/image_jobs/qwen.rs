@@ -25,7 +25,10 @@ const QWEN_CONTROL_FILE: &str = "model.safetensors";
 /// an absent `snapshot` (nothing cached yet) falls back to `q8`, the fresh-install co-requisite the base
 /// download brings. Mirrors the candle `qwen_control_tier_subdir` (`qwen_control.rs`).
 fn qwen_control_tier_subdir(request: &ImageRequest, snapshot: Option<&Path>) -> &'static str {
-    crate::payload::tier_for_bits(request.quant_bits(), qwen_control_installed_default_tier(snapshot))
+    request.quant_bits().map_or_else(
+        || qwen_control_installed_default_tier(snapshot),
+        |bits| crate::payload::tier_for_bits(Some(bits), "q8"),
+    )
 }
 
 /// The highest CLEAN control overlay tier (q8 → bf16 → q4) whose `<tier>/model.safetensors` is present
