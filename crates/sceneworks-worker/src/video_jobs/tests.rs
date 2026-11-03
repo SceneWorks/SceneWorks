@@ -957,8 +957,11 @@ fn video_jobs_remains_split_into_real_engine_modules() {
             source.lines().count() >= 100,
             "{name}.rs is unexpectedly empty or collapsed"
         );
+        // Check the family module's root imports, not nested test modules whose parent
+        // is the family itself. This stays independent of cfg aliases on those tests.
         assert!(
-            !source.contains("use super::*"),
+            !source.lines().any(|line| line.starts_with("use super::*"))
+                && source.lines().any(|line| line == "use super::prelude::*;"),
             "{name}.rs must import its parent dependencies through the explicit prelude"
         );
         assert!(
@@ -5990,8 +5993,14 @@ fn krea_realtime_routes_to_the_krea_engine_and_never_degrades_to_a_fake_video() 
                 panic!("expected an actionable InvalidPayload");
             };
             assert!(
-                message.contains("krea_realtime_14b") && message.contains("Model Manager"),
-                "the error must name the model and tell the user what to do: {message}"
+                message.starts_with("krea_realtime: no MLX weights found.")
+                    && message.contains("Download the turnkey SceneWorks/krea-realtime-14b-mlx")
+                    && message.contains("Model Manager")
+                    && message.contains("$SCENEWORKS_MLX_KREA_REALTIME_DIR")
+                    && message.contains(
+                        &empty.join("models/mlx/krea_realtime").display().to_string()
+                    ),
+                "the error must name the model family, published snapshot and installation routes: {message}"
             );
         },
     );
