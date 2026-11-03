@@ -602,9 +602,10 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
 
   it("retains browser download behavior outside the desktop shell", async () => {
     const file = new File(["png"], "shot.png", { type: "image/png" });
+    let clickedAnchor;
     const click = vi
       .spyOn(window.HTMLAnchorElement.prototype, "click")
-      .mockImplementation(() => {});
+      .mockImplementation(function () { clickedAnchor = this; });
     const urlApi = {
       createObjectURL: vi.fn(() => "blob:test"),
       revokeObjectURL: vi.fn(),
@@ -617,8 +618,13 @@ describe("WebKit-safe editor canvas and export (sc-10380)", () => {
       }),
     ).resolves.toBeNull();
     expect(click).toHaveBeenCalledTimes(1);
-    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith("blob:test");
+    expect(urlApi.createObjectURL).toHaveBeenCalledWith(file);
+    expect(clickedAnchor.download).toBe("shot.png");
+    expect(clickedAnchor.href).toBe("blob:test");
     expect(document.querySelector("a[download]")).toBeNull();
+    expect(urlApi.revokeObjectURL).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(urlApi.revokeObjectURL).toHaveBeenCalledWith("blob:test");
   });
 
   // sc-15954: the two shells must not disagree about what a download contains. The desktop
