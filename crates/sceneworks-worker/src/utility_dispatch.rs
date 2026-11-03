@@ -344,7 +344,7 @@ async fn dispatch_utility_job(
         _ => {
             let result = fail_job(
                 api,
-                job.id,
+                &job.id,
                 "No utility exists for this job type.",
                 Some(format!(
                     "Unsupported utility job type: {}",
