@@ -1,25 +1,13 @@
-import React, { useLayoutEffect, useState } from "react";
+import { assetMatchesSearch } from "../assetSearch.js";
+import React, { useLayoutEffect, useMemo, useState } from "react";
 import { AssetBatchModal, AssetSelectionBar, useAssetBatch } from "../assetBatch.jsx";
 import { foldUpscaledAssetVariants } from "../assetVariants.js";
 import { AssetDetail, AssetGrid, emptyTrash } from "../components/assetPanels.jsx";
 import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
 import { isLibraryAsset, terminalStatuses } from "../constants.js";
-import { useAppContext } from "../context/AppContext.js";
+import { useAppStatic, useAppLive } from "../context/AppContext.js";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { recordStartupMark } from "../startupTiming.js";
-
-// Free-text Library search across an asset's display name, prompt, and tags.
-// Case-insensitive substring match; an empty needle matches everything so callers
-// can pass the query unconditionally. `needle` is expected pre-lowercased/trimmed.
-export function assetMatchesSearch(asset, needle) {
-  if (!needle) {
-    return true;
-  }
-  const displayName = asset.displayName ?? "";
-  const prompt = asset.recipe?.prompt ?? "";
-  const tags = Array.isArray(asset.tags) ? asset.tags.join(" ") : "";
-  return `${displayName} ${prompt} ${tags}`.toLowerCase().includes(needle);
-}
 
 export function LibraryScreen() {
   const {
@@ -28,7 +16,6 @@ export function LibraryScreen() {
     assetsReady = false,
     assetsLoading = false,
     assetsError = "",
-    jobs = [],
     imageModels = [],
     createVqaJob,
     deleteAsset,
@@ -45,7 +32,8 @@ export function LibraryScreen() {
     updateAssetStatus,
     updateAssetTags,
     audioModels = [],
-  } = useAppContext();
+  } = useAppStatic();
+  const { jobs = [] } = useAppLive();
   useLayoutEffect(() => {
     if (assetsReady) {
       recordStartupMark("assets-ready-render");
@@ -82,8 +70,8 @@ export function LibraryScreen() {
   // also exposes `?scope=library`; we filter on the authoritative `origin` field
   // client-side to reuse the shared asset feed instead of loading a second scoped copy.
   // Dataset images never reach the Library — they are stored outside the indexed folders.
-  const libraryAssets = assets.filter(isLibraryAsset);
-  const visibleAssets = foldUpscaledAssetVariants(libraryAssets.filter((asset) => {
+  const libraryAssets = useMemo(() => assets.filter(isLibraryAsset), [assets]);
+  const visibleAssets = useMemo(() => foldUpscaledAssetVariants(libraryAssets.filter((asset) => {
     if (typeFilter !== "all" && asset.type !== typeFilter) {
       return false;
     }
@@ -103,7 +91,7 @@ export function LibraryScreen() {
       return false;
     }
     return true;
-  }));
+  })), [libraryAssets, typeFilter, showRejected, assetMode, tagFilter, searchNeedle]);
   // Detail-sidebar selection, scoped to the Library (sc-8339). The global `selectedAsset`
   // falls back to the most-recent asset across ALL studios, so without scoping the panel
   // can show a freshly generated Character Studio image instead of a library asset. Keep
@@ -125,7 +113,7 @@ export function LibraryScreen() {
   const vqaPending = assetVqaJobs.some((job) => !terminalStatuses.has(job.status));
   // All discarded assets within the current type/tag filters — the exact scope
   // the "Empty Trash" button purges (unfolded, so folded variants go too).
-  const trashedInView = libraryAssets.filter((asset) => {
+  const trashedInView = useMemo(() => libraryAssets.filter((asset) => {
     if (typeFilter !== "all" && asset.type !== typeFilter) {
       return false;
     }
@@ -136,7 +124,7 @@ export function LibraryScreen() {
       return false;
     }
     return Boolean(asset.status?.trashed);
-  });
+  }), [libraryAssets, typeFilter, tagFilter, searchNeedle]);
 
   async function handleImport(event) {
     const input = event.currentTarget;
@@ -159,7 +147,7 @@ export function LibraryScreen() {
   const imageCount = libraryAssets.filter((asset) => asset.type === "image").length;
   const videoCount = libraryAssets.filter((asset) => asset.type === "video").length;
   const uploadCount = libraryAssets.filter((asset) => asset.type === "upload").length;
-  const availableTags = [...new Set(libraryAssets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort();
+  const availableTags = useMemo(() => [...new Set(libraryAssets.flatMap((asset) => (Array.isArray(asset.tags) ? asset.tags : [])))].sort(), [libraryAssets]);
 
   return (
     <section className="page-frame library-surface">
