@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { sha256 as sha } from "./lib/file-sha256.mjs";
 // Start the actual current-tree Rust API and worker for the terminal campaign.
 // This is intentionally not an arbitrary service command: its source revision,
 // Cargo inference pin, binaries and health response are all recorded together.
@@ -6,7 +7,7 @@ import { METAL_LOCK_FD, metalExecutionWaitSeconds } from "./lib/apple-metal-exec
 import { withMacMetalExecutionLease, scopedMetalChildOptions } from "./lib/apple-metal-lease.mjs";
 import { execFileWithFds } from "./lib/exec-file-with-fds.mjs";
 import { bindMetallib, readBoundAppMetallib } from "./ci/memory-catalog/bind-metallib.mjs";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { execFile as execFileCallback, spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import { copyFile, lstat, mkdir, open, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -19,7 +20,7 @@ import { terminalGpuBinding, terminalGpuEnvironment, probeTerminalCuda } from ".
 import { sortTerminalTreeEntries, terminalTreeEntry, terminalTreeSha256 } from "./lib/terminal-tree-identity.mjs";
 
 const execFile = promisify(execFileCallback);
-const sha = (value) => createHash("sha256").update(value).digest("hex");
+
 const die = (value) => { throw new Error(`starvector terminal service: ${value}`); };
 export function productServiceBuildArgs(platform = process.platform) {
   // Latency and admission measure the optimized shipping path, including host

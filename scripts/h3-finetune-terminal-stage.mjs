@@ -1,9 +1,10 @@
 #!/usr/bin/env node
+import { fileSha256 } from "./lib/file-sha256.mjs";
 // sc-26691 frozen weight staging. Production entry is explicit workflow_dispatch Actions ONLY.
 // No model execution, no GPU initialization, no downloaded-code execution, no shared-cache mutation.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { constants as fsConstants, createReadStream, realpathSync } from 'node:fs';
+import { constants as fsConstants, realpathSync } from 'node:fs';
 import { access, appendFile, copyFile, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -36,13 +37,10 @@ function stageError(code, message) {
   return error;
 }
 export async function hashFileSha256(filePath, { signal, deadline, now = Date.now } = {}) {
-  const hash = createHash('sha256');
-  for await (const chunk of createReadStream(filePath)) {
+  return fileSha256(filePath, { onChunk: () => {
     if (signal?.aborted) throw stageError('H3_STAGE_INTERRUPTED', 'staging interrupted during content hash');
     if (deadline !== undefined && now() > deadline) throw stageError('H3_STAGE_INTERRUPTED', 'job deadline exceeded during content hash');
-    hash.update(chunk);
-  }
-  return hash.digest('hex');
+  } });
 }
 // A single FileHandle.write may write fewer bytes than requested. Count only actual written bytes
 // and never report progress for unwritten bytes.

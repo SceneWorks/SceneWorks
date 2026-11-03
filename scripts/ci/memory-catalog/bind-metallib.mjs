@@ -1,12 +1,12 @@
 #!/usr/bin/env node
+import { sha256 as digest } from "../../lib/file-sha256.mjs";
 // Metadata/file copy only. Select this successful Cargo invocation's actual mlx-sys output,
 // never a global fallback or newest directory. Does not run Cargo, a model, or a device probe.
 import { readFile, writeFile, realpath, mkdtemp, copyFile, stat, appendFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
 const inside = (root, file) => { const rel = path.relative(root, file); return rel !== "" && rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel); };
 async function nonemptyFile(file) {
   const info = await stat(file);

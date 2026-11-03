@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { execFileBounded as execFile } from "./lib/exec.mjs";
+import { sha256 } from "./lib/file-sha256.mjs";
 // YuE2 terminal acceptance driver (sc-23002, epic 22988): runs the epic's acceptance matrix through
 // the REAL app — the source-built API, a worker started from the same binary
 // (`SCENEWORKS_WORKER_ONLY=1`) and the registered `yue2` provider on this host's production device
@@ -53,8 +55,8 @@
 // same job path (`yue2_jobs::resolve_load` / `build_request`); the summary names it under
 // `coveredElsewhere`.
 import { enterMacMetalExecution, metalChildOptions } from "./lib/apple-metal-execution-lock.mjs";
-import { spawn, execFile as execFileCallback } from "node:child_process";
-import { createHash, randomBytes } from "node:crypto";
+import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -62,7 +64,6 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { promisify } from "node:util";
 
 import { isDeepStrictEqual } from "node:util";
 
@@ -72,7 +73,6 @@ import { fileSha256 } from "./lib/file-sha256.mjs";
 import { stripJsoncComments } from "./lib/jsonc.mjs";
 import { generateSilence, generateTestRecording } from "./lib/yue2-test-recording.mjs";
 
-const execFile = promisify(execFileCallback);
 
 export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const RECORD_SCHEMA = "sceneworks-yue2-acceptance-record-v1";
@@ -959,7 +959,7 @@ export async function waitForPartialRemoval({ partialPath, exists = existsSync, 
   }
   return outcome;
 }
-const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
 const nowIso = () => new Date().toISOString();
 
 async function freePort() {

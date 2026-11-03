@@ -1,5 +1,5 @@
+import { sha256 } from "./lib/file-sha256.mjs";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -11,9 +11,6 @@ const INSTALLED_SCRIPTS = [
   ["/usr/local/bin/runpod-privileges.sh", "docker/runpod-privileges.sh"],
 ];
 
-function sha256(bytes) {
-  return createHash("sha256").update(bytes).digest("hex");
-}
 
 export function validateStagedImage({ image, revision, inspectJson, installedHashes, sourceHashes }) {
   assert.match(image, /@sha256:[a-f0-9]{64}$/, "staged image must be addressed by immutable digest");
