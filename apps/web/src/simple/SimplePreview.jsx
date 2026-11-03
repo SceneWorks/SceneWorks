@@ -1,3 +1,4 @@
+import { useDialogFocus } from "../components/Modal.jsx";
 import React, { useEffect, useMemo, useRef } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetMedia, assetCanRenderAsAudio, assetCanRenderAsVideo } from "../components/assetMedia.jsx";
@@ -86,17 +87,7 @@ export function SimplePreview({
   const rootRef = useRef(null);
   usePreviewArrowNavigation({ rootRef, onPrevious: goPrevious, onNext: goNext });
 
-  // Take focus on open so keys reach the viewer, not the grid tile that opened it; hand it back
-  // on close (same contract as the shared Modal).
-  useEffect(() => {
-    const previousFocus = document.activeElement;
-    rootRef.current?.focus();
-    return () => {
-      if (previousFocus?.isConnected && typeof previousFocus.focus === "function") {
-        previousFocus.focus();
-      }
-    };
-  }, []);
+  const onKeyDown = useDialogFocus(rootRef, onClose);
 
   const swipeStart = useRef(null);
   const onTouchStart = (event) => {
@@ -126,7 +117,7 @@ export function SimplePreview({
   const navigable = Boolean(previousAsset || nextAsset);
 
   return (
-    <div aria-label={`${title} preview`} className="su-preview" ref={rootRef} role="dialog" tabIndex={-1}>
+    <div aria-label={`${title} preview`} aria-modal="true" className="su-preview" onKeyDown={onKeyDown} ref={rootRef} role="dialog" tabIndex={-1}>
       <div className="su-preview-head">
         <button aria-label="Close preview" className="su-preview-close" onClick={onClose} type="button">
           <Icon.Close size={18} />

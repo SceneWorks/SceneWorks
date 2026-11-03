@@ -1,3 +1,4 @@
+import { downloadBlob } from "../saveExportFile.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../components/Icons.jsx";
 import { AssetPickerField } from "../components/AssetPicker.jsx";
@@ -45,16 +46,6 @@ const MODES = [
   { mode: "full", label: "Full score (melody + chords)" },
 ];
 
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
-}
 
 function NoncommercialChips({ license }) {
   return (

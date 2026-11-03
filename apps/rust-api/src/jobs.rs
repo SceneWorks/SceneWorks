@@ -688,11 +688,13 @@ fn training_plan_resume_checkpoint_step(
 }
 
 async fn retry_job_request_from_body(request: AxumRequest) -> Result<RetryJobRequest, ApiError> {
+    let headers = request.headers().clone();
     let bytes = to_bytes(request.into_body(), 1024 * 1024)
         .await
         .map_err(|error| {
             ApiError::bad_request(format!("Unable to read retry request body: {error}"))
         })?;
+    auth::require_json_content_type(&headers, !bytes.is_empty())?;
     if bytes.iter().all(|byte| byte.is_ascii_whitespace()) {
         return Ok(RetryJobRequest::default());
     }

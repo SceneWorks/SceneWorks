@@ -168,7 +168,7 @@ describe("prompt guide popup (sc-1817)", () => {
     });
     await settle();
 
-    expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/generic-image.md");
+    expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/generic-image.md", { signal: expect.any(AbortSignal) });
     expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Image Prompt Guide");
   });
 
@@ -219,7 +219,7 @@ describe("prompt guide popup (sc-1817)", () => {
     });
     await settle();
 
-    expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/generic-video.md");
+    expect(global.fetch).toHaveBeenCalledWith("/prompt-guides/generic-video.md", { signal: expect.any(AbortSignal) });
     expect(document.body.querySelector("#prompt-guide-title").textContent).toBe("Video Prompt Guide");
     expect(createVideoJob).not.toHaveBeenCalled();
   });

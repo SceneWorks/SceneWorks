@@ -83,9 +83,9 @@ async function renderReview({ view = reviewView(), onChange = vi.fn(), select = 
   return { onChange, select, refresh };
 }
 
-async function renderReviewVisibility({ active, runLocatorId = "", setNotice = vi.fn() }) {
+async function renderReviewVisibility({ active, runLocatorId = "", runSnapshot = null, setNotice = vi.fn() }) {
   await act(async () => {
-    root.render(<FilmReview active={active} draft={draft()} onChange={vi.fn()} projectId="project_1" refreshTimelines={vi.fn()} runLocatorId={runLocatorId} setNotice={setNotice} setSelectedTimelineId={vi.fn()} token="token" />);
+    root.render(<FilmReview active={active} draft={draft()} onChange={vi.fn()} projectId="project_1" refreshTimelines={vi.fn()} runLocatorId={runLocatorId} runSnapshot={runSnapshot} setNotice={setNotice} setSelectedTimelineId={vi.fn()} token="token" />);
     await Promise.resolve(); await Promise.resolve();
   });
 }
@@ -195,6 +195,7 @@ describe("FilmReview", () => {
     expect(apiFetchMock).toHaveBeenCalledWith(
       `/api/v1/projects/project_1/film-runs/${locatorId}/review`,
       "token",
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
     );
     expect(apiFetchMock.mock.calls.some(([path]) => path.includes(recordRunId))).toBe(false);
     expect(container.querySelectorAll("video")).toHaveLength(2);
@@ -249,6 +250,30 @@ describe("FilmReview", () => {
     expect(current.reviewPlan.limits.maxQuestionsPerShot).toBe(8);
   });
 
+  it("aborts an obsolete review read before accepting an action", async () => {
+    const initial = reviewView();
+    await renderReview({ view: initial });
+    let resolveOld;
+    let oldSignal;
+    apiFetchMock.mockImplementation((path, _token, options = {}) => {
+      if (options.method === "POST") return Promise.resolve(initial);
+      if (path.endsWith("/film-runs")) return Promise.resolve([{ locator: { id: "run_1", draftId: "film_1" }, record: {} }]);
+      if (!resolveOld) {
+        oldSignal = options.signal;
+        return new Promise((resolve) => { resolveOld = resolve; });
+      }
+      return Promise.resolve(initial);
+    });
+    await renderReviewVisibility({ active: true, runLocatorId: "run_1", runSnapshot: { ...initial.run } });
+    expect(oldSignal.aborted).toBe(false);
+    const analyze = button("Analyze selected takes");
+    expect(analyze.disabled).toBe(false);
+    await act(async () => analyze.click());
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => resolveOld({ ...initial, actionDisabledReason: "stale response" }));
+    expect(container.textContent).not.toContain("stale response");
+  });
+
   it("shows analysis progress after starting and unlocks take actions when polling completes", async () => {
     vi.useFakeTimers();
     const idle = reviewView({ selections: [{ shotId: "SH010", state: "aligned", timelineAssetId: "asset_2", timelineAttempt: 2 }] });
@@ -272,7 +297,7 @@ describe("FilmReview", () => {
     apiFetchMock.mockImplementation((path) => Promise.resolve(path.endsWith("/film-runs")
       ? [{ locator: { id: "run_1", draftId: "film_1" }, record: {} }]
       : { ...idle, reviewOperation: { status: "completed" } }));
-    await act(async () => { await vi.advanceTimersByTimeAsync(800); });
+    await renderReviewVisibility({ active: true, runLocatorId: "run_1", runSnapshot: { ...idle.run } });
     expect(container.textContent).not.toContain("Analyzing selected takes.");
     expect(button("Analyze selected takes").disabled).toBe(false);
     expect(button("Render one replacement").disabled).toBe(false);

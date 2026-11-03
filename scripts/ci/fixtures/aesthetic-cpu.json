@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "backend": "rust-vec-f64",
+  "device": "cpu",
+  "fixtures": {
+    "synthetic-chain": {
+      "kind": "synthetic",
+      "model_sha256": "e0c7bc3b506c809e4771cf971bad515c244d2e307864e48645dab54057d3598c",
+      "tensors": [
+        {
+          "name": "layers.0.weight",
+          "shape": [
+            2,
+            2
+          ],
+          "f32": [
+            1.0,
+            0.0,
+            0.0,
+            1.0
+          ]
+        },
+        {
+          "name": "layers.0.bias",
+          "shape": [
+            2
+          ],
+          "f32": [
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "layers.2.weight",
+          "shape": [
+            1,
+            2
+          ],
+          "f32": [
+            1.0,
+            1.0
+          ]
+        },
+        {
+          "name": "layers.2.bias",
+          "shape": [
+            1
+          ],
+          "f32": [
+            0.5
+          ]
+        }
+      ],
+      "inputs": [
+        [
+          3.0,
+          4.0
+        ]
+      ],
+      "expected_score": 1.9,
+      "normalization": "L2 before linear layers"
+    },
+    "synthetic-constant": {
+      "kind": "synthetic",
+      "model_sha256": "74ee8afec7aba0b52d9ec0324688227fa3f9321ee66f8149c1ee548a67c6b664",
+      "tensors": [
+        {
+          "name": "layers.0.weight",
+          "shape": [
+            1,
+            2
+          ],
+          "f32": [
+            0.0,
+            0.0
+          ]
+        },
+        {
+          "name": "layers.0.bias",
+          "shape": [
+            1
+          ],
+          "f32": [
+            3.0
+          ]
+        }
+      ],
+      "inputs": [
+        [
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0
+        ]
+      ],
+      "expected_score": 3.0,
+      "threshold_floors": [
+        5.0,
+        2.0
+      ]
+    },
+    "bundled-laion-head": {
+      "kind": "bundled-checkpoint",
+      "path": "crates/sceneworks-image-quality/assets/aesthetic-v2-sac-logos-ava1-l14.safetensors",
+      "model_sha256": "7d20df228c501e2c31b6d8ff04169ed8a11d00a6eabdfb4997281c49c7ffa0e9",
+      "repository": "shunk031/aesthetics-predictor-v2-sac-logos-ava1-l14-linearMSE",
+      "license": "Apache-2.0",
+      "inputs": {
+        "value_f32": 0.1,
+        "dimensions": 768
+      },
+      "result_contract": "finite score; singleton predictor; expected input dimension 768",
+      "provenance": "existing bundled asset; no checkpoint download"
+    },
+    "api-bundled-laion-head": {
+      "kind": "bundled-checkpoint",
+      "path": "crates/sceneworks-image-quality/assets/aesthetic-v2-sac-logos-ava1-l14.safetensors",
+      "model_sha256": "7d20df228c501e2c31b6d8ff04169ed8a11d00a6eabdfb4997281c49c7ffa0e9",
+      "repository": "shunk031/aesthetics-predictor-v2-sac-logos-ava1-l14-linearMSE",
+      "license": "Apache-2.0",
+      "inputs": {
+        "sparse_f32": {
+          "0": 0.6,
+          "1": 0.8
+        },
+        "dimensions": 768
+      },
+      "result_contract": "readiness aesthetic score is a number; complete tier0 cache/diversity/caption acknowledgement assertions",
+      "provenance": "existing bundled asset; no checkpoint download"
+    }
+  }
+}

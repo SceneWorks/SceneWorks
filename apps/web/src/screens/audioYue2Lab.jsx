@@ -439,10 +439,14 @@ export function Yue2SongLab({ header }) {
   const [regenerationNotice, setRegenerationNotice] = useState("");
   const [comparisons, setComparisons] = useState([]);
   const [comparisonsError, setComparisonsError] = useState(null);
+  const historyRequests = useRef({ versions: 0, comparisons: 0 });
+  useEffect(() => () => { historyRequests.current.versions += 1; historyRequests.current.comparisons += 1; }, [projectId, token]);
   const reloadVersions = useCallback(async () => {
     if (!projectId) return;
+    const request = ++historyRequests.current.versions;
     try {
       const listing = await listYue2ScoreVersions(projectId, token);
+      if (historyRequests.current.versions !== request) return;
       setVersions([...(listing?.items ?? [])].sort((a, b) => Date.parse(b.createdAt ?? 0) - Date.parse(a.createdAt ?? 0)));
       setRegenerationNotice(listing?.renderNotice ?? "");
       setVersionsError(
@@ -451,13 +455,15 @@ export function Yue2SongLab({ header }) {
           : null,
       );
     } catch (error) {
-      setVersionsError(error);
+      if (historyRequests.current.versions === request) setVersionsError(error);
     }
   }, [projectId, token]);
   const reloadComparisons = useCallback(async () => {
     if (!projectId) return;
+    const request = ++historyRequests.current.comparisons;
     try {
       const listing = await listYue2Comparisons(projectId, token);
+      if (historyRequests.current.comparisons !== request) return;
       setComparisons([...(listing?.items ?? [])].sort((a, b) => Date.parse(b.createdAt ?? 0) - Date.parse(a.createdAt ?? 0)));
       setComparisonsError(
         Array.isArray(listing?.unreadable) && listing.unreadable.length
@@ -465,7 +471,7 @@ export function Yue2SongLab({ header }) {
           : null,
       );
     } catch (error) {
-      setComparisonsError(error);
+      if (historyRequests.current.comparisons === request) setComparisonsError(error);
     }
   }, [projectId, token]);
   useEffect(() => {

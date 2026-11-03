@@ -13,6 +13,59 @@ use crate::contracts::StringEnum;
 
 use crate::project_store::{ProjectStoreError, ProjectStoreResult};
 
+/// All stores wait up to five seconds for a competing process. Writers must also
+/// use BEGIN IMMEDIATE before reading, since SQLite cannot wait on lock upgrades.
+pub(crate) const SQLITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Preserve each store's established durability and concurrency policy.
+/// Project (including character, voice and training indexes) keeps SQLite's
+/// rollback journal and default synchronization. Jobs attempts WAL but warns and
+/// continues if unavailable; Catalog requires WAL and uses NORMAL synchronization,
+/// disk-backed temporary sorts and a bounded page cache/checkpoint interval.
+pub(crate) enum Profile<'a> {
+    Project,
+    Jobs { database_path: &'a Path },
+    Catalog { wal_autocheckpoint_pages: u32 },
+}
+
+pub(crate) fn configure_connection(
+    connection: &Connection,
+    profile: Profile<'_>,
+) -> rusqlite::Result<()> {
+    connection.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    match profile {
+        Profile::Project => {}
+        Profile::Jobs { database_path } => {
+            if let Err(error) = connection.pragma_update(None, "journal_mode", "wal") {
+                // Never remove live WAL/SHM sidecars or silently force DELETE mode.
+                tracing::warn!(
+                    event = "sqlite_wal_enable_failed",
+                    dbPath = %database_path.display(),
+                    error = %error,
+                    "could not enable SQLite WAL mode; continuing in the default rollback-journal \
+                     mode — cross-process write concurrency will be more serialized than usual"
+                );
+            }
+            connection.pragma_update(None, "foreign_keys", "on")?;
+        }
+        Profile::Catalog {
+            wal_autocheckpoint_pages,
+        } => {
+            let journal_mode: String =
+                connection.pragma_query_value(None, "journal_mode", |row| row.get(0))?;
+            if !journal_mode.eq_ignore_ascii_case("wal") {
+                connection.pragma_update(None, "journal_mode", "wal")?;
+            }
+            connection.pragma_update(None, "synchronous", "normal")?;
+            connection.pragma_update(None, "foreign_keys", true)?;
+            connection.pragma_update(None, "temp_store", "file")?;
+            connection.pragma_update(None, "cache_size", -65_536)?;
+            connection.pragma_update(None, "wal_autocheckpoint", wal_autocheckpoint_pages)?;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn read_json(path: &Path) -> ProjectStoreResult<Value> {
     let payload = fs::read_to_string(path)?;
     Ok(serde_json::from_str(&payload)?)
@@ -228,6 +281,75 @@ mod tests {
     use crate::contracts::JobStatus;
     use rusqlite::Connection;
     use std::collections::HashSet;
+
+    #[test]
+    fn connection_profiles_preserve_store_pragma_contracts() {
+        let temp = tempfile::tempdir().unwrap();
+        for (name, profile, journal, foreign_keys, synchronous) in [
+            ("project", super::Profile::Project, None, None, None),
+            (
+                "jobs",
+                super::Profile::Jobs {
+                    database_path: temp.path(),
+                },
+                Some("wal"),
+                Some(1),
+                None,
+            ),
+            (
+                "catalog",
+                super::Profile::Catalog {
+                    wal_autocheckpoint_pages: 20_000,
+                },
+                Some("wal"),
+                Some(1),
+                Some(1),
+            ),
+        ] {
+            let connection = Connection::open(temp.path().join(format!("{name}.db"))).unwrap();
+            // Preserve the actual bundled SQLite defaults rather than assuming
+            // foreign_keys is disabled (bundled builds may enable it at compile time).
+            let default_foreign_keys: i64 = connection
+                .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+                .unwrap();
+            let default_synchronous: i64 = connection
+                .pragma_query_value(None, "synchronous", |row| row.get(0))
+                .unwrap();
+            let default_journal: String = connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .unwrap();
+            super::configure_connection(&connection, profile).unwrap();
+            let actual_journal: String = connection
+                .pragma_query_value(None, "journal_mode", |row| row.get(0))
+                .unwrap();
+            assert_eq!(actual_journal, journal.unwrap_or(&default_journal));
+            for (pragma, expected) in [
+                (
+                    "busy_timeout",
+                    super::SQLITE_BUSY_TIMEOUT.as_millis() as i64,
+                ),
+                ("foreign_keys", foreign_keys.unwrap_or(default_foreign_keys)),
+                ("synchronous", synchronous.unwrap_or(default_synchronous)),
+            ] {
+                let actual: i64 = connection
+                    .pragma_query_value(None, pragma, |row| row.get(0))
+                    .unwrap();
+                assert_eq!(actual, expected, "{name} {pragma}");
+            }
+            if name == "catalog" {
+                for (pragma, expected) in [
+                    ("temp_store", 1),
+                    ("cache_size", -65_536),
+                    ("wal_autocheckpoint", 20_000),
+                ] {
+                    let actual: i64 = connection
+                        .pragma_query_value(None, pragma, |row| row.get(0))
+                        .unwrap();
+                    assert_eq!(actual, expected, "catalog {pragma}");
+                }
+            }
+        }
+    }
 
     /// sc-4271 / F-CORE-11: the hoisted `ensure_column` adds a missing column and
     /// is a no-op when it already exists (the three per-store copies it replaced

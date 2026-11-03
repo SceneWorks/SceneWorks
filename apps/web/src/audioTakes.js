@@ -11,7 +11,7 @@ import { usagePolicyChips, yue2TakeFilename } from "./yue2Policy.js";
 // its takes are the assets that job produced, and the header chips are read off the job's
 // own submitted `payload`. No new API surface.
 
-export const AUDIO_MODE_LABELS = Object.freeze({
+const AUDIO_MODE_LABELS = Object.freeze({
   speech: "Speech",
   sfx: "Sound FX",
   music: "Music",
@@ -24,7 +24,7 @@ export const AUDIO_MODE_LABELS = Object.freeze({
 // `extra.yue2` provenance, so the shared results surfaces label it as the experimental,
 // noncommercial model it is — instead of guessing a standard mode from its knobs — and never offer
 // a "Run again" that would resubmit it to the generic audio route (which refuses it).
-export function isYue2AudioRun(job, asset = null) {
+function isYue2AudioRun(job, asset = null) {
   return Boolean(
     job?.payload?.yue2 ||
       job?.payload?.model === "yue2" ||
@@ -197,7 +197,7 @@ export function audioStemLabel(asset) {
 }
 
 // True while a run is still producing — the in-flight strip's gate.
-export function audioJobIsRunning(job) {
+function audioJobIsRunning(job) {
   return Boolean(job) && !terminalStatuses.has(job.status);
 }
 

@@ -1,3 +1,4 @@
+import { downloadSizeText } from "../formatting.js";
 import React, { useEffect, useState } from "react";
 import { WorkerProgressCard } from "./WorkerProgressCard.jsx";
 import { terminalStatuses } from "../constants.js";
@@ -26,12 +27,6 @@ import { terminalStatuses } from "../constants.js";
 //                  static app context (DatasetCatalogsScreen, deliberately — sc-8855 keeps it off
 //                  the per-SSE-tick live context) passes nothing and gets the local "Queued" state
 //                  below instead, which needs no jobs list.
-function sizeText(model) {
-  if (!model?.downloadSizeLabel) {
-    return null;
-  }
-  return model.downloadSizeEstimated ? `~${model.downloadSizeLabel}` : model.downloadSizeLabel;
-}
 
 export function RequiredModelsNotice({
   models = [],
@@ -101,7 +96,7 @@ export function RequiredModelsNotice({
       <ul className="required-models-list">
         {models.map((model) => {
           const job = activeJobFor(model);
-          const size = sizeText(model);
+          const size = downloadSizeText(model);
           const pending = Boolean(job) || requested.has(model.id);
           return (
             <li key={model.id}>
