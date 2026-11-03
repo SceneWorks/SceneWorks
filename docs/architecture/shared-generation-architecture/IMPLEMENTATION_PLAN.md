@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…3 were approved by Michael on 2026-11-03; DEC-4…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
+| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1…3 were approved by Michael on 2026-11-03; DEC-4 reuse strategy is approved; its chained-pass product scope and DEC-5…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -107,7 +107,7 @@ The design grows existing seams rather than inventing new ones.
 
 | Existing asset | Where | Becomes |
 |---|---|---|
-| **sc-20414 executor invariants and testkit** | `feature/sc-20414`: `gen-core/src/sampling/pass_executor.rs` (844 lines), `gen-core-testkit/src/denoise_passes.rs` | Salvaged per DEC-4: monotone progress, cancel at every evaluation and boundary, `end_pass` on every exit path, the domain-separated re-noise salt, the CPU-ops conformance suite, and the ComfyUI pass-schedule math (`denoise_pass_schedule_steps`, `terminal_pass_segment`). **Not reused:** the executor itself. It is fresh-per-pass only, always re-noises (`:274`), has no geometry, leaves the combine to the host (`:36,143`), and refuses Krea phases (`denoise_passes.rs:433-435`). The `denoise_passes.rs` wire contract is also not reused. [ENG-1] |
+| **sc-20414 executor invariants and testkit** | `feature/sc-20414`: `gen-core/src/sampling/pass_executor.rs` (844 lines), `gen-core-testkit/src/denoise_passes.rs` | **Selective reuse approved under DEC-4; extraction remains unimplemented.** Reuse candidates: monotone progress, cancellation at every evaluation/boundary, cleanup guarantees adapted to §3.3's error policy, domain-separated re-noise seeds, backend-neutral conformance tests, and ComfyUI pass-schedule math (`denoise_pass_schedule_steps`, `terminal_pass_segment`). Check each against current contracts. The executor is fresh-per-pass only, always re-noises (`:274`), has no geometry, leaves combine to the host (`:36,143`), and refuses Krea phases (`denoise_passes.rs:433-435`), so it is not the runner base. The old wire schema informs behavior/compatibility analysis; the shared option system owns any resulting schema. [ENG-1] |
 | Krea multiphase host math | `gen-core-family/src/krea_multiphase.rs` | Generic global-sliced phase math in gen-core |
 | H3 `JointVelocity` loop seam | `mlx-gen-minimax-h3/src/denoise/mod.rs:25-29` | The pattern for `FamilyDriver`s that are generic over a forward seam (PIPE-7 conformance) |
 | candle `AvLatents` (two-stream ops) | `candle-gen/src/sampler.rs:374,420-468` | The precedent for `LatentBundle` |
@@ -420,6 +420,8 @@ finish request accounting and host resource release on every exit; GPU cleanup o
 - **Re-noise seeds are domain-separated** for new streams; legacy schemes stay bit-exact.
 - **Shared resident modules are never mutated.** Per-request state flows through `ForwardArgs` and `StepCtx`.
 - **A single-pass, single-phase plan equals the legacy route bit-exactly.** Inert splits preserve numerical and stochastic traces.
+
+**DEC-4 boundary:** Michael approved selective prior-art reuse on 2026-11-03, not a port of the executor or its hand-written wire contract. User-configurable chained denoise passes remain a separate open product-scope choice; support for fresh-per-pass schedules under DEC-3 does not itself approve that feature. If selected, its schema belongs to the shared option system after APP-2 and it needs an explicit roadmap delivery slice. No implementation or tracker creation is authorized during this design discussion.
 
 ### 3.4 Features (HOOK-1…5) [ENG-11]
 
