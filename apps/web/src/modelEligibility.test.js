@@ -29,7 +29,7 @@ import {
   vectorModelUsable,
 } from "./modelEligibility.js";
 import { VISION_CAPTION_MODEL_ID } from "./constants.js";
-import { fallbackModels } from "./modelCatalog.js";
+import { fallbackModels } from "./testSupport/builtinModels.js";
 
 const caps = DEFAULT_MAC_CAPABILITIES; // gating off → Mac blocks are no-ops
 
@@ -523,6 +523,7 @@ describe("audio model eligibility (sc-13403)", () => {
         "moss_tts_realtime",
         "moss_ttsd_v05",
         "openvoice_v2",
+        "yue2",
         "yue_en_cot",
         "yue_en_icl",
         "yue_zh_cot",
@@ -548,6 +549,10 @@ describe("audio model eligibility (sc-13403)", () => {
       yue_jp_kr_icl: "music",
     };
     for (const model of fallbackAudio) {
+      if (model.audio?.supportsSymbolicSong) {
+        expect(AUDIO_MODES.every((mode) => !audioModelServesMode(model, mode))).toBe(true);
+        continue;
+      }
       expect(audioModelServesMode(model, expectedMode[model.id]), `fallback ${model.id}`).toBe(true);
       for (const mode of AUDIO_MODES.filter((m) => m !== expectedMode[model.id])) {
         expect(audioModelServesMode(model, mode), `fallback ${model.id} must NOT serve ${mode}`).toBe(false);

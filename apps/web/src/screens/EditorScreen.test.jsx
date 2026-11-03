@@ -742,3 +742,38 @@ describe("editor guide access", () => {
     expect(setActiveTimeline).not.toHaveBeenCalled();
   });
 });
+
+
+describe("EditorScreen live video model admission", () => {
+  function timelineWithClip() {
+    const timeline = makeTimeline("tl_1", "Main");
+    timeline.tracks[0].items = [{ id: "clip", trackId: "track_main", assetId: "video", type: "video", displayName: "Clip", sourceIn: 0, sourceOut: 4, timelineStart: 0, timelineEnd: 4, speed: 1, volume: 1 }];
+    return timeline;
+  }
+
+  it("does not substitute an image from the global catalog when video facts are missing", async () => {
+    const queueTimelineVideoJob = vi.fn();
+    render({ activeTimeline: timelineWithClip(), models: [{ id: "image-only", type: "image" }], videoModels: [], queueTimelineVideoJob });
+    act(() => container.querySelector(".ve-clip").click());
+    await flush();
+    const button = (label) => Array.from(container.querySelectorAll("button")).find((item) => item.textContent.trim() === label);
+    expect(button("Extend clip").disabled).toBe(true);
+    expect(button("Regenerate").disabled).toBe(true);
+    expect(button("Variation").disabled).toBe(true);
+    expect(button("Extract frame").disabled).toBe(false);
+    expect(container.querySelector(".ve-generate").disabled).toBe(true);
+    act(() => container.querySelector(".ve-generate").click());
+    expect(queueTimelineVideoJob).not.toHaveBeenCalled();
+  });
+
+  it("keeps extension available and sends the live video model", async () => {
+    const queueTimelineVideoJob = vi.fn(async () => ({ id: "job" }));
+    render({ activeTimeline: timelineWithClip(), videoModels: [{ id: "live-video", type: "video" }], models: [{ id: "image-only", type: "image" }], queueTimelineVideoJob });
+    act(() => container.querySelector(".ve-clip").click());
+    await flush();
+    expect(container.querySelector(".ve-generate").disabled).toBe(false);
+    act(() => container.querySelector(".ve-generate").click());
+    await flush();
+    expect(queueTimelineVideoJob).toHaveBeenCalledWith(expect.objectContaining({ model: "live-video", mode: "extend_clip", sourceClipAssetId: "video" }));
+  });
+});
