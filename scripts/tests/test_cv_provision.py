@@ -314,7 +314,11 @@ class ProvisionContracts(unittest.TestCase):
                 self.assertIn(Path(asset["url"]).name, source)
             total = sum(a["bytes"] for a in manifest["models"] if backend in a["backends"]) + sum(a["bytes"] for a in manifest["runtime"][backend]) + manifest["photo"]["bytes"]
             self.assertLess(total, manifest["budgets"]["assetDownloadBytes"])
-        self.assertEqual({p["name"] for p in manifest["oracle"]["packages"]}, {"torch", "torchvision", "ultralytics", "numpy", "safetensors", "opencv-python", "Pillow"})
+        # The primary tools are part of a complete locked transitive closure, including yaml.
+        from cv_oracle_tools import locked_packages
+        packages = locked_packages(manifest)
+        self.assertTrue({"torch", "torchvision", "ultralytics", "numpy", "safetensors",
+                         "opencv-python", "pillow", "pyyaml"} <= {p["name"] for p in packages})
 
 
 if __name__ == "__main__":
