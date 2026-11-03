@@ -1,3 +1,4 @@
+import { useConsentRequestOwner } from "../hooks/useConsentRequestOwner.js";
 import { downloadSizeText } from "../formatting.js";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { WorkerProgressCard } from "../components/WorkerProgressCard.jsx";
@@ -103,11 +104,13 @@ export function SetupWizard({
   onOpenQueue,
 }) {
   const [step, setStep] = useState("models");
+  const captureConsentOwner = useConsentRequestOwner(token, models, undefined, step);
   const [selected, setSelected] = useState(() => defaultSelection(models, macCapabilities));
   const [started, setStarted] = useState(() => new Set());
   const { licenseAcks, setLicenseAck, licenseAckError } = useLicenseAcknowledgments(models, token);
   const [refusals, setRefusals] = useState([]);
   const [queueing, setQueueing] = useState(false);
+  useEffect(() => { setQueueing(false); }, [token, models, step]);
   const [projectName, setProjectName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   // When the first project can't be created — almost always because the chosen
@@ -180,6 +183,8 @@ export function SetupWizard({
     if (queueing) {
       return;
     }
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return;
     setQueueing(true);
     setRefusals([]);
     const startedNow = [];
@@ -187,11 +192,14 @@ export function SetupWizard({
     try {
       for (const model of pendingSelection) {
         const name = model.name ?? model.id;
-        if (await licenseAcknowledgmentBlocked(model, token)) {
+        const blocked = await licenseAcknowledgmentBlocked(model, token);
+        if (!ownsRequest()) return;
+        if (blocked) {
           refusedNow.push(`${name} was not downloaded — accept its license above first.`);
           continue;
         }
         const job = await onDownloadModel(model);
+        if (!ownsRequest()) return;
         if (job) {
           startedNow.push(model.id);
         } else {
@@ -203,9 +211,10 @@ export function SetupWizard({
       }
       setRefusals(refusedNow);
     } catch (err) {
+      if (!ownsRequest()) return;
       setRefusals([...refusedNow, `Could not check license acknowledgment: ${err.message}`]);
     } finally {
-      setQueueing(false);
+      if (ownsRequest()) setQueueing(false);
     }
   }
 

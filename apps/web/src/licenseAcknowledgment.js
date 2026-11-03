@@ -97,7 +97,6 @@ export function writeLicenseAck(modelId, acknowledged) {
 export async function licenseAcknowledgmentBlocked(model, token) {
   if (!requiresLicenseAcknowledgment(model)) return false;
   const view = await getLicenseAcknowledgment(model.id, token);
-  writeLicenseAck(model.id, view?.acknowledged === true);
   return view?.acknowledged !== true;
 }
 

@@ -10,8 +10,8 @@ export const systemApi = {
     apiFetch(`/api/v1/health`, token, options),
   capabilitiesMac: (token, options = {}) =>
     apiFetch(`/api/v1/capabilities/mac`, token, options),
-  hostCapabilities: (token, options = {}) =>
-    apiFetch(`/api/v1/host-capabilities`, token, options),
+  hostCapabilities: (token, ...options) =>
+    apiFetch(`/api/v1/host-capabilities`, token, ...options),
   workerRestart: (token, options = {}) =>
     apiFetch(`/api/v1/worker/restart`, token, options),
 };

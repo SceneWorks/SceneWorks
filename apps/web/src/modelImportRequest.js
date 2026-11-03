@@ -1,6 +1,5 @@
 import { modelImportPath } from "./api/modelImport.js";
 import { bytesToGib } from "./modelCache.js";
-import { licenseAckRefusalMessage, licenseAcknowledgmentBlocked, requiresLicenseAcknowledgment } from "./licenseAcknowledgment.js";
 
 const maxModelUploadBytes = 256 * 1024 * 1024 * 1024;
 
@@ -11,17 +10,8 @@ function uploadLimitLabel(bytes) {
 
 // Builds a model import (or repair) request. Loaded on first use by useModelsAndLoras so the
 // import-only request shape stays out of the first-paint bundle (bundle-budgets.json `initial`).
-export function buildModelImportRequest(payload, { models }) {
+export function buildModelImportRequest(payload) {
   const { file, repairModelId, ...metadata } = payload;
-  // Fine-tune component acquisition is the selected base's ordinary download workflow. Reuse
-  // consent taken on its existing model card, for both JSON/link and multipart/upload requests.
-  const base = models.find((model) => model.id === metadata.baseModel);
-  if (requiresLicenseAcknowledgment(base)) {
-    if (licenseAcknowledgmentBlocked(base)) {
-      throw new Error(licenseAckRefusalMessage(base));
-    }
-    metadata.licenseAcknowledged = true;
-  }
   if (file?.size > maxModelUploadBytes) {
     throw new Error(`Uploaded model file exceeds the ${uploadLimitLabel(maxModelUploadBytes)} limit`);
   }

@@ -1,3 +1,4 @@
+import { useConsentRequestOwner } from "./useConsentRequestOwner.js";
 import { useProjectScopedList } from "./useProjectScopedList.js";
 import { modelsApi } from "../api/modelsResources.js";
 import { lorasApi } from "../api/lorasResources.js";
@@ -52,6 +53,7 @@ export function useModelsAndLoras({
 }) {
   const [models, setModels] = useState([]);
   const [loras, setLoras] = useState([]);
+  const captureConsentOwner = useConsentRequestOwner(token, models, loras, activeProject?.id);
 
   // sc-4194: actions wrapped in useCallback so their identity is stable across App's
   // SSE-driven re-renders, letting appContextValue memoize.
@@ -174,13 +176,25 @@ export function useModelsAndLoras({
 
   const createModelImportJob = useCallback(
     async (payload, options = {}) => {
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return null;
     // Request building is loaded on first use so it stays out of the first-paint bundle.
     const { buildModelImportRequest } = await import("../modelImportRequest.js");
-    const { endpoint, body } = buildModelImportRequest(payload, { models });
+    if (!ownsRequest()) return null;
+    // An import may acquire components of the selected base. Reuse current server
+    // consent without turning a cached flag into a new acceptance assertion.
+    const base = models.find((model) => model.id === payload.baseModel);
+    const blocked = await licenseAcknowledgmentBlocked(base, token);
+    if (!ownsRequest()) return null;
+    if (blocked) {
+      throw new Error(licenseAckRefusalMessage(base));
+    }
+    const { endpoint, body } = buildModelImportRequest(payload);
     const job = await modelsApi.importRequest(endpoint, token, {
       method: "POST",
       body,
     });
+    if (!ownsRequest()) return null;
     setJobs((items) => upsertJobNewest(items, job));
     if (options.navigateToQueue ?? false) {
       setActiveView("Queue");
@@ -188,7 +202,7 @@ export function useModelsAndLoras({
     setError("");
     return job;
     },
-    [token, models, setJobs, setActiveView, setError],
+    [token, models, setJobs, setActiveView, setError, captureConsentOwner],
   );
 
   const createLoraImportJob = useCallback(
@@ -244,6 +258,8 @@ export function useModelsAndLoras({
 
   const createModelDownloadJob = useCallback(
     async (model, options = {}) => {
+      const ownsRequest = captureConsentOwner(token);
+      if (!ownsRequest()) return null;
       // Licence-acknowledgment CHOKE POINT (sc-17227). Every download-starting surface funnels
       // through here — the Models screen, the Simple UI's model manager, the first-run Setup
       // Wizard, the studio availability gates, the workflow drop, the Update button — so this is
@@ -255,7 +271,9 @@ export function useModelsAndLoras({
       // unacknowledged fetch and the weights would simply land. The API refuses the same request
       // independently (`apps/rust-api/src/models.rs`) for clients this code never runs in.
       try {
-        if (await licenseAcknowledgmentBlocked(model, token)) {
+        const blocked = await licenseAcknowledgmentBlocked(model, token);
+        if (!ownsRequest()) return null;
+        if (blocked) {
           setError(licenseAckRefusalMessage(model));
           return null;
         }
@@ -281,15 +299,17 @@ export function useModelsAndLoras({
           method: "POST",
           body: JSON.stringify(body),
         });
+        if (!ownsRequest()) return null;
         setJobs((items) => upsertJobNewest(items, job));
         setError("");
         return job;
       } catch (err) {
+        if (!ownsRequest()) return null;
         setError(err.message);
         return null;
       }
     },
-    [token, setJobs, setError],
+    [token, setJobs, setError, captureConsentOwner],
   );
 
   const createModelConvertJob = useCallback(
@@ -315,6 +335,8 @@ export function useModelsAndLoras({
   // Mirrors createModelDownloadJob.
   const createLoraDownloadJob = useCallback(
     async (lora) => {
+      const ownsRequest = captureConsentOwner(token);
+      if (!ownsRequest()) return null;
       // The LoRA half of the licence CHOKE POINT (sc-17227). `POST /api/v1/loras/:id/download`
       // gates on the repo the catalog row resolves to, so a LoRA whose `source.repo` is a
       // restricted repo is refused exactly as the model download is — and without this the refusal
@@ -324,7 +346,9 @@ export function useModelsAndLoras({
       // once on the model's card is what makes its LoRAs downloadable.
       const licenseSource = licenseAcknowledgmentSource(lora);
       try {
-        if (await borrowedLicenseAcknowledgmentBlocked(lora, token)) {
+        const blocked = await borrowedLicenseAcknowledgmentBlocked(lora, token);
+        if (!ownsRequest()) return null;
+        if (blocked) {
           setLoraError(licenseAckRefusalMessage(licenseSource));
           return null;
         }
@@ -333,10 +357,12 @@ export function useModelsAndLoras({
           method: "POST",
           body: JSON.stringify(body),
         });
+        if (!ownsRequest()) return null;
         setJobs((items) => upsertJobNewest(items, job));
         setLoraError("");
         return job;
       } catch (err) {
+        if (!ownsRequest()) return null;
         // The server probes installState live from the HF cache; our badge is a snapshot
         // from the last catalog fetch. When the cache is filled out-of-band (the on-demand
         // pull at first generation, another client) the row is already "installed" server-
@@ -352,15 +378,19 @@ export function useModelsAndLoras({
         return null;
       }
     },
-    [token, setJobs, setLoraError, refreshLoras],
+    [token, setJobs, setLoraError, refreshLoras, captureConsentOwner],
   );
 
-  const downloadConditionalComponents = useCallback(
-    (model, purpose) => modelsApi.conditionalDownload(model, purpose, token, {
-      method: "POST", body: JSON.stringify({ licenseAcknowledged: true }),
-    }),
-    [token],
-  );
+  const downloadConditionalComponents = useCallback(async (modelId, purpose) => {
+    const ownsRequest = captureConsentOwner(token);
+    if (!ownsRequest()) return null;
+    const blocked = await licenseAcknowledgmentBlocked(models.find((model) => model.id === modelId), token);
+    if (!ownsRequest()) return null;
+    if (blocked) throw new Error(licenseAckRefusalMessage(models.find((model) => model.id === modelId)));
+    return modelsApi.conditionalDownload(modelId, purpose, token, {
+      method: "POST", body: JSON.stringify({}),
+    });
+  }, [token, models, captureConsentOwner]);
 
   return {
     models,

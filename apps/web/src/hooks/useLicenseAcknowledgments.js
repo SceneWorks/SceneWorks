@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { getLicenseAcknowledgment, putLicenseAcknowledgment, deleteLicenseAcknowledgment } from "../api/yue2.js";
 import { licenseTermsMatch, requiresLicenseAcknowledgment, writeLicenseAck } from "../licenseAcknowledgment.js";
 
@@ -11,7 +11,7 @@ export function useLicenseAcknowledgments(models, token) {
   const mutations = useRef(new Map());
   const views = useRef(new Map());
   const key = JSON.stringify(models.filter(requiresLicenseAcknowledgment).map(({ id, license, licenseUrl, licenseNotice }) => [id, license, licenseUrl, licenseNotice]));
-  useEffect(() => {
+  useLayoutEffect(() => {
     const generation = ++epoch.current;
     let live = true;
     views.current = new Map();
@@ -39,6 +39,7 @@ export function useLicenseAcknowledgments(models, token) {
     const previous = mutations.current.get(id) ?? Promise.resolve();
     const view = views.current.get(id);
     const pending = previous.catch(() => {}).then(() => {
+      if (epoch.current !== generation) return null;
       if (acknowledged && (!view || !view.matches)) {
         throw new Error("Refresh the model catalog and review the current license terms before accepting.");
       }
