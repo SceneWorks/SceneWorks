@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { uploadFiles } from "../uploadFiles.js";
 import {
   AssetThumbnail,
   assetCanRenderAsAudio,
@@ -183,7 +184,7 @@ function PickerCardGrid({ assets, isSelected, onSelect, onActivate, ariaMultisel
         return (
           <button
             aria-selected={selected}
-            className={selected ? "asset-picker-card selected" : "asset-picker-card"}
+            className={selected ? "asset-picker-card asset-tile-windowed selected" : "asset-picker-card asset-tile-windowed"}
             key={asset.id}
             onClick={() => onSelect(asset)}
             onDoubleClick={onActivate ? () => onActivate(asset) : undefined}
@@ -422,6 +423,7 @@ function MediaSourcePickerModal({
   const [tab, setTab] = useState("assets");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectedSet = new Set(selectedIds);
   const selectedIdsRef = useRef(normalizeSelection(initialSelectedIds, assets, multiple));
   const selectionVersionRef = useRef(0);
   const [characterId, setCharacterId] = useState(characters[0]?.id ?? "");
@@ -534,12 +536,6 @@ function MediaSourcePickerModal({
     }
   }
 
-  function handleDrop(event) {
-    event.preventDefault();
-    setDragActive(false);
-    handleUpload(event.dataTransfer?.files);
-  }
-
   function switchTab(nextTab) {
     setTab(nextTab);
     setQuery("");
@@ -562,7 +558,7 @@ function MediaSourcePickerModal({
         ariaMultiselectable={multiple || undefined}
         assets={visibleAssets}
         emptyLabel={emptyLabel}
-        isSelected={(asset) => selectedIds.includes(asset.id)}
+        isSelected={(asset) => selectedSet.has(asset.id)}
         onActivate={multiple ? undefined : (asset) => onConfirm([asset.id])}
         onSelect={toggleAsset}
       />
@@ -618,7 +614,6 @@ function MediaSourcePickerModal({
           hint={uploading ? `Importing ${mediaLabel}${multiple ? "s" : ""}...` : `Drop ${multiple ? `${mediaLabel}s` : `a ${mediaLabel}`} here, or`}
           multiple={multiple}
           onActiveChange={setDragActive}
-          onDrop={handleDrop}
           onFiles={handleUpload}
         />
       ) : null}
@@ -733,6 +728,7 @@ export function AssetPickerModal({
   const [category, setCategory] = useState("all");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState(() => normalizeSelection(initialSelectedIds, assets, multiple));
+  const selectedSet = new Set(selectedIds);
   const selectedIdsRef = useRef(normalizeSelection(initialSelectedIds, assets, multiple));
   const selectionVersionRef = useRef(0);
   const [dragActive, setDragActive] = useState(false);
@@ -811,12 +807,6 @@ export function AssetPickerModal({
     }
   }
 
-  function handleDrop(event) {
-    event.preventDefault();
-    setDragActive(false);
-    handleUpload(event.dataTransfer?.files);
-  }
-
   const categoryCounts = useMemo(() => {
     return Object.fromEntries(categoryOptions.map(([key]) => [key, assets.filter((asset) => categoryMatches(asset, key)).length]));
   }, [assets]);
@@ -875,7 +865,7 @@ export function AssetPickerModal({
           ariaMultiselectable={multiple || undefined}
           assets={visibleAssets}
           emptyLabel="No assets match this view"
-          isSelected={(asset) => selectedIds.includes(asset.id)}
+          isSelected={(asset) => selectedSet.has(asset.id)}
           onActivate={(asset) => !multiple && onConfirm([asset.id])}
           onSelect={(asset) => toggleAsset(asset)}
         />
@@ -892,8 +882,7 @@ export function AssetPickerModal({
             }
             multiple={multiple}
             onActiveChange={setDragActive}
-            onDrop={handleDrop}
-            onFiles={handleUpload}
+              onFiles={handleUpload}
           />
         ) : null}
         {canImport && uploadError ? <p className="inline-warning">{uploadError}</p> : null}
@@ -932,6 +921,7 @@ export function CharacterImportDialog({
   const [tab, setTab] = useState("images");
   const [query, setQuery] = useState("");
   const [selectedIds, setSelectedIds] = useState([]);
+  const selectedSet = new Set(selectedIds);
   const [dragActive, setDragActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -966,9 +956,19 @@ export function CharacterImportDialog({
     setError("");
   }
 
-  async function attach(assetIds) {
-    await onImport(assetIds);
-    onClose();
+  const [pendingAttachments, setPendingAttachments] = useState([]);
+  async function attach(assetIds, { keepOpen = false } = {}) {
+    const result = await onImport(assetIds);
+    if (result?.failedIds?.length) {
+      setPendingAttachments(result.failedIds);
+      setSelectedIds(result.failedIds);
+      setTab("images");
+      setError(`Attached ${result.attached} of ${assetIds.length}. Retry the remaining assets.`);
+      setBusy(false);
+      return;
+    }
+    setPendingAttachments([]);
+    if (!keepOpen) onClose();
   }
 
   async function commitSelection() {
@@ -997,16 +997,14 @@ export function CharacterImportDialog({
     setBusy(true);
     setError("");
     try {
-      const importedIds = [];
-      for (const file of files) {
-        const imported = await importAsset(file, { throwOnError: true });
-        if (imported?.id) {
-          importedIds.push(imported.id);
-        }
-      }
-      if (importedIds.length) {
-        await attach(importedIds);
-      } else {
+      const outcomes = await uploadFiles(files, (file) => importAsset(file, { throwOnError: true }));
+      const importedIds = outcomes.filter((item) => item.value).map((item) => item.value.id);
+      const failures = outcomes.filter((item) => item.error);
+      if (importedIds.length) await attach(importedIds, { keepOpen: failures.length > 0 });
+      if (failures.length) {
+        setError(`Uploaded ${importedIds.length} of ${files.length}. Failed: ${failures.map(({ file }) => file.name).join(", ")}. Retry those files.`);
+        setBusy(false);
+      } else if (!importedIds.length) {
         setError("Upload failed — try another file.");
         setBusy(false);
       }
@@ -1016,19 +1014,13 @@ export function CharacterImportDialog({
     }
   }
 
-  function handleDrop(event) {
-    event.preventDefault();
-    setDragActive(false);
-    handleUploadFiles(event.dataTransfer?.files);
-  }
-
   function renderGrid(emptyLabel) {
     return (
       <PickerCardGrid
         ariaMultiselectable
         assets={visibleAssets}
         emptyLabel={emptyLabel}
-        isSelected={(asset) => selectedIds.includes(asset.id)}
+        isSelected={(asset) => selectedSet.has(asset.id)}
         onSelect={(asset) => toggleAsset(asset.id)}
       />
     );
@@ -1084,12 +1076,16 @@ export function CharacterImportDialog({
           hint={busy ? "Importing…" : "Drop images or videos here, or"}
           multiple
           onActiveChange={setDragActive}
-          onDrop={handleDrop}
           onFiles={handleUploadFiles}
         />
       ) : null}
 
       {error ? <p className="inline-warning">{error}</p> : null}
+      {pendingAttachments.length ? <button type="button" disabled={busy} onClick={async () => {
+        setBusy(true);
+        setError("");
+        try { await attach(pendingAttachments); } catch (err) { setError(err?.message ?? "Could not attach assets."); setBusy(false); }
+      }}>Retry {pendingAttachments.length} attachments</button> : null}
 
       {tab === "upload" ? null : (
         <footer className="asset-picker-footer">

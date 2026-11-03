@@ -1130,6 +1130,12 @@ export function configValidation(
     const value = numberFromDraft(configDraft[field]);
     if (!value || value <= 0) {
       issues.push(issue.error(field, `${label} must be greater than zero`));
+    } else if ((["rank", "steps", "resolution", "batchSize", "gradientAccumulation", "saveEvery"].includes(field) || (field === "alpha" && Array.isArray(selectedTarget?.limits?.alpha))) && !Number.isSafeInteger(value)) {
+      issues.push(issue.error(field, `${label} must be a whole number`));
+    } else if (Array.isArray(selectedTarget?.limits?.[field]) && ["rank", "alpha", "steps", "batchSize"].includes(field) && (value < selectedTarget.limits[field][0] || value > selectedTarget.limits[field][1])) {
+      issues.push(issue.error(field, `${label} must be between ${selectedTarget.limits[field][0]} and ${selectedTarget.limits[field][1]}`));
+    } else if (field === "resolution" && Array.isArray(selectedTarget?.limits?.resolutions) && !selectedTarget.limits.resolutions.includes(value)) {
+      issues.push(issue.error(field, `${label} must be one of ${selectedTarget.limits.resolutions.join(", ")}`));
     } else if (field === "alpha" && selectedTarget?.kernel === "moss_image_lora") {
       const nativeAlpha = Math.fround(value);
       if (!Number.isFinite(nativeAlpha) || nativeAlpha <= 0) {
@@ -1736,19 +1742,19 @@ function bodyLossExtraIssues(configDraft, selectedTarget, prefix) {
 }
 
 // Field issues for every enabled auxiliary loss (of `family` when given), in spec order.
-function auxLossesIssues(configDraft, selectedTarget, family = null) {
+function auxLossesIssues(configDraft, selectedTarget) {
   return auxLossSpecs
-    .filter((spec) => (!family || spec.family === family) && auxLossOn(configDraft, spec.prefix))
+    .filter((spec) => auxLossOn(configDraft, spec.prefix))
     .flatMap((spec) => auxLossIssues(configDraft, selectedTarget, spec));
 }
 
 // The auxiliary-loss keys a job snapshot carries: none for a loss that is off (a default job's
 // snapshot is unchanged); its weight plus every set knob while on (unset knobs take the API
 // defaults).
-function auxLossesSnapshot(configDraft, family = null) {
+function auxLossesSnapshot(configDraft) {
   const snapshot = {};
   for (const spec of auxLossSpecs) {
-    if ((family && spec.family !== family) || !auxLossOn(configDraft, spec.prefix)) continue;
+    if (!auxLossOn(configDraft, spec.prefix)) continue;
     Object.assign(
       snapshot,
       compactObject({
@@ -1760,30 +1766,4 @@ function auxLossesSnapshot(configDraft, family = null) {
     );
   }
   return snapshot;
-}
-
-// Per-family views of the shared checks (depth anchoring, body, face, latent-perceptual).
-export function depthAnchoringIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, "depth");
-}
-export function depthAnchoringSnapshot(configDraft) {
-  return auxLossesSnapshot(configDraft, "depth");
-}
-export function bodyLossIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, "body");
-}
-export function bodyLossSnapshot(configDraft) {
-  return auxLossesSnapshot(configDraft, "body");
-}
-export function faceLossIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, "face");
-}
-export function faceLossSnapshot(configDraft) {
-  return auxLossesSnapshot(configDraft, "face");
-}
-export function latentPerceptualIssues(configDraft, selectedTarget) {
-  return auxLossesIssues(configDraft, selectedTarget, "latent");
-}
-export function latentPerceptualSnapshot(configDraft) {
-  return auxLossesSnapshot(configDraft, "latent");
 }

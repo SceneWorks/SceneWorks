@@ -279,11 +279,13 @@ function CatalogCuration({ catalogId, token }) {
   });
   const [error, setError] = useState("");
   const abortRef = useRef(null);
+  const openAbortRef = useRef(null);
   const materializeAbortRef = useRef(null);
   const materializeGenerationRef = useRef(0);
 
   useEffect(() => () => {
     abortRef.current?.abort();
+    openAbortRef.current?.abort();
     materializeAbortRef.current?.abort();
     materializeGenerationRef.current += 1;
   }, []);
@@ -296,6 +298,7 @@ function CatalogCuration({ catalogId, token }) {
   }, [selectedRecordId, reviews]);
   useEffect(() => {
     abortRef.current?.abort();
+    openAbortRef.current?.abort();
     materializeAbortRef.current?.abort();
     materializeGenerationRef.current += 1;
     setOpen(false);
@@ -364,14 +367,19 @@ function CatalogCuration({ catalogId, token }) {
 
   async function openCuration() {
     setOpen(true);
+    openAbortRef.current?.abort();
+    const controller = new AbortController();
+    openAbortRef.current = controller;
     try {
       const [views, projectList] = await Promise.all([
         apiFetch(
           `/api/v1/catalogs/${encodeURIComponent(catalogId)}/saved-views`,
           token,
+          { signal: controller.signal },
         ),
-        apiFetch("/api/v1/projects", token),
+        apiFetch("/api/v1/projects", token, { signal: controller.signal }),
       ]);
+      if (controller.signal.aborted) return;
       setSavedViews(views ?? []);
       setProjects(projectList ?? []);
       setMaterializeDraft((current) => ({
@@ -379,10 +387,11 @@ function CatalogCuration({ catalogId, token }) {
         projectId: current.projectId || projectList?.[0]?.id || "",
       }));
     } catch {
+      if (controller.signal.aborted) return;
       setSavedViews([]);
       setProjects([]);
     }
-    await run(PRIMARY_CURATION);
+    if (!controller.signal.aborted) await run(PRIMARY_CURATION);
   }
 
   async function saveView(event) {
@@ -1221,7 +1230,7 @@ export function DatasetCatalogsScreen() {
 
               <Progress catalog={selected} />
 
-              <CatalogCuration catalogId={selected.id} token={token} />
+              <CatalogCuration key={selected.id} catalogId={selected.id} token={token} />
 
               <section className="catalog-detail-section" aria-labelledby="catalog-source-title">
                 <h3 id="catalog-source-title">Source configuration</h3>

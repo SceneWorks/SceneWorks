@@ -21,14 +21,15 @@ function CandidateGrid({ assets, selectedIds, onToggle, emptyLabel }) {
   if (!assets.length) {
     return <div className="empty-panel compact-panel">{emptyLabel}</div>;
   }
+  const selectedSet = new Set(selectedIds);
   return (
     <div aria-multiselectable className="dataset-add-grid" role="listbox">
       {assets.map((asset) => {
-        const selected = selectedIds.includes(asset.id);
+        const selected = selectedSet.has(asset.id);
         return (
           <button
             aria-selected={selected}
-            className={selected ? "dataset-add-card selected" : "dataset-add-card"}
+            className={selected ? "dataset-add-card asset-tile-windowed selected" : "dataset-add-card asset-tile-windowed"}
             key={asset.id}
             onClick={() => onToggle(asset.id)}
             role="option"
@@ -117,15 +118,6 @@ export function DatasetAddDialog({
     setSelectedIds([]);
   }
 
-  function handleDrop(event) {
-    event.preventDefault();
-    setDragActive(false);
-    const files = event.dataTransfer?.files;
-    if (files?.length) {
-      onImport(files);
-    }
-  }
-
   return (
     <Modal className="dataset-add-modal" labelledBy="dataset-add-title" onClose={onClose}>
       <header className="dataset-add-head">
@@ -161,7 +153,6 @@ export function DatasetAddDialog({
           hint={fileHint}
           multiple={multiple}
           onActiveChange={setDragActive}
-          onDrop={handleDrop}
           onFiles={onImport}
         />
       ) : null}

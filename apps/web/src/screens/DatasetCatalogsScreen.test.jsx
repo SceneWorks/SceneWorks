@@ -601,6 +601,31 @@ describe("DatasetCatalogsScreen", () => {
     expect(form.textContent).toContain("1 unavailable or duplicate candidates were replaced");
   });
 
+  it("aborts an opening catalog and cannot publish its delayed results after switching", async () => {
+    catalogs = [catalog(), catalog({ id: "cat-2", name: "Other catalog" })];
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Refresh")).click());
+    await flush();
+    const pending = deferred();
+    const original = fetch.getMockImplementation();
+    let oldSignal;
+    fetch.mockImplementation((url, options = {}) => {
+      if (new URL(url).pathname === "/api/v1/catalogs/cat-1/saved-views") {
+        oldSignal = options.signal;
+        return pending.promise;
+      }
+      return original(url, options);
+    });
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Browse catalog")).click());
+    await act(async () => [...container.querySelectorAll(".catalog-list-item")].find((button) => button.textContent.includes("Other catalog")).click());
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => pending.resolve(await response([{ id: "old", name: "Old catalog view" }])));
+    await flush();
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Browse catalog")).click());
+    await flush();
+    expect(container.textContent).not.toContain("Old catalog view");
+    expect(container.textContent).toContain("Other catalog");
+  });
+
   it("aborts and ignores stale materialization completion after switching catalogs", async () => {
     catalogs = [
       catalog(),
@@ -652,6 +677,11 @@ describe("DatasetCatalogsScreen", () => {
       .find((button) => button.textContent.includes("Browse catalog")).click());
     await flush();
     const nextForm = container.querySelector(".catalog-materialize-form");
+    const nextName = nextForm.querySelector("input[aria-label='Training dataset name']");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(nextName, "New dataset");
+      nextName.dispatchEvent(new Event("input", { bubbles: true }));
+    });
     await act(async () => [...nextForm.querySelectorAll("button")]
       .find((button) => button.textContent === "Create training dataset").click());
     await flush();

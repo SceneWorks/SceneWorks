@@ -2,7 +2,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { AssetPickerField, ImageEditSourcePickerField, VideoSourcePickerField } from "./AssetPicker.jsx";
+import { AssetPickerField, CharacterImportDialog, ImageEditSourcePickerField, VideoSourcePickerField } from "./AssetPicker.jsx";
 
 // The picker was previously "Change"/"Select"-only: once an optional source (img2img reference,
 // control image, second edit image) was picked there was no way to un-pick it, so it kept driving
@@ -634,5 +634,31 @@ describe("AssetPickerField audio import (VideoStudio reference audio)", () => {
     await openPicker({ onChange: vi.fn() });
     expect(document.body.querySelector('input[type="file"]')).toBeFalsy();
     expect(document.body.querySelector(".dataset-add-dropzone")).toBeFalsy();
+  });
+});
+
+
+describe("character import recovery", () => {
+  it("reports partial attachment and retries only failed ids", async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const onImport = vi.fn().mockResolvedValueOnce({ attached: 1, failedIds: ["b"] }).mockResolvedValueOnce({ attached: 1, failedIds: [] });
+    const onClose = vi.fn();
+    await act(async () => root.render(<CharacterImportDialog projectId="p" characterId="c" characterName="Ada" assets={[
+      { id: "a", type: "image", projectId: "p", displayName: "A" },
+      { id: "b", type: "image", projectId: "p", displayName: "B" },
+    ]} onImport={onImport} onClose={onClose} />));
+    const options = document.body.querySelectorAll('.asset-picker-grid [role="option"]');
+    await act(async () => { options[0].click(); options[1].click(); });
+    await act(async () => [...document.body.querySelectorAll("button")].find((b) => b.textContent.trim() === "Import 2").click());
+    expect(document.body.textContent).toContain("Attached 1 of 2");
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => [...document.body.querySelectorAll("button")].find((b) => b.textContent.includes("Retry 1 attachments")).click());
+    expect(onImport).toHaveBeenLastCalledWith(["b"]);
+    expect(onClose).toHaveBeenCalled();
+    await act(async () => root.unmount());
+    container.remove();
   });
 });

@@ -618,18 +618,23 @@ export function CharacterGenerationPanel({
       return;
     }
     setStatus("Uploading reference…");
-    const asset = await importAsset(file, { throwOnError: false });
-    if (asset?.id) {
-      // Approve the reference first, THEN select it (sc-8851). addCharacterReference
-      // triggers a characters refetch that folds the new asset into approvedReferences;
-      // selecting only after it lands means the reference-selection guard sees a valid
-      // id and keeps it, instead of the id being set while it's still absent from
-      // approvedReferences (which the guard would immediately snap back to [0]).
-      await addCharacterReference(characterId, { assetId: asset.id, approved: true, role: mode.referenceRole });
-      setReferenceAssetId(asset.id);
-      setStatus("");
-    } else {
-      setStatus("Upload failed — try another image.");
+    try {
+      const asset = await importAsset(file, { throwOnError: false });
+      if (asset?.id) {
+        // Approve the reference first, THEN select it (sc-8851). addCharacterReference
+        // triggers a characters refetch that folds the new asset into approvedReferences;
+        // selecting only after it lands means the reference-selection guard sees a valid
+        // id and keeps it, instead of the id being set while it's still absent from
+        // approvedReferences (which the guard would immediately snap back to [0]).
+        const attached = await addCharacterReference(characterId, { assetId: asset.id, approved: true, role: mode.referenceRole });
+        if (!attached) throw new Error("Could not attach the reference. Try again.");
+        setReferenceAssetId(asset.id);
+        setStatus("");
+      } else {
+        setStatus("Upload failed — try another image.");
+      }
+    } catch (error) {
+      setStatus(error?.message || "Reference upload failed — try again.");
     }
   }
 
@@ -1002,6 +1007,7 @@ export function CharacterAssets({
 }) {
   const [viewMode, setViewMode] = React.useState("active");
   const [importOpen, setImportOpen] = React.useState(false);
+  const [importStatus, setImportStatus] = React.useState("");
   // Same multi-select + batch toolbar as the Assets page (Batch… / Discard / Move).
   const batch = useAssetBatch();
   const characterId = selectedCharacter?.id;
@@ -1014,9 +1020,18 @@ export function CharacterAssets({
     if (!characterId || !addCharacterReference) {
       return;
     }
+    const failedIds = [];
     for (const assetId of assetIds) {
-      await addCharacterReference(characterId, { assetId, approved: false, role: "import" });
+      try {
+        const result = await addCharacterReference(characterId, { assetId, approved: false, role: "import" });
+        if (!result) failedIds.push(assetId);
+      } catch {
+        failedIds.push(assetId);
+      }
     }
+    const attached = assetIds.length - failedIds.length;
+    setImportStatus(`Attached ${attached} of ${assetIds.length} assets.`);
+    return { attached, failedIds };
   }
   if (!selectedCharacter) {
     return null;
@@ -1084,6 +1099,7 @@ export function CharacterAssets({
           </button>
         ) : null}
       </div>
+      {importStatus ? <p role="status">{importStatus}</p> : null}
       {importOpen ? (
         <CharacterImportDialog
           assets={assets}
@@ -1103,7 +1119,7 @@ export function CharacterAssets({
         <div className="asset-grid character-asset-grid">
           {visibleAssets.map((asset) => (
             <div
-              className={batch.selectedAssetIds.has(asset.id) ? "asset-tile-wrap selected" : "asset-tile-wrap"}
+              className={batch.selectedAssetIds.has(asset.id) ? "asset-tile-wrap asset-tile-windowed selected" : "asset-tile-wrap asset-tile-windowed"}
               key={asset.id}
             >
               <label className="asset-tile-check">

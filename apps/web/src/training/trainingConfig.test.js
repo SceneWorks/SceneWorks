@@ -45,7 +45,6 @@ import {
   targetSupportsFaceLandmarkLoss,
   targetSupportsIdentityLoss,
   faceLossCombinationRefusal,
-  faceLossIssues,
   resolutionBucketRepeatsMax,
   resolutionBucketsMax,
   resolutionBucketStride,
@@ -514,6 +513,16 @@ describe("configValidation", () => {
       expect(kindsOf(configValidation({ ...wholeDraft, [field]: -1 }, ctx), field)).toEqual(["error"]);
     });
   }
+
+  it("enforces advertised numeric limits and integer fields without losing fractional alpha or learning rate", () => {
+    const advertised = { ...target, limits: { rank: [4, 128], alpha: [1, 128], steps: [10, 2000], batchSize: [1, 4], resolutions: [512, 1024] } };
+    const errors = (draft, selectedTarget = advertised) => configValidation({ ...wholeDraft, ...draft }, { ...ctx, selectedTarget }).filter((entry) => entry.kind === "error");
+    expect(errors({ rank: 3 }).some((entry) => entry.field === "rank")).toBe(true);
+    expect(errors({ steps: 100.5 }).some((entry) => entry.field === "steps")).toBe(true);
+    expect(errors({ resolution: 768 }).some((entry) => entry.field === "resolution")).toBe(true);
+    expect(errors({ alpha: 1.5 }).some((entry) => entry.field === "alpha")).toBe(true);
+    expect(errors({ alpha: 1.5, learningRate: 0.00001 }, { ...advertised, limits: { ...advertised.limits, alpha: undefined } })).toEqual([]);
+  });
 
   it("names the output after the target's output kind", () => {
     const issues = configValidation({ ...wholeDraft, outputName: "" }, ctx);
@@ -1672,11 +1681,11 @@ describe("face loss combination refusals (sc-24831)", () => {
   const full = { ...target, limits: { ...target.limits, supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
   it("refuses a full fine-tune and a no-video LTX-2.5 workflow on the weight key", () => {
     for (const [key, label] of [["identityLossWeight", "Identity loss"], ["faceLandmarkLossWeight", "Face landmark loss"]]) {
-      const ft = faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", networkType: "full" }, full);
-      expect(ft).toEqual([[key, `${label} trains a LoRA/LoKr adapter only, not a full fine-tune`]]);
-      const audio = faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", ltxWorkflow: "t2a_lora" }, ltx);
-      expect(audio).toEqual([[key, `${label} needs a generated video stream; the LTX-2.5 workflow t2a_lora generates none`]]);
-      expect(faceLossIssues({ [key]: "0.1", identityLossReference: "dataset_average", ltxWorkflow: "t2v_lora" }, ltx)).toEqual([]);
+      const messages = (draft, selectedTarget) => configValidation(draft, { selectedTarget }).filter((entry) => entry.field === key).map((entry) => entry.message);
+      const draft = { [key]: "0.1", identityLossReference: "dataset_average" };
+      expect(messages({ ...draft, networkType: "full" }, full)).toEqual([`${label} trains a LoRA/LoKr adapter only, not a full fine-tune`]);
+      expect(messages({ ...draft, ltxWorkflow: "t2a_lora" }, ltx)).toEqual([`${label} needs a generated video stream; the LTX-2.5 workflow t2a_lora generates none`]);
+      expect(messages({ ...draft, ltxWorkflow: "t2v_lora" }, ltx)).toEqual([]);
     }
     expect(faceLossCombinationRefusal({ baseModel: "ltx_2_3" }, { ltxWorkflow: "t2a_lora" }, "Identity loss")).toBeNull();
   });

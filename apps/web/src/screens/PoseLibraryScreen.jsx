@@ -1,3 +1,4 @@
+import { isImageUpload } from "../uploadFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API_BASE_URL, apiFetch, isAbortError, withMediaTicket } from "../api.js";
 import { AssetDetail, AssetGrid, FullscreenPreview, emptyTrash } from "../components/assetPanels.jsx";
@@ -157,7 +158,7 @@ function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
   // asset) — the worker reads it by path and deletes it after detection (epic 2282).
   const handleImport = useCallback(
     async (files) => {
-      const images = Array.from(files).filter((file) => file.type?.startsWith("image/"));
+      const images = Array.from(files).filter((file) => isImageUpload(file));
       if (!images.length) return;
       setImporting(true);
       try {
