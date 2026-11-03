@@ -279,7 +279,9 @@ pub trait FamilyDriver<B: RunnerBackend>: Send + Sync {    // PIPE-7
                  hooks: &mut StepHooks<'_, B>) -> Result<BoundaryState<B::Latent>>;
 }
 
+pub enum EvaluationKind { Trajectory, BoundaryEstimate }
 pub struct StepInfo { pub pass: PassId, pub phase: u16, pub step: u32, pub outer_step: u32, pub eval_in_step: u32,
+                      pub kind: EvaluationKind,
                       pub sigma: PerStream<f32>, pub next_sigma: PerStream<f32> }
 pub enum TimeInput { Sigma(PerStream<f32>), FlowMap{ t: f32, t_ref: f32 },
                      PerToken(TokenTimeBuilder), RowTimesteps(RowTimes), Angle(f32) }
@@ -288,6 +290,8 @@ pub enum TimeInput { Sigma(PerStream<f32>), FlowMap{ t: f32, t_ref: f32 },
 **Request execution state (R2-03).** `RunState` owns the solver/driver state, previous nodes/intervals, stochastic draw coordinates, request caches and any autoregressive causal state. The shared driver takes `&mut SolverRunState`, as the native driver takes `&mut DriverRunState`; neither creates fresh history on every slice. A phase references its range in the **whole pass schedule**, not a newly zero-indexed solver call. `Carry` requires the same solver variant and numerical convention, a contiguous schedule and compatible geometry; a solver change uses Reset unless an explicit tested conversion exists. For native Wan the same scheduler continues across the expert crossing; native Krea retains its declared Reset behavior.
 
 RNG coordinates and solver history are separate fields. For an inert split, a draw previously addressed by `i`, `2*i` or `2*i+1` keeps that absolute pass index. New boundary noise uses `(recipe version, PassId, stream, sample identity, transition role)` salts and does not advance the solver draw stream. Pass restarts follow the route's existing legacy policy or a named new recipe stream. Reset clears numerical history and previous intervals, not RNG coordinates or unrelated KV. State retention/reset rules for driver caches are explicit and checked when geometry changes. An inert boundary may be elided for execution so it cannot introduce an extra materialization, terminal sigma or cast. Evidence: inference `sampling/solvers.rs:219,264,380,403` and Wan `pipeline/moe.rs:33-46`.
+
+**Guidance/Feature state (round-3 correction).** `RunState` also owns guidance momentum and mutable Feature state. `EvaluationKind::BoundaryEstimate` propagates through prediction, combine and hooks: evaluate the departing configuration against a snapshot, discard all updates to momentum/history/cache counters, and emit only internal evaluation/telemetry accounting. It cannot mutate live APG state, advance outer progress, commit KV or consume solver draws. Derived immutable preparation caches may be reused through their ordinary dependency keys; any snapshot/scratch allocations are priced. If an active Feature cannot provide this read-only behavior, composed-plan validation refuses the combination rather than silently bypassing it. State descriptors specify dependencies and invalidation for geometry, branch layout, model and adapter changes. In recipe v1 a geometry change resets incompatible shape-dependent momentum/residual caches before the next trajectory evaluation; geometry-independent state retains its declared cadence. Native no-Feature paths keep existing update behavior. This is required because APG's `MomentumBuffer::update` stores a running tensor and guidance calls it (`gen-core/src/guidance.rs:168-190,201-208`), independently of solver history. Tier 0 uses a fake/stateful guidance operator to check snapshot nonmutation and invalidation before new-shape arithmetic; no learned forward runs in that test.
 
 **Preparation/cache dependency contract (R2-04).** The runner resolves the model slot for the **actual evaluation**, ensures its weights/residency, derives aligned inputs, then prepares context with `PrepareArgs`. Keys include the declared subset of request/pass/sample identity, effective weights/tier, geometry, encoded conditioning, adapter identity/scales, branch layout and perturbation. An adapter-dependent aggregator cannot share a key with base-only preparation; a CFG batch-1 cache cannot stand in for batch 2. Split independent caches where their dependency subsets differ. Numeric scale or branch-count changes need not invalidate a geometry-only RoPE cache. Future-use cache retention is an explicit live allocation, not free reuse. Krea's existing preparation explains the adapter dependency (`mlx-gen-krea/src/pipeline.rs:1127-1148`). No per-request cache values are installed on shared resident modules.
 
@@ -629,7 +633,7 @@ The hook enum in code is the source of truth (HOOK-1). The table below is the de
 |---|---|
 | Engine `[INF]` | `gen-core/src/features/low_res_start.rs`. **Params:** `{version: 1, k, scale}`. **Resolved constants:** first denoising PassId only; fixed final-pass-geometry schedule/mu; read-only endpoint x0; bilinear clean-latent resample; destination noise law; Reset. No exposed `renoise` or `mu_policy` knob in v1. **Applicability:** supported spatial axes/grids/modes, endpoint estimator, transition, stream coupling and composed-plan checks (§3.1, FEAT-1). Edit/reference/control initially refuse until ENG-12 rebuild support; ordinary img2img init remains supported. **Plan rewrite:** split that pass's M executed steps at K, use reduced spatial dimensions for `[0,K)` and full pass dimensions for `[K,M)`. Other axes and later passes are unchanged. All transition allocations are priced. |
 | Backend `[INF]` | None after ENG-1, which builds `BundleOps::resample` and pack/unpack once. |
-| Families | None. Each route's `prepare_step_context` is keyed on geometry (PIPE-5). Refusals come from the route structure. |
+| Families | None after adoption. `prepare_step_context` uses its complete declared dependency key (PIPE-5), and model/guidance/Feature hooks honor boundary-estimate nonmutation and state invalidation (§3.3). Refusals come from composed route support. |
 | SceneWorks `[SW]` | The `lowResStart` option entry, common parameter validation, persistence/upgrade/replay wiring and web controls gated by the export. ENG-1 updates adopted-route admission to the shared plan/live-set interface and per-phase scope identities (§3.9); it does not wait for APP-4. Preserve existing user shapes through the upgrader and recipe-version rules. Reuse this integration when APP-2 supplies the general option registry, migrating consumers in that producer feature. |
 | **Not the PAT-1 measure** | ENG-1 legitimately touches SceneWorks option, validation and web files. PAT-1 is measured on a later Feature (§6.4). |
 
@@ -663,7 +667,7 @@ Take a t2i pass `base` with M=8 executed outer steps, K=4, full 1024×1024 and s
 
 1. Enter the priced transition scope; check cancellation. Resolve the departing configuration's slot at sigma[4], ensure it and prepare its dependency-keyed context. Perform one read-only endpoint forward and convert its output to x0 using the declared sampling convention.
 2. Unpack and bilinearly resize **x0** to the 1024-grid latent dimensions. Draw feature-domain target-grid noise. For FLUX flow, use `(1−sigma[4])*x0_resized + sigma[4]*noise`; never feed the noisy endpoint to this clean-sample formula.
-3. Repack/cast to the declared solver latent representation, release transition-only buffers, Reset numerical history, retain the defined absolute stochastic coordinates, enter the full-size phase scope and rebuild the geometry-dependent context.
+3. Repack/cast to the declared solver latent representation, release transition-only buffers, Reset numerical history and incompatible geometry-dependent guidance/Feature state, retain the defined absolute stochastic coordinates, enter the full-size phase scope and rebuild the geometry-dependent context. The boundary estimate has not committed a guidance momentum/cache update.
 4. Execute `[4,8)`, decode once and persist final output plus resolved recipe. Progress is eight outer steps; the report includes the boundary evaluation. Price all transition buffers even if the steady full-size phase appears larger in one measurement.
 
 With the Feature absent, there is one full-size phase and no boundary estimate, feature noise draw or transition allocation. Img2img resolves strength first: if only three steps execute, K=4 refuses before load. Count > 1 follows the route's legacy sequential/batched relation; every sample's new transition stream includes that sample identity.
@@ -712,13 +716,13 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 | Runner trace over a mocked backend | 0 | Pass/stage/phase/hook sequence; Hires prompt/conditioning/event equality; Wan MoE trace equality with legacy; §6.5–6.8 |
 | `FamilyDriver` and Feature conformance over a mocked forward | 0 | Every `DriverSupport` and geometry-change claim [ENG-16, ENG-21] |
 | Concurrency | 0 | Two interleaved requests on one provider (PIPE-14) |
-| Boundary-state and split conformance | 0 | Flow/VE noise law and estimate provenance; inert split versus unsplit history/draw coordinates; incompatible Carry refusal |
+| Boundary-state and split conformance | 0 | Flow/VE noise law and estimate provenance; inert split versus unsplit history/draw coordinates; incompatible Carry refusal; read-only guidance/Feature state and geometry invalidation |
 | Context dependency conformance | 0 | Krea base/adapter/base, CFG-off/on and request isolation; retained allocation pricing |
 | Fault injection | 0 | Error classes × stages (PIPE-15) |
 | Weight-plan receipt | 0 | Header-only compile and bind receipts |
 | Engine-request equivalence | 0 | SceneWorks-built requests recorded by a fake generator |
 | Admission and routing decision-diffs | 0 | Per (route, tier, geometry, budget); cfg-free core runs on Linux CI |
-| Allocation live-set pricing | 0 | Concurrent streams, joint workspace, transition peak, aliased views and phase/transition scope identities at budget boundaries |
+| Allocation live-set pricing | 0 | Concurrent streams, joint workspace, transition peak, aliased views, count > 1, selected rungs and actual phase/transition scope identities at budget boundaries |
 | Receipt/`raw_settings` shape | 0 | Shape assertions |
 | Primitive op checks | 0 | Kit ops on synthetic tensors |
 | Base-versus-head equivalence | 1 | Same runner, same job, shape-faithful random weights (real dims, truncated depth), in-job comparison, no committed goldens |
