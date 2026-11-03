@@ -1,3 +1,4 @@
+import { sha256 } from "./lib/file-sha256.mjs";
 // Terminal installed-product proof. CLI defaults to pure planning; no credentials or downloads.
 import assert from 'node:assert/strict';
 import { createHash, randomBytes } from 'node:crypto';
@@ -12,7 +13,7 @@ import { contained, fileHash, validateAdmission, launchTerminalSession, Provisio
 import { validateApprovedPlan, planHash, initializeLedger, auditLedger, boundInputSpecSha256, admittedHost, inHostLane, ledgerLane } from './flux3-image-klein-terminal-budget.mjs';
 import { verifyTerminalMapping, artifactStagingPlan, revalidateMappedArtifacts, invalidateArtifactVerification, ArtifactReadinessBlocked } from './flux3-image-klein-terminal-artifacts.mjs';
 import { bindTrainingExpectation, verifyNativeContinuation } from './flux3-image-klein-terminal-training-proof.mjs';
-export const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
+export { sha256 };
 export const objectHash = object => sha256(JSON.stringify(object));
 export function pngCrc32(bytes) { let crc = 0xffffffff; for (const byte of bytes) { crc ^= byte; for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0); } return (crc ^ 0xffffffff) >>> 0; }
 export function assertFinishedPng(bytes, width, height, { allowBlank = false, forReference = false } = {}) {

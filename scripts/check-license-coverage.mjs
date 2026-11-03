@@ -1,3 +1,4 @@
+import { stripJsoncComments as stripJsonc } from "./lib/jsonc.mjs";
 // SceneWorks packaging guard: every shipped model must have an About→Licenses entry (sc-13803).
 //
 // WHY THIS EXISTS
@@ -89,14 +90,6 @@ const UNDETERMINED = new Map([
     "TheDrummer/Anubis-Mini-8B-v1 declares no license; it derives from a Llama-3.3-8B-Instruct finetune, so Meta's Llama 3.3 Community License likely governs — needs confirmation.",
   ],
 ]);
-
-/** Strip `//` and `/* *​/` comments from JSONC without touching string contents. */
-function stripJsonc(source) {
-  return source.replace(
-    /\\"|"(?:\\"|[^"])*"|(\/\/.*|\/\*[\s\S]*?\*\/)/g,
-    (match, comment) => (comment ? "" : match),
-  );
-}
 
 const catalog = JSON.parse(stripJsonc(fs.readFileSync(CATALOG, "utf8")));
 const manifest = JSON.parse(fs.readFileSync(MANIFEST, "utf8"));

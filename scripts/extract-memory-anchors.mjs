@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { sha256 } from "./lib/file-sha256.mjs";
 /**
  * sc-22510 — extract the measured memory ANCHOR store from the retained evidence, and classify
  * every routing-catalog cell the evidence cannot anchor as explicitly ANALYTIC-ONLY.
@@ -78,7 +79,6 @@
  *
  * Usage: node scripts/extract-memory-anchors.mjs [--check] [--inference-root <dir>|auto]
  */
-import { createHash } from "node:crypto";
 import { readFile, writeFile, rename, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -158,7 +158,6 @@ export const ANALYTIC_BASES = [
 // UTF-8 protocol string, so compare code units directly (same rule as fit-ltx-temporal-form.mjs).
 const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0);
 
-const sha256 = (body) => createHash("sha256").update(body).digest("hex");
 
 const toPosix = (value) => value.split(path.sep).join("/");
 

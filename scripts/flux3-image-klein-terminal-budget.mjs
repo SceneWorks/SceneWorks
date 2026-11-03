@@ -1,3 +1,5 @@
+import { fileSha256 } from "./lib/file-sha256.mjs";
+import { sha256 as rawHash } from "./lib/file-sha256.mjs";
 // No service/distributed allocation. One immutable GLOBAL plan assigns disjoint backend permits.
 // Product/resource/resume sessions consume their backend's SAME stable local atomic ledger.
 import assert from 'node:assert/strict';
@@ -5,7 +7,6 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes } from 'node:crypto';
-import { createReadStream } from 'node:fs';
 import { mkdir, open, readFile, readdir, rename, unlink, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { validateNativeBoundaryReceipt } from './lib/flux3-native-boundary.mjs';
@@ -131,7 +132,7 @@ export function validateApprovedPlan(approval) {
 const CANDLE_PREVIOUS_SOURCE = '7090f742a7d2973dc3cc1c144aa8a272cdc293c9';
 const CANDLE_REPLAY_CASE = 'candle.distilled.representative-repro.bf16';
 const CANDLE_CONSUMED = `${CANDLE_REPLAY_CASE}.generation-1`, CANDLE_NEXT = `${CANDLE_REPLAY_CASE}.generation-2`;
-const rawHash = bytes => createHash('sha256').update(bytes).digest('hex');
+
 const canonical = value => JSON.stringify(canonicalValue(value));
 function canonicalValue(value) {
   if (Array.isArray(value)) return Array.from(value, canonicalValue);
@@ -385,8 +386,7 @@ async function ownedArtifact(binding, ownedRoot, text = true) {
   assert(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative), 'artifact escaped owned root');
   assert((await stat(file)).isFile(), 'owned regular artifact required');
   if (!text) {
-    const hash = createHash('sha256'); for await (const chunk of createReadStream(file)) hash.update(chunk);
-    assert.equal(hash.digest('hex'), binding.sha256, 'owned artifact raw bytes mismatch'); return;
+    assert.equal(await fileSha256(file), binding.sha256, 'owned artifact raw bytes mismatch'); return;
   }
   const bytes = await readFile(file); assert.equal(rawHash(bytes), binding.sha256, 'owned artifact raw bytes mismatch'); return bytes.toString('utf8');
 }
