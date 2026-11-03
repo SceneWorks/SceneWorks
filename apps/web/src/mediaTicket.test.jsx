@@ -7,7 +7,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { API_BASE_URL, getMediaTicket, setMediaTicket, withMediaTicket } from "./api.js";
-import { AssetThumbnail, assetUrl, posterUrl } from "./components/assetMedia.jsx";
+import { AssetMedia, AssetThumbnail, assetUrl, posterUrl } from "./components/assetMedia.jsx";
 import { AssetDetail } from "./components/assetPanels.jsx";
 import { keypointSourceImageUrl } from "./keypointLibrary.js";
 
@@ -183,5 +183,41 @@ describe("DocumentReader authenticates its document fetch (sc-8810)", () => {
       `${API_BASE_URL}/api/v1/projects/p1/files/assets/documents/story.json?ticket=d0cticket`,
     );
     expect(container.textContent).toContain("hello");
+  });
+});
+
+describe("finite media-credential rotation", () => {
+  it("updates mounted playback and retains position and playing state for the same file", async () => {
+    global.IS_REACT_ACT_ENVIRONMENT = true;
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const ref = React.createRef();
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockResolvedValue();
+    try {
+      setMediaTicket("old-client-ticket");
+      act(() => root.render(<AssetMedia asset={videoAsset} ref={ref} />));
+      const video = container.querySelector("video");
+      expect(ref.current).toBe(video);
+      video.currentTime = 42;
+      video.playbackRate = 1.5;
+      Object.defineProperty(video, "paused", { configurable: true, value: false });
+      act(() => setMediaTicket("new-client-ticket"));
+      expect(video.src).toContain("ticket=new-client-ticket");
+      video.currentTime = 0; // the browser resets it while loading the new URL
+      act(() => video.dispatchEvent(new Event("loadedmetadata")));
+      expect(video.currentTime).toBe(42);
+      expect(video.playbackRate).toBe(1.5);
+      expect(play).toHaveBeenCalledOnce();
+      act(() => root.render(<AssetMedia asset={{ ...videoAsset, file: { path: "assets/other.mp4" } }} ref={ref} />));
+      video.currentTime = 0;
+      act(() => video.dispatchEvent(new Event("loadedmetadata")));
+      expect(video.currentTime).toBe(0);
+      expect(play).toHaveBeenCalledOnce();
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      play.mockRestore();
+    }
   });
 });

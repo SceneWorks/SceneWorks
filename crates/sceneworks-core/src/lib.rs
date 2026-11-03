@@ -145,3 +145,5 @@ mod tests {
         assert_eq!(contract.service(), "sceneworks-api");
     }
 }
+
+pub mod network_policy;

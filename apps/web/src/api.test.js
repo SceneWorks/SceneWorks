@@ -212,11 +212,13 @@ it("keeps the long-lived access token in headers and short-lived tickets in URLs
   try {
     fetch.mockClear();
     const password = "long-lived-host-password";
-    await apiFetch("/api/v1/files/ticket", password, { method: "POST" });
+    await apiFetch("/api/v1/files/ticket", password, { method: "POST", body: "{}" });
     const [url, options] = fetch.mock.calls[0];
     expect(url).not.toContain(password);
     expect(url).not.toContain("token=");
     expect(options.headers.get("X-SceneWorks-Token")).toBe(password);
+    expect(options.headers.get("Content-Type")).toBe("application/json");
+    expect(options.body).toBe("{}");
     setMediaTicket("short-lived-media-ticket");
     expect(withMediaTicket("/api/v1/projects/p/files/movie.mp4")).toBe("/api/v1/projects/p/files/movie.mp4?ticket=short-lived-media-ticket");
     expect(eventUrl("/api/v1/events", "short-lived-sse-ticket")).not.toContain(password);

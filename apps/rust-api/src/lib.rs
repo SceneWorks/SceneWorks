@@ -195,6 +195,7 @@ use workers::{
 };
 mod events;
 use events::{create_event_ticket, job_events, EventHub, EventMessage};
+mod http_boundary;
 mod tickets;
 use tickets::{create_media_ticket, EventTicketContext, TicketResponse, TicketStore};
 mod dto;
@@ -1511,7 +1512,7 @@ fn create_app_with_state_mode(
             EVENT_TICKET_TTL_SECONDS,
             MAX_OUTSTANDING_EVENT_TICKETS,
         )),
-        media_tickets: Arc::new(TicketStore::new(MEDIA_TICKET_TTL_SECONDS)),
+        media_tickets: Arc::new(TicketStore::media(MEDIA_TICKET_TTL_SECONDS, 24 * 60 * 60)),
         thumbnail_generation_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         workflow_strip_slots: Arc::new(tokio::sync::Semaphore::new(WORKFLOW_STRIP_SLOTS)),
         auth_throttle: Arc::new(AuthThrottle::default()),
@@ -1530,7 +1531,10 @@ fn create_app_with_state_mode(
         external_base_model_cache: Arc::new(Mutex::new(
             external_base_models::ExternalBaseModelCache::default(),
         )),
-        http_client: reqwest::Client::new(),
+        http_client: http_boundary::outbound_client()
+            .map_err(|error| JobsStoreError::Io(std::io::Error::other(error)))?,
+        planner_http_client: http_boundary::planner_client()
+            .map_err(|error| JobsStoreError::Io(std::io::Error::other(error)))?,
         interrupted_jobs_on_startup,
         startup_maintenance: if defer_upload_sweeps {
             StartupMaintenance::pending()
@@ -2382,6 +2386,7 @@ fn create_app_with_state_mode(
         // route (asset import, training uploads, pose/keypoint sources, and the
         // model/lora import routes above).
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+        .layer(middleware::from_fn(http_boundary::request_body_idle_timeout))
         .layer(middleware::from_fn_with_state(state, access_control))
         .layer(cors)
         // Marking is inside CompressionLayer on the response path. This keeps
@@ -2402,7 +2407,9 @@ fn create_app_with_state_mode(
         )
         // Outermost so auth failures, CORS responses, and handler responses are
         // all timed. Non-API frontend traffic is ignored by the middleware.
-        .layer(middleware::from_fn(api_request_timing));
+        .layer(middleware::from_fn(api_request_timing))
+        .layer(tower::limit::GlobalConcurrencyLimitLayer::new(http_boundary::MAX_CONCURRENT_REQUESTS))
+        .layer(middleware::from_fn(http_boundary::no_referrer));
     Ok((router, returned_state))
 }
 

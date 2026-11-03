@@ -10,13 +10,13 @@ use std::time::Duration;
 /// (`remote_content_length` / `lora_source_content_length`), which run before any
 /// cancel checkpoint exists — without a bound the process would never heartbeat or
 /// claim again (sc-11149).
-pub(crate) const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) use sceneworks_core::network_policy::HTTP_CONNECT_TIMEOUT;
 
 /// Chunk-level read timeout: the longest gap tolerated between received bytes on a
 /// streaming download. This bounds a stalled mid-stream peer WITHOUT a total timeout,
 /// so legitimate multi-GB weight streams still complete as long as bytes keep
 /// arriving (sc-11149).
-pub(crate) const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) use sceneworks_core::network_policy::DOWNLOAD_READ_TIMEOUT as HTTP_READ_TIMEOUT;
 
 /// Apply the standard connect + chunk-level read timeouts to a download client
 /// builder. Streaming downloads deliberately get NO total `timeout` (that would cap a

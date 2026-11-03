@@ -1,6 +1,6 @@
 import { AssetVedaOutcome } from "./VedaOutcome.jsx";
 import React from "react";
-import { isAbortError } from "../api.js";
+import { getMediaTicket, isAbortError, subscribeMediaTicket } from "../api.js";
 import { appConfirm } from "../appConfirm.jsx";
 import { assetMatchesCharacter } from "../characterMembership.js";
 import { assetCanCarryWorkflow, saveAssetAs, revealAsset } from "../assetActions.js";
@@ -938,6 +938,7 @@ function FullscreenPreviewComponent({
   sourceAsset,
   updateAssetStatus,
 }) {
+  React.useSyncExternalStore(subscribeMediaTicket, getMediaTicket, getMediaTicket);
   const hasUpscaleVariants = Boolean(asset.variants?.original && asset.variants?.upscaled);
   const [variantMode, setVariantMode] = React.useState("upscaled");
   React.useEffect(() => {

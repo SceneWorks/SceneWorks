@@ -160,9 +160,18 @@ export function eventUrl(path, ticket) {
 // Module-level (not React state) because URL producers like assetUrl() are plain
 // functions called from render paths and non-component code (browserDownload).
 let mediaTicket = "";
+const mediaTicketSubscribers = new Set();
+
+export function subscribeMediaTicket(listener) {
+  mediaTicketSubscribers.add(listener);
+  return () => mediaTicketSubscribers.delete(listener);
+}
 
 export function setMediaTicket(ticket) {
-  mediaTicket = typeof ticket === "string" ? ticket : "";
+  const next = typeof ticket === "string" ? ticket : "";
+  if (next === mediaTicket) return;
+  mediaTicket = next;
+  for (const listener of mediaTicketSubscribers) listener();
 }
 
 export function getMediaTicket() {

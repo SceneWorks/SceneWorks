@@ -644,8 +644,8 @@ pub(crate) async fn provision(app: &AppHandle) -> Result<(), String> {
         false,
     );
     let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .read_timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(sceneworks_core::network_policy::HTTP_CONNECT_TIMEOUT)
+        .read_timeout(sceneworks_core::network_policy::DOWNLOAD_READ_TIMEOUT)
         .build()
         .map_err(|error| format!("http client: {error}"))?;
     for (index, component) in COMPONENTS.iter().enumerate() {

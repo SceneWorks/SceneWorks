@@ -3015,8 +3015,7 @@ fn progress_report_interval(settings: &Settings) -> Duration {
 }
 
 fn retry_delay(poll_seconds: u64, attempt: u32) -> u64 {
-    let multiplier = 2_u64.saturating_pow(attempt.saturating_sub(1).min(4));
-    poll_seconds.max(1).saturating_mul(multiplier).clamp(1, 30)
+    sceneworks_core::network_policy::retry_delay_seconds(poll_seconds, attempt)
 }
 
 #[cfg(test)]
