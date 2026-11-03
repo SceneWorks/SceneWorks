@@ -30,19 +30,18 @@ worker cache, resolver, cancellation and error-classification fixtures.
 
 ## Explicit provider validation
 
-Dispatch `.github/workflows/cv-provider-validation.yml` twice against the clean,
-stable paired source: once with `backend=mlx`, once with `backend=cuda`. Its five
-inputs are `source_sha` (the exact dispatch-ref SHA), `inference_sha` (the full
+Dispatch the registered `.github/workflows/nax-kernel-validation.yml` with
+`suite=cv` twice against the clean, stable paired source: once with `backend=mlx`,
+once with `backend=cuda`. It forwards five CV inputs: `source_sha` (the exact dispatch-ref SHA), `inference_sha` (the full
 reachable revision pinned everywhere by that source), `backend`, `build_only`,
 and `mac_go`. Actual evidence requires `build_only=false`; Mac execution also
 requires `mac_go=true`. Build-only skips provisioning and all model execution.
 
 The workflow provisions its own fixtures and native runtime. No pre-existing
 oracle directory, manually exported model, or user-supplied runtime is required.
-The registered `nax-kernel-validation.yml` dispatcher can call this reusable
-workflow with `suite=cv` after the coordinator integrates that bridge; keep its
-existing default NAX and aesthetic suites unchanged. The bridge is not part of
-this source change. Neither CV workflow has an automatic push/PR/schedule trigger.
+The registered dispatcher calls the reusable `cv-provider-validation.yml`
+workflow and preserves its existing default NAX and aesthetic suites. Neither
+CV workflow has an automatic push/PR/schedule trigger.
 
 ### Independent oracle production
 
