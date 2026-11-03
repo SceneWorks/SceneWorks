@@ -7028,9 +7028,12 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("bounded.safetensors");
         let length = crate::safetensors::MAX_ADAPTER_HEADER_BYTES + 1;
-        std::fs::write(&path, length.to_le_bytes()).unwrap();
-        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-        file.set_len(length + 8).unwrap();
+        // Valid JSON apart from the intentional size violation: widening the import cap would
+        // accept this file, rather than merely failing later on malformed sparse-file padding.
+        let mut oversized = length.to_le_bytes().to_vec();
+        oversized.extend_from_slice(b"{}");
+        oversized.resize((length + 8) as usize, b' ');
+        std::fs::write(&path, oversized).unwrap();
         assert!(matches!(
             read_safetensors_header(&path),
             Err(SafetensorsHeaderError::InvalidHeader)

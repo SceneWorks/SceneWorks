@@ -3257,13 +3257,12 @@ mod safetensors_header_tests {
             assert_eq!(wan_expert_in_channels(&path), Some(channels));
         }
         let length = 64 * 1024 * 1024 + 1_u64;
-        std::fs::write(&path, length.to_le_bytes()).unwrap();
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&path)
-            .unwrap()
-            .set_len(length + 8)
-            .unwrap();
+        // A valid channel descriptor padded with JSON whitespace makes this discriminate the
+        // caller's 64 MiB limit from the general reader's larger model limit.
+        let mut oversized = length.to_le_bytes().to_vec();
+        oversized.extend_from_slice(br#"{"patch_embedding.weight":{"shape":[1,16,1,1]}}"#);
+        oversized.resize((length + 8) as usize, b' ');
+        std::fs::write(&path, oversized).unwrap();
         assert_eq!(wan_expert_in_channels(&path), None);
         std::fs::write(&path, 0_u64.to_le_bytes()).unwrap();
         assert_eq!(wan_expert_in_channels(&path), None);
