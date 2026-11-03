@@ -1,12 +1,7 @@
+import { useSamplerControls } from "../../hooks/useSamplerControls.js";
 import { useEffect, useMemo, useState } from "react";
 import { qualityChoices } from "../../jobTypes.js";
-import {
-  samplerOptionsFromModel,
-  schedulerOptionsFromModel,
-  samplerDefaultFromModel,
-  schedulerDefaultFromModel,
-  schedulerShiftDefaultFromModel,
-} from "../../samplerOptions.js";
+
 import {
   allPossibleTiers,
   installedTiers,
@@ -114,8 +109,8 @@ export function useEditorGeneration({ context }) {
   const resolutionOptions = selectedModel?.limits?.resolutions ?? RESOLUTION_FALLBACK;
   const fpsOptions = selectedModel?.limits?.fps ?? FPS_FALLBACK;
   const durationOptions = selectedModel?.limits?.durations ?? DURATION_FALLBACK;
-  const samplerOptions = useMemo(() => samplerOptionsFromModel(selectedModel, null), [selectedModel]);
-  const schedulerOptions = useMemo(() => schedulerOptionsFromModel(selectedModel, null), [selectedModel]);
+  const { samplerOptions, schedulerOptions, showSamplerPicker, showSchedulerPicker } = useSamplerControls(selectedModel, null, { sampler, scheduler, setSampler, setScheduler, setSchedulerShift, reconcile: "model-invalid" });
+
   const tierPickerOpts = useMemo(
     () => ({
       convRotEligible: false,
@@ -137,8 +132,6 @@ export function useEditorGeneration({ context }) {
     }
   };
 
-  const showSamplerPicker = samplerOptions.length > 1;
-  const showSchedulerPicker = schedulerOptions.length > 1;
   const showTierPicker = possibleTiers.length > 1 && availableTiers.length > 0;
   // The tier the request actually carries. State when it is installed, else the same
   // EDITOR_DEFAULT_TIER-first rule the reconciler below applies. This is a belt at the payload
@@ -172,13 +165,6 @@ export function useEditorGeneration({ context }) {
     }
     if (!durationOptions.includes(Number(duration))) {
       setDuration(selectedModel.defaults?.duration ?? durationOptions[0]);
-    }
-    if (!samplerOptions.includes(sampler)) {
-      setSampler(samplerDefaultFromModel(selectedModel));
-    }
-    if (!schedulerOptions.includes(scheduler)) {
-      setScheduler(schedulerDefaultFromModel(selectedModel));
-      setSchedulerShift(schedulerShiftDefaultFromModel(selectedModel));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedModel?.id]);
