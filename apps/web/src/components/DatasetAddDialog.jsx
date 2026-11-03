@@ -111,8 +111,16 @@ export function DatasetAddDialog({
     if (selectedIds.length) {
       // sc-2022: adding from the Character tab associates the dataset with that
       // character on the next save; other sources pass no character.
-      onAdd(selectedIds, tab === "character" ? characterId : null);
-      setSelectedIds([]);
+      const result = onAdd(selectedIds, tab === "character" ? characterId : null);
+      setSelectedIds(result?.rejectedIds ?? []);
+    }
+  }
+
+  async function importFiles(files) {
+    const result = await onImport(files);
+    if (result?.rejectedIds?.length) {
+      setSelectedIds(result.rejectedIds);
+      setTab("library");
     }
   }
 
@@ -157,13 +165,13 @@ export function DatasetAddDialog({
           hint={fileHint}
           multiple={multiple}
           onActiveChange={setDragActive}
-          onFiles={onImport}
+          onFiles={importFiles}
         />
       ) : null}
 
       {tab === "file" && importing ? <button type="button" onClick={onCancelImport}>Cancel import</button> : null}
       {tab === "file" && importProgress && importing ? <p role="status">{importProgress}</p> : null}
-      {tab === "file" && importError ? <p className="inline-warning" role="alert">{importError}</p> : null}
+      {importError ? <p className="inline-warning" role="alert">{importError}</p> : null}
 
       {tab === "library" ? (
         <CandidateGrid

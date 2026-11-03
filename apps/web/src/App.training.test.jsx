@@ -959,6 +959,60 @@ describe("SceneWorks app shell", () => {
     expect(container.querySelectorAll(".training-caption-card-text")).toHaveLength(1);
   });
 
+  it("reports rejected reference uploads at the cap and retains the rejected selection", async () => {
+    const uploadDatasetItem = vi.fn(async (file) => ({
+      id: `upload-${file.name}`, type: "image", displayName: file.name,
+      file: { path: `training/uploads/${file.name}`, mimeType: "image/png" },
+    }));
+    const editTarget = {
+      ...zImageTrainingTarget,
+      id: "qwen_image_edit_lora",
+      baseModel: "qwen_image_2_1",
+      limits: { ...zImageTrainingTarget.limits, maxReferenceImages: 1 },
+    };
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" },
+      assets: [{ id: "asset-a", type: "image", displayName: "item_0001.png", file: { path: "assets/images/a.png", mimeType: "image/png" } }],
+      datasets: [{ id: "dataset-a", name: "Portrait Set", modality: "image", itemCount: 1 }],
+      loadDataset: vi.fn(async () => singleItemDataset()),
+      trainingTargets: [editTarget], uploadDatasetItem,
+    })));
+    await openPortraitSet();
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Edit pairs").click());
+    await act(async () => document.body.querySelector('[aria-label="Add references to item_0001.png"]').click());
+    const input = document.body.querySelector('.dataset-add-dropzone input[type="file"]');
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [
+        new File(["a"], "accepted.png", { type: "image/png" }),
+        new File(["b"], "rejected.png", { type: "image/png" }),
+      ] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+    const dialog = document.body.querySelector('.dataset-add-modal');
+    expect(dialog).not.toBeNull();
+    expect(dialog.textContent).toContain("Attached 1 of 2 references. Maximum 1 reference; 1 not added.");
+    const selected = dialog.querySelector('[role="option"][aria-selected="true"]');
+    expect(selected?.textContent).toContain("rejected.png");
+    expect(container.textContent).toContain("1 / 1");
+    expect(container.textContent).not.toContain("Imported 2 of 2 references");
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "Add 1").click());
+    expect(dialog.textContent).toContain("Attached 0 of 1 references. Maximum 1 reference; 1 not added.");
+    expect(dialog.querySelector('[role="option"][aria-selected="true"]')?.textContent).toContain("rejected.png");
+    await act(async () => [...dialog.querySelectorAll("button")].find((button) => button.textContent === "Done").click());
+    await act(async () => container.querySelector('[aria-label="Remove Image 1"]').click());
+    await act(async () => container.querySelector('[aria-label="Add references to item_0001.png"]').click());
+    const nextDialog = document.body.querySelector('.dataset-add-modal');
+    await act(async () => [...nextDialog.querySelectorAll('[role="tab"]')].find((tab) => tab.textContent === "Asset Library").click());
+    const rejected = [...nextDialog.querySelectorAll('[role="option"]')].find((option) => option.textContent.includes("rejected.png"));
+    expect(rejected).toBeTruthy();
+    await act(async () => rejected.click());
+    await act(async () => [...nextDialog.querySelectorAll("button")].find((button) => button.textContent.trim() === "Add 1").click());
+    expect(document.body.querySelector('.dataset-add-modal')).toBeNull();
+    expect(container.textContent).toContain("1 / 1");
+  });
+
   it("preserves ordered references when dedupe rekeys a newly uploaded target between its two saves (sc-24163)", async () => {
     const initialDataset = {
       id: "dataset-a",

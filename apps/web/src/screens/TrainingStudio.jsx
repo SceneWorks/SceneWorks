@@ -1675,6 +1675,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   // Replace one item's ordered reference list (reorder / remove from the reference rail, sc-24161).
   function setItemReferences(selectionId, referenceIds) {
     setDatasetMessage("");
+    setDatasetError("");
     setReferenceDraftById((current) => ({ ...current, [selectionId]: [...(referenceIds ?? [])] }));
   }
 
@@ -1685,12 +1686,16 @@ export function TrainingStudio({ mode = "training" } = {}) {
       cap: datasetReferenceLimit,
       itemId: selectionId,
     });
+    const current = referenceDraftById[selectionId] ?? [];
+    const rejectedIds = [...new Set(pickedIds)].filter((id) => id && id !== selectionId && !next.includes(id));
+    const accepted = next.length - current.length;
     setItemReferences(selectionId, next);
     if (dropped > 0) {
-      setDatasetMessage(
-        `Maximum ${datasetReferenceLimit} references; ${dropped} not added.`,
-      );
+      setDatasetError(`Attached ${accepted} of ${accepted + dropped} references. Maximum ${datasetReferenceLimit} reference${datasetReferenceLimit === 1 ? "" : "s"}; ${dropped} not added.`);
+    } else {
+      setDatasetError("");
     }
+    return { accepted, dropped, rejectedIds };
   }
 
   // Upload dropped files as dataset-only images, then attach them as references (sc-24161) —
@@ -1711,12 +1716,15 @@ export function TrainingStudio({ mode = "training" } = {}) {
     if (controller.signal.aborted) return;
     const imported = results.filter((result) => result.value).map(({ value }) => ({ ...value, datasetOnly: true }));
     setUploadedDatasetAssets((current) => [...imported, ...current.filter((item) => !imported.some((asset) => item.id === asset.id))]);
-    addItemReferences(selectionId, imported.map((asset) => asset.id));
+    const { accepted, dropped, rejectedIds } = addItemReferences(selectionId, imported.map((asset) => asset.id));
     const failed = results.filter((result) => result.error);
-    setDatasetMessage(`Imported ${imported.length} of ${files.length} references.`);
-    if (failed.length) setDatasetError(`Failed to upload: ${failed.map(({ file }) => file.name).join(", ")}. Retry those files.`);
+    const capNote = dropped ? ` Maximum ${datasetReferenceLimit} reference${datasetReferenceLimit === 1 ? "" : "s"}; ${dropped} not added.` : "";
+    const failureNote = failed.length ? ` Failed to upload: ${failed.map(({ file }) => file.name).join(", ")}. Retry those files.` : "";
+    const message = `Attached ${accepted} of ${files.length} references.${capNote}${failureNote}`;
+    setDatasetMessage(message);
+    if (dropped || failed.length) setDatasetError(message);
     setImportingAssets(false);
-    return failed.length === 0;
+    return { complete: failed.length === 0 && dropped === 0, rejectedIds };
   }
 
   // Editing a caption marks it as manually authored (sc-2025) — caption source
