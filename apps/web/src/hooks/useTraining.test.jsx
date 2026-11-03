@@ -1,3 +1,4 @@
+import { deferred } from "../testUtils/async.js";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -10,15 +11,7 @@ vi.mock("../api.js", async (importOriginal) => ({
 
 import { useTraining } from "./useTraining.js";
 
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((done, fail) => {
-    resolve = done;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
-}
+
 
 describe("useTraining deleteTrainingDataset", () => {
   let container;
