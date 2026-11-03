@@ -112,7 +112,7 @@ fn path_and_error_helpers_are_bounded_and_defensive() {
     let temp = tempdir().expect("tempdir creates");
     let error = safe_project_path(temp.path(), "").expect_err("empty relative path rejects");
     assert!(matches!(error, WorkerError::InvalidPayload(message)
-        if message == "Unsafe project-relative path: : empty"));
+        if message == "Project-relative path is required."));
 
     // sc-4278 / F-MLXW-14: load_reference_image and resolve_clip_media_path route
     // sidecar-sourced media paths through safe_project_path, so a traversal or
