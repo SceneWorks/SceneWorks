@@ -641,7 +641,6 @@ impl CatalogFetchLease {
         Self::acquire_with_processing(catalog, Some(processing))
     }
 
-    #[allow(dead_code)]
     fn acquire_under_processing_lease(
         catalog: &Catalog,
         _processing: &CatalogProcessingLease,
@@ -706,7 +705,7 @@ pub async fn fetch_attached_catalog_images(
 /// Pipeline-only sibling that proves the caller already owns the shared
 /// catalog-processing lease. The fetch-specific compatibility lock remains
 /// held for the complete pass, while the shared lease can span later stages.
-#[allow(dead_code)]
+#[cfg(any(test, native_lane))]
 pub(crate) async fn fetch_attached_catalog_images_under_processing_lease(
     registry: &CatalogRegistry,
     catalog_id: &str,

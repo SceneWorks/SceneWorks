@@ -203,15 +203,15 @@ pub fn flux3_converted_bundle_check(root: &Path, package: &Path) -> Result<(), S
     Ok(())
 }
 
+/// Request-geometry admission against a model's declared `admissionGeometry` envelope (sc-24112).
+/// Backend-neutral: the envelope is a property of the engine's attention layout, which both lanes
+/// share, so a per-lane copy would be two declarations of one fact.
+pub(crate) use sceneworks_core::admission_geometry;
 // Shared `advanced` knob accessors (sc-4281). The MLX image/video job paths are macOS-gated; the
 // candle InstantID lane (sc-5491) is the first off-Mac caller, so the module also compiles on the
 // Windows candle build. The candle lane calls only a subset (`flag`/`str`/`f32_clamped`), so allow
 // dead_code there (the rest are MLX-only) — same pattern as `openpose_skeleton`. On a non-candle
 // Windows/Linux build it stays excluded, so its accessors are never uncalled-dead there.
-/// Request-geometry admission against a model's declared `admissionGeometry` envelope (sc-24112).
-/// Backend-neutral: the envelope is a property of the engine's attention layout, which both lanes
-/// share, so a per-lane copy would be two declarations of one fact.
-pub(crate) use sceneworks_core::admission_geometry;
 #[cfg(native_lane)]
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod advanced;
@@ -554,10 +554,12 @@ mod qwen_prompt_rewrite;
 // sc-6541 closed-loop study: test-only LoRA output-quality eval harness (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/studies/lora_eval_harness.rs"]
 mod lora_eval_harness;
 // sc-6541 closed-loop study: native-Rust LoRA train→generate driver (research instrument) —
 // see the module doc + docs/sc-6541/closed-loop-protocol.md.
 #[cfg(all(test, target_os = "macos"))]
+#[path = "../tests/studies/lora_train_driver.rs"]
 mod lora_train_driver;
 // Shared test-support helpers for the real-weight smoke harnesses (sc-8866, epic 8800): the
 // byte-identical `env_or` + RGB8 degenerate-decode floor checks (`image_mean`/`image_std`/
@@ -923,17 +925,6 @@ mod control_preprocess;
 // the pipeline, so keep the dead_code allowance only for that build.
 #[cfg_attr(not(native_lane), allow(dead_code))]
 mod control_dataset_prep;
-// Bring-your-own-dataset ingest adapter (Training Studio A3, sc-10171, epic 10159): the second
-// dataset-input path — map a PROVIDED dataset into the same on-disk layout A2 emits, skipping what
-// the source supplies. Prepared pairs (target + rendered condition) are convention-validated then
-// ingested as-is / normalized / regenerated via the A1 preprocessor; annotated COCO
-// (person_keypoints + captions) renders the OpenPose-18 skeleton from ground-truth keypoints (no
-// detection) — cross-platform. Reuses A2's square letterbox + write/manifest tail. B1 (sc-10162)
-// ships only the render-from-an-existing-dataset source; wiring this bring-your-own path into the
-// studio job (source provisioning + convention-warning surfacing) is a scoped follow-up, so this
-// module keeps its dead_code allowance until that lands.
-#[allow(dead_code)]
-mod control_dataset_byo;
 // ControlNet Training Studio orchestration job (B1, sc-10162, epic 10159): renders the per-image
 // control condition from an existing captioned dataset via `control_preprocess`/`control_dataset_prep`
 // (A1/A2), then trains the control branch through the shared `training_jobs` executor

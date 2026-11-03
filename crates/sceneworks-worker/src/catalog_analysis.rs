@@ -452,7 +452,6 @@ impl CatalogAnalysisLease {
         Self::acquire_with_processing(catalog, Some(processing))
     }
 
-    #[allow(dead_code)]
     fn acquire_under_processing_lease(
         catalog: &Catalog,
         _processing: &CatalogProcessingLease,
@@ -506,30 +505,9 @@ pub fn analyze_attached_catalog<A: CatalogAnalyzers>(
     analyze_attached_catalog_with_lease(registry, catalog_id, config, analyzers, None, None, None)
 }
 
-/// Pipeline-only sibling that keeps the caller's shared processing lease alive
-/// across fetch, structured analysis, and survivor-only semantic analysis.
-#[allow(dead_code)]
-pub(crate) fn analyze_attached_catalog_under_processing_lease<A: CatalogAnalyzers>(
-    registry: &CatalogRegistry,
-    catalog_id: &str,
-    config: &CatalogAnalysisConfig,
-    analyzers: &mut A,
-    processing: &CatalogProcessingLease,
-) -> CatalogAnalysisResult<CatalogAnalysisReport> {
-    analyze_attached_catalog_with_lease(
-        registry,
-        catalog_id,
-        config,
-        analyzers,
-        Some(processing),
-        None,
-        None,
-    )
-}
-
 /// Pipeline-only controlled sibling. The cancel flag is polled between every
 /// record and page, and the callback observes each durable keyset checkpoint.
-#[allow(dead_code)]
+#[cfg(any(test, native_lane))]
 pub(crate) fn analyze_attached_catalog_under_processing_lease_with_control<A: CatalogAnalyzers>(
     registry: &CatalogRegistry,
     catalog_id: &str,
