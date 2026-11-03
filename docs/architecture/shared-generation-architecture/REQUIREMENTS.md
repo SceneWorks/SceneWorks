@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.4.** It addresses the 69 round-0 findings, the nine round-2 findings and the eight round-4 findings (see [REVIEW_LOG.md](REVIEW_LOG.md)). These are proposed design resolutions, not implementation evidence or approval of the open decisions in §10. Design-only: no program tracker items or implementation will be created until the design is approved. |
+| **Status** | **Draft 0.5.** It addresses all four round-5 findings in addition to the earlier review resolutions (see [REVIEW_LOG.md](REVIEW_LOG.md)). These are proposed design resolutions, not implementation evidence or approval of the open decisions in §10. Design-only: no program tracker items or implementation will be created until the design is approved. |
 | **Date** | 2026-11-03 |
 | **Repositories** | SceneWorks (`main` @ `a1d95e2c4`) and inference (`origin/main` @ `a43724b82`). All citations refer to those revisions. |
 | **Companion** | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): target design, migration strategy and phased roadmap. |
@@ -262,11 +262,13 @@ Encode includes declared dependencies among encoder components, such as Qwen edi
 
 **PIPE-16 — The runner supports chunked and incremental output.** Chunks are runner-owned repeated stage invocations delivered through the event sink. Buffering is bounded, cancellation is supported, and causal codec state and residency are declared.
 - **Today's state:** Krea-realtime generates a whole clip and then decodes it once (`mlx-gen-krea-realtime/src/t2v.rs:12-16`).
-- **Ownership:** delivery of decoded chunk streaming as a product capability belongs to its existing streaming epic. SGA owns the runner contract and migrates whichever Krea-realtime path exists when ENG-6 runs (MIG-7 ledger).
+- **Production use:** the existing batch path uses the same output contract as one terminal chunk. Its public output, events and persistence stay unchanged; internal chunk metadata does not create a new streaming product surface. Repeated delivery uses that same primitive, rather than a second unused hook.
+- **Ownership:** decoded streaming product delivery belongs to **SW-F148 (`sc-8432`)**, including its feasibility spike and permitted NO-GO outcome. SGA owns the shared contract and batch adoption. A NO-GO leaves the contract's batch production user intact. Stream-only hooks are implemented with their first production consumer under HOOK-1, not as dormant SGA scaffolding.
 
 **Accept:**
-- The batch route migrates unchanged.
-- The chunk contract is proven by a mocked chunk producer in Tier 0: ordering, backpressure, cancellation and bounded retention.
+- The production batch path goes through the shared contract and yields the same final output/event sequence as before.
+- A mocked multi-chunk producer proves ordering, backpressure, cancellation and bounded retention in Tier 0. This is contract evidence, not proof of decoded streaming delivery.
+- Where SW-F148 has delivered a streaming path, it adopts that same contract with production evidence in its owning feature; otherwise SGA makes no streaming-delivery completion claim.
 
 **PIPE-17 — Telemetry flows through `gen-core-telemetry`** at stage, phase and lifecycle hooks. Existing telemetry fields stay stable (OPT-8). **Accept:** existing telemetry consumers see unchanged field names.
 
@@ -410,15 +412,16 @@ The rung set is open.
 
 **Peak memory counts what is live together:**
 - **Concurrent streams and joint workspaces are summed, never maxed.** Example: H3 video plus audio plus their joint workspace.
-- **Transitions are priced** above both the phase they leave and the phase they enter.
+- **The request bound covers both neighboring phases and each transition operation,** including the workspace of the component/evaluation actually executing there.
 - **Aliases and shared weights are counted once.**
 - **Budget domains are kept apart:** host, device, and unified memory (counted once).
 
-Pricing is built from per-component weights, per-phase activation evidence (two anchors plus derivation) and shape-computed transition deltas. It is not a per-allocation model of every family's activations (C4-02).
+Pricing uses per-component weights, existing aggregate phase/operation peak evidence (two anchors plus derivation) and shape-computed additional buffers. Transition operations include their executing component/evaluation workspace and the components actually resident at that operation. Evidence states whether weights, ordinary latents, streams and joint workspace are already included; adding them again is invalid. A transition is not bounded by weights and latent shapes alone. This remains component/phase accounting, not a per-allocation model or a new measurement gate.
 
 **Accept:**
 - Low-res start, multi-phase, video and audio-video plans are priced by one mechanism.
 - Pure fixtures cover two streams that each fit alone but exceed the budget together, a transition peak above either steady phase, and alias deduplication.
+- A learned-transition workspace is priced above latent-only deltas; a joint-total evidence value is not added to its already included stream totals. Ambiguous evidence follows the existing route's unpriced-evidence posture and is reported as such, rather than silently reinterpreted.
 
 **MEM-4 — Equivalent-class Features stay within a declared, recorded quality bound.**
 - **Equivalent-class Features are output-preserving within a declared and recorded quality bound.** Tiled decode changes pixels (`gen-core/src/memory_strategy/decode_quality.rs`), so "output-preserving" cannot mean byte-identical here.
@@ -671,11 +674,13 @@ Pure admission and routing logic lives cfg-free in `sceneworks-core`, so it runs
   - The expected-route list comes from the route inventory, so availability cannot pass vacuously.
 - **UI:** a number field for K; a linked slider showing K/M; a scale control; the resolved dimensions shown.
 - **Replay:** the resolved recipe is persisted and versioned. Replay with the same seed is deterministic per backend, and unknown recipe versions refuse.
+- **Estimator choice:** endpoint evaluation remains the default. The optional previous-estimate candidate completes all K low-res steps with their normal solver evaluations, state updates and events, then uses a specifically identified earlier clean estimate. It does not skip a solver integration. Solver support and estimator identity/provenance are explicit and persisted; a quality comparison cannot silently change replay or admission's recipe selection.
 
 **Accept:**
 - Correct plans and refusals at the parameter boundaries, under img2img truncation, on legal-grid limits, with spatial-only scaling on AV routes, and under composition.
 - Correct output size on every expected route.
 - Deterministic replay.
+- Default and candidate traces preserve the same K completed low-res steps, solver sub-evaluations, noise-draw coordinates and outer progress. Unsupported estimator/solver combinations refuse explicitly without removing the default estimator's supported routes.
 - A bounded prompt/seed comparison against full resolution, per backend, checking prompt and content retention, structure, blur, seams, non-finite values and img2img retention. An unusable result blocks that route until it is repaired, or decided under DEC-13. There is no bit-identity requirement and no Cartesian campaign.
 - Speedup measured per PERF-3, including estimator and transition costs. A benefit is claimed only where measurement and quality support it.
 
@@ -771,7 +776,7 @@ These are measured at baseline and again at every feature end. They are **goals,
 | **DEC-7** | **Numerics classes (AP13).** | Bit-exact only; (a)/(b)/(c) classes | **(a)/(b)/(c).** Class (c) needs your sign-off per route. Each feature lists its expected (b) and (c) entries at planning. (High.) | PIPE-10, COMP-1/4, WGT-3 |
 | **DEC-8** | **Feature classes.** | Reuse the "approximation" regime; add a recipe class | **Recipe / equivalent (within a declared quality bound) / diagnostic.** Admission selects only equivalent-class Features. (High.) | HOOK-2, MEM-4 |
 | **DEC-9** | **Web validation mechanism.** | Server endpoint per change; core validator compiled to WebAssembly and run in the browser; hybrid (availability cached per (model, backend, mode) plus server round-trip for cross-field rules) | **WebAssembly-compiled core validator.** One Rust implementation, instant, works offline and over the RunPod proxy. Cost: wasm build and bundle size. **Fallback:** hybrid. (Medium.) | OPT-4 |
-| **DEC-10** | **Low-res start recipe v1** (mechanics: PLAN §6.1, §3.1). | Coverage and modes; step domain; scale and grid policy; estimator; schedule policy; quality acceptance | **Coverage:** every structurally supporting route; noise-start plus img2img. Edit, reference and control refuse on the targeted pass until COMP-5. **Step domain:** the first denoising pass, once; `1 ≤ K < M` executed steps; default `max(1, floor(M/2))`. **Scale:** 0.25–0.9, default 0.5, floor-to-quantum, refuse when invalid. **Schedule:** the full-pass schedule and `mu` are kept. **Estimator:** `EndpointEvaluation` by default. `PreviousEvaluation` (no extra forward) is a candidate decided by the bounded quality comparison (C4-04). **Fixed:** these semantics are versioned and persisted; the only user controls are K and scale. **Quality:** the bounded checks and replay in FEAT-1, plus speed. (Medium on quality and benefit; high on the need for explicit semantics.) | FEAT-1, PIPE-2/4/5, ADM-3 |
+| **DEC-10** | **Low-res start recipe v1** (mechanics: PLAN §6.1, §3.1). | Coverage and modes; step domain; scale and grid policy; estimator; schedule policy; quality acceptance | **Coverage:** every structurally supporting route; noise-start plus img2img. Edit, reference and control refuse on the targeted pass until COMP-5. **Step domain:** the first denoising pass, once; `1 ≤ K < M` executed steps; default `max(1, floor(M/2))`. **Scale:** 0.25–0.9, default 0.5, floor-to-quantum, refuse when invalid. **Schedule:** full-pass schedule and `mu` kept. **Estimator:** `EndpointEvaluation` default; `PreviousEvaluation` is a candidate that completes K steps normally and retains the last step's named guided primary x0. It skips no integration/sub-evaluation; it adds no endpoint forward. Require solver support and bounded quality/time/memory comparison before recipe finalization, with no percentage saving assumed. **Fixed:** estimator identity and semantics are persisted/versioned; no runtime/admission estimator switch; only K/scale user controls. **Quality:** FEAT-1's bounded checks and replay. Proposed, not approved by this revision. (Medium on quality/benefit; high on explicit semantics.) | FEAT-1, PIPE-2/4/5, ADM-3 |
 | **DEC-11** | **Tracker naming in inference CI.** | Land the CodeGraph-key policy fix first; use `sc-` names | **Policy fix first, as a prerequisite PR.** (High.) | MIG-1 |
 | **DEC-12** | **Branch lifetime window.** | ≤4, ≤6 or ≤8 weeks | **≤6 weeks, with a re-plan if it is exceeded.** (Medium.) | MIG-1 |
 | **DEC-13** | **Routes that cannot change geometry or adapters per phase** (Mage watermark, merge-only adapters, fixed-grid planners), plus any driver refusal under PIPE-7. | Refuse; change product behaviour | **Refuse with a typed reason.** Each refusal is listed for your approval when its feature is planned. (High.) | HOOK-4, FEAT-1, PIPE-7 |
