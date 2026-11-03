@@ -2,7 +2,10 @@
 
 SW-6775 / SW-6680 move the shipped CV engines to inference's
 `crates/media/gen-cv` (`sceneworks-gen-cv`), reexported by the existing
-`runtime-macos::cv` and `runtime-cuda::cv` media bundles. SceneWorks owns model
+`runtime-macos::cv` and `runtime-cuda::cv` through their explicit `cv` feature.
+The worker enables that feature on both platforms. The extracted crate retains
+SceneWorks' AGPL-3.0-or-later terms and source provenance in its LICENSE/NOTICE;
+default runtime media consumers do not acquire the CV dependency. SceneWorks owns model
 resolution, JSON/render/job behavior, cancellation between jobs/images, and the
 existing process caches. The engine owns YOLO11m's entire MLX network and shared
 letterbox/decode/NMS, DWPose's YOLOX/RTMW execution and numerical pre/postprocessing,

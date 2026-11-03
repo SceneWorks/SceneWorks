@@ -120,7 +120,7 @@ ort = { workspace = true, features = ["coreml"] }
 # weights, Metal beat CPU in every paired run for both Speech and Voice Clone, at equal-or-lower
 # peak RSS; the exact ratios are not pinned down because the box was under heavy concurrent load
 # (sc-13501 carries the clean numbers).
-runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", features = ["audio-metal"] }
+runtime-macos = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", features = ["audio-metal", "cv"] }
 # Direct weights-free LTX-2.5 training preflight. The runtime bundle owns execution, while this
 # public header/request validator lets dry-run fail before any base model is loaded.
 mlx-gen-ltx = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c" }
@@ -131,7 +131,7 @@ mlx-rs = { package = "pmetal-mlx-rs", git = "https://github.com/michaeltrefry/ml
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 candle-gen-moss-image = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", default-features = false, features = ["test-support"], optional = true }
 # Canonical NVIDIA inference composition; enabled only by `backend-candle`.
-runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", optional = true }
+runtime-cuda = { git = "https://github.com/SceneWorks/inference", rev = "a43724b82fbae35c9227cef4bcdabba6dd1da12c", optional = true, features = ["cv"] }
 # The shared Candle training validator is a weights-free contract dependency. Keeping this direct
 # lets SceneWorks dry-run preflight use the exact optimizer/timestep/bias/loss parser the production
 # family trainers use instead of maintaining a second, inevitably drifting enum mirror.
