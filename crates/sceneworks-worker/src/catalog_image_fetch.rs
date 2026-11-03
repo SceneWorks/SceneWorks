@@ -1774,7 +1774,12 @@ fn safe_catalog_directory(
     relative: &str,
     create: bool,
 ) -> CatalogImageFetchResult<PathBuf> {
-    let path = safe_relative_join(catalog.root(), relative)?;
+    // An empty parent denotes the trusted catalog root, never a file path.
+    let path = if relative.is_empty() {
+        catalog.root().to_path_buf()
+    } else {
+        safe_relative_join(catalog.root(), relative)?
+    };
     let mut current = catalog.root().to_path_buf();
     for component in Path::new(relative).components() {
         let Component::Normal(component) = component else {
@@ -3101,6 +3106,11 @@ mod tests {
     fn cache_paths_reject_parent_and_symlink_escape() {
         let (_root, registry, id) = catalog_fixture();
         let catalog = registry.open_attached(&id).expect("open");
+        std::fs::write(catalog.root().join("root.png"), b"fixture").unwrap();
+        assert_eq!(
+            safe_catalog_file(&catalog, "root.png", false).unwrap(),
+            catalog.root().join("root.png")
+        );
         assert!(safe_catalog_file(&catalog, "../outside", true).is_err());
         #[cfg(unix)]
         {
