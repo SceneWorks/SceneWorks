@@ -128,3 +128,41 @@ test('API readiness and caption coverage retain ordinary refusal fixtures; only 
   // Other endpoint calls use only face sidecars (Person path or empty image sidecar), never MLP.
   assert.doesNotMatch(api, /vec!\[0\.0;\s*768\]/, 'a new full-dimensional sidecar fixture requires learned-routing review');
 });
+
+
+// GitHub's context-availability table deliberately excludes runner/job/steps/env from
+// jobs.<job_id>.env. They are available after allocation, in steps or runtime variables.
+// https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#context-availability
+function assertJobEnvContexts(job) {
+  const env = job.match(/^    env:\n((?:      [^\n]*\n)*)/m)?.[1];
+  assert.ok(env, 'job environment is present');
+  const allowed = new Set(['github', 'needs', 'strategy', 'matrix', 'vars', 'secrets', 'inputs']);
+  for (const expression of env.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
+    for (const root of expression[1].matchAll(/\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\./g)) {
+      assert.ok(allowed.has(root[1]), `context ${root[1]} is unavailable in jobs.<job_id>.env`);
+    }
+  }
+}
+
+test('job environment rejects unavailable runner contexts and the actual initialization step exports shell-safe paths', () => {
+  const workflow = read('.github/workflows/nax-kernel-validation.yml');
+  const cpu = workflow.slice(workflow.indexOf('\n  aesthetic-cpu:'));
+  assertJobEnvContexts(cpu);
+  for (const context of ['runner', 'job', 'steps', 'env']) {
+    const broken = cpu.replace('    env:\n', `    env:\n      INVALID: \${{ ${context}.temp }}/evidence\n`);
+    assert.throws(() => assertJobEnvContexts(broken), /unavailable in jobs/);
+  }
+  const step = cpu.match(/- name: Initialize CPU evidence paths on the assigned runner\n        shell: bash\n        run: \|\n([\s\S]*?)(?=\n      - )/);
+  assert.ok(step, 'actual runner initialization entrypoint exists');
+  assert.ok(cpu.indexOf(step[0]) < cpu.indexOf('node scripts/ci/aesthetic-cpu-validation.mjs --preflight'));
+  const directory = mkdtempSync(path.join(tmpdir(), 'aesthetic runner paths '));
+  try {
+    const envFile = path.join(directory, 'github env');
+    const result = spawnSync('bash', ['-euo', 'pipefail', '-c', step[1].replace(/^          /gm, '')], {
+      env: { ...process.env, RUNNER_TEMP: directory, GITHUB_ENV: envFile }, encoding: 'utf8', timeout: 15_000,
+    });
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(readFileSync(envFile, 'utf8'), `AESTHETIC_OUTPUT=${directory}/aesthetic-cpu-evidence\nCARGO_TARGET_DIR=${directory}/aesthetic-cpu-target\n`);
+    assert.match(cpu, /path: \$\{\{ runner.temp \}\}\/aesthetic-cpu-evidence\//, 'artifact step retains valid step-level runner context');
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
