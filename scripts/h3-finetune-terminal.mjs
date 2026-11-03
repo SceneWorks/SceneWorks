@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { fileSha256 as hashFile } from "./lib/file-sha256.mjs";
 // sc-26691: explicit, source-bound terminal execution. No ordinary CI/model execution.
 import assert from 'node:assert/strict';
 import { campaignProfileArgs } from './lib/h3-campaign-build-profile.mjs';
@@ -6,7 +7,7 @@ import { stripVerbatim } from './lib/windows-verbatim-path.mjs';
 import { isServicePort } from './lib/h3-owned-processes.mjs';
 import { assertExpectedRunner, assertWritePathOffWeights } from './h3-finetune-terminal-stage.mjs';
 import { createHash } from 'node:crypto';
-import { createReadStream, createWriteStream } from 'node:fs';
+import { createWriteStream } from 'node:fs';
 import { mkdir, readFile, realpath, rename, stat, writeFile, copyFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -52,11 +53,7 @@ const json = async p => JSON.parse(await readFile(p, 'utf8'));
 // Final delivery links arrive after hardware execution; they are not execution inputs.
 const digest = ({ delivery: _delivery, matrixDecision:_decision, matrixAnchors:_anchors, proofIndex:_retainedProofs, ...inputs }) => createHash('sha256').update(JSON.stringify(inputs)).digest('hex');
 export const executionPlanDigest = digest;
-export async function hashFile(p) {
-  const h = createHash('sha256');
-  for await (const chunk of createReadStream(p)) h.update(chunk);
-  return h.digest('hex');
-}
+export { hashFile };
 async function save(p, value) {
   await writeFile(`${p}.tmp`, JSON.stringify(value, null, 2) + '\n', { flag: 'w' });
   await rename(`${p}.tmp`, p);

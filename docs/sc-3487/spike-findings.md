@@ -1,5 +1,10 @@
 # sc-3487 — DWPose → Rust path-selection spike (GO: `ort` + CoreML)
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 **Decision: GO on the `ort` (onnxruntime) + CoreML path.** It reproduces the shipped
 Python rtmlib detector at sub-pixel parity and matches its latency. The fallbacks the
 story listed (a different Rust onnx runtime, or an MLX pose model) are **not needed**.

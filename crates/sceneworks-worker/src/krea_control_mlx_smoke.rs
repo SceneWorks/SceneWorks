@@ -15,7 +15,7 @@
 //! the `krea_2_turbo_control` `inventory::submit!` from being GC'd so `gen_core::load` resolves it.
 //!
 //! Setup — with the turnkey + overlay already in the HF cache, no env is needed (auto-discovered). The
-//! pose defaults to a repo skeleton PNG (`poses/dance_01.png`), already an OpenPose render.
+//! pose defaults to a repo skeleton PNG (`apps/web/public/poses/dance_01.png`), already an OpenPose render.
 //! ```text
 //! # optional: KREA_CTRL_POSE=/path/to/skeleton.png KREA_CTRL_STEPS=8 KREA_CTRL_SIZE=512
 //! #           KREA_CTRL_SCALE=0.6 KREA_CTRL_SEED=1234 KREA_CTRL_OUT_DIR=/tmp/krea_control_smoke
@@ -123,7 +123,10 @@ fn krea_control_q8_mlx_smoke() {
         .unwrap_or_else(|| panic!("no cached SceneWorks/krea2-pose-controlnet-beta overlay found"));
     let pose_path = PathBuf::from(env_or(
         "KREA_CTRL_POSE",
-        "/Users/michael/Repos/SceneWorks/poses/dance_01.png",
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../apps/web/public/poses/dance_01.png"
+        ),
     ));
     let out_dir = PathBuf::from(env_or("KREA_CTRL_OUT_DIR", "/tmp/krea_control_smoke"));
     std::fs::create_dir_all(&out_dir).expect("create out dir");
