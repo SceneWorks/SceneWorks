@@ -21,12 +21,12 @@ This is a design-only program. Its aim is to slim SceneWorks and its inference e
 | [F](evidence/F-worker.md) | SceneWorks worker: lifecycle, engine boundary, lanes, admission paths, cache, cfg split |
 | [G](evidence/G-app-layers.md) | SceneWorks manifest, hand tables, request contracts, validation, web gating, persistence, tooling, LOC census |
 | [H](evidence/H-constraints.md) | Process rules, prior attempts, code-review themes, in-flight work, hazards, hardware |
-| [reviews/](evidence/reviews/) | Round-0 adversarial reviews and the source-backed round-2 architecture review; subsequent re-review is recorded in the review log. |
+| [reviews/](evidence/reviews/) | Round-0 adversarial reviews, the source-backed round-2 architecture review and [round-3 re-review](evidence/reviews/round3-codex.md). |
 
 ## Status
 
 **Draft 0.3**, revised under Michael's design-only instruction to address all nine round-2 findings. Round-0 and round-2 source reports remain historical evidence; [REVIEW_LOG.md](REVIEW_LOG.md) records the current dispositions. Requirements and plan now distinguish pass/stage/phase coordinates, typed boundary noise laws, solver/RNG state, preparation dependencies, concurrent memory and first-consumer admission. ENG-4 is split into primitive extraction/projection adoption (4a) and runtime scales/per-phase adapters (4b).
 
-No product/process decision in REQUIREMENTS §10 is implicitly approved by these edits. The low-res recipe details are a concrete proposal under DEC-10; the design traces are walkthroughs, not executed or measured proof. Re-review follows the revision on the same design branch.
+The subsequent round-3 self-review found one additional guidance-state gap and two consistency issues; all were corrected. No unresolved architecture blocker or major finding remains in that review's scope. No product/process decision in REQUIREMENTS §10 is implicitly approved by these edits. The low-res recipe details are a concrete proposal under DEC-10; the design traces are walkthroughs, not executed or measured proof.
 
 No CodeGraph features or items will be created until the design is approved. After approval, each roadmap feature is planned individually with `codegraph-plan`.

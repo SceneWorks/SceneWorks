@@ -116,4 +116,16 @@ Reviewed design commit `3bc17e3a0587b0c2aff069f6bab384eca9eef047`. Full findings
 
 The four requested weights-free design traces are in PLAN §6.5–6.8. They define the expected contract and future checks; no model or conformance implementation was executed. The full roadmap remains, with prerequisite ownership corrected and the stale aggregate calendar withdrawn pending consumer-based feature sizing. No implementation or tracker items were created by this revision.
 
-## Round 3: re-review of draft 0.3 (pending publication of the revision)
+## Round 3: re-review of draft 0.3 (2026-11-03)
+
+Reviewed the published revision `71d278386e`, then verified the requirements/plan corrections at `1f5fd6508`. Full report: [round3-codex.md](evidence/reviews/round3-codex.md). This was a subsequent **self-review by the revision author**, not an independent review.
+
+**Verdict: all nine round-2 findings addressed at the design level; no unresolved BLOCKER or MAJOR finding in the re-reviewed scope.** Confidence is high in the contract coherence, medium in unmeasured performance/quality and backend-generic feasibility. Open §10 decisions remain open; the design walkthroughs and document checks are not native implementation evidence.
+
+| # | Sev | Finding | Disposition |
+|---|---|---|---|
+| R3-01 | MAJOR | A read-only endpoint evaluation must also protect APG/Feature mutable state, and geometry changes must invalidate incompatible state separately from solver history. | **Accepted.** PIPE-3 and PLAN §3.3/6.5/7.2 define `EvaluationKind::BoundaryEstimate`, snapshot nonmutation, dependency-based invalidation, priced scratch and future fake-operator closure checks. Source: inference `gen-core/src/guidance.rs:168-208`. |
+| R3-02 | MINOR | PLAN §6.1 still summarized the preparation key as geometry-only. | **Accepted.** The worked-example row now uses the complete dependency contract and state rules. |
+| R3-03 | MINOR | The UI fraction still said total steps rather than executed steps in the selected pass. | **Accepted.** FEAT-1 now states K/M for that pass's executed steps. |
+
+Document links/fences, whitespace, nine dispositions, illustrative memory arithmetic and the 23-feature dependency DAG were checked. No implementation, model execution, builds/CI dispatches or tracker items. Design decisions require their existing approval process; no runtime or performance acceptance is claimed.
