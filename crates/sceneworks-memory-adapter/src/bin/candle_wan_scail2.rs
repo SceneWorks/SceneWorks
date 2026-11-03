@@ -971,22 +971,20 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
 mod tests {
     use super::*;
 
-    struct WanFixture(PathBuf);
-
-    impl Drop for WanFixture {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
+    struct WanFixture {
+        root: PathBuf,
+        _temporary: tempfile::TempDir,
     }
 
     fn a14b_fixture(arm: Arm, tier: &str) -> (WanFixture, LoadSpec) {
         use gen_core_memory_wan::{fixture_snapshot_root, WanI2vBackend};
-        let temporary = WanFixture(std::env::temp_dir().join(format!(
-            "sc23026-wan-{}-{}-{}", std::process::id(), arm.provider,
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
-        )));
+        let owner = tempfile::tempdir().unwrap();
+        let temporary = WanFixture {
+            root: owner.path().to_path_buf(),
+            _temporary: owner,
+        };
         let root = if tier == "bf16" {
-            fixture_snapshot_root(&temporary.0, WanI2vBackend::Candle, arm.route.unwrap())
+            fixture_snapshot_root(&temporary.root, WanI2vBackend::Candle, arm.route.unwrap())
         } else {
             let revision = if arm.provider == WAN_T2V_A14B_ID {
                 "da1909b66b360e1ea8cdeb3e39e40dca172cfa32"
@@ -994,7 +992,7 @@ mod tests {
                 "d01bf1ea995c01a5bc545cefb977a320c9cb9fd0"
             };
             temporary
-                .0
+                .root
                 .join(format!(
                     "models--{}",
                     arm.packed.repository.replace('/', "--")

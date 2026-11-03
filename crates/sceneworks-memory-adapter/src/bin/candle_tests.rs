@@ -399,55 +399,13 @@ fn qwen_edit_generation_uses_the_lightning_recipe_only_for_the_distilled_arm() {
     assert_eq!(base.prompt, lightning.prompt);
 }
 
-fn qwen_edit_scratch_dir(label: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("sc-22728-{label}-{}-{nonce}", std::process::id()))
+fn qwen_edit_source(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    arm: QwenEditArm,
+    tier: &str,
+) -> QwenEditArtifactSource {
+    fixtures.qwen_edit_source(arm.lightning, tier, QWEN_EDIT_TEST_REVISION)
 }
-
-/// A `models--<repo>/snapshots/<revision>/<tier>` root laid out exactly as the HF cache does, so
-/// the tier suffix the validator pins is real rather than mocked.
-fn qwen_edit_snapshot_root(tier: &str) -> PathBuf {
-    let root = qwen_edit_scratch_dir("qwen-edit-candle-root")
-        .join(format!(
-            "models--{}",
-            protocol::QWEN_EDIT_REPOSITORY.replace('/', "--")
-        ))
-        .join("snapshots")
-        .join(QWEN_EDIT_TEST_REVISION)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
-}
-
-/// The distill snapshot, with the one pinned file actually on disk — the adapter helper refuses
-/// any other file name, so a fixture that skipped this would assert nothing.
-fn qwen_edit_lightning_fixture() -> QwenEditLightningSource {
-    let root = qwen_edit_scratch_dir("qwen-edit-candle-lightning");
-    std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join(protocol::QWEN_EDIT_LIGHTNING_FILE), b"distill").unwrap();
-    QwenEditLightningSource {
-        repository: protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned(),
-        revision: QWEN_EDIT_TEST_REVISION.to_owned(),
-        root,
-    }
-}
-
-fn qwen_edit_source(arm: QwenEditArm, tier: &str) -> QwenEditArtifactSource {
-    QwenEditArtifactSource {
-        repository: protocol::QWEN_EDIT_REPOSITORY.to_owned(),
-        revision: QWEN_EDIT_TEST_REVISION.to_owned(),
-        root: qwen_edit_snapshot_root(tier),
-        lightning: arm.lightning.then(qwen_edit_lightning_fixture),
-    }
-}
-
-const QWEN_EDIT_MEMBERS: [(QwenEditArm, &str); 2] = [
-    (QWEN_EDIT_ARM, "qwen_image_edit_2511"),
-    (QWEN_EDIT_LIGHTNING_ARM, "qwen_image_edit_2511_lightning"),
-];
 
 /// sc-22728: the ONE thing that makes the Lightning member Lightning at load time. Every
 /// downstream claim — the record's `builtInAdapters` count, the gated fragment's overlay
@@ -457,13 +415,15 @@ const QWEN_EDIT_MEMBERS: [(QwenEditArm, &str); 2] = [
 /// stack itself is therefore asserted here, on BOTH members and at every shipped tier.
 #[test]
 fn the_candle_qwen_edit_load_spec_carries_the_distill_on_exactly_the_lightning_member() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for (arm, model_id) in QWEN_EDIT_MEMBERS {
         for (tier, quant) in [
             ("q4", Some(Quant::Q4)),
             ("q8", Some(Quant::Q8)),
             ("bf16", None),
         ] {
-            let source = qwen_edit_source(arm, tier);
+            let source = qwen_edit_source(fixtures, arm, tier);
             let artifact =
                 qwen_edit_load_spec(arm, tier, &source, LoadShape::DeferredMaterialization)
                     .unwrap_or_else(|error| panic!("{model_id}/{tier}: {error}"));
@@ -519,9 +479,11 @@ fn the_candle_qwen_edit_load_spec_carries_the_distill_on_exactly_the_lightning_m
 /// a stale `…/q4` export cannot satisfy a q8 plan and quietly re-label another tier's peaks.
 #[test]
 fn a_candle_qwen_edit_root_of_another_tier_is_refused_naming_the_planned_tier() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for (arm, model_id) in QWEN_EDIT_MEMBERS {
         // The plan is q8; the root on disk is the q4 export.
-        let source = qwen_edit_source(arm, "q4");
+        let source = qwen_edit_source(fixtures, arm, "q4");
         let error = qwen_edit_load_spec(arm, "q8", &source, LoadShape::DeferredMaterialization)
             .expect_err("a q8 plan must not be satisfied by a q4 root");
         assert!(
@@ -529,7 +491,7 @@ fn a_candle_qwen_edit_root_of_another_tier_is_refused_naming_the_planned_tier() 
             "{model_id}: {error}"
         );
         // The wrong artifact family is refused before the root is even looked at.
-        let mut foreign = qwen_edit_source(arm, "q8");
+        let mut foreign = qwen_edit_source(fixtures, arm, "q8");
         foreign.repository = protocol::QWEN_EDIT_LIGHTNING_REPOSITORY.to_owned();
         let error = qwen_edit_load_spec(arm, "q8", &foreign, LoadShape::DeferredMaterialization)
             .expect_err("the distill repository is not the base artifact");
@@ -1215,34 +1177,23 @@ fn every_planned_sd3_5_candle_cell_is_served_by_an_arm() {
 // sc-22726 — the FLUX.1 family on the Candle lane.
 // -----------------------------------------------------------------------------------------
 
-fn flux_one_temp_dir(label: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!(
-        "sc-22726-candle-{label}-{}-{nonce}",
-        std::process::id()
-    ))
+fn flux_one_temp_dir(fixtures: &crate::adapter_test_support::Fixtures, label: &str) -> PathBuf {
+    fixtures.path(label)
 }
 
-fn flux_one_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
-    let root = flux_one_temp_dir("flux1")
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn flux_one_snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
-fn staged_pulid_bundle() -> protocol::PulidIdentityBundle {
-    let root = flux_one_temp_dir("pulid-bundle");
-    std::fs::create_dir_all(&root).unwrap();
-    for file in protocol::PULID_IDENTITY_BUNDLE_FILES {
-        std::fs::write(root.join(file), b"weights").unwrap();
-    }
-    protocol::pulid_identity_bundle_at(root).unwrap()
+fn staged_pulid_bundle(
+    fixtures: &crate::adapter_test_support::Fixtures,
+) -> protocol::PulidIdentityBundle {
+    fixtures.pulid_bundle()
 }
 
 /// The two FLUX.1 BASE providers reach the shared five-rung reference path under their own
@@ -1329,6 +1280,8 @@ fn every_candle_flux_one_member_refuses_a_multi_frame_geometry() {
 /// refused naming the tier, and all three tiers round-trip.
 #[test]
 fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
     let pulid_case = |tier: &str| {
         let mut planned =
@@ -1341,13 +1294,13 @@ fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
         ));
         json!({ "planned": planned })
     };
-    let q4_root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+    let q4_root = flux_one_snapshot_root(fixtures, protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
     let error = pulid_flux_binding_at(
         &pulid_case("q8"),
         protocol::FLUX1_DEV_REPOSITORY.to_owned(),
         REVISION.to_owned(),
         q4_root.clone(),
-        staged_pulid_bundle(),
+        staged_pulid_bundle(fixtures),
     )
     .expect_err("a q8 plan must not be satisfied by a q4 root");
     assert!(
@@ -1356,8 +1309,8 @@ fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
     );
 
     for tier in ["q4", "q8", "bf16"] {
-        let bundle = staged_pulid_bundle();
-        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, tier);
+        let bundle = staged_pulid_bundle(fixtures);
+        let root = flux_one_snapshot_root(fixtures, protocol::FLUX1_DEV_REPOSITORY, REVISION, tier);
         let binding = pulid_flux_binding_at(
             &pulid_case(tier),
             protocol::FLUX1_DEV_REPOSITORY.to_owned(),
@@ -1405,7 +1358,7 @@ fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
         protocol::FLUX1_DEV_REPOSITORY.to_owned(),
         REVISION.to_owned(),
         q4_root.clone(),
-        staged_pulid_bundle(),
+        staged_pulid_bundle(fixtures),
     )
     .expect_err("the fixture seed must be the seed the capture renders at");
     assert!(error.contains("does not match the seed"), "{error}");
@@ -1416,7 +1369,7 @@ fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
         protocol::FLUX1_SCHNELL_REPOSITORY.to_owned(),
         REVISION.to_owned(),
         q4_root.clone(),
-        staged_pulid_bundle(),
+        staged_pulid_bundle(fixtures),
     )
     .expect_err("the schnell artifact must be refused");
     assert!(error.contains(protocol::FLUX1_DEV_REPOSITORY), "{error}");
@@ -1429,7 +1382,7 @@ fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
         protocol::FLUX1_DEV_REPOSITORY.to_owned(),
         REVISION.to_owned(),
         q4_root.clone(),
-        staged_pulid_bundle(),
+        staged_pulid_bundle(fixtures),
     )
     .expect_err("PuLID has no text-to-image route");
     assert!(error.contains("character_image only"), "{error}");
@@ -1440,7 +1393,7 @@ fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
         protocol::FLUX1_DEV_REPOSITORY.to_owned(),
         REVISION.to_owned(),
         q4_root,
-        staged_pulid_bundle(),
+        staged_pulid_bundle(fixtures),
     )
     .expect_err("the identity route must require its own overlay");
     assert!(error.contains("executes exactly \"identity\""), "{error}");
@@ -1449,7 +1402,9 @@ fn the_candle_pulid_binding_carries_the_planned_tier_and_the_identity_stack() {
 /// An incomplete staged bundle is refused before the load, naming the missing files.
 #[test]
 fn an_incomplete_candle_pulid_bundle_is_refused_naming_the_missing_files() {
-    let root = flux_one_temp_dir("pulid-partial");
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
+    let root = flux_one_temp_dir(fixtures, "pulid-partial");
     std::fs::create_dir_all(&root).unwrap();
     for file in protocol::PULID_IDENTITY_BUNDLE_FILES.iter().skip(1) {
         std::fs::write(root.join(file), b"weights").unwrap();
@@ -1469,13 +1424,15 @@ fn an_incomplete_candle_pulid_bundle_is_refused_naming_the_missing_files() {
 /// binary fails before it reads an env var.
 #[test]
 fn the_env_bound_pulid_binding_reads_the_bundle_env_and_the_dev_family() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
     let _guard = PULID_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let restore = PulidEnv::capture();
-    let bundle = staged_pulid_bundle();
-    let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
+    let bundle = staged_pulid_bundle(fixtures);
+    let root = flux_one_snapshot_root(fixtures, protocol::FLUX1_DEV_REPOSITORY, REVISION, "q4");
     let mut planned =
         still_planned_case_in_mode(PULID_FLUX_ID, "staged_residency", 1, "character_image");
     planned["target"]["overlay"] = json!("identity");
@@ -1737,6 +1694,8 @@ fn the_candle_flux_one_fixture_binds_member_tier_edge_seed_and_steps() {
 /// plan with q4 (or dense) weights inside it.
 #[test]
 fn the_candle_flux_one_base_arm_reads_the_tier_off_the_transformer_config() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     const REVISION: &str = "323fd12d79f78ad444e882e8d8e871914584f2b9";
     for (tier, config) in [
         (
@@ -1749,7 +1708,7 @@ fn the_candle_flux_one_base_arm_reads_the_tier_off_the_transformer_config() {
         ),
         ("bf16", None),
     ] {
-        let root = flux_one_snapshot_root(protocol::FLUX1_DEV_REPOSITORY, REVISION, tier);
+        let root = flux_one_snapshot_root(fixtures, protocol::FLUX1_DEV_REPOSITORY, REVISION, tier);
         if let Some(config) = &config {
             std::fs::create_dir_all(root.join("transformer")).unwrap();
             std::fs::write(

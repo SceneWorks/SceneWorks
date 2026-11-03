@@ -425,7 +425,7 @@ fn candle_instantid_refuses_a_packed_tier() {
     }
 }
 
-use protocol::staging::StagedInstantId;
+use crate::adapter_test_support::staging::StagedInstantId;
 
 fn digest_of(paths: &[PathBuf]) -> String {
     instantid_artifact_fingerprint(&paths.iter().map(PathBuf::as_path).collect::<Vec<_>>())

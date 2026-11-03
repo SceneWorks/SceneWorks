@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod adapter_test_support;
+
 #[cfg(not(target_os = "macos"))]
 compile_error!("memory-mlx-adapter is supported only on macOS");
 
@@ -1996,9 +1999,6 @@ const QWEN_EDIT_LIGHTNING_ARM: QwenEditArm = QwenEditArm {
     steps: QWEN_EDIT_LIGHTNING_STEPS,
     slug: "qwen-edit-lightning",
 };
-
-#[cfg(test)]
-use protocol::QwenEditLightningSource;
 
 use protocol::QwenEditArtifactSource;
 

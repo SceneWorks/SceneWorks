@@ -449,16 +449,18 @@ fn every_mage_member_refuses_a_multi_frame_geometry_under_its_own_label() {
     }
 }
 
-fn mage_temp_root(label: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    std::env::temp_dir().join(format!("sc-22733-{label}-{}-{nonce}", std::process::id()))
+fn mage_temp_root(fixtures: &crate::adapter_test_support::Fixtures, label: &str) -> PathBuf {
+    fixtures.path(label)
 }
 
-fn staged_snapshot(repository: &str, revision: &str, tier: &str, components: bool) -> PathBuf {
-    let root = mage_temp_root(&repository.replace('/', "-"))
+fn staged_snapshot(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+    components: bool,
+) -> PathBuf {
+    let root = mage_temp_root(fixtures, &repository.replace('/', "-"))
         .join(format!("models--{}", repository.replace('/', "--")))
         .join("snapshots")
         .join(revision);
@@ -480,14 +482,19 @@ fn staged_snapshot(repository: &str, revision: &str, tier: &str, components: boo
 const MAGE_TEST_REVISION: &str = "5f6455818d8ca80ce780e9c01b9e0de1d8c5f9db";
 const MAGE_TEST_COMPONENTS_REVISION: &str = "c936de2a107ee8d0869137e73943f6414f23adaa";
 
-fn mage_source(arm: MageArm, tier: &str) -> MageArtifactSource {
+fn mage_source(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    arm: MageArm,
+    tier: &str,
+) -> MageArtifactSource {
     MageArtifactSource {
         repository: arm.repository.to_owned(),
         revision: MAGE_TEST_REVISION.to_owned(),
-        root: staged_snapshot(arm.repository, MAGE_TEST_REVISION, tier, false),
+        root: staged_snapshot(fixtures, arm.repository, MAGE_TEST_REVISION, tier, false),
         components_repository: protocol::MAGE_COMPONENTS_REPOSITORY.to_owned(),
         components_revision: MAGE_TEST_COMPONENTS_REVISION.to_owned(),
         components_root: staged_snapshot(
+            fixtures,
             protocol::MAGE_COMPONENTS_REPOSITORY,
             MAGE_TEST_COMPONENTS_REVISION,
             tier,
@@ -627,9 +634,11 @@ fn every_planned_mage_mlx_row_names_the_production_identity_and_is_checked_befor
 /// pair so the pass-through itself is what is asserted).
 #[test]
 fn the_load_spec_binds_the_tier_root_both_components_and_the_planned_quant() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for arm in MAGE_ARMS {
         for tier in ["bf16", "q4", "q8"] {
-            let source = mage_source(arm, tier);
+            let source = mage_source(fixtures, arm, tier);
             let selection = resident_selection(tier);
             let MageArtifact { root, spec } = mage_load_spec(
                 arm,
@@ -673,9 +682,11 @@ fn the_load_spec_binds_the_tier_root_both_components_and_the_planned_quant() {
 /// the planned tier before the load is paid for (the sc-17097 defect class).
 #[test]
 fn another_tiers_root_cannot_satisfy_the_planned_tier() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let arm = MAGE_ARMS[0];
-    let mut source = mage_source(arm, "q4");
-    source.root = staged_snapshot(arm.repository, MAGE_TEST_REVISION, "q8", false);
+    let mut source = mage_source(fixtures, arm, "q4");
+    source.root = staged_snapshot(fixtures, arm.repository, MAGE_TEST_REVISION, "q8", false);
     let error = mage_load_spec(
         arm,
         "q4",
@@ -692,8 +703,10 @@ fn another_tiers_root_cannot_satisfy_the_planned_tier() {
 /// variant root pointing at a sibling's — is refused by repository name.
 #[test]
 fn each_member_refuses_another_repositorys_root() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let arm = MAGE_ARMS[3];
-    let mut crossed = mage_source(arm, "q4");
+    let mut crossed = mage_source(fixtures, arm, "q4");
     crossed.repository = MAGE_ARMS[4].repository.to_owned();
     let error = mage_load_spec(
         arm,
@@ -706,7 +719,7 @@ fn each_member_refuses_another_repositorys_root() {
     .unwrap_err();
     assert!(error.contains(arm.repository), "{error}");
 
-    let mut crossed_components = mage_source(arm, "q4");
+    let mut crossed_components = mage_source(fixtures, arm, "q4");
     crossed_components.components_repository = arm.repository.to_owned();
     let error = mage_load_spec(
         arm,
@@ -832,8 +845,11 @@ fn is_live_budget_refusal(reason: &str) -> bool {
         || reason.contains("exceeding the safe wired-memory budget")
 }
 
-fn mage_registration_spec(tier: &str) -> LoadSpec {
-    let spec = LoadSpec::new(WeightsSource::Dir(mage_temp_root("registration")));
+fn mage_registration_spec(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    tier: &str,
+) -> LoadSpec {
+    let spec = LoadSpec::new(WeightsSource::Dir(mage_temp_root(fixtures, "registration")));
     match resident_selection(tier).tier.quant {
         Some(quant) => spec.with_quant(quant),
         None => spec,
@@ -888,13 +904,15 @@ fn mage_admitted_context(
 /// provider's own registered predicate rather than a restatement of it.
 #[test]
 fn every_member_and_tier_is_admitted_by_the_pinned_providers_own_safety_predicate() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for (arm, (variant, registration)) in MAGE_ARMS.iter().zip(MAGE_MEMORY_REGISTRATIONS) {
         assert_eq!(
             registration.provider_id, arm.provider,
             "the registration table is out of order with MAGE_ARMS"
         );
         for tier in ["bf16", "q4", "q8"] {
-            let spec = mage_registration_spec(tier);
+            let spec = mage_registration_spec(fixtures, tier);
             let (contract, context) = mage_admitted_context(*arm, variant, tier);
             let key = format!("{}:{tier}", arm.provider);
             // Every REQUEST-context rule must admit this pair. The resident rung then resolves

@@ -518,15 +518,11 @@ fn rung_four_is_capturable_only_under_the_deferred_load_shape() {
 /// reads (`transformer/config.json`, the same file `mlx_gen::quant::packed_quant_bits_at`
 /// parses on the load path). `None` writes a DENSE marker — a real `config.json` with no
 /// `quantization` block — which is what makes a bf16 root distinguishable from an absent one.
-fn minimax_marked_root(bits: Option<u32>) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "sc-22737-minimax-{}-{nonce}-{bits:?}",
-        std::process::id()
-    ));
+fn minimax_marked_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    bits: Option<u32>,
+) -> PathBuf {
+    let root = fixtures.path("minimax-marked-root");
     let dit = root.join(mlx_gen_minimax_h3::model::DIT_COMPONENT);
     std::fs::create_dir_all(&dit).unwrap();
     let body = match bits {
@@ -549,6 +545,8 @@ fn minimax_marked_root(bits: Option<u32>) -> PathBuf {
 ///   withheld too, never re-labelled.
 #[test]
 fn the_pinned_minimax_engine_mints_this_arms_identity_family_per_artifact_tier() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
     let withheld = registry
         .memory_strategy_contract(
@@ -568,7 +566,7 @@ fn the_pinned_minimax_engine_mints_this_arms_identity_family_per_artifact_tier()
         ("q8", Some(8), Some(Quant::Q8)),
         ("bf16", None, None),
     ] {
-        let root = minimax_marked_root(bits);
+        let root = minimax_marked_root(fixtures, bits);
         let spec = |quant: Option<Quant>| {
             let mut spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
                 .with_offload_policy(OffloadPolicy::Resident)
@@ -613,7 +611,6 @@ fn the_pinned_minimax_engine_mints_this_arms_identity_family_per_artifact_tier()
             "{tier}: a spec.quantize that disagrees with the marker must be withheld, got {:?}",
             mismatch.calibration
         );
-        std::fs::remove_dir_all(&root).unwrap();
     }
 }
 
@@ -625,8 +622,10 @@ fn the_pinned_minimax_engine_mints_this_arms_identity_family_per_artifact_tier()
 /// skipped over a weights-free contract that publishes none.
 #[test]
 fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let registry = mlx_gen_minimax_h3::provider_registry().unwrap();
-    let root = minimax_marked_root(Some(4));
+    let root = minimax_marked_root(fixtures, Some(4));
     let spec = LoadSpec::new(WeightsSource::Dir(root.clone()))
         .with_offload_policy(OffloadPolicy::Resident)
         .with_load_shape(LoadShape::EagerMaterialization)
@@ -689,7 +688,6 @@ fn the_minimax_h3_memory_strategy_contract_enforces_non_vacuous_admission() {
         }
         other => panic!("a foreign identity must be refused, got {other:?}"),
     }
-    std::fs::remove_dir_all(&root).unwrap();
 }
 
 /// The three `mlx:minimax_h3` identities are ONE family minted off the engine's retained key

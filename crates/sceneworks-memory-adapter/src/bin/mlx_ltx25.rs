@@ -1799,14 +1799,9 @@ mod tests {
 
     #[test]
     fn canonical_av_receipts_are_content_addressed_and_immutable() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let output_dir = std::env::temp_dir().join(format!(
-            "sceneworks-ltx25-av-receipt-{}-{nonce}",
-            std::process::id()
-        ));
+        let fixture_owner = crate::adapter_test_support::Fixtures::default();
+        let fixtures = &fixture_owner;
+        let output_dir = fixtures.path("canonical-av-receipts-are-content-addressed-and-immutable");
         std::fs::create_dir_all(&output_dir).unwrap();
         let plan = SourceCapturePlan {
             output_dir: output_dir.clone(),
@@ -1838,7 +1833,6 @@ mod tests {
         std::fs::write(&local_path, b"tampered").unwrap();
         let error = persist_canonical_av(&plan, "selected_av", &clip).unwrap_err();
         assert!(error.contains("different bytes"), "{error}");
-        std::fs::remove_dir_all(output_dir).unwrap();
     }
 
     #[test]
@@ -1896,14 +1890,10 @@ mod tests {
 
     #[test]
     fn source_capture_seals_enhancer_and_variant_exact_adapter_inputs() {
-        let nonce = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let output_dir = std::env::temp_dir().join(format!(
-            "sceneworks-ltx25-shared-receipt-{}-{nonce}",
-            std::process::id()
-        ));
+        let fixture_owner = crate::adapter_test_support::Fixtures::default();
+        let fixtures = &fixture_owner;
+        let output_dir =
+            fixtures.path("source-capture-seals-enhancer-and-variant-exact-adapter-inputs");
         std::fs::create_dir_all(&output_dir).unwrap();
         let snapshot_root = output_dir.join("snapshot");
         let target = validate_target(&request("q4", "dev", "conv", 768, 512, BASE_FRAMES)).unwrap();
@@ -1976,7 +1966,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["base", "enhancer"]
         );
-        std::fs::remove_dir_all(output_dir).unwrap();
     }
 
     #[test]

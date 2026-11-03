@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod adapter_test_support;
+
 #[cfg(target_os = "macos")]
 compile_error!("memory-candle-adapter is supported only on CUDA hosts");
 
@@ -1406,9 +1409,6 @@ const QWEN_EDIT_PROMPT: &str = "replace the background with a plain grey studio 
 /// (`resolve_qwen_edit_guidance`, manifest `variationStrength.default`). Lightning requires 1.0
 /// explicitly: the engine rejects other guidance values rather than overriding them.
 const QWEN_EDIT_GUIDANCE: f32 = 4.0;
-
-#[cfg(test)]
-use protocol::QwenEditLightningSource;
 
 use protocol::QwenEditArtifactSource;
 

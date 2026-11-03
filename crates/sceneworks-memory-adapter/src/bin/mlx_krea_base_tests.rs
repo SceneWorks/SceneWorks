@@ -156,29 +156,26 @@ fn each_member_refuses_the_other_members_load_shape() {
 
 /// The tier-exact snapshot root every member binds against, built the way a real export lays
 /// one out.
-fn snapshot_root(repository: &str, revision: &str, tier: &str, tag: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22735-{tag}-{}-{nonce}", std::process::id()))
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+    _tag: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
 /// The Raw load spec carries NO quant at ANY tier, and still binds the tier-exact root — driven
 /// env-free through [`krea_base_spec_at`], the way `z_image_load_spec_at` is unit-tested.
 #[test]
 fn the_raw_load_spec_carries_no_quant_and_binds_the_planned_tier() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let repository = "SceneWorks/krea-2-raw-mlx";
     let revision = "a".repeat(40);
     for tier in ["bf16", "q4", "q8"] {
-        let root = snapshot_root(repository, &revision, tier, "raw");
+        let root = snapshot_root(fixtures, repository, &revision, tier, "raw");
         let selection = planned_selection(&planned_row(KREA_RAW_ARM, tier)).unwrap();
         let spec = krea_base_spec_at(
             KREA_RAW_ARM,
@@ -225,7 +222,6 @@ fn the_raw_load_spec_carries_no_quant_and_binds_the_planned_tier() {
                      snapshot suffix it required, got {error:?}"
             );
         }
-        std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }
 
@@ -233,6 +229,8 @@ fn the_raw_load_spec_carries_no_quant_and_binds_the_planned_tier() {
 /// the planned tier's quant on the spec, and this story does not re-measure them.
 #[test]
 fn the_turbo_load_spec_still_carries_its_tier_quant() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let repository = "SceneWorks/krea-2-turbo-mlx";
     let revision = "b".repeat(40);
     for (tier, expected) in [
@@ -240,7 +238,7 @@ fn the_turbo_load_spec_still_carries_its_tier_quant() {
         ("q4", Some(Quant::Q4)),
         ("q8", Some(Quant::Q8)),
     ] {
-        let root = snapshot_root(repository, &revision, tier, "turbo");
+        let root = snapshot_root(fixtures, repository, &revision, tier, "turbo");
         let selection = planned_selection(&planned_row(KREA_TURBO_ARM, tier)).unwrap();
         let spec = krea_base_spec_at(
             KREA_TURBO_ARM,
@@ -253,7 +251,6 @@ fn the_turbo_load_spec_still_carries_its_tier_quant() {
         .unwrap();
         assert_eq!(spec.quantize, expected, "{tier}");
         assert_eq!(spec.load_shape, LoadShape::DeferredMaterialization);
-        std::fs::remove_dir_all(root.parent().unwrap()).ok();
     }
 }
 
@@ -365,14 +362,9 @@ fn base_admission_context_is_reference_free_text_to_image() {
 
 #[test]
 fn pinned_base_contract_exposes_the_exact_declared_full_ladder() {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "sc-18377-krea-contract-{}-{nonce}",
-        std::process::id()
-    ));
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
+    let root = fixtures.path("pinned-base-contract-exposes-the-exact-declared-full-ladder");
     std::fs::create_dir_all(&root).unwrap();
     let spec = fixture_spec(&root);
     let contract = mlx_gen_krea::provider_registry()
@@ -435,5 +427,4 @@ fn pinned_base_contract_exposes_the_exact_declared_full_ladder() {
             MemoryStrategy::BoundedTransformerResidency,
         ]
     );
-    std::fs::remove_dir_all(root).ok();
 }

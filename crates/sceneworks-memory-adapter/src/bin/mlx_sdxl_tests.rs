@@ -240,14 +240,9 @@ fn sdxl_runtime_complete_sweep_attests_the_exact_tuple_without_a_string_axis() {
 
 #[test]
 fn pinned_sdxl_contract_exposes_the_four_implemented_rungs() {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "sc-18379-sdxl-contract-{}-{nonce}",
-        std::process::id()
-    ));
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
+    let root = fixtures.path("pinned-sdxl-contract-exposes-the-four-implemented-rungs");
     std::fs::create_dir_all(&root).unwrap();
     let spec = fixture_spec(&root);
     let contract = mlx_gen_sdxl::provider_registry()
@@ -396,5 +391,4 @@ fn pinned_sdxl_contract_exposes_the_four_implemented_rungs() {
         mlx_gen_sdxl::memory_strategy::MEMORY_CALIBRATION_FINGERPRINT_VAE_FP16
     );
     assert_ne!(fixed.calibration, contract.calibration);
-    std::fs::remove_dir_all(root).ok();
 }

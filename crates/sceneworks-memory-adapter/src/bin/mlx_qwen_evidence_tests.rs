@@ -17,14 +17,10 @@ fn negative_mutation_changes_pixels_and_is_measured_from_the_changed_image() {
 
 #[test]
 fn physical_mlx_rgb_receipts_are_role_and_content_addressed_without_overwrite() {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock after epoch")
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!(
-        "sceneworks-physical-mlx-receipts-{}-{nonce}",
-        std::process::id()
-    ));
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
+    let root =
+        fixtures.path("physical-mlx-rgb-receipts-are-role-and-content-addressed-without-overwrite");
     std::fs::create_dir_all(&root).expect("create receipt fixture");
     let first = Image {
         width: 2,
@@ -88,6 +84,4 @@ fn physical_mlx_rgb_receipts_are_role_and_content_addressed_without_overwrite() 
     )
     .expect_err("exclusive receipt creation must not repair or overwrite tampering");
     assert!(error.contains("already exists with different bytes"));
-
-    std::fs::remove_dir_all(root).ok();
 }

@@ -29,25 +29,24 @@ fn turnkey_planned(provider: &str, mode: &str, tier: &str) -> Value {
     })
 }
 
-fn turnkey_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22732-{}-{nonce}", std::process::id()))
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn turnkey_snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
 /// The root a family's `tier` loads from: `<snapshot>/<tier>` for a tiered family, and the
 /// snapshot ROOT for Qwen-Image 2.1's untiered bf16 leg (sc-24112).
-fn turnkey_family_root(family: TurnkeyFamily, revision: &str, tier: &str) -> PathBuf {
-    let root = turnkey_snapshot_root(family.expected_repository, revision, tier);
+fn turnkey_family_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    family: TurnkeyFamily,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    let root = turnkey_snapshot_root(fixtures, family.expected_repository, revision, tier);
     if family.tiered {
         root
     } else {
@@ -184,6 +183,8 @@ fn each_member_binds_its_own_artifact_family_and_ideogram_splits_bf16() {
 /// flux2-klein ids).
 #[test]
 fn the_turnkey_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let revision = "a".repeat(40);
     for (provider, _) in MEMBERS {
         let arm = turnkey_arm(&turnkey_planned(provider, "text_to_image", "q4")).unwrap();
@@ -193,7 +194,7 @@ fn the_turnkey_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
             ("bf16", None),
         ] {
             let family = arm.family_for(tier);
-            let root = turnkey_family_root(family, &revision, tier);
+            let root = turnkey_family_root(fixtures, family, &revision, tier);
             let artifact = turnkey_load_spec_at(
                 &turnkey_planned(provider, "text_to_image", tier),
                 LoadShape::EagerMaterialization,
@@ -230,13 +231,15 @@ fn the_turnkey_root_must_carry_the_planned_tier_and_the_spec_binds_it() {
 /// this check stands between a bf16 record and the packed artifact's identity.
 #[test]
 fn an_ideogram_tier_cannot_be_satisfied_by_the_other_repositorys_snapshot() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let revision = "b".repeat(40);
     for arm in [IDEOGRAM_ARM, IDEOGRAM_TURBO_ARM] {
         for (tier, foreign) in [
             ("bf16", protocol::IDEOGRAM_REPOSITORY),
             ("q4", protocol::IDEOGRAM_BF16_REPOSITORY),
         ] {
-            let root = turnkey_snapshot_root(foreign, &revision, tier);
+            let root = turnkey_snapshot_root(fixtures, foreign, &revision, tier);
             let error = turnkey_load_spec_at(
                 &turnkey_planned(arm.provider, "text_to_image", tier),
                 LoadShape::EagerMaterialization,
@@ -261,6 +264,8 @@ fn an_ideogram_tier_cannot_be_satisfied_by_the_other_repositorys_snapshot() {
 /// it neither checkpoint's repositories satisfy the OTHER checkpoint's plan at any tier.
 #[test]
 fn the_qwen_image_2_1_bf16_leg_binds_the_upstream_snapshot_root() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     let revision = "c".repeat(40);
     for (arm, sibling) in [
         (QWEN_IMAGE_2_1_ARM, QWEN_IMAGE_2_1_TURBO_ARM),
@@ -268,7 +273,7 @@ fn the_qwen_image_2_1_bf16_leg_binds_the_upstream_snapshot_root() {
     ] {
         let dense = arm.family_for("bf16").expected_repository;
         let packed = arm.family_for("q8").expected_repository;
-        let tiered_bf16 = turnkey_snapshot_root(dense, &revision, "bf16");
+        let tiered_bf16 = turnkey_snapshot_root(fixtures, dense, &revision, "bf16");
         let error = turnkey_load_spec_at(
             &turnkey_planned(arm.provider, "text_to_image", "bf16"),
             LoadShape::EagerMaterialization,
@@ -290,12 +295,12 @@ fn the_qwen_image_2_1_bf16_leg_binds_the_upstream_snapshot_root() {
             ("q4", sibling.family_for("q4").expected_repository),
         ] {
             let root = if tier == "bf16" && foreign != packed {
-                turnkey_snapshot_root(foreign, &revision, tier)
+                turnkey_snapshot_root(fixtures, foreign, &revision, tier)
                     .parent()
                     .unwrap()
                     .to_path_buf()
             } else {
-                turnkey_snapshot_root(foreign, &revision, tier)
+                turnkey_snapshot_root(fixtures, foreign, &revision, tier)
             };
             let error = turnkey_load_spec_at(
                 &turnkey_planned(arm.provider, "text_to_image", tier),

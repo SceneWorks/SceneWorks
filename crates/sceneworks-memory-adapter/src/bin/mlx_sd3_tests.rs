@@ -81,19 +81,13 @@ fn the_sd3_metric_helper_refuses_an_uncomparable_pair() {
         .contains("image shape mismatch"));
 }
 
-fn sd3_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22730-mlx-{}-{nonce}", std::process::id()))
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn sd3_snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
 fn sd3_planned(provider: &str, mode: &str, tier: &str, fixture: &str) -> Value {
@@ -143,10 +137,12 @@ fn the_sd3_arm_resolves_on_provider_and_mode_and_refuses_everything_else() {
 /// repository can never satisfy another's.
 #[test]
 fn the_sd3_load_spec_binds_the_member_and_the_planned_tier() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for arm in SD3_ARMS {
         for tier in ["q4", "q8", "bf16"] {
             let revision = "0".repeat(40);
-            let root = sd3_snapshot_root(arm.expected_repository, &revision, tier);
+            let root = sd3_snapshot_root(fixtures, arm.expected_repository, &revision, tier);
             let fixture = format!("{}-mlx-{tier}-1024-seed{SD3_SEED}-step2", arm.slug);
             let request = sd3_planned(arm.provider, "text_to_image", tier, &fixture);
             let artifact = sd3_load_spec_at(

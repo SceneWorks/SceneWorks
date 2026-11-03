@@ -905,10 +905,8 @@ mod tests {
     #[test]
     fn each_route_binds_only_its_own_folder_of_the_upstream_snapshot() {
         let revision = "c".repeat(40);
-        let scratch = std::env::temp_dir().join(format!(
-            "sceneworks-mlx-iris-arm-{}-{revision}",
-            std::process::id()
-        ));
+        let temporary = tempfile::tempdir().unwrap();
+        let scratch = temporary.path().to_path_buf();
         let snapshot = scratch
             .join("models--speridlabs--iris-3b")
             .join("snapshots")
@@ -957,7 +955,6 @@ mod tests {
             .expect_err("a foreign repository is refused");
             assert!(error.contains(protocol::IRIS_3B_REPOSITORY), "{error}");
         }
-        std::fs::remove_dir_all(&scratch).unwrap();
     }
 
     /// Generation stages the text encoder as its one component; the downstream routes refuse one,

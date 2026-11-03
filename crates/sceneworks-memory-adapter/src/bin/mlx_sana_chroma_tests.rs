@@ -50,19 +50,13 @@ fn sana_chroma_planned(provider: &str, tier: &str) -> Value {
     })
 }
 
-fn sana_chroma_snapshot_root(repository: &str, revision: &str, tier: &str) -> PathBuf {
-    let nonce = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir()
-        .join(format!("sc-22731-{}-{nonce}", std::process::id()))
-        .join(format!("models--{}", repository.replace('/', "--")))
-        .join("snapshots")
-        .join(revision)
-        .join(tier);
-    std::fs::create_dir_all(&root).unwrap();
-    root
+fn sana_chroma_snapshot_root(
+    fixtures: &crate::adapter_test_support::Fixtures,
+    repository: &str,
+    revision: &str,
+    tier: &str,
+) -> PathBuf {
+    fixtures.snapshot(repository, revision, Some(tier))
 }
 
 const REVISION: &str = "ac421696dd6eb0b41f446f4c45a53ccc057d82a1";
@@ -229,6 +223,8 @@ fn a_provider_no_member_serves_is_refused_by_name() {
 /// exact resolved route, and the planned materialization shape.
 #[test]
 fn the_load_spec_is_resident_and_carries_the_planned_tier_and_route() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for (arm, tier, quant) in [
         (SANA_ARM, "q4", Some(Quant::Q4)),
         (SANA_ARM, "q8", Some(Quant::Q8)),
@@ -236,7 +232,7 @@ fn the_load_spec_is_resident_and_carries_the_planned_tier_and_route() {
         (CHROMA1_HD_ARM, "q4", Some(Quant::Q4)),
         (CHROMA1_FLASH_ARM, "bf16", None),
     ] {
-        let root = sana_chroma_snapshot_root(arm.expected_repository, REVISION, tier);
+        let root = sana_chroma_snapshot_root(fixtures, arm.expected_repository, REVISION, tier);
         let artifact = sana_chroma_load_spec_at(
             &sana_chroma_planned(arm.provider, tier),
             arm.load_shape,
@@ -263,8 +259,10 @@ fn the_load_spec_is_resident_and_carries_the_planned_tier_and_route() {
 /// never satisfy a q8 or bf16 plan and quietly re-label another tier's peaks.
 #[test]
 fn a_root_of_another_tier_is_refused_naming_the_tier() {
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
     for arm in SANA_CHROMA_ARMS {
-        let root = sana_chroma_snapshot_root(arm.expected_repository, REVISION, "q4");
+        let root = sana_chroma_snapshot_root(fixtures, arm.expected_repository, REVISION, "q4");
         let error = sana_chroma_load_spec_at(
             &sana_chroma_planned(arm.provider, "q8"),
             LoadShape::DeferredMaterialization,
@@ -285,7 +283,9 @@ fn a_root_of_another_tier_is_refused_naming_the_tier() {
 /// so a Flash plan can never be satisfied by HD weights.
 #[test]
 fn a_root_of_another_route_is_refused() {
-    let root = sana_chroma_snapshot_root(protocol::CHROMA1_HD_REPOSITORY, REVISION, "q4");
+    let fixture_owner = crate::adapter_test_support::Fixtures::default();
+    let fixtures = &fixture_owner;
+    let root = sana_chroma_snapshot_root(fixtures, protocol::CHROMA1_HD_REPOSITORY, REVISION, "q4");
     let error = sana_chroma_load_spec_at(
         &sana_chroma_planned(CHROMA1_FLASH_PROVIDER, "q4"),
         LoadShape::DeferredMaterialization,
