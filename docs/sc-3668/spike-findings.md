@@ -1,5 +1,10 @@
 # sc-3668 — Port-or-drop AuraSR upscaler engine on Mac: path-selection spike
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 **Recommendation: DROP on Mac.** UI-gate the `engine=aura-sr` option out of the
 Mac upscale UI (sc-3486 mechanism) and keep Real-ESRGAN x4 as the only Mac
 upscaler. Keep AuraSR fully available on the Windows/Linux torch path. The two

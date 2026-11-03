@@ -1,5 +1,10 @@
 # Cross-backend memory-strategy calibration harness
 
+> **Historical RGB retrieval:** the 61 former tracked RGB frames are preserved by digest in the
+> [immutable artifact archive](archive/historical-artifacts.md#calibration-reproduction). Restore
+> group `calibration` and pass its directory as `--source-root` for byte-level reproduction.
+> Existing receipt checks, measurement records, request/stdout receipts and logs remain unchanged.
+
 > **Measuring a lane? Start with [calibration-runbook.md](calibration-runbook.md)** (sc-18103) — the
 > parameterized, copy-paste procedure from "I want `<backend>:<provider>` measured" to "PR open with
 > the record ingested". This page is the *reference* it draws on: identities, schema semantics,

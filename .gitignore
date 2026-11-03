@@ -316,3 +316,27 @@ film-harness-review-eval/
 
 # Design-tool export preview (extensionless WebP); fails check-source-control-bytes classification
 design/system/.thumbnail
+
+# Historical evidence payloads: recover via docs/archive/historical-artifacts.md.
+/docs/calibration/**/*.rgb
+/design/*.zip
+/poses/*.png
+/logo-large.png
+/scripts/spikes/**
+!/scripts/spikes/README.md
+/docs/sc-15360/fetch_style_sets.py
+/docs/sc-16962/worker-progress-card-step-02-of-24.png
+/docs/sc-16962/worker-progress-card-step-21-of-24.png
+/docs/sc-3494/images/candle-sdxl-seed42.png
+/docs/sc-3494/images/candle-seed42-repro-collapse.png
+/docs/sc-3494/images/python-sdxl-seed42.png
+/docs/sc-3734/attn_precision.py
+/docs/sc-3734/mlx_matmul_check.py
+/docs/sc-3734/torch_ref.py
+/docs/sc-4422-kps-experiment/extract_kps.py
+/docs/sc-4422-kps-experiment/instantid_current_vs_tightened.png
+/docs/sc-4422-kps-experiment/instantid_downfix/before_after.png
+/docs/sc-4422-kps-experiment/instantid_exp.py
+/docs/sc-4422-kps-experiment/measure_out.py
+/docs/sc-4422-kps-experiment/montage_all11.png
+/docs/sc-4422-kps-experiment/tighten_preview.py

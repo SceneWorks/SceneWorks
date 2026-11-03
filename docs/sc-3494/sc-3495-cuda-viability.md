@@ -1,5 +1,10 @@
 # sc-3495 — Candle CUDA build/runtime viability on Windows: PASS
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 Epic 3494 (Candle SDXL Windows feasibility spike). Outcome: **Candle builds and
 runs a CUDA workload on this Windows/Blackwell box.** A minimal Candle smoke
 allocated a tensor on the Blackwell GPU (sm_120) and ran a real matmul+softmax

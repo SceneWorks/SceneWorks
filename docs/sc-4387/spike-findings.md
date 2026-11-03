@@ -1,5 +1,10 @@
 # sc-4387 — DWPose backend: native-MLX port vs keep `ort`+CoreML (R2)
 
+> **Historical experiment.** The scripts/images referenced below are preserved at their original
+> paths in the [immutable artifact archive](../archive/historical-artifacts.md). Restore all groups
+> outside the checkout before following these historical reproduction commands. Reports and
+> retained JSON are unchanged evidence; old runtime paths describe the original experiment.
+
 **Recommendation: do NOT port DWPose to MLX in isolation.** On the evidence, DWPose
 is the *success* case for the CoreML EP — not a failure case like YOLO11 (hung) or
 SAM2 (fragmented). Keep `ort`+CoreML for DWPose now; treat an MLX port as a deliberate

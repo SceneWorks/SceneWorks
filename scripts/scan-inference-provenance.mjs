@@ -1,6 +1,6 @@
 #!/usr/bin/env node
+import { sha256 } from "./lib/file-sha256.mjs";
 
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
@@ -167,9 +167,6 @@ const SPECIAL_AREAS = new Map([
   ["crates/media/candle-gen/candle-gen/build.rs", "first-party:crates/media/candle-gen/candle-gen/build.rs"],
 ]);
 
-function sha256(text) {
-  return crypto.createHash("sha256").update(text).digest("hex");
-}
 
 function normalizeMarkers(source) {
   return [...source.matchAll(MARKER)]

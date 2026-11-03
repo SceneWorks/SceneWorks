@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
+import { sha256 as hash } from "./file-sha256.mjs";
 import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
-const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
 const fail = (message) => { throw new Error(`upstream reference: ${message}`); };
 export const UPSTREAM_REVISION = "0e083c1911760aa31bc576ca7f337a7f8ee605ec";
 export const PARITY_SOURCE_INDICES = [0, 30, 60, 90].flatMap((start) => Array.from({ length: 5 }, (_, offset) => start + offset));

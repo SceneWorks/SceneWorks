@@ -1,14 +1,14 @@
 #!/usr/bin/env node
+import { sha256 as hash } from "./lib/file-sha256.mjs";
 // Transport small authorized component configs through an Actions secret.
 // Content never enters source control, command arguments, logs, or artifacts.
-import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { isExecutedModule } from "./starvector-terminal-cli.mjs";
 const COMPONENTS = ["starcoder1", "starcoder2", "siglip"];
 const MAX_BUNDLE_BYTES = 32 * 1024;
 const MAX_CONFIG_BYTES = 8 * 1024;
-const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+
 const fail = message => { throw new Error(`terminal component transport: ${message}`); };
 const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
 

@@ -1098,7 +1098,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         run: |
           "$RUNNER_TEMP/qwen-provision-venv/bin/python" -m pip install \
-            --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
+            --disable-pip-version-check --no-input -r .github/requirements-hf.txt
       - name: Set up runner Python 3.12 for Z-Image provisioning
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_z_image_snapshot }}
         run: |
@@ -1109,7 +1109,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_five_rung_reference && inputs.provision_z_image_snapshot }}
         run: |
           "$RUNNER_TEMP/z-image-provision-venv/bin/python" -m pip install \
-            --disable-pip-version-check --no-input "huggingface_hub==0.36.0"
+            --disable-pip-version-check --no-input -r .github/requirements-hf.txt
       - name: Provision exact public Qwen calibration snapshot
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_memory_calibration && inputs.provision_qwen_snapshot }}
         env:
