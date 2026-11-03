@@ -395,6 +395,20 @@ describe("EditorScreen keep-alive keydown gating (sc-13589)", () => {
     expect(setActiveTimeline.mock.calls[1][0].tracks[0].items[0].id).toBe("item_1");
   });
 
+  it.each(["button", "a", '[role="button"]', '[role="tab"]', '[contenteditable="true"]'])
+  ("leaves Space to an interactive focus target %s", (selector) => {
+    renderEditor(true);
+    const target = document.createElement(selector.startsWith("[") ? "div" : selector);
+    if (selector.startsWith("[")) {
+      const [, key, value] = selector.match(/\[(.+)="(.+)"\]/);
+      target.setAttribute(key, value);
+    }
+    container.appendChild(target);
+    const event = new window.KeyboardEvent("keydown", { code: "Space", key: " ", bubbles: true, cancelable: true });
+    act(() => target.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(false);
+  });
+
   it("ignores Delete while the editor is HIDDEN under keep-alive", () => {
     const { setActiveTimeline } = renderEditor(false);
     selectClipAndPressDelete();

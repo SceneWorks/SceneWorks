@@ -57,6 +57,15 @@ describe("advanced studio settings are durable (sc-15425)", () => {
     });
   }
 
+  it("flushes the latest debounced snapshot when the studio unmounts", async () => {
+    await act(async () => root.render(<Harness settings={{ prompt: "first" }} />));
+    await act(async () => root.render(<Harness settings={{ prompt: "latest" }} />));
+    expect(persistNavigationPreferences).not.toHaveBeenCalled();
+    await act(async () => root.unmount());
+    expect(lastSentMap()["ws-1"].image.prompt).toBe("latest");
+    root = createRoot(container);
+  });
+
   it("mirrors a studio snapshot into the durable map, keyed by workspace", async () => {
     await render(<Harness settings={{ prompt: "a fox", model: "z_image" }} />);
     expect(lastSentMap()["ws-1"].image).toMatchObject({ prompt: "a fox", model: "z_image" });

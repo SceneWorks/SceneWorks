@@ -200,10 +200,11 @@ export function EditorScreen() {
         return;
       }
       const target = event.target;
-      if (["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName)) {
+      if (["INPUT", "TEXTAREA", "SELECT"].includes(target?.tagName) || target?.isContentEditable || target?.closest?.('[contenteditable="true"]')) {
         return;
       }
       if (event.code === "Space") {
+        if (target?.closest?.('button, a, [role="button"], [role="tab"]')) return;
         event.preventDefault();
         togglePreviewPlayback();
       }

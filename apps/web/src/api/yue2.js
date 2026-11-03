@@ -1,4 +1,4 @@
-import { API_BASE_URL, ApiError, apiFetch } from "../api.js";
+import { API_BASE_URL, apiFetch } from "../api.js";
 
 // YuE2 (epic 22988) client seam: the song-job route, the server-side licence acknowledgment and
 // the score-version / comparison records. Every call goes through `apiFetch`, so a refusal arrives
@@ -119,20 +119,6 @@ export function yue2TranscriptionFileUrl(projectId, transcriptionId, path) {
 // so a bare link would be refused in remote-auth mode). A refusal is an `ApiError` carrying the
 // server's typed code — never an empty file.
 export async function fetchYue2TranscriptionFile(projectId, transcriptionId, path, token) {
-  const headers = new Headers();
-  if (token) {
-    headers.set("X-SceneWorks-Token", token);
-  }
-  const response = await fetch(yue2TranscriptionFileUrl(projectId, transcriptionId, path), { headers });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    const detail = payload?.detail;
-    throw new ApiError(typeof detail === "string" ? detail : `Request failed with ${response.status}`, {
-      status: response.status,
-      detail,
-      code: payload?.code,
-      context: payload?.context,
-    });
-  }
-  return response.blob();
+  const url = yue2TranscriptionFileUrl(projectId, transcriptionId, path);
+  return apiFetch(url.slice(API_BASE_URL.length), token, { responseType: "blob" });
 }

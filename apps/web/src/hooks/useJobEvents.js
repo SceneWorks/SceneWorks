@@ -69,6 +69,7 @@ export function useJobEvents({
     let reconnectTimer = null;
     let reconnectAttempt = 0;
     let closed = false;
+    const ticketController = new AbortController();
     let snapshotRevision = 0;
     let reconnectKnownJobIds = new Set();
     let maxRetainedClearTombstones = MAX_TERMINAL_JOBS;
@@ -417,11 +418,13 @@ export function useJobEvents({
         if (access.authRequired || activeJobIds.length > 0 || knownTerminalJobIds.length > 0) {
           const response = await apiFetch("/api/v1/jobs/events/ticket", token, {
             method: "POST",
+            signal: ticketController.signal,
             body: JSON.stringify({ activeJobIds, knownTerminalJobIds }),
           });
           ticket = response.ticket;
         }
       } catch (err) {
+        if (closed) return;
         if (isReauthenticating(err)) {
           // sc-15105: the token went stale mid-session and the access gate has claimed the
           // session. Don't push the raw "SceneWorks access token required" into the error
@@ -473,6 +476,7 @@ export function useJobEvents({
 
     return () => {
       closed = true;
+      ticketController.abort();
       if (reconnectTimer) {
         window.clearTimeout(reconnectTimer);
       }
