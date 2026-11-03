@@ -136,6 +136,32 @@ describe("FilmLifecycle", () => {
     expect(notice).not.toHaveBeenCalledWith(expect.stringContaining("Cancellation requested"));
   });
 
+  it("aborts and resumes the feed when the browser tab visibility changes", async () => {
+    let hidden = false;
+    const descriptor = Object.getOwnPropertyDescriptor(document, "hidden");
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+    try {
+      let signal;
+      apiFetchMock.mockImplementation((url, _token, options) => {
+        if (url.endsWith("/planning")) return Promise.resolve(null);
+        signal = options.signal;
+        return new Promise(() => {});
+      });
+      await renderLifecycle();
+      const previous = signal;
+      hidden = true;
+      await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+      expect(previous.aborted).toBe(true);
+      hidden = false;
+      await act(async () => document.dispatchEvent(new Event("visibilitychange")));
+      expect(signal).not.toBe(previous);
+      expect(signal.aborted).toBe(false);
+    } finally {
+      if (descriptor) Object.defineProperty(document, "hidden", descriptor);
+      else delete document.hidden;
+    }
+  });
+
   it("does not start a run feed while the Editor is hidden", async () => {
     await renderLifecycle(vi.fn(), vi.fn(), { screenActive: false });
     expect(apiFetchMock).not.toHaveBeenCalled();
