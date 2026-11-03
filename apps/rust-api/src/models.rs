@@ -4922,7 +4922,56 @@ mod runtime_text_encoder_option_tests {
         assert!(model.get("textEncoderOptions").is_none());
     }
 
-    #[cfg(target_os = "macos")]
+    #[test]
+    fn embedded_builtin_lookup_preserves_entries_and_isolates_returned_clones() {
+        let predicate = |entry: &Value| entry["id"] == "moss_image_base";
+        let expected = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .unwrap()["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| predicate(entry))
+            .unwrap()
+            .clone();
+        let mut first = embedded_builtin_catalog_entry(predicate).unwrap().unwrap();
+        assert_eq!(
+            first, expected,
+            "the complete cross-platform entry is retained"
+        );
+        first["downloads"] = json!([]);
+        assert_eq!(
+            embedded_builtin_catalog_entry(predicate).unwrap(),
+            Some(expected)
+        );
+        assert!(embedded_builtin_catalog_entry(|_| false).unwrap().is_none());
+    }
+
+    #[test]
+    fn install_health_uses_full_core_safetensors_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let component = temp.path().join("transformer");
+        std::fs::create_dir(&component).unwrap();
+        let path = component.join("model.safetensors");
+        write_tiny_safetensors(&path);
+        assert!(diffusers_component_safetensors_are_valid(
+            temp.path(),
+            "transformer"
+        ));
+        for raw in [
+            br#"{}"#.as_slice(),
+            br#"{"weight":{"dtype":"F32","shape":[2],"data_offsets":[0,1]}}"#,
+        ] {
+            let mut bytes = (raw.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(raw);
+            bytes.push(0);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(!diffusers_component_safetensors_are_valid(
+                temp.path(),
+                "transformer"
+            ));
+        }
+    }
+
     fn write_tiny_safetensors(path: &FsPath) {
         let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;
         let mut bytes = (header.len() as u64).to_le_bytes().to_vec();
@@ -5894,14 +5943,8 @@ mod download_receipt_tests {
     }
 
     fn builtin_models_entry(model_id: &str) -> Value {
-        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("builtin.models.jsonc present");
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
-                .expect("builtin.models.jsonc parses");
+        let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         manifest["models"]
             .as_array()
             .expect("models array")
@@ -11957,9 +12000,8 @@ mod model_size_concurrency_tests {
 
     #[test]
     fn builtin_download_contexts_fit_in_size_cache() {
-        let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
-        let manifest: Value = serde_json::from_str(&crate::strip_jsonc_comments(raw))
-            .expect("builtin manifest parses");
+        let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         // The cache is keyed by `(repo, files)`, so shared model rows deliberately collapse to one
         // entry. Assert the invariant the production scan needs instead of sealing today's catalog
         // population: every platform's distinct contexts fit together and remain addressable.
@@ -12349,8 +12391,7 @@ pub(crate) async fn resolve_model_manifest_entry(
 pub(crate) fn embedded_builtin_catalog_entry(
     predicate: impl Fn(&Value) -> bool,
 ) -> Result<Option<Value>, ApiError> {
-    let raw = include_str!("../../../config/manifests/builtin.models.jsonc");
-    let manifest: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw))
+    let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
         .map_err(|error| ApiError::internal(format!("embedded model manifest invalid: {error}")))?;
     let entry = manifest
         .get("models")
@@ -13061,31 +13102,11 @@ fn diffusers_component_safetensors_are_valid(snapshot: &FsPath, component: &str)
         .filter(|path| path.to_ascii_lowercase().ends_with(".safetensors"))
         .collect::<Vec<_>>();
     !files.is_empty()
-        && files
-            .iter()
-            .all(|path| safetensors_header_is_valid(&snapshot.join(component).join(path)))
-}
-
-fn safetensors_header_is_valid(path: &FsPath) -> bool {
-    use std::io::Read as _;
-
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut length = [0_u8; 8];
-    if file.read_exact(&mut length).is_err() {
-        return false;
-    }
-    let header_len = u64::from_le_bytes(length);
-    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else {
-        return false;
-    };
-    if header_len == 0 || header_len > file_len.saturating_sub(8) || header_len > 64 * 1024 * 1024 {
-        return false;
-    }
-    let mut header = vec![0_u8; header_len as usize];
-    file.read_exact(&mut header).is_ok()
-        && serde_json::from_slice::<Value>(&header).is_ok_and(|value| value.is_object())
+        && files.iter().all(|path| {
+            sceneworks_core::safetensors::file_is_structurally_valid(
+                &snapshot.join(component).join(path),
+            )
+        })
 }
 
 /// Whether an already-walked snapshot file list holds anything that is not documentation/artwork.
@@ -14415,13 +14436,8 @@ mod variant_install_tests {
         let _env = isolate_hf_cache();
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path();
-        let raw = sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-            .iter()
-            .find(|(name, _)| *name == "builtin.models.jsonc")
-            .map(|(_, contents)| *contents)
-            .expect("builtin.models.jsonc present");
-        let manifest: Value =
-            serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(raw)).unwrap();
+        let manifest = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         let shipped = manifest["models"]
             .as_array()
             .unwrap()
@@ -15866,14 +15882,8 @@ mod variant_delete_tests {
     /// *Mutation that reds this:* `is_sole_repo_tier` answering `false` — the scope is refused.
     #[tokio::test]
     async fn deleting_the_qwen_image_2_1_bf16_tier_reclaims_only_the_upstream_snapshot() {
-        let shipped: Value = serde_json::from_str(&sceneworks_core::jsonc::strip_jsonc_comments(
-            sceneworks_core::builtin_manifests::BUILTIN_MANIFESTS
-                .iter()
-                .find(|(name, _)| *name == "builtin.models.jsonc")
-                .expect("builtin.models.jsonc embedded")
-                .1,
-        ))
-        .expect("builtin.models.jsonc parses");
+        let shipped = sceneworks_core::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+            .expect("valid embedded model catalog");
         let model = shipped["models"]
             .as_array()
             .expect("models array")

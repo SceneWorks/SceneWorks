@@ -1753,20 +1753,20 @@ impl AestheticPredictor {
     /// little-endian tensor bytes — so this needs only `serde_json`, no tensor backend.
     pub fn from_safetensors_bytes(bytes: &[u8]) -> Result<Self, AestheticLoadError> {
         let err = |m: &str| AestheticLoadError(m.to_owned());
-        let len_bytes: [u8; 8] = bytes
-            .get(0..8)
-            .and_then(|s| s.try_into().ok())
-            .ok_or_else(|| err("truncated header length"))?;
-        let header_len = u64::from_le_bytes(len_bytes) as usize;
-        let header_end = 8usize
-            .checked_add(header_len)
-            .filter(|end| *end <= bytes.len())
-            .ok_or_else(|| err("header length past end of file"))?;
-        let header: serde_json::Value = serde_json::from_slice(&bytes[8..header_end])
-            .map_err(|e| AestheticLoadError(format!("header json: {e}")))?;
+        // This caller already owns the entire blob in memory; preserve its resident-buffer bound
+        // rather than imposing the smaller on-disk adapter/import limit.
+        let header = crate::safetensors::read_header(
+            &mut std::io::Cursor::new(bytes),
+            bytes.len() as u64,
+            bytes.len() as u64,
+            crate::safetensors::HeaderJsonPolicy::Standard,
+        )
+        .map_err(|error| AestheticLoadError(error.to_string()))?;
+        let header_end = header.data_start as usize;
         let obj = header
+            .value
             .as_object()
-            .ok_or_else(|| err("header is not an object"))?;
+            .expect("shared reader requires an object");
         let data = &bytes[header_end..];
 
         let read = |name: &str| -> Result<(Vec<f32>, Vec<usize>), AestheticLoadError> {
@@ -1781,8 +1781,11 @@ impl AestheticPredictor {
                 .and_then(serde_json::Value::as_array)
                 .ok_or_else(|| AestheticLoadError(format!("{name}: no shape")))?
                 .iter()
-                .filter_map(|v| v.as_u64().map(|x| x as usize))
-                .collect();
+                .map(|dimension| {
+                    dimension.as_u64().and_then(|value| usize::try_from(value).ok())
+                        .ok_or_else(|| AestheticLoadError(format!("{name}: shape dimensions must be representable non-negative integers")))
+                })
+                .collect::<Result<_, _>>()?;
             let offs = t
                 .get("data_offsets")
                 .and_then(serde_json::Value::as_array)
@@ -1822,7 +1825,10 @@ impl AestheticPredictor {
             let [out_dim, in_dim] = wshape[..] else {
                 return Err(AestheticLoadError(format!("layers.{i}.weight is not 2-D")));
             };
-            if weight.len() != out_dim * in_dim || bias.len() != out_dim {
+            let expected_elements = out_dim
+                .checked_mul(in_dim)
+                .ok_or_else(|| AestheticLoadError(format!("layers.{i}: weight shape overflows")))?;
+            if weight.len() != expected_elements || bias.len() != out_dim {
                 return Err(AestheticLoadError(format!(
                     "layers.{i}: weight/bias shape mismatch"
                 )));
@@ -2972,6 +2978,47 @@ mod tests {
         out.extend(hjson);
         out.extend(data);
         out
+    }
+
+    #[test]
+    fn aesthetic_header_parser_uses_shared_descriptor_contract_without_execution() {
+        let bytes = safetensors_bytes(&[
+            ("layers.0.weight", vec![1, 2], vec![0.0, 0.0]),
+            ("layers.0.bias", vec![1], vec![0.0]),
+        ]);
+        let predictor = AestheticPredictor::from_safetensors_bytes(&bytes).unwrap();
+        assert_eq!(predictor.input_dim(), 2);
+        for bytes in [
+            vec![0; 7],
+            u64::MAX.to_le_bytes().to_vec(),
+            [2_u64.to_le_bytes().as_slice(), b"[]"].concat(),
+        ] {
+            assert!(AestheticPredictor::from_safetensors_bytes(&bytes).is_err());
+        }
+        // Parsing/deserializing fixture operands is the only operation; no predict/forward call.
+    }
+
+    #[test]
+    fn aesthetic_header_parser_rejects_malformed_shapes_without_execution() {
+        for shape in [
+            serde_json::json!([1, -1, 2]),
+            serde_json::json!([1, 1.5, 2]),
+            serde_json::json!([1, "ignored", 2]),
+            serde_json::json!([usize::MAX, 2]),
+        ] {
+            let header = serde_json::json!({
+                "layers.0.weight":{"dtype":"F32","shape":shape,"data_offsets":[0,8]},
+                "layers.0.bias":{"dtype":"F32","shape":[1],"data_offsets":[8,12]},
+            });
+            let raw = serde_json::to_vec(&header).unwrap();
+            let mut bytes = (raw.len() as u64).to_le_bytes().to_vec();
+            bytes.extend_from_slice(&raw);
+            bytes.extend_from_slice(&[0; 12]);
+            assert!(
+                AestheticPredictor::from_safetensors_bytes(&bytes).is_err(),
+                "invalid shape {shape}"
+            );
+        }
     }
 
     #[test]

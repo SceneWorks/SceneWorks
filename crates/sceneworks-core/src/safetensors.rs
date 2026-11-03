@@ -8,14 +8,125 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Component, Path};
 
-const MAX_HEADER_BYTES: usize = 100_000_000;
+/// General model/checkpoint descriptor bound (the safetensors format limit).
+pub const MAX_HEADER_BYTES: u64 = 100_000_000;
+/// Adapter imports and prepared training bundles intentionally use a smaller descriptor bound.
+pub const MAX_ADAPTER_HEADER_BYTES: u64 = 16 * 1024 * 1024;
 
-fn dtype_size(dtype: &str) -> Option<u64> {
+#[derive(Clone, Copy, Debug)]
+pub enum HeaderJsonPolicy {
+    /// Preserve metadata discovery/import's serde JSON (last duplicate key wins) contract.
+    Standard,
+    /// Runnable checkpoint inspection rejects ambiguous descriptors, including nested duplicates.
+    RejectDuplicateKeys,
+}
+
+#[derive(Debug)]
+pub enum HeaderError {
+    Io(std::io::Error),
+    Truncated,
+    InvalidLength(u64),
+    Malformed(String),
+    DuplicateKey(String),
+}
+
+impl std::fmt::Display for HeaderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => write!(f, "{error}"),
+            Self::Truncated => f.write_str("safetensors header is truncated"),
+            Self::InvalidLength(length) => {
+                write!(f, "safetensors header length {length} is outside its bound")
+            }
+            Self::Malformed(error) | Self::DuplicateKey(error) => {
+                write!(f, "invalid safetensors descriptor: {error}")
+            }
+        }
+    }
+}
+impl std::error::Error for HeaderError {}
+
+/// A decoded descriptor. Tensor-body validation is deliberately separate: discovery/import and
+/// runnable checkpoint inspection have different dtype, metadata and payload-range contracts.
+pub struct Header {
+    pub value: Value,
+    pub data_start: u64,
+    pub file_len: u64,
+}
+
+/// Read only the bounded descriptor from an already-open stream. The supplied file length also
+/// permits callers inspecting a bounded prefix to validate against the complete artifact size.
+pub fn read_header(
+    reader: &mut impl Read,
+    file_len: u64,
+    max_header_bytes: u64,
+    json_policy: HeaderJsonPolicy,
+) -> Result<Header, HeaderError> {
+    let mut length = [0_u8; 8];
+    reader
+        .read_exact(&mut length)
+        .map_err(|_| HeaderError::Truncated)?;
+    let header_len = u64::from_le_bytes(length);
+    if header_len == 0 || header_len > max_header_bytes {
+        return Err(HeaderError::InvalidLength(header_len));
+    }
+    let data_start = header_len
+        .checked_add(8)
+        .filter(|end| *end <= file_len)
+        .ok_or(HeaderError::Truncated)?;
+    let header_len =
+        usize::try_from(header_len).map_err(|_| HeaderError::InvalidLength(header_len))?;
+    let mut raw = vec![0_u8; header_len];
+    reader
+        .read_exact(&mut raw)
+        .map_err(|_| HeaderError::Truncated)?;
+    if matches!(json_policy, HeaderJsonPolicy::RejectDuplicateKeys) {
+        let text =
+            std::str::from_utf8(&raw).map_err(|error| HeaderError::Malformed(error.to_string()))?;
+        crate::jsonc::reject_duplicate_keys(text).map_err(|error| {
+            if error.contains("duplicate object key") {
+                HeaderError::DuplicateKey(error)
+            } else {
+                HeaderError::Malformed(error)
+            }
+        })?;
+    }
+    let value: Value =
+        serde_json::from_slice(&raw).map_err(|error| HeaderError::Malformed(error.to_string()))?;
+    if !value.is_object() {
+        return Err(HeaderError::Malformed(
+            "header must be a JSON object".to_owned(),
+        ));
+    }
+    Ok(Header {
+        value,
+        data_start,
+        file_len,
+    })
+}
+
+/// Open a safetensors artifact and read its descriptor without opening a second metadata handle.
+pub fn read_file_header(
+    path: &Path,
+    max_header_bytes: u64,
+    json_policy: HeaderJsonPolicy,
+) -> Result<Header, HeaderError> {
+    let mut file = std::fs::File::open(path).map_err(HeaderError::Io)?;
+    let file_len = file.metadata().map_err(HeaderError::Io)?.len();
+    read_header(&mut file, file_len, max_header_bytes, json_policy)
+}
+
+// The pinned safetensors 0.7 descriptor contract includes sub-byte and complex dtypes.
+// Keep the FNUZ aliases already recognized by checkpoint inspection as well.
+pub(crate) fn dtype_bits(dtype: &str) -> Option<u64> {
     match dtype {
-        "BOOL" | "U8" | "I8" | "F8_E4M3" | "F8_E5M2" | "F8_E8M0" => Some(1),
-        "U16" | "I16" | "F16" | "BF16" => Some(2),
-        "U32" | "I32" | "F32" => Some(4),
-        "U64" | "I64" | "F64" => Some(8),
+        "F4" => Some(4),
+        "F6_E2M3" | "F6_E3M2" => Some(6),
+        "BOOL" | "U8" | "I8" | "F8_E4M3" | "F8_E5M2" | "F8_E8M0" | "F8_E4M3FNUZ"
+        | "F8_E5M2FNUZ" => Some(8),
+        "U16" | "I16" | "F16" | "BF16" => Some(16),
+        "U32" | "I32" | "F32" => Some(32),
+        "U64" | "I64" | "F64" | "C64" => Some(64),
         _ => None,
     }
 }
@@ -27,37 +138,14 @@ fn dtype_size(dtype: &str) -> Option<u64> {
 /// truncated files, malformed headers, overlapping tensors, and headers whose claimed shape does not
 /// match the stored byte range.
 pub fn file_is_structurally_valid(path: &Path) -> bool {
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Ok(header) = read_file_header(path, MAX_HEADER_BYTES, HeaderJsonPolicy::Standard) else {
         return false;
     };
-    let Ok(file_len) = file.metadata().map(|metadata| metadata.len()) else {
-        return false;
-    };
-    let mut header_len_bytes = [0_u8; 8];
-    if file.read_exact(&mut header_len_bytes).is_err() {
-        return false;
-    }
-    let Ok(header_len) = usize::try_from(u64::from_le_bytes(header_len_bytes)) else {
-        return false;
-    };
-    if header_len == 0 || header_len > MAX_HEADER_BYTES {
-        return false;
-    }
-    let Some(header_and_prefix) = (header_len as u64).checked_add(8) else {
-        return false;
-    };
-    if header_and_prefix > file_len {
-        return false;
-    }
-    let mut header = vec![0_u8; header_len];
-    if file.read_exact(&mut header).is_err() {
-        return false;
-    }
-    let Ok(Value::Object(entries)) = serde_json::from_slice::<Value>(&header) else {
-        return false;
-    };
-
-    let data_len = file_len - header_and_prefix;
+    let entries = header
+        .value
+        .as_object()
+        .expect("shared reader requires an object");
+    let data_len = header.file_len - header.data_start;
     let mut ranges = Vec::new();
     for (name, entry) in entries {
         if name == "__metadata__" {
@@ -72,10 +160,10 @@ pub fn file_is_structurally_valid(path: &Path) -> bool {
         let Some(entry) = entry.as_object() else {
             return false;
         };
-        let Some(element_size) = entry
+        let Some(bits_per_element) = entry
             .get("dtype")
             .and_then(Value::as_str)
-            .and_then(dtype_size)
+            .and_then(dtype_bits)
         else {
             return false;
         };
@@ -96,10 +184,14 @@ pub fn file_is_structurally_valid(path: &Path) -> bool {
         let (Some(start), Some(end)) = (start.as_u64(), end.as_u64()) else {
             return false;
         };
-        let Some(expected_bytes) = element_count.checked_mul(element_size) else {
+        let Some(expected_bits) = element_count.checked_mul(bits_per_element) else {
             return false;
         };
-        if start > end || end > data_len || end - start != expected_bytes {
+        if expected_bits % 8 != 0
+            || start > end
+            || end > data_len
+            || end - start != expected_bits / 8
+        {
             return false;
         }
         ranges.push((start, end));
@@ -259,6 +351,137 @@ pub fn gemma_text_encoder_dir_is_complete(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn descriptor(raw: &[u8]) -> Vec<u8> {
+        let mut bytes = (raw.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(raw);
+        bytes
+    }
+
+    #[test]
+    fn shared_header_bounds_truncation_shape_and_json_policy() {
+        let valid = descriptor(br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#);
+        let mut file = valid.clone();
+        file.push(7);
+        let mut cursor = std::io::Cursor::new(&file);
+        let header = read_header(
+            &mut cursor,
+            file.len() as u64,
+            MAX_HEADER_BYTES,
+            HeaderJsonPolicy::Standard,
+        )
+        .unwrap();
+        assert_eq!(
+            cursor.position(),
+            valid.len() as u64,
+            "tensor payload is never read"
+        );
+        assert_eq!(header.data_start, valid.len() as u64);
+        assert!(
+            read_header(
+                &mut file.as_slice(),
+                file.len() as u64,
+                (valid.len() - 8) as u64,
+                HeaderJsonPolicy::Standard
+            )
+            .is_ok(),
+            "the exact bound is inclusive"
+        );
+        assert!(matches!(
+            read_header(
+                &mut file.as_slice(),
+                file.len() as u64,
+                1,
+                HeaderJsonPolicy::Standard
+            ),
+            Err(HeaderError::InvalidLength(_))
+        ));
+        for raw in [b"".as_slice(), b"[]", b"null", b"{broken"] {
+            let bytes = descriptor(raw);
+            assert!(read_header(
+                &mut bytes.as_slice(),
+                bytes.len() as u64,
+                MAX_HEADER_BYTES,
+                HeaderJsonPolicy::Standard
+            )
+            .is_err());
+        }
+        for bytes in [
+            vec![0; 7],
+            u64::MAX.to_le_bytes().to_vec(),
+            descriptor(b"{}")[..9].to_vec(),
+        ] {
+            assert!(read_header(
+                &mut bytes.as_slice(),
+                bytes.len() as u64,
+                MAX_HEADER_BYTES,
+                HeaderJsonPolicy::Standard
+            )
+            .is_err());
+        }
+        let overflow = u64::MAX.to_le_bytes();
+        assert!(matches!(
+            read_header(
+                &mut overflow.as_slice(),
+                u64::MAX,
+                u64::MAX,
+                HeaderJsonPolicy::Standard
+            ),
+            Err(HeaderError::Truncated)
+        ));
+        let duplicate = descriptor(br#"{"__metadata__":{"format":"pt","format":"np"}}"#);
+        assert!(read_header(
+            &mut duplicate.as_slice(),
+            duplicate.len() as u64,
+            MAX_HEADER_BYTES,
+            HeaderJsonPolicy::Standard
+        )
+        .is_ok());
+        assert!(matches!(
+            read_header(
+                &mut duplicate.as_slice(),
+                duplicate.len() as u64,
+                MAX_HEADER_BYTES,
+                HeaderJsonPolicy::RejectDuplicateKeys
+            ),
+            Err(HeaderError::DuplicateKey(_))
+        ));
+    }
+
+    #[test]
+    fn structural_validation_covers_scalar_empty_and_float8_descriptors() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("metadata-only-fixture.safetensors");
+        // These fixture bytes are never executed by an inference backend.
+        for (dtype, shape, size) in [
+            ("BF16", serde_json::json!([]), 2),
+            ("F8_E8M0", serde_json::json!([2]), 2),
+            ("F32", serde_json::json!([0]), 0),
+            ("F4", serde_json::json!([2]), 1),
+            ("F6_E2M3", serde_json::json!([4]), 3),
+            ("F6_E3M2", serde_json::json!([4]), 3),
+            ("C64", serde_json::json!([]), 8),
+        ] {
+            let raw =
+                serde_json::json!({"weight":{"dtype":dtype,"shape":shape,"data_offsets":[0,size]}})
+                    .to_string();
+            let mut bytes = descriptor(raw.as_bytes());
+            bytes.resize(bytes.len() + size, 0);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(file_is_structurally_valid(&path), "{dtype} descriptor");
+        }
+        for raw in [
+            r#"{"a":{"dtype":"F4","shape":[1],"data_offsets":[0,1]}}"#,
+            r#"{"a":{"dtype":"U8","shape":[18446744073709551615,2],"data_offsets":[0,0]}}"#,
+            r#"{"a":{"dtype":"U8","shape":[1],"data_offsets":[1,2]}}"#,
+            r#"{"a":{"dtype":"U8","shape":[1],"data_offsets":[0,1]},"b":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#,
+        ] {
+            let mut bytes = descriptor(raw.as_bytes());
+            bytes.extend_from_slice(&[0, 0]);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(!file_is_structurally_valid(&path));
+        }
+    }
 
     fn write_tiny_safetensors(path: &Path) {
         let header = br#"{"weight":{"dtype":"U8","shape":[1],"data_offsets":[0,1]}}"#;

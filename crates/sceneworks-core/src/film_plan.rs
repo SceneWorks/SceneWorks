@@ -3196,7 +3196,12 @@ static BUILTIN_PLAN_LORAS: std::sync::OnceLock<Vec<PlanLoraEntry>> = std::sync::
 
 /// Every LoRA in the embedded builtin catalog, in catalog order.
 pub fn builtin_plan_loras() -> &'static [PlanLoraEntry] {
-    BUILTIN_PLAN_LORAS.get_or_init(|| parse_plan_loras(embedded_manifest("builtin.loras.jsonc")))
+    BUILTIN_PLAN_LORAS.get_or_init(|| {
+        plan_loras_from_manifest(
+            crate::builtin_manifests::builtin_manifest("builtin.loras.jsonc")
+                .expect("invalid embedded LoRA catalog"),
+        )
+    })
 }
 
 /// The embedded builtin catalog entry for `id`, or `None` when the id names nothing shipped.
@@ -3204,24 +3209,11 @@ pub fn builtin_plan_lora(id: &str) -> Option<&'static PlanLoraEntry> {
     builtin_plan_loras().iter().find(|lora| lora.id == id)
 }
 
-fn embedded_manifest(name: &str) -> &'static str {
-    crate::builtin_manifests::BUILTIN_MANIFESTS
-        .iter()
-        .find(|(manifest, _)| *manifest == name)
-        .map(|(_, contents)| *contents)
-        .unwrap_or("")
-}
-
-/// Parse a `builtin.loras.jsonc` body. Split out so tests can drive synthetic catalogs; a malformed
-/// manifest yields an EMPTY list rather than a panic, exactly as [`crate::minimax_h3_turbo`] does.
-fn parse_plan_loras(contents: &str) -> Vec<PlanLoraEntry> {
-    let stripped = strip_jsonc_comments(contents);
-    let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
-        return Vec::new();
-    };
-    let Some(loras) = manifest.get("loras").and_then(Value::as_array) else {
-        return Vec::new();
-    };
+fn plan_loras_from_manifest(manifest: &Value) -> Vec<PlanLoraEntry> {
+    let loras = manifest
+        .get("loras")
+        .and_then(Value::as_array)
+        .expect("embedded LoRA catalog requires a loras array");
     loras
         .iter()
         .filter_map(|lora| {
@@ -3273,10 +3265,8 @@ pub fn model_lora_families(model_id: &str) -> Vec<String> {
         std::sync::OnceLock::new();
     MODEL_LORA_FAMILIES
         .get_or_init(|| {
-            let stripped = strip_jsonc_comments(embedded_manifest("builtin.models.jsonc"));
-            let Ok(manifest) = serde_json::from_str::<Value>(&stripped) else {
-                return BTreeMap::new();
-            };
+            let manifest = crate::builtin_manifests::builtin_manifest("builtin.models.jsonc")
+                .expect("invalid embedded model catalog");
             manifest
                 .get("models")
                 .and_then(Value::as_array)

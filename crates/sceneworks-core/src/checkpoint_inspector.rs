@@ -38,7 +38,7 @@ thread_local! {
 
 const MAX_DISCOVERY_ENTRIES: usize = 4096;
 const MAX_DISCOVERY_DEPTH: usize = 8;
-const MAX_SAFETENSORS_HEADER_BYTES: u64 = 100_000_000;
+const MAX_SAFETENSORS_HEADER_BYTES: u64 = crate::safetensors::MAX_HEADER_BYTES;
 pub(crate) const MAX_JSON_DESCRIPTOR_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_GGUF_DESCRIPTOR_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_GGUF_ITEMS: u64 = 1_000_000;
@@ -1915,40 +1915,29 @@ fn discover_safetensors_header(
         code: CheckpointDiagnosticCodeV1::Io,
         message: format!("safetensors candidate could not be opened: {error}"),
     })?;
-    let mut length_bytes = [0_u8; 8];
-    file.read_exact(&mut length_bytes)
-        .map_err(|_| SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors candidate is truncated before its header length".to_owned(),
-        })?;
-    let header_len = u64::from_le_bytes(length_bytes);
-    if header_len == 0 || header_len > MAX_SAFETENSORS_HEADER_BYTES {
-        return Err(SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::HeaderTooLarge,
-            message: format!(
-                "safetensors header length {header_len} is outside the discovery bound"
-            ),
-        });
+    crate::safetensors::read_header(
+        &mut file,
+        file_len,
+        MAX_SAFETENSORS_HEADER_BYTES,
+        crate::safetensors::HeaderJsonPolicy::Standard,
+    )
+    .map(|header| header.value)
+    .map_err(safetensors_header_error)
+}
+
+fn safetensors_header_error(error: crate::safetensors::HeaderError) -> SafetensorsDiscoveryError {
+    use crate::safetensors::HeaderError;
+    let code = match &error {
+        HeaderError::Io(_) => CheckpointDiagnosticCodeV1::Io,
+        HeaderError::Truncated => CheckpointDiagnosticCodeV1::TruncatedHeader,
+        HeaderError::InvalidLength(_) => CheckpointDiagnosticCodeV1::HeaderTooLarge,
+        HeaderError::DuplicateKey(_) => CheckpointDiagnosticCodeV1::DuplicateKey,
+        HeaderError::Malformed(_) => CheckpointDiagnosticCodeV1::MalformedMetadata,
+    };
+    SafetensorsDiscoveryError {
+        code,
+        message: error.to_string(),
     }
-    if 8_u64
-        .checked_add(header_len)
-        .is_none_or(|end| end > file_len)
-    {
-        return Err(SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors descriptor bytes are truncated".to_owned(),
-        });
-    }
-    let mut header = vec![0_u8; header_len as usize];
-    file.read_exact(&mut header)
-        .map_err(|_| SafetensorsDiscoveryError {
-            code: CheckpointDiagnosticCodeV1::TruncatedHeader,
-            message: "safetensors descriptor bytes are truncated".to_owned(),
-        })?;
-    serde_json::from_slice(&header).map_err(|error| SafetensorsDiscoveryError {
-        code: CheckpointDiagnosticCodeV1::MalformedMetadata,
-        message: format!("safetensors descriptor is malformed JSON: {error}"),
-    })
 }
 
 #[derive(Default)]
@@ -1965,60 +1954,23 @@ fn validate_safetensors(
     file_len: u64,
     relative_path: Option<String>,
 ) -> Result<ValidatedArtifact, Vec<CheckpointDiagnosticV1>> {
-    let Some(header_len_bytes) = prefix.get(..8) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            "safetensors file is truncated before its 8-byte header length",
-        )]);
-    };
-    let header_len = u64::from_le_bytes(header_len_bytes.try_into().unwrap());
-    if header_len == 0 || header_len > MAX_SAFETENSORS_HEADER_BYTES {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::HeaderTooLarge,
-            relative_path,
-            format!(
-                "safetensors header length {header_len} is outside the 1..={MAX_SAFETENSORS_HEADER_BYTES} bound"
-            ),
-        )]);
-    }
-    let Some(data_start) = 8_u64.checked_add(header_len) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::InvalidTensorRange,
-            relative_path,
-            "safetensors header length overflows the file address space",
-        )]);
-    };
-    if data_start > file_len {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            format!(
-                "safetensors header ends at byte {data_start}, beyond the {file_len}-byte file"
-            ),
-        )]);
-    }
-    let Some(header) = prefix.get(8..data_start as usize) else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::TruncatedHeader,
-            relative_path,
-            "safetensors descriptor bytes are truncated",
-        )]);
-    };
-    let value = strict_json(header).map_err(|error| {
+    let header = crate::safetensors::read_header(
+        &mut std::io::Cursor::new(prefix),
+        file_len,
+        MAX_SAFETENSORS_HEADER_BYTES,
+        crate::safetensors::HeaderJsonPolicy::RejectDuplicateKeys,
+    )
+    .map_err(|error| {
+        let error = safetensors_header_error(error);
         vec![CheckpointDiagnosticV1::error(
             error.code,
             relative_path.clone(),
-            format!("invalid safetensors descriptor: {}", error.message),
+            error.message,
         )]
     })?;
-    let Some(entries) = value.as_object() else {
-        return Err(vec![CheckpointDiagnosticV1::error(
-            CheckpointDiagnosticCodeV1::MalformedMetadata,
-            relative_path,
-            "safetensors descriptor must be a JSON object",
-        )]);
-    };
+    let data_start = header.data_start;
+    let value = header.value;
+    let entries = value.as_object().expect("shared reader requires an object");
 
     let mut diagnostics = Vec::new();
     if let Some(metadata) = entries.get("__metadata__") {
@@ -2056,7 +2008,7 @@ fn validate_safetensors(
         let Some(bits_per_element) = tensor
             .get("dtype")
             .and_then(Value::as_str)
-            .and_then(safetensors_dtype_bits)
+            .and_then(crate::safetensors::dtype_bits)
         else {
             diagnostics.push(CheckpointDiagnosticV1::error(
                 CheckpointDiagnosticCodeV1::UnsupportedTensorType,
@@ -2194,19 +2146,6 @@ fn validate_safetensors(
         declared_tensor_bytes: Some(data_len),
         tensor_names,
     })
-}
-
-fn safetensors_dtype_bits(dtype: &str) -> Option<u64> {
-    match dtype {
-        "F4" => Some(4),
-        "F6_E2M3" | "F6_E3M2" => Some(6),
-        "BOOL" | "U8" | "I8" | "F8_E4M3" | "F8_E5M2" | "F8_E8M0" | "F8_E4M3FNUZ"
-        | "F8_E5M2FNUZ" => Some(8),
-        "U16" | "I16" | "F16" | "BF16" => Some(16),
-        "U32" | "I32" | "F32" => Some(32),
-        "U64" | "I64" | "F64" | "C64" => Some(64),
-        _ => None,
-    }
 }
 
 #[derive(Default)]
