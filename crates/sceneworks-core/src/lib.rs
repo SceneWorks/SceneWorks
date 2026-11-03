@@ -164,3 +164,11 @@ mod tests {
 pub mod network_policy;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_env;
+
+// Contract tests move before their production owner in the following prefix.
+#[cfg(test)]
+#[path = "image_limits/tests.rs"]
+mod image_limits_tests;
+#[cfg(test)]
+#[path = "limits/tests.rs"]
+mod limits_tests;
