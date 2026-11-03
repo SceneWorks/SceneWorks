@@ -292,7 +292,6 @@ mod flux2_convert_tests {
 
 #[cfg(test)]
 mod supra2_convert_tests {
-    use crate::test_env::isolate_hf_cache;
     use super::*;
     use serde_json::json;
 
@@ -1026,7 +1025,6 @@ mod tier_builder {
 /// temp HF cache, so it runs on every lane (macOS `cargo test` AND the Linux parity clippy build).
 #[cfg(test)]
 mod co_requisite_tests {
-    use crate::test_env::isolate_hf_cache;
     #[test]
     fn ltx_import_base_model_gate_rejects_only_unstamped_ltx() {
         let unstamped = JsonObject::new();
