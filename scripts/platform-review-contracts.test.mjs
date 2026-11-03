@@ -6285,3 +6285,54 @@ test("hosted macOS aligns dev/test and proc-macro debug settings", async () => {
     assert.ok(hosted.includes(`CARGO_PROFILE_${profile}_DEBUG: line-tables-only`), profile);
   }
 });
+
+
+test("hosted parity Rust keeps lean profiles and cache restores compatible without weakening checks", async () => {
+  const job = workflowJob(await source(".github/workflows/check.yml"), "parity-rust");
+  const expected = {
+    CARGO_PROFILE_DEV_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_DEBUG: "line-tables-only",
+    CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "line-tables-only", CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "line-tables-only",
+    CARGO_INCREMENTAL: "0", CARGO_BUILD_JOBS: "2", CARGO_NET_OFFLINE: "true", SCENEWORKS_REQUIRE_FFMPEG: "1",
+  };
+  function validate(candidate) {
+    const settings = Object.fromEntries([...candidate.slice(0, candidate.indexOf("\n    steps:")).matchAll(/^      ([A-Z_]+): (.+)$/gm)]
+      .map(([, key, value]) => [key, value.replace(/^"|"$/g, "")]));
+    for (const [key, value] of Object.entries(expected)) assert.equal(settings[key], value, key);
+    const cache = candidate.match(/      - uses: Swatinem\/rust-cache@[^\n]+[\s\S]*?(?=\n      - )/)?.[0];
+    assert.ok(cache, "existing Rust cache remains selected");
+    assert.match(cache, /prefix-key: v1-rust-parity-lean/);
+    assert.match(cache, /add-rust-environment-hash-key: true/);
+    assert.match(cache, /save-if: \$\{\{ github\.ref == 'refs\/heads\/main' \}\}/);
+    assert.doesNotMatch(cache, /v0-rust/);
+    assert.match(candidate, /run: cargo fetch --locked/);
+    assert.match(candidate, /run: bash scripts\/ensure-ci-ffmpeg\.sh/);
+    assert.match(candidate, /run: node scripts\/unit-hf-sandbox\.mjs -- npm run rust:check/);
+    assert.match(candidate, /run: python -m pytest -q -m e2e --strict-markers/);
+    assert.match(candidate, /run: python -m pytest -q -m parity --strict-markers/);
+    return settings;
+  }
+  const settings = validate(job);
+  for (const [before, after] of [
+    ["CARGO_PROFILE_DEV_DEBUG: line-tables-only", 'CARGO_PROFILE_DEV_DEBUG: "2"'],
+    ["CARGO_PROFILE_TEST_DEBUG: line-tables-only", 'CARGO_PROFILE_TEST_DEBUG: "2"'],
+    ["CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only", 'CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: "2"'],
+    ["CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only", 'CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: "2"'],
+    ['CARGO_INCREMENTAL: "0"', 'CARGO_INCREMENTAL: "1"'],
+    ["prefix-key: v1-rust-parity-lean", "prefix-key: v0-rust"],
+    ["add-rust-environment-hash-key: true", "add-rust-environment-hash-key: false"],
+  ]) assert.throws(() => validate(job.replace(before, after)), before);
+
+  // Execute only the assembled environment wrapper with a metadata-only Node child.
+  // This checks inheritance into the actual command boundary, never invoking Cargo/models.
+  const temporary = await mkdtemp(path.join(await realpath(tmpdir()), "parity-rust-profile-"));
+  try {
+    const executable = fileURLToPath(new URL("./unit-hf-sandbox.mjs", import.meta.url));
+    const program = `console.log(JSON.stringify(Object.fromEntries(${JSON.stringify(Object.keys(expected))}.map(key => [key, process.env[key]]))))`;
+    const { stdout } = await promisify(execFile)(process.execPath, [executable, "--", process.execPath, "-e", program], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      env: { ...process.env, ...settings, RUNNER_TEMP: temporary, GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", GITHUB_JOB: "parity-rust" },
+      timeout: 5000,
+    });
+    assert.deepEqual(JSON.parse(stdout), expected);
+  } finally { await rm(temporary, { recursive: true, force: true }); }
+});

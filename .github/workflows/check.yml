@@ -111,6 +111,15 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust != 'false') }}
     runs-on: ubuntu-latest
     env:
+      # Keep the hosted workspace/test links lean (run 41673350029 filled the disk
+      # compiling full-DWARF libtests). Match the hosted Metal line-table policy,
+      # including proc macros, without changing product/local Cargo profiles.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+      CARGO_PROFILE_DEV_BUILD_OVERRIDE_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_BUILD_OVERRIDE_DEBUG: line-tables-only
+      CARGO_INCREMENTAL: "0"
+      CARGO_BUILD_JOBS: "2"
       # Fetch the pinned inference source once, then force every build and build.rs process
       # offline so nothing else can reach the network mid-build.
       CARGO_NET_OFFLINE: "true"
@@ -161,8 +170,13 @@ jobs:
       # Restricting saves to main keeps exactly one baseline per lane, which is the only kind a PR
       # can read anyway. A PR whose Cargo.lock differs from main's gets rust-cache's prefix restore
       # instead of a full match: partial, and far better than cold.
+      # Both exact and prefix restores must exclude the old full-DWARF target cache.
+      # rust-cache hashes the CARGO_* profile settings into its restore prefix too;
+      # retain that hashing so future profile changes cannot mix build artifacts.
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2 (v2.9.1+1)
         with:
+          prefix-key: v1-rust-parity-lean
+          add-rust-environment-hash-key: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Fetch the pinned inference release
         env:
