@@ -28,7 +28,7 @@ pub fn is_contended(error: &io::Error) -> bool {
     error.kind() == io::ErrorKind::WouldBlock || code.is_some() && error.raw_os_error() == code
 }
 
-/// Open a catalog lock without following a final symlink/reparse point, including a link
+/// Open a lock file without following a final symlink/reparse point, including a link
 /// substituted between metadata inspection and open. Callers retain their lock contention policy.
 pub fn open_regular_lock_file(path: &std::path::Path) -> io::Result<File> {
     let mut options = std::fs::OpenOptions::new();
