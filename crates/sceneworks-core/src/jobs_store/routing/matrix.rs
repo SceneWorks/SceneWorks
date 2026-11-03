@@ -148,7 +148,23 @@ const WEB_SIMPLE_AUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/simpleAudioParts.jsx");
 const WEB_SIMPLE_AUDIO_STUDIO: &str =
     include_str!("../../../../../apps/web/src/simple/SimpleAudioStudio.jsx");
-const WEB_AUDIO_STUDIO: &str = include_str!("../../../../../apps/web/src/screens/AudioStudio.jsx");
+// The studio owner was split; keep the same provenance key over every moved source.
+const WEB_AUDIO_STUDIO: &str = concat!(
+    include_str!("../../../../../apps/web/src/screens/AudioStudio.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioAdvancedPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioGenerationSettings.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioPromptComposer.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioReviewPanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/AudioVoiceReferencePanel.jsx"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/audioStudioHelpers.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioDraft.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioModelDefaults.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioModelSelection.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioScript.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioSettingsWriter.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioSubmission.js"),
+    include_str!("../../../../../apps/web/src/screens/audioStudio/useAudioVoiceLibrary.js"),
+);
 const WEB_UPSCALE_ENGINES: &str = include_str!("../../../../../apps/web/src/upscaleEngines.js");
 const WEB_VIDEO_UPSCALE: &str =
     include_str!("../../../../../apps/web/src/screens/VideoUpscalePanel.jsx");

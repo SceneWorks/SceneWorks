@@ -1,218 +1,35 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import { appConfirm } from "../appConfirm.jsx";
+import { AudioReviewPanel } from "./audioStudio/AudioReviewPanel.jsx";
+import { AudioPromptComposer } from "./audioStudio/AudioPromptComposer.jsx";
+import { AudioVoiceReferencePanel } from "./audioStudio/AudioVoiceReferencePanel.jsx";
+import { AudioGenerationSettings } from "./audioStudio/AudioGenerationSettings.jsx";
+import { AudioAdvancedPanel } from "./audioStudio/AudioAdvancedPanel.jsx";
+import { useAudioSettingsWriter } from "./audioStudio/useAudioSettingsWriter.js";
+import { useAudioSubmission } from "./audioStudio/useAudioSubmission.js";
+import { useAudioModelDefaults } from "./audioStudio/useAudioModelDefaults.js";
+import { useAudioScript } from "./audioStudio/useAudioScript.js";
+import { useAudioVoiceLibrary } from "./audioStudio/useAudioVoiceLibrary.js";
+import { useAudioDraft } from "./audioStudio/useAudioDraft.js";
+import { useAudioModelSelection } from "./audioStudio/useAudioModelSelection.js";
+import { MODE_LABELS, DURATION_MODES, WIRED_MODES, isNativeCloneGenerator, SAMPLING_KNOB_MODES, ICL_DEFAULT_END_SECS, speakerOptions, scriptSegmentsForSubmit, groupVoicesByGenderAccent } from "./audioStudio/audioStudioHelpers.js";
+import React, { useMemo, useState } from "react";
+
 import { Icon } from "../components/Icons.jsx";
 import { AdvancedSection } from "../components/AdvancedSection.jsx";
 import { WorkPanel } from "../components/WorkPanel.jsx";
 import { ModelAvailabilityGate } from "../components/ModelAvailabilityGate.jsx";
 import { useAudioTakePlayer } from "../components/audioTakeParts.jsx";
-import { AudioResults } from "./audioResults.jsx";
+
 import { useAppContext } from "../context/AppContext.js";
-import {
-  AUDIO_MODES,
-  audioModelServesMode,
-  audioModelUsable,
-  downloadOffersFor,
-} from "../modelEligibility.js";
-import { loadStudioSettings, useStudioSettingsWriter } from "../hooks/useStudioSettings.js";
-import { AssetPickerField } from "../components/AssetPicker.jsx";
+import { AUDIO_MODES } from "../modelEligibility.js";
+import { loadStudioSettings } from "../hooks/useStudioSettings.js";
+
 import { PromptGuideModal } from "../components/PromptGuideModal.jsx";
-import { RefinePromptControl } from "../components/RefinePromptControl.jsx";
-import { PROMPT_REFINE_MODEL_ID } from "../constants.js";
-import { TierPickerField, useQuantTierPicker } from "../components/generationStudio.jsx";
-import { installedTiers, tierLabel, tierPickerOptions } from "../quantTier.js";
-import { YueGenreTags, YueLyricsEditor, YueReferenceBand } from "./audioYueControls.jsx";
-import {
-  defaultYueSections,
-  genreTagsPrompt,
-  isIclSongModel,
-  isSegmentedSongModel,
-  splitGenreTagLine,
-  yueLyricsForSubmit,
-} from "../yueSong.js";
+
+import { useQuantTierPicker } from "../components/generationStudio.jsx";
+import { installedTiers, tierPickerOptions } from "../quantTier.js";
+import { YueReferenceBand } from "./audioYueControls.jsx";
+import { genreTagsPrompt, isIclSongModel, isSegmentedSongModel, yueLyricsForSubmit } from "../yueSong.js";
 import { Yue2SongLab } from "./audioYue2Lab.jsx";
-
-// SceneWorks Audio Studio — the navigable shell (epic 13400, C0 / sc-13407). This screen mirrors
-// the canonical studio shell (VideoStudio.jsx): page-frame > WorkPanel + .mode-tabs + AdvancedSection
-// + .studio-results, gated by ModelAvailabilityGate. The four modes (speech / sfx / music /
-// voiceclone) come from AUDIO_MODES so the tab set and the eligibility predicates can't drift.
-//
-// Every settings/advanced field is CAPABILITY-DRIVEN — it reads the selected model's `audio`
-// sub-block (voices / languages / editModes / sampleRates / conditioning / maxDurationSecs), never a
-// hardcoded list. audioModelServesMode is the single source of truth for which model serves which
-// mode (Speech = ships a voice bank, Music = advertises edit ops, Voice Clone = reference/embedding
-// conditioning, Sound FX = residual text→audio generator).
-//
-// SCOPE (C1 sc-13408 + C2 sc-13409 + C3 sc-13410): Speech (TTS), Sound FX and Music are fully wired —
-// the Generate CTA submits the prompt + capability-driven knobs through createAudioJob →
-// rememberLocalGenerationJob('audio', job), surfacing the run in the audioLocalJobs stack below via the
-// shared audio-player card (A5, sc-13405). Speech carries voice/language/length/seed; Sound FX
-// (MOSS-SoundEffect v2) carries the prompt + length/language + the diffusion sampling knobs
-// guidance(CFG)/steps/seed. Music (ACE-Step v1.5 XL Turbo) carries the describe-the-music prompt +
-// length/language + BPM/key/lyrics (the gen-core AudioParams music sub-block) + steps/seed, and — ONLY
-// when the selected model advertises audio.editModes — an extend/inpaint/repaint SOURCE band that picks a
-// library audio track + edit mode and rides through as a Conditioning::AudioEdit (mirroring the Video
-// Studio source-band pattern). guidance(CFG)/negative are capability-gated: the pinned ACE-Step turbo is
-// guidance-distilled (advertises neither), so they stay hidden for it — surfacing them would be a typed
-// Unsupported at the gen-core floor; a future non-distilled music model that advertises them shows them.
-//
-// SCOPE (C4 sc-13411 → E1 sc-13412): Voice Clone is fully wired, with TWO capability-gated backends.
-// Its generate model advertises ReferenceAudio conditioning (isVoiceCloneConverter); a bare speaker
-// embedder (Chatterbox-VE, VoiceEmbedding only) is filtered out of the tab/picker. When a NATIVE
-// clone-TTS generator is installed — one advertising BOTH ReferenceAudio and VoiceEmbedding (Chatterbox
-// chatterbox_tts, isNativeCloneGenerator) — the picker prefers it and Generate renders the cloned voice
-// in a SINGLE step from the script + reference; the match-strength (τ) control is hidden because it is
-// the OpenVoice converter's knob, not the native generator's. Otherwise the mode falls back to the
-// OpenVoice conversion converter: it surfaces the match-strength control and the worker runs the two
-// backend calls (base TTS speaks the script, then OpenVoice V2 transfers the reference's tone color).
-// Either way Generate submits referenceAudioAssetId (+ matchStrength only on the conversion path) through
-// createAudioJob and the worker registers the single produced clip. The native-vs-conversion routing is
-// gated purely on the audio catalog's registration + Capabilities in the worker, never a hardcoded id.
-
-// Tab labels per the epic, keyed by the AUDIO_MODES ids so the ordering follows that array.
-const MODE_LABELS = {
-  speech: "Speech",
-  sfx: "Sound FX",
-  music: "Music",
-  voiceclone: "Voice Clone",
-};
-
-// Per-mode prompt placeholder for each fully wired generation surface.
-const MODE_PLACEHOLDER = {
-  speech: "Type the words to speak…",
-  sfx: "Describe the sound — a door creak, distant thunder, footsteps on gravel…",
-  music: "Describe the music — mood, instruments, tempo, genre…",
-  voiceclone: "Type the words to speak in the cloned voice…",
-};
-
-// Modes that emit a fixed-length waveform, so a length control (clamped to the model's
-// audio.maxDurationSecs) applies. Voice Clone follows its reference clip's length.
-const DURATION_MODES = new Set(["speech", "sfx", "music"]);
-// Modes whose Generate CTA is fully wired to createAudioJob (Speech C1 sc-13408, Sound FX C2 sc-13409,
-// Music C3 sc-13410, Voice Clone C4 sc-13411). This set is the single guard both `canGenerate` and
-// `submit` read.
-const WIRED_MODES = new Set(["speech", "sfx", "music", "voiceclone"]);
-const audioConditioning = (item) =>
-  (Array.isArray(item?.audio?.conditioning) ? item.audio.conditioning : []).map((kind) =>
-    String(kind).toLowerCase(),
-  );
-// Voice Clone's generate model must consume a reference clip: its conditioning includes ReferenceAudio.
-// Both the OpenVoice V2 conversion CONVERTER (ReferenceAudio only) and the native clone-TTS GENERATOR
-// (Chatterbox chatterbox_tts, ReferenceAudio + VoiceEmbedding) qualify. A bare speaker EMBEDDER
-// (Chatterbox-VE, VoiceEmbedding only) "serves" the mode conceptually but cannot render from a reference,
-// so it is filtered out of the generate picker.
-function isVoiceCloneConverter(item) {
-  return audioConditioning(item).includes("referenceaudio");
-}
-// A NATIVE clone-TTS generator (sc-13412): renders the cloned voice from script + reference in ONE call.
-// The capability signature is BOTH ReferenceAudio (the clip) AND VoiceEmbedding (the speaker vector the
-// generator derives from it) — the text→waveform clone generator, as opposed to the OpenVoice converter
-// (ReferenceAudio only) that re-timbres a separately-synthesized base clip. When one is installed the
-// Voice Clone picker prefers it (a single native step) over the two-call conversion chain.
-function isNativeCloneGenerator(item) {
-  const conditioning = audioConditioning(item);
-  return conditioning.includes("referenceaudio") && conditioning.includes("voiceembedding");
-}
-// Modes that expose the diffusion sampling knobs (CFG guidance + solver steps) in the advanced panel.
-// Sound FX runs the MOSS-SoundEffect flow-matching pipeline, which reads guidance/steps off the
-// top-level request; Speech (Kokoro) is not a diffusion model and ignores them, so it hides them. This
-// is mode-gated rather than manifest-gated because MOSS is the sole SFX model and the `audio` sub-block
-// carries no per-knob range to drive it — a future non-diffusion SFX model would move this to a
-// capability flag (mirrors how showVoice/showEditModes gate on their mode + a capability array).
-const SAMPLING_KNOB_MODES = new Set(["sfx"]);
-// Fallback target length before the model's cap is known; always clamped to maxDurationSecs.
-const DEFAULT_TARGET_DURATION_SECS = 10;
-// Upstream YuE's `prompt_end_time` default — the ICL window end when only a start is given (the API's
-// AUDIO_ICL_DEFAULT_END_SECS, sc-19384).
-const ICL_DEFAULT_END_SECS = 30;
-
-// Multi-speaker / long-form dialogue (sc-13676). A model advertising audio.supportsMultiSpeaker
-// reveals a segmented-script editor: an ordered list of turns, each { speaker, text }. The number of
-// distinct speaker labels the editor offers is READ off the model's audio.maxSpeakers — never a
-// hardcoded 2. When a model sets supportsMultiSpeaker but omits maxSpeakers, fall back to this so the
-// editor still offers a sensible dialogue.
-const DEFAULT_MAX_SPEAKERS = 2;
-
-// The speaker labels a multi-speaker model offers, capped at its advertised maxSpeakers. The stored
-// value is the compact turn tag ("S1"/"S2") the backend maps to a voice; the display is friendlier.
-function speakerOptions(maxSpeakers) {
-  const cap = Number.isFinite(maxSpeakers) && maxSpeakers >= 1 ? Math.floor(maxSpeakers) : DEFAULT_MAX_SPEAKERS;
-  return Array.from({ length: cap }, (_, index) => ({
-    value: `S${index + 1}`,
-    label: `Speaker ${index + 1}`,
-  }));
-}
-
-// The starter script for a freshly-selected multi-speaker model: one empty turn per advertised
-// speaker (capped at maxSpeakers, at least one), so the editor opens ready for a two-person dialogue.
-function defaultScript(maxSpeakers) {
-  return speakerOptions(maxSpeakers).map((speaker) => ({ speaker: speaker.value, text: "" }));
-}
-
-// The non-empty turns of a script, trimmed — what actually submits (empty rows are dropped). A row
-// keeps its speaker label so the backend renders the right voice.
-function scriptSegmentsForSubmit(script) {
-  return (Array.isArray(script) ? script : [])
-    .map((segment) => ({
-      speaker: typeof segment?.speaker === "string" ? segment.speaker.trim() : "",
-      text: typeof segment?.text === "string" ? segment.text.trim() : "",
-    }))
-    .filter((segment) => segment.text.length > 0)
-    .map((segment) => (segment.speaker ? { text: segment.text, speaker: segment.speaker } : { text: segment.text }));
-}
-
-// Capitalize the first letter of a capability token for a group heading (e.g. "american" →
-// "American"). The tokens come straight from the manifest, so this is display-only — never a
-// hardcoded taxonomy.
-const titleCase = (value) =>
-  typeof value === "string" && value ? value.charAt(0).toUpperCase() + value.slice(1) : "";
-
-// Human-readable heading for a voice group, built from whichever of accent / gender the manifest
-// supplies (e.g. "American · Female"). Both absent ⇒ "" (an unlabeled bucket, rendered as bare
-// options), so a model that ships a flat voice bank still renders.
-function voiceGroupLabel(accent, gender) {
-  return [titleCase(accent), titleCase(gender)].filter(Boolean).join(" · ");
-}
-
-// Group a model's advertised voice bank into <optgroup>s keyed by accent + gender — the picker the
-// Speech mode surfaces (sc-13408). CAPABILITY-DRIVEN: the buckets and their headings come straight
-// from voices[].accent / voices[].gender, never a hardcoded list. Group order and within-group order
-// follow first appearance in the advertised bank, so the picker mirrors the manifest exactly; voices
-// with neither field collapse into a single unlabeled bucket rendered as bare options.
-function groupVoicesByGenderAccent(voices) {
-  const groups = [];
-  const byKey = new Map();
-  for (const voice of Array.isArray(voices) ? voices : []) {
-    if (!voice || typeof voice !== "object" || !voice.id) {
-      continue;
-    }
-    const accent = typeof voice.accent === "string" ? voice.accent.trim() : "";
-    const gender = typeof voice.gender === "string" ? voice.gender.trim() : "";
-    const key = `${accent}|${gender}`;
-    let group = byKey.get(key);
-    if (!group) {
-      group = { key, label: voiceGroupLabel(accent, gender), voices: [] };
-      byKey.set(key, group);
-      groups.push(group);
-    }
-    group.voices.push(voice);
-  }
-  return groups;
-}
-
-const GENERIC_AUDIO_PROMPT_GUIDE = Object.freeze({
-  title: "Audio Prompt Guide",
-  path: "/prompt-guides/generic-audio.md",
-});
-
-function usablePromptGuide(guide) {
-  return (
-    guide &&
-    typeof guide.title === "string" &&
-    guide.title.trim() &&
-    typeof guide.path === "string" &&
-    guide.path.trim()
-  );
-}
 
 export function AudioStudio() {
   const {
@@ -249,78 +66,107 @@ export function AudioStudio() {
   );
 
   const [mode, setMode] = useState(saved.mode ?? AUDIO_MODES[0]);
-  const [model, setModel] = useState(saved.model ?? audioModels[0]?.id ?? "");
-  const [prompt, setPrompt] = useState(saved.prompt ?? "");
-  // Multi-speaker dialogue script (sc-13676): an ordered list of { speaker, text } turns, surfaced by
-  // the segmented-script editor only when the selected model advertises audio.supportsMultiSpeaker.
-  // Restored from the snapshot when present, else an empty array (the editor seeds a starter dialogue
-  // the moment a multi-speaker model is selected — see the model-change clamp effect).
-  const [script, setScript] = useState(Array.isArray(saved.script) ? saved.script : []);
-  const [voice, setVoice] = useState(saved.voice ?? "");
-  const [language, setLanguage] = useState(saved.language ?? "");
-  const [editMode, setEditMode] = useState(saved.editMode ?? "");
-  const [targetDurationSecs, setTargetDurationSecs] = useState(
-    saved.targetDurationSecs ?? DEFAULT_TARGET_DURATION_SECS,
-  );
-  const [seed, setSeed] = useState(saved.seed ?? "");
-  // Sound FX (MOSS-SoundEffect) + Music (ACE-Step) diffusion sampling knobs — the CFG guidance scale and
-  // the solver step count. Empty ⇒ the model's own default (MOSS: CFG 4.0 / 100 steps; ACE-Step turbo:
-  // 8 steps, guidance baked in), matching the advanced hint.
-  const [guidance, setGuidance] = useState(saved.guidance ?? "");
-  const [steps, setSteps] = useState(saved.steps ?? "");
-  // Music (ACE-Step) describe-the-music sub-block — the gen-core AudioParams music fields. BPM + key are
-  // optional metadata; lyrics is free-form (empty ⇒ instrumental). Cleared ⇒ omitted so the model derives
-  // its own. Negative is capability-gated (hidden for the guidance-distilled turbo).
-  const [bpm, setBpm] = useState(saved.bpm ?? "");
-  const [musicalKey, setMusicalKey] = useState(saved.musicalKey ?? "");
-  const [lyrics, setLyrics] = useState(saved.lyrics ?? "");
-  const [negativePrompt, setNegativePrompt] = useState(saved.negativePrompt ?? "");
-  // Music extend/edit SOURCE band (Conditioning::AudioEdit) — a USER selection, so it persists like the
-  // Video Studio source band. `sourceAudioAssetId` names a library audio track; `editMode` (inpaint /
-  // repaint / extend) comes from the model's advertised audio.editModes. Region seconds bound an
-  // inpaint/repaint window; extend reuses the Length field as the new total. Strength is optional.
-  const [sourceAudioAssetId, setSourceAudioAssetId] = useState(saved.sourceAudioAssetId ?? "");
-  const [editRegionStartSecs, setEditRegionStartSecs] = useState(saved.editRegionStartSecs ?? "");
-  const [editRegionEndSecs, setEditRegionEndSecs] = useState(saved.editRegionEndSecs ?? "");
-  const [editStrength, setEditStrength] = useState(saved.editStrength ?? "");
-  // Voice Clone (C4 sc-13411) — a USER selection, so it persists like the Music source band.
-  // `referenceAudioAssetId` names the library audio track whose voice is cloned; `matchStrength` is the
-  // OpenVoice conversion strength (τ), empty ⇒ the converter default (0.3).
-  const [referenceAudioAssetId, setReferenceAudioAssetId] = useState(saved.referenceAudioAssetId ?? "");
-  const [matchStrength, setMatchStrength] = useState(saved.matchStrength ?? "");
-  // YuE lyrics-to-song (sc-19385) — separate from ACE-Step's `lyrics` so switching music models never
-  // bleeds one model's controls into the other. `yueSections` is the section-labelled lyrics editor
-  // ({ label, text }[]); `genreTags` is the prompt (space-joined on submit). The numeric knobs are
-  // strings, empty ⇒ omitted ⇒ the model default. `outputLimiter` "" ⇒ the model default (clamp).
-  const [yueSections, setYueSections] = useState(
-    Array.isArray(saved.yueSections) ? saved.yueSections : [],
-  );
-  const [genreTags, setGenreTags] = useState(Array.isArray(saved.genreTags) ? saved.genreTags : []);
-  const [segments, setSegments] = useState(saved.segments ?? "");
-  const [maxNewTokensPerSegment, setMaxNewTokensPerSegment] = useState(
-    saved.maxNewTokensPerSegment ?? "",
-  );
-  const [repetitionPenalty, setRepetitionPenalty] = useState(saved.repetitionPenalty ?? "");
-  const [guidanceEnabled, setGuidanceEnabled] = useState(saved.guidanceEnabled ?? true);
-  const [songGuidance, setSongGuidance] = useState(saved.songGuidance ?? "");
-  const [outputLimiter, setOutputLimiter] = useState(saved.outputLimiter ?? "");
-  // YuE ICL reference (sc-19385): one mixed clip ("single") or a vocal + instrumental pair ("dual"),
-  // plus the window of it the prompt uses. Library audio asset ids, like the Voice Clone reference.
-  const [iclMode, setIclMode] = useState(saved.iclMode ?? "single");
-  const [iclReferenceAssetId, setIclReferenceAssetId] = useState(saved.iclReferenceAssetId ?? "");
-  const [iclVocalAssetId, setIclVocalAssetId] = useState(saved.iclVocalAssetId ?? "");
-  const [iclInstrumentalAssetId, setIclInstrumentalAssetId] = useState(
-    saved.iclInstrumentalAssetId ?? "",
-  );
-  const [iclStartSecs, setIclStartSecs] = useState(saved.iclStartSecs ?? "");
-  const [iclEndSecs, setIclEndSecs] = useState(saved.iclEndSecs ?? "");
-  // Register-a-voice affordance (sc-13517): a name for the saved voice built from the currently
-  // selected reference clip, an in-flight guard, and the post-register notice (dedup warning / info).
-  const [savedVoiceName, setSavedVoiceName] = useState("");
-  const [registeringVoice, setRegisteringVoice] = useState(false);
-  const [deletingVoiceId, setDeletingVoiceId] = useState("");
-  const deletingVoiceRef = useRef("");
-  const [savedVoiceNotice, setSavedVoiceNotice] = useState(null);
+  const {
+    model,
+    setModel,
+    modelsForMode,
+    modeModels,
+    selectedModel,
+    modelReady,
+    songLabModel,
+    songLabInstalled,
+    modelOffers,
+    modelDownloadJobs,
+    refineModel,
+    promptGuide,
+    audio,
+    voices,
+    languages,
+    editModes,
+    sampleRates,
+    conditioning,
+    maxDurationSecs,
+    maxSpeakers
+  } = useAudioModelSelection({
+    saved,
+  audioModels,
+  mode,
+  models,
+  macCapabilities,
+  jobs
+  });
+
+  const {
+    prompt,
+    setPrompt,
+    script,
+    setScript,
+    voice,
+    setVoice,
+    language,
+    setLanguage,
+    editMode,
+    setEditMode,
+    targetDurationSecs,
+    setTargetDurationSecs,
+    seed,
+    setSeed,
+    guidance,
+    setGuidance,
+    steps,
+    setSteps,
+    bpm,
+    setBpm,
+    musicalKey,
+    setMusicalKey,
+    lyrics,
+    setLyrics,
+    negativePrompt,
+    setNegativePrompt,
+    sourceAudioAssetId,
+    setSourceAudioAssetId,
+    editRegionStartSecs,
+    setEditRegionStartSecs,
+    editRegionEndSecs,
+    setEditRegionEndSecs,
+    editStrength,
+    setEditStrength,
+    referenceAudioAssetId,
+    setReferenceAudioAssetId,
+    matchStrength,
+    setMatchStrength,
+    yueSections,
+    setYueSections,
+    genreTags,
+    setGenreTags,
+    segments,
+    setSegments,
+    maxNewTokensPerSegment,
+    setMaxNewTokensPerSegment,
+    repetitionPenalty,
+    setRepetitionPenalty,
+    guidanceEnabled,
+    setGuidanceEnabled,
+    songGuidance,
+    setSongGuidance,
+    outputLimiter,
+    setOutputLimiter,
+    iclMode,
+    setIclMode,
+    iclReferenceAssetId,
+    setIclReferenceAssetId,
+    iclVocalAssetId,
+    setIclVocalAssetId,
+    iclInstrumentalAssetId,
+    setIclInstrumentalAssetId,
+    iclStartSecs,
+    setIclStartSecs,
+    iclEndSecs,
+    setIclEndSecs
+  } = useAudioDraft({
+    saved
+  });
+
   const [advancedOpen, setAdvancedOpen] = useState(saved.advancedOpen ?? false);
   // Which surface is showing (sc-23000): the standard modes, or the experimental YuE2 Song Lab.
   // The lab is entered ONLY by an explicit click on its separately-marked tab; the standard modes'
@@ -331,85 +177,6 @@ export function AudioStudio() {
   // Guards a Speech run in flight so a second submit (double-click / ⌘↵) can't double-enqueue
   // (mirrors VideoStudio's `submitting`). Cleared in submit's finally.
   const [submitting, setSubmitting] = useState(false);
-
-  // Models gated on the selected tab (mirrors VideoStudio.jsx): a model "serves" a mode when its
-  // audio capability block matches (audioModelServesMode). The tabs, the picker and the snap effect
-  // all derive from this so the user is never trapped on a mode whose model can't serve the others.
-  const modelServesMode = (item, value) => audioModelServesMode(item, value);
-  const modelsForMode = (value) => {
-    const serving = audioModels.filter((item) => modelServesMode(item, value));
-    if (value !== "voiceclone") {
-      return serving;
-    }
-    // Voice Clone's generate model must consume a reference clip — filter the bare speaker embedder
-    // (Chatterbox-VE) out so the CTA never routes a clone to an embedder. Prefer a native clone-TTS
-    // generator (single-call, sc-13412) over the OpenVoice conversion converter, so the picker default
-    // (index 0) becomes the native clone whenever one is installed — the capability-gated upgrade.
-    return serving
-      .filter(isVoiceCloneConverter)
-      .sort((a, b) => Number(isNativeCloneGenerator(b)) - Number(isNativeCloneGenerator(a)));
-  };
-  const modeModels = modelsForMode(mode);
-  // Resolve only against models that can actually generate in this mode. A reduced catalog may
-  // contain audio utility components (for example Chatterbox-VE) that must never become a prompt
-  // target merely because there is no compatible generator to put in the picker.
-  const selectedModel =
-    modeModels.find((item) => item.id === model) ?? modeModels[0] ?? null;
-
-  // Model-availability gate: an installed audio utility alone is not enough; at least one model must
-  // serve a real Audio Studio generation mode. Offers still come from the full catalog so the user
-  // can install a compatible generator.
-  const modelReady = AUDIO_MODES.some((value) => modelsForMode(value).length > 0);
-  // The experimental Song Lab (sc-23000) is offered when the catalog carries a symbolic-song model
-  // (YuE2), installed or not — the lab owns its own opt-in, licence acceptance and install. An
-  // INSTALLED one also opens the studio's availability gate, so a YuE2-only install is reachable.
-  const songLabModel = useMemo(
-    () => (models ?? []).find((item) => item?.type === "audio" && item?.audio?.supportsSymbolicSong === true) ?? null,
-    [models],
-  );
-  const songLabInstalled = audioModels.some((item) => item?.audio?.supportsSymbolicSong === true);
-  const modelOffers = useMemo(
-    () => downloadOffersFor(models, audioModelUsable, macCapabilities),
-    [models, macCapabilities],
-  );
-  const modelDownloadJobs = useMemo(
-    () => (jobs ?? []).filter((job) => job.type === "model_download"),
-    [jobs],
-  );
-  // Same local refinement model used by Image / Video Studio. The shared control owns the
-  // missing-model download affordance; Audio Studio only resolves the catalog entry.
-  const refineModel = useMemo(
-    () => models.find((entry) => entry.id === PROMPT_REFINE_MODEL_ID),
-    [models],
-  );
-  // Built-ins declare a model-specific guide. Keep third-party / legacy entries useful with an
-  // audio-aware fallback instead of silently hiding the guide and refinement surfaces.
-  const declaredPromptGuide = selectedModel?.ui?.promptGuide;
-  const promptGuide = usablePromptGuide(declaredPromptGuide)
-    ? declaredPromptGuide
-    : GENERIC_AUDIO_PROMPT_GUIDE;
-
-  // The selected model's audio capabilities — the single source every field below reads from. Never
-  // hardcoded: an absent sub-block simply hides the dependent control.
-  const audio = useMemo(
-    () =>
-      selectedModel?.audio && typeof selectedModel.audio === "object"
-        ? selectedModel.audio
-        : {},
-    [selectedModel?.audio],
-  );
-  const voices = useMemo(
-    () => (Array.isArray(audio.voices) ? audio.voices : []),
-    [audio],
-  );
-  const languages = Array.isArray(audio.languages) ? audio.languages : [];
-  const editModes = Array.isArray(audio.editModes) ? audio.editModes : [];
-  const sampleRates = Array.isArray(audio.sampleRates) ? audio.sampleRates : [];
-  const conditioning = Array.isArray(audio.conditioning) ? audio.conditioning : [];
-  const maxDurationSecs = Number.isFinite(audio.maxDurationSecs) ? audio.maxDurationSecs : null;
-  // Multi-speaker cap (sc-13676): READ off the selected model's audio.maxSpeakers — never hardcoded.
-  // Falls back to DEFAULT_MAX_SPEAKERS only when the model advertises multi-speaker but omits the cap.
-  const maxSpeakers = Number.isFinite(audio.maxSpeakers) ? audio.maxSpeakers : DEFAULT_MAX_SPEAKERS;
 
   // Which capability-driven controls the active mode surfaces. Speech leads with the full
   // voice/language/length triad C1 builds on; the other modes show a capability-driven scaffold.
@@ -507,99 +274,33 @@ export function AudioStudio() {
   // runs with categories hidden since its `all/image/video` tabs carry no audio bucket).
   const audioAssets = useMemo(() => assets.filter((asset) => asset?.type === "audio"), [assets]);
 
-  // Saved voices (sc-13517): a saved voice is "selected" when the reference clip in play is the one
-  // it points to. Picking a saved voice just sets referenceAudioAssetId, which the existing pipeline
-  // routes to native chatterbox_tts / OpenVoice fallback — no new generation wiring.
-  const selectedSavedVoiceId = useMemo(() => {
-    if (!referenceAudioAssetId) return "";
-    const match = savedVoices.find(
-      (voice) => voice?.referenceAudioAssetId === referenceAudioAssetId,
-    );
-    return match?.id ?? "";
-  }, [savedVoices, referenceAudioAssetId]);
+  const {
+    savedVoiceName,
+    setSavedVoiceName,
+    registeringVoice,
+    deletingVoiceId,
+    savedVoiceNotice,
+    selectedSavedVoiceId,
+    canRegisterVoice,
+    handleRegisterVoice,
+    handleSelectSavedVoice,
+    handleDeleteSavedVoice
+  } = useAudioVoiceLibrary({
+    referenceAudioAssetId,
+  savedVoices,
+  createSavedVoice,
+  setReferenceAudioAssetId,
+  deleteSavedVoice
+  });
 
-  const canRegisterVoice =
-    Boolean(createSavedVoice) &&
-    referenceAudioAssetId.length > 0 &&
-    savedVoiceName.trim().length > 0 &&
-    !registeringVoice;
-
-  async function handleRegisterVoice() {
-    if (!canRegisterVoice) return;
-    setRegisteringVoice(true);
-    setSavedVoiceNotice(null);
-    try {
-      const created = await createSavedVoice({
-        name: savedVoiceName.trim(),
-        referenceAudioAssetId,
-      });
-      // A null result means the register failed — the error is surfaced by the app-level banner.
-      if (!created) return;
-      setSavedVoiceName("");
-      const duplicate = created.nearDuplicate;
-      if (duplicate) {
-        setSavedVoiceNotice({
-          tone: "warning",
-          message: `Saved “${created.name}”, but it looks very similar to “${duplicate.name}” (${Math.round(
-            duplicate.similarity * 100,
-          )}% match) — you may already have this voice registered.`,
-        });
-      } else {
-        setSavedVoiceNotice({
-          tone: "info",
-          message: `Saved “${created.name}” to this project’s voices.`,
-        });
-      }
-    } finally {
-      setRegisteringVoice(false);
-    }
-  }
-
-  function handleSelectSavedVoice(voice) {
-    setReferenceAudioAssetId(voice.referenceAudioAssetId);
-    setSavedVoiceNotice(null);
-  }
-
-  async function handleDeleteSavedVoice(voice) {
-    if (!deleteSavedVoice || deletingVoiceRef.current) return;
-    deletingVoiceRef.current = voice.id;
-    setDeletingVoiceId(voice.id);
-    try {
-      const proceed = await appConfirm({
-        title: "Delete saved voice?",
-        message: `Permanently delete “${voice.name}” from this project’s saved voices? This cannot be undone.`,
-        confirmLabel: "Delete permanently",
-        cancelLabel: "Cancel",
-        tone: "danger",
-      });
-      if (!proceed) return;
-      const deleted = await deleteSavedVoice(voice.id);
-      if (deleted) {
-        setSavedVoiceNotice(null);
-      }
-    } finally {
-      deletingVoiceRef.current = "";
-      setDeletingVoiceId("");
-    }
-  }
-
-  // Segmented-script editor handlers (sc-13676). Each edits a single { speaker, text } turn; the
-  // speaker dropdown is capped at `maxSpeakers` labels so a script can never name more speakers than
-  // the model renders. A row can always be added (dialogue length is unbounded — max_speakers caps
-  // DISTINCT speakers, not turns) and removed down to a single turn.
-  function updateSegment(index, patch) {
-    setScript((current) => current.map((segment, i) => (i === index ? { ...segment, ...patch } : segment)));
-  }
-  function addSegment() {
-    setScript((current) => {
-      // Default the new turn to the speaker that keeps a two-person dialogue alternating.
-      const next = speakerChoices[current.length % speakerChoices.length]?.value ?? speakerChoices[0]?.value ?? "S1";
-      return [...current, { speaker: next, text: "" }];
-    });
-  }
-  function removeSegment(index) {
-    setScript((current) => (current.length > 1 ? current.filter((_, i) => i !== index) : current));
-  }
+  const {
+    updateSegment,
+    addSegment,
+    removeSegment
+  } = useAudioScript({
+    setScript,
+  speakerChoices
+  });
 
   // Generate is guarded (never a silent no-op): a run needs a wired mode, generation content (a
   // non-empty prompt, or — for a multi-speaker model — at least one non-empty script turn), an
@@ -648,119 +349,72 @@ export function AudioStudio() {
     referenceReady &&
     !submitting;
 
-  // Snap a reduced catalog to its first usable mode, then snap the model state to the resolved
-  // generator for that mode. This keeps prompt-free audio utilities out of the picker/refiner path.
-  useEffect(() => {
-    if (!modeModels.length) {
-      const fallbackMode = AUDIO_MODES.find((value) => modelsForMode(value).length > 0);
-      if (fallbackMode && fallbackMode !== mode) {
-        setMode(fallbackMode);
-      }
-      return;
-    }
-    if (selectedModel && selectedModel.id !== model) {
-      setModel(selectedModel.id);
-    }
-    // modelServesMode / modelsForMode close over audioModels, captured below.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, model, selectedModel, audioModels]);
+  useAudioModelDefaults({
+    modeModels,
+  modelsForMode,
+  mode,
+  setMode,
+  selectedModel,
+  model,
+  setModel,
+  audioModels,
+  setVoice,
+  voices,
+  setLanguage,
+  languages,
+  setEditMode,
+  editModes,
+  setTargetDurationSecs,
+  maxDurationSecs,
+  audio,
+  speakerChoices,
+  setScript,
+  maxSpeakers,
+  setYueSections
+  });
 
-  // Re-seed the capability-bound selections whenever the model changes, clamped to what the new
-  // model actually advertises (mirrors VideoStudio's duration/resolution/fps clamp). Keeps a restored
-  // snapshot value when the new model still offers it; otherwise falls back to the model's first
-  // option, so a value from a previous model can never persist onto one that lacks it.
-  useEffect(() => {
-    if (!selectedModel) {
-      return;
-    }
-    setVoice((current) => (voices.some((item) => item.id === current) ? current : voices[0]?.id ?? ""));
-    setLanguage((current) => (languages.includes(current) ? current : languages[0] ?? ""));
-    setEditMode((current) => (editModes.includes(current) ? current : editModes[0] ?? ""));
-    setTargetDurationSecs((current) => {
-      if (maxDurationSecs == null) {
-        return current;
-      }
-      const value = Number(current);
-      if (Number.isFinite(value) && value > 0 && value <= maxDurationSecs) {
-        return current;
-      }
-      return Math.min(DEFAULT_TARGET_DURATION_SECS, maxDurationSecs);
-    });
-    // Multi-speaker script (sc-13676): seed a starter dialogue the first time a multi-speaker model is
-    // selected (an empty editor is useless), and clamp any restored/prior segments' speaker labels to
-    // those the NEW model advertises — so a label from a 2-speaker model can never persist onto one
-    // with a different cap. A non-multi-speaker model leaves the script untouched (it's never read).
-    if (audio.supportsMultiSpeaker) {
-      const allowed = new Set(speakerChoices.map((choice) => choice.value));
-      const fallback = speakerChoices[0]?.value ?? "S1";
-      setScript((current) => {
-        if (!Array.isArray(current) || current.length === 0) {
-          return defaultScript(maxSpeakers);
-        }
-        return current.map((segment) => ({
-          ...segment,
-          speaker: allowed.has(segment?.speaker) ? segment.speaker : fallback,
-        }));
-      });
-    }
-    // YuE (sc-19385): open the lyrics editor on a verse + chorus the first time a segmented-song
-    // model is selected; a restored / prior song is kept.
-    if (isSegmentedSongModel(selectedModel)) {
-      setYueSections((current) =>
-        Array.isArray(current) && current.length > 0 ? current : defaultYueSections(),
-      );
-    }
-    // The capability arrays are derived from selectedModel; keying on its id is the intended clamp.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedModel?.id]);
-
-  // Per-workspace stickiness (sc-11964 pattern). Suppressed until the audio catalog has loaded so a
-  // transient default can't overwrite the restored snapshot mid-settle.
-  useStudioSettingsWriter(
-    "audio",
-    activeProject?.id ?? null,
-    {
-      mode,
-      model,
-      prompt,
-      script,
-      voice,
-      language,
-      editMode,
-      targetDurationSecs,
-      seed,
-      guidance,
-      steps,
-      bpm,
-      musicalKey,
-      lyrics,
-      negativePrompt,
-      sourceAudioAssetId,
-      editRegionStartSecs,
-      editRegionEndSecs,
-      editStrength,
-      referenceAudioAssetId,
-      matchStrength,
-      yueSections,
-      genreTags,
-      segments,
-      maxNewTokensPerSegment,
-      repetitionPenalty,
-      guidanceEnabled,
-      songGuidance,
-      outputLimiter,
-      iclMode,
-      iclReferenceAssetId,
-      iclVocalAssetId,
-      iclInstrumentalAssetId,
-      iclStartSecs,
-      iclEndSecs,
-      advancedOpen,
-      songLab: surface === "yue2",
-    },
-    // Plus ui-preferences hydration (sc-15425) — see the same gate in ImageStudio.
-    preferencesHydrated && audioModels.length > 0,
-  );
+  useAudioSettingsWriter({
+    activeProject,
+  mode,
+  model,
+  prompt,
+  script,
+  voice,
+  language,
+  editMode,
+  targetDurationSecs,
+  seed,
+  guidance,
+  steps,
+  bpm,
+  musicalKey,
+  lyrics,
+  negativePrompt,
+  sourceAudioAssetId,
+  editRegionStartSecs,
+  editRegionEndSecs,
+  editStrength,
+  referenceAudioAssetId,
+  matchStrength,
+  yueSections,
+  genreTags,
+  segments,
+  maxNewTokensPerSegment,
+  repetitionPenalty,
+  guidanceEnabled,
+  songGuidance,
+  outputLimiter,
+  iclMode,
+  iclReferenceAssetId,
+  iclVocalAssetId,
+  iclInstrumentalAssetId,
+  iclStartSecs,
+  iclEndSecs,
+  advancedOpen,
+  surface,
+  preferencesHydrated,
+  audioModels
+  });
 
   // A human-readable capability summary so the capability-driven nature of the settings is visible
   // at a glance and survives a model switch. Every clause is READ off the model's own audio block —
@@ -786,165 +440,64 @@ export function AudioStudio() {
   // a take always pauses the previous one.
   const player = useAudioTakePlayer();
 
-  // "Run again" re-submits the run's OWN stored payload verbatim — the request the job
-  // recorded, not the current control values (which may have moved on since). A new run
-  // lands at the top of the stack with its own in-flight strip.
-  async function runAgain(job) {
-    const payload = job?.payload;
-    if (!payload) {
-      return;
-    }
-    const next = await createAudioJob?.(payload);
-    if (next) {
-      rememberLocalGenerationJob?.("audio", next);
-    }
-  }
-
-  async function submit(event) {
-    event.preventDefault();
-    if (submitting) {
-      return;
-    }
-    // All four current modes are wired; WIRED_MODES remains the authoritative guard if a future
-    // display-only mode is added. `canGenerate` also covers the
-    // empty-prompt / no-model / in-flight guards, so a direct form submit can never slip past them.
-    if (!canGenerate) {
-      return;
-    }
-    setSubmitting(true);
-    try {
-      // Clamp the requested length to the model's advertised cap (never a hardcoded ceiling); the
-      // worker range-checks it too. Omitted when the mode carries no duration control so the model
-      // synthesizes its natural length.
-      const durationValue = Number(targetDurationSecs);
-      const clampedDuration =
-        showDuration && Number.isFinite(durationValue) && durationValue > 0
-          ? Math.min(durationValue, maxDurationSecs)
-          : undefined;
-      // The audio route deserializes `model` (not `modelId`) and reads the typed knobs verbatim
-      // (apps/rust-api/src/dto.rs AudioJobRequest → crates/sceneworks-worker/src/audio_jobs.rs). The
-      // language-casing seam (en-US → en-us) is handled server-side. Language is omitted when unset so
-      // the model derives its own default. Mirrors how VideoStudio builds createVideoJob's payload.
-      const payload = {
-        model: selectedModel.id,
-        prompt: prompt.trim(),
-        language: language || undefined,
-        targetDurationSecs: clampedDuration,
-        seed: seed === "" ? null : Number(seed),
-      };
-      if (mode === "speech") {
-        if (showMultiSpeaker) {
-          // Multi-speaker Speech (MOSS-TTSD, sc-13676): submit the segmented dialogue as
-          // AudioParams.script (empty turns dropped). No `voice` — a multi-speaker model advertises no
-          // fixed voice bank; it maps the per-segment [S1]/[S2] labels to its own voices. The prompt is
-          // left empty; the script carries the text. The worker passes the script to the generator and
-          // the gen-core floor gates it on supports_multi_speaker / maxSpeakers (never a hardcoded id).
-          payload.prompt = "";
-          payload.script = scriptSegmentsForSubmit(script);
-        } else {
-          // Single-voice Speech (Kokoro) ships a voice bank; omitted when unset so it falls back to af_heart.
-          payload.voice = voice || undefined;
-        }
-      } else if (mode === "sfx") {
-        // Sound FX (MOSS-SoundEffect) — the CFG guidance scale + solver steps ride the top-level
-        // request the diffusion pipeline reads. Cleared ⇒ omitted so the model uses its own default
-        // (CFG 4.0 / 100 steps); the shared gen-core floor range-checks any value we do send. No
-        // `voice` is sent — MOSS advertises no voice surface and the floor rejects one.
-        payload.guidance = guidance === "" ? undefined : Number(guidance);
-        payload.steps = steps === "" ? undefined : Number(steps);
-      } else if (songModel) {
-        // YuE lyrics-to-song (sc-19385 → the sc-19384 job surface). The genre tags ARE the prompt
-        // (space-joined, upstream genre.txt); the sections ride `lyrics` as `[label]\n…` blocks. Every
-        // numeric knob is omitted when cleared so the model default applies. Guidance is an on/off
-        // switch plus an optional scale (> 1; off ⇒ no scale, the worker sends 0.0 = no CFG).
-        // No bpm / key / steps / length — the API refuses them for a segmented-song model.
-        const optionalNumber = (value) => (value === "" ? undefined : Number(value));
-        payload.prompt = songPrompt;
-        payload.lyrics = songLyrics;
-        payload.segments = optionalNumber(segments);
-        payload.maxNewTokensPerSegment = optionalNumber(maxNewTokensPerSegment);
-        payload.repetitionPenalty = optionalNumber(repetitionPenalty);
-        payload.guidanceEnabled = Boolean(guidanceEnabled);
-        if (guidanceEnabled) {
-          payload.guidance = optionalNumber(songGuidance);
-        }
-        payload.quantTier = quantTier || undefined;
-        if (showOutputLimiter) {
-          payload.outputLimiter = outputLimiter || undefined;
-        }
-        if (songIcl && iclComplete) {
-          payload.iclMode = iclMode;
-          if (iclMode === "dual") {
-            payload.iclVocalAssetId = iclVocalAssetId;
-            payload.iclInstrumentalAssetId = iclInstrumentalAssetId;
-          } else {
-            payload.iclReferenceAssetId = iclReferenceAssetId;
-          }
-          if (audio.supportsReferenceRegion) {
-            payload.iclStartSecs = optionalNumber(iclStartSecs);
-            payload.iclEndSecs = optionalNumber(iclEndSecs);
-          }
-        }
-      } else if (mode === "music") {
-        // Music (ACE-Step) — the describe-the-music sub-block. BPM/key/lyrics ride the gen-core
-        // AudioParams music fields; steps rides the top-level request (the turbo's 8-step sampler).
-        // Cleared ⇒ omitted so the model derives its own. guidance/negative are sent ONLY when the model
-        // advertises support (the guidance-distilled turbo advertises neither, so they are never sent —
-        // the shared floor would reject them as typed Unsupported).
-        payload.bpm = bpm === "" ? undefined : Number(bpm);
-        payload.musicalKey = musicalKey.trim() || undefined;
-        payload.lyrics = lyrics.trim() || undefined;
-        payload.steps = steps === "" ? undefined : Number(steps);
-        if (musicSupportsGuidance) {
-          payload.guidance = guidance === "" ? undefined : Number(guidance);
-        }
-        if (musicSupportsNegative) {
-          payload.negativePrompt = negativePrompt.trim() || undefined;
-        }
-        // Extend/edit SOURCE band → Conditioning::AudioEdit. Only when the user has both picked a source
-        // track AND chosen an edit mode the model advertises; otherwise this is plain text-to-music.
-        if (showEditModes && sourceAudioAssetId && editMode) {
-          payload.sourceAudioAssetId = sourceAudioAssetId;
-          payload.editMode = editMode;
-          if (editMode === "extend") {
-            // Extend: the appended tail's new TOTAL length is the Length field; the worker defaults the
-            // region start to the source clip's own length (where generation begins).
-            payload.editRegionEndSecs = clampedDuration;
-          } else if (editMode === "inpaint" || editMode === "repaint") {
-            // Inpaint / repaint: a bounded interior window (seconds). Cleared bounds are omitted so the
-            // worker/provider apply their own defaults (end unset ⇒ to the clip end).
-            payload.editRegionStartSecs =
-              editRegionStartSecs === "" ? undefined : Number(editRegionStartSecs);
-            payload.editRegionEndSecs =
-              editRegionEndSecs === "" ? undefined : Number(editRegionEndSecs);
-          }
-          // Cover (sc-13821) is a whole-clip restyle — no region (the worker's audio_edit_region
-          // returns None for Cover); the source track + prompt are the whole input.
-          payload.editStrength = editStrength === "" ? undefined : Number(editStrength);
-        }
-      } else if (mode === "voiceclone") {
-        // Voice Clone (sc-13411 C4 → sc-13412). The prompt is the SCRIPT to speak in the cloned voice;
-        // `referenceAudioAssetId` names the library audio track whose voice is cloned. `canGenerate`
-        // guarantees a reference is selected. The worker routes on the selected model's capability: a
-        // native clone-TTS generator renders in ONE call; otherwise the base TTS (Kokoro, `baseModel`
-        // server-default) speaks and OpenVoice V2 re-timbres toward the reference. `matchStrength`
-        // overrides the OpenVoice τ and is sent ONLY on the conversion path — the native clone has no τ,
-        // so sending it would be a knob the model doesn't have.
-        payload.referenceAudioAssetId = referenceAudioAssetId;
-        if (!selectedIsNativeClone) {
-          payload.matchStrength = matchStrength === "" ? undefined : Number(matchStrength);
-        }
-      }
-      const job = await createAudioJob?.(payload);
-      if (job) {
-        // Land the run in the audio local-job lane so it stacks in .studio-results via the shared
-        // audio-player card (A5 / sc-13405) — the audio twin of rememberLocalGenerationJob('video').
-        rememberLocalGenerationJob?.("audio", job);
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  }
+  const {
+    runAgain,
+    submit
+  } = useAudioSubmission({
+    createAudioJob,
+  rememberLocalGenerationJob,
+  submitting,
+  canGenerate,
+  setSubmitting,
+  targetDurationSecs,
+  showDuration,
+  maxDurationSecs,
+  selectedModel,
+  prompt,
+  language,
+  seed,
+  mode,
+  showMultiSpeaker,
+  script,
+  voice,
+  guidance,
+  steps,
+  songModel,
+  songPrompt,
+  songLyrics,
+  segments,
+  maxNewTokensPerSegment,
+  repetitionPenalty,
+  guidanceEnabled,
+  songGuidance,
+  quantTier,
+  showOutputLimiter,
+  outputLimiter,
+  songIcl,
+  iclComplete,
+  iclMode,
+  iclVocalAssetId,
+  iclInstrumentalAssetId,
+  iclReferenceAssetId,
+  audio,
+  iclStartSecs,
+  iclEndSecs,
+  bpm,
+  musicalKey,
+  lyrics,
+  musicSupportsGuidance,
+  musicSupportsNegative,
+  negativePrompt,
+  showEditModes,
+  sourceAudioAssetId,
+  editMode,
+  editRegionStartSecs,
+  editRegionEndSecs,
+  editStrength,
+  referenceAudioAssetId,
+  selectedIsNativeClone,
+  matchStrength
+  });
 
   // The picker must contain only models that can generate in the active mode. Utility-only or
   // incompatible reduced catalogs are handled by the availability gate / mode snap above.
@@ -1040,131 +593,28 @@ export function AudioStudio() {
               />
             ) : null}
 
-            <div className="prompt-input-row">
-              {/* Multi-speaker / long-form dialogue (sc-13676): the plain prompt is replaced by a
-                  segmented-script editor ONLY when the selected model advertises
-                  audio.supportsMultiSpeaker. Each turn carries a speaker (capped at maxSpeakers, read
-                  off the model) + its text; the script submits as AudioParams.script. Capability-driven
-                  — every single-voice Speech model keeps the plain textarea, so those modes are
-                  unperturbed. */}
-              {/* YuE (sc-19385): a segmented-song model replaces the prompt with its section-labelled
-                  lyrics editor; its prompt is the genre tags in the settings bar below. */}
-              {songModel ? (
-                <YueLyricsEditor onChange={setYueSections} sections={yueSections} />
-              ) : showMultiSpeaker ? (
-                <div
-                  className="prompt-input multi-speaker-script"
-                  data-testid="multi-speaker-script"
-                  role="group"
-                  aria-label="Multi-speaker script"
-                >
-                  {script.map((segment, index) => (
-                    <div className="script-segment" key={index}>
-                      <select
-                        aria-label={`Segment ${index + 1} speaker`}
-                        className="script-segment-speaker"
-                        onChange={(event) => updateSegment(index, { speaker: event.target.value })}
-                        value={segment.speaker ?? speakerChoices[0]?.value ?? "S1"}
-                      >
-                        {speakerChoices.map((choice) => (
-                          <option key={choice.value} value={choice.value}>
-                            {choice.label}
-                          </option>
-                        ))}
-                      </select>
-                      <div className="script-segment-content">
-                        <textarea
-                          aria-label={`Segment ${index + 1} text`}
-                          className="script-segment-text"
-                          onChange={(event) => updateSegment(index, { text: event.target.value })}
-                          placeholder="What this speaker says…"
-                          rows={2}
-                          value={segment.text ?? ""}
-                        />
-                        <RefinePromptControl
-                          key={`${mode}:${selectedModel?.id}:${script.length}:${index}`}
-                          guidePath={promptGuide.path}
-                          modelId={selectedModel?.id}
-                          onApply={(refined) => updateSegment(index, { text: refined })}
-                          prompt={segment.text}
-                          refinePrompt={refinePrompt}
-                          refineModel={refineModel}
-                          onDownloadRefineModel={
-                            refineModel ? () => createModelDownloadJob(refineModel) : undefined
-                          }
-                          workflow="audio"
-                        />
-                      </div>
-                      <button
-                        aria-label={`Remove segment ${index + 1}`}
-                        className="script-segment-remove"
-                        disabled={script.length <= 1}
-                        onClick={() => removeSegment(index)}
-                        title="Remove this turn"
-                        type="button"
-                      >
-                        <Icon.Trash size={14} />
-                      </button>
-                    </div>
-                  ))}
-                  <button
-                    className="script-add-segment"
-                    data-testid="script-add-segment"
-                    onClick={addSegment}
-                    type="button"
-                  >
-                    <Icon.Plus size={14} />
-                    Add turn
-                  </button>
-                </div>
-              ) : (
-                <textarea
-                  aria-label="Prompt"
-                  className="prompt-input"
-                  onChange={(event) => setPrompt(event.target.value)}
-                  placeholder={MODE_PLACEHOLDER[mode] ?? "Describe the audio…"}
-                  value={prompt}
-                />
-              )}
-              {/* The shell's primary action. C1 (sc-13408) wires the real Speech submission via the
-                  form's onSubmit. Disabled — never a silent no-op — until a run can proceed: empty
-                  content (prompt or multi-speaker script), no installed model, a non-Speech tab, or a
-                  run already in flight all block it. */}
-              {/* The CTA and the shortcut hint that used to live in the results head — the hint
-                  belongs with the action it describes (epic 14361, screen 2a). */}
-              <div className="prompt-cta-stack">
-                <button className="prompt-cta" type="submit" disabled={!canGenerate}>
-                  <Icon.Sparkle size={14} />
-                  Generate
-                </button>
-                <span className="kbd-hint">
-                  <kbd>⌘</kbd>
-                  <kbd>↵</kbd>
-                  to generate
-                </span>
-              </div>
-            </div>
-
-            {/* Multi-speaker turns own one refiner apiece inside their structured editor above. Plain
-                prompt modes share this single control. Key by mode + resolved model so switching either
-                aborts an in-flight request and cannot surface a stale rewrite from the previous guide. */}
-            {/* A segmented-song model's prompt is its genre-tag list, so the refiner reads and writes
-                that (a refined tag line is re-split into tags — commas, else known multi-word tags, else words). */}
-            {!showMultiSpeaker && selectedModel ? (
-              <RefinePromptControl
-                key={`${mode}:${selectedModel.id}`}
-                guidePath={promptGuide.path}
-                modelId={selectedModel.id}
-                onApply={songModel ? (refined) => setGenreTags(splitGenreTagLine(refined)) : setPrompt}
-                prompt={songModel ? songPrompt : prompt}
-                refinePrompt={refinePrompt}
-                refineModel={refineModel}
-                onDownloadRefineModel={
-                  refineModel ? () => createModelDownloadJob(refineModel) : undefined
-                }
-                workflow="audio"
-              />
-            ) : null}
+            <AudioPromptComposer
+            songModel={songModel}
+            setYueSections={setYueSections}
+            yueSections={yueSections}
+            showMultiSpeaker={showMultiSpeaker}
+            script={script}
+            updateSegment={updateSegment}
+            speakerChoices={speakerChoices}
+            mode={mode}
+            selectedModel={selectedModel}
+            promptGuide={promptGuide}
+            refinePrompt={refinePrompt}
+            refineModel={refineModel}
+            createModelDownloadJob={createModelDownloadJob}
+            removeSegment={removeSegment}
+            addSegment={addSegment}
+            setPrompt={setPrompt}
+            prompt={prompt}
+            canGenerate={canGenerate}
+            setGenreTags={setGenreTags}
+            songPrompt={songPrompt}
+          />
 
             {/* Settings bar (epic 14361 / sc-14363). The row is a FIXED 4-column grid — Model ·
                 Voice · Language · Length — with `align-items: end`, and the model's capability
@@ -1173,236 +623,52 @@ export function AudioStudio() {
                 Model label, so `align-items: flex-end` pushed the MODEL caption ~24px above its
                 neighbours and the field overflowed them. Mode-dependent extra fields keep their
                 capability gating and simply become cells in the same grid. */}
-            <div className="settings-bar audio-settings-bar">
-              <div className="settings-bar-row">
-                <label className="settings-field settings-field-model">
-                  Model
-                  <select
-                    onChange={(event) => setModel(event.target.value)}
-                    value={selectedModel?.id ?? ""}
-                  >
-                    {/* Models gated on the selected tab: only real generators that serve this mode. */}
-                    {pickerModels.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name ?? item.ui?.label ?? item.id}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                {/* Speech: the voice bank the selected model ships (audio.voices), grouped into
-                    <optgroup>s by accent + gender (sc-13408). The buckets and their headings are
-                    capability-driven — straight from voices[].accent / voices[].gender — never a
-                    hardcoded taxonomy; a flat bank (no accent/gender) renders as bare options. */}
-                {showVoice ? (
-                  <label className="settings-field settings-field-voice">
-                    Voice
-                    <select onChange={(event) => setVoice(event.target.value)} value={voice}>
-                      {voiceGroups.map((group) =>
-                        group.label ? (
-                          <optgroup key={group.key} label={group.label}>
-                            {group.voices.map((item) => (
-                              <option key={item.id} value={item.id}>
-                                {item.label ?? item.id}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ) : (
-                          <React.Fragment key={group.key}>
-                            {group.voices.map((item) => (
-                              <option key={item.id} value={item.id}>
-                                {item.label ?? item.id}
-                              </option>
-                            ))}
-                          </React.Fragment>
-                        ),
-                      )}
-                    </select>
-                  </label>
-                ) : null}
-
-                {/* Language options the model advertises (audio.languages). */}
-                {showLanguage ? (
-                  <label className="settings-field settings-field-language">
-                    Language
-                    <select onChange={(event) => setLanguage(event.target.value)} value={language}>
-                      {languages.map((value) => (
-                        <option key={value} value={value}>
-                          {value}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-
-                {/* Length, capped to the model's audio.maxDurationSecs (never a hardcoded ceiling). */}
-                {showDuration ? (
-                  <label className="settings-field settings-field-duration">
-                    Length (s)
-                    <input
-                      max={maxDurationSecs}
-                      min="1"
-                      onChange={(event) => setTargetDurationSecs(event.target.value)}
-                      step="1"
-                      type="number"
-                      value={targetDurationSecs}
-                    />
-                  </label>
-                ) : null}
-
-                {/* Music: optional tempo (BPM) + musical key. Both ride the gen-core AudioParams music
-                    sub-block ACE-Step reads; cleared ⇒ omitted so the model derives its own. */}
-                {showMusicFields ? (
-                  <label className="settings-field settings-field-bpm">
-                    BPM
-                    <input
-                      min="1"
-                      onChange={(event) => setBpm(event.target.value)}
-                      placeholder="Optional"
-                      step="1"
-                      type="number"
-                      value={bpm}
-                    />
-                  </label>
-                ) : null}
-
-                {showMusicFields ? (
-                  <label className="settings-field settings-field-key">
-                    Key
-                    <input
-                      onChange={(event) => setMusicalKey(event.target.value)}
-                      placeholder="e.g. C minor"
-                      type="text"
-                      value={musicalKey}
-                    />
-                  </label>
-                ) : null}
-
-                {/* YuE (sc-19385): how many lyric sections to render (song length follows this and
-                    the lyrics, not a duration) and the weight tier. */}
-                {songModel ? (
-                  <label className="settings-field settings-field-segments">
-                    Sections
-                    <input
-                      max="100"
-                      min="1"
-                      onChange={(event) => setSegments(event.target.value)}
-                      placeholder="2 (default)"
-                      step="1"
-                      type="number"
-                      value={segments}
-                    />
-                  </label>
-                ) : null}
-                {songModel && songTierItems.length > 0 ? (
-                  <TierPickerField
-                    className="settings-field settings-field-tier"
-                    items={songTierItems}
-                    onChange={handleTierChange}
-                    tierLabel={tierLabel}
-                    tierSwitching={tierSwitching}
-                    title="Which installed weight tier renders the song. Higher precision uses more memory."
-                    value={quantTier}
-                  />
-                ) : null}
-              </div>
-
-              {songModel ? <YueGenreTags onChange={setGenreTags} tags={genreTags} /> : null}
-
-              {/* Music: optional lyrics (free-form; empty ⇒ instrumental). Rides the AudioParams
-                  `lyrics` field, distinct from the describe-the-music prompt. */}
-              {showMusicFields ? (
-                <label className="settings-field settings-field-lyrics">
-                  Lyrics
-                  <textarea
-                    aria-label="Lyrics"
-                    onChange={(event) => setLyrics(event.target.value)}
-                    placeholder="Optional — [verse] / [chorus] tags supported; leave empty for instrumental"
-                    value={lyrics}
-                  />
-                </label>
-              ) : null}
-
-              {/* Music extend/edit SOURCE band (sc-13410) — revealed ONLY when the selected model
-                  advertises audio.editModes (Conditioning::AudioEdit). Mirrors VideoStudio's
-                  `studio-source-band`: pick a library audio track + an edit mode the model advertises,
-                  then (for a bounded inpaint/repaint) a region window. Extend reuses the Length field as
-                  the new total length. Empty source ⇒ plain text-to-music (the band is optional). */}
-              {showEditModes ? (
-                <div className="studio-source-band">
-                  <AssetPickerField
-                    assets={audioAssets}
-                    buttonLabel="Select audio"
-                    changeLabel="Change"
-                    emptyLabel="No source track selected"
-                    label="Source track (extend / edit)"
-                    onChange={setSourceAudioAssetId}
-                    showCategories={false}
-                    value={sourceAudioAssetId}
-                  />
-                  <div className="settings-bar-styles">
-                    <span className="settings-bar-label">Edit</span>
-                    <div className="preset-chips">
-                      {editModes.map((value) => (
-                        <button
-                          className={editMode === value ? "preset-chip active" : "preset-chip"}
-                          key={value}
-                          onClick={() => setEditMode(value)}
-                          type="button"
-                        >
-                          {value}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  {/* Inpaint / repaint bound a region (seconds) inside the source clip. Extend needs no
-                      region here — its new total length is the Length field, and the worker begins the
-                      appended tail at the source clip's own length. */}
-                  {sourceAudioAssetId && (editMode === "inpaint" || editMode === "repaint") ? (
-                    <div className="settings-bar-row">
-                      <label className="settings-field settings-field-region-start">
-                        Region start (s)
-                        <input
-                          min="0"
-                          onChange={(event) => setEditRegionStartSecs(event.target.value)}
-                          step="0.1"
-                          type="number"
-                          value={editRegionStartSecs}
-                        />
-                      </label>
-                      <label className="settings-field settings-field-region-end">
-                        Region end (s)
-                        <input
-                          min="0"
-                          onChange={(event) => setEditRegionEndSecs(event.target.value)}
-                          placeholder="To clip end"
-                          step="0.1"
-                          type="number"
-                          value={editRegionEndSecs}
-                        />
-                      </label>
-                    </div>
-                  ) : null}
-                  {/* Edit strength (0..=1) — an optional weight on the whole AudioEdit, part of the
-                      Conditioning::AudioEdit contract. Cleared ⇒ the model default; a model that ignores
-                      it (the ACE-Step turbo) simply falls back to its own behaviour. */}
-                  {sourceAudioAssetId ? (
-                    <label className="settings-field settings-field-edit-strength">
-                      Edit strength
-                      <input
-                        max="1"
-                        min="0"
-                        onChange={(event) => setEditStrength(event.target.value)}
-                        placeholder="Model default"
-                        step="0.05"
-                        type="number"
-                        value={editStrength}
-                      />
-                    </label>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
+            <AudioGenerationSettings
+            setModel={setModel}
+            selectedModel={selectedModel}
+            pickerModels={pickerModels}
+            showVoice={showVoice}
+            setVoice={setVoice}
+            voice={voice}
+            voiceGroups={voiceGroups}
+            showLanguage={showLanguage}
+            setLanguage={setLanguage}
+            language={language}
+            languages={languages}
+            showDuration={showDuration}
+            maxDurationSecs={maxDurationSecs}
+            setTargetDurationSecs={setTargetDurationSecs}
+            targetDurationSecs={targetDurationSecs}
+            showMusicFields={showMusicFields}
+            setBpm={setBpm}
+            bpm={bpm}
+            setMusicalKey={setMusicalKey}
+            musicalKey={musicalKey}
+            songModel={songModel}
+            setSegments={setSegments}
+            segments={segments}
+            songTierItems={songTierItems}
+            handleTierChange={handleTierChange}
+            tierSwitching={tierSwitching}
+            quantTier={quantTier}
+            setGenreTags={setGenreTags}
+            genreTags={genreTags}
+            setLyrics={setLyrics}
+            lyrics={lyrics}
+            showEditModes={showEditModes}
+            audioAssets={audioAssets}
+            setSourceAudioAssetId={setSourceAudioAssetId}
+            sourceAudioAssetId={sourceAudioAssetId}
+            editModes={editModes}
+            editMode={editMode}
+            setEditMode={setEditMode}
+            setEditRegionStartSecs={setEditRegionStartSecs}
+            editRegionStartSecs={editRegionStartSecs}
+            setEditRegionEndSecs={setEditRegionEndSecs}
+            editRegionEndSecs={editRegionEndSecs}
+            setEditStrength={setEditStrength}
+            editStrength={editStrength}
+          />
 
             {/* Voice Clone (sc-13411 C4 → sc-13412): reference-voice band + (conversion-only) match
                 strength. Pick a library audio track whose voice is cloned; the prompt above is the script
@@ -1433,112 +699,27 @@ export function AudioStudio() {
             ) : null}
 
             {showVoiceClone ? (
-              <div className="studio-source-band">
-                <AssetPickerField
-                  assets={audioAssets}
-                  buttonLabel="Select reference voice"
-                  changeLabel="Change"
-                  emptyLabel="No reference voice selected"
-                  label="Reference voice"
-                  onChange={setReferenceAudioAssetId}
-                  showCategories={false}
-                  value={referenceAudioAssetId}
-                />
-                {savedVoices.length > 0 ? (
-                  <div className="saved-voices" role="group" aria-label="Saved voices">
-                    <span className="field-label">Saved voices</span>
-                    <div className="preset-chips saved-voices-chips">
-                      {savedVoices.map((voice) => (
-                        <span
-                          key={voice.id}
-                          className={`preset-chip saved-voice-chip${
-                            selectedSavedVoiceId === voice.id ? " is-selected" : ""
-                          }`}
-                        >
-                          <button
-                            type="button"
-                            className="saved-voice-select"
-                            aria-pressed={selectedSavedVoiceId === voice.id}
-                            onClick={() => handleSelectSavedVoice(voice)}
-                          >
-                            {voice.name}
-                          </button>
-                          <button
-                            type="button"
-                            className="saved-voice-delete"
-                            aria-label={`Delete saved voice ${voice.name}`}
-                            disabled={Boolean(deletingVoiceId)}
-                            title="Delete saved voice"
-                            onClick={() => handleDeleteSavedVoice(voice)}
-                          >
-                            <Icon.Trash />
-                          </button>
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                ) : null}
-                {createSavedVoice ? (
-                  <div className="register-voice">
-                    <label className="settings-field">
-                      Save this reference as a voice
-                      <div className="register-voice-row">
-                        <input
-                          onChange={(event) => setSavedVoiceName(event.target.value)}
-                          placeholder="Voice name (e.g. Narrator)"
-                          type="text"
-                          value={savedVoiceName}
-                        />
-                        <button
-                          className="secondary-action register-voice-save"
-                          disabled={!canRegisterVoice}
-                          onClick={handleRegisterVoice}
-                          type="button"
-                        >
-                          <Icon.Save />
-                          {registeringVoice ? "Saving…" : "Save voice"}
-                        </button>
-                      </div>
-                      <span className="field-hint" role="note">
-                        Registers the selected reference clip as a reusable named voice. We compute its
-                        speaker fingerprint and warn if it closely matches a voice you already saved.
-                      </span>
-                    </label>
-                    {savedVoiceNotice ? (
-                      <p
-                        className={
-                          savedVoiceNotice.tone === "warning" ? "inline-warning" : "field-hint"
-                        }
-                        role="status"
-                      >
-                        {savedVoiceNotice.message}
-                      </p>
-                    ) : null}
-                  </div>
-                ) : null}
-                {showMatchStrength ? (
-                  <label className="settings-field settings-field-match-strength">
-                    Match strength
-                    <input
-                      max="1"
-                      min="0"
-                      onChange={(event) => setMatchStrength(event.target.value)}
-                      placeholder="0.3 (default)"
-                      step="0.05"
-                      type="number"
-                      value={matchStrength}
-                    />
-                    <span className="field-hint" role="note">
-                      OpenVoice tone-color sampling temperature (τ). Cleared → model default (0.3).
-                    </span>
-                  </label>
-                ) : null}
-                <p className="helper-copy">
-                  {selectedIsNativeClone
-                    ? "Your script is rendered directly in the reference clip’s voice in a single step. Record or import a reference clip into the library to use it here."
-                    : "The base voice speaks your script, then OpenVoice V2 converts it to match the reference clip’s voice. Record or import a reference clip into the library to use it here."}
-                </p>
-              </div>
+              <AudioVoiceReferencePanel
+            audioAssets={audioAssets}
+            setReferenceAudioAssetId={setReferenceAudioAssetId}
+            referenceAudioAssetId={referenceAudioAssetId}
+            savedVoices={savedVoices}
+            selectedSavedVoiceId={selectedSavedVoiceId}
+            handleSelectSavedVoice={handleSelectSavedVoice}
+            deletingVoiceId={deletingVoiceId}
+            handleDeleteSavedVoice={handleDeleteSavedVoice}
+            createSavedVoice={createSavedVoice}
+            setSavedVoiceName={setSavedVoiceName}
+            savedVoiceName={savedVoiceName}
+            canRegisterVoice={canRegisterVoice}
+            handleRegisterVoice={handleRegisterVoice}
+            registeringVoice={registeringVoice}
+            savedVoiceNotice={savedVoiceNotice}
+            showMatchStrength={showMatchStrength}
+            setMatchStrength={setMatchStrength}
+            matchStrength={matchStrength}
+            selectedIsNativeClone={selectedIsNativeClone}
+          />
             ) : null}
 
             {/* The Advanced disclosure doubles as the settings bar's footer row (screen 2a): the
@@ -1558,142 +739,32 @@ export function AudioStudio() {
               onToggle={() => setAdvancedOpen((value) => !value)}
               open={advancedOpen}
             >
-              <div className="advanced-panel">
-                <label>
-                  Seed
-                  <input
-                    onChange={(event) => setSeed(event.target.value)}
-                    placeholder="Random"
-                    type="number"
-                    value={seed}
-                  />
-                </label>
-                {/* Diffusion sampling knobs. Steps (the solver step count) rides the top-level request
-                    both the Sound FX (MOSS) and Music (ACE-Step) samplers read. Guidance (the CFG scale)
-                    surfaces only when the model advertises guidance support — MOSS does; the
-                    guidance-distilled ACE-Step turbo does NOT, so it stays hidden rather than sent (the
-                    gen-core floor would reject it). Cleared ⇒ the model's own default; the floor
-                    range-checks any value sent, so no hardcoded ceiling is baked into the input. */}
-                {showGuidance ? (
-                  <label>
-                    Guidance (CFG)
-                    <input
-                      min="1"
-                      onChange={(event) => setGuidance(event.target.value)}
-                      placeholder="Model default"
-                      step="0.5"
-                      type="number"
-                      value={guidance}
-                    />
-                  </label>
-                ) : null}
-                {showSteps ? (
-                  <label>
-                    Steps
-                    <input
-                      min="1"
-                      onChange={(event) => setSteps(event.target.value)}
-                      placeholder="Model default"
-                      step="1"
-                      type="number"
-                      value={steps}
-                    />
-                  </label>
-                ) : null}
-                {/* YuE song knobs (sc-19385, R5). Defaults are upstream's published values: guidance on
-                    (1.5 first section / 1.2 after), 3000 tokens per section, repetition penalty 1.1.
-                    Cleared ⇒ omitted ⇒ the model default. A guidance scale must be > 1 (the model
-                    reads ≤ 1 as "off"), so the switch — not a 0 scale — turns guidance off. */}
-                {songModel ? (
-                  <>
-                    <label className="checkline">
-                      <input
-                        checked={Boolean(guidanceEnabled)}
-                        onChange={(event) => setGuidanceEnabled(event.target.checked)}
-                        type="checkbox"
-                      />
-                      Guidance (CFG)
-                    </label>
-                    <label>
-                      Guidance scale
-                      <input
-                        disabled={!guidanceEnabled}
-                        min="1.05"
-                        onChange={(event) => setSongGuidance(event.target.value)}
-                        placeholder="1.5 → 1.2 (default)"
-                        step="0.05"
-                        type="number"
-                        value={songGuidance}
-                      />
-                    </label>
-                    <label>
-                      Max tokens per section
-                      <input
-                        max="16382"
-                        min="1"
-                        onChange={(event) => setMaxNewTokensPerSegment(event.target.value)}
-                        placeholder="3000 (default)"
-                        step="100"
-                        type="number"
-                        value={maxNewTokensPerSegment}
-                      />
-                    </label>
-                    <label>
-                      Repetition penalty
-                      <input
-                        max="10"
-                        min="0.05"
-                        onChange={(event) => setRepetitionPenalty(event.target.value)}
-                        placeholder="1.1 (default)"
-                        step="0.05"
-                        type="number"
-                        value={repetitionPenalty}
-                      />
-                    </label>
-                    {showOutputLimiter ? (
-                      <label>
-                        Output limiter
-                        <select onChange={(event) => setOutputLimiter(event.target.value)} value={outputLimiter}>
-                          <option value="">Model default (clamp)</option>
-                          <option value="clamp">Clamp — hard-clip peaks</option>
-                          <option value="rescale">Rescale — normalize the whole stem</option>
-                        </select>
-                      </label>
-                    ) : null}
-                  </>
-                ) : null}
-                {/* Negative prompt — the traits to steer away from. Capability-gated: surfaced only when
-                    the model advertises negative-prompt support (audio.supportsNegativePrompt). The
-                    guidance-distilled ACE-Step turbo advertises none, so it stays hidden; a music model
-                    that supports it renders this and rides it through as GenerationRequest.negative_prompt. */}
-                {showNegative ? (
-                  <label>
-                    Negative prompt
-                    <textarea
-                      aria-label="Negative prompt"
-                      onChange={(event) => setNegativePrompt(event.target.value)}
-                      placeholder="Traits to avoid"
-                      value={negativePrompt}
-                    />
-                  </label>
-                ) : null}
-                {/* Sample rate the model emits at (audio.sampleRates). Capability-driven, never
-                    hardcoded — and read-only: the output rate is a fixed property of the model's
-                    vocoder (Kokoro is 24 kHz mono), not a request knob the audio route accepts, so it
-                    is surfaced for transparency rather than sent in the payload. */}
-                {sampleRates.length ? (
-                  <label>
-                    Sample rate
-                    <select disabled value={String(sampleRates[0])}>
-                      {sampleRates.map((rate) => (
-                        <option key={rate} value={String(rate)}>
-                          {rate} Hz
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ) : null}
-              </div>
+              <AudioAdvancedPanel
+            setSeed={setSeed}
+            seed={seed}
+            showGuidance={showGuidance}
+            setGuidance={setGuidance}
+            guidance={guidance}
+            showSteps={showSteps}
+            setSteps={setSteps}
+            steps={steps}
+            songModel={songModel}
+            guidanceEnabled={guidanceEnabled}
+            setGuidanceEnabled={setGuidanceEnabled}
+            setSongGuidance={setSongGuidance}
+            songGuidance={songGuidance}
+            setMaxNewTokensPerSegment={setMaxNewTokensPerSegment}
+            maxNewTokensPerSegment={maxNewTokensPerSegment}
+            setRepetitionPenalty={setRepetitionPenalty}
+            repetitionPenalty={repetitionPenalty}
+            showOutputLimiter={showOutputLimiter}
+            setOutputLimiter={setOutputLimiter}
+            outputLimiter={outputLimiter}
+            showNegative={showNegative}
+            setNegativePrompt={setNegativePrompt}
+            negativePrompt={negativePrompt}
+            sampleRates={sampleRates}
+          />
             </AdvancedSection>
           </WorkPanel>
 
@@ -1701,39 +772,21 @@ export function AudioStudio() {
               in-flight strip and the docked play deck. The full WorkerProgressCard is no longer
               this surface's vocabulary; it stays in the Queue screen (and here only for a FAILED
               run, which needs its error + Retry actions). */}
-          <div className="studio-results">
-            <AudioResults
-              assets={assets}
-              jobs={audioLocalJobs}
-              models={audioModels}
-              recentAssets={recentAudioAssets}
-              onCancelJob={onCancelJob}
-              onDiscard={(asset) => deleteAsset?.(asset)}
-              onFavorite={(asset) =>
-                updateAssetStatus?.(asset, { favorite: !asset.status?.favorite })
-              }
-              onOpenQueue={onOpenQueue}
-              onRunAgain={runAgain}
-              onSeeAll={() => setActiveView("Library")}
-              onSendToVideo={(asset) => sendAssetToVideo?.(asset)}
-              player={player}
-              streamingBadge={
-                /* Streaming reveal (sc-13675): shown ONLY when the selected model advertises
-                   audio.supportsStreaming — the clip renders incrementally, so the in-flight strip
-                   advances THROUGH the stream as chunks arrive and the first audio is produced
-                   before the full clip finishes. Capability-driven, never a hardcoded id. */
-                showStreaming ? (
-                  <span
-                    className="streaming-badge"
-                    data-testid="audio-streaming-badge"
-                    title="This model streams audio incrementally — the first audio arrives before the full clip finishes rendering."
-                  >
-                    Streams incrementally
-                  </span>
-                ) : null
-              }
-            />
-          </div>
+          <AudioReviewPanel
+            assets={assets}
+            audioLocalJobs={audioLocalJobs}
+            audioModels={audioModels}
+            recentAudioAssets={recentAudioAssets}
+            onCancelJob={onCancelJob}
+            deleteAsset={deleteAsset}
+            updateAssetStatus={updateAssetStatus}
+            onOpenQueue={onOpenQueue}
+            runAgain={runAgain}
+            setActiveView={setActiveView}
+            sendAssetToVideo={sendAssetToVideo}
+            player={player}
+            showStreaming={showStreaming}
+          />
         </form>
         {surface === "yue2" ? (
           <Yue2SongLab header={<div className="prompt-hero-top">{modeTabs}</div>} />
