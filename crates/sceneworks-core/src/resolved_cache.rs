@@ -152,9 +152,9 @@ impl ResolvedCachePolicy {
         let defaults = Self::default();
         let enabled = match value(RESOLVED_CACHE_ENABLED_ENV) {
             None => defaults.enabled,
-            Some(raw) => parse_bool(&raw).ok_or_else(|| {
+            Some(raw) => crate::env_util::parse_bool(&raw).ok_or_else(|| {
                 ResolvedCacheError::new(format!(
-                    "{RESOLVED_CACHE_ENABLED_ENV} must be true/false or 1/0"
+                    "{RESOLVED_CACHE_ENABLED_ENV} must be 1/true/yes/on or 0/false/no/off"
                 ))
             })?,
         };
@@ -175,14 +175,6 @@ impl ResolvedCachePolicy {
         };
         policy.validate()?;
         Ok(policy)
-    }
-}
-
-fn parse_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" => Some(true),
-        "0" | "false" => Some(false),
-        _ => None,
     }
 }
 

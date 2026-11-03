@@ -156,11 +156,20 @@ impl Settings {
         }
     }
 
+    /// Compatibility accessor for existing fixture callers; invalid configuration never defaults.
     pub fn from_env() -> Self {
+        Self::try_from_env().expect("invalid worker environment configuration")
+    }
+
+    /// Read worker configuration, refusing an invalid numeric override at startup.
+    pub fn try_from_env() -> WorkerResult<Self> {
+        // The download watchdog reads its value when creating a transfer; validate it
+        // here as well so an invalid operator setting fails before work begins.
+        env_u64_any(&["SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS"], 0)?;
         let defaults = sceneworks_core::app_paths::AppPaths::platform_default();
         let config_dir = env_path_or("SCENEWORKS_CONFIG_DIR", &defaults.config_dir);
         let credentials_dir = sceneworks_core::credentials::credentials_dir(&config_dir);
-        Self {
+        Ok(Self {
             api_url: env_string("SCENEWORKS_API_URL", DEFAULT_API_URL),
             access_token: std::env::var("SCENEWORKS_ACCESS_TOKEN")
                 .ok()
@@ -172,23 +181,22 @@ impl Settings {
             config_dir: config_dir.clone(),
             worker_id: env_string("SCENEWORKS_WORKER_ID", "rust-utility-worker"),
             gpu_id: env_string("SCENEWORKS_GPU_ID", "cpu"),
-            is_child_worker: std::env::var("SCENEWORKS_WORKER_CHILD")
-                .is_ok_and(|value| value.trim() == "1"),
+            is_child_worker: sceneworks_core::env_util::env_flag("SCENEWORKS_WORKER_CHILD", false),
             poll_seconds: env_u64_any(
                 &["SCENEWORKS_POLL_SECONDS", "SCENEWORKS_WORKER_POLL_SECONDS"],
                 2,
-            ),
+            )?,
             heartbeat_seconds: env_u64_any(
                 &[
                     "SCENEWORKS_HEARTBEAT_SECONDS",
                     "SCENEWORKS_WORKER_HEARTBEAT_SECONDS",
                 ],
                 10,
-            ),
+            )?,
             shutdown_timeout_seconds: env_u64_any(
                 &["SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS"],
                 10,
-            ),
+            )?,
             huggingface_base_url: env_string(
                 "SCENEWORKS_HUGGINGFACE_BASE_URL",
                 DEFAULT_HUGGINGFACE_BASE_URL,
@@ -201,14 +209,13 @@ impl Settings {
             max_lora_url_bytes: env_u64_any(
                 &["SCENEWORKS_MAX_LORA_URL_BYTES"],
                 DEFAULT_MAX_LORA_URL_BYTES,
-            ),
+            )?,
             max_model_url_bytes: env_u64_any(
                 &["SCENEWORKS_MAX_MODEL_URL_BYTES"],
                 DEFAULT_MAX_MODEL_URL_BYTES,
-            ),
-            allow_private_lora_urls: std::env::var("SCENEWORKS_ALLOW_PRIVATE_LORA_URLS")
-                .is_ok_and(|value| value.trim() == "1"),
-            utility_workers: env_u64_any(&["SCENEWORKS_UTILITY_WORKERS"], 4).max(1) as usize,
+            )?,
+            allow_private_lora_urls: sceneworks_core::env_util::env_flag("SCENEWORKS_ALLOW_PRIVATE_LORA_URLS", false),
+            utility_workers: usize::try_from(env_u64_any(&["SCENEWORKS_UTILITY_WORKERS"], 4)?.max(1)).map_err(|_| WorkerError::InvalidPayload("SCENEWORKS_UTILITY_WORKERS exceeds this platform’s supported range".to_owned()))?,
             backend_mlx_enabled: env_bool("SCENEWORKS_BACKEND_MLX_ENABLED", true),
             // Phase-7 cutover (sc-5502): a candle build defaults the backend ON (the providers are at
             // off-Mac parity); a non-candle build defaults it off. The env var overrides either way.
@@ -216,9 +223,9 @@ impl Settings {
                 "SCENEWORKS_BACKEND_CANDLE_ENABLED",
                 cfg!(feature = "backend-candle"),
             ),
-            gpu_memory_limit_bytes: env_u64_any(&["SCENEWORKS_GPU_MEMORY_LIMIT_BYTES"], 0),
+            gpu_memory_limit_bytes: env_u64_any(&["SCENEWORKS_GPU_MEMORY_LIMIT_BYTES"], 0)?,
             external_model_roots: sceneworks_core::external_roots::external_model_roots_from_env(),
-        }
+        })
     }
 }
 
@@ -226,24 +233,68 @@ pub(crate) use sceneworks_core::env_util::env_trimmed_string as env_string;
 
 pub(crate) use sceneworks_core::env_util::env_path_or;
 
-pub(crate) fn env_u64_any(keys: &[&str], default: u64) -> u64 {
-    keys.iter()
-        .find_map(|key| std::env::var(key).ok().and_then(|value| value.parse().ok()))
-        .unwrap_or(default)
+pub(crate) fn env_u64_any(keys: &[&str], default: u64) -> WorkerResult<u64> {
+    sceneworks_core::env_util::env_u64_any(keys, default, false)
+        .map_err(WorkerError::InvalidPayload)
 }
 
-/// Parse a boolean env toggle: `1`/`true`/`yes`/`on` → true, `0`/`false`/`no`/`off` → false,
-/// empty or unrecognized → `default` (and an unset var → `default`). Used by the per-backend
-/// capability toggles (sc-3723).
-pub(crate) fn env_bool(key: &str, default: bool) -> bool {
-    match std::env::var(key) {
-        Ok(value) => match value.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            "0" | "false" | "no" | "off" => false,
-            "" => default,
-            _ => default,
-        },
-        Err(_) => default,
+pub(crate) use sceneworks_core::env_util::env_flag as env_bool;
+
+#[cfg(test)]
+mod numeric_env_tests {
+    use super::*;
+
+    #[test]
+    fn numeric_env_rejects_invalid_primary_without_falling_through_to_alias() {
+        let parse = |primary: Option<&str>, alias: Option<&str>| {
+            sceneworks_core::env_util::env_u64_any_with(&["PRIMARY", "ALIAS"], 42, false, |key| {
+                match if key == "PRIMARY" { primary } else { alias } {
+                    Some(value) => Ok(value.to_owned()),
+                    None => Err(std::env::VarError::NotPresent),
+                }
+            })
+        };
+        assert_eq!(parse(None, None).unwrap(), 42);
+        assert_eq!(parse(None, Some("12")).unwrap(), 12);
+        assert_eq!(parse(Some("0"), Some("12")).unwrap(), 0);
+        for bad in ["abc", "256G", "", "-1", "18446744073709551616"] {
+            let error = parse(Some(bad), Some("12")).unwrap_err().to_string();
+            assert!(error.contains("PRIMARY"), "{bad:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn settings_reject_invalid_limits_instead_of_using_defaults() {
+        use sceneworks_core::test_env::EnvVars;
+        let keys = [
+            "SCENEWORKS_POLL_SECONDS",
+            "SCENEWORKS_WORKER_POLL_SECONDS",
+            "SCENEWORKS_HEARTBEAT_SECONDS",
+            "SCENEWORKS_WORKER_HEARTBEAT_SECONDS",
+            "SCENEWORKS_WORKER_SHUTDOWN_TIMEOUT_SECONDS",
+            "SCENEWORKS_MAX_LORA_URL_BYTES",
+            "SCENEWORKS_MAX_MODEL_URL_BYTES",
+            "SCENEWORKS_UTILITY_WORKERS",
+            "SCENEWORKS_GPU_MEMORY_LIMIT_BYTES",
+            "SCENEWORKS_DOWNLOAD_STALL_TIMEOUT_SECONDS",
+        ];
+        // `set` removes empty values; use one lock for the complete environment fixture.
+        let scratch = tempfile::tempdir().unwrap();
+        let config = scratch.path().to_str().unwrap();
+        for invalid in keys {
+            let mut entries: Vec<_> = keys
+                .iter()
+                .map(|key| (*key, if *key == invalid { "256G" } else { "" }))
+                .collect();
+            entries.push(("SCENEWORKS_CONFIG_DIR", config));
+            entries.push(("SCENEWORKS_CREDENTIALS", ""));
+            let _env = EnvVars::set(&entries);
+            let error = match Settings::try_from_env() {
+                Ok(_) => panic!("invalid setting accepted"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains(invalid), "{error}");
+        }
     }
 }
 

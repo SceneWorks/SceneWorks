@@ -1151,7 +1151,7 @@ async fn wait_for_process_shutdown_source() {
         // supervisor process is NOT a child (its stdin is the real console, not a
         // supervisor-held pipe), so it keeps Ctrl-C only; gate the stdin path to child
         // workers via the `SCENEWORKS_WORKER_CHILD` marker the supervisor sets.
-        if std::env::var_os("SCENEWORKS_WORKER_CHILD").is_some() {
+        if sceneworks_core::env_util::env_flag("SCENEWORKS_WORKER_CHILD", false) {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {}
                 _ = wait_for_parent_stdin_close() => {}
@@ -1300,7 +1300,7 @@ pub async fn run() -> WorkerResult<()> {
             "rust_worker defaulting HF_HOME"
         );
     }
-    let settings = Settings::from_env();
+    let settings = Settings::try_from_env()?;
     // Refuse the preparation scope before an auto supervisor can enumerate devices.
     validate_utility_worker_selection(
         &settings,
