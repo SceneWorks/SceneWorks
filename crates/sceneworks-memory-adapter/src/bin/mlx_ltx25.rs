@@ -127,15 +127,7 @@ struct SourceCapturePlan {
     dev_adapter_inventory: Option<ArtifactInventory>,
 }
 
-fn target_string<'a>(
-    target: &'a serde_json::Map<String, Value>,
-    name: &str,
-) -> Result<&'a str, String> {
-    target
-        .get(name)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("planned.target.{name} must be a string"))
-}
+use protocol::target_str as target_string;
 
 fn validate_geometry(width: u32, height: u32, frames: u32) -> Result<Geometry, String> {
     const BASE: &[(u32, u32)] = &[(768, 512), (512, 768), (640, 640), (1280, 704), (704, 1280)];
@@ -169,10 +161,7 @@ fn validate_geometry(width: u32, height: u32, frames: u32) -> Result<Geometry, S
 
 fn validate_target(request: &Value) -> Result<Target, String> {
     let planned = protocol::planned(request)?;
-    let target = planned
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let target = protocol::plan_object(planned, "/target")?;
     for name in ["provider", "modelId"] {
         let actual = target_string(target, name)?;
         if actual != LTX25_PROVIDER {
@@ -236,27 +225,21 @@ fn validate_target(request: &Value) -> Result<Target, String> {
         geometry.frames,
         geometry.fps,
     );
-    let fixture = planned
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::plan_str(planned, "/fixture")?;
     if fixture != expected_fixture {
         return Err(format!(
             "{LABEL} fixture must bind tier, transformerVariant, decoder, geometry, cadence, and seed exactly: expected {expected_fixture:?}, got {fixture:?}"
         ));
     }
-    let fingerprint = planned
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let fingerprint = protocol::plan_str(planned, "/calibrationFingerprint")?;
     if fingerprint != FINGERPRINT {
         return Err(format!(
             "{LABEL} requires calibration fingerprint {FINGERPRINT:?}, got {fingerprint:?}"
         ));
     }
-    if planned.get("expectedResult").and_then(Value::as_str) != Some("passed")
+    if protocol::plan_optional_str(planned, "/expectedResult") != Some("passed")
         || planned.get("negative").and_then(Value::as_bool) != Some(false)
-        || planned.get("modelLoadPolicy").and_then(Value::as_str) != Some("fresh_per_case")
+        || protocol::plan_optional_str(planned, "/modelLoadPolicy") != Some("fresh_per_case")
         || !planned.get("modelLoadGroup").is_some_and(Value::is_null)
     {
         return Err(format!(
@@ -608,11 +591,7 @@ fn prepare_source_capture(request: &Value, target: Target) -> Result<SourceCaptu
             "SCENEWORKS_MEMORY_SOURCE_PATH_PREFIX escaped SCENEWORKS_MEMORY_CAPTURE_DIR".to_owned(),
         );
     }
-    let logical_case_id = protocol::planned(request)?
-        .get("logicalCaseId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.logicalCaseId must be a string".to_owned())?
-        .to_owned();
+    let logical_case_id = protocol::planned_str(request, "/logicalCaseId")?.to_owned();
     if !valid_logical_case_id(&logical_case_id) {
         return Err(
             "planned.logicalCaseId must be implan- plus 20 lowercase hex characters".to_owned(),

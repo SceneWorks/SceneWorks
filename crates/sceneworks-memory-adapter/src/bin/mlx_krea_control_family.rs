@@ -175,10 +175,7 @@ pub(super) fn run_krea_control(request: &Value) -> Result<Value, String> {
         .ok_or_else(|| "pinned Krea control provider has no calibration identity".to_owned())?;
     // Fail closed when the plan and the pinned provider disagree, rather than measuring against
     // one identity and stamping the receipt with the other.
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

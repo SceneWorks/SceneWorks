@@ -7,14 +7,8 @@ use super::*;
 /// their own admission contexts, and none of them is this arm's plain text-to-image measurement.
 pub(super) fn turnkey_arm(request: &Value) -> Result<TurnkeyArm, String> {
     let planned = protocol::planned(request)?;
-    let provider = planned
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let mode = planned
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let provider = protocol::plan_str(planned, "/target/provider")?;
+    let mode = protocol::plan_str(planned, "/target/mode")?;
     match (provider, mode) {
         (KOLORS_PROVIDER, "text_to_image") => Ok(KOLORS_ARM),
         (IDEOGRAM_PROVIDER, "text_to_image") => Ok(IDEOGRAM_ARM),
@@ -129,10 +123,7 @@ pub(super) fn validate_turnkey_fixture(
     arm: TurnkeyArm,
     tier: &str,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
     let remainder = fixture
@@ -228,8 +219,12 @@ pub(super) fn turnkey_calibration_fingerprint(arm: TurnkeyArm, tier: &str) -> Op
 pub(super) fn is_turnkey_weights_free_fingerprint(fingerprint: &str) -> bool {
     fingerprint
         .starts_with(runtime_macos::providers::lens::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
-        || fingerprint.starts_with("kolors-mlx-registry-behavior-v1")
-        || fingerprint.starts_with("ideogram4-mlx-registry-behavior-v1")
+        || fingerprint.starts_with(
+            runtime_macos::providers::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
+        )
+        || fingerprint.starts_with(
+            runtime_macos::providers::ideogram::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT,
+        )
         || fingerprint
             == runtime_macos::providers::lens::memory_strategy::LEGACY_TEXT_ENCODER_FINGERPRINT
 }
@@ -305,11 +300,7 @@ pub(super) fn run_turnkey_still(request: &Value) -> Result<Value, String> {
     // checked against the weights-free table BEFORE the load, so a row still carrying a
     // conformance string (or the legacy dense Lens-Turbo key) fails in milliseconds rather than
     // after a multi-gigabyte load.
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     let expected_fingerprint = turnkey_calibration_fingerprint(arm, tier).ok_or_else(|| {
         format!(
             "no turnkey member {} at tier {tier}: the turnkey family ships bf16, q4 and q8 only",

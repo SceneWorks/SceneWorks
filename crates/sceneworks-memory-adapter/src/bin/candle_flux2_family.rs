@@ -9,10 +9,7 @@ pub(super) fn flux2_arm(request: &Value) -> Result<Option<Flux2Arm>, String> {
     if !FLUX2_ARMS.iter().any(|arm| arm.provider == provider) {
         return Ok(None);
     }
-    let model_id = protocol::planned(request)?
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::planned_model_id(request)?;
     FLUX2_ARMS
         .into_iter()
         .find(|arm| arm.provider == provider && arm.model_id == model_id)

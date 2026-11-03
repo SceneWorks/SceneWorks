@@ -1,18 +1,7 @@
 //! CANDLE instantid capture owner.
 use super::*;
 
-/// The ORDERED artifact set one InstantID capture consumes, hashed exactly as the worker hashes it
-/// (`crates/sceneworks-worker/src/image_jobs/instantid.rs` `instantid_artifact_fingerprint`): the
-/// paths in role order, record-separated, hex sha256. The digest lands verbatim inside the
-/// provider's `overlay_key()`, the axis `validate_context` checks.
-pub(super) fn instantid_artifact_fingerprint(paths: &[&std::path::Path]) -> String {
-    let mut hasher = Sha256::new();
-    for path in paths {
-        hasher.update(path.to_string_lossy().as_bytes());
-        hasher.update(b"\x1e");
-    }
-    format!("{:x}", hasher.finalize())
-}
+pub(super) use protocol::instantid_artifact_fingerprint;
 
 pub(super) fn instantid_candle_identity(tier: &str) -> Result<InstantIdCandleIdentity, String> {
     if tier != INSTANTID_CANDLE_TIER {
@@ -102,10 +91,7 @@ pub(super) fn validate_instantid_candle_target(request: &Value) -> Result<(), St
             "{INSTANTID_STILL_CALIBRATION} does not implement provider {provider:?}"
         ));
     }
-    let model_id = protocol::planned(request)?
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::planned_model_id(request)?;
     if model_id != INSTANTID_MODEL_ID {
         return Err(format!(
             "{INSTANTID_STILL_CALIBRATION} requires modelId {INSTANTID_MODEL_ID:?}, got {model_id:?}"
@@ -121,50 +107,15 @@ pub(super) fn validate_instantid_candle_target(request: &Value) -> Result<(), St
     protocol::validate_exact_overlay_target(request, "identity", INSTANTID_EXECUTION_PATH)
 }
 
-/// A deterministic 512-d ArcFace-shaped embedding. `InstantId::generate_with` is the engine's own
-/// face-stack-independent path: the identity VALUE never changes what the denoise and decode phases
-/// materialize, so a fixed embedding makes the capture reproducible without a face photograph on
-/// the capture host. The face stack is still staged on `paths.face_dir`, and therefore priced and
-/// resident, exactly as in production.
-pub(super) fn instantid_reference_embedding() -> Vec<f32> {
-    (0..512)
-        .map(|index| ((index as f32) * 0.017_f32).sin() * 0.05)
-        .collect()
-}
+pub(super) use protocol::instantid_reference_embedding;
 
-pub(super) fn instantid_kps(side: u32) -> Vec<(f32, f32)> {
-    let side = side as f32;
-    [
-        (0.37_f32, 0.42_f32),
-        (0.63, 0.42),
-        (0.50, 0.55),
-        (0.40, 0.68),
-        (0.60, 0.68),
-    ]
-    .into_iter()
-    .map(|(x, y)| (x * side, y * side))
-    .collect()
-}
+pub(super) use protocol::instantid_kps;
 
 pub(super) fn planned_instantid_seed(request: &Value, width: u32) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("instantid-realvisxl-candle-{INSTANTID_CANDLE_TIER}-{width}-seed");
-    let remainder = fixture
-        .strip_prefix(&prefix)
-        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
-    let (seed, steps) = remainder
-        .split_once("-step")
-        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
-    if steps != "2" {
-        return Err(format!(
-            "planned.fixture {fixture:?} must use the two-step calibration request"
-        ));
-    }
-    seed.parse::<u64>()
-        .map_err(|error| format!("parse InstantID fixture seed {seed:?}: {error}"))
+    protocol::instantid_fixture_seed(
+        request,
+        &format!("instantid-realvisxl-candle-{INSTANTID_CANDLE_TIER}-{width}-seed"),
+    )
 }
 
 /// Real capture arm for the `candle:instantid` identity route on `instantid_realvisxl`.
@@ -175,10 +126,7 @@ pub(super) fn planned_instantid_seed(request: &Value, width: u32) -> Result<u64,
 /// StagedResidency and publishes a HARD-CODED `LoadShape::EagerMaterialization`.
 pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
     validate_instantid_candle_target(request)?;
-    let planned_shape = protocol::planned(request)?
-        .get("loadShape")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.loadShape must be a string".to_owned())?;
+    let planned_shape = protocol::planned_load_shape(request)?;
     if planned_shape != protocol::LOAD_SHAPE_EAGER {
         return Err(format!(
             "InstantID calibration must use the {} load shape the pinned provider publishes, not \
@@ -256,10 +204,7 @@ pub(super) fn run_instantid_candle(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

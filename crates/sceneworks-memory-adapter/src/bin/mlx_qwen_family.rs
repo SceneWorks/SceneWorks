@@ -36,10 +36,7 @@ pub(super) fn qwen_source_capture(
         .fold(capture_root, |directory, part| directory.join(part));
     std::fs::create_dir_all(&output_dir)
         .map_err(|error| format!("create physical MLX capture directory: {error}"))?;
-    let logical_case_id = protocol::planned(request)?
-        .get("logicalCaseId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.logicalCaseId must be a string".to_owned())?;
+    let logical_case_id = protocol::planned_str(request, "/logicalCaseId")?;
     let inventory_bytes = integer(
         &protocol::required_env("SCENEWORKS_MEMORY_MODEL_BYTES")?,
         "SCENEWORKS_MEMORY_MODEL_BYTES",
@@ -84,21 +81,14 @@ pub(super) fn qwen_source_capture(
 }
 
 pub(super) fn planned_qwen_tier(request: &Value) -> Result<&str, String> {
-    match protocol::planned(request)?
-        .pointer("/target/tier")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.tier must be a string".to_owned())?
-    {
+    match protocol::planned_tier(request)? {
         tier @ ("bf16" | "q4" | "q8") => Ok(tier),
         tier => Err(format!("unsupported MLX numeric tier {tier:?}")),
     }
 }
 
 pub(super) fn planned_qwen_seed(request: &Value, tier: &str) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let prefix = format!("qwen-image-{tier}-seed");
     let remainder = fixture
         .strip_prefix(&prefix)
@@ -136,11 +126,7 @@ pub(super) fn qwen_load_spec(
 }
 
 pub(super) fn run_qwen_vae_probe(request: &Value) -> Result<Value, String> {
-    if protocol::planned(request)?
-        .get("backend")
-        .and_then(Value::as_str)
-        != Some("mlx")
-    {
+    if protocol::planned_optional_str(request, "/backend")? != Some("mlx") {
         return Err(
             "MLX adapter received a non-MLX planned case; run the harness with --backend mlx"
                 .to_owned(),
@@ -456,10 +442,7 @@ pub(super) fn run_qwen_provider(request: &Value) -> Result<Value, String> {
         .calibration
         .as_ref()
         .ok_or_else(|| "pinned Qwen provider has no calibration identity".to_owned())?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

@@ -4,6 +4,11 @@
 //! scenario has actually executed. A successful model call is not silently promoted into a complete
 //! calibration record.
 
+mod adapter_common;
+pub use adapter_common::*;
+mod protocol_fields;
+pub use protocol_fields::*;
+
 use serde_json::{json, Map, Value};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -1503,10 +1508,7 @@ pub fn optional_parameter(request: &Value, name: &str) -> Result<Option<u32>, St
 }
 
 pub fn planned_rung(request: &Value) -> Result<&str, String> {
-    planned(request)?
-        .pointer("/strategy/rung")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.strategy.rung must be a string".to_owned())
+    planned_str(request, "/strategy/rung")
 }
 
 pub fn reference_sweep(request: &Value, result: &str) -> Result<Value, String> {

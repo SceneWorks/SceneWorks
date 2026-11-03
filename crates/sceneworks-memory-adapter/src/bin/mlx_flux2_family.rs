@@ -59,14 +59,8 @@ pub(super) fn flux2_lifecycle_blockers(
 /// rather than misrouted into another member's contract.
 pub(super) fn flux2_arm(request: &Value) -> Result<Flux2Arm, String> {
     let planned = protocol::planned(request)?;
-    let provider = planned
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let model_id = planned
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let provider = protocol::plan_str(planned, "/target/provider")?;
+    let model_id = protocol::plan_str(planned, "/target/modelId")?;
     for arm in [FLUX2_DEV_ARM, FLUX2_KLEIN_ARM, FLUX2_KLEIN_KV_ARM] {
         if arm.provider == provider && arm.model_id == model_id {
             return Ok(arm);
@@ -123,10 +117,7 @@ pub(super) fn planned_flux2_seed(
     tier: &str,
     width: u32,
 ) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let prefix = format!("flux2-{}-mlx-{tier}-{width}-seed", arm.fixture_slug);
     let remainder = fixture
         .strip_prefix(&prefix)
@@ -356,10 +347,7 @@ pub(super) fn run_flux2(request: &Value) -> Result<Value, String> {
             arm.model_id, calibration.fingerprint
         ));
     }
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

@@ -1,51 +1,26 @@
 //! MLX instantid capture owner.
 use super::*;
 
-/// The ORDERED artifact set one InstantID capture consumes, hashed exactly as the worker hashes it
-/// (`crates/sceneworks-worker/src/image_jobs/instantid.rs` `instantid_artifact_entries` /
-/// `instantid_artifact_fingerprint`): the paths in role order, record-separated, hex sha256. The
-/// role tag is positional, so it is not part of the hashed stream. The digest lands verbatim inside
-/// the provider's `overlay_key()`, which is the axis `validate_context` checks — two different
-/// artifact sets can therefore never price each other.
-pub(super) fn instantid_artifact_fingerprint(paths: &[&Path]) -> String {
-    let mut hasher = Sha256::new();
-    for path in paths {
-        hasher.update(path.to_string_lossy().as_bytes());
-        hasher.update(b"\x1e");
-    }
-    format!("{:x}", hasher.finalize())
-}
+pub(super) use protocol::instantid_artifact_fingerprint;
 
 /// The plan's InstantID target: the bespoke `instantid` provider on the `instantid_realvisxl`
 /// catalog model, in the only mode the worker's route serves (`character_image`), under the
 /// `identity` overlay the provider's own `overlay_key()` names.
 pub(super) fn validate_instantid_target(request: &Value) -> Result<(), String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let provider = target
-        .get("provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
+    let provider = protocol::target_str(target, "provider")?;
     if provider != INSTANTID_PROVIDER {
         return Err(format!(
             "{INSTANTID_STILL_CALIBRATION} does not implement provider {provider:?}"
         ));
     }
-    let model_id = target
-        .get("modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::target_str(target, "modelId")?;
     if model_id != INSTANTID_MODEL_ID {
         return Err(format!(
             "{INSTANTID_STILL_CALIBRATION} requires modelId {INSTANTID_MODEL_ID:?}, got {model_id:?}"
         ));
     }
-    let mode = target
-        .get("mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let mode = protocol::target_str(target, "mode")?;
     if mode != "character_image" {
         return Err(format!(
             "{INSTANTID_STILL_CALIBRATION} requires character_image mode, got {mode:?}"
@@ -145,32 +120,9 @@ pub(super) fn instantid_context(
     }
 }
 
-/// A deterministic 512-d ArcFace-shaped embedding. `InstantId::generate_with` is the engine's own
-/// "face-stack-independent path": the identity VALUE never changes what the denoise and decode
-/// phases materialize, so a fixed embedding makes the capture reproducible without needing a real
-/// face photograph on the capture host. The face stack itself is still attached and resident (the
-/// worker attaches it too), so the composition the peaks describe is production's.
-pub(super) fn instantid_reference_embedding() -> Vec<f32> {
-    (0..512)
-        .map(|index| ((index as f32) * 0.017_f32).sin() * 0.05)
-        .collect()
-}
+pub(super) use protocol::instantid_reference_embedding;
 
-/// Five landmarks in the canonical `draw_kps` order (both eyes, nose, both mouth corners), scaled
-/// from the normalized square the worker's angle presets use to output-canvas pixels.
-pub(super) fn instantid_kps(side: u32) -> Vec<(f32, f32)> {
-    let side = side as f32;
-    [
-        (0.37_f32, 0.42_f32),
-        (0.63, 0.42),
-        (0.50, 0.55),
-        (0.40, 0.68),
-        (0.60, 0.68),
-    ]
-    .into_iter()
-    .map(|(x, y)| (x * side, y * side))
-    .collect()
-}
+pub(super) use protocol::instantid_kps;
 
 pub(super) fn instantid_request(
     width: u32,
@@ -198,24 +150,10 @@ pub(super) fn planned_instantid_seed(
     tier: &str,
     width: u32,
 ) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
-    let prefix = format!("instantid-realvisxl-mlx-{tier}-{width}-seed");
-    let remainder = fixture
-        .strip_prefix(&prefix)
-        .ok_or_else(|| format!("planned.fixture {fixture:?} must start with {prefix:?}"))?;
-    let (seed, steps) = remainder
-        .split_once("-step")
-        .ok_or_else(|| format!("planned.fixture {fixture:?} must end with -step<count>"))?;
-    if steps != "2" {
-        return Err(format!(
-            "planned.fixture {fixture:?} must use the two-step calibration request"
-        ));
-    }
-    seed.parse::<u64>()
-        .map_err(|error| format!("parse InstantID fixture seed {seed:?}: {error}"))
+    protocol::instantid_fixture_seed(
+        request,
+        &format!("instantid-realvisxl-mlx-{tier}-{width}-seed"),
+    )
 }
 
 /// Real capture arm for the `mlx:instantid` identity route on `instantid_realvisxl`.
@@ -304,10 +242,7 @@ pub(super) fn run_instantid(request: &Value) -> Result<Value, String> {
             calibration.fingerprint
         ));
     }
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

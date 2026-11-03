@@ -116,16 +116,8 @@ pub(super) fn bernini_rendered_frame_count(geometry: BerniniGeometry) -> Result<
 /// the MODEL ID check is not: one provider serves two catalog entries whose records are filed
 /// separately, and nothing else in this arm distinguishes them.
 pub(super) fn bernini_target(request: &Value) -> Result<(BerniniArm, BerniniGeometry), String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
-    let string = |field: &str| {
-        target
-            .get(field)
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("planned.target.{field} must be a string"))
-    };
+    let target = protocol::planned_object(request, "/target")?;
+    let string = |field: &str| protocol::target_str(target, field);
     let provider = string("provider")?;
     if provider != BERNINI_PROVIDER {
         return Err(format!(
@@ -193,10 +185,7 @@ pub(super) fn bernini_target(request: &Value) -> Result<(BerniniArm, BerniniGeom
 /// so a reference-carrying member added later cannot silently inherit a decision taken for the
 /// reference-free one.
 pub(super) fn bernini_reference_count(request: &Value) -> Result<u32, String> {
-    let target = protocol::planned(request)?
-        .get("target")
-        .and_then(Value::as_object)
-        .ok_or_else(|| "planned.target must be an object".to_owned())?;
+    let target = protocol::planned_object(request, "/target")?;
     for field in ["referenceCount", "reference_count"] {
         if let Some(value) = target.get(field) {
             return value
@@ -217,10 +206,7 @@ pub(super) fn planned_bernini_capture(
     tier: &str,
     geometry: BerniniGeometry,
 ) -> Result<(u32, u64), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let prefix = format!(
         "bernini-{}-mlx-{tier}-{}x{}-f{}-fps",
         arm.slug, geometry.width, geometry.height, geometry.frames
@@ -459,10 +445,7 @@ pub(super) fn run_bernini(request: &Value) -> Result<Value, String> {
     let expected_fingerprint = bernini_calibration_fingerprint(tier)?;
     // Fingerprint check 1 of 3: the PLAN against this arm's own expectation, before any environment
     // or weight work. A provider re-fingerprint must not silently reuse the epic's plan.
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
             "plan/adapter calibration mismatch: plan={planned_fingerprint}, MLX Bernini arm \

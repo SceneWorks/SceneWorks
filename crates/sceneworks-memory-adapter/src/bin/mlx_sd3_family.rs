@@ -26,14 +26,8 @@ pub(super) fn sd3_calibration_fingerprint(arm: Sd3Arm, tier: &str) -> String {
 /// not implement; measuring it as its nearest text-to-image neighbour would be a mislabelled record.
 pub(super) fn sd3_arm(request: &Value) -> Result<Sd3Arm, String> {
     let planned = protocol::planned(request)?;
-    let provider = planned
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
-    let mode = planned
-        .pointer("/target/mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.mode must be a string".to_owned())?;
+    let provider = protocol::plan_str(planned, "/target/provider")?;
+    let mode = protocol::plan_str(planned, "/target/mode")?;
     SD3_ARMS
         .into_iter()
         .find(|arm| arm.provider == provider && mode == "text_to_image")
@@ -135,10 +129,7 @@ pub(super) fn planned_sd3_seed(
     tier: &str,
     width: u32,
 ) -> Result<u64, String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
     let remainder = fixture
         .strip_prefix(&prefix)
@@ -277,10 +268,7 @@ pub(super) fn run_sd3(request: &Value) -> Result<Value, String> {
             arm.provider, calibration.fingerprint, artifact.tier, expected_fingerprint
         ));
     }
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     if planned_fingerprint != calibration.fingerprint {
         return Err(format!(
             "plan/provider calibration mismatch: plan={planned_fingerprint}, pinned provider={}",

@@ -1407,34 +1407,12 @@ const QWEN_EDIT_PROMPT: &str = "replace the background with a plain grey studio 
 /// explicitly: the engine rejects other guidance values rather than overriding them.
 const QWEN_EDIT_GUIDANCE: f32 = 4.0;
 
-/// Where the built-in Lightning distill snapshot lives, as the three
-/// `SCENEWORKS_QWEN_EDIT_LIGHTNING_LORA_*` values name it — lifted out of the environment so the
-/// attachment that makes the Lightning member Lightning is unit-testable.
-#[derive(Clone, Debug)]
-struct QwenEditLightningSource {
-    repository: String,
-    revision: String,
-    root: PathBuf,
-}
+#[cfg(test)]
+use protocol::QwenEditLightningSource;
 
-/// The three `SCENEWORKS_QWEN_IMAGE_EDIT_*` values naming the base snapshot one capture opens, plus
-/// the distill snapshot the Lightning member stacks — lifted out of the environment so both the tier
-/// binding and the adapter attachment are unit-testable.
-#[derive(Clone, Debug)]
-struct QwenEditArtifactSource {
-    repository: String,
-    revision: String,
-    root: PathBuf,
-    lightning: Option<QwenEditLightningSource>,
-}
+use protocol::QwenEditArtifactSource;
 
-/// The artifact one Candle Qwen edit capture loads: the canonical snapshot root the loader is handed
-/// as `QwenEditPaths.root`, and the `LoadSpec` that opens it.
-#[derive(Debug)]
-struct QwenEditArtifact {
-    root: PathBuf,
-    spec: LoadSpec,
-}
+use protocol::QwenEditArtifact;
 
 // A persistent idle CUDA context is part of the sampled baseline, not evidence of activity.
 // This manual profile verifies repeated physical-device activity and stable residency before load.

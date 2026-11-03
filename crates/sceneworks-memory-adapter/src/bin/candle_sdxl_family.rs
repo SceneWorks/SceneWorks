@@ -40,10 +40,7 @@ pub(super) fn sdxl_candle_route_revision(arm: &SdxlCandleArm) -> Result<&'static
 /// Refuses by name: the engine id is not an artifact identity — all five members load through the
 /// same `sdxl` provider — so a model id no member serves must not be measured as base SDXL.
 pub(super) fn sdxl_candle_arm(request: &Value) -> Result<SdxlCandleArm, String> {
-    let model_id = protocol::planned(request)?
-        .pointer("/target/modelId")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.modelId must be a string".to_owned())?;
+    let model_id = protocol::planned_model_id(request)?;
     let arm = SDXL_CANDLE_FAMILY
         .into_iter()
         .find(|arm| arm.model_id == model_id)
@@ -318,10 +315,7 @@ pub(super) fn run_sdxl_endpoint(request: &Value) -> Result<Value, String> {
     if planned_provider(request)? != SDXL_ID
         || planned_tier(request)? != "q4"
         || protocol::planned_rung(request)? != expected_rung
-        || protocol::planned(request)?
-            .pointer("/target/modelId")
-            .and_then(Value::as_str)
-            != Some("sdxl")
+        || protocol::planned_optional_str(request, "/target/modelId")? != Some("sdxl")
     {
         return Err("SDXL endpoint only accepts base SDXL q4 and its exact endpoint rung".into());
     }

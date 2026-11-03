@@ -6,10 +6,7 @@ use super::*;
 /// (Chroma is `text_to_image` only, and SANA's `image_to_image` is the same base load driven from
 /// a reference, which no anchor plans).
 pub(super) fn sana_chroma_arm(request: &Value) -> Result<SanaChromaArm, String> {
-    let provider = protocol::planned(request)?
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let provider = protocol::planned_provider(request)?;
     SANA_CHROMA_ARMS
         .iter()
         .copied()
@@ -159,10 +156,7 @@ pub(super) fn validate_sana_chroma_fixture(
     arm: SanaChromaArm,
     tier: &str,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{}-mlx-{tier}-{width}-seed", arm.slug);
     let remainder = fixture
@@ -266,11 +260,7 @@ pub(super) fn run_sana_chroma(request: &Value) -> Result<Value, String> {
     // The plan row must name the production identity this cell's loaded generator publishes —
     // checked against the weights-free table BEFORE the load, so a row still carrying a
     // conformance string fails in milliseconds rather than after a multi-gigabyte load.
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     let expected_fingerprint = sana_chroma_calibration_fingerprint(arm, tier);
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(

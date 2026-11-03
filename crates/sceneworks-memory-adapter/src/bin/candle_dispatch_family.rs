@@ -2,11 +2,7 @@
 use super::*;
 
 pub(super) fn run(request: &Value) -> Result<Value, String> {
-    if protocol::planned(request)?
-        .get("backend")
-        .and_then(Value::as_str)
-        != Some("candle")
-    {
+    if protocol::planned_optional_str(request, "/backend")? != Some("candle") {
         return Err(
             "Candle adapter received a non-Candle planned case; run the harness with --backend candle"
                 .to_owned(),
@@ -155,10 +151,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
         &selection,
         &contract.engaged_composition(selection.strategy),
     )?;
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     let actual_calibration = contract.calibration.as_ref().ok_or_else(|| {
         format!(
             "{KREA_ID} has no calibration identity at {}",

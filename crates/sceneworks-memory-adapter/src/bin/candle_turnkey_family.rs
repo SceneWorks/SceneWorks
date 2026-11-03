@@ -68,9 +68,11 @@ pub(super) fn turnkey_calibration_fingerprint(provider_id: &str, tier: &str) -> 
 /// test.
 #[cfg(test)]
 pub(super) fn is_turnkey_weights_free_fingerprint(fingerprint: &str) -> bool {
-    fingerprint.starts_with("kolors-candle-registry-behavior-v1")
-        || fingerprint.starts_with("lens-candle-registry-behavior-v1")
+    fingerprint.starts_with(runtime_cuda::providers::kolors::memory_strategy::STATIC_BEHAVIOR_FINGERPRINT)
+        || fingerprint.starts_with(runtime_cuda::providers::lens::STATIC_BEHAVIOR_FINGERPRINT)
+        // Retired plan namespace: this string is not an engine identity at the pinned source.
         || fingerprint.starts_with("ideogram4-candle-request-scoped-staged-residency-static-v1")
+        // Retired pre-sc-22732 all-tier spelling, also absent from the current engine exports.
         || fingerprint == "kolors-candle-staged-chatglm-unet-f32-vae-v1"
 }
 
@@ -82,10 +84,7 @@ pub(super) fn validate_turnkey_identity(
     provider_id: &str,
     tier: &str,
 ) -> Result<(), String> {
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?;
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?;
     let expected_fingerprint = turnkey_calibration_fingerprint(provider_id, tier)
         .ok_or_else(|| format!("no turnkey member {provider_id} at tier {tier}"))?;
     if planned_fingerprint != expected_fingerprint {
@@ -123,10 +122,7 @@ pub(super) fn validate_turnkey_fixture(
     slug: &str,
     tier: &str,
 ) -> Result<(), String> {
-    let fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let fixture = protocol::planned_fixture(request)?;
     let (width, _) = protocol::target_geometry(request)?;
     let prefix = format!("{FIVE_RUNG_FIXTURE_PREFIX}{slug}-{tier}-{width}-seed");
     let remainder = fixture

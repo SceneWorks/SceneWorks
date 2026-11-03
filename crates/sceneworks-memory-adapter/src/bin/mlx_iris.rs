@@ -27,9 +27,9 @@
 //! a deferred materialization shape; a deferred spec fails the load.
 
 use super::*;
-use gen_core_iris::depth::{plan_depth_input, DepthRequest, DepthResolution, IrisDepthEstimator};
+use gen_core_iris::depth::{plan_depth_input, IrisDepthEstimator};
 use gen_core_iris::TEXT_ENCODER_COMPONENT;
-use mlx_gen::gen_core::{InputSizing, TargetSize, Transform, TransformRequest};
+use mlx_gen::gen_core::Transform;
 use runtime_macos::providers::iris as engine;
 
 /// The label the depth and restoration fixtures carry in their name. Neither request takes a
@@ -39,7 +39,7 @@ const SEED: u64 = 25_690;
 const GENERATION_SEED: u64 = TURNKEY_SEED;
 const GENERATION_STEPS: u32 = TURNKEY_STEPS;
 /// Restoration upscales by the release's default factor, so the source is the plan geometry / 4.
-const RESTORE_SCALE: u32 = 4;
+use protocol::IRIS_RESTORE_CAPTURE_SCALE as RESTORE_SCALE;
 
 /// Generation: the backbone at the snapshot root, plus the staged text encoder.
 const GENERATION: protocol::IrisRoute = protocol::IrisRoute {
@@ -181,21 +181,7 @@ impl Loaded {
     }
 }
 
-/// One planned request of a loaded route: the geometry it is admitted at, and how to run it.
-enum Planned {
-    Generation(Box<GenerationRequest>),
-    Depth(DepthRequest),
-    Restore(TransformRequest),
-}
-
-/// The synthetic source image a downstream capture feeds its model.
-fn source_image(width: u32, height: u32) -> Image {
-    Image {
-        width,
-        height,
-        pixels: protocol::synthetic_reference_rgb(width, height),
-    }
-}
+use protocol::IrisPlanned as Planned;
 
 /// Build the one request a route's capture runs at the plan geometry, and the geometry the ENGINE
 /// admits that request at — which must be the plan's, or the record would price another shape.
@@ -206,16 +192,12 @@ fn plan_request(
 ) -> Result<(Planned, MemoryGeometry), String> {
     match loaded {
         Loaded::Generation(_) => Ok((
-            Planned::Generation(Box::new(GenerationRequest {
-                prompt: "a portrait of a person in a sunlit studio, editorial photograph"
-                    .to_owned(),
+            Planned::Generation(Box::new(protocol::iris_generation_request(
                 width,
                 height,
-                count: 1,
-                seed: Some(GENERATION_SEED),
-                steps: Some(GENERATION_STEPS),
-                ..Default::default()
-            })),
+                GENERATION_SEED,
+                GENERATION_STEPS,
+            ))),
             MemoryGeometry {
                 width,
                 height,
@@ -227,11 +209,7 @@ fn plan_request(
         Loaded::Depth(model) => {
             // The source IS the plan geometry and the cap is its long side, so the model-input grid
             // the engine plans is the plan geometry itself whenever it sits on the patch lattice.
-            let request = DepthRequest {
-                image: source_image(width, height),
-                resolution: DepthResolution::Capped(width.max(height)),
-                cancel: Default::default(),
-            };
+            let request = protocol::iris_depth_request(width, height);
             let plan = plan_depth_input(
                 width,
                 height,
@@ -270,17 +248,7 @@ fn plan_request(
     }
 }
 
-/// The restoration capture's request: the plan geometry is the OUTPUT, so the source is it over
-/// the capture scale, taken at its own size. No seed, strength or step count — the restorer is one
-/// deterministic forward and refuses each of them by name.
-fn restoration_request(width: u32, height: u32) -> TransformRequest {
-    TransformRequest {
-        image: source_image(width / RESTORE_SCALE, height / RESTORE_SCALE),
-        target: TargetSize::Scale(RESTORE_SCALE as f32),
-        input_sizing: InputSizing::Original,
-        ..Default::default()
-    }
-}
+use protocol::iris_restoration_request as restoration_request;
 
 /// A depth map as an RGB image, so the shared determinism envelope judges it like any render: the
 /// map min-max normalized to 8 bits, replicated over the three channels.
@@ -441,18 +409,12 @@ fn context(
 
 /// The `mlx:iris_3b` / `mlx:iris_3b_depth` / `mlx:iris_3b_restore` arm.
 pub(super) fn run(request: &Value) -> Result<Value, String> {
-    let provider = protocol::planned(request)?
-        .pointer("/target/provider")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.target.provider must be a string".to_owned())?;
+    let provider = protocol::planned_provider(request)?;
     let route = route(provider)?;
     // Mode, tier, still geometry, overlay and load shape — all before an env var or a weight.
     let (width, height) = protocol::validate_iris_plan(request, route)?;
     let selection = planned_selection(request)?;
-    let planned_fixture = protocol::planned(request)?
-        .get("fixture")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.fixture must be a string".to_owned())?;
+    let planned_fixture = protocol::planned_fixture(request)?;
     let expected_fixture = fixture(route, width, height);
     if planned_fixture != expected_fixture {
         return Err(format!(
@@ -461,11 +423,7 @@ pub(super) fn run(request: &Value) -> Result<Value, String> {
             route.provider
         ));
     }
-    let planned_fingerprint = protocol::planned(request)?
-        .get("calibrationFingerprint")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "planned.calibrationFingerprint must be a string".to_owned())?
-        .to_owned();
+    let planned_fingerprint = protocol::planned_calibration_fingerprint(request)?.to_owned();
     let expected_fingerprint = calibration_fingerprint(route);
     if planned_fingerprint != expected_fingerprint {
         return Err(format!(
