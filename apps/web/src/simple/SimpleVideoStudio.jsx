@@ -164,7 +164,7 @@ export function SimpleVideoStudio() {
 
   const latestJob = newestLocalJob(videoLocalJobs);
   const busy = submitting || jobIsRunning(latestJob);
-  const supportsLastFrame = model === "minimax_h3" && mode === "image_to_video";
+  const supportsLastFrame = selectedModel?.supportsLastOnlyImageToVideo === true && mode === "image_to_video";
   const needsSource = mode === "image_to_video" && !sourceAssetId && !(supportsLastFrame && lastFrameAssetId);
   const canGenerate =
     Boolean(prompt.trim()) && Boolean(model) && Boolean(resolution) && !busy && !needsSource;
@@ -188,6 +188,7 @@ export function SimpleVideoStudio() {
         styleId,
         sourceAssetId,
         lastFrameAssetId,
+        selectedModel,
         loras: lora.serializedLoras,
       });
       if (!request) {

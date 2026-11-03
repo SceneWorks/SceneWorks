@@ -11544,6 +11544,7 @@ fn apply_model_catalog_entry(
     // "nothing supports preview" on every server). Engine-KEYED on purpose — the flag genuinely
     // diverges by backend and never fully collapses. Additive: a model the generated table does not
     // know gets no `preview` key, which the UI reads as "unknown" and renders exactly as before.
+    apply_last_only_video_capability(object);
     sceneworks_core::preview_support::apply_to_model_entry(object);
     sceneworks_core::decoder_support::apply_to_model_entry(object);
     apply_decoder_availability(object, data_dir);
@@ -11563,6 +11564,76 @@ fn apply_model_catalog_entry(
     Ok(model)
 }
 
+// Use exactly the entry validation uses, including resolved imported partitions.
+fn apply_last_only_video_capability(object: &mut JsonObject) {
+    let imported_partition = object.get("id").and_then(Value::as_str).and_then(|_| {
+        use sceneworks_core::minimax_h3_import::{
+            entry_is_imported_minimax_h3, MiniMaxH3Partition,
+        };
+        entry_is_imported_minimax_h3(object)
+            .then(|| MiniMaxH3Partition::from_entry(object).ok())
+            .flatten()
+    });
+    let accepts_last_only =
+        sceneworks_core::h3_keyframes::accepts_last_only_resolved_image_to_video(
+            object.get("id").and_then(Value::as_str).unwrap_or_default(),
+            "image_to_video",
+            true,
+            imported_partition.map(|partition| partition.as_str()),
+        );
+    object.insert(
+        "supportsLastOnlyImageToVideo".to_owned(),
+        Value::Bool(accepts_last_only),
+    );
+}
+
+#[cfg(test)]
+mod last_only_projection_tests {
+    use super::*;
+
+    #[test]
+    fn imported_partitions_require_the_verified_plan_shape() {
+        use sceneworks_core::minimax_h3_import::{
+            MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION, MINIMAX_H3_IMPORT_FAMILY,
+            MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+        };
+        for (partition, base, expected) in [
+            ("fl2va", "minimax_h3", true),
+            ("ref2va", "minimax_h3_ref", false),
+        ] {
+            let mut entry = json!({
+                "id": "custom", "family": MINIMAX_H3_IMPORT_FAMILY,
+                "importSourceShape": MINIMAX_H3_IMPORT_SOURCE_SHAPE,
+                "baseModel": base, "minimaxH3Partition": partition,
+                "importPlan": {"checkpointId": "managed/custom", "assembly": {
+                    "schemaVersion": MINIMAX_H3_ASSEMBLY_SCHEMA_VERSION, "partition": partition
+                }}
+            })
+            .as_object()
+            .unwrap()
+            .clone();
+            apply_last_only_video_capability(&mut entry);
+            assert_eq!(entry["supportsLastOnlyImageToVideo"], json!(expected));
+            entry.remove("importPlan");
+            apply_last_only_video_capability(&mut entry);
+            assert_eq!(entry["supportsLastOnlyImageToVideo"], json!(false));
+        }
+    }
+
+    #[test]
+    fn stock_and_unknown_entries_match_the_validator() {
+        for (id, expected) in [
+            ("minimax_h3", true),
+            ("minimax_h3_ref", false),
+            ("unknown", false),
+        ] {
+            let mut entry = json!({"id": id}).as_object().unwrap().clone();
+            apply_last_only_video_capability(&mut entry);
+            assert_eq!(entry["supportsLastOnlyImageToVideo"], json!(expected));
+        }
+    }
+}
+
 /// Give a provider-aliased model row the canonical provider's exact optional decoder donors.
 ///
 /// Imported Krea entries intentionally carry `downloads: []`: their primary DiT is an in-place user
@@ -11570,6 +11641,7 @@ fn apply_model_catalog_entry(
 /// selected decoder must resolve the same pinned standalone VAE as the builtin Turbo provider. Clone
 /// only soft co-requisites whose component ids occur in the provider's generated decoder facts;
 /// primary downloads and unrelated components (including text encoders) are never inherited.
+
 fn inherit_provider_decoder_downloads(model: &mut Value, builtin_models: &[Value]) {
     let Some(object) = model.as_object() else {
         return;

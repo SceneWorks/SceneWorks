@@ -19,7 +19,6 @@ import { useGenerationStudio } from "../generationStudio.jsx";
 import { loadStudioSettings, useStudioSettingsWriter } from "../../hooks/useStudioSettings.js";
 import { MOTIONS, DEFAULT_MOTION } from "./editorUtils.js";
 
-const LTX_VIDEO_MODEL_ID = "ltx_2_3";
 const EDITOR_DEFAULT_TIER = "q4";
 // Preset filtering is by workflow/mode; the editor drives multiple video modes, so it
 // borrows the most common video preset workflow for the availability filter.
@@ -59,7 +58,7 @@ export function useEditorGeneration({ context }) {
     return { ...studio, ...own };
   }, [projectId]);
 
-  const fallbackModelId = videoModels[0]?.id ?? LTX_VIDEO_MODEL_ID;
+  const fallbackModelId = videoModels[0]?.id ?? "";
   const [model, setModel] = useState(saved.model ?? fallbackModelId);
   const [quality, setQuality] = useState(saved.quality ?? "balanced");
   const [resolution, setResolution] = useState(saved.resolution ?? "1280x720");
