@@ -554,6 +554,10 @@ export function EditorScreen() {
       return;
     }
     const base = gen.buildBasePayload();
+    if (!base) {
+      setTimelineNotice("Choose an available video model before generating.");
+      return;
+    }
     const job = await queueTimelineVideoJob({
       ...base,
       mode: "extend_clip",
@@ -578,6 +582,10 @@ export function EditorScreen() {
     }
     const isStill = selectedItem.type === "image";
     const base = gen.buildBasePayload();
+    if (!base) {
+      setTimelineNotice("Choose an available video model before generating.");
+      return;
+    }
     const job = await queueTimelineVideoJob({
       ...base,
       mode: isStill ? "image_to_video" : "extend_clip",
@@ -613,6 +621,10 @@ export function EditorScreen() {
       return;
     }
     const base = gen.buildBasePayload();
+    if (!base) {
+      setTimelineNotice("Choose an available video model before generating.");
+      return;
+    }
     const job = await queueTimelineVideoJob({
       ...base,
       mode: "video_bridge",
@@ -718,9 +730,9 @@ export function EditorScreen() {
     if (selectionKind === "clip" || selectionKind === "key") {
       if (selectedItem?.type === "image") {
         return [
-          { id: "animate", label: "Animate", primary: true, onClick: () => replaceSelectedItem() },
+          { id: "animate", disabled: !gen.hasSelectedModel, label: "Animate", primary: true, onClick: () => replaceSelectedItem() },
           { id: "send-video", label: "Send to Video", onClick: () => sendAssetToVideo(selectedAsset, "image_to_video") },
-          { id: "variation", label: "Variation", onClick: () => replaceSelectedItem({ variation: true }) },
+          { id: "variation", disabled: !gen.hasSelectedModel, label: "Variation", onClick: () => replaceSelectedItem({ variation: true }) },
           { id: "extract", label: "Extract frame", disabled: true, onClick: () => extractFrame() },
         ];
       }
@@ -733,16 +745,16 @@ export function EditorScreen() {
       ] : [];
       return [
         ...filmActions,
-        { id: "extend", label: "Extend clip", primary: !filmActions.length, onClick: extendSelectedClip },
-        { id: "regenerate", label: "Regenerate", onClick: () => replaceSelectedItem() },
+        { id: "extend", disabled: !gen.hasSelectedModel, label: "Extend clip", primary: !filmActions.length, onClick: extendSelectedClip },
+        { id: "regenerate", disabled: !gen.hasSelectedModel, label: "Regenerate", onClick: () => replaceSelectedItem() },
         { id: "extract", label: "Extract frame", onClick: extractFrame },
-        { id: "variation", label: "Variation", onClick: () => replaceSelectedItem({ variation: true }) },
+        { id: "variation", disabled: !gen.hasSelectedModel, label: "Variation", onClick: () => replaceSelectedItem({ variation: true }) },
       ];
     }
     if (selectionKind === "gap") {
       return [
-        { id: "bridge", label: "Generate bridge", primary: true, onClick: () => bridgeGap(selectedGap) },
-        { id: "fill", label: "Generate to fill", onClick: () => bridgeGap(selectedGap) },
+        { id: "bridge", disabled: !gen.hasSelectedModel, label: "Generate bridge", primary: true, onClick: () => bridgeGap(selectedGap) },
+        { id: "fill", disabled: !gen.hasSelectedModel, label: "Generate to fill", onClick: () => bridgeGap(selectedGap) },
         { id: "ripple", label: "Ripple close gap", onClick: () => rippleCloseGap(selectedGap) },
       ];
     }
@@ -922,7 +934,7 @@ export function EditorScreen() {
         <GenerationRail
           contextActions={contextActions}
           gen={gen}
-          generateDisabled={!activeTimeline}
+          generateDisabled={!activeTimeline || !primaryAction}
           generateSummary={generateSummary}
           header={railHeader()}
           onGenerate={() => (primaryAction ? primaryAction.onClick() : setTimelineNotice("Select a clip or gap to generate."))}

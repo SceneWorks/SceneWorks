@@ -121,9 +121,8 @@ describe("samplerOptions", () => {
     expect(stepsMenuFromModel({ limits: { steps: [8, 0, "12"] } })).toEqual([8]);
   });
 
-  // sc-19502 — the fallback catalog is a MIRROR of builtin.models.jsonc, and the Steps control reads
-  // it when the live catalog is unavailable. If the mirror drifted, the offline studio would offer a
-  // free-text Steps box for a model whose backend refuses every value but 8.
+  // sc-19502 — exercise the Steps reader with the actual shipped manifest through
+  // the test-only loader. Runtime studios receive this policy through the live API.
   it("the fallback catalog pins LTX to its single baked step count", () => {
     for (const id of ["ltx_2_3", "ltx_2_3_eros"]) {
       const model = fallbackModels.find((entry) => entry.id === id);

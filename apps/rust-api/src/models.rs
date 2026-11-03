@@ -11591,6 +11591,20 @@ fn apply_last_only_video_capability(object: &mut JsonObject) {
 mod last_only_projection_tests {
     use super::*;
 
+    fn assert_matches_request_validator(entry: &JsonObject, expected: bool) {
+        assert_eq!(entry["supportsLastOnlyImageToVideo"], json!(expected));
+        let payload = json!({"mode": "image_to_video", "lastFrameAssetId": "last-frame"});
+        assert_eq!(
+            crate::validate_video_reference_asset_ids_payload(
+                payload.as_object().unwrap(),
+                &Value::Object(entry.clone()),
+            )
+            .is_ok(),
+            expected,
+            "projected last-only fact must match actual request admission for {entry:?}"
+        );
+    }
+
     #[test]
     fn imported_partitions_require_the_verified_plan_shape() {
         use sceneworks_core::minimax_h3_import::{
@@ -11599,6 +11613,7 @@ mod last_only_projection_tests {
         };
         for (partition, base, expected) in [
             ("fl2va", "minimax_h3", true),
+            ("hybrid", "minimax_h3", true),
             ("ref2va", "minimax_h3_ref", false),
         ] {
             let mut entry = json!({
@@ -11613,10 +11628,13 @@ mod last_only_projection_tests {
             .unwrap()
             .clone();
             apply_last_only_video_capability(&mut entry);
-            assert_eq!(entry["supportsLastOnlyImageToVideo"], json!(expected));
+            assert_matches_request_validator(&entry, expected);
+            entry["importPlan"]["assembly"]["partition"] = json!("forged-partition");
+            apply_last_only_video_capability(&mut entry);
+            assert_matches_request_validator(&entry, false);
             entry.remove("importPlan");
             apply_last_only_video_capability(&mut entry);
-            assert_eq!(entry["supportsLastOnlyImageToVideo"], json!(false));
+            assert_matches_request_validator(&entry, false);
         }
     }
 
@@ -11629,7 +11647,7 @@ mod last_only_projection_tests {
         ] {
             let mut entry = json!({"id": id}).as_object().unwrap().clone();
             apply_last_only_video_capability(&mut entry);
-            assert_eq!(entry["supportsLastOnlyImageToVideo"], json!(expected));
+            assert_matches_request_validator(&entry, expected);
         }
     }
 }
@@ -11641,7 +11659,6 @@ mod last_only_projection_tests {
 /// selected decoder must resolve the same pinned standalone VAE as the builtin Turbo provider. Clone
 /// only soft co-requisites whose component ids occur in the provider's generated decoder facts;
 /// primary downloads and unrelated components (including text encoders) are never inherited.
-
 fn inherit_provider_decoder_downloads(model: &mut Value, builtin_models: &[Value]) {
     let Some(object) = model.as_object() else {
         return;
