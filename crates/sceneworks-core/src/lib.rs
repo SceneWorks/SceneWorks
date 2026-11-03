@@ -51,6 +51,7 @@ pub mod lora_url;
 pub mod managed_checkpoint_variants;
 pub mod managed_file;
 pub mod media_convert;
+pub mod media_process;
 pub mod memory_anchor;
 pub mod memory_calibration;
 pub mod memory_contracts;
