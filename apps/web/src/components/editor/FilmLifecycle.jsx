@@ -17,30 +17,50 @@ function runStatus(run) {
   return run.record.stop?.reason || run.record.outcome || run.record.state;
 }
 
-export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId = "", runActive = false, screenActive = true, token, setNotice }) {
+export function FilmLifecycle({ draftId, onRunChange, onRuns, planningSnapshot, projectId, selectedRunId = "", runActive = false, screenActive = true, token, setNotice }) {
   const [runs, setRuns] = useState([]);
+  const [projectRunsActive, setProjectRunsActive] = useState(false);
   const [planning, setPlanning] = useState(null);
   const [pending, setPending] = useState("");
   const refreshRequest = useRef(0);
+  const feedController = useRef(null);
+  const actionController = useRef(null);
+  useEffect(() => {
+    setPending("");
+    return () => { actionController.current?.abort(); };
+  }, [projectId, draftId]);
 
-  const refresh = useCallback(async (signal) => {
-    if (!projectId || !draftId) return;
+  const refresh = useCallback(async (ownerSignal) => {
+    if (!projectId || !draftId || ownerSignal?.aborted) return;
+    feedController.current?.abort();
+    const controller = new AbortController();
+    feedController.current = controller;
+    const abort = () => controller.abort();
+    ownerSignal?.addEventListener("abort", abort, { once: true });
+    const signal = controller.signal;
     const requestId = ++refreshRequest.current;
-    const [runResult, planningResult] = await Promise.allSettled([
-      listFilmRuns(projectId, token, { signal }),
-      getFilmPlanning(projectId, draftId, token, { signal }),
-    ]);
-    if (signal?.aborted || refreshRequest.current !== requestId) return;
-    if (runResult.status === "fulfilled") {
-      const listed = Array.isArray(runResult.value) ? runResult.value : [];
-      const scoped = listed.filter((run) => run.locator.draftId === draftId);
-      setRuns(scoped);
-      for (const [index, run] of scoped.entries()) onRunChange?.(run, { latest: index === 0, select: false });
-    } else {
-      setNotice(runResult.reason.message);
+    try {
+      const [runResult, planningResult] = await Promise.allSettled([
+        listFilmRuns(projectId, token, { signal }),
+        getFilmPlanning(projectId, draftId, token, { signal }),
+      ]);
+      if (signal.aborted || refreshRequest.current !== requestId) return;
+      if (runResult.status === "fulfilled") {
+        const listed = Array.isArray(runResult.value) ? runResult.value : [];
+        await onRuns?.(listed, signal);
+        if (signal.aborted || refreshRequest.current !== requestId) return;
+        setProjectRunsActive(listed.some((run) => run.controllerActive));
+        const scoped = listed.filter((run) => run.locator.draftId === draftId);
+        setRuns(scoped);
+        for (const [index, run] of scoped.entries()) onRunChange?.(run, { latest: index === 0, select: false });
+      } else {
+        setNotice(runResult.reason.message);
+      }
+      if (planningResult.status === "fulfilled") setPlanning(planningResult.value);
+    } finally {
+      ownerSignal?.removeEventListener("abort", abort);
     }
-    if (planningResult.status === "fulfilled") setPlanning(planningResult.value);
-  }, [draftId, onRunChange, projectId, setNotice, token]);
+  }, [draftId, onRunChange, onRuns, projectId, setNotice, token]);
 
   const [visible, setVisible] = useState(() => !document.hidden);
   useEffect(() => {
@@ -56,7 +76,7 @@ export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId =
     return () => { controller.abort(); refreshRequest.current += 1; };
   }, [refresh, screenActive, visible, selectedRunId]);
 
-  const active = runActive || runs.some((run) => run.controllerActive) || ["running", "canceling"].includes(planning?.status);
+  const active = runActive || projectRunsActive;
   useEffect(() => {
     if (!screenActive || !visible || !active) return undefined;
     const controller = new AbortController();
@@ -72,20 +92,25 @@ export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId =
   async function mutate(runId, action) {
     // A list read started before this mutation cannot overwrite the accepted controller snapshot.
     refreshRequest.current += 1;
+    actionController.current?.abort();
+    const controller = new AbortController();
+    actionController.current = controller;
     setPending(`${runId}:${action}`);
     try {
-      const updated = await startFilmRun(projectId, runId, action, token);
+      const updated = await startFilmRun(projectId, runId, action, token, { signal: controller.signal });
+      if (controller.signal.aborted) return;
       if (updated?.locator?.draftId === draftId) onRunChange?.(updated, { select: true });
       setNotice(action === "cancel" ? "Cancellation requested. Completed takes and spent attempts are preserved." : action === "start" ? "Start requested. Checking saved inputs and worker availability." : "Resume requested. Checking saved attempts and worker availability.");
-      await refresh();
+      await refresh(controller.signal);
     } catch (error) {
-      setNotice(error.message);
+      if (!controller.signal.aborted) setNotice(error.message);
     } finally {
-      setPending("");
+      if (!controller.signal.aborted) setPending("");
     }
   }
 
-  const planningActive = planning && ["running", "canceling"].includes(planning.status);
+  const effectivePlanning = planningSnapshot ?? planning;
+  const planningActive = effectivePlanning && ["running", "canceling"].includes(effectivePlanning.status);
   if (!planningActive && runs.length === 0) return null;
 
   return (
@@ -111,8 +136,8 @@ export function FilmLifecycle({ draftId, onRunChange, projectId, selectedRunId =
       ) : null}
       {planningActive ? (
         <div className="ve-film-lifecycle-row">
-          <span><strong>Planning</strong> · {planning.stage}</span>
-          <span>{planning.detail || `${Math.round((planning.progress || 0) * 100)}%`}</span>
+          <span><strong>Planning</strong> · {effectivePlanning.stage}</span>
+          <span>{effectivePlanning.detail || `${Math.round((effectivePlanning.progress || 0) * 100)}%`}</span>
         </div>
       ) : null}
       {runs.map((run) => {

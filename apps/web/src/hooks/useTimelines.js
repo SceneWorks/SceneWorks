@@ -93,27 +93,38 @@ export function useTimelines({
     savedTimelineSnapshotRef.current = serializeTimeline(stored);
   }
 
-  const isFilmTimeline = Boolean(activeTimeline?.filmAssembly);
-
-  // Film delivery is server-owned and can finish without an editor SSE subscriber. A bounded
-  // read refresh discovers it while preserving pending edits; navigation does not own the run.
-  useEffect(() => {
-    if (!activeProject?.id || !selectedTimelineId || !isFilmTimeline) return;
-    let disposed = false;
-    let inFlight = false;
-    const timer = window.setInterval(async () => {
-      if (inFlight) return;
-      inFlight = true;
-      try {
-        const stored = await timelineRequest(activeProject.id, selectedTimelineId, token);
-        if (!disposed && activeProjectRef.current?.id === activeProject.id && selectedTimelineIdRef.current === selectedTimelineId) adoptStoredTimeline(stored);
-      } catch (err) { if (!disposed) setError(err.message); }
-      finally { inFlight = false; }
-    }, 1000);
-    return () => { disposed = true; window.clearInterval(timer); };
-    // Ref-backed adoption reads current pending edits, never the timer's initial snapshot.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProject?.id, selectedTimelineId, isFilmTimeline, token]);
+  // FilmLifecycle owns the run feed. Refresh the selected film timeline only while one of
+  // its runs is active, and once more when that run becomes terminal.
+  const adoptStoredTimelineRef = useRef(adoptStoredTimeline);
+  useLayoutEffect(() => { adoptStoredTimelineRef.current = adoptStoredTimeline; });
+  const filmRefreshRef = useRef({ controller: null, key: "", active: false });
+  useEffect(() => () => {
+    filmRefreshRef.current.controller?.abort();
+    filmRefreshRef.current = { controller: null, key: "", active: false };
+  }, [activeProject?.id, selectedTimelineId]);
+  const refreshFilmTimeline = useCallback((runs, signal) => {
+    const projectId = activeProjectRef.current?.id;
+    const timeline = activeTimelineRef.current;
+    if (!projectId || !timeline?.filmAssembly || timeline.id !== selectedTimelineIdRef.current) return;
+    const key = `${projectId}:${timeline.id}`;
+    const previous = filmRefreshRef.current;
+    const ids = new Set(Object.keys(timeline.filmAssembly.runs ?? {}));
+    const active = runs.some((run) => run.controllerActive && (ids.has(run.locator?.id) || run.record?.timeline?.timelineId === timeline.id));
+    const shouldRefresh = active || (previous.key === key && previous.active);
+    previous.controller?.abort();
+    const controller = new AbortController();
+    filmRefreshRef.current = { controller, key, active };
+    if (!shouldRefresh || signal?.aborted) return;
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    return timelineRequest(projectId, timeline.id, token, { signal: controller.signal }).then((stored) => {
+      if (!controller.signal.aborted && activeProjectRef.current?.id === projectId && selectedTimelineIdRef.current === timeline.id) {
+        adoptStoredTimelineRef.current(stored);
+      }
+    }).catch((error) => {
+      if (!controller.signal.aborted && !isAbortError(error)) setError(error.message);
+    }).finally(() => signal?.removeEventListener("abort", abort));
+  }, [activeProjectRef, token, setError]);
 
   // Compare a timeline against the last-persisted snapshot. Unknown baseline (nothing loaded
   // yet) or no working copy → not dirty, so a freshly loaded/empty editor never prompts.
@@ -421,6 +432,7 @@ export function useTimelines({
     setActiveTimeline,
     isActiveTimelineDirty,
     refreshTimelines,
+    refreshFilmTimeline,
     createTimeline,
     saveTimeline,
     resolveTimelineTrim,

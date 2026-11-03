@@ -97,24 +97,35 @@ export function normalizedPlan(draft) {
   };
 }
 
-export function FilmReview({ active = true, draft, focusShotId = "", onChange, projectId, refreshTimelines, runControllerActive = false, runLocatorId = "", setNotice, setSelectedTimelineId, token }) {
+export function FilmReview({ active = true, draft, focusShotId = "", onChange, projectId, refreshTimelines, runControllerActive = false, runLocatorId = "", runSnapshot = null, onRunChange, setNotice, setSelectedTimelineId, token }) {
   const [runId, setRunId] = useState("");
+  const [visible, setVisible] = useState(() => !document.hidden);
+  useEffect(() => {
+    const changed = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", changed);
+    return () => document.removeEventListener("visibilitychange", changed);
+  }, []);
   const [view, setView] = useState(null);
   const rootRef = useRef(null);
   const [pending, setPending] = useState(false);
   const [reasons, setReasons] = useState({});
   const refreshRequest = useRef(0);
+  const actionController = useRef(null);
+  useEffect(() => {
+    setPending(false);
+    return () => { actionController.current?.abort(); };
+  }, [projectId, draft.id]);
   const plan = useMemo(() => normalizedPlan(draft), [draft]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (signal) => {
     if (!projectId || !draft.id) return;
     const requestId = ++refreshRequest.current;
     try {
       let locatorId = runLocatorId;
       if (!locatorId) {
-        const runs = await listFilmRuns(projectId, token);
+        const runs = await listFilmRuns(projectId, token, { signal });
         const latest = runs.find((item) => item.locator.draftId === draft.id && item.record);
-        if (refreshRequest.current !== requestId) return;
+        if (signal?.aborted || refreshRequest.current !== requestId) return;
         if (!latest) {
           setRunId("");
           setView(null);
@@ -122,34 +133,23 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
         }
         locatorId = latest.locator.id;
       }
-      const next = await getFilmReview(projectId, locatorId, token);
-      if (refreshRequest.current !== requestId) return;
+      const next = await getFilmReview(projectId, locatorId, token, { signal });
+      if (signal?.aborted || refreshRequest.current !== requestId) return;
       setRunId(locatorId);
       setView(next);
     } catch (error) {
-      if (refreshRequest.current === requestId) setNotice(error.message);
+      if (!signal?.aborted && refreshRequest.current === requestId) setNotice(error.message);
     }
   }, [draft.id, projectId, runLocatorId, setNotice, token]);
 
-  // The three workspace panels stay mounted to preserve unsaved edits. Refresh when Review becomes
-  // visible or its durable controller transitions, so Resume cannot leave a terminal cached view.
-  useEffect(() => { if (active) refresh(); }, [active, refresh, runControllerActive]);
-  const pollingActive = Boolean(runControllerActive || view?.run?.controllerActive);
+  // Active snapshots refresh review progress; identical terminal snapshots do not restart reads.
+  const reviewFeedRevision = runSnapshot?.controllerActive ? runSnapshot : JSON.stringify(runSnapshot);
   useEffect(() => {
-    if (!active || !pollingActive) return undefined;
-    let canceled = false;
-    let timer = null;
-    async function poll() {
-      await refresh();
-      if (!canceled) timer = window.setTimeout(poll, 800);
-    }
-    timer = window.setTimeout(poll, 800);
-    return () => {
-      canceled = true;
-      refreshRequest.current += 1;
-      if (timer !== null) window.clearTimeout(timer);
-    };
-  }, [active, pollingActive, refresh]);
+    if (!active || !visible) return undefined;
+    const controller = new AbortController();
+    refresh(controller.signal);
+    return () => { controller.abort(); refreshRequest.current += 1; };
+  }, [active, visible, refresh, runControllerActive, reviewFeedRevision]);
 
   // A hand-off from a timeline clip names its shot; bring that shot's takes into view.
   const focusedShotLoaded = Boolean(focusShotId && view?.run?.record?.shots?.some((shot) => shot.shotId === focusShotId));
@@ -168,15 +168,20 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
 
   async function mutate(action, message) {
     if (!runId) return;
+    actionController.current?.abort();
+    const controller = new AbortController();
+    actionController.current = controller;
     setPending(true);
     try {
-      const next = await action();
+      const next = await action(controller.signal);
+      if (controller.signal.aborted) return;
       setView(next);
+      if (next?.run) onRunChange?.(next.run, { select: true });
       setNotice(message);
     } catch (error) {
-      setNotice(error.message);
+      if (!controller.signal.aborted) setNotice(error.message);
     } finally {
-      setPending(false);
+      if (!controller.signal.aborted) setPending(false);
     }
   }
 
@@ -244,7 +249,7 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
       {!view ? <p>Render a shot to review takes.</p> : (
         <div className="ve-film-review-runs">
           <div className="ve-film-actions">
-            <button disabled={Boolean(disabledReason)} onClick={() => mutate(() => analyzeFilmTake(projectId, runId, [], token), "Assistive review started.")} title={disabledReason} type="button">Analyze selected takes</button>
+            <button disabled={Boolean(disabledReason)} onClick={() => mutate((signal) => analyzeFilmTake(projectId, runId, [], token, { signal }), "Assistive review started.")} title={disabledReason} type="button">Analyze selected takes</button>
             <button disabled={!view.run.record?.timeline?.timelineId} onClick={() => openTimeline(view.run.record.timeline.timelineId)} type="button">Open saved cut</button>
             <button disabled={!view.reviewTimelineId} onClick={() => openTimeline(view.reviewTimelineId)} type="button">Open review frames</button>
           </div>
@@ -277,9 +282,9 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
                         <dl><dt>Asset</dt><dd>{attempt.take.assetId}</dd><dt>Job</dt><dd>{attempt.jobId || "unknown"}</dd><dt>Model</dt><dd>{attempt.take.model}</dd><dt>Seed</dt><dd>{attempt.take.seed ?? "random"}</dd></dl>
                         {attempt.rejection ? <p>Rejected {attempt.rejection.at}: {attempt.rejection.reason}</p> : null}
                         <div className="ve-film-actions">
-                          <button disabled={!canDecide || Boolean(disabledReason)} onClick={() => mutate(() => decideFilmTake(projectId, runId, shot.shotId, "accept", reasons[shot.shotId] || "Human accepted.", token), `${shot.shotId} accepted.`)} title={decisionTitle} type="button">Accept</button>
-                          <button disabled={!canDecide || Boolean(disabledReason)} onClick={() => mutate(() => decideFilmTake(projectId, runId, shot.shotId, "reject", reasons[shot.shotId] || "Human rejected.", token), `${shot.shotId} rejected; history kept.`)} title={decisionTitle} type="button">Reject</button>
-                          <button disabled={Boolean(disabledReason) || (isSavedCut && isGenerationSelected)} onClick={() => mutate(() => swapFilmTake(projectId, runId, shot.shotId, attempt.take.assetId, token), `${shot.shotId} saved cut now uses attempt ${attempt.attempt}.`)} title={disabledReason || (isSavedCut && isGenerationSelected ? "Already selected in the saved cut." : "")} type="button">Use in saved cut</button>
+                          <button disabled={!canDecide || Boolean(disabledReason)} onClick={() => mutate((signal) => decideFilmTake(projectId, runId, shot.shotId, "accept", reasons[shot.shotId] || "Human accepted.", token, { signal }), `${shot.shotId} accepted.`)} title={decisionTitle} type="button">Accept</button>
+                          <button disabled={!canDecide || Boolean(disabledReason)} onClick={() => mutate((signal) => decideFilmTake(projectId, runId, shot.shotId, "reject", reasons[shot.shotId] || "Human rejected.", token, { signal }), `${shot.shotId} rejected; history kept.`)} title={decisionTitle} type="button">Reject</button>
+                          <button disabled={Boolean(disabledReason) || (isSavedCut && isGenerationSelected)} onClick={() => mutate((signal) => swapFilmTake(projectId, runId, shot.shotId, attempt.take.assetId, token, { signal }), `${shot.shotId} saved cut now uses attempt ${attempt.attempt}.`)} title={disabledReason || (isSavedCut && isGenerationSelected ? "Already selected in the saved cut." : "")} type="button">Use in saved cut</button>
                         </div>
                       </article>
                     );
@@ -287,8 +292,8 @@ export function FilmReview({ active = true, draft, focusShotId = "", onChange, p
                 </div>
                 <label>Decision or repair reason<input aria-label={`${shot.shotId} review reason`} value={reasons[shot.shotId] ?? ""} onChange={(event) => setReasons((current) => ({ ...current, [shot.shotId]: event.target.value }))} /></label>
                 <div className="ve-film-actions">
-                  <button disabled={repairDisabled} onClick={() => mutate(() => replaceFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Replacement requested.", token), `${shot.shotId} replacement requested; checking availability.`)} title={repairTitle} type="button">Render one replacement</button>
-                  <button disabled={repairDisabled} onClick={() => mutate(() => repairFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Repair requested.", token), `${shot.shotId} repair requested; checking availability.`)} title={repairTitle} type="button">Repair from findings</button>
+                  <button disabled={repairDisabled} onClick={() => mutate((signal) => replaceFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Replacement requested.", token, { signal }), `${shot.shotId} replacement requested; checking availability.`)} title={repairTitle} type="button">Render one replacement</button>
+                  <button disabled={repairDisabled} onClick={() => mutate((signal) => repairFilmTake(projectId, runId, shot.shotId, reasons[shot.shotId] || "Repair requested.", token, { signal }), `${shot.shotId} repair requested; checking availability.`)} title={repairTitle} type="button">Repair from findings</button>
                 </div>
                 {reviews.map((review) => <ReviewFindings key={review.reviewId} review={review} />)}
                 {shot.humanDecision ? <p><strong>Human decision:</strong> {shot.humanDecision.state} attempt {shot.humanDecision.attempt} · {shot.humanDecision.reason}</p> : <p>No human decision.</p>}

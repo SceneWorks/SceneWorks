@@ -21,6 +21,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root?.unmount());
   container.remove();
+  vi.useRealTimers();
 });
 
 async function renderLifecycle(setNotice = vi.fn(), onRunChange = vi.fn(), props = {}) {
@@ -33,6 +34,22 @@ async function renderLifecycle(setNotice = vi.fn(), onRunChange = vi.fn(), props
 }
 
 describe("FilmLifecycle", () => {
+  it("polls active runs and stops after the terminal snapshot", async () => {
+    vi.useFakeTimers();
+    let active = true;
+    const onRuns = vi.fn();
+    apiFetchMock.mockImplementation((url) => url.endsWith("/planning")
+      ? Promise.resolve(null)
+      : Promise.resolve([{ locator: { id: "run_1", draftId: "film_1" }, controllerActive: active }]));
+    await renderLifecycle(vi.fn(), vi.fn(), { onRuns });
+    expect(onRuns).toHaveBeenCalledTimes(1);
+    active = false;
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(onRuns).toHaveBeenCalledTimes(2);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(onRuns).toHaveBeenCalledTimes(2);
+  });
+
   it("aborts the active feed on unmount and suppresses its stale result", async () => {
     let resolveRuns;
     let signal;
@@ -72,6 +89,26 @@ describe("FilmLifecycle", () => {
     await act(async () => resolveOld([{ locator: { id: "old", draftId: "film_1" }, controllerActive: true }]));
     expect(onRunChange).not.toHaveBeenCalledWith(expect.objectContaining({ locator: expect.objectContaining({ id: "old" }) }), expect.anything());
     expect(onRunChange).toHaveBeenCalledWith(expect.objectContaining({ locator: expect.objectContaining({ id: "new" }) }), expect.anything());
+  });
+
+  it("aborts a pending run action when the project changes", async () => {
+    let resolveAction;
+    let actionSignal;
+    const notice = vi.fn();
+    apiFetchMock.mockImplementation((url, _token, options) => {
+      if (url.endsWith("/planning")) return Promise.resolve(null);
+      if (url.endsWith("/cancel")) {
+        actionSignal = options.signal;
+        return new Promise((resolve) => { resolveAction = resolve; });
+      }
+      return Promise.resolve([{ locator: { id: "run_1", draftId: "film_1" }, controllerActive: true }]);
+    });
+    await renderLifecycle(notice);
+    await act(async () => container.querySelector("button").click());
+    await act(async () => root.render(<FilmLifecycle draftId="film_1" onRunChange={vi.fn()} projectId="project_2" setNotice={notice} token="token" />));
+    expect(actionSignal.aborted).toBe(true);
+    await act(async () => resolveAction({ locator: { id: "run_1", draftId: "film_1" } }));
+    expect(notice).not.toHaveBeenCalledWith(expect.stringContaining("Cancellation requested"));
   });
 
   it("does not start a run feed while the Editor is hidden", async () => {
@@ -150,7 +187,7 @@ describe("FilmLifecycle", () => {
     expect(apiFetchMock).toHaveBeenCalledWith(
       "/api/v1/projects/project_1/film-runs/filmrun_1/cancel",
       "token",
-      { method: "POST" },
+      expect.objectContaining({ method: "POST", signal: expect.any(AbortSignal) }),
     );
     expect(setNotice).toHaveBeenCalledWith(expect.stringContaining("Completed takes"));
   });
@@ -176,7 +213,7 @@ describe("FilmLifecycle", () => {
     expect(apiFetchMock).toHaveBeenCalledWith(
       "/api/v1/projects/project_1/film-runs/filmrun_2/resume",
       "token",
-      { method: "POST" },
+      expect.objectContaining({ method: "POST", signal: expect.any(AbortSignal) }),
     );
     expect(onRunChange).toHaveBeenCalledWith(resumed, { select: true });
   });

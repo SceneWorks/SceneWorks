@@ -44,8 +44,9 @@ export function installFilmPlanner(modelId, token) {
   });
 }
 
-export function preflightFilm(projectId, draftId, selectedShotIds, token, expectedDraftRevision) {
+export function preflightFilm(projectId, draftId, selectedShotIds, token, expectedDraftRevision, options = {}) {
   return apiFetch(`${base(projectId, draftId)}/preflight`, token, {
+    ...options,
     method: "POST",
     body: JSON.stringify({ selectedShotIds, expectedDraftRevision }),
   });
@@ -75,8 +76,9 @@ export function addFilmSound(projectId, draftId, payload, token) {
   });
 }
 
-export function exportFilmRun(projectId, runId, token) {
+export function exportFilmRun(projectId, runId, token, options = {}) {
   return apiFetch(`/api/v1/projects/${encodeURIComponent(projectId)}/film-runs/${encodeURIComponent(runId)}/export`, token, {
+    ...options,
     method: "POST",
   });
 }

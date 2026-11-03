@@ -27,7 +27,7 @@ vi.mock("../api.js", async (importOriginal) => {
     apiFetch: vi.fn(async (path, _token, options = {}) => {
       const method = options.method ?? "GET";
       const body = options.body ? JSON.parse(options.body) : undefined;
-      apiCalls.push({ path, method, body });
+      apiCalls.push({ path, method, body, signal: options.signal });
       return apiRouter({ path, method, body });
     }),
   };
@@ -226,13 +226,42 @@ describe("useTimelines dirty tracking (sc-11967)", () => {
   });
 });
 
-describe("useTimelines film delivery polling", () => {
+describe("useTimelines film delivery feed", () => {
+  it("refreshes on active and terminal snapshots, then stops, and aborts on feed teardown", async () => {
+    vi.useFakeTimers();
+    const get = mount();
+    const timeline = makeTimeline({ filmAssembly: { runs: { run_1: {} } } });
+    await loadSelected(get, timeline);
+    apiCalls.length = 0;
+    apiRouter = () => timeline;
+    const owner = new AbortController();
+    const running = [{ locator: { id: "run_1" }, controllerActive: true }];
+    await act(async () => get().api.refreshFilmTimeline(running, owner.signal));
+    await settle();
+    expect(apiCalls).toHaveLength(1);
+    expect(apiCalls[0].signal).toBeInstanceOf(AbortSignal);
+    await act(async () => get().api.refreshFilmTimeline([{ locator: { id: "run_1" }, controllerActive: false }], owner.signal));
+    await settle();
+    expect(apiCalls).toHaveLength(2);
+    await act(async () => get().api.refreshFilmTimeline([{ locator: { id: "run_1" }, controllerActive: false }], owner.signal));
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(apiCalls).toHaveLength(2);
+    let resolve;
+    apiRouter = () => new Promise((done) => { resolve = done; });
+    act(() => { get().api.refreshFilmTimeline(running, owner.signal); });
+    const pendingSignal = apiCalls.at(-1).signal;
+    owner.abort();
+    expect(pendingSignal.aborted).toBe(true);
+    await act(async () => resolve({ ...timeline, name: "stale" }));
+    expect(get().api.activeTimeline.name).toBe("Main");
+  });
+
   it("adopts a later clip on the same timeline revision stream without losing dirty edits or selection", async () => {
     vi.useFakeTimers();
     const get = mount();
     const first = makeTimeline({
       revision: 1,
-      filmAssembly: { runId: "run_1" },
+      filmAssembly: { runs: { run_1: {} } },
       tracks: [{ id: "track_main", name: "Main", items: [{ id: "item_1", assetId: "asset_1", type: "video", timelineStart: 0, timelineEnd: 4 }] }],
     });
     await loadSelected(get, first);
@@ -242,7 +271,7 @@ describe("useTimelines film delivery polling", () => {
 
     const delivered = makeTimeline({
       revision: 2,
-      filmAssembly: { runId: "run_1" },
+      filmAssembly: { runs: { run_1: {} } },
       tracks: [{ id: "track_main", name: "Main", items: [
         { id: "item_1", assetId: "asset_1", type: "video", timelineStart: 0, timelineEnd: 4 },
         { id: "item_2", assetId: "asset_2", type: "video", timelineStart: 4, timelineEnd: 8 },
@@ -254,7 +283,8 @@ describe("useTimelines film delivery polling", () => {
       return delivered;
     };
 
-    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    const feedSignal = new AbortController().signal;
+    await act(async () => get().api.refreshFilmTimeline([{ locator: { id: "run_1" }, controllerActive: true }], feedSignal));
     await settle();
     expect(get().api.selectedTimelineId).toBe("tl_1");
     expect(get().api.activeTimeline.name).toBe("Unsaved title");
