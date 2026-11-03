@@ -67,7 +67,7 @@ pub(super) const ZIMAGE_CONTROL_FILE: &str =
 /// base `Tongyi-MAI/Z-Image` snapshot + the base control checkpoint, and driven with REAL CFG. Default
 /// control repo comes from the `STRICT_CONTROL_ENGINES` table (via `strict_control_default_repo`).
 const ZIMAGE_BASE_CONTROL_ENGINE_ID: &str = "z_image_control";
-const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-2.1.safetensors";
+pub(super) const ZIMAGE_BASE_CONTROL_FILE: &str = "Z-Image-Fun-Controlnet-Union-2.1.safetensors";
 
 // `pose_entries` / `parse_poses` / `PoseInput` moved to `base.rs` (shared by the candle InstantID
 // lane, sc-5491); still in scope here via the shared `image_jobs` module.

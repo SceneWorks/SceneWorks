@@ -1,28 +1,15 @@
-#[cfg(test)]
-use crate::ApiClient;
-#[cfg(all(test,native_lane))]
-use super::CancelFlag;
-#[cfg(all(test,native_lane))]
-use super::stream::GenEvent;
-#[cfg(test)]
-use super::ImagePlan;
-use super::ImageRequest;
-#[cfg(test)]
-use crate::JobSnapshot;
-#[cfg(test)]
-use crate::Path;
-#[cfg(test)]
-use crate::PathBuf;
-use crate::Settings;
-use crate::WorkerError;
-use crate::WorkerResult;
-#[cfg(all(test,native_lane))]
-use super::events::consume_gen_events;
-use super::parse_prompt_enhancement_fields;
 //! Tensor-neutral FLUX 3 prompt-upsampling composition and provenance. The same functions run
 //! in both native production lanes; CPU tests exercise them without linking a CUDA/MLX bundle.
 
-
+#[cfg(all(test, native_lane))]
+use super::events::consume_gen_events;
+use super::parse_prompt_enhancement_fields;
+#[cfg(all(test, native_lane))]
+use super::stream::GenEvent;
+use super::ImageRequest;
+use crate::Settings;
+use crate::WorkerError;
+use crate::WorkerResult;
 use gen_core::{LoadSpec, WeightsSource};
 use gen_core_flux3::pup::{
     UpsampleMode, MAX_EFFECTIVE_CAPTION_CHARS as PROMPT_ENHANCE_MAX_EFFECTIVE_CHARS,
@@ -827,7 +814,7 @@ mod tests {
     #[test]
     fn native_progress_bridge_keeps_upsampling_separate_from_denoise_steps() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(2);
-        super::super::send_gen_progress(
+        crate::image_jobs::stream::send_gen_progress(
             &tx,
             3,
             gen_core::Progress::Upsampling {
@@ -836,7 +823,7 @@ mod tests {
             },
         );
         match rx.try_recv().unwrap() {
-            super::super::GenEvent::Upsampling {
+            crate::image_jobs::stream::GenEvent::Upsampling {
                 index: 3,
                 tokens: 17,
                 max_tokens: 73,

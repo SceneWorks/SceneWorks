@@ -111,9 +111,9 @@ pub(super) const MAGE_FLOW_PLAN_FAMILY: &str = "mage-flow";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct PreparedMageFinetunedTransformer {
-    directory: PathBuf,
-    config: gen_core::PinnedWeightsFile,
-    weights: gen_core::PinnedWeightsFile,
+    pub(super) directory: PathBuf,
+    pub(super) config: gen_core::PinnedWeightsFile,
+    pub(super) weights: gen_core::PinnedWeightsFile,
 }
 
 /// Resolve the fine-tuned Mage-Flow transformer directory for `request`, or `None` when this is not

@@ -1,9 +1,9 @@
-use super::choose_downtier;
-use super::DowntierPick;
-use super::TierFit;
 use super::super::mlx::mlx_tier_fit;
 use super::super::LoadSpec;
 use super::super::WeightsSource;
+use super::choose_downtier;
+use super::DowntierPick;
+use super::TierFit;
 use crate::PathBuf;
 #[test]
 #[ignore = "sc-10733 AC#6 e2e; run with SCENEWORKS_MLX_MEMORY_CAP_GB=21"]

@@ -334,8 +334,8 @@ pub(super) struct HiresFixPlan {
     pub(super) width: u32,
     pub(super) height: u32,
     pub(super) steps: u32,
-    guidance: Option<f32>,
-    true_cfg: Option<f32>,
+    pub(super) guidance: Option<f32>,
+    pub(super) true_cfg: Option<f32>,
     pub(super) provider_reference_strength: f32,
 }
 

@@ -164,6 +164,11 @@ use super::mlx_model;
     )
 ))]
 use super::moss::generate_moss_stream_with_runtime;
+#[cfg(any(
+    all(not(target_os = "macos"), feature = "backend-candle"),
+    all(test, target_os = "macos")
+))]
+use super::moss::MossStreamRuntime;
 #[cfg(not(target_os = "macos"))]
 use super::moss::NativeMossStreamRuntime;
 #[cfg(not(target_os = "macos"))]
@@ -482,7 +487,7 @@ pub(super) async fn generate_candle_stream(
     all(not(target_os = "macos"), feature = "backend-candle"),
     all(test, target_os = "macos")
 ))]
-async fn generate_candle_stream_using(
+pub(super) async fn generate_candle_stream_using(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,

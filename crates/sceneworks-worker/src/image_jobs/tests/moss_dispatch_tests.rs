@@ -19,17 +19,17 @@ use super::Probe;
 use super::Progress;
 use super::ProjectStore;
 use super::Settings;
-use super::Sha256;
 use super::Value;
 use super::WeightsSource;
 use super::WorkerError;
-use crate::heartbeat;
-use crate::progress;
-use crate::Digest;
+use crate::image_jobs::moss::MossStreamRuntime;
 use crate::Duration;
 use crate::Instant;
 use crate::Uuid;
 use crate::WorkerResult;
+use gen_core::moss_image::{
+    MossImageAcceleration, MossImageAdvancedOutput, MossImageOutputKind, MossImageVariant,
+};
 use serde_json::json;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},

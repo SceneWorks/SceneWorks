@@ -1,5 +1,5 @@
-use super::prepare_candle_image_route;
 use super::super::ImageRequest;
+use super::prepare_candle_image_route;
 use crate::Settings;
 use crate::WorkerError;
 use serde_json::json;

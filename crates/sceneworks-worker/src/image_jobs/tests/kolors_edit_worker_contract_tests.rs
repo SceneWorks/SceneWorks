@@ -1,7 +1,7 @@
-use super::resolve_candle_kolors_edit_init;
 use super::super::routing::resolve_candle_image_route;
 use super::super::routing::CandleImageRoute;
 use super::super::ImageRequest;
+use super::resolve_candle_kolors_edit_init;
 use crate::Path;
 use crate::PathBuf;
 use crate::ProjectStore;

@@ -41,7 +41,7 @@ pub(super) fn resolve_steps(request: &ImageRequest, model: &ResolvedModel) -> u3
 /// The largest `advanced.steps` the generic image lane forwards: the historical 80, or the model's
 /// own default when that is higher. Mirrored by Image Studio's Steps input (`maxStepsForModel`).
 #[cfg(native_lane)]
-fn max_requested_steps(default_steps: u32) -> u32 {
+pub(super) fn max_requested_steps(default_steps: u32) -> u32 {
     default_steps.max(sceneworks_core::image_request::BASE_MAX_IMAGE_STEPS)
 }
 
@@ -497,7 +497,7 @@ pub(crate) fn curated_image_menu() -> (Vec<&'static str>, Vec<&'static str>) {
     )
 }
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/sampling_knob_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/sampling_knob_tests.rs"]
 mod sampling_knob_tests;

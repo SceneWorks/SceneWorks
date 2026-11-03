@@ -1,7 +1,7 @@
-use super::candle_certified_hf_artifact_path;
-use super::candle_certified_load_spec;
 use super::super::LoadSpec;
 use super::super::WeightsSource;
+use super::candle_certified_hf_artifact_path;
+use super::candle_certified_load_spec;
 use crate::JsonObject;
 use crate::Path;
 use crate::PathBuf;

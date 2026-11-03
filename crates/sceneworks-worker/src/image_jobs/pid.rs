@@ -5,8 +5,6 @@ use crate::safe_weight_filename;
 use crate::Path;
 use crate::Value;
 use crate::WorkerResult;
-#[cfg(all(test, target_os = "macos"))]
-use serde_json::json;
 // Per-generation PiD (pixel-diffusion) super-resolving decoder routing (epic 7840, sc-7849).
 //
 // PiD is an OPTIONAL, per-generation replacement for a model's VAE decoder: when the request opts in

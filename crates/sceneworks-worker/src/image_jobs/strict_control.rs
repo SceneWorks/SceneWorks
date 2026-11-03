@@ -44,10 +44,10 @@ pub(super) struct StrictControlEngine {
     /// The mlx-gen registry id (`crate::inference_runtime::load(engine_id, spec)`).
     engine_id: &'static str,
     /// The default Fun-Union control-weights HF repo for this engine.
-    repo: &'static str,
+    pub(super) repo: &'static str,
     /// The `ControlKind`s this engine accepts. Pose is the proven tier on every engine; canny / depth
     /// are unlocked per-model by sc-8248 / sc-8249 / sc-8250 (the driver supports them generically here).
-    supported_kinds: &'static [ControlKind],
+    pub(super) supported_kinds: &'static [ControlKind],
 }
 
 /// The shared strict-control catalog (S0 table). SINGLE SOURCE OF TRUTH for `(engine_id, control_repo,

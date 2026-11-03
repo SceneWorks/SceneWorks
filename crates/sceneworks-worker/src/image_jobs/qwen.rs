@@ -488,12 +488,12 @@ pub(super) fn qwen_edit_engine_id(model: &str) -> Option<&'static str> {
 /// `load_lora_weights` → `fuse_lora` (it is not a manifest install artifact). sc-3398.
 pub(super) struct LightningDistill {
     /// The engine sampler id passed via `GenerationRequest.sampler`.
-    sampler: &'static str,
+    pub(super) sampler: &'static str,
     /// HuggingFace repo holding the distill LoRA.
-    repo: &'static str,
+    pub(super) repo: &'static str,
     /// The distill LoRA filename within the repo (the 4-step bf16 variant matches the
     /// 4-step `default_steps` of the lightning model row).
-    file: &'static str,
+    pub(super) file: &'static str,
 }
 
 /// The default Lightning distill-LoRA repo (`qwen_image_edit_2511_lightning`). A fixed default; a

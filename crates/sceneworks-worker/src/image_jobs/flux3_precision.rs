@@ -1,27 +1,3 @@
-#[cfg(native_lane)]
-use super::LoadSpec;
-#[cfg(any(test,native_lane))]
-use crate::Path;
-#[cfg(any(test,native_lane))]
-use crate::PathBuf;
-#[cfg(native_lane)]
-use super::Quant;
-#[cfg(test)]
-use crate::Sha256;
-#[cfg(any(test,native_lane))]
-use crate::Value;
-#[cfg(native_lane)]
-use super::WeightsSource;
-use crate::WorkerError;
-use crate::WorkerResult;
-#[cfg(all(test,native_lane))]
-use crate::advanced;
-#[cfg(test)]
-use serde_json::json;
-#[cfg(any(test,native_lane))]
-use crate::local_derivation;
-#[cfg(test)]
-use sha2::Digest;
 //! FLUX 3 Image Klein package selection (sc-26241).
 //!
 //! The distilled `flux3_klein` route loads exactly one [`Flux3Tier`] package, every one of them a
@@ -42,12 +18,12 @@ use sha2::Digest;
 //! never the bits-ladder `q8` default the generic resolvers fall back to. Nothing here downtiers,
 //! dequantizes or substitutes another package; every shape it cannot honor is a typed refusal.
 
+use crate::WorkerError;
+use crate::WorkerResult;
 use sceneworks_core::contracts::JsonObject;
 use sceneworks_core::image_request::{
     flux3_requested_tier, image_quant_tier_refusal, Flux3Tier, FLUX3_TIERED_MODEL_IDS,
 };
-
-
 
 /// The native image lane a request is about to run on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

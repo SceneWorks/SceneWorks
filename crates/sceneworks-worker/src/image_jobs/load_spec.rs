@@ -20,8 +20,6 @@ use super::LoadSpec;
 use super::Quant;
 use super::WeightsSource;
 use crate::advanced;
-#[cfg(any(test, all(not(target_os = "macos"), feature = "backend-candle")))]
-use crate::BTreeMap;
 use crate::JsonObject;
 #[cfg(any(
     all(not(target_os = "macos"), feature = "backend-candle"),
@@ -1020,22 +1018,22 @@ pub(super) fn load_control_engine(
         .map_err(|error| WorkerError::Engine(format!("{engine_id} load failed: {error}")))
 }
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/sdxl_endpoint_inventory_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/sdxl_endpoint_inventory_tests.rs"]
 mod sdxl_endpoint_inventory_tests;
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/chroma_load_seal_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/chroma_load_seal_tests.rs"]
 mod chroma_load_seal_tests;
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/ideogram_load_seal_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/ideogram_load_seal_tests.rs"]
 mod ideogram_load_seal_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/mage_artifact_certification_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/mage_artifact_certification_tests.rs"]
 mod mage_artifact_certification_tests;

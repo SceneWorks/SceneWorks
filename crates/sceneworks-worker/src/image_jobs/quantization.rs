@@ -345,8 +345,8 @@ pub(super) fn fixed_mlx_artifact_tier(model_id: &str) -> Option<&'static str> {
     (model_id == "flux2_klein_9b_true_v2").then_some("bf16")
 }
 
-# [cfg (native_lane)]
-# [cfg (test)]
-# [cfg (target_os = "macos")]
-#[path="tests/quant_tier_reconcile_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+#[path = "tests/quant_tier_reconcile_tests.rs"]
 mod quant_tier_reconcile_tests;

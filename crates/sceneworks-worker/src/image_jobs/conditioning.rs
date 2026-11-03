@@ -1739,12 +1739,12 @@ pub(super) fn resolve_generic_lane_conditioning(
     }
 }
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/kolors_edit_worker_contract_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/kolors_edit_worker_contract_tests.rs"]
 mod kolors_edit_worker_contract_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , native_lane))]
-#[path="tests/text_style_gain_gate_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, native_lane))]
+#[path = "tests/text_style_gain_gate_tests.rs"]
 mod text_style_gain_gate_tests;

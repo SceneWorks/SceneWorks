@@ -49,21 +49,9 @@ pub const PRODUCTION_MODEL_CONSUMERS: &[ModelConsumerInventoryEntry] = &[
     ModelConsumerInventoryEntry {
         source_files: &[
             "crates/sceneworks-worker/src/image_jobs.rs",
-            "crates/sceneworks-worker/src/image_jobs/geometry.rs",
-            "crates/sceneworks-worker/src/image_jobs/routing.rs",
             "crates/sceneworks-worker/src/image_jobs/artifact_resolution.rs",
-            "crates/sceneworks-worker/src/image_jobs/quantization.rs",
             "crates/sceneworks-worker/src/image_jobs/load_spec.rs",
-            "crates/sceneworks-worker/src/image_jobs/adapters.rs",
-            "crates/sceneworks-worker/src/image_jobs/load_policy.rs",
             "crates/sceneworks-worker/src/image_jobs/memory.rs",
-            "crates/sceneworks-worker/src/image_jobs/sampling.rs",
-            "crates/sceneworks-worker/src/image_jobs/conditioning.rs",
-            "crates/sceneworks-worker/src/image_jobs/render.rs",
-            "crates/sceneworks-worker/src/image_jobs/mlx.rs",
-            "crates/sceneworks-worker/src/image_jobs/candle.rs",
-            "crates/sceneworks-worker/src/image_jobs/metrics.rs",
-            "crates/sceneworks-worker/src/image_jobs/events.rs",
             "crates/sceneworks-worker/src/image_jobs/bernini.rs",
             "crates/sceneworks-worker/src/image_jobs/detail.rs",
             "crates/sceneworks-worker/src/image_jobs/flux1_control.rs",
@@ -560,6 +548,9 @@ mod tests {
     const TEST_ONLY_MODEL_SURFACES: &[&str] = &[
         "crates/sceneworks-worker/src/bernini_tier_build.rs",
         "crates/sceneworks-worker/src/footprint_measure.rs",
+        // Shared smoke HF-layout helpers remain behind cfg(all(test, native_lane)); the root
+        // declaration is verified by inventory_covers_every_required_category_and_has_real_entrypoints.
+        "crates/sceneworks-worker/src/smoke_support.rs",
         // sc-26243: off-Mac sibling compiled only under cfg(all(test, not(macos), backend-candle)).
         "crates/sceneworks-worker/src/flux3_candle_footprint.rs",
         // sc-27092: the imported ComfyUI-quantized (scalar fp8 / MXFP8) worker smoke — an

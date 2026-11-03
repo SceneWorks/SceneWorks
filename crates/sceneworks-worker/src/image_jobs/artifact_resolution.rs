@@ -642,7 +642,7 @@ pub(crate) fn resolve_weights_dir(
 /// (sc-24114) — answering `None` there let the caller fall back to the default snapshot directory,
 /// which loads a bf16 root that may not hold a `transformer/` at all instead of saying "install".
 #[cfg(native_lane)]
-fn qwen_image_2_1_tier_dir(
+pub(super) fn qwen_image_2_1_tier_dir(
     settings: &Settings,
     request: &ImageRequest,
 ) -> WorkerResult<Option<(PathBuf, &'static str)>> {
@@ -1824,17 +1824,17 @@ pub(super) fn resolve_flux_ip_adapter_dir(settings: &Settings) -> WorkerResult<P
     Ok(staged)
 }
 
-# [cfg (native_lane)]
-# [cfg (all (test , target_os = "macos"))]
-#[path="tests/resolved_artifact_provenance_tests.rs"]
-pub (crate) mod resolved_artifact_provenance_tests;
+#[cfg(native_lane)]
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tests/resolved_artifact_provenance_tests.rs"]
+pub(crate) mod resolved_artifact_provenance_tests;
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/boogu_tier_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/boogu_tier_tests.rs"]
 mod boogu_tier_tests;
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/standard_tier_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/standard_tier_tests.rs"]
 mod standard_tier_tests;

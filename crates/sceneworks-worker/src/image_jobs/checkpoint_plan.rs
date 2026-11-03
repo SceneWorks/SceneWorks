@@ -620,21 +620,21 @@ fn checkpoint_plan_refusal(error: CheckpointPlanError) -> WorkerError {
 /// Every plan-derived, pinned input the handler needs. Selected once in `prepare_image_route` and
 /// carried through dispatch so the async preamble can never retarget a source.
 pub(super) struct PreparedCheckpointPlanSources {
-    checkpoint_id: String,
+    pub(super) checkpoint_id: String,
     resolved: ResolvedCheckpointV1,
     /// The family's portable checkpoint-adapter authority — eligible backends, dialect source
     /// shapes, component topology and per-operation capability policy.
     adapter: &'static gen_core::CheckpointAdapterRegistration,
     /// The registered provider that loads this family/source/operation.
-    descriptor: gen_core::ModelDescriptor,
-    source: gen_core::ImportedModelSource,
+    pub(super) descriptor: gen_core::ModelDescriptor,
+    pub(super) source: gen_core::ImportedModelSource,
     /// The registry operation the request selected, and the one the descriptor was resolved for.
-    operation: gen_core::ImportedModelOperation,
+    pub(super) operation: gen_core::ImportedModelOperation,
     /// The provider's primary weights, as the loader will receive them (a File for a single-file
     /// backbone, a Dir for a component-directory dialect).
-    primary: WeightsSource,
+    pub(super) primary: WeightsSource,
     /// Components the provider declares as required, resolved to local sources.
-    components: Vec<(&'static str, WeightsSource)>,
+    pub(super) components: Vec<(&'static str, WeightsSource)>,
     /// Every payload-selected File token the route retains from selection through load: the
     /// primary's file(s) plus any component sourced from a plan layer.
     pins: Vec<gen_core::PinnedWeightsFile>,
@@ -684,9 +684,9 @@ struct CheckpointPlanPrimary {
 #[derive(Debug)]
 pub(super) struct CheckpointPlanPrimarySelection<'a> {
     /// `Some` only for a component-directory dialect, whose loader opens the directory itself.
-    directory: Option<PathBuf>,
+    pub(super) directory: Option<PathBuf>,
     /// Every layer the primary artifact covers, in plan order. The backbone is always first.
-    layers: Vec<&'a ResolvedLayerV1>,
+    pub(super) layers: Vec<&'a ResolvedLayerV1>,
 }
 
 pub(super) fn checkpoint_plan_primary_selection<'a>(

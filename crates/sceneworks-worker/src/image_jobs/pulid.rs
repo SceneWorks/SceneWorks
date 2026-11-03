@@ -198,12 +198,12 @@ fn pulid_timestep_to_start_cfg(request: &ImageRequest) -> u32 {
 /// The resolved engine weight inputs: the three files/dirs the engine reads from its env-var seam.
 pub(super) struct PulidWeights {
     /// `pulid_flux_v0.9.1.safetensors` (the IDFormer + PerceiverAttention CA blocks).
-    adapter: PathBuf,
+    pub(super) adapter: PathBuf,
     /// The converted EVA02-CLIP-L-336 safetensors.
-    eva: PathBuf,
+    pub(super) eva: PathBuf,
     /// A dir holding `scrfd_10g.safetensors` + `arcface_iresnet100.safetensors` +
     /// `bisenet_parsing.safetensors` (the native face stack `mlx-gen-face` loads).
-    face_dir: PathBuf,
+    pub(super) face_dir: PathBuf,
 }
 
 /// An operator-/parity-gate-supplied weight preset: if all three engine env vars are ALREADY set

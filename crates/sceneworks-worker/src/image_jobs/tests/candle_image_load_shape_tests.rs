@@ -1,8 +1,8 @@
-use super::apply_candle_image_load_shape;
 use super::super::memory::optimized_shared_memory_context;
 use super::super::memory::shared_image_reference_count;
 use super::super::LoadSpec;
 use super::super::WeightsSource;
+use super::apply_candle_image_load_shape;
 use std::sync::{Arc, Mutex};
 
 fn fixture_spec() -> LoadSpec {

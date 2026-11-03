@@ -266,7 +266,7 @@ pub(super) fn build_image_metrics(
     image_settings_metrics(request, effective_steps, None, None, None, image_count)
 }
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/metrics_settings_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/metrics_settings_tests.rs"]
 mod metrics_settings_tests;

@@ -1057,32 +1057,32 @@ pub(super) async fn gate_with_evict_reclaim<D>(
     Ok((reclaimed, reclaimed_budget))
 }
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/candle_request_residency_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/candle_request_residency_tests.rs"]
 mod candle_request_residency_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/krea_turbo_memory_route_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/krea_turbo_memory_route_tests.rs"]
 mod krea_turbo_memory_route_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/candle_resolved_tier_contract_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/candle_resolved_tier_contract_tests.rs"]
 mod candle_resolved_tier_contract_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , native_lane))]
-#[path="tests/capability_downtier_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, native_lane))]
+#[path = "tests/capability_downtier_tests.rs"]
 mod capability_downtier_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , target_os = "macos"))]
-#[path="tests/mlx_downtier_emulation_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tests/mlx_downtier_emulation_tests.rs"]
 mod mlx_downtier_emulation_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/candle_downtier_emulation_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/candle_downtier_emulation_tests.rs"]
 mod candle_downtier_emulation_tests;

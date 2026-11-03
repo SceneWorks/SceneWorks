@@ -50,10 +50,7 @@ use super::render::hires_fix_reference_count;
 use super::render::resolve_hires_fix_plan;
 use super::render::HiresFixPlan;
 use super::resolve_seed;
-#[cfg(all(
-    native_lane,
-    any(all(not(target_os = "macos"), feature = "backend-candle"), test)
-))]
+#[cfg(all(native_lane, all(not(target_os = "macos"), feature = "backend-candle")))]
 use super::routing::imported_base_snapshot_companions;
 use super::routing::PreparedFileDispatch;
 use super::sampling::resolve_advanced_or_manifest_u32;
@@ -601,16 +598,16 @@ pub(super) fn krea_imported_control_available(request: &ImageRequest, settings: 
 
 #[derive(Debug)]
 pub(super) struct PreparedKreaImportedSources {
-    dit_pin: gen_core::PinnedWeightsFile,
-    prepared_adapters: PreparedAdapters,
+    pub(super) dit_pin: gen_core::PinnedWeightsFile,
+    pub(super) prepared_adapters: PreparedAdapters,
 }
 
 #[cfg(target_os = "macos")]
 #[derive(Debug)]
 pub(super) struct PreparedKreaImportedControlSources {
-    dit_pin: gen_core::PinnedWeightsFile,
-    control_pin: gen_core::PinnedWeightsFile,
-    prepared_adapters: PreparedAdapters,
+    pub(super) dit_pin: gen_core::PinnedWeightsFile,
+    pub(super) control_pin: gen_core::PinnedWeightsFile,
+    pub(super) prepared_adapters: PreparedAdapters,
 }
 
 /// Resolve the pose control-branch overlay for the imported lane **cache-only** (epic 17625 AC9: a

@@ -1,5 +1,5 @@
-use super::resolve_text_style_gain;
 use super::super::ImageRequest;
+use super::resolve_text_style_gain;
 use crate::Value;
 use serde_json::json;
 

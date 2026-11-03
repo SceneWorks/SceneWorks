@@ -1,5 +1,5 @@
-use super::resolved_mlx_artifact_provenance;
 use super::super::ImageRequest;
+use super::resolved_mlx_artifact_provenance;
 use crate::Path;
 use crate::Settings;
 use crate::Value;

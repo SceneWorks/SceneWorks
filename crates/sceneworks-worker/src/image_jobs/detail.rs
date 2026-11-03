@@ -83,15 +83,15 @@ fn engine_image_to_rgb(image: Image) -> WorkerResult<image::RgbImage> {
 /// The locked detail recipe (sc-2437 round-2 spike defaults), resolved from `advanced`.
 #[derive(Clone)]
 pub(super) struct DetailParams {
-    strength: f32,
-    cn_scale: f32,
-    steps: u32,
-    guidance: f32,
-    tile: u32,
-    overlap: u32,
-    prompt: String,
-    negative: String,
-    seed: i64,
+    pub(super) strength: f32,
+    pub(super) cn_scale: f32,
+    pub(super) steps: u32,
+    pub(super) guidance: f32,
+    pub(super) tile: u32,
+    pub(super) overlap: u32,
+    pub(super) prompt: String,
+    pub(super) negative: String,
+    pub(super) seed: i64,
 }
 
 /// Events emitted by the blocking tiled-detail pass. Tile completion is load-bearing progress;

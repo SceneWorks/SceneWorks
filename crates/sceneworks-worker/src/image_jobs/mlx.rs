@@ -312,7 +312,7 @@ pub(super) async fn generate_stream(
 /// is injectable, so a test can pin progress / cancel / failure on a real job arm without weights.
 #[allow(clippy::too_many_arguments)]
 #[cfg(target_os = "macos")]
-async fn generate_stream_using(
+pub(super) async fn generate_stream_using(
     api: &ApiClient,
     settings: &Settings,
     job: &JobSnapshot,
@@ -1274,7 +1274,7 @@ async fn generate_stream_using(
     .await
 }
 
-# [cfg (native_lane)]
-# [cfg (test)]
-#[path="tests/mlx_request_tier_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(test)]
+#[path = "tests/mlx_request_tier_tests.rs"]
 mod mlx_request_tier_tests;

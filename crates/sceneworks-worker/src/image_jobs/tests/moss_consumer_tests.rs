@@ -38,7 +38,6 @@ use super::PathBuf;
 use super::Progress;
 use super::ProjectStore;
 use super::Settings;
-use super::Sha256;
 use super::Value;
 use super::WeightsSource;
 use super::WorkerError;

@@ -1,73 +1,73 @@
+use super::adapters::resolve_adapters;
+use super::admit_conditioning_paths;
+use super::artifact_resolution::krea_model_subdir;
+use super::conditioning::pose_entries;
+use super::conditioning::resolve_text_style_gain;
+#[cfg(target_os = "macos")]
+use super::krea_control::ensure_krea_control_weights;
+#[cfg(target_os = "macos")]
+use super::krea_control::is_krea_control_model;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_overlay_repo_file;
+#[cfg(target_os = "macos")]
+use super::krea_control::krea_control_payload_overlay_path;
+#[cfg(target_os = "macos")]
+use super::krea_control::resolve_krea_control_base;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_BASE_ENV;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_DEFAULT_SCALE;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_DEFAULT_STEPS;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_ENGINE_ID;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_MLX_REPO;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_FILE;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_REPO;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_OVERLAY_REVISION;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_SCALE_CAP;
+#[cfg(target_os = "macos")]
+use super::krea_control::KREA_CONTROL_WEIGHTS_ENV;
+use super::load_spec::attach_manifest_text_encoder;
+use super::memory::gate_with_evict_reclaim;
+use super::metrics::lora_label;
+use super::nvfp4_host_eligible;
+use super::nvfp4_selected;
+use super::quantization::gate_tier_key;
+use super::run_candle_strict_control;
+use super::sampling::resolve_advanced_or_manifest_u32;
+use super::strict_control::trusted_control_weight_revision;
 use super::AdapterSpec;
-use crate::ApiClient;
 use super::CancelFlag;
 use super::CandleStrictControl;
-use crate::DownloadContext;
 use super::Image;
 use super::ImagePlan;
 use super::ImageRequest;
-use crate::JobSnapshot;
-use crate::JsonObject;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_BASE_ENV;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_DEFAULT_SCALE;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_DEFAULT_STEPS;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_ENGINE_ID;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_MLX_REPO;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_OVERLAY_FILE;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_OVERLAY_REPO;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_OVERLAY_REVISION;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_SCALE_CAP;
-#[cfg(target_os="macos")]
-use super::krea_control::KREA_CONTROL_WEIGHTS_ENV;
+use super::Progress;
 #[cfg(test)]
 use super::NVFP4_TIER;
+use crate::advanced;
+use crate::conditioning_fit::ConditioningAdmission;
+use crate::ensure_hf_cached_file;
+use crate::gpu;
+use crate::huggingface_snapshot_dir;
+use crate::resolve_app_managed_model_dir;
+use crate::safe_weight_filename;
+use crate::ApiClient;
+use crate::DownloadContext;
+use crate::JobSnapshot;
+use crate::JsonObject;
 use crate::Path;
 use crate::PathBuf;
-use super::Progress;
 use crate::Settings;
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
-use super::admit_conditioning_paths;
-use crate::advanced;
-use super::load_spec::attach_manifest_text_encoder;
-use crate::ensure_hf_cached_file;
-#[cfg(target_os="macos")]
-use super::krea_control::ensure_krea_control_weights;
-use super::quantization::gate_tier_key;
-use super::memory::gate_with_evict_reclaim;
-use crate::gpu;
-use crate::huggingface_snapshot_dir;
-#[cfg(target_os="macos")]
-use super::krea_control::is_krea_control_model;
-#[cfg(target_os="macos")]
-use super::krea_control::krea_control_overlay_repo_file;
-#[cfg(target_os="macos")]
-use super::krea_control::krea_control_payload_overlay_path;
-use super::artifact_resolution::krea_model_subdir;
-use super::metrics::lora_label;
-use super::nvfp4_host_eligible;
-use super::nvfp4_selected;
-use super::conditioning::pose_entries;
-use super::adapters::resolve_adapters;
-use super::sampling::resolve_advanced_or_manifest_u32;
-use crate::resolve_app_managed_model_dir;
-#[cfg(target_os="macos")]
-use super::krea_control::resolve_krea_control_base;
-use super::conditioning::resolve_text_style_gain;
-use super::run_candle_strict_control;
-use crate::safe_weight_filename;
-use super::strict_control::trusted_control_weight_revision;
-use crate::conditioning_fit::ConditioningAdmission;
 use serde_json::json;
 
 // Candle (Windows/CUDA) Krea 2 pose-ControlNet route (sc-8464, epic 8459) — `krea_2_turbo` +

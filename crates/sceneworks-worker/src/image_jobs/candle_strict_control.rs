@@ -1,30 +1,30 @@
-use crate::ApiClient;
+use super::admit_conditioning_overlay;
+use super::conditioning::parse_poses;
+use super::conditioning::resolve_control_identity_source;
+use super::conditioning::stage_likeness;
+use super::events::consume_gen_events;
+use super::resolve_seed;
+use super::stream::drive_gen_items_scored;
+use super::stream::start_gen_stream;
+use super::strict_control::ensure_depth_estimator_dir;
+use super::strict_control::preprocess_control_entry;
+use super::strict_control::requested_control_kind;
+use super::strict_control::resolve_control_source;
+use super::strict_control::resolve_user_control_map;
+use super::strict_control::validate_control_kind;
 use super::CancelFlag;
 use super::ControlKind;
 use super::Image;
 use super::ImagePlan;
+use super::Progress;
+use crate::conditioning_fit::ConditioningAdmission;
+use crate::ApiClient;
 use crate::JobSnapshot;
 use crate::JsonObject;
 use crate::Path;
-use super::Progress;
 use crate::Settings;
 use crate::Value;
 use crate::WorkerResult;
-use super::admit_conditioning_overlay;
-use super::events::consume_gen_events;
-use super::stream::drive_gen_items_scored;
-use super::strict_control::ensure_depth_estimator_dir;
-use super::conditioning::parse_poses;
-use super::strict_control::preprocess_control_entry;
-use super::strict_control::requested_control_kind;
-use super::conditioning::resolve_control_identity_source;
-use super::strict_control::resolve_control_source;
-use super::resolve_seed;
-use super::strict_control::resolve_user_control_map;
-use super::conditioning::stage_likeness;
-use super::stream::start_gen_stream;
-use super::strict_control::validate_control_kind;
-use crate::conditioning_fit::ConditioningAdmission;
 
 // Shared candle (Windows/CUDA) strict-control driver (sc-8304, epic 8236). The candle siblings of the
 // MLX `strict_control.rs` driver: the three bespoke non-registry candle control providers

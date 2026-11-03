@@ -41,15 +41,11 @@ use crate::Path;
 use crate::PathBuf;
 use crate::ProjectStore;
 use crate::Settings;
-#[cfg(test)]
-use crate::Sha256;
 use crate::Value;
 use crate::WorkerError;
 use crate::WorkerResult;
 use crate::{fresh_asset_id, now_rfc3339};
 use serde_json::json;
-#[cfg(test)]
-use sha2::Digest;
 // MOSS uses the generic image stream/cache transaction, with its own exact author admission.
 // The same function is reached from the MLX and Candle `_using` loader-injection seams.
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]

@@ -1,4 +1,4 @@
-use super::super::{admission_needs_no_staging, declared_sequential_resident_alternative};
+use super::{admission_needs_no_staging, declared_sequential_resident_alternative};
 use gen_core::{LoadShapeDeclarationResult, LoadSpec, OffloadPolicy, WeightsSource};
 
 const GIB: u64 = 1024 * 1024 * 1024;

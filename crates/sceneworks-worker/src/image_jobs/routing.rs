@@ -1554,12 +1554,12 @@ pub(super) fn candle_adapter_label(model: &str) -> &'static str {
     }
 }
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/candle_disabled_plan_backed_refusal_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/candle_disabled_plan_backed_refusal_tests.rs"]
 mod candle_disabled_plan_backed_refusal_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/candle_label_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/candle_label_tests.rs"]
 mod candle_label_tests;

@@ -1,8 +1,8 @@
+use super::memory::gate_with_evict_reclaim;
+use crate::conditioning_fit::{ConditioningFit, ConditioningFootprint};
 use crate::Path;
 use crate::Settings;
 use crate::WorkerResult;
-use super::memory::gate_with_evict_reclaim;
-use crate::conditioning_fit::{ConditioningFit, ConditioningFootprint};
 
 // The ONE admission seam every candle conditioning route (ControlNet / IP-Adapter / identity encoder)
 // calls before it allocates (sc-16069, epic 15448). The pure decision lives in

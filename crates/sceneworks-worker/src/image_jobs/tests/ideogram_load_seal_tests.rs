@@ -1,6 +1,6 @@
-use super::seal_ideogram_load_spec;
 use super::super::LoadSpec;
 use super::super::WeightsSource;
+use super::seal_ideogram_load_spec;
 use crate::Path;
 fn write(path: &Path, bytes: &[u8]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();

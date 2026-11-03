@@ -252,22 +252,22 @@ pub(super) fn apply_measured_mlx_load_shape_for_request(
     )
 }
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/candle_prefix_kv_cache_pricing_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/candle_prefix_kv_cache_pricing_tests.rs"]
 mod candle_prefix_kv_cache_pricing_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , not (target_os = "macos") , feature = "backend-candle"))]
-#[path="tests/candle_image_load_shape_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
+#[path = "tests/candle_image_load_shape_tests.rs"]
 mod candle_image_load_shape_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , target_os = "macos"))]
-#[path="tests/measured_mlx_load_shape_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tests/measured_mlx_load_shape_tests.rs"]
 mod measured_mlx_load_shape_tests;
 
-# [cfg (native_lane)]
-# [cfg (all (test , target_os = "macos"))]
-#[path="tests/declared_sequential_resident_tests.rs"]
+#[cfg(native_lane)]
+#[cfg(all(test, target_os = "macos"))]
+#[path = "tests/declared_sequential_resident_tests.rs"]
 mod declared_sequential_resident_tests;
