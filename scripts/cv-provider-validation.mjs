@@ -59,6 +59,36 @@ export function validateReceipt(receipt, selected) {
     assert.equal(receipt.result.height,receipt.result.sourceHeight*selected.factor);
   }
 }
+export function validateProvisioning(provision, fixtureIdentities, runtime, pins, source, inference, platform) {
+  assert.equal(provision.status,'passed','complete provisioning receipt required');
+  assert.equal(provision.sourceSha,source); assert.equal(provision.inferenceSha,inference);
+  const backend=platform==='darwin'?'mlx':'cuda';
+  const identities=new Map(fixtureIdentities.map(item=>[item.file,item]));
+  const expected=[...pins.models.filter(item=>item.backends.includes(backend)),pins.photo];
+  for(const item of expected) {
+    const actual=identities.get(item.name);
+    assert(actual,`missing pinned fixture ${item.name}`);
+    assert.equal(actual.sha256,item.sha256,`${item.name}: wrong pinned bytes`);
+    assert.equal(actual.bytes,item.bytes,`${item.name}: wrong pinned length`);
+  }
+  const onnx=expected.filter(item=>item.name.endsWith('.onnx'));
+  assert.equal(provision.onnx?.length,onnx.length);
+  for(const item of onnx) assert(provision.onnx.some(graph=>graph.file===item.name&&graph.externalData===false&&graph.tensors>0));
+  assert(provision.runtime?.some(item=>item.file===runtime.path&&item.sha256===runtime.sha256),'runtime must match the verified wheel extraction');
+  if(platform==='darwin') {
+    const oracle=provision.oracle;
+    assert.equal(oracle?.status,'passed'); assert.equal(oracle.sourceSha,source); assert.equal(oracle.inferenceSha,inference);
+    assert.equal(oracle.upstreamCommit,pins.oracle.upstreamCommit); assert.equal(oracle.device,'cpu');
+    assert.equal(oracle.tensorCount,225); assert.equal(oracle.personCount,4);
+    assert.equal(oracle.weightsSha256,pins.models.find(item=>item.name==='yolo11m_fused_mlx.safetensors').sha256);
+    assert.equal(oracle.photoSha256,pins.photo.sha256);
+    for(const name of ['refs.safetensors','refs_ext.safetensors','ref_people.json']) {
+      const actual=identities.get(name), expected=oracle.outputs?.[name];
+      assert(actual&&expected&&/^[a-f0-9]{64}$/.test(expected.sha256),`missing independent oracle ${name}`);
+      assert.equal(actual.sha256,expected.sha256,`mismatched independent oracle ${name}`);
+    }
+  }
+}
 async function sha256(file) {
   const hash=createHash('sha256'); for await (const data of createReadStream(file)) hash.update(data); return hash.digest('hex');
 }
@@ -111,6 +141,12 @@ export async function run(env=process.env) {
       receipt.fixtures=await fixtureIdentity(directory);
       assert((await stat(env.ORT_DYLIB_PATH)).isFile());
       receipt.ortRuntime={path:env.ORT_DYLIB_PATH,sha256:await sha256(env.ORT_DYLIB_PATH)};
+      const pinFile=path.join(root,'scripts/cv-fixture-manifest.json');
+      const pins=JSON.parse(await readFile(pinFile,'utf8'));
+      assert(env.CV_PROVISION_RECEIPT,'provisioning receipt required');
+      receipt.provisioning=JSON.parse(await readFile(env.CV_PROVISION_RECEIPT,'utf8'));
+      assert.equal(receipt.provisioning.manifestSha256,await sha256(pinFile));
+      validateProvisioning(receipt.provisioning,receipt.fixtures,receipt.ortRuntime,pins,env.CV_SOURCE_SHA,env.CV_INFERENCE_SHA,process.platform);
       if(process.platform==='win32') receipt.hardware=(await execFile('nvidia-smi',['-i','1','--query-gpu=index,uuid,name,memory.total','--format=csv,noheader'])).stdout.trim();
       else receipt.hardware=JSON.parse((await execFile('system_profiler',['SPHardwareDataType','-json'])).stdout).SPHardwareDataType?.map(({chip_type,physical_memory,machine_model})=>({chip_type,physical_memory,machine_model}));
       Object.assign(childEnv, {CV_FIXTURE_DIR:directory,

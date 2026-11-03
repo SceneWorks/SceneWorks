@@ -1,0 +1,227 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "name": "yolo11m_fused_mlx.safetensors",
+      "repo": "SceneWorks/yolo11m-person-detect-mlx",
+      "revision": "d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777",
+      "url": "https://huggingface.co/SceneWorks/yolo11m-person-detect-mlx/resolve/d7027d3a8812bdebbf7862fc1c7dcfdeebb0f777/yolo11m_fused_mlx.safetensors",
+      "bytes": 80388864,
+      "sha256": "ba91d8345ddffbf8abc5ebadfa6bb891b0cb9881eb112aa8d002e879158cf31d",
+      "backends": [
+        "mlx"
+      ]
+    },
+    {
+      "name": "yolo11m.onnx",
+      "repo": "SceneWorks/yolo11m-person-detect-onnx",
+      "revision": "3cffbaccca4f239ae6301d8b66ba721401ecfa8d",
+      "url": "https://huggingface.co/SceneWorks/yolo11m-person-detect-onnx/resolve/3cffbaccca4f239ae6301d8b66ba721401ecfa8d/yolo11m.onnx",
+      "bytes": 80622117,
+      "sha256": "ca4e3cb4f187ba2e3c3e8610db06eb4be761191342ff753c63530148c5a3aeb1",
+      "backends": [
+        "cuda"
+      ]
+    },
+    {
+      "name": "rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx",
+      "repo": "SceneWorks/dwpose-onnx",
+      "revision": "c330a9609201343576b8b69d222e38c1486d2854",
+      "url": "https://huggingface.co/SceneWorks/dwpose-onnx/resolve/c330a9609201343576b8b69d222e38c1486d2854/rtmw-dw-x-l_simcc-cocktail14_270e-384x288_20231122.onnx",
+      "bytes": 229320930,
+      "sha256": "bd033156e5104c4f5d2edfe0453e02661e30a2f3da453ec93c8764d561b83054",
+      "backends": [
+        "mlx",
+        "cuda"
+      ]
+    },
+    {
+      "name": "yolox_m_8xb8-300e_humanart-c2c7a14a.onnx",
+      "repo": "SceneWorks/dwpose-onnx",
+      "revision": "c330a9609201343576b8b69d222e38c1486d2854",
+      "url": "https://huggingface.co/SceneWorks/dwpose-onnx/resolve/c330a9609201343576b8b69d222e38c1486d2854/yolox_m_8xb8-300e_humanart-c2c7a14a.onnx",
+      "bytes": 101400344,
+      "sha256": "3dea6513388889f0fff4b77bf7a26013600321b9eb9ceb0e9a400a82572f5f23",
+      "backends": [
+        "mlx",
+        "cuda"
+      ]
+    },
+    {
+      "name": "real_esrgan_x2.onnx",
+      "repo": "SceneWorks/real-esrgan-onnx",
+      "revision": "09f741bac80a246b407da3ee902bf5f3291b602f",
+      "url": "https://huggingface.co/SceneWorks/real-esrgan-onnx/resolve/09f741bac80a246b407da3ee902bf5f3291b602f/real_esrgan_x2.onnx",
+      "bytes": 67073434,
+      "sha256": "7115ba92e8a1bfa63d68558ef006ef3d91273a068d321b1439f8bb1c9179002c",
+      "backends": [
+        "mlx",
+        "cuda"
+      ]
+    },
+    {
+      "name": "real_esrgan_x4.onnx",
+      "repo": "SceneWorks/real-esrgan-onnx",
+      "revision": "09f741bac80a246b407da3ee902bf5f3291b602f",
+      "url": "https://huggingface.co/SceneWorks/real-esrgan-onnx/resolve/09f741bac80a246b407da3ee902bf5f3291b602f/real_esrgan_x4.onnx",
+      "bytes": 67051616,
+      "sha256": "5c586662929cbc686c1a5c38d9c060dbdb4ea5863a1f7672b8c0761e6b89c033",
+      "backends": [
+        "mlx",
+        "cuda"
+      ]
+    }
+  ],
+  "photo": {
+    "url": "https://raw.githubusercontent.com/ultralytics/ultralytics/790f9c067c9a3548acf7c6925cea14de9ad77787/ultralytics/assets/bus.jpg",
+    "bytes": 137419,
+    "sha256": "c02019c4979c191eb739ddd944445ef408dad5679acab6fd520ef9d434bfbc63",
+    "name": "people.jpg"
+  },
+  "runtime": {
+    "mlx": [
+      {
+        "url": "https://files.pythonhosted.org/packages/40/89/17546c1c20f6bfc3ae41c22152378a26edfea918af3129e2139dcd7c99f3/onnxruntime-1.26.0-cp314-cp314-macosx_14_0_arm64.whl",
+        "bytes": 18019724,
+        "sha256": "33a791f31432a3af1a96db5e54818b37aba5e5eefc2e6af5794c10a9118a9993",
+        "name": "onnxruntime-macos.whl",
+        "kind": "ort"
+      }
+    ],
+    "cuda": [
+      {
+        "name": "cuda-runtime.whl",
+        "url": "https://files.pythonhosted.org/packages/59/df/e7c3a360be4f7b93cee39271b792669baeb3846c58a4df6dfcf187a7ffab/nvidia_cuda_runtime_cu12-12.9.79-py3-none-win_amd64.whl",
+        "bytes": 3591604,
+        "sha256": "8e018af8fa02363876860388bd10ccb89eb9ab8fb0aa749aaf58430a9f7c4891",
+        "kind": "cuda"
+      },
+      {
+        "name": "cublas.whl",
+        "url": "https://files.pythonhosted.org/packages/45/a1/a17fade6567c57452cfc8f967a40d1035bb9301db52f27808167fbb2be2f/nvidia_cublas_cu12-12.9.1.4-py3-none-win_amd64.whl",
+        "bytes": 553153899,
+        "sha256": "1e5fee10662e6e52bd71dec533fbbd4971bb70a5f24f3bc3793e5c2e9dc640bf",
+        "kind": "cuda"
+      },
+      {
+        "name": "curand.whl",
+        "url": "https://files.pythonhosted.org/packages/e5/98/1bd66fd09cbe1a5920cb36ba87029d511db7cca93979e635fd431ad3b6c0/nvidia_curand_cu12-10.3.10.19-py3-none-win_amd64.whl",
+        "bytes": 68774847,
+        "sha256": "e8129e6ac40dc123bd948e33d3e11b4aa617d87a583fa2f21b3210e90c743cde",
+        "kind": "cuda"
+      },
+      {
+        "name": "nvrtc.whl",
+        "url": "https://files.pythonhosted.org/packages/52/de/823919be3b9d0ccbf1f784035423c5f18f4267fb0123558d58b813c6ec86/nvidia_cuda_nvrtc_cu12-12.9.86-py3-none-win_amd64.whl",
+        "bytes": 76408187,
+        "sha256": "72972ebdcf504d69462d3bcd67e7b81edd25d0fb85a2c46d3ea3517666636349",
+        "kind": "cuda"
+      },
+      {
+        "name": "cudnn.whl",
+        "url": "https://files.pythonhosted.org/packages/b7/ec/d95cc4204dd45f40f2d1512f8ff0d4c3fb1810a893fecc79fcea05dfec0e/nvidia_cudnn_cu12-9.23.0.39-py3-none-win_amd64.whl",
+        "bytes": 689742654,
+        "sha256": "357e5d59a1b79d27eef754aa79b3d9e7adf11baf86dc928dc114df0033c2c912",
+        "kind": "cuda"
+      },
+      {
+        "name": "cufft.whl",
+        "url": "https://files.pythonhosted.org/packages/20/ee/29955203338515b940bd4f60ffdbc073428f25ef9bfbce44c9a066aedc5c/nvidia_cufft_cu12-11.4.1.4-py3-none-win_amd64.whl",
+        "bytes": 200067309,
+        "sha256": "8e5bfaac795e93f80611f807d42844e8e27e340e0cde270dcb6c65386d795b80",
+        "kind": "cuda"
+      },
+      {
+        "name": "nvjitlink.whl",
+        "url": "https://files.pythonhosted.org/packages/dd/7e/2eecb277d8a98184d881fb98a738363fd4f14577a4d2d7f8264266e82623/nvidia_nvjitlink_cu12-12.9.86-py3-none-win_amd64.whl",
+        "bytes": 35584936,
+        "sha256": "cc6fcec260ca843c10e34c936921a1c426b351753587fdd638e8cff7b16bb9db",
+        "kind": "cuda"
+      },
+      {
+        "name": "onnxruntime.whl",
+        "url": "https://files.pythonhosted.org/packages/a4/e4/9b378a5466ea0bed65e5beb8e09254973c580a6522810a38afbcc45e5105/onnxruntime_gpu-1.26.0-cp312-cp312-win_amd64.whl",
+        "bytes": 226548963,
+        "sha256": "5f49c44689894650990e4c8a857d2edafc276fbd79bba57ceb224bd18d25d491",
+        "kind": "ort"
+      }
+    ]
+  },
+  "oracle": {
+    "upstreamRepository": "https://github.com/ultralytics/ultralytics",
+    "upstreamCommit": "6e43d1e1e5db72afbf686dee6745669bcb124b0a",
+    "upstreamTag": "v8.3.0",
+    "python": "3.12",
+    "packages": [
+      {
+        "name": "ultralytics",
+        "version": "8.3.0",
+        "filename": "ultralytics-8.3.0-py3-none-any.whl",
+        "size": 881284,
+        "sha256": "3137c4921c18c8ddf610f64f1badc2dad2a9fd182e10218c2bbb29caee308b9e",
+        "url": "https://files.pythonhosted.org/packages/ef/67/78eac779c488f10d4977b0a7ff9bb4ecc91acecf6c37455e2ce34b1b335e/ultralytics-8.3.0-py3-none-any.whl"
+      },
+      {
+        "name": "torch",
+        "version": "2.8.0",
+        "filename": "torch-2.8.0-cp312-none-macosx_11_0_arm64.whl",
+        "size": 73630478,
+        "sha256": "619c2869db3ada2c0105487ba21b5008defcc472d23f8b80ed91ac4a380283b0",
+        "url": "https://files.pythonhosted.org/packages/be/66/5c9a321b325aaecb92d4d1855421e3a055abd77903b7dab6575ca07796db/torch-2.8.0-cp312-none-macosx_11_0_arm64.whl"
+      },
+      {
+        "name": "torchvision",
+        "version": "0.23.0",
+        "filename": "torchvision-0.23.0-cp312-cp312-macosx_11_0_arm64.whl",
+        "size": 1856885,
+        "sha256": "e0e2c04a91403e8dd3af9756c6a024a1d9c0ed9c0d592a8314ded8f4fe30d440",
+        "url": "https://files.pythonhosted.org/packages/df/1d/0ea0b34bde92a86d42620f29baa6dcbb5c2fc85990316df5cb8f7abb8ea2/torchvision-0.23.0-cp312-cp312-macosx_11_0_arm64.whl"
+      },
+      {
+        "name": "numpy",
+        "version": "1.26.4",
+        "filename": "numpy-1.26.4-cp312-cp312-macosx_11_0_arm64.whl",
+        "size": 13685868,
+        "sha256": "03a8c78d01d9781b28a6989f6fa1bb2c4f2d51201cf99d3dd875df6fbd96b23b",
+        "url": "https://files.pythonhosted.org/packages/75/5b/ca6c8bd14007e5ca171c7c03102d17b4f4e0ceb53957e8c44343a9546dcc/numpy-1.26.4-cp312-cp312-macosx_11_0_arm64.whl"
+      },
+      {
+        "name": "safetensors",
+        "version": "0.6.2",
+        "filename": "safetensors-0.6.2-cp38-abi3-macosx_11_0_arm64.whl",
+        "size": 432206,
+        "sha256": "d6675cf4b39c98dbd7d940598028f3742e0375a6b4d4277e76beb0c35f4b843b",
+        "url": "https://files.pythonhosted.org/packages/8c/c9/bb114c158540ee17907ec470d01980957fdaf87b4aa07914c24eba87b9c6/safetensors-0.6.2-cp38-abi3-macosx_11_0_arm64.whl"
+      },
+      {
+        "name": "opencv-python",
+        "version": "4.10.0.84",
+        "filename": "opencv_python-4.10.0.84-cp37-abi3-macosx_11_0_arm64.whl",
+        "size": 54835524,
+        "sha256": "fc182f8f4cda51b45f01c64e4cbedfc2f00aff799debebc305d8d0210c43f251",
+        "url": "https://files.pythonhosted.org/packages/66/82/564168a349148298aca281e342551404ef5521f33fba17b388ead0a84dc5/opencv_python-4.10.0.84-cp37-abi3-macosx_11_0_arm64.whl"
+      },
+      {
+        "name": "Pillow",
+        "version": "11.3.0",
+        "filename": "pillow-11.3.0-cp312-cp312-macosx_11_0_arm64.whl",
+        "size": 4686296,
+        "sha256": "921bd305b10e82b4d1f5e802b6850677f965d8394203d182f078873851dada69",
+        "url": "https://files.pythonhosted.org/packages/2c/32/7e2ac19b5713657384cec55f89065fb306b06af008cfd87e572035b27119/pillow-11.3.0-cp312-cp312-macosx_11_0_arm64.whl"
+      }
+    ],
+    "sourceFiles": {
+      "cfg/models/11/yolo11.yaml": "94cf4eb9ac55aec23513b447626a6d637300f7462244e413e59ea4b68885c4a5",
+      "nn/tasks.py": "9899ae2677002b68909be94216322b16bb60b13e6ddc3a0e7ad451a5f2d110f9",
+      "nn/modules/block.py": "b617083dc9c6451c430c3b30cb026c7f36dec2bf577d3af397f52f4a5f9b2777",
+      "nn/modules/head.py": "c7463c953285a980b8a0037525327ec90e37b085c4229df97660b5e2f76d4279",
+      "utils/ops.py": "76c5cd772ad8c7fa7a8a8eb37b38a0f69f387714bb53ed74bdc787355bb620bd"
+    }
+  },
+  "budgets": {
+    "assetDownloadBytes": 3221225472,
+    "extractedRuntimeBytes": 6442450944,
+    "oracleOutputBytes": 134217728,
+    "oracleWheelBytes": 536870912
+  }
+}

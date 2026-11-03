@@ -1,0 +1,99 @@
+name: Manual independent CV oracle provisioning
+# Real CPU model execution is confined to this explicitly selected manual workflow.
+on:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      inference_sha:
+        required: true
+        type: string
+      mac_go:
+        required: true
+        type: boolean
+    outputs:
+      artifact_name:
+        value: ${{ jobs.produce.outputs.artifact_name }}
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      inference_sha:
+        required: true
+        type: string
+      mac_go:
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  produce:
+    runs-on: [self-hosted, macOS, ARM64, rw-starvector, real-weights]
+    timeout-minutes: 35
+    concurrency:
+      group: cv-oracle-${{ github.run_id }}-${{ github.run_attempt }}
+      cancel-in-progress: false
+    outputs:
+      artifact_name: cv-oracles-${{ github.run_id }}-${{ github.run_attempt }}
+    env:
+      CV_SOURCE_SHA: ${{ inputs.source_sha }}
+      CV_INFERENCE_SHA: ${{ inputs.inference_sha }}
+      CV_MAC_GO: ${{ inputs.mac_go }}
+      CV_ORACLE_EXECUTION: "true"
+      YOLO_AUTOINSTALL: "false"
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONNOUSERSITE: "1"
+      CUDA_VISIBLE_DEVICES: ""
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Select run-private provisioning paths
+        shell: bash
+        run: |
+          python -B - <<'PYTHON'
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          suffix = os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"]
+          names = {'CV_ORACLE_INPUT': 'cv-oracle-input', 'CV_ORACLE_TOOLS': 'cv-oracle-tools', 'CV_ORACLE_OUTPUT': 'cv-oracles', 'YOLO_CONFIG_DIR': 'cv-ultralytics', 'MPLCONFIGDIR': 'cv-matplotlib', 'TORCH_HOME': 'cv-torch', 'XDG_CACHE_HOME': 'cv-oracle-cache', 'PIP_CACHE_DIR': 'cv-pip'}
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
+              for name, prefix in names.items():
+                  stream.write(f"{name}={root / (prefix + '-' + suffix)}\n")
+          PYTHON
+      - name: Admit exact pair and stage only pinned oracle inputs
+        run: python -I -B scripts/cv_provision.py --mode oracle-input --backend mlx --source-sha "$CV_SOURCE_SHA" --inference-sha "$CV_INFERENCE_SHA" --output "$CV_ORACLE_INPUT"
+      - name: Install bounded run-private CPU oracle tools
+        run: python -I -B scripts/cv_oracle_tools.py --source-sha "$CV_SOURCE_SHA" --inference-sha "$CV_INFERENCE_SHA" --output "$CV_ORACLE_TOOLS"
+      - name: Execute independent pinned upstream CPU oracle and assert contracts
+        run: '"$CV_ORACLE_PYTHON" -I -B scripts/cv_oracle_producer.py --source-sha "$CV_SOURCE_SHA" --inference-sha "$CV_INFERENCE_SHA" --fixtures "$CV_ORACLE_INPUT/fixtures" --output "$CV_ORACLE_OUTPUT" --install-report "$CV_ORACLE_TOOLS/install.json"'
+      - name: Retain independent oracle tensors, outputs, source and tool provenance
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cv-oracles-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/cv-oracles-${{ github.run_id }}-${{ github.run_attempt }}/
+          if-no-files-found: error
+          retention-days: 30
+      - name: Retain input and isolated tool provisioning provenance
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cv-oracle-provenance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/cv-oracle-input-${{ github.run_id }}-${{ github.run_attempt }}/provisioning.json
+            ${{ runner.temp }}/cv-oracle-tools-${{ github.run_id }}-${{ github.run_attempt }}/*.json
+            ${{ runner.temp }}/cv-oracle-tools-${{ github.run_id }}-${{ github.run_attempt }}/freeze.txt
+          if-no-files-found: error
+          retention-days: 30

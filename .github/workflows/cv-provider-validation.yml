@@ -15,14 +15,6 @@ on:
         description: MLX plus CoreML on Mac, or ORT/CUDA on physical GPU1
         required: true
         type: string
-      fixture_dir:
-        description: Dedicated existing absolute fixture directory (see docs/cv-provider-validation.md)
-        required: true
-        type: string
-      ort_dylib:
-        description: Existing absolute ONNX Runtime 1.26 library path
-        required: true
-        type: string
       build_only:
         description: Compile and discover proofs without model execution
         required: true
@@ -46,14 +38,6 @@ on:
         required: true
         type: choice
         options: [mlx, cuda]
-      fixture_dir:
-        description: Dedicated existing absolute fixture directory (see docs/cv-provider-validation.md)
-        required: true
-        type: string
-      ort_dylib:
-        description: Existing absolute ONNX Runtime 1.26 library path
-        required: true
-        type: string
       build_only:
         description: Compile and discover proofs without model execution
         required: true
@@ -67,7 +51,16 @@ on:
 permissions:
   contents: read
 jobs:
+  oracle:
+    if: ${{ inputs.backend == 'mlx' && !inputs.build_only }}
+    uses: ./.github/workflows/cv-oracle-provision.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      inference_sha: ${{ inputs.inference_sha }}
+      mac_go: ${{ inputs.mac_go }}
   validate:
+    needs: oracle
+    if: ${{ !cancelled() && (needs.oracle.result == 'success' || needs.oracle.result == 'skipped') }}
     runs-on: ${{ inputs.backend == 'mlx' && fromJSON('["self-hosted","macOS","ARM64","rw-starvector","real-weights"]') || fromJSON('["self-hosted","Windows","X64","cuda","real-weights"]') }}
     timeout-minutes: 180
     concurrency:
@@ -78,10 +71,11 @@ jobs:
       CV_SOURCE_SHA: ${{ inputs.source_sha }}
       CV_INFERENCE_SHA: ${{ inputs.inference_sha }}
       CV_BACKEND: ${{ inputs.backend }}
-      CV_FIXTURE_DIR: ${{ inputs.fixture_dir }}
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPATH: ""
+      PYTHONNOUSERSITE: "1"
       CV_BUILD_ONLY: ${{ inputs.build_only }}
       CV_MAC_GO: ${{ inputs.mac_go }}
-      ORT_DYLIB_PATH: ${{ inputs.ort_dylib }}
       DISPATCH_SHA: ${{ github.sha }}
       SCENEWORKS_GPU_ID: ${{ inputs.backend == 'cuda' && '1' || 'mlx' }}
       CUDA_VISIBLE_DEVICES: ${{ inputs.backend == 'cuda' && '1' || '' }}
@@ -103,6 +97,34 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: ${{ !inputs.build_only }}
+        with:
+          python-version: "3.12"
+      - name: Select run-private provisioning paths
+        if: ${{ !inputs.build_only }}
+        shell: bash
+        run: |
+          python -B - <<'PYTHON'
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"])
+          suffix = os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"]
+          names = {'CV_PROVISION_ROOT': 'cv-provision', 'CV_ORACLE_ARTIFACT': 'cv-oracle-artifact'}
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as stream:
+              for name, prefix in names.items():
+                  stream.write(f"{name}={root / (prefix + '-' + suffix)}\n")
+          PYTHON
+      - name: Receive independent CPU oracle artifact
+        if: ${{ inputs.backend == 'mlx' && !inputs.build_only }}
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ needs.oracle.outputs.artifact_name }}
+          path: ${{ env.CV_ORACLE_ARTIFACT }}
+      - name: Provision pinned model fixtures and verified native runtime
+        if: ${{ !inputs.build_only }}
+        shell: bash
+        run: python -I -B scripts/cv_provision.py --mode proof --backend "$CV_BACKEND" --source-sha "$CV_SOURCE_SHA" --inference-sha "$CV_INFERENCE_SHA" --output "$CV_PROVISION_ROOT" --oracle-dir "$CV_ORACLE_ARTIFACT"
       - uses: ./.github/actions/prepare-rust-runner
         if: ${{ inputs.backend == 'cuda' }}
         with:
@@ -156,6 +178,7 @@ jobs:
           name: cv-validation-${{ inputs.backend }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/cv-validation-${{ github.run_id }}-${{ github.run_attempt }}/
+            ${{ runner.temp }}/cv-provision-${{ github.run_id }}-${{ github.run_attempt }}/*.json
             ${{ runner.temp }}/sceneworks-cuda-execution-${{ github.run_id }}-${{ github.run_attempt }}-cv-provider-validation/
           if-no-files-found: error
           retention-days: 30
