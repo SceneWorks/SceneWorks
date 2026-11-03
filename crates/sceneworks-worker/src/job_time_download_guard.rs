@@ -296,13 +296,6 @@ const CACHE_DESTINATIONS: &[(&str, &str, &str, CacheRole)] = &[
         "synthetic-component-staging",
         CacheRole::Scratch,
     ),
-    // Explicit per-fixture HF-layout library for pinned-vs-mutable-source regression cases.
-    (
-        "worker",
-        "video_jobs/minimax_h3_import_tests.rs",
-        "source-library",
-        CacheRole::HfCache,
-    ),
     // Prepared control-training datasets, regenerated from the source images.
     (
         "worker",
@@ -2872,25 +2865,30 @@ fn synthetic_fixture_cache_roles_do_not_authorize_new_destinations() {
         (
             "minimax_h3_import_fixture.rs",
             "fixture-hub",
-            CacheRole::HfCache,
+            Some(CacheRole::HfCache),
         ),
         (
             "minimax_h3_import_fixture.rs",
             "synthetic-component-staging",
-            CacheRole::Scratch,
+            Some(CacheRole::Scratch),
         ),
         (
             "video_jobs/minimax_h3_import_tests.rs",
             "source-library",
-            CacheRole::HfCache,
+            None,
         ),
     ] {
         assert_eq!(
-            allowed.get(&("worker".into(), file.into(), subdir.into())),
-            Some(&role),
-            "fixture role is exact, not permission for arbitrary generated weight caches"
+            allowed.get(&("worker".into(), file.into(), subdir.into())).copied(),
+            role,
+            "fixture role or test-only absence is exact, not permission for arbitrary generated weight caches"
         );
     }
+    let tree = read_tree(&repo_root().join("crates/sceneworks-worker/src"));
+    assert!(
+        test_only_files(&tree, "lib.rs").contains("video_jobs/minimax_h3_import_tests.rs"),
+        "the #[path] import regression fixture must remain compiler-derived test-only source"
+    );
     let discovered = cache_destinations(
         "let p = data_dir.join(\"cache\").join(\"fixture-hub-new-unregistered\");",
         &BTreeMap::new(),
