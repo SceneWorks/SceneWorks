@@ -1241,13 +1241,8 @@ where
         let mut encoded = Vec::new();
         JpegEncoder::new_with_quality(&mut encoded, 82).encode_image(&thumbnail)?;
         let thumbnail_hash = hex_digest(&encoded);
-        let (relative, path, unpublished) = select_thumbnail_target(
-            catalog,
-            &hash,
-            &thumbnail_hash,
-            encoded.len() as u64,
-            artifact_budget,
-        )?;
+        let (relative, path, unpublished) =
+            select_thumbnail_target(catalog, &hash, &thumbnail_hash, encoded.len() as u64)?;
         if validate_cached_file(&path, &thumbnail_hash, encoded.len() as u64).is_err() {
             let mut existing_bytes = std::fs::metadata(&path)
                 .map(|metadata| metadata.len())
@@ -1951,14 +1946,12 @@ fn select_thumbnail_target(
     image_hash: &str,
     thumbnail_hash: &str,
     bytes: u64,
-    budget: &mut ArtifactBudget,
 ) -> CatalogImageFetchResult<(String, PathBuf, bool)> {
     select_thumbnail_target_with_probe(
         catalog,
         image_hash,
         thumbnail_hash,
         bytes,
-        budget,
         sceneworks_core::fsutil::atomic_create_supported,
     )
 }
@@ -1968,7 +1961,6 @@ fn select_thumbnail_target_with_probe(
     image_hash: &str,
     thumbnail_hash: &str,
     bytes: u64,
-    budget: &mut ArtifactBudget,
     probe: impl FnOnce(&Path) -> std::io::Result<bool>,
 ) -> CatalogImageFetchResult<(String, PathBuf, bool)> {
     let relative = format!("thumbnails/sha256/{}/{}.jpg", &image_hash[..2], image_hash);
@@ -1977,12 +1969,13 @@ fn select_thumbnail_target_with_probe(
         return Ok((relative, path, false));
     }
     let temporary = safe_catalog_directory(catalog, "thumbnails/.fetch-tmp", true)?;
-    if probe(&temporary)? {
+    let atomic_create_supported = probe(&temporary)?;
+    if atomic_create_supported && !path.exists() {
         return Ok((relative, path, false));
     }
-    // Preserve the existing invalid-thumbnail accounting policy before moving to
-    // a fresh generation; never disturb a valid thumbnail referenced by a reader.
-    remove_accounted_file(&path, budget)?;
+    // A different encoding is not proof the canonical thumbnail is corrupt.
+    // Keep existing paths immutable until reference/journal-aware cleanup can
+    // reclaim them; only the current record will name this new generation.
     let generation_directory = format!("thumbnails/sha256/{}/{}", &image_hash[..2], image_hash);
     let directory = safe_catalog_directory(catalog, &generation_directory, true)?;
     for entry in std::fs::read_dir(directory)? {
@@ -2002,7 +1995,7 @@ fn select_thumbnail_target_with_probe(
         uuid::Uuid::new_v4().simple()
     );
     let path = safe_catalog_file(catalog, &relative, true)?;
-    Ok((relative, path, true))
+    Ok((relative, path, !atomic_create_supported))
 }
 
 fn thumbnail_generation_name(name: &str) -> bool {
@@ -2078,6 +2071,22 @@ fn cleanup_abandoned_thumbnail_generations(
             safe_catalog_directory(catalog, &format!("thumbnails/sha256/{prefix}"), false)?;
         for hash in std::fs::read_dir(directory)? {
             let hash = hash?;
+            if let Some(name) = hash.file_name().to_str().filter(|name| {
+                name.strip_suffix(".jpg").is_some_and(|hash| {
+                    hash.len() == 64
+                        && hash.starts_with(&prefix)
+                        && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+            }) {
+                let relative = format!("thumbnails/sha256/{prefix}/{name}");
+                if !journals.contains(&relative)
+                    && !references.thumbnail_is_referenced(&relative)?
+                {
+                    let path = safe_catalog_file(catalog, &relative, false)?;
+                    remove_accounted_file(&path, budget)?;
+                }
+                continue;
+            }
             let Some(hash) = hash
                 .file_name()
                 .to_str()
@@ -2528,6 +2537,17 @@ mod tests {
 
     #[test]
     fn private_thumbnail_generations_preserve_shared_readers_and_recover_quota() {
+        assert_thumbnail_references_and_recovery(false, false);
+    }
+
+    #[test]
+    fn canonical_thumbnail_survives_different_encoding_until_all_references_are_gone() {
+        for atomic_create_supported in [false, true] {
+            assert_thumbnail_references_and_recovery(true, atomic_create_supported);
+        }
+    }
+
+    fn assert_thumbnail_references_and_recovery(canonical: bool, atomic_create_supported: bool) {
         use std::io::Write as _;
         let (_root, registry, id) =
             catalog_with_urls(&["https://example.com/old", "https://example.com/new"]);
@@ -2540,9 +2560,22 @@ mod tests {
         let cache = safe_catalog_file(&catalog, &cache_relative, true).unwrap();
         atomic_create(&cache, &bytes).unwrap();
         let generation_dir = format!("thumbnails/sha256/{}/{}", &hash[..2], hash);
-        let old_relative = format!("{generation_dir}/{}.jpg", uuid::Uuid::new_v4().simple());
+        let old_relative = if canonical {
+            format!("thumbnails/sha256/{}/{}.jpg", &hash[..2], hash)
+        } else {
+            format!("{generation_dir}/{}.jpg", uuid::Uuid::new_v4().simple())
+        };
         let old = safe_catalog_file(&catalog, &old_relative, true).unwrap();
-        let old_bytes = b"complete existing shared thumbnail";
+        let image = image::load_from_memory(&bytes).unwrap();
+        let encode = |edge| {
+            let mut encoded = Vec::new();
+            JpegEncoder::new_with_quality(&mut encoded, 82)
+                .encode_image(&image.thumbnail(edge, edge).to_rgb8())
+                .unwrap();
+            encoded
+        };
+        let old_encoded = encode(8);
+        let old_bytes = old_encoded.as_slice();
         atomic_create(&old, old_bytes).unwrap();
         records[0].thumbnail_path = Some(old_relative.clone());
         catalog
@@ -2556,18 +2589,75 @@ mod tests {
             }])
             .unwrap();
         let mut budget = ArtifactBudget::initialize(&catalog, u64::MAX).unwrap();
-        let new_bytes = b"different complete new thumbnail generation";
+        let new_encoded = encode(4);
+        let new_bytes = new_encoded.as_slice();
+        assert_ne!(hex_digest(old_bytes), hex_digest(new_bytes));
         let (new_relative, new, unpublished) = select_thumbnail_target_with_probe(
             &catalog,
             &hash,
             &hex_digest(new_bytes),
             new_bytes.len() as u64,
-            &mut budget,
-            |_| Ok(false),
+            |_| Ok(atomic_create_supported),
         )
         .unwrap();
-        assert!(unpublished);
+        assert_eq!(unpublished, !atomic_create_supported);
         assert_ne!(new, old);
+        assert_eq!(
+            std::fs::read(&old).expect("referenced thumbnail survives different encoding"),
+            old_bytes
+        );
+        assert_eq!(
+            budget.bytes,
+            catalog.storage_accounting().unwrap().artifact_bytes
+        );
+        let options = CatalogImageFetchOptions {
+            thumbnail_max_edge: Some(4),
+            ..Default::default()
+        };
+        let permit = Arc::new(Semaphore::new(bytes.len()))
+            .try_acquire_many_owned(bytes.len() as u32)
+            .unwrap();
+        let fetched = validate_image(bytes.clone(), &options, permit).unwrap();
+        let mut counts = CatalogImageFetchCounts::default();
+        persist_fetched(
+            &catalog,
+            &records[1],
+            &fetched,
+            &CatalogImageFetchOptions {
+                thumbnail_max_edge: None,
+                ..options.clone()
+            },
+            &mut counts,
+            &mut budget,
+        )
+        .unwrap();
+        for (max_thumbnail_bytes, max_artifact_bytes) in
+            [(1, u64::MAX), (options.max_thumbnail_bytes, budget.bytes)]
+        {
+            budget.max_bytes = max_artifact_bytes;
+            let before = budget.bytes;
+            let omitted = persist_fetched(
+                &catalog,
+                &records[1],
+                &fetched,
+                &CatalogImageFetchOptions {
+                    max_thumbnail_bytes,
+                    ..options.clone()
+                },
+                &mut counts,
+                &mut budget,
+            )
+            .unwrap();
+            assert!(omitted.thumbnail_path.is_none());
+            assert!(omitted.pending_thumbnail.is_none());
+            assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+            assert_eq!(budget.bytes, before);
+            assert_eq!(
+                budget.bytes,
+                catalog.storage_accounting().unwrap().artifact_bytes
+            );
+        }
+        budget.max_bytes = u64::MAX;
         let marker = CompletionMarker {
             record_id: records[1].id.clone(),
             content_hash: hash.clone(),
@@ -2635,16 +2725,14 @@ mod tests {
             .unwrap()
             .thumbnail_path
             .is_none());
-        // A complete already referenced generation is reused, including at an
-        // exact quota, rather than allocating a duplicate generation.
-        budget.max_bytes = budget.bytes;
+        // A complete already referenced thumbnail is reused rather than
+        // allocating a duplicate generation.
         let (reused, _, unpublished) = select_thumbnail_target_with_probe(
             &catalog,
             &hash,
             &hex_digest(old_bytes),
             old_bytes.len() as u64,
-            &mut budget,
-            |_| Ok(false),
+            |_| Ok(atomic_create_supported),
         )
         .unwrap();
         assert_eq!(reused, old_relative);
@@ -2696,6 +2784,67 @@ mod tests {
             .unwrap()
             .exists());
         assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+        assert_eq!(
+            budget.bytes,
+            catalog.storage_accounting().unwrap().artifact_bytes
+        );
+        // An acquisition pointer alone is a live reference even after the row
+        // pointer is cleared. Neither representation may lose its thumbnail.
+        let mut owner = catalog.record_by_id(&records[0].id).unwrap();
+        owner.thumbnail_path = None;
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: owner.id.clone(),
+                image_path: owner.image_path.clone(),
+                thumbnail_path: owner.thumbnail_path.clone(),
+                embedding_path: owner.embedding_path.clone(),
+                artifact_path: owner.artifact_path.clone(),
+                metadata: owner.metadata.clone(),
+            }])
+            .unwrap();
+        let references = CacheReferenceIndex::build(&catalog).unwrap();
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+
+        let mut state = acquisition_state(&owner);
+        state.thumbnail_path = None;
+        set_acquisition_state(&mut owner, &state).unwrap();
+        catalog
+            .append_records(&[NewCatalogRecord {
+                id: owner.id.clone(),
+                image_path: owner.image_path.clone(),
+                thumbnail_path: owner.thumbnail_path.clone(),
+                embedding_path: owner.embedding_path.clone(),
+                artifact_path: owner.artifact_path.clone(),
+                metadata: owner.metadata.clone(),
+            }])
+            .unwrap();
+        let references = CacheReferenceIndex::build(&catalog).unwrap();
+        assert!(!references.thumbnail_is_referenced(&old_relative).unwrap());
+        // A valid pending journal still owns the bytes until recovery or discard.
+        let mut journal = recovered;
+        journal.pending_thumbnail = Some(PendingThumbnail {
+            path: old_relative.clone(),
+            content_hash: hex_digest(old_bytes),
+            bytes: old_bytes.len() as u64,
+        });
+        persist_completion_marker(&catalog, &journal, &mut budget).unwrap();
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+        let recovered = recover_completion_marker(&catalog, &records[1], &mut budget)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            recovered.thumbnail_path.as_deref(),
+            Some(old_relative.as_str())
+        );
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert_eq!(std::fs::read(&old).unwrap(), old_bytes);
+        remove_completion_marker(&catalog, &records[1].id, &mut budget).unwrap();
+        let before = budget.bytes;
+        cleanup_abandoned_thumbnail_generations(&catalog, &references, &mut budget).unwrap();
+        assert!(!old.exists(), "unreferenced thumbnails must release quota");
+        assert_eq!(budget.bytes, before - old_bytes.len() as u64);
         assert_eq!(
             budget.bytes,
             catalog.storage_accounting().unwrap().artifact_bytes
@@ -3088,7 +3237,6 @@ mod tests {
             &base.content_hash,
             &hex_digest(&encoded),
             encoded.len() as u64,
-            &mut seed_budget,
         )
         .expect("filesystem-specific thumbnail target");
         let mut pending_marker = base.clone();
