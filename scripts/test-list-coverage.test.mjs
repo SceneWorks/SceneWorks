@@ -8,7 +8,7 @@ test("root discovery includes nested tests and leaves desktop to its suite", () 
   const files = discoverRootTests();
   assert.ok(files.includes("scripts/test-list-coverage.test.mjs"));
   assert.ok(files.includes("scripts/lib/jsonc.test.mjs"));
-  assert.ok(!files.some((file) => file.startsWith(`apps${path.sep}desktop${path.sep}`)));
+  assert.ok(!files.some((file) => file.startsWith("apps/desktop/")));
   const pkg = JSON.parse(readFileSync("package.json", "utf8"));
   assert.equal(pkg.scripts.check, "node scripts/run-root-tests.mjs");
 });

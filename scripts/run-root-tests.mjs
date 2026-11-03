@@ -10,17 +10,27 @@ const skipped = new Set([".git", ".claude", "node_modules", "target", "dist"]);
 export function discoverRootTests(dir = root) {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
     const full = path.join(dir, entry.name);
-    const relative = path.relative(root, full);
+    const relative = path.relative(root, full).split(path.sep).join("/");
     if (entry.isDirectory()) {
-      return skipped.has(entry.name) || relative === path.join("apps", "desktop") ? [] : discoverRootTests(full);
+      return skipped.has(entry.name) || relative === "apps/desktop" ? [] : discoverRootTests(full);
     }
     return entry.isFile() && entry.name.endsWith(".test.mjs") ? [relative] : [];
   }).sort();
 }
+// Keep this suite in its original invocation after all parallel tests finish.
+export const SERIAL_TEST = "scripts/matrix-removed-sources.test.mjs";
+export function rootTestGroups(files = discoverRootTests()) {
+  if (files.filter((file) => file === SERIAL_TEST).length !== 1 || new Set(files).size !== files.length) {
+    throw new Error("Root test inventory is duplicated or missing its serial suite");
+  }
+  const parallel = files.filter((file) => file !== SERIAL_TEST);
+  if (!parallel.length) throw new Error("No parallel root Node tests discovered");
+  return [parallel, [SERIAL_TEST]];
+}
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const tests = discoverRootTests();
-  if (!tests.length) throw new Error("No root Node tests discovered");
-  const result = spawnSync(process.execPath, ["--test", ...tests], { cwd: root, stdio: "inherit" });
-  if (result.error) throw result.error;
-  process.exit(result.status ?? 1);
+  for (const tests of rootTestGroups()) {
+    const result = spawnSync(process.execPath, ["--test", ...tests], { cwd: root, stdio: "inherit" });
+    if (result.error) throw result.error;
+    if (result.status !== 0) { process.exitCode = result.status ?? 1; break; }
+  }
 }

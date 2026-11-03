@@ -831,7 +831,8 @@ test('bootstrap request branches before the first plan read and skips restaging 
 });
 test('ordinary check selects the CPU-only preparation tests rather than a terminal/model command',async()=>{
   const p=JSON.parse(await readFile(new URL('../package.json',import.meta.url),'utf8'));
-  for(const name of ['h3-finetune-terminal.test.mjs','h3-finetune-terminal-cases.test.mjs','h3-finetune-terminal-runtime.test.mjs'])assert.ok(p.scripts.check.includes(`scripts/${name}`));
+  const { rootTestGroups } = await import('./run-root-tests.mjs');
+  for(const name of ['h3-finetune-terminal.test.mjs','h3-finetune-terminal-cases.test.mjs','h3-finetune-terminal-runtime.test.mjs'])assert.ok(rootTestGroups().flat().includes(`scripts/${name}`));
   assert.doesNotMatch(p.scripts.check,/h3-finetune-terminal(?:-runtime)?\.mjs\s+(?:run-case|api|numeric)|gh workflow run/);
 });
 test('delivery records reject old CI, wrong main pin and unresolved limitations', async t => {

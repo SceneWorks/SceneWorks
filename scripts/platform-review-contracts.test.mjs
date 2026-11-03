@@ -6,6 +6,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { rootTestGroups } from "./run-root-tests.mjs";
 import { proofSelection, requireManualSelection, verifyProofResult, cudaDeviceEvidence, requireMetalHeadroom, observeMetalCase, streamProofBuild } from "./ci/h3-import-native-proof.mjs";
 import { writeFileSync } from "node:fs";
 
@@ -1844,7 +1845,7 @@ test("imported NVFP4 model proof is explicitly manual at both reachable endpoint
 
 test("ordinary scaffold CI explicitly runs the CPU-only imported NVFP4 proof policy suite", async () => {
   const scripts = JSON.parse(await source("package.json")).scripts;
-  assert.equal(scripts.check.split(" ").filter((arg) => arg === "scripts/ci/imported-nvfp4-proof.test.mjs").length, 1);
+  assert.equal(rootTestGroups().flat().filter((arg) => arg === "scripts/ci/imported-nvfp4-proof.test.mjs").length, 1);
   assert.doesNotMatch(scripts.check, /node scripts\/ci\/imported-nvfp4-proof\.mjs|imported-nvfp4-cuda-guard\.py/);
   assert.match(await source(".github/workflows/check.yml"), /npm run check/);
 });
@@ -2835,7 +2836,10 @@ test("macOS memory-strategy calibration dispatch is opt-in and secret-scoped", a
     workflow,
     /"\$RUNNER_TEMP\/qwen-provision-venv\/bin\/python" -m pip install/,
   );
-  assert.match(workflow, /huggingface_hub==0\.36\.0/);
+  assert.match(await source(".github/requirements-hf.txt"), /^huggingface_hub==0\.36\.0$/m);
+  assert.equal((workflow.match(/-r \.github\/requirements-hf\.txt/g) ?? []).length, 2);
+  const windows = await source(".github/workflows/windows-candle.yml");
+  assert.equal((windows.match(/-r \.github\/requirements-hf\.txt/g) ?? []).length, 3);
   assert.match(workflow, /from huggingface_hub import snapshot_download/);
   assert.match(workflow, /repo_id="SceneWorks\/qwen-image-mlx"/);
   assert.match(workflow, /revision=os\.environ\["QWEN_REVISION"\]/);
