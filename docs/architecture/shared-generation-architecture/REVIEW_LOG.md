@@ -173,3 +173,9 @@ Reviewed published revision `62e247b1fb`, then the final requirements/plan clari
 Closure checks cover transition workspace and evidence inclusion basis, completed-K estimator provenance/state/draw semantics, production terminal-chunk adoption with SW-F148 before/after/NO-GO ownership, and `PricingPlan` terminology/counts. Editorial clarification labels endpoint estimation as the default and requires payload transfer without an extra full-clip copy or surviving legacy finalization path.
 
 Verified links/fences/whitespace, four Accepted R5 dispositions, pricing and draw-coordinate arithmetic, and the acyclic 24-node roadmap with 16 pre-pilot engine features. These are document checks and walkthroughs; the owning features still implement their conformance/runtime proofs. No new unresolved findings, code implementation, learned execution, builds/CI dispatches or program tracker items.
+
+## Section 10 decision review (2026-11-03)
+
+**DEC-1 approved by Michael:** option (b), shared host math and identical layer APIs, is the baseline. Option (c), generic model graphs over a layer-level trait, is conditional on both pilots passing: a small representative model, then FLUX.3 end to end including LoRA training. Preserve capabilities, per-backend fidelity, speed, memory and binary-size bounds. If either fails, retain (b). Backend kernels and execution policy remain specialized; shared pipeline and low-res work proceed independently of generic rollout.
+
+Recorded in REQUIREMENTS (G1/G5, BACK-5 and §10), PLAN (§3.7 and ENG-15) and README. Confidence: high in the approved choice and baseline; medium in unproven generic feasibility. DEC-2…19 remain open. This individual decision does not approve the overall design or authorize pilots, implementation or program tracker items. Next discussion: DEC-2, lane scope.

@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5.** It addresses all four round-5 findings in addition to the earlier review resolutions (see [REVIEW_LOG.md](REVIEW_LOG.md)). These are proposed design resolutions, not implementation evidence or approval of the open decisions in §10. Design-only: no program tracker items or implementation will be created until the design is approved. |
+| **Status** | **Draft 0.5, decision review in progress.** All four round-5 findings are addressed. Michael approved DEC-1 on 2026-11-03; DEC-2…19 remain open. This is not overall design approval or implementation evidence. Design-only: no program tracker items, pilots or implementation start from an individual decision approval. |
 | **Date** | 2026-11-03 |
 | **Repositories** | SceneWorks (`main` @ `a1d95e2c4`) and inference (`origin/main` @ `a43724b82`). All citations refer to those revisions. |
 | **Companion** | [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md): target design, migration strategy and phased roadmap. |
@@ -79,11 +79,11 @@ A cross-cutting capability costs roughly **families × backends × routes** of h
 
 | ID | Goal |
 |---|---|
-| **G1** | **One change per cross-cutting feature.** A generation feature (low-res first steps, a guidance trick, per-phase adapters, a preview mode, a memory rung) is implemented once in shared code. Every route whose structure supports it gets it with **no family-file edits**. Routes that cannot support it refuse with a typed reason. For plan-rewrite and latent-op Features, "once" means one module. For model-internal hooks, it means one module per backend until ⟂DEC-1 (c). |
+| **G1** | **One change per cross-cutting feature.** A generation feature (low-res first steps, a guidance trick, per-phase adapters, a preview mode, a memory rung) is implemented once in shared code. Every route whose structure supports it gets it with **no family-file edits**. Routes that cannot support it refuse with a typed reason. For plan-rewrite and latent-op Features, "once" means one module. For model-internal hooks, it means one module per backend until the pilot-gated generic rollout under approved DEC-1. |
 | **G2** | **Hooks and entrypoints at every stage** of the stack: request and options, plan, weight lifecycle, pipeline stages, phases, steps, blocks, layers, decode, output, admission, lane execution and events. |
 | **G3** | **Every fact has exactly one primary declaration; everything else is derived.** This covers model facts, capabilities, limits, defaults, routes and memory facts. No hand table restates another source. No generator reverse-engineers facts from source text. |
 | **G4** | **Slim the codebase** by deleting duplicate implementations, not by moving them. Targets are in §8. |
-| **G5** | **Share model code across backends** as far as the evidence supports. At minimum, every shared layer exposes an identical API on both backends. The end state is set by ⟂DEC-1. |
+| **G5** | **Share model code across backends** as far as the evidence supports. Approved DEC-1 establishes shared host math and identical layer APIs as the baseline, with generic model graphs conditional on both BACK-5 pilots passing. If either fails, the baseline remains a valid outcome. |
 | **G6** | **Adding a model is data and graph only.** A new model in an existing class needs config, graph, weight plan, route record, product-manifest entry and its declared measured anchors (PAT-3). It needs no SceneWorks code tables, admission wiring, lane wiring or per-family memory code. |
 | **G7** | **No regression** in output, speed, peak memory, features, UI controls or platform coverage (macOS, iOS, Windows/Linux CUDA, CPU), except changes explicitly approved under AP13 class (c). |
 | **G8** | **Safe, incremental delivery.** Each feature lands on `main` within weeks, protected by characterization tests, and deletes what it replaces. |
@@ -96,7 +96,7 @@ A cross-cutting capability costs roughly **families × backends × routes** of h
 - **A dynamic plugin ABI** or third-party runtime code loading. This preserves the 2026-07-13 inference decision.
 - **Replacing the build or CI system, or re-enabling any dismantled measurement gate.** See FEATURE_DEVELOPMENT.md *Gate teardown*.
 - **Forcing essential bespoke loops into the shared driver.** Essential variance stays family-owned behind a typed escape hatch (PIPE-7).
-- **A lowest-common-denominator engine.** If ⟂DEC-1 adopts generic model code, the seam sits at the *layer* level and backend kernels and fusions stay [D §10.1].
+- **A lowest-common-denominator engine.** Under approved DEC-1, any pilot-gated generic model rollout keeps the seam at the *layer* level and retains backend kernels and fusions [D §10.1].
 
 ## 4. Scope
 
@@ -359,10 +359,12 @@ Kit replacements that change operation order declare class (b) or (c). **Accept:
 
 **BACK-4 — Both backends expose an identical layer-kit API**: names, shapes, broadcasting and dtype promotion. Layout is explicit at conv boundaries and converted at load. **Accept:** for migrated families, the two backends' graph files differ only in imports and backend types.
 
-**BACK-5 — Backend-generic model code (⟂DEC-1).** If option (c) is approved:
+**BACK-5 — Backend-generic model code (DEC-1 approved, rollout conditional).**
 - Model graphs are written once, generic over a layer-level backend trait.
 - Two pilots gate any rollout: (A) a small family; (B) FLUX.3 end to end, including LoRA training.
-- Pilot acceptance is bit-exact output against each backend's current twin, with s/step and peak memory unchanged (A/B on the same runner).
+- Both must preserve the declared capability surface and per-backend numerical fidelity, with speed/peak memory satisfying PERF-1/2 and iOS binary size satisfying PERF-2. Existing pilot acceptance retains bit-exact output against each backend's current twin, measured A/B on the same runner.
+- Rollout proceeds only if both pass. Otherwise retain option (b), the shared-host-math/identical-layer-API baseline, and record the failing seam; do not force all models through an abstraction that failed a pilot. Shared pipeline work and low-res start do not wait for this outcome.
+- This is an approved design direction, not authorization to run pilots or start implementation during decision review.
 
 ### 6.5 Weights, quantization, adapters, training (WGT)
 
@@ -763,11 +765,13 @@ These are measured at baseline and again at every feature end. They are **goals,
 
 ---
 
-## 10. Decisions required from Michael
+## 10. Decisions and approval status
 
-| ID | Decision | Options | Recommendation (confidence) | Affects |
+**DEC-1 approved by Michael on 2026-11-03. DEC-2…19 remain open.** Approvals here select the design direction; they do not approve the whole design or authorize implementation during this design-only discussion.
+
+| ID | Decision | Options | Recommendation / decision (confidence) | Affects |
 |---|---|---|---|---|
-| **DEC-1** | **Backend strategy.** Options (c) and (d) reverse the 2026-07-13 non-goal (`inference-rearchitecture.md:81`). | (a) status quo; (b) shared host math + identical layer-kit API; (c) backend-generic model code over a layer-level trait; (d) burn; (f) candle on Mac | **(b) everywhere, as BACK-1…4; (c) as the target end state, gated by the BACK-5 pilots.** Not (d): burn dropped its candle backend, its quantization is symmetric-only, and its iOS support is unproven. Not (f): no benchmark exists, and iOS is MLX-only [D §8]. (Medium-high for (b); medium for (c).) | BACK-5, G5, §8 |
+| **DEC-1 — Approved** | **Backend strategy.** The conditional generic-model path reverses the former non-goal only within the pilot gates (`inference-rearchitecture.md:81`). | (a) status quo; (b) shared host math + identical layer-kit API; (c) generic model graphs over a layer-level trait; (d) Burn; (f) Candle on Mac | **Michael approved (b) as the baseline, with (c) conditional on both pilots passing (2026-11-03).** Pilot A: a small representative model. Pilot B: FLUX.3 end to end, including LoRA training. Preserve capabilities and per-backend fidelity, speed, memory and binary-size bounds. If either fails, stay at (b). Backend kernels/execution policy remain specialized; shared pipeline and low-res work are not blocked by generic rollout. No framework/backend replacement selected. Design-only, not permission to execute pilots. (High confidence in the approved choice/baseline; medium in unproven generic feasibility.) | BACK-1…5, G5, §8 |
 | **DEC-2** | **Lane scope.** | Include audio, LLM-as-encoder and training: now, later, or never | **Include all three, after the image/video core.** They hold the largest remaining copy sources. (Medium-high.) | XL-1/2, WGT-4, COMP-1 |
 | **DEC-3** | **Schedule source kinds.** | Global-sliced; fresh-per-pass; explicit table; all three | **All three.** Sources resolve per pass; phase ranges use that pass's executed outer-step coordinates and stream coupling. LTX needs explicit tables; Krea and low-res need slicing; chained recipes need fresh passes. (High.) | PIPE-1/3/4, HOOK-3 |
 | **DEC-4** | **sc-20414** (4,212 commits behind). | Port the executor; salvage parts; abandon | **Salvage its invariants, conformance testkit and ComfyUI pass-schedule math. Do not port `denoise_passes.rs` as a wire contract.** Separately decide whether `denoisePasses` becomes a fresh-per-pass Feature whose schema is derived from that contract (recommend yes, after APP-2). Review `sc-19048` and `sc-25327` for salvage. (High.) | PIPE-3/4 |

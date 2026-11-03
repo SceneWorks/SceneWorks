@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | **Draft 0.5.** Addresses all four round-5 findings while retaining the earlier corrected contracts. Dispositions and the subsequent self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Proposed design only: no implementation, tracker items, model execution or approval of §10 decisions. |
+| **Status** | **Draft 0.5, decision review in progress.** Addresses all four round-5 findings. DEC-1 was approved by Michael on 2026-11-03; DEC-2…19 remain open. Dispositions and self-review are in [REVIEW_LOG.md](REVIEW_LOG.md). Design-only: individual decisions do not authorize implementation, tracker items or pilot/model execution. |
 | **Date** | 2026-11-03 |
 | **Implements** | [REQUIREMENTS.md](REQUIREMENTS.md). Requirement IDs and decisions (`DEC-n`) refer to that document. |
 | **Evidence** | [evidence/](evidence/) `[A]`…`[H]`; review findings `[ENG-n]` (engine) and `[APP-n]` (app/process) in [REVIEW_LOG.md](REVIEW_LOG.md). Inference `origin/main` `a43724b82`; SceneWorks `main` `a1d95e2c4`. |
@@ -514,7 +514,7 @@ PiD stays a decoder override, and its sampler is hosted in S10.
 
 **MLX watchdog ordering** lives in the loader and `ExecPolicy::materialize`.
 
-**The DEC-1 (c) path** follows [D §9]: pilot A (a small family), then pilot B (FLUX.3 including LoRA training), with A/B acceptance on the same runner. Until then, BACK-4's identical API makes twins mechanically mirrorable.
+**Approved DEC-1:** option (b), shared host math and identical layer APIs, is the baseline. Option (c) follows [D §9] only through pilot A (a small representative family) and pilot B (FLUX.3 end to end including LoRA training). Both must pass BACK-5's fidelity/capability, speed, memory and binary-size criteria before generic rollout; if either fails, remain at (b). Keep backend-specific kernels, fusion/materialization and autodiff policy. The shared runner and low-res start proceed independently of generic rollout. This design approval does not start either pilot during the design-only discussion.
 
 ### 3.8 Weights and adapters (WGT-1…5)
 
@@ -967,7 +967,7 @@ Illustrative allocation arithmetic, **not a device estimate**: weights=100 units
 | **ENG-12: BlockStack + conditioning + R3/R4** | `BlockStack`, block hooks, conditioning modules; R3 in `AttentionOp`, R4 in `BlockStack` | ENG-8, ENG-9 | 5–6 wk |
 | **ENG-13: Computed memory contracts + R1 + iOS** | MEM-2 (delete the fixtures); R1 in the lifetime graph; retire `MemoryRequestScope`; MEM-6 iOS admission. `[SW]` migrate the admission contract input if APP-4 has landed. | ENG-10, ENG-11, ENG-12 | 5–6 wk |
 | **ENG-14: Audio + LLM adoption** | XL-1/2 | ENG-9, ENG-13 | 5–6 wk |
-| **ENG-15: DEC-1 (c) pilots** | Pilot A, pilot B, go/no-go; rollout waves as separate features | ENG-8…12; DEC-1 | 4–6 wk pilots; rollout 3–6 months `[L]` |
+| **ENG-15: DEC-1 (c) pilots** | Approved design direction: pilot A then pilot B, with no rollout until both satisfy BACK-5. Failure leaves baseline (b) in place. Successful rollout waves remain separately planned; no pilot execution is authorized by decision review. | ENG-8…12; DEC-1 approved | 4–6 wk pilots; conditional rollout 3–6 months `[L]` |
 
 ### 9.3 SceneWorks features (all `[SW]`; start after the DEC-5 gate)
 
@@ -998,7 +998,7 @@ APP     (DEC-5 gate) APP-1 → APP-2 → APP-3
   - **Per feature:** 4–6 weeks each, as shown in the tables. Any feature planned above 6 weeks is split at a complete consumer boundary (DEC-12).
   - **Engine track:** ENG-1a…14 contains **16 features** including the 1a/1b and 4a/4b splits (24 roadmap nodes including ENG-15 pilots and APP-1…7). With the parallelism the graph allows (ENG-2∥3, ENG-8∥9, ENG-10∥11∥12 on disjoint files), that is **about 14–18 months**.
   - **SceneWorks track:** APP-1…3 can run from the DEC-5 gate onward, in roughly months 2–8. APP-4…7 follow their engine producers and finish around months 14–18.
-  - **DEC-1 (c):** backend-generic rollout adds 3–6 months if approved.
+  - **DEC-1 (c):** backend-generic rollout adds 3–6 months if both approved pilots pass.
   - **Why longer than draft 0.2's 13–16 months:** the R2 prerequisites (pass model, state contracts, first-consumer admission, the primitives extraction) now land inside early features.
   - **Main uncertainty:** the size of the inventories found at each planning — projection inventory, admission consumers, route-inventory exceptions.
 - **Value milestones.**
