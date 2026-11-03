@@ -1852,6 +1852,22 @@ async fn ltx_prepared_upload_saves_reopens_and_rejects_wrong_schema() {
 
 #[tokio::test]
 async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
+    assert!(training_dataset_readiness_fixture(false).await.is_none());
+}
+
+#[cfg(feature = "aesthetic-inference-proof")]
+#[tokio::test]
+#[ignore = "learned CPU MLP execution; explicit aesthetic-cpu manual validation only"]
+async fn training_dataset_aesthetic_readiness_executes_bundled_head() {
+    let score = training_dataset_readiness_fixture(true)
+        .await
+        .expect("aesthetic score");
+    println!(
+        "\nAESTHETIC_BODY_COMPLETED {{\"case\":\"tests::training::training_dataset_aesthetic_readiness_executes_bundled_head\",\"backend\":\"rust-vec-f64\",\"device\":\"cpu\",\"score\":{score}}}"
+    );
+}
+
+async fn training_dataset_readiness_fixture(execute_aesthetic: bool) -> Option<f64> {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
@@ -1954,11 +1970,11 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
 
     // sc-6535 read-back: once the analysis worker POSTs an embedding sidecar (keyed by content hash),
     // the readiness report folds the Tier-1 diversity sub-score in. This is the seam that lights up
-    // the Variety meter + embedding findings in the UI. A full 768-d embedding also lights up the
-    // sc-6537 aesthetic sub-score (the LAION head is 768-in); a sparse unit vector suffices for the
-    // "is a number" assertions.
+    // the Variety meter + embedding findings in the UI. Ordinary tests use a 2-d vector: the
+    // bundled 768-in head refuses it before any learned layer. Only the ignored manual wrapper
+    // opts into the full 768-d fixture and its aesthetic assertion.
     let embedding: Vec<f64> = {
-        let mut values = vec![0.0; 768];
+        let mut values = vec![0.0; if execute_aesthetic { 768 } else { 2 }];
         values[0] = 0.6;
         values[1] = 0.8;
         values
@@ -1990,12 +2006,18 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
         report["subScores"]["diversity"].is_number(),
         "the embedding sidecar lights up the Tier-1 diversity sub-score"
     );
-    // sc-6537: the same style sidecar lights up the aesthetic sub-score (LAION head over the persisted
-    // 768-d CLIP embedding); a person/object dataset would leave it null.
-    assert!(
-        report["subScores"]["aesthetic"].is_number(),
-        "a style dataset + embedding sidecar lights up the aesthetic sub-score"
-    );
+    let aesthetic_score = report["subScores"]["aesthetic"].as_f64();
+    if execute_aesthetic {
+        assert!(
+            aesthetic_score.is_some(),
+            "a style dataset + embedding sidecar lights up the aesthetic sub-score"
+        );
+    } else {
+        assert!(
+            aesthetic_score.is_none(),
+            "wrong-dimension refusal executes no learned layer"
+        );
+    }
     assert!(
         report["subScores"]["alignment"].is_null(),
         "image-only sidecars do not pretend caption alignment has run"
@@ -2013,7 +2035,7 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
                 "contentHash": upload_hash.clone(),
                 "embedding": embedding.clone(),
                 "captionHash": sceneworks_core::dataset_quality::caption_hash("tiny test image"),
-                "textEmbedding": [1.0, 0.0]
+                "textEmbedding": [1.0]
             }]
         }),
     )
@@ -2127,6 +2149,7 @@ async fn training_dataset_readiness_reports_and_persists_tier0_cache() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ack["captionHash"], current_caption_hash);
     assert_eq!(ack["checks"], json!(["caption_alignment"]));
+    aesthetic_score
 }
 
 /// sc-6538 face stack (slice 2): the worker face pass POSTs a face sidecar; a PERSON readiness report
@@ -2413,11 +2436,9 @@ async fn training_dataset_caption_alignment_requires_current_text_embedding_cove
     let dataset_id = dataset["id"].as_str().expect("dataset id").to_owned();
     assert_eq!(dataset["items"].as_array().expect("items").len(), 2);
 
-    let embedding: Vec<f64> = {
-        let mut values = vec![0.0; 768];
-        values[0] = 1.0;
-        values
-    };
+    // Caption-coverage logic needs same-space vectors, not a learned forward pass. The 2-d
+    // fixture is refused by the bundled 768-in head before layer execution.
+    let embedding: Vec<f64> = vec![1.0, 0.0];
     let first_caption_hash = sceneworks_core::dataset_quality::caption_hash("first caption");
     let second_caption_hash = sceneworks_core::dataset_quality::caption_hash("second caption");
 

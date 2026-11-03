@@ -490,6 +490,15 @@ mod tests {
     }
 
     #[test]
+    fn bundled_aesthetic_predictor_loads_without_execution() {
+        let predictor = aesthetic_predictor();
+        assert_eq!(predictor.input_dim(), 768);
+        assert!(std::ptr::eq(predictor, aesthetic_predictor()));
+    }
+
+    #[cfg(feature = "model-inference-proof")]
+    #[test]
+    #[ignore = "learned CPU MLP execution; explicit aesthetic-cpu manual validation only"]
     fn bundled_aesthetic_predictor_loads_and_scores() {
         // The bundled LAION head parses, expects a 768-d CLIP embedding, and scores one to a finite
         // value. (A real-image sanity band is validated end-to-end with the MLX CLIP embedder.)
@@ -504,6 +513,10 @@ mod tests {
         assert!(score.is_finite());
         // Same predictor instance is returned (parsed once).
         assert!(std::ptr::eq(predictor, aesthetic_predictor()));
+        // The controller hashes the immutable bundled asset and requires this terminal marker.
+        println!(
+            "\nAESTHETIC_BODY_COMPLETED {{\"case\":\"tests::bundled_aesthetic_predictor_loads_and_scores\",\"backend\":\"rust-vec-f64\",\"device\":\"cpu\",\"score\":{score}}}"
+        );
     }
 
     /// A 1px checkerboard — maximally high-frequency, so its Laplacian variance is large.

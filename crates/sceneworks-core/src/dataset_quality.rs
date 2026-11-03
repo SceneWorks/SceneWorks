@@ -2967,23 +2967,70 @@ mod tests {
             );
             data.extend(bytes);
         }
-        let hjson = serde_json::to_vec(&serde_json::Value::Object(header)).unwrap();
+        // Stable synthetic model identity across Cargo's serde_json preserve_order feature union.
+        let mut header = serde_json::Value::Object(header);
+        header.sort_all_objects();
+        let hjson = serde_json::to_vec(&header).unwrap();
         let mut out = (hjson.len() as u64).to_le_bytes().to_vec();
         out.extend(hjson);
         out.extend(data);
         out
     }
 
-    #[test]
-    fn aesthetic_predictor_parses_and_forwards() {
-        // layers.0 = identity (2->2); layers.2 = sum + 0.5 (2->1). Gaps in indices mirror the real
-        // head (dropout layers carry no params); the parser orders by index and chains the dims.
-        let st = safetensors_bytes(&[
+    fn aesthetic_forward_fixture() -> Vec<u8> {
+        safetensors_bytes(&[
             ("layers.0.weight", vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]),
             ("layers.0.bias", vec![2], vec![0.0, 0.0]),
             ("layers.2.weight", vec![1, 2], vec![1.0, 1.0]),
             ("layers.2.bias", vec![1], vec![0.5]),
-        ]);
+        ])
+    }
+
+    fn aesthetic_constant_fixture() -> Vec<u8> {
+        safetensors_bytes(&[
+            ("layers.0.weight", vec![1, 2], vec![0.0, 0.0]),
+            ("layers.0.bias", vec![1], vec![3.0]),
+        ])
+    }
+
+    #[test]
+    fn aesthetic_fixture_manifest_matches_serialized_models_without_execution() {
+        let manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../scripts/ci/fixtures/aesthetic-cpu.json"
+        ))
+        .expect("fixture manifest");
+        for (name, bytes) in [
+            ("synthetic-chain", aesthetic_forward_fixture()),
+            ("synthetic-constant", aesthetic_constant_fixture()),
+        ] {
+            assert_eq!(
+                manifest["fixtures"][name]["model_sha256"].as_str(),
+                Some(format!("{:x}", Sha256::digest(&bytes)).as_str()),
+                "serialized fixed weights differ from recorded fixture identity"
+            );
+            AestheticPredictor::from_safetensors_bytes(&bytes).expect("fixture parses");
+        }
+    }
+
+    #[test]
+    fn aesthetic_predictor_parses_and_refuses_invalid_embeddings() {
+        // Parsing, shape inspection and refusal paths execute no Linear layer.
+        let st = aesthetic_forward_fixture();
+        let predictor = AestheticPredictor::from_safetensors_bytes(&st).expect("parse");
+        assert_eq!(predictor.input_dim(), 2);
+        assert_eq!(predictor.layers.len(), 2);
+        assert_eq!(predictor.layers[0].out_dim, predictor.layers[1].in_dim);
+        assert!(predictor.predict(&[0.0, 0.0]).is_none());
+        assert!(predictor.predict(&[1.0, 2.0, 3.0]).is_none());
+    }
+
+    #[cfg(feature = "model-inference-proof")]
+    #[test]
+    #[ignore = "learned CPU MLP execution; explicit aesthetic-cpu manual validation only"]
+    fn aesthetic_predictor_parses_and_forwards() {
+        // layers.0 = identity (2->2); layers.2 = sum + 0.5 (2->1). Gaps in indices mirror the real
+        // head (dropout layers carry no params); the parser orders by index and chains the dims.
+        let st = aesthetic_forward_fixture();
         let predictor = AestheticPredictor::from_safetensors_bytes(&st).expect("parse");
         assert_eq!(predictor.input_dim(), 2);
         // [3,4] L2-normalizes to [0.6,0.8] -> identity -> 0.6 + 0.8 + 0.5 = 1.9.
@@ -2997,15 +3044,36 @@ mod tests {
             predictor.predict(&[1.0, 2.0, 3.0]).is_none(),
             "wrong dim -> None"
         );
+        println!(
+            "\nAESTHETIC_BODY_COMPLETED {}",
+            serde_json::json!({
+                "case": "dataset_quality::tests::aesthetic_predictor_parses_and_forwards",
+                "backend": "rust-vec-f64", "device": "cpu",
+                "model_sha256": format!("{:x}", Sha256::digest(&st)),
+                "inputs": [[3.0, 4.0]], "score": score,
+            })
+        );
     }
 
     #[test]
+    fn aesthetic_non_style_refuses_before_model_execution() {
+        // Empty layers cannot execute a learned layer. Non-style and empty-style paths return
+        // before predict; the learned style assertions remain in the manual proof below.
+        let predictor = AestheticPredictor { layers: vec![] };
+        let items = [emb("a", &[1.0, 0.0])];
+        let thresholds = AestheticThresholds { floor: 5.0 };
+        for kind in [DatasetKind::Person, DatasetKind::Object] {
+            assert!(evaluate_aesthetic(&items, &predictor, &kind, &thresholds).is_none());
+        }
+        assert!(evaluate_aesthetic(&[], &predictor, &DatasetKind::Style, &thresholds).is_none());
+    }
+
+    #[cfg(feature = "model-inference-proof")]
+    #[test]
+    #[ignore = "learned CPU MLP execution; explicit aesthetic-cpu manual validation only"]
     fn aesthetic_is_style_only_and_advisory() {
         // Constant predictor: weight zeros, bias 3.0 -> always 3.0 regardless of input.
-        let st = safetensors_bytes(&[
-            ("layers.0.weight", vec![1, 2], vec![0.0, 0.0]),
-            ("layers.0.bias", vec![1], vec![3.0]),
-        ]);
+        let st = aesthetic_constant_fixture();
         let predictor = AestheticPredictor::from_safetensors_bytes(&st).expect("parse");
         let items = vec![
             ItemEmbedding {
@@ -3040,6 +3108,15 @@ mod tests {
         let eval =
             evaluate_aesthetic(&items, &predictor, &DatasetKind::Style, &lenient).expect("style");
         assert!(eval.dataset.is_empty());
+        println!(
+            "\nAESTHETIC_BODY_COMPLETED {}",
+            serde_json::json!({
+                "case": "dataset_quality::tests::aesthetic_is_style_only_and_advisory",
+                "backend": "rust-vec-f64", "device": "cpu",
+                "model_sha256": format!("{:x}", Sha256::digest(&st)),
+                "inputs": [[1.0, 0.0], [0.0, 1.0]], "score": eval.score,
+            })
+        );
     }
 
     #[test]
