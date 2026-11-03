@@ -943,6 +943,7 @@ test('three individual source mutations are killed by executed assertions, not s
   const original = await readFile(new URL('./h3-finetune-terminal.mjs', import.meta.url), 'utf8');
   for (const file of ['h3-finetune-terminal-api.mjs', 'h3-finetune-terminal-reduced.mjs', 'h3-finetune-terminal-stage.mjs', 'h3-finetune-terminal.test.mjs']) await writeFile(path.join(dir, file), await readFile(new URL(file, import.meta.url)));
   await mkdir(path.join(dir, 'lib'), { recursive: true });
+  await writeFile(path.join(dir, 'lib', 'file-sha256.mjs'), await readFile(new URL('./lib/file-sha256.mjs', import.meta.url)));
   await writeFile(path.join(dir, 'lib', 'h3-campaign-build-profile.mjs'), await readFile(new URL('./lib/h3-campaign-build-profile.mjs', import.meta.url)));
   await writeFile(path.join(dir, 'lib', 'windows-verbatim-path.mjs'), await readFile(new URL('./lib/windows-verbatim-path.mjs', import.meta.url)));
   await writeFile(path.join(dir, 'lib', 'h3-owned-processes.mjs'), await readFile(new URL('./lib/h3-owned-processes.mjs', import.meta.url)));

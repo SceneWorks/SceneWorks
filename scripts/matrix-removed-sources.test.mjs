@@ -47,6 +47,7 @@ async function matrixFixture(t) {
     "scripts/check-tier-integrity.mjs",
     "scripts/tier-integrity-measurement-receipts.mjs",
     "scripts/lib/jsonc.mjs",
+    "scripts/lib/file-sha256.mjs",
     "scripts/lib/source-revision.mjs",
     "scripts/lib/manifest-memory-declarations.mjs",
   ];

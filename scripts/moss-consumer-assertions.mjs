@@ -1,7 +1,7 @@
 #!/usr/bin/env node
+import { sha256 as digest } from "./lib/file-sha256.mjs";
 // Closed S1/S2 consumer assertion proof. This driver never runs an integration/default/ignored
 // test, never writes a preflight stamp, and accepts no operator-supplied command or mutation.
-import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync, utimesSync, mkdirSync, renameSync } from "node:fs";
 import path from "node:path";
@@ -28,7 +28,7 @@ export const TESTS = {
 };
 const fail = message => { throw new Error(`MOSS consumer assertions: ${message}`); };
 const requireFact = (value, message) => { if (!value) fail(message); };
-export const digest = value => createHash("sha256").update(value).digest("hex");
+export { digest };
 const SHA = /^[0-9a-f]{40}$/;
 
 // Byte-scoped Rust patching, not regex replacement across a crate. Ignore braces in comments,
