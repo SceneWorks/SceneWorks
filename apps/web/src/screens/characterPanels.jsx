@@ -1018,7 +1018,7 @@ export function CharacterAssets({
   // unapproved so they're library members, not auto-promoted identity references.
   async function importAssetIds(assetIds) {
     if (!characterId || !addCharacterReference) {
-      return;
+      throw new Error("Character attachment is unavailable.");
     }
     const failedIds = [];
     for (const assetId of assetIds) {

@@ -397,6 +397,78 @@ describe("SceneWorks app shell", () => {
     );
   });
 
+  it("keeps successful dataset uploads and reports failures for retry", async () => {
+    const uploadDatasetItem = vi.fn(async (file) => {
+      if (file.name === "bad.png") throw new Error("failed");
+      return { id: file.name, displayName: file.name, file: { path: `training/uploads/${file.name}`, mimeType: "image/png" } };
+    });
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" }, assets: [], datasets: [], uploadDatasetItem,
+    })));
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click());
+    const input = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [new File(["a"], "good.png", { type: "image/png" }), new File(["b"], "bad.png", { type: "image/png" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    await settle();
+    expect(container.textContent).toContain("Imported 1 image");
+    expect(container.textContent).toContain("Failed to upload: bad.png");
+  });
+
+  it("shows upload progress and allows cancellation", async () => {
+    let resolveUpload;
+    let signal;
+    const uploadDatasetItem = vi.fn((_file, _projectId, options) => {
+      signal = options.signal;
+      return new Promise((resolve) => { resolveUpload = resolve; });
+    });
+    root = createRoot(container);
+    await act(async () => root.render(withTrainingDataSetsLibraryContext({
+      activeProject: { id: "project-a", name: "Project A" }, assets: [], datasets: [], uploadDatasetItem,
+    })));
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click());
+    const input = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [new File(["a"], "one.png", { type: "image/png" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(document.body.textContent).toContain("Uploading 0 of 1");
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Cancel import").click());
+    expect(signal.aborted).toBe(true);
+    await act(async () => resolveUpload({ id: "late", displayName: "late.png", file: { path: "training/uploads/late.png" } }));
+    expect(container.textContent).toContain("Import cancelled.");
+    expect(container.textContent).not.toContain("Imported 1 image");
+  });
+
+  it("aborts an in-flight dataset import when the project switches and ignores its late result", async () => {
+    let resolveUpload;
+    let signal;
+    const uploadDatasetItem = vi.fn((_file, _projectId, options) => {
+      signal = options.signal;
+      return new Promise((resolve) => { resolveUpload = resolve; });
+    });
+    const renderProject = (id) => withTrainingDataSetsLibraryContext({
+      activeProject: { id, name: id }, assets: [], datasets: [], uploadDatasetItem,
+    });
+    root = createRoot(container);
+    await act(async () => root.render(renderProject("project-a")));
+    await act(async () => [...document.body.querySelectorAll("button")].find((button) => button.textContent === "Add images").click());
+    const input = document.body.querySelector(".dataset-add-dropzone input[type=file]");
+    await act(async () => {
+      Object.defineProperty(input, "files", { configurable: true, value: [new File(["a"], "old.png", { type: "image/png" })] });
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(signal.aborted).toBe(false);
+    await act(async () => root.render(renderProject("project-b")));
+    expect(signal.aborted).toBe(true);
+    await act(async () => resolveUpload({ id: "old", displayName: "old.png", file: { path: "training/uploads/old.png" } }));
+    await settle();
+    expect(container.textContent).not.toContain("Imported 1 image");
+    expect(container.textContent).not.toContain("old.png");
+  });
+
   it("does not mutate the API-returned asset record when flagging dataset-only (sc-8939)", async () => {
     // Capture the exact object the upload transport returns so we can assert the import
     // path treats it as immutable (the datasetOnly flag must land on a copy, not here).

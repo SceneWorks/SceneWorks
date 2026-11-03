@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { isImageUpload, uploadFiles } from "./uploadFiles.js";
+import { fileMatchesMediaKind, isCaptionUpload, isImageUpload, uploadFiles } from "./uploadFiles.js";
 
 describe("uploadFiles", () => {
   it("bounds concurrency, reports progress and keeps per-file failures", async () => {
@@ -26,5 +26,8 @@ describe("uploadFiles", () => {
     expect(upload).toHaveBeenCalledTimes(1);
     expect(progress).not.toHaveBeenCalled();
     expect(isImageUpload({ name: "PHOTO.JPG", type: "" })).toBe(true);
+    expect(isCaptionUpload({ name: "caption.TXT", type: "" })).toBe(true);
+    expect(fileMatchesMediaKind({ name: "legacy.WMV", type: "application/octet-stream" }, "video")).toBe(true);
+    expect(fileMatchesMediaKind({ name: "photo.jpg", type: "video/mp4" }, "image")).toBe(false);
   });
 });

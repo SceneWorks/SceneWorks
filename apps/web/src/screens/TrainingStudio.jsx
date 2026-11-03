@@ -412,7 +412,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const datasetsError = trainingDatasetsError;
   const loadingDatasets = loadingTrainingDatasets;
   const onPreview = setPreviewAsset;
-  const uploadDatasetItem = uploadTrainingDatasetItem ?? ((file) => importAssetRaw(file, { throwOnError: true }));
+  const uploadDatasetItem = uploadTrainingDatasetItem ?? ((file, _projectId, { signal } = {}) => importAssetRaw(file, { throwOnError: true, select: false, signal }));
   const importController = useRef(null);
   const importProject = useRef(activeProject?.id);
   if (importProject.current !== activeProject?.id) {
@@ -424,7 +424,11 @@ export function TrainingStudio({ mode = "training" } = {}) {
   async function uploadDatasetFiles(files, controller, projectId) {
     return uploadFiles(files, (file, signal) => uploadDatasetItem(file, projectId, { signal }), {
       signal: controller.signal,
-      onProgress: (done, total) => setDatasetMessage(`Uploading ${done} of ${total}…`),
+      onProgress: (done, total) => {
+        const message = `Uploading ${done} of ${total}…`;
+        setImportProgress(message);
+        setDatasetMessage(message);
+      },
     });
   }
   const loadDataset = loadTrainingDataset;
@@ -446,6 +450,13 @@ export function TrainingStudio({ mode = "training" } = {}) {
   const [draftName, setDraftName] = useState("");
   const [busyDatasetId, setBusyDatasetId] = useState("");
   const [importingAssets, setImportingAssets] = useState(false);
+  const [importProgress, setImportProgress] = useState("");
+  function cancelDatasetImport() {
+    importController.current?.abort();
+    setImportingAssets(false);
+    setImportProgress("");
+    setDatasetMessage("Import cancelled.");
+  }
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [uploadedDatasetAssets, setUploadedDatasetAssets] = useState([]);
   const [savingDataset, setSavingDataset] = useState(false);
@@ -1694,6 +1705,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     importController.current = controller;
     const projectId = activeProject?.id;
     setImportingAssets(true);
+    setImportProgress(`Uploading 0 of ${files.length}…`);
     setDatasetError("");
     const results = await uploadDatasetFiles(files, controller, projectId);
     if (controller.signal.aborted) return;
@@ -1701,8 +1713,10 @@ export function TrainingStudio({ mode = "training" } = {}) {
     setUploadedDatasetAssets((current) => [...imported, ...current.filter((item) => !imported.some((asset) => item.id === asset.id))]);
     addItemReferences(selectionId, imported.map((asset) => asset.id));
     const failed = results.filter((result) => result.error);
-    setDatasetMessage(`Imported ${imported.length} of ${files.length} references.${failed.length ? ` Failed: ${failed.map(({ file }) => file.name).join(", ")}. Retry those files.` : ""}`);
+    setDatasetMessage(`Imported ${imported.length} of ${files.length} references.`);
+    if (failed.length) setDatasetError(`Failed to upload: ${failed.map(({ file }) => file.name).join(", ")}. Retry those files.`);
     setImportingAssets(false);
+    return failed.length === 0;
   }
 
   // Editing a caption marks it as manually authored (sc-2025) — caption source
@@ -1877,6 +1891,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
     importController.current = controller;
     const projectId = activeProject?.id;
     setImportingAssets(true);
+    setImportProgress(`Uploading 0 of ${files.length}…`);
     setDatasetError("");
     setDatasetMessage("");
     try {
@@ -2512,7 +2527,7 @@ export function TrainingStudio({ mode = "training" } = {}) {
                 }}
                 config={{
                   imageAssets, characters, associatedCharacterId, setActiveView,
-                  importingAssets, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
+                  importingAssets, importProgress, onCancelImport: cancelDatasetImport, gpuOptions, onUploadPreparedBundle: uploadPreparedBundle,
                   onIrisSidecar: activeDataset?.id ? irisSidecar : undefined,
                 }}
                 maskSession={{

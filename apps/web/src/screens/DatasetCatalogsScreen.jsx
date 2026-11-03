@@ -280,14 +280,20 @@ function CatalogCuration({ catalogId, token }) {
   const [error, setError] = useState("");
   const abortRef = useRef(null);
   const openAbortRef = useRef(null);
+  const mutationAbortRef = useRef(null);
   const materializeAbortRef = useRef(null);
   const materializeGenerationRef = useRef(0);
 
-  useEffect(() => () => {
-    abortRef.current?.abort();
-    openAbortRef.current?.abort();
-    materializeAbortRef.current?.abort();
-    materializeGenerationRef.current += 1;
+  useEffect(() => {
+    const mutationController = new AbortController();
+    mutationAbortRef.current = mutationController;
+    return () => {
+      abortRef.current?.abort();
+      openAbortRef.current?.abort();
+      mutationController.abort();
+      materializeAbortRef.current?.abort();
+      materializeGenerationRef.current += 1;
+    };
   }, []);
   const selectedRecordId = selectedRecord?.id;
   useEffect(() => {
@@ -395,6 +401,7 @@ function CatalogCuration({ catalogId, token }) {
   }
 
   async function saveView(event) {
+    const signal = mutationAbortRef.current.signal;
     event.preventDefault();
     if (!savedName.trim()) return;
     try {
@@ -404,16 +411,19 @@ function CatalogCuration({ catalogId, token }) {
         {
           method: "POST",
           body: JSON.stringify({ name: savedName.trim(), query: curationBody(query) }),
+          signal,
         },
       );
+      if (signal.aborted) return;
       setSavedViews((current) => [...current, saved]);
       setSavedName("");
     } catch (err) {
-      setError(safeCatalogError(err, "save the catalog view"));
+      if (!signal.aborted) setError(safeCatalogError(err, "save the catalog view"));
     }
   }
 
   async function setReview(recordId, decision) {
+    const signal = mutationAbortRef.current.signal;
     try {
       const review = await apiFetch(
         `/api/v1/catalogs/${encodeURIComponent(catalogId)}/records/${encodeURIComponent(recordId)}/review`,
@@ -424,8 +434,10 @@ function CatalogCuration({ catalogId, token }) {
             decision,
             rejectionReason: decision === "exclude" ? rejectionReason.trim() : null,
           }),
+          signal,
         },
       );
+      if (signal.aborted) return;
       setReviews((current) => {
         const next = { ...current };
         if (review) next[recordId] = review;
@@ -434,7 +446,7 @@ function CatalogCuration({ catalogId, token }) {
       });
       setRejectionReason("");
     } catch (err) {
-      setError(safeCatalogError(err, "save the record review"));
+      if (!signal.aborted) setError(safeCatalogError(err, "save the record review"));
     }
   }
 

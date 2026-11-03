@@ -1,5 +1,22 @@
 const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "webp", "bmp", "gif", "tif", "tiff"]);
 
+export function fileMatchesMediaKind(file, mediaKind) {
+  const mime = String(file?.type ?? "").toLowerCase();
+  if (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/")) {
+    return mime.startsWith(`${mediaKind}/`);
+  }
+  const name = String(file?.name ?? "").toLowerCase();
+  if (mediaKind === "video") {
+    return /\.(mp4|m4v|mov|webm|mkv|avi|ogv|mpeg|mpg|wmv|flv|3gp|3g2)$/i.test(name);
+  }
+  if (mediaKind === "audio") {
+    return /\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|wma|aiff?)$/i.test(name);
+  }
+  return /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|heic|heif)$/i.test(name);
+}
+
+
+
 export function uploadFileBaseName(name) {
   return String(name ?? "").replaceAll("\\", "/").split("/").pop() ?? "";
 }

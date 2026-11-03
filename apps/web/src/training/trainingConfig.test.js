@@ -31,7 +31,6 @@ import {
   depthAnchoringCombinationRefusal,
   auxModelsInstallNote,
   trainingAdapterModelId,
-  depthAnchoringNoVideoLtxWorkflows,
   depthAnchoringEveryMax,
   depthAnchoringMaxTDefault,
   depthAnchoringModelOptions,
@@ -104,6 +103,8 @@ describe("trainingTargetLicense", () => {
     expect(messages(true)).not.toContain(message);
   });
 });
+
+const ltxContract = trainingTargets.targets.find((item) => item.id === "ltx_2_5_video_lora");
 
 const ltxWorkflows = [
   "i2v_lora", "t2v_lora", "v2a_lora", "a2v_lora", "t2a_lora",
@@ -364,15 +365,30 @@ describe("LTX-2.5 advanced workflow contract", () => {
       },
     },
     limits: { ...target.limits, ltxWorkflows },
+    ui: ltxContract.ui,
   };
+  ltxTarget.defaults.advanced.ltxValidation = ltxContract.defaults.advanced.ltxValidation;
   const preparedDataset = {
     ...dataset,
     items: [{ id: "item_1", ltxPreparedBundlePath: "prepared/item_1.safetensors" }],
   };
 
+  it("uses server-owned defaults, workflow plans, and carve-outs even for a different target id", () => {
+    const changed = structuredClone(ltxTarget);
+    changed.id = "other-target";
+    changed.baseModel = "other-model";
+    changed.defaults.advanced.ltxValidation.width = 640;
+    changed.ui.ltxWorkflowPlans.t2v_lora.video.conditions = [{ type: "firstFrame", probability: 0.25 }];
+    const draft = configDraftFromTarget(changed, preparedDataset, ["auto"]);
+    expect(draft.ltxValidation.width).toBe(640);
+    expect(draft.ltxVideo.conditions).toEqual([{ type: "firstFrame", probability: 0.25 }]);
+    expect(depthAnchoringCombinationRefusal(changed, { ltxWorkflow: "t2a_lora" })).toContain("generates none");
+    expect(subjectMaskConsumerField({ normalWeight: "0.1", normalRestrictToSubject: true }, changed)).toBeNull();
+  });
+
   it.each(ltxWorkflows)("submits the canonical %s video/audio plan", (workflow) => {
     const draft = configDraftFromTarget(ltxTarget, preparedDataset, ["auto"]);
-    const plan = ltx25WorkflowPlan(workflow);
+    const plan = ltx25WorkflowPlan(ltxTarget, workflow);
     const snapshot = trainingConfigSnapshot({
       activeDataset: preparedDataset,
       selectedTarget: ltxTarget,
@@ -1164,7 +1180,7 @@ describe("depth anchoring target support (sc-2125)", () => {
   // depthAnchoringCombinationRefusal ⇒ red.
   it("refuses a full fine-tune and the no-video LTX-2.5 workflows", () => {
     const supported = { ...target, limits: { ...target.limits, supportsDepthAnchoring: true } };
-    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const ltx = { ...supported, baseModel: "ltx_2_5", ui: ltxContract.ui };
     const messages = (draft, selectedTarget) =>
       configValidation({ ...whole, depthAnchoringWeight: "0.1", ...draft }, { activeDataset: dataset, selectedTarget })
         .filter((entry) => entry.field === "depthAnchoringWeight")
@@ -1173,8 +1189,8 @@ describe("depth anchoring target support (sc-2125)", () => {
       "Depth anchoring trains a LoRA/LoKr adapter only, not a full fine-tune",
     ]);
     expect(messages({ networkType: "lora" }, supported)).toEqual([]);
-    expect(depthAnchoringNoVideoLtxWorkflows).toHaveLength(6);
-    for (const workflow of depthAnchoringNoVideoLtxWorkflows) {
+    expect(ltxContract.ui.noVideoLossWorkflows).toHaveLength(6);
+    for (const workflow of ltxContract.ui.noVideoLossWorkflows) {
       expect(messages({ ltxWorkflow: workflow }, ltx)).toHaveLength(1);
       // The same name on a non-LTX-2.5 target is no refusal.
       expect(depthAnchoringCombinationRefusal(supported, { ltxWorkflow: workflow })).toBeNull();
@@ -1487,7 +1503,7 @@ describe("body losses (sc-24832)", () => {
   // Mirrors the API: LTX-2.5 cannot restrict the normal loss to the subject — a field-less issue,
   // since the toggle is hidden there. Mutation: drop the LTX-2.5 check in bodyLossIssues ⇒ red.
   it("flags subject-restricted normals on LTX-2.5 only", () => {
-    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
+    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5", ui: ltxContract.ui };
     const draft = { normalWeight: "0.1", normalRestrictToSubject: true, ltxWorkflow: "t2v_lora" };
     const ltx = configValidation({ ...whole, ...draft }, { activeDataset: dataset, selectedTarget: ltx25 });
     expect(ltx.filter((entry) => entry.field === null && /LTX-2.5 cannot restrict/.test(entry.message))).toHaveLength(1);
@@ -1526,7 +1542,7 @@ describe("body losses (sc-24832)", () => {
   // name no field ⇒ red.
   it("refuses a full fine-tune and a video-less LTX-2.5 workflow on the weight key", () => {
     expect(bodyLossCombinationRefusal(bodyTarget, { networkType: "full" })).toMatch(/full fine-tune/);
-    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5" };
+    const ltx25 = { ...bodyTarget, baseModel: "ltx_2_5", ui: ltxContract.ui };
     expect(bodyLossCombinationRefusal(ltx25, { ltxWorkflow: "v2a_lora" })).toMatch(/v2a_lora/);
     expect(bodyLossCombinationRefusal(ltx25, { ltxWorkflow: "t2v_lora" })).toBe(null);
     const blocked = configValidation(
@@ -1678,7 +1694,7 @@ describe("face losses (sc-24831)", () => {
 // their controls are not offered there. Mutation: drop `faceLossCombinationRefusal` from
 // `faceLossScheduleIssues` ⇒ no issue ⇒ red.
 describe("face loss combination refusals (sc-24831)", () => {
-  const ltx = { id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
+  const ltx = { id: "ltx_2_5_video_lora", baseModel: "ltx_2_5", ui: ltxContract.ui, limits: { supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
   const full = { ...target, limits: { ...target.limits, supportsIdentityLoss: true, supportsFaceLandmarkLoss: true } };
   it("refuses a full fine-tune and a no-video LTX-2.5 workflow on the weight key", () => {
     for (const [key, label] of [["identityLossWeight", "Identity loss"], ["faceLandmarkLossWeight", "Face landmark loss"]]) {
@@ -1767,7 +1783,7 @@ describe("latent-space perceptual losses (sc-24833)", () => {
       expect(issues.map((entry) => entry.field)).toContain(`${loss.prefix}Weight`);
       expect(latentLossCombinationRefusal(supported, { networkType: "lora" }, loss)).toBeNull();
     }
-    const ltx = { ...supported, baseModel: "ltx_2_5" };
+    const ltx = { ...supported, baseModel: "ltx_2_5", ui: ltxContract.ui };
     const [vaeAnchor, lpips] = latentPerceptualLosses;
     expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2a_lora" }, vaeAnchor)).toContain("t2a_lora");
     expect(latentLossCombinationRefusal(ltx, { ltxWorkflow: "t2v_lora" }, vaeAnchor)).toBeNull();

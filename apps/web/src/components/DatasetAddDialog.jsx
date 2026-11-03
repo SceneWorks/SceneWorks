@@ -53,6 +53,9 @@ export function DatasetAddDialog({
   memberIds = [],
   characters = [],
   importing = false,
+  importProgress = "",
+  importError = "",
+  onCancelImport,
   onImport,
   onAdd,
   onClose,
@@ -150,12 +153,17 @@ export function DatasetAddDialog({
           accept={fileAccept}
           active={dragActive}
           busy={importing}
+          busyLabel={importProgress || "Importing"}
           hint={fileHint}
           multiple={multiple}
           onActiveChange={setDragActive}
           onFiles={onImport}
         />
       ) : null}
+
+      {tab === "file" && importing ? <button type="button" onClick={onCancelImport}>Cancel import</button> : null}
+      {tab === "file" && importProgress && importing ? <p role="status">{importProgress}</p> : null}
+      {tab === "file" && importError ? <p className="inline-warning" role="alert">{importError}</p> : null}
 
       {tab === "library" ? (
         <CandidateGrid

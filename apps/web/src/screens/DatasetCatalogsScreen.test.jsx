@@ -626,6 +626,35 @@ describe("DatasetCatalogsScreen", () => {
     expect(container.textContent).toContain("Other catalog");
   });
 
+  it("aborts an in-flight saved-view mutation on catalog switch", async () => {
+    catalogs = [catalog(), catalog({ id: "cat-2", name: "Other catalog" })];
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Refresh")).click());
+    await flush();
+    const pending = deferred();
+    const original = fetch.getMockImplementation();
+    let signal;
+    fetch.mockImplementation((url, options = {}) => {
+      if (new URL(url).pathname.endsWith("/saved-views") && options.method === "POST") {
+        signal = options.signal;
+        return pending.promise;
+      }
+      return original(url, options);
+    });
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent.includes("Browse catalog")).click());
+    await flush();
+    const input = container.querySelector('input[placeholder="Full-body photos"]');
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set.call(input, "Old view");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => [...container.querySelectorAll("button")].find((button) => button.textContent === "Save view").click());
+    await act(async () => [...container.querySelectorAll(".catalog-list-item")].find((button) => button.textContent.includes("Other catalog")).click());
+    expect(signal.aborted).toBe(true);
+    await act(async () => pending.resolve(await response({ id: "old", name: "Old view" })));
+    await flush();
+    expect(container.textContent).not.toContain("Old view");
+  });
+
   it("aborts and ignores stale materialization completion after switching catalogs", async () => {
     catalogs = [
       catalog(),

@@ -122,9 +122,6 @@ export const latentPerceptualLosses = [
     everyMax: latentLpipsEveryMax,
   },
 ];
-// The LTX-2.5 workflows that generate no video (API: DEPTH_ANCHORING_NO_VIDEO_LTX_WORKFLOWS) — depth
-// anchoring has no video x0 to decode there, so the engine refuses it (sc-24830).
-export const depthAnchoringNoVideoLtxWorkflows = ["v2a_lora", "t2a_lora", "audio_extend_lora", "audio_inpainting_lora", "audio_suffix_lora", "a2a_ic_lora"];
 export const depthAnchoringModelLabels = {
   small: "Small (fast)",
   base: "Base",
@@ -197,7 +194,7 @@ function adapterLossRefusal(target, configDraft, adapterOnly, video) {
     return `${adapterOnly} a LoRA/LoKr adapter only, not a full fine-tune`;
   }
   const workflow = asText(configDraft?.ltxWorkflow).trim();
-  if (video && target?.baseModel === "ltx_2_5" && depthAnchoringNoVideoLtxWorkflows.includes(workflow)) {
+  if (video && target?.ui?.noVideoLossWorkflows?.includes(workflow)) {
     return `${video}; the LTX-2.5 workflow ${workflow} generates none`;
   }
   return null;
@@ -247,7 +244,7 @@ export function subjectMaskConsumerField(configDraft, selectedTarget) {
     return "subjectMaskLoss";
   }
   const normalOn = bodyLosses.some((loss) => loss.prefix === "normal" && bodyLossEnabled(configDraft ?? {}, loss));
-  if (configDraft?.normalRestrictToSubject && normalOn && selectedTarget?.baseModel !== "ltx_2_5") {
+  if (configDraft?.normalRestrictToSubject && normalOn && selectedTarget?.ui?.subjectRestrictedNormalLoss !== false) {
     return "normalRestrictToSubject";
   }
   return null;
@@ -524,59 +521,14 @@ export const trainingAdapterVersionLabels = {
   v2: "v2 — experimental (heavier de-distill)",
 };
 
-export const ltx25ValidationDefaults = Object.freeze({
-  width: 960,
-  height: 544,
-  frames: 89,
-  fps: 24,
-  steps: 30,
-  videoCfgScale: 3.0,
-  audioCfgScale: 7.0,
-  videoStgScale: 1.0,
-  audioStgScale: 1.0,
-  stgBlocks: [28],
-  guidanceRescale: 0.7,
-  videoModalityGuidanceScale: 3.0,
-  audioModalityGuidanceScale: 3.0,
-  generateAudio: true,
-});
-
-const condition = (type, probability, extra = {}) => ({ type, probability, ...extra });
-const generated = (conditions = []) => ({ isGenerated: true, conditions });
-const frozen = () => ({ isGenerated: false, conditions: [] });
-const LTX25_WORKFLOW_PLANS = Object.freeze({
-  i2v_lora: { video: generated([condition("firstFrame", 0.5)]), audio: generated() },
-  t2v_lora: { video: generated(), audio: generated() },
-  v2a_lora: { video: frozen(), audio: generated() },
-  a2v_lora: { video: generated(), audio: frozen() },
-  t2a_lora: { video: null, audio: generated() },
-  video_extend_lora: { video: generated([condition("prefix", 1, { temporalBoundary: 8 })]), audio: generated() },
-  video_inpainting_lora: { video: generated([condition("mask", 1, { tensorKey: "video_mask" })]), audio: null },
-  video_outpainting_lora: { video: generated([condition("spatialCrop", 1, { spatialRegion: [0, 0, 288, 576] })]), audio: null },
-  video_suffix_lora: { video: generated([condition("suffix", 1, { temporalBoundary: 8 })]), audio: generated() },
-  audio_extend_lora: { video: null, audio: generated([condition("prefix", 1, { temporalBoundary: 8 })]) },
-  audio_inpainting_lora: { video: null, audio: generated([condition("mask", 1, { tensorKey: "audio_mask" })]) },
-  audio_suffix_lora: { video: null, audio: generated([condition("suffix", 1, { temporalBoundary: 8 })]) },
-  av2av_ic_lora: {
-    video: generated([condition("reference", 1, { tensorKey: "video_reference" })]),
-    audio: generated([condition("reference", 1, { tensorKey: "audio_reference" })]),
-  },
-  v2v_ic_lora: {
-    video: generated([
-      condition("reference", 1, { tensorKey: "video_reference" }),
-      condition("firstFrame", 0.2),
-    ]),
-    audio: null,
-  },
-  a2a_ic_lora: { video: null, audio: generated([condition("reference", 1, { tensorKey: "audio_reference" })]) },
-});
-
 function cloneJson(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
-export function ltx25WorkflowPlan(workflow, previousVideo = null, previousAudio = null) {
-  const canonical = LTX25_WORKFLOW_PLANS[workflow] ?? LTX25_WORKFLOW_PLANS.t2v_lora;
+export function ltx25WorkflowPlan(target, workflow, previousVideo = null, previousAudio = null) {
+  const plans = target?.ui?.ltxWorkflowPlans ?? {};
+  const canonical = plans[workflow] ?? plans[target?.defaults?.advanced?.ltxWorkflow];
+  if (!canonical) return null;
   const mergeModality = (next, previous) => {
     if (!next) return null;
     return {
@@ -593,8 +545,8 @@ export function ltx25WorkflowPlan(workflow, previousVideo = null, previousAudio 
   };
 }
 
-function ltxValidationSnapshot(value = {}) {
-  const merged = { ...ltx25ValidationDefaults, ...value };
+function ltxValidationSnapshot(value = {}, defaults = {}) {
+  const merged = { ...defaults, ...value };
   return {
     width: numberFromDraft(merged.width),
     height: numberFromDraft(merged.height),
@@ -615,8 +567,8 @@ function ltxValidationSnapshot(value = {}) {
   };
 }
 
-function validateLtxValidationControls(value, issues) {
-  const validation = ltxValidationSnapshot(value);
+function validateLtxValidationControls(value, issues, defaults) {
+  const validation = ltxValidationSnapshot(value, defaults);
   const integerRange = (field, min, max, label = optionLabel(field)) => {
     const current = validation[field];
     if (!Number.isInteger(current) || current < min || current > max) {
@@ -811,8 +763,8 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
   const firstGpu = gpuOptions[0] ?? "";
   const requestedGpu = asText(advanced.requestedGpu || firstGpu);
   const outputLabel = outputKindLabel(target, advanced.networkType);
-  const ltxWorkflow = asText(advanced.ltxWorkflow || "t2v_lora");
-  const ltxPlan = ltx25WorkflowPlan(ltxWorkflow, advanced.ltxVideo, advanced.ltxAudio);
+  const ltxWorkflow = asText(advanced.ltxWorkflow || target?.defaults?.advanced?.ltxWorkflow);
+  const ltxPlan = ltx25WorkflowPlan(target, ltxWorkflow, advanced.ltxVideo, advanced.ltxAudio);
   const objective = irisObjective(target);
   const taskBag = IRIS_TASK_BAG_KEYS[objective];
   return {
@@ -893,12 +845,12 @@ export function configDraftFromTarget(target, dataset, gpuOptions, triggerPhrase
     batchSize: numericDraft(defaults.batchSize ?? defaultBatchSize),
     gradientAccumulation: numericDraft(defaults.gradientAccumulation ?? defaultGradientAccumulation),
     seed: numericDraft(defaults.seed),
-    ...(target?.baseModel === "ltx_2_5"
+    ...(target?.ui?.ltxWorkflowPlans
       ? {
           ltxWorkflow,
           ltxVideo: ltxPlan.video,
           ltxAudio: ltxPlan.audio,
-          ltxValidation: ltxValidationSnapshot(advanced.ltxValidation),
+          ltxValidation: ltxValidationSnapshot(advanced.ltxValidation, target?.defaults?.advanced?.ltxValidation),
         }
       : {}),
     ...(advanced.flux3 !== undefined
@@ -1284,7 +1236,7 @@ export function configValidation(
     // Attached to the version picker — the same field the API's submit-time refusal names.
     issues.push(issue.error("trainingAdapterVersion", `Install ${names.join(" and ")} — this run trains with it.`));
   }
-  if (selectedTarget?.baseModel === "ltx_2_5") {
+  if (selectedTarget?.ui?.ltxWorkflowPlans) {
     const workflows = Array.isArray(selectedTarget?.limits?.ltxWorkflows)
       ? selectedTarget.limits.ltxWorkflows
       : [];
@@ -1324,7 +1276,7 @@ export function configValidation(
         }
       }
     }
-    validateLtxValidationControls(configDraft.ltxValidation, issues);
+    validateLtxValidationControls(configDraft.ltxValidation, issues, selectedTarget?.defaults?.advanced?.ltxValidation);
   }
   return issues;
 }
@@ -1396,8 +1348,8 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
     ? []
     : editedPrompts.length ? editedPrompts : samplePromptsFromTrigger(configDraft.triggerWord);
   const ltxWorkflow = asText(configDraft.ltxWorkflow).trim();
-  const ltxPlan = selectedTarget?.baseModel === "ltx_2_5"
-    ? ltx25WorkflowPlan(ltxWorkflow, configDraft.ltxVideo, configDraft.ltxAudio)
+  const ltxPlan = selectedTarget?.ui?.ltxWorkflowPlans
+    ? ltx25WorkflowPlan(selectedTarget, ltxWorkflow, configDraft.ltxVideo, configDraft.ltxAudio)
     : null;
   const advanced = compactObject({
     ...defaultAdvanced,
@@ -1466,7 +1418,7 @@ export function trainingConfigSnapshot({ activeDataset, configDraft, selectedPre
           ltxWorkflow,
           ltxVideo: ltxModalitySnapshot(ltxPlan.video),
           ltxAudio: ltxModalitySnapshot(ltxPlan.audio),
-          ltxValidation: ltxValidationSnapshot(configDraft.ltxValidation),
+          ltxValidation: ltxValidationSnapshot(configDraft.ltxValidation, selectedTarget?.defaults?.advanced?.ltxValidation),
         }
       : {}),
     // Always the compacted draft bag (never the target's raw default bag spread above), so a
@@ -1724,7 +1676,7 @@ function auxLossIssues(configDraft, selectedTarget, spec) {
 function bodyLossExtraIssues(configDraft, selectedTarget, prefix) {
   const issues = [];
   if (prefix === "normal" && configDraft.normalRestrictToSubject) {
-    if (selectedTarget?.baseModel === "ltx_2_5") {
+    if (selectedTarget?.ui?.subjectRestrictedNormalLoss === false) {
       // Mirrors the API: LTX-2.5's prepared latent bundles carry no image a mask can align with.
       // The toggle is hidden there, so a carried-over `true` names no input.
       issues.push([null, "LTX-2.5 cannot restrict the normal loss to the subject — clear it or pick another target"]);

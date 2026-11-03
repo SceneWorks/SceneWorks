@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { uploadFiles } from "../uploadFiles.js";
+import { fileMatchesMediaKind, uploadFiles } from "../uploadFiles.js";
 import {
   AssetThumbnail,
   assetCanRenderAsAudio,
@@ -9,6 +9,12 @@ import {
 import { assetMatchesCharacter, characterAssetIdIndex } from "../characterMembership.js";
 import { FileDropzone } from "./FileDropzone.jsx";
 import { Modal } from "./Modal.jsx";
+
+function indexAssets(assets) {
+  const index = new Map();
+  for (const asset of assets) if (!index.has(asset.id)) index.set(asset.id, asset);
+  return index;
+}
 
 const categoryOptions = [
   ["all", "All"],
@@ -338,8 +344,10 @@ function MediaSourcePickerField({
     [assets, mediaKind, projectId],
   );
   const selectedIds = multiple ? values : value ? [value] : [];
+  const selectableById = useMemo(() => indexAssets(selectableAssets), [selectableAssets]);
+  const assetsById = useMemo(() => indexAssets(assets), [assets]);
   const selectedAssets = selectedIds
-    .map((id) => selectableAssets.find((asset) => asset.id === id) ?? assets.find((asset) => asset.id === id))
+    .map((id) => selectableById.get(id) ?? assetsById.get(id))
     .filter(Boolean);
 
   function confirm(ids) {
@@ -381,21 +389,6 @@ function MediaSourcePickerField({
       ) : null}
     </div>
   );
-}
-
-function fileMatchesMediaKind(file, mediaKind) {
-  const mime = String(file?.type ?? "").toLowerCase();
-  if (mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/")) {
-    return mime.startsWith(`${mediaKind}/`);
-  }
-  const name = String(file?.name ?? "").toLowerCase();
-  if (mediaKind === "video") {
-    return /\.(mp4|m4v|mov|webm|mkv|avi|ogv|mpeg|mpg|wmv|flv|3gp|3g2)$/i.test(name);
-  }
-  if (mediaKind === "audio") {
-    return /\.(mp3|wav|flac|m4a|aac|ogg|oga|opus|wma|aiff?)$/i.test(name);
-  }
-  return /\.(png|jpe?g|webp|gif|bmp|tiff?|avif|heic|heif)$/i.test(name);
 }
 
 function assetMatchesMediaKind(asset, mediaKind) {
@@ -681,7 +674,8 @@ export function AssetPickerField({
 }) {
   const [open, setOpen] = useState(false);
   const selectedIds = multiple ? values : value ? [value] : [];
-  const selectedAssets = selectedIds.map((id) => assets.find((asset) => asset.id === id)).filter(Boolean);
+  const assetsById = useMemo(() => indexAssets(assets), [assets]);
+  const selectedAssets = selectedIds.map((id) => assetsById.get(id)).filter(Boolean);
 
   function confirm(ids) {
     onChange(multiple ? ids : ids[0] ?? "");
@@ -965,10 +959,11 @@ export function CharacterImportDialog({
       setTab("images");
       setError(`Attached ${result.attached} of ${assetIds.length}. Retry the remaining assets.`);
       setBusy(false);
-      return;
+      return result;
     }
     setPendingAttachments([]);
     if (!keepOpen) onClose();
+    return result ?? { attached: assetIds.length, failedIds: [] };
   }
 
   async function commitSelection() {
@@ -1000,9 +995,10 @@ export function CharacterImportDialog({
       const outcomes = await uploadFiles(files, (file) => importAsset(file, { throwOnError: true }));
       const importedIds = outcomes.filter((item) => item.value).map((item) => item.value.id);
       const failures = outcomes.filter((item) => item.error);
-      if (importedIds.length) await attach(importedIds, { keepOpen: failures.length > 0 });
+      const attachment = importedIds.length ? await attach(importedIds, { keepOpen: failures.length > 0 }) : null;
       if (failures.length) {
-        setError(`Uploaded ${importedIds.length} of ${files.length}. Failed: ${failures.map(({ file }) => file.name).join(", ")}. Retry those files.`);
+        const pending = attachment?.failedIds?.length ?? 0;
+        setError(`Attached ${attachment?.attached ?? 0} of ${files.length}. Failed uploads: ${failures.map(({ file }) => file.name).join(", ")}. Retry those files.${pending ? ` ${pending} attachments can also be retried.` : ""}`);
         setBusy(false);
       } else if (!importedIds.length) {
         setError("Upload failed — try another file.");
