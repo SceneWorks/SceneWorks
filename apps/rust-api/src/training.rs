@@ -3740,7 +3740,7 @@ const MIN_FREE_TRAINING_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) fn training_disk_space_error(output_dir: &FsPath) -> Option<String> {
     // `output_dir` itself rarely exists yet; probe the nearest existing parent.
     let probe = nearest_existing_ancestor(output_dir)?;
-    let available = fs2::available_space(&probe).ok()?;
+    let available = sceneworks_core::disk::disk_free_bytes(&probe).ok()?;
     insufficient_disk_space(available, MIN_FREE_TRAINING_BYTES).then(|| {
         format!(
             "Not enough free disk space to train: {} available on the volume holding {}, but at least {} is recommended. Free up space and try again.",

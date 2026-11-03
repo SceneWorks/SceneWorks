@@ -103,7 +103,7 @@ struct SenseNovaDirectAdmission {
 }
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
-const SENSENOVA_BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const SENSENOVA_BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 #[cfg(any(target_os = "macos", feature = "backend-candle"))]
 fn sensenova_gib_bytes(gb: f64) -> u64 {
@@ -247,10 +247,7 @@ async fn sensenova_direct_admission(
                 ))
             },
         )?;
-    let budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let (total_gb, free_gb) = budget
         .map(|budget| (budget.total_gb, budget.free_gb))
         .unwrap_or((predicted_peak_gb, predicted_peak_gb));
@@ -346,48 +343,11 @@ fn sensenova_selection_parameters(
     contract: &gen_core::MemoryProviderContract,
     strategy: gen_core::MemoryStrategy,
 ) -> Option<gen_core::MemoryStrategyParameters> {
-    let smallest = |rung: gen_core::MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !contract.engages(strategy, rung) {
-            return Some(None);
-        }
-        pick(&contract.capability(rung)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    let window_component = if contract.engages(
-        strategy,
-        gen_core::MemoryStrategy::BoundedTransformerResidency,
-    ) {
-        contract
-            .capability(gen_core::MemoryStrategy::BoundedTransformerResidency)?
-            .parameters
-            .transformer_window_components
-            .first()
-            .copied()
-    } else {
-        None
-    };
-    Some(gen_core::MemoryStrategyParameters {
-        stage_residency: None,
-        decode_tile_edge: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(gen_core::MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
-        attention_chunk_size: smallest(gen_core::MemoryStrategy::BoundedAttention, |ranges| {
-            &ranges.attention_chunk_sizes
-        })?,
-        transformer_window_size: smallest(
-            gen_core::MemoryStrategy::BoundedTransformerResidency,
-            |ranges| &ranges.transformer_window_sizes,
-        )?,
-        transformer_window_component: window_component,
-    })
+    sceneworks_core::memory_contracts::smallest_parameters(
+        contract,
+        &contract.engaged_composition(strategy),
+        sceneworks_core::memory_contracts::TransformerScopeParameters::ProviderOrder,
+    )
 }
 
 /// The request's predicted resident peak, in bytes.

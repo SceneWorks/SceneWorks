@@ -31,21 +31,20 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
-#[cfg(test)]
-use gen_core::StagedResidencyAvailability;
 use gen_core::{
     GenerationMemory, LoadShapeDeclarationResult, LoadSpec, MemoryBackend,
     MemoryBackendRealization, MemoryBudget, MemoryCacheState, MemoryConformanceState,
     MemoryDecodeArtifactIdentity, MemoryDecodeGeometryPolicy, MemoryDecodePolicyQuery,
     MemoryDecodeQualityDisposition, MemoryDecodeQualityFixture, MemoryDecodeQualityRuntimeIdentity,
-    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryEvidenceVerdict,
-    MemoryGeometry, MemoryMode, MemoryNumericTier, MemoryOptimizationAuthority,
-    MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemoryReferenceShape,
-    MemoryRunContext, MemorySelection, MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision,
-    Quant, TransformerComponent, WeightsSource,
+    MemoryEvidence, MemoryEvidenceDimensions, MemoryEvidenceKey, MemoryGeometry, MemoryMode,
+    MemoryNumericTier, MemoryOptimizationAuthority, MemoryParityContract, MemoryParityResult,
+    MemoryProviderContract, MemoryReferenceShape, MemoryRunContext, MemorySelection,
+    MemoryStrategy, OffloadPolicy, PerComponentBytes, Precision, Quant, TransformerComponent,
+    WeightsSource,
 };
+#[cfg(test)]
+use gen_core::{MemoryEvidenceVerdict, StagedResidencyAvailability};
 use sceneworks_core::memory_calibration::{
     Backend as CalibrationBackend, CalibrationBinding, EvidenceBundle, EvidenceMismatchReason,
     EvidenceQuery, EvidenceVerdict, Geometry as CalibrationGeometry, LoadShapeKey, StrategyRung,
@@ -60,7 +59,8 @@ use crate::model_jobs::ResolvedArtifactProvenance;
 use crate::{WorkerError, WorkerResult};
 
 const REQUEST_EVIDENCE_REVISION: &str = "sc-15507-request-scope-v1";
-const INFERENCE_CONTRACT_REVISION: &str = "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82";
+#[cfg(test)]
+use sceneworks_core::inference_provenance::INFERENCE_REVISION;
 // Must remain identical to mlx-gen-mage's loaded provider contract. sc-22733 (inference #953,
 // epic sc-22723) retired the single string `mage-flow-mlx-shared-ladder-2026-08-03-v1` for a
 // table keyed on (route, PROVEN artifact tier) — `mage-flow-<route>-<tier>-mlx-shared-ladder-v1`,
@@ -1142,10 +1142,7 @@ fn active_component_floors(
     declared: &'static [gen_core::ComponentPrecisionFloor],
     selected: Option<gen_core::Quant>,
 ) -> &'static [gen_core::ComponentPrecisionFloor] {
-    match selected {
-        Some(selected) if declared.iter().any(|floor| floor.applies_to(selected)) => declared,
-        _ => &[],
-    }
+    sceneworks_core::memory_contracts::active_component_floors(declared, selected)
 }
 
 pub(crate) fn plan_tier_key(tier: MemoryNumericTier) -> &'static str {
@@ -1705,8 +1702,8 @@ fn resident_evidence(
         parameters: Default::default(),
         tier,
     };
-    let evidence = MemoryEvidence {
-        key: MemoryEvidenceKey {
+    let evidence = sceneworks_core::memory_contracts::unverified_estimate(
+        MemoryEvidenceKey {
             model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend: gen_core::MemoryBackend::Mlx,
@@ -1725,25 +1722,11 @@ fn resident_evidence(
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
         },
-        conformance: MemoryConformanceState::ImplementedUnverified,
-        dimensions: MemoryEvidenceDimensions {
-            static_implementation: MemoryEvidenceVerdict::Satisfied,
-            declared_calibration: MemoryEvidenceVerdict::Missing,
-            historical_verification: MemoryEvidenceVerdict::Missing,
-            current_environment_verification: MemoryEvidenceVerdict::Missing,
-            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-        },
-        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
-        calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
-        sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
-        inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
-        harness_version: String::new(),
+        gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint.unwrap_or_default().to_owned(),
+        REQUEST_EVIDENCE_REVISION.to_owned(),
         predicted_peak_bytes,
-        observed_peak_bytes: None,
-        parity: MemoryParityContract::Exact,
-        parity_result: MemoryParityResult::NotRun,
-    };
+    );
     (selection, evidence)
 }
 
@@ -2349,29 +2332,7 @@ fn request_regime(
     engaged: &[MemoryStrategy],
     parameters: gen_core::MemoryStrategyParameters,
 ) -> sceneworks_core::memory_anchor::RequestRegime {
-    use sceneworks_core::memory_anchor::{DecodeTile, RequestRegime};
-
-    RequestRegime {
-        staged: engaged.contains(&MemoryStrategy::StagedResidency),
-        decode_tile: engaged
-            .contains(&MemoryStrategy::BoundedDecode)
-            .then(|| {
-                Some(DecodeTile {
-                    edge: parameters.decode_tile_edge?,
-                    overlap: parameters.decode_overlap?,
-                })
-            })
-            .flatten(),
-        attention_chunk_scores: engaged
-            .contains(&MemoryStrategy::BoundedAttention)
-            .then_some(parameters.attention_chunk_size)
-            .flatten()
-            .map(u64::from),
-        transformer_window: engaged
-            .contains(&MemoryStrategy::BoundedTransformerResidency)
-            .then_some(parameters.transformer_window_size)
-            .flatten(),
-    }
+    sceneworks_core::memory_contracts::request_regime(engaged, &parameters)
 }
 
 /// Active phase residue from a compatible anchor. Production MLX fallback calls this with the
@@ -2519,8 +2480,8 @@ pub(crate) fn estimate_evidence(
     predicted_peak_bytes: u64,
     calibration_fingerprint: Option<&str>,
 ) -> MemoryEvidence {
-    MemoryEvidence {
-        key: MemoryEvidenceKey {
+    sceneworks_core::memory_contracts::unverified_estimate(
+        MemoryEvidenceKey {
             model_family: contract.provider_id.clone(),
             resolved_route: contract.provider_id.clone(),
             backend,
@@ -2539,25 +2500,11 @@ pub(crate) fn estimate_evidence(
             engaged_composition: contract.engaged_composition_for_selection(&selection),
             parameters: selection.parameters,
         },
-        conformance: MemoryConformanceState::ImplementedUnverified,
-        dimensions: MemoryEvidenceDimensions {
-            static_implementation: MemoryEvidenceVerdict::Satisfied,
-            declared_calibration: MemoryEvidenceVerdict::Missing,
-            historical_verification: MemoryEvidenceVerdict::Missing,
-            current_environment_verification: MemoryEvidenceVerdict::Missing,
-            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-        },
-        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
-        calibration_fingerprint: calibration_fingerprint.unwrap_or_default().to_owned(),
-        sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
-        inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
-        harness_version: String::new(),
+        gen_core::MEMORY_CALIBRATION_ABI,
+        calibration_fingerprint.unwrap_or_default().to_owned(),
+        REQUEST_EVIDENCE_REVISION.to_owned(),
         predicted_peak_bytes,
-        observed_peak_bytes: None,
-        parity: MemoryParityContract::Exact,
-        parity_result: MemoryParityResult::NotRun,
-    }
+    )
 }
 
 /// Bytes the provider declares it drops from INSIDE `asset_facts.transformer_bytes` before the
@@ -2722,71 +2669,17 @@ fn floor_weights_bytes(
     )
 }
 
-/// The smallest declared value for every numeric knob the engaged composition requires — the most
-/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
-/// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
-/// knob has no declared range: such a selection cannot be validated, so no candidate is
-/// synthesized for the rung.
-/// The smallest declared value for every numeric knob the engaged composition requires — the most
-/// deeply bounding parameters the provider publishes, which keeps the true runtime transient as
-/// far below the floor's unreduced headroom charge as the provider allows. `None` when a required
-/// knob has no declared range: such a selection cannot be validated, so no candidate is
-/// synthesized for the rung. This is the video-lane floor shape (`video_admission`); the image
-/// lane's per-candidate builder below carries decode-quality decisions the video lane has no use
-/// for.
+/// Video callers share the declared parameter builder; the image builder below layers the
+/// provider's decode-quality authority over the same non-decode parameters.
 pub(crate) fn estimate_floor_smallest_parameters(
     contract: &MemoryProviderContract,
     engaged: &[MemoryStrategy],
 ) -> Option<gen_core::MemoryStrategyParameters> {
-    let smallest = |strategy: MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !engaged.contains(&strategy) {
-            return Some(None);
-        }
-        pick(&contract.capability(strategy)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    let transformer_window_component = if engaged
-        .contains(&MemoryStrategy::BoundedTransformerResidency)
-        && contract
-            .phase_facts
-            .as_ref()
-            .and_then(|phase| phase.native_quant.as_ref())
-            .is_some()
-    {
-        contract
-            .capability(MemoryStrategy::BoundedTransformerResidency)?
-            .parameters
-            .transformer_window_components
-            .iter()
-            .copied()
-            .min()
-            // Preserve the legacy/default Dit representation; non-default declared scopes
-            // must reach validation and execution rather than silently becoming Dit.
-            .filter(|component| *component != gen_core::TransformerComponent::Dit)
-    } else {
-        None
-    };
-    Some(gen_core::MemoryStrategyParameters {
-        stage_residency: None,
-        decode_tile_edge: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_tile_edges
-        })?,
-        decode_overlap: smallest(MemoryStrategy::BoundedDecode, |ranges| {
-            &ranges.decode_overlaps
-        })?,
-        attention_chunk_size: smallest(MemoryStrategy::BoundedAttention, |ranges| {
-            &ranges.attention_chunk_sizes
-        })?,
-        transformer_window_size: smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
-            &ranges.transformer_window_sizes
-        })?,
-        transformer_window_component,
-    })
+    sceneworks_core::memory_contracts::smallest_parameters(
+        contract,
+        engaged,
+        sceneworks_core::memory_contracts::TransformerScopeParameters::NativeQuant,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2803,21 +2696,16 @@ fn estimate_floor_parameters(
     Vec<EstimateParameterCandidate>,
     Vec<DecodeQualityRequestDecision>,
 ) {
-    let smallest = |strategy: MemoryStrategy,
-                    pick: fn(&gen_core::MemoryParameterRanges) -> &Vec<u32>|
-     -> Option<Option<u32>> {
-        if !engaged.contains(&strategy) {
-            return Some(None);
-        }
-        pick(&contract.capability(strategy)?.parameters)
-            .iter()
-            .copied()
-            .min()
-            .map(Some)
-    };
-    let Some(attention_chunk_size) = smallest(MemoryStrategy::BoundedAttention, |ranges| {
-        &ranges.attention_chunk_sizes
-    }) else {
+    let non_decode: Vec<_> = engaged
+        .iter()
+        .copied()
+        .filter(|rung| *rung != MemoryStrategy::BoundedDecode)
+        .collect();
+    let Some(base_parameters) = sceneworks_core::memory_contracts::smallest_parameters(
+        contract,
+        &non_decode,
+        sceneworks_core::memory_contracts::TransformerScopeParameters::ImplicitDit,
+    ) else {
         return (
             Vec::new(),
             vec![DecodeQualityRequestDecision::Refused {
@@ -2825,33 +2713,19 @@ fn estimate_floor_parameters(
                 tile_edge: None,
                 overlap: None,
                 evidence_sha256: None,
-                reason: "required attention chunk range is empty".to_owned(),
+                reason: if engaged.contains(&MemoryStrategy::BoundedAttention)
+                    && contract
+                        .capability(MemoryStrategy::BoundedAttention)
+                        .is_none_or(|capability| {
+                            capability.parameters.attention_chunk_sizes.is_empty()
+                        }) {
+                    "required attention chunk range is empty"
+                } else {
+                    "required transformer window range is empty"
+                }
+                .to_owned(),
             }],
         );
-    };
-    let Some(transformer_window_size) =
-        smallest(MemoryStrategy::BoundedTransformerResidency, |ranges| {
-            &ranges.transformer_window_sizes
-        })
-    else {
-        return (
-            Vec::new(),
-            vec![DecodeQualityRequestDecision::Refused {
-                strategy,
-                tile_edge: None,
-                overlap: None,
-                evidence_sha256: None,
-                reason: "required transformer window range is empty".to_owned(),
-            }],
-        );
-    };
-    let base_parameters = gen_core::MemoryStrategyParameters {
-        stage_residency: None,
-        decode_tile_edge: None,
-        decode_overlap: None,
-        attention_chunk_size,
-        transformer_window_size,
-        transformer_window_component: None,
     };
     if !engaged.contains(&MemoryStrategy::BoundedDecode) {
         return (
@@ -2905,13 +2779,12 @@ fn estimate_floor_parameters(
                 .min()
                 .zip(Some(route.tile_overlap))
         } else {
-            decode
-                .parameters
-                .decode_tile_edges
-                .iter()
-                .copied()
-                .min()
-                .zip(decode.parameters.decode_overlaps.iter().copied().min())
+            sceneworks_core::memory_contracts::smallest_parameters(
+                contract,
+                engaged,
+                sceneworks_core::memory_contracts::TransformerScopeParameters::ImplicitDit,
+            )
+            .and_then(|parameters| parameters.decode_tile_edge.zip(parameters.decode_overlap))
         };
         let Some((tile_edge, overlap)) = pair else {
             return (
@@ -3088,7 +2961,7 @@ fn mlx_selected_phase_peak(
         let windows = conditioning_windows.filter(|windows| *windows > 0)?;
         // Retained SDXL UNet-only seam: CFG batch 2, 77 tokens, 1024², dense fp16.
         // The exact selected reference tensor shapes total 5,134,927,368 bytes.
-        let seam_workspace = (6.58685 * 1_073_741_824.0_f64).ceil() as u64 - 5_134_927_368;
+        let seam_workspace = (6.58685 * BYTES_PER_GIB).ceil() as u64 - 5_134_927_368;
         workspace.conditioning = crate::mlx_phase_estimate::dual_clip_workspace(windows);
         // Scaling the whole workspace by padded context windows is conservative: only the
         // cross-attention and carried conditioning actually grow with prompt length.
@@ -5520,17 +5393,7 @@ fn predicted_peak_gb_with_headroom(weight_bytes: u64, headroom_gb: f64) -> Optio
 /// Decide whether the predicted peak fits the budget. Missing either input ⇒ `Unknown` (never
 /// block), exactly like the flux2 guard and the candle gate.
 pub(crate) fn fit_decision(needed_gb: Option<f64>, budget: Option<MlxMemoryBudget>) -> FitDecision {
-    let (Some(needed_gb), Some(budget)) = (needed_gb, budget) else {
-        return FitDecision::Unknown;
-    };
-    if budget.total_gb + f64::EPSILON < needed_gb {
-        FitDecision::TooBig {
-            needed_gb,
-            available_gb: budget.total_gb,
-        }
-    } else {
-        FitDecision::Fits
-    }
+    crate::fit_gate::fit_decision(needed_gb, budget.map(|budget| budget.total_gb))
 }
 
 /// Predicted SEQUENTIAL peak (GiB) = the largest single working set + [`HEADROOM_GB`] (sc-10839). The
@@ -5569,8 +5432,10 @@ pub(crate) fn sequential_overflow_gb(
     sequential_needed_gb: Option<f64>,
     budget: Option<MlxMemoryBudget>,
 ) -> Option<f64> {
-    let (needed_gb, budget) = (sequential_needed_gb?, budget?);
-    (budget.total_gb + f64::EPSILON < needed_gb).then_some(needed_gb)
+    crate::fit_gate::sequential_overflow_gb(
+        sequential_needed_gb,
+        budget.map(|budget| budget.total_gb),
+    )
 }
 
 /// Sum the on-disk bytes of every `.safetensors` weight file under `dir` (recursively), following
@@ -5852,39 +5717,21 @@ pub(crate) fn sum_text_encoder_bytes(dir: &Path) -> u64 {
     total
 }
 
-/// Total unified memory (GiB) via a blocking `sysctl hw.memsize`, cached process-wide (physical RAM
+/// Total unified memory (GiB) via the shared bounded physical-memory probe, cached process-wide (physical RAM
 /// never changes at runtime). The blocking sibling of `gpu::total_unified_memory_gb` — the gate runs
-/// on the generator-cache thread, which is already blocking on the weight load, so a one-shot
-/// subprocess probe there is free. `None` off macOS or when the probe fails ⇒ the gate no-ops (a
-/// cached `None` is a deliberate fail-open, consistent with `Unknown` never blocking).
+/// on the generator-cache thread, which is already blocking on the weight load, so the bounded
+/// subprocess read does not require a Tokio runtime. `None` off macOS or on probe failure retains
+/// fail-open admission; failures are retried so a transient launch failure cannot disable the gate.
 pub(crate) fn probe_total_unified_memory_gib() -> Option<f64> {
     probe_total_unified_memory_bytes().map(|bytes| bytes as f64 / BYTES_PER_GIB)
 }
 
 /// Total unified memory (bytes) — the raw probe [`probe_total_unified_memory_gib`] scales. Cached
-/// process-wide behind one `OnceLock`, so the `sysctl` subprocess runs at most once however many
+/// process-wide after a successful bounded read, so the `sysctl` subprocess is shared however many
 /// callers ask. Also read by [`crate::generator_cache::apply_gpu_memory_limit`] at worker startup,
 /// which needs the byte figure rather than the GiB one.
 pub(crate) fn probe_total_unified_memory_bytes() -> Option<u64> {
-    static TOTAL_BYTES: OnceLock<Option<u64>> = OnceLock::new();
-    *TOTAL_BYTES.get_or_init(sysctl_total_unified_memory_bytes)
-}
-
-#[cfg(target_os = "macos")]
-fn sysctl_total_unified_memory_bytes() -> Option<u64> {
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
-}
-
-#[cfg(not(target_os = "macos"))]
-fn sysctl_total_unified_memory_bytes() -> Option<u64> {
-    None
+    crate::gpu::total_unified_memory_bytes()
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5958,7 +5805,7 @@ pub(crate) fn mochi_fit_error(
     let budget = budget?;
     let reserve = crate::fit_gate::legacy_unified_reserve(budget.total_gb);
     let needed_gb = mochi_needed_gb(weight_bytes, frames, width, height, reserve.gb)?;
-    (budget.total_gb + f64::EPSILON < needed_gb).then(|| {
+    crate::fit_gate::exceeds_budget(needed_gb, budget.total_gb).then(|| {
         mochi_too_big_error(
             model_label,
             needed_gb,
@@ -6206,10 +6053,8 @@ fn generic_mlx_shared_observation(
 ) -> crate::memory_strategy::Selection {
     use crate::memory_strategy::{Budget, Candidate, RequestScope};
     use gen_core::{
-        MemoryBackendRealization, MemoryConformanceState, MemoryEvidence, MemoryEvidenceDimensions,
-        MemoryEvidenceKey, MemoryEvidenceVerdict, MemoryGeometry, MemoryNumericTier,
-        MemoryParityContract, MemoryParityResult, MemoryProviderContract, MemorySelection,
-        MemoryStrategy,
+        MemoryBackendRealization, MemoryEvidenceKey, MemoryGeometry, MemoryNumericTier,
+        MemoryProviderContract, MemorySelection, MemoryStrategy,
     };
 
     let tier = MemoryNumericTier {
@@ -6233,8 +6078,8 @@ fn generic_mlx_shared_observation(
         .max(0.0)
         .ceil()
         .clamp(0.0, u64::MAX as f64) as u64;
-    let evidence = MemoryEvidence {
-        key: MemoryEvidenceKey {
+    let evidence = sceneworks_core::memory_contracts::unverified_estimate(
+        MemoryEvidenceKey {
             model_family: "generic_mlx_cold_load".into(),
             resolved_route: "generic_mlx_cold_load".into(),
             backend: gen_core::MemoryBackend::Mlx,
@@ -6251,20 +6096,9 @@ fn generic_mlx_shared_observation(
             engaged_composition: vec![MemoryStrategy::Resident],
             parameters: Default::default(),
         },
-        conformance: MemoryConformanceState::ImplementedUnverified,
-        dimensions: MemoryEvidenceDimensions {
-            static_implementation: MemoryEvidenceVerdict::Satisfied,
-            declared_calibration: MemoryEvidenceVerdict::Missing,
-            historical_verification: MemoryEvidenceVerdict::Missing,
-            current_environment_verification: MemoryEvidenceVerdict::Missing,
-            canonical_route_loadability: MemoryEvidenceVerdict::Unverified,
-            exact_strategy_parameters: MemoryEvidenceVerdict::Satisfied,
-        },
-        calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
-        calibration_fingerprint: String::new(),
-        sceneworks_revision: "sc-15449-contract-v1".into(),
-        inference_revision: "1c4354b4b22d7f2cf5c4ea5fe17a83ab6c655e82".into(),
-        harness_version: String::new(),
+        gen_core::MEMORY_CALIBRATION_ABI,
+        String::new(),
+        "sc-15449-contract-v1".into(),
         // sc-22508: the peak is the WHOLE floor — resolved-spec weights plus the activation
         // headroom — because the allowance declared below must be a slice of the peak it grades,
         // not a second charge sitting outside it (`memory_strategy::Candidate
@@ -6279,11 +6113,8 @@ fn generic_mlx_shared_observation(
         // the corpus derives A to be, and the earlier prose that spelled it `0.17` went stale the
         // moment that derivation moved. `reserved_headroom_gb` is zeroed below so headroom is
         // counted once.
-        predicted_peak_bytes: total_bytes.saturating_add(headroom_bytes),
-        observed_peak_bytes: None,
-        parity: MemoryParityContract::Exact,
-        parity_result: MemoryParityResult::NotRun,
-    };
+        total_bytes.saturating_add(headroom_bytes),
+    );
     let contract = MemoryProviderContract::compatibility_default(
         "generic_mlx_cold_load",
         MemoryBackendRealization::MlxMetal {
@@ -6952,7 +6783,7 @@ fn full_finetune_fit_message(
         full_finetune_peak_gb(dit_bytes, resolution, gradient_accumulation)?,
         budget?,
     );
-    (budget.total_gb + f64::EPSILON < needed_gb).then(|| {
+    crate::fit_gate::exceeds_budget(needed_gb, budget.total_gb).then(|| {
         full_finetune_too_big_message(
             model_label,
             needed_gb,
@@ -19870,7 +19701,7 @@ mod tests {
             calibration_abi: gen_core::MEMORY_CALIBRATION_ABI,
             calibration_fingerprint: "wrong-provider-fingerprint".to_owned(),
             sceneworks_revision: REQUEST_EVIDENCE_REVISION.to_owned(),
-            inference_revision: INFERENCE_CONTRACT_REVISION.to_owned(),
+            inference_revision: INFERENCE_REVISION.to_owned(),
             harness_version: "test".to_owned(),
             predicted_peak_bytes: gib_to_bytes(5.0),
             observed_peak_bytes: Some(gib_to_bytes(5.0)),

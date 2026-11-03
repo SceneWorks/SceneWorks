@@ -490,10 +490,7 @@ pub(super) async fn generate_candle_kolors_control_stream(
     if let Some(pid) = pid_weights.as_ref() {
         strategy_spec = strategy_spec.with_pid(pid.checkpoint.clone(), pid.gemma.clone());
     }
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let predicted_peak = crate::vram_gate::predicted_peak_gb(&request.model_manifest_entry, tier);
     let (control_repo, control_file) = kolors_control_repo_file(request)?;
     let control_revision = trusted_control_weight_revision(

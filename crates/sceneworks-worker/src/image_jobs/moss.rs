@@ -13,10 +13,7 @@ fn moss_live_budget(settings: &Settings) -> WorkerResult<gen_core::MemoryBudget>
     }
     #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
     {
-        let budget = crate::vram_gate::apply_vram_cap(
-            crate::gpu::nvidia_vram_budget_gb_fresh_blocking(&settings.gpu_id),
-            crate::vram_gate::cuda_vram_cap_gb(),
-        )
+        let budget = crate::vram_gate::live_capped_budget_fresh_blocking(&settings.gpu_id)
         .ok_or_else(|| {
             WorkerError::InvalidPayload(
                 "MOSS-Image device memory budget unavailable; refusing an unbounded load".into(),

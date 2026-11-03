@@ -3556,7 +3556,7 @@ pub(crate) struct VideoRuntimeMemoryState {
 
 impl VideoRuntimeMemoryState {
     fn selector_budget(self) -> Option<Budget> {
-        const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+        const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
         Some(Budget {
             available_gb: self
                 .budget

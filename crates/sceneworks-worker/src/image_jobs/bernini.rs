@@ -720,10 +720,7 @@ async fn generate_candle_bernini_image_stream(
 
     // Live device budget, mirroring base.rs: credit the reclaimable pool the imminent single-slot
     // evict will produce, then cap it to the configured CUDA ceiling.
-    let raw_budget = crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    );
+    let raw_budget = crate::vram_gate::live_capped_budget(&settings.gpu_id).await;
     let reclaimable_gb = crate::vram_gate::reclaimable_pool_gb(&settings.gpu_id);
     let budget =
         raw_budget.map(|budget| crate::vram_gate::with_reclaimable(budget, reclaimable_gb));

@@ -262,6 +262,23 @@ pub(super) fn resolve_wan_model_dir(
     )))
 }
 
+/// Shared family-root lookup. Delegates to existing local and HF resolvers so installed symlinks,
+/// snapshot revision selection, legacy roots and tier-specific pinned downloads remain intact.
+#[cfg(target_os = "macos")]
+pub(super) fn resolve_mlx_family_dir(
+    settings: &Settings,
+    env_key: &str,
+    name: &str,
+    repo: &str,
+) -> WorkerResult<PathBuf> {
+    local_mlx_dir(settings, env_key, name)
+        .or_else(|| huggingface_snapshot_dir(&settings.data_dir, repo))
+        .ok_or_else(|| WorkerError::InvalidPayload(format!(
+            "{name}: no MLX weights found. Download the turnkey {repo} snapshot via the Model Manager, set ${env_key}, or place a converted snapshot at {}.",
+            settings.data_dir.join("models").join("mlx").join(name).display()
+        )))
+}
+
 /// A locally-converted MLX dir for the model (env override, then
 /// `<data>/models/mlx/<id>`), counted only when it holds a `config.json` — mirrors the
 /// Python `_local_mlx_dir`, so a locally-quantized conversion supersedes a turnkey download.

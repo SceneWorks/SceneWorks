@@ -515,20 +515,14 @@ pub(crate) async fn nvidia_compute_cap(gpu_id: &str) -> Option<f32> {
     if gpu_id.trim().is_empty() || gpu_id == "auto" || gpu_id == "cpu" {
         return None;
     }
-    let output = tokio::time::timeout(
-        Duration::from_secs(3),
-        Command::new("nvidia-smi")
-            .arg(format!("--id={gpu_id}"))
-            .args(["--query-gpu=compute_cap", "--format=csv,noheader,nounits"])
-            .output(),
-    )
-    .await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            parse_selected_compute_cap(&String::from_utf8_lossy(&output.stdout))
-        }
-        _ => None,
-    }
+    let mut command = Command::new("nvidia-smi");
+    command
+        .arg(format!("--id={gpu_id}"))
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader,nounits"]);
+    let output = run_bounded_command(command, Duration::from_secs(3))
+        .await
+        .ok()?;
+    parse_selected_compute_cap(&String::from_utf8_lossy(&output.stdout))
 }
 
 pub(crate) fn parse_selected_compute_cap(output: &str) -> Option<f32> {
@@ -808,33 +802,92 @@ pub(crate) async fn query_mlx_utilization() -> Option<WorkerUtilizationSnapshot>
     mlx_utilization_from(total_mb, used_mb, gpu_load_percent)
 }
 
+#[cfg(target_os = "macos")]
+static PHYSICAL_MEMORY_BYTES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+
+/// Physical RAM, cached after the first successful bounded read. Failure is retried, never cached.
+/// The synchronous accessor also serves admission callers that have no Tokio runtime.
+pub(crate) fn total_unified_memory_bytes() -> Option<u64> {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(bytes) = PHYSICAL_MEMORY_BYTES.get() {
+            return Some(*bytes);
+        }
+        static PROBE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _probe = PROBE.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(bytes) = PHYSICAL_MEMORY_BYTES.get() {
+            return Some(*bytes);
+        }
+        let bytes = probe_physical_memory_bytes()?;
+        let _ = PHYSICAL_MEMORY_BYTES.set(bytes);
+        Some(bytes)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn probe_physical_memory_bytes() -> Option<u64> {
+    let mut command = std::process::Command::new("sysctl");
+    command.args(["-n", "hw.memsize"]);
+    let output = run_bounded_sync_probe(command, Duration::from_secs(2))?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|bytes| *bytes > 0)
+}
+
+/// Small-output probe only: timeout/error always kills AND waits for the child. This synchronous
+/// primitive is needed by cache-thread admission and never enters a nested async runtime.
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn run_bounded_sync_probe(
+    mut command: std::process::Command,
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    use std::process::Stdio;
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                return child
+                    .wait_with_output()
+                    .ok()
+                    .filter(|out| out.status.success())
+            }
+            Ok(None) if started.elapsed() < timeout => std::thread::sleep(
+                Duration::from_millis(10).min(timeout.saturating_sub(started.elapsed())),
+            ),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 /// Total unified memory (MB) via `sysctl -n hw.memsize`. The machine's physical RAM never changes at
 /// runtime, so the first successful read is cached process-wide and every subsequent call (each
 /// heartbeat) skips the subprocess entirely (sc-8928). A failed probe is NOT cached — it re-probes
 /// next time.
 #[cfg(target_os = "macos")]
 async fn sysctl_memsize_mb() -> Option<u64> {
-    static MEMSIZE_MB: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    if let Some(cached) = MEMSIZE_MB.get() {
-        return Some(*cached);
+    if let Some(bytes) = PHYSICAL_MEMORY_BYTES.get() {
+        return Some(bytes / (1024 * 1024));
     }
-    let output = tokio::time::timeout(
-        Duration::from_secs(2),
-        Command::new("sysctl").args(["-n", "hw.memsize"]).output(),
-    )
-    .await;
-    let mb = match output {
-        Ok(Ok(output)) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .trim()
-            .parse::<u64>()
-            .ok()
-            .map(|bytes| bytes / (1024 * 1024)),
-        _ => None,
-    };
-    if let Some(mb) = mb {
-        let _ = MEMSIZE_MB.set(mb);
-    }
-    mb
+    tokio::task::spawn_blocking(total_unified_memory_bytes)
+        .await
+        .ok()
+        .flatten()
+        .map(|bytes| bytes / (1024 * 1024))
 }
 
 /// Total unified memory in GB (`sysctl hw.memsize`), for per-job memory-budget guards such as the
@@ -851,18 +904,11 @@ pub(crate) async fn total_unified_memory_gb() -> Option<f64> {
 /// privileges). Empty when ioreg is unavailable.
 #[cfg(target_os = "macos")]
 async fn ioreg_accelerator_stats() -> BTreeMap<String, u64> {
-    let output = tokio::time::timeout(
-        Duration::from_secs(3),
-        Command::new("ioreg")
-            .args(["-r", "-c", "IOAccelerator", "-d", "1"])
-            .output(),
-    )
-    .await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            parse_ioreg_accelerator_stats(&String::from_utf8_lossy(&output.stdout))
-        }
-        _ => BTreeMap::new(),
+    let mut command = Command::new("ioreg");
+    command.args(["-r", "-c", "IOAccelerator", "-d", "1"]);
+    match run_bounded_command(command, Duration::from_secs(3)).await {
+        Ok(output) => parse_ioreg_accelerator_stats(&String::from_utf8_lossy(&output.stdout)),
+        Err(_) => BTreeMap::new(),
     }
 }
 
@@ -929,14 +975,10 @@ async fn ioreg_gpu_load() -> Option<f64> {
 /// page size or the required counters can't be read.
 #[cfg(target_os = "macos")]
 async fn vm_stat_used_mb() -> Option<u64> {
-    let output =
-        tokio::time::timeout(Duration::from_secs(2), Command::new("vm_stat").output()).await;
-    match output {
-        Ok(Ok(output)) if output.status.success() => {
-            system_used_mb_from_vm_stat(&String::from_utf8_lossy(&output.stdout))
-        }
-        _ => None,
-    }
+    let output = run_bounded_command(Command::new("vm_stat"), Duration::from_secs(2))
+        .await
+        .ok()?;
+    system_used_mb_from_vm_stat(&String::from_utf8_lossy(&output.stdout))
 }
 
 /// The page size (bytes) from the `vm_stat` header `(page size of N bytes)`.
@@ -1482,5 +1524,94 @@ mod preparation_scope_tests {
                 worker_capabilities_with_utility(&fallback_gpu(id), true)
             );
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod bounded_probe_tests {
+    use super::*;
+    use nix::{sys::signal::kill, unistd::Pid};
+
+    fn fake_probe(pid_file: &Path) -> Command {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "probe"])
+            .arg(pid_file);
+        command
+    }
+    async fn assert_reaped(pid_file: &Path) {
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        for _ in 0..100 {
+            if kill(Pid::from_raw(pid), None).is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("bounded probe child {pid} is still alive or unreaped");
+    }
+    #[tokio::test]
+    async fn timeout_kills_and_reaps_async_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        assert!(matches!(
+            run_bounded_command(fake_probe(&pid), Duration::from_millis(200)).await,
+            Err(GpuDiscoveryFailure::Timeout)
+        ));
+        assert_reaped(&pid).await;
+    }
+    #[tokio::test]
+    async fn cancellation_kills_and_reaps_async_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        let command = fake_probe(&pid);
+        let job = tokio::spawn(run_bounded_command(command, Duration::from_secs(30)));
+        for _ in 0..100 {
+            if pid.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(pid.exists());
+        job.abort();
+        assert!(job.await.unwrap_err().is_cancelled());
+        assert_reaped(&pid).await;
+    }
+    #[tokio::test]
+    async fn probe_success_and_nonzero_exit_are_distinct() {
+        let mut success = Command::new("sh");
+        success.args(["-c", "printf 137438953472"]);
+        let output = run_bounded_command(success, Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(output.stdout, b"137438953472");
+        let mut failure = Command::new("sh");
+        failure.args(["-c", "exit 7"]);
+        assert!(matches!(
+            run_bounded_command(failure, Duration::from_secs(1)).await,
+            Err(GpuDiscoveryFailure::NonZeroExit)
+        ));
+    }
+    #[tokio::test]
+    async fn sync_probe_timeout_kills_and_waits_and_success_keeps_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid = dir.path().join("pid");
+        let mut command = std::process::Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "probe"])
+            .arg(&pid);
+        assert!(run_bounded_sync_probe(command, Duration::from_millis(200)).is_none());
+        assert_reaped(&pid).await;
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "printf 137438953472"]);
+        assert_eq!(
+            run_bounded_sync_probe(command, Duration::from_secs(1))
+                .unwrap()
+                .stdout,
+            b"137438953472"
+        );
     }
 }

@@ -38,7 +38,7 @@ const TERMINAL_8B_FILES: &[&str] = &[
     "tokenizer_config.json",
     "vocab.json",
 ];
-const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -727,7 +727,7 @@ mod tests {
         })];
         json!({
             "schemaVersion": 1,
-            "inferenceRevision": crate::catalog_semantic_jobs::INFERENCE_RUNTIME_REVISION,
+            "inferenceRevision": sceneworks_core::inference_provenance::INFERENCE_REVISION,
             "corpusSha256": "b".repeat(64),
             "model": {
                 "repository": TERMINAL_8B_REPOSITORY,

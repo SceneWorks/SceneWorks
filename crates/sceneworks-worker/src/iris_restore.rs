@@ -469,15 +469,15 @@ pub(crate) const MLX_FLOOR_GB: f64 = 14.0;
 pub(crate) const CANDLE_FLOOR_GB: f64 = 12.0;
 /// The reserve each lane's gate keeps free on top of the floor (the legacy unified foreign-resident
 /// reserve on MLX, the dedicated-VRAM allocator slack on CUDA — both 2 GiB in this worker).
-pub(crate) const MLX_RESERVE_GB: f64 = 2.0;
-pub(crate) const CANDLE_RESERVE_GB: f64 = 2.0;
+pub(crate) const MLX_RESERVE_GB: f64 = crate::fit_gate::LEGACY_UNIFIED_FALLBACK_RESERVE_GB;
+pub(crate) const CANDLE_RESERVE_GB: f64 = crate::fit_gate::dedicated_vram_reserve().gb;
 /// Peak host bytes per pixel of the patch-padded processing canvas: the f32 bicubic reference, the
 /// padded model input, the fused output and its weight plane during tiling, then the colour fix's
 /// per-channel wavelet planes and the restored planes after it — 96 B/px is a conservative bound.
 pub(crate) const CANVAS_BYTES_PER_PIXEL: u64 = 96;
 /// The processing canvas the floors' evidence covered (2048×1536).
 pub(crate) const REFERENCE_CANVAS_PIXELS: u64 = 2048 * 1536;
-const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+const BYTES_PER_GIB: f64 = crate::fit_gate::BYTES_PER_GIB;
 
 /// Predicted peak (GiB) of `plan` on `lane`. On unified memory the output canvas beyond the
 /// reference geometry is added on top of the floor (host buffers draw from the same pool as the
@@ -542,20 +542,13 @@ pub(crate) fn admission_error(
 /// (or capped) VRAM of this worker's card on CUDA. Both honour the existing small-device emulation
 /// caps (`SCENEWORKS_MLX_MEMORY_CAP_GB` / `SCENEWORKS_CUDA_VRAM_CAP_GB`).
 #[cfg(target_os = "macos")]
-pub(crate) async fn live_total_gb(_settings: &Settings) -> Option<f64> {
-    let real = crate::mlx_fit_gate::probe_total_unified_memory_bytes()
-        .map(|bytes| bytes as f64 / BYTES_PER_GIB);
-    crate::mlx_fit_gate::resolve_budget(real, crate::mlx_fit_gate::mlx_memory_cap_gb())
-        .map(|budget| budget.total_gb)
+pub(crate) async fn live_total_gb(settings: &Settings) -> Option<f64> {
+    crate::fit_gate::lane_total_gb(&settings.gpu_id).await
 }
 
 #[cfg(all(not(target_os = "macos"), feature = "backend-candle"))]
 pub(crate) async fn live_total_gb(settings: &Settings) -> Option<f64> {
-    crate::vram_gate::apply_vram_cap(
-        crate::gpu::nvidia_vram_budget_gb(&settings.gpu_id).await,
-        crate::vram_gate::cuda_vram_cap_gb(),
-    )
-    .map(|budget| budget.total_gb)
+    crate::fit_gate::lane_total_gb(&settings.gpu_id).await
 }
 
 #[cfg(not(any(target_os = "macos", feature = "backend-candle")))]
