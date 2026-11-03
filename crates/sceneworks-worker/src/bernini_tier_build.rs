@@ -202,18 +202,10 @@ fn resolve_bf16_source() -> PathBuf {
         );
         return path;
     }
-    if let Some(home) = std::env::var_os("HOME") {
-        let snapshots = PathBuf::from(home)
-            .join(".cache/huggingface/hub")
-            .join("models--SceneWorks--bernini-mlx")
-            .join("snapshots");
-        if let Ok(entries) = std::fs::read_dir(&snapshots) {
-            for entry in entries.flatten() {
-                if entry.path().join("qwen2_5_vl.safetensors").is_file() {
-                    return entry.path();
-                }
-            }
-        }
+    if let Some(root) = super::smoke_support::cached_snapshot("SceneWorks/bernini-mlx", |root| {
+        root.join("qwen2_5_vl.safetensors").is_file()
+    }) {
+        return root;
     }
     panic!(
         "no Bernini bf16 snapshot found — set SCENEWORKS_BERNINI_BF16_DIR or cache the turnkey \

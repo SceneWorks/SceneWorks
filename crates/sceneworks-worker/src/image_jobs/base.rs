@@ -1052,7 +1052,9 @@ impl CandleImageRoute {
                 sceneworks_core::angle_kps::BUILTIN_ANGLE_SET_ORDER.len() as u32
             }
             // The generic lane also serves a native prompt batch (sc-25681): `prompts × count`.
-            CandleImageRoute::CandleTxt2Img | CandleImageRoute::MossImageEdit => request.image_count(),
+            CandleImageRoute::CandleTxt2Img | CandleImageRoute::MossImageEdit => {
+                request.image_count()
+            }
             // Every other lane (plain txt2img, the edit/reference/identity/comfyui/bernini lanes, and the
             // pose-reject arms — which error before generation) produces the requested count.
             _ => request.count,
@@ -1677,9 +1679,7 @@ fn model_repo_with_default(request: &ImageRequest, default_repo: &str) -> String
 #[cfg(native_lane)]
 fn requested_receipt_variant(request: &ImageRequest) -> Option<String> {
     if let Some(bits) = request.quant_bits() {
-        return Some(
-            crate::payload::tier_for_bits(Some(bits), "q8").to_owned(),
-        );
+        return Some(crate::payload::tier_for_bits(Some(bits), "q8").to_owned());
     }
     let selectable = request
         .model_manifest_entry
@@ -1924,10 +1924,7 @@ fn unconverted_model_preflight(request: &ImageRequest) -> WorkerResult<()> {
 /// — never by hashing here, so a healthy install is hashed once per load. Every other converter
 /// passes untouched.
 #[cfg(native_lane)]
-fn converted_artifact_preflight(
-    request: &ImageRequest,
-    dir: &std::path::Path,
-) -> WorkerResult<()> {
+fn converted_artifact_preflight(request: &ImageRequest, dir: &std::path::Path) -> WorkerResult<()> {
     let Some(mlx) = request.model_manifest_entry.get("mlx") else {
         return Ok(());
     };
@@ -2696,26 +2693,14 @@ pub(crate) mod resolved_artifact_provenance_tests {
     pub(crate) fn settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
-            access_token: None,
-            data_dir: data_dir.to_path_buf(),
             config_dir: data_dir.join("config"),
             worker_id: "test-worker".to_owned(),
             gpu_id: "gpu-0".to_owned(),
-            is_child_worker: false,
-            poll_seconds: 1,
-            heartbeat_seconds: 1,
-            shutdown_timeout_seconds: 1,
             huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
-            huggingface_token: None,
-            credentials: Vec::new(),
             max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
             max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
-            allow_private_lora_urls: false,
-            utility_workers: 1,
             backend_mlx_enabled: true,
-            backend_candle_enabled: false,
-            gpu_memory_limit_bytes: 0,
-            external_model_roots: Vec::new(),
+            ..crate::Settings::for_test(data_dir.to_path_buf())
         }
     }
 
@@ -4662,26 +4647,14 @@ mod mage_artifact_certification_tests {
     fn settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
-            access_token: None,
-            data_dir: data_dir.to_path_buf(),
             config_dir: data_dir.join("config"),
             worker_id: "test-worker".to_owned(),
             gpu_id: "gpu-0".to_owned(),
-            is_child_worker: false,
-            poll_seconds: 1,
-            heartbeat_seconds: 1,
-            shutdown_timeout_seconds: 1,
             huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
-            huggingface_token: None,
-            credentials: Vec::new(),
             max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
             max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
-            allow_private_lora_urls: false,
-            utility_workers: 1,
-            backend_mlx_enabled: false,
             backend_candle_enabled: true,
-            gpu_memory_limit_bytes: 0,
-            external_model_roots: Vec::new(),
+            ..crate::Settings::for_test(data_dir.to_path_buf())
         }
     }
 
@@ -5342,10 +5315,7 @@ fn resolve_advanced_or_manifest_f32(
 /// (`flux_ipadapter` variant steps, `qwen_edit_candle`/`zimage_control` per-variant steps) rather than a
 /// bare constant. Every caller passes its OWN `range`/`default_fn`, so per-lane bounds stay byte-for-byte.
 ///
-#[cfg(any(
-    native_lane,
-    test
-))]
+#[cfg(any(native_lane, test))]
 fn resolve_advanced_or_manifest_u32_with(
     request: &ImageRequest,
     key: &str,
@@ -5371,10 +5341,7 @@ fn resolve_advanced_or_manifest_u32_with(
 /// only when the manifest key is absent), then [`advanced::f32_clamped`] reads `advanced[key]` (falling
 /// back to that default) and clamps to `range`. Covers `flux_ipadapter`, whose guidance fallback is a
 /// per-variant fn. Each caller passes its OWN `range`/`default_fn`.
-#[cfg(any(
-    native_lane,
-    test
-))]
+#[cfg(any(native_lane, test))]
 fn resolve_advanced_or_manifest_f32_with(
     request: &ImageRequest,
     key: &str,
@@ -5560,27 +5527,18 @@ pub(crate) fn classify_prepared_adapter(pin: &gen_core::PinnedWeightsFile) -> Wo
 }
 
 #[derive(Debug)]
-#[cfg(any(
-    native_lane,
-    test
-))]
+#[cfg(any(native_lane, test))]
 struct PreparedAdapters {
     specs: Vec<AdapterSpec>,
     pins: Vec<gen_core::PinnedWeightsFile>,
 }
 
-#[cfg(any(
-    native_lane,
-    test
-))]
+#[cfg(any(native_lane, test))]
 impl PreparedAdapters {
     // Gated to exactly where it is used. `imported_edit_requires_the_identity_edit_lora` became
     // cross-platform when the Kontext edit surface started being served on both native backends, so
     // a macOS-only helper left the candle test build without it.
-    #[cfg(all(
-        native_lane,
-        test
-    ))]
+    #[cfg(all(native_lane, test))]
     fn is_empty(&self) -> bool {
         self.specs.is_empty()
     }
@@ -5589,10 +5547,7 @@ impl PreparedAdapters {
 /// Prepared counterpart of [`resolve_adapters`]. Classification reads through the exact token that
 /// is later installed on the `LoadSpec`; repeated references to the same lexical entry share one
 /// token, while preserving every requested adapter spec and its scale/order.
-#[cfg(any(
-    native_lane,
-    test
-))]
+#[cfg(any(native_lane, test))]
 fn resolve_prepared_adapters(
     request: &ImageRequest,
     settings: &Settings,
@@ -8234,8 +8189,14 @@ fn resolve_hires_fix_plan(
         .hires_fix
         .effective_cfg_scale(first_pass_guidance.or(first_pass_true_cfg));
     Some(HiresFixPlan {
-        width: sceneworks_core::image_request::hires_fix_target_dimension(request.width, upscale_by),
-        height: sceneworks_core::image_request::hires_fix_target_dimension(request.height, upscale_by),
+        width: sceneworks_core::image_request::hires_fix_target_dimension(
+            request.width,
+            upscale_by,
+        ),
+        height: sceneworks_core::image_request::hires_fix_target_dimension(
+            request.height,
+            upscale_by,
+        ),
         steps: request.hires_fix.effective_steps(first_pass_steps),
         guidance: first_pass_guidance.map(|_| cfg.unwrap_or_default()),
         true_cfg: first_pass_true_cfg.map(|_| cfg.unwrap_or_default()),
@@ -8517,7 +8478,9 @@ fn generate_one_with_hires_on_surface(
         Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
         Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
-        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
+        Progress::Upsampling { tokens, max_tokens } => {
+            on_progress(Progress::Upsampling { tokens, max_tokens })
+        }
     };
     // Enhancement belongs to the final persisted pass. Running it on the disposable base pass
     // would produce two reports for one image and could feed two different prompts into one recipe.
@@ -8585,7 +8548,9 @@ fn generate_one_with_hires_on_surface(
         Progress::PromptEncodingComplete => on_progress(Progress::PromptEncodingComplete),
         Progress::PromptUpsamplingComplete => on_progress(Progress::PromptUpsamplingComplete),
         Progress::ConditioningComplete => on_progress(Progress::ConditioningComplete),
-        Progress::Upsampling { tokens, max_tokens } => on_progress(Progress::Upsampling { tokens, max_tokens }),
+        Progress::Upsampling { tokens, max_tokens } => {
+            on_progress(Progress::Upsampling { tokens, max_tokens })
+        }
     };
     let refine_surface = LaneRgbaSurface {
         multi_reference_alpha: &[],
@@ -11410,7 +11375,10 @@ impl ResolutionLever {
     /// follows a comma (a smaller tier was just offered), `leading` opens the clause on its own.
     fn levers(self) -> (&'static str, &'static str) {
         match self {
-            Self::Blind => ("or run on a GPU with more VRAM.", "run on a GPU with more VRAM."),
+            Self::Blind => (
+                "or run on a GPU with more VRAM.",
+                "run on a GPU with more VRAM.",
+            ),
             Self::Priced => (
                 "lower the output resolution, or run on a GPU with more VRAM.",
                 "lower the output resolution or run on a GPU with more VRAM.",
@@ -12149,11 +12117,7 @@ fn candle_capability_reject_message(
     )
 }
 
-#[cfg(all(
-    test,
-    not(target_os = "macos"),
-    feature = "backend-candle"
-))]
+#[cfg(all(test, not(target_os = "macos"), feature = "backend-candle"))]
 mod krea_turbo_memory_route_tests {
     use super::{
         candle_adapter_resident_bytes, capability_downtier_floor,
@@ -13783,11 +13747,8 @@ async fn generate_candle_registry_stream_using(
             downtier_candidate_tiers(request, settings, tier, floor)
                 .into_iter()
                 .map(|candidate| -> WorkerResult<_> {
-                    let candidate_adapter_bytes = candle_adapter_resident_bytes(
-                        engine_id,
-                        candidate,
-                        adapter_source_bytes,
-                    );
+                    let candidate_adapter_bytes =
+                        candle_adapter_resident_bytes(engine_id, candidate, adapter_source_bytes);
                     let fit = if sdxl_request_tier_admission {
                         let legacy = candle_tier_fit(
                             &request.model_manifest_entry,
@@ -13834,8 +13795,11 @@ async fn generate_candle_registry_stream_using(
                             );
                             let candidate_endpoints = match sdxl_endpoints {
                                 Some(endpoints) if certified && candidate == "q4" => {
-                                    seal_sdxl_endpoint_load_spec(&mut spec, &endpoints.artifact.files)?
-                                        .then_some(endpoints)
+                                    seal_sdxl_endpoint_load_spec(
+                                        &mut spec,
+                                        &endpoints.artifact.files,
+                                    )?
+                                    .then_some(endpoints)
                                 }
                                 _ => None,
                             };
@@ -14548,88 +14512,82 @@ async fn generate_candle_registry_stream_using(
     let plain_gate_lever = ResolutionLever::for_selector(
         sdxl_request_tier_admission || memory_strategy_selection.is_some(),
     );
-    let use_sequential =
-        if request_selector_authoritative {
-            generation_memory.is_some_and(|memory| memory.stage_residency)
-        } else if let Some(
-            fit @ crate::vram_gate::KreaTurboFit::Resident {
-                peak_gb,
-                needed_gb,
-                selection,
-                ..
-            },
-        ) = shared_krea_fit
-        {
-            memory_strategy_selection = Some(selection);
-            adapted_peak_gb = Some(peak_gb);
-            tracing::info!(
-                model = %request.model,
-                tier,
-                width,
-                height,
-                needed_gb,
-                available_gb = budget.map_or(0.0, |budget| budget.free_gb),
-                "shared memory-strategy selector retained Krea Turbo resident execution"
-            );
-            // sc-22667 (E7): the Krea lane's selection event, in the shared ladder's spelling.
-            if let Some(telemetry) = fit.selection_telemetry(tier, memory_width, memory_height) {
-                emit_event("image_memory_strategy_selected", telemetry);
+    let use_sequential = if request_selector_authoritative {
+        generation_memory.is_some_and(|memory| memory.stage_residency)
+    } else if let Some(
+        fit @ crate::vram_gate::KreaTurboFit::Resident {
+            peak_gb,
+            needed_gb,
+            selection,
+            ..
+        },
+    ) = shared_krea_fit
+    {
+        memory_strategy_selection = Some(selection);
+        adapted_peak_gb = Some(peak_gb);
+        tracing::info!(
+            model = %request.model,
+            tier,
+            width,
+            height,
+            needed_gb,
+            available_gb = budget.map_or(0.0, |budget| budget.free_gb),
+            "shared memory-strategy selector retained Krea Turbo resident execution"
+        );
+        // sc-22667 (E7): the Krea lane's selection event, in the shared ladder's spelling.
+        if let Some(telemetry) = fit.selection_telemetry(tier, memory_width, memory_height) {
+            emit_event("image_memory_strategy_selected", telemetry);
+        }
+        false
+    } else {
+        // A verified non-resident Krea result bypasses the legacy chooser. Missing or
+        // unverified Krea evidence fails closed to resident-or-reject: it must never select a
+        // legacy optimized rung.
+        let gate_decision = if matches!(
+            shared_krea_fit,
+            Some(crate::vram_gate::KreaTurboFit::Fits { .. })
+                | Some(crate::vram_gate::KreaTurboFit::Reject { .. })
+        ) {
+            match (needed, budget) {
+                (Some(needed_gb), Some(budget)) => crate::vram_gate::FitDecision::Offload {
+                    needed_gb,
+                    available_gb: budget.free_gb,
+                },
+                _ => crate::vram_gate::FitDecision::Unknown,
             }
-            false
+        } else if krea_turbo_ladder {
+            krea_unverified_resident_decision(needed, budget)
+        } else if sequential_capable
+            && memory_strategy_selection.is_some_and(|selection| selection.strategy.is_optimized())
+            && generation_memory.is_some_and(|memory| memory.stage_residency)
+        {
+            // sc-22664: the shared ladder SELECTED an optimized rung that ENGAGES staged
+            // residency for this request, priced per rung from the law against the
+            // reserve-charged budget, on a provider that supports sequential offload. That
+            // decision stands: the legacy resident-vs-free comparison (the padded
+            // `vramGbByTier` row) must not re-refuse it, and the Offload arm below already
+            // defers its sequential-overflow gate to a shared selection. The figures name the
+            // resident peak the ladder moved off, as the Krea Fits arm above does.
+            //
+            // A staging-FREE optimized selection (a bounded rung whose composition excludes
+            // `StagedResidency`) runs whole-model resident, so the resident-vs-free gate
+            // below still applies to it; and a provider without `supportsSequentialOffload`
+            // cannot run the staged shape the ladder chose, so it keeps its `TooBig` refusal
+            // rather than being sent down an Offload path it does not implement.
+            match (needed, budget) {
+                (Some(needed_gb), Some(budget)) => crate::vram_gate::FitDecision::Offload {
+                    needed_gb,
+                    available_gb: budget.free_gb,
+                },
+                _ => crate::vram_gate::FitDecision::Unknown,
+            }
         } else {
-            // A verified non-resident Krea result bypasses the legacy chooser. Missing or
-            // unverified Krea evidence fails closed to resident-or-reject: it must never select a
-            // legacy optimized rung.
-            let gate_decision = if matches!(
-                shared_krea_fit,
-                Some(crate::vram_gate::KreaTurboFit::Fits { .. })
-                    | Some(crate::vram_gate::KreaTurboFit::Reject { .. })
-            ) {
-                match (needed, budget) {
-                    (Some(needed_gb), Some(budget)) => {
-                        crate::vram_gate::FitDecision::Offload {
-                            needed_gb,
-                            available_gb: budget.free_gb,
-                        }
-                    }
-                    _ => crate::vram_gate::FitDecision::Unknown,
-                }
-            } else if krea_turbo_ladder {
-                krea_unverified_resident_decision(needed, budget)
-            } else if sequential_capable
-                && memory_strategy_selection
-                    .is_some_and(|selection| selection.strategy.is_optimized())
-                && generation_memory.is_some_and(|memory| memory.stage_residency)
-            {
-                // sc-22664: the shared ladder SELECTED an optimized rung that ENGAGES staged
-                // residency for this request, priced per rung from the law against the
-                // reserve-charged budget, on a provider that supports sequential offload. That
-                // decision stands: the legacy resident-vs-free comparison (the padded
-                // `vramGbByTier` row) must not re-refuse it, and the Offload arm below already
-                // defers its sequential-overflow gate to a shared selection. The figures name the
-                // resident peak the ladder moved off, as the Krea Fits arm above does.
-                //
-                // A staging-FREE optimized selection (a bounded rung whose composition excludes
-                // `StagedResidency`) runs whole-model resident, so the resident-vs-free gate
-                // below still applies to it; and a provider without `supportsSequentialOffload`
-                // cannot run the staged shape the ladder chose, so it keeps its `TooBig` refusal
-                // rather than being sent down an Offload path it does not implement.
-                match (needed, budget) {
-                    (Some(needed_gb), Some(budget)) => {
-                        crate::vram_gate::FitDecision::Offload {
-                            needed_gb,
-                            available_gb: budget.free_gb,
-                        }
-                    }
-                    _ => crate::vram_gate::FitDecision::Unknown,
-                }
-            } else {
-                crate::vram_gate::resolve_offload(
-                    crate::vram_gate::fit_decision(needed, budget),
-                    sequential_capable,
-                )
-            };
-            match gate_decision {
+            crate::vram_gate::resolve_offload(
+                crate::vram_gate::fit_decision(needed, budget),
+                sequential_capable,
+            )
+        };
+        match gate_decision {
             crate::vram_gate::FitDecision::Offload {
                 needed_gb,
                 available_gb,
@@ -14921,70 +14879,74 @@ async fn generate_candle_registry_stream_using(
     if let Some(peak_gb) = incurred_peak {
         crate::vram_gate::note_loaded_peak(&settings.gpu_id, peak_gb);
     }
-    let mut memory_strategy_context = selected_memory_strategy_context.or_else(|| memory_strategy_selection.and_then(|selection| {
-        let budget = budget?;
-        let predicted_peak_gb = adapted_peak_gb?;
-        let turbo_fit = request.model_manifest_entry.get("candle")?.get("turboFit")?;
-        let calibration_abi =
-            u32::try_from(turbo_fit.get("calibrationAbi")?.as_u64()?).ok()?;
-        let calibration_fingerprint = turbo_fit
-            .get("calibrationFingerprint")?
-            .as_str()?
-            .to_owned();
-        let gb_to_bytes = |gb: f64| {
-            (gb * 1024.0 * 1024.0 * 1024.0)
-                .round()
-                .clamp(0.0, u64::MAX as f64) as u64
-        };
-        tracing::info!(
-            backend = "candle",
-            evidence_revision = krea_evidence_revision(),
-            reclaimable_gb,
-            raw_available_gb = raw_budget.map_or(0.0, |raw| raw.free_gb),
-            effective_available_gb = budget.free_gb,
-            requested_tier,
-            effective_tier = tier,
-            strategy = ?selection.strategy,
-            "shared memory-strategy selection admitted"
-        );
-        // sc-17097: the shape now comes from the manifest, which states what the curves were MEASURED
-        // under. Reading it back off the provider - as this did - made the safety check compare the
-        // provider against itself, so calibration ABI 2's load-shape axis could never fail here.
-        let load_shape = crate::vram_gate::krea_turbo_load_shape(turbo_fit)?;
-        Some(gen_core::MemoryRunContext {
-            selection,
-            optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
-            calibration_abi,
-            calibration_fingerprint,
-            load_shape,
-            mode: gen_core::MemoryMode::TextToImage,
-            has_reference: reference_count > 0,
-            use_pid: false,
-            has_phases: false,
-            geometry: gen_core::MemoryGeometry {
-                width: memory_width,
-                height: memory_height,
-                batch: 1,
-                frames: 1,
-                reference_count,
-            },
-            reference_resources: None,
-            overlay: None,
-            budget: gen_core::MemoryBudget {
-                total_bytes: gb_to_bytes(budget.total_gb),
-                committed_bytes: gb_to_bytes((budget.total_gb - budget.free_gb).max(0.0)),
-                reclaimable_bytes: 0,
-                reserved_headroom_bytes: gb_to_bytes(2.0),
-            },
-            predicted_peak_bytes: gb_to_bytes(predicted_peak_gb),
-            cache_state: if reclaimable_gb > 0.0 {
-                gen_core::MemoryCacheState::Warm
-            } else {
-                gen_core::MemoryCacheState::Cold
-            },
-            evidence_revision: krea_evidence_revision(),
+    let mut memory_strategy_context = selected_memory_strategy_context.or_else(|| {
+        memory_strategy_selection.and_then(|selection| {
+            let budget = budget?;
+            let predicted_peak_gb = adapted_peak_gb?;
+            let turbo_fit = request
+                .model_manifest_entry
+                .get("candle")?
+                .get("turboFit")?;
+            let calibration_abi = u32::try_from(turbo_fit.get("calibrationAbi")?.as_u64()?).ok()?;
+            let calibration_fingerprint = turbo_fit
+                .get("calibrationFingerprint")?
+                .as_str()?
+                .to_owned();
+            let gb_to_bytes = |gb: f64| {
+                (gb * 1024.0 * 1024.0 * 1024.0)
+                    .round()
+                    .clamp(0.0, u64::MAX as f64) as u64
+            };
+            tracing::info!(
+                backend = "candle",
+                evidence_revision = krea_evidence_revision(),
+                reclaimable_gb,
+                raw_available_gb = raw_budget.map_or(0.0, |raw| raw.free_gb),
+                effective_available_gb = budget.free_gb,
+                requested_tier,
+                effective_tier = tier,
+                strategy = ?selection.strategy,
+                "shared memory-strategy selection admitted"
+            );
+            // sc-17097: the shape now comes from the manifest, which states what the curves were MEASURED
+            // under. Reading it back off the provider - as this did - made the safety check compare the
+            // provider against itself, so calibration ABI 2's load-shape axis could never fail here.
+            let load_shape = crate::vram_gate::krea_turbo_load_shape(turbo_fit)?;
+            Some(gen_core::MemoryRunContext {
+                selection,
+                optimization_authority: gen_core::MemoryOptimizationAuthority::Calibrated,
+                calibration_abi,
+                calibration_fingerprint,
+                load_shape,
+                mode: gen_core::MemoryMode::TextToImage,
+                has_reference: reference_count > 0,
+                use_pid: false,
+                has_phases: false,
+                geometry: gen_core::MemoryGeometry {
+                    width: memory_width,
+                    height: memory_height,
+                    batch: 1,
+                    frames: 1,
+                    reference_count,
+                },
+                reference_resources: None,
+                overlay: None,
+                budget: gen_core::MemoryBudget {
+                    total_bytes: gb_to_bytes(budget.total_gb),
+                    committed_bytes: gb_to_bytes((budget.total_gb - budget.free_gb).max(0.0)),
+                    reclaimable_bytes: 0,
+                    reserved_headroom_bytes: gb_to_bytes(2.0),
+                },
+                predicted_peak_bytes: gb_to_bytes(predicted_peak_gb),
+                cache_state: if reclaimable_gb > 0.0 {
+                    gen_core::MemoryCacheState::Warm
+                } else {
+                    gen_core::MemoryCacheState::Cold
+                },
+                evidence_revision: krea_evidence_revision(),
+            })
         })
-    }));
+    });
     if !receipt_selector_authoritative {
         apply_request_scoped_candle_residency(use_sequential, &mut generation_memory);
     }
@@ -16355,8 +16317,6 @@ mod candle_label_tests {
         );
     }
 
-
-
     /// sc-24163: a LoRA/LoKr on a Qwen-Image 2.1 reference edit must pass the fail-closed route
     /// guard — the edit route renders through the same adapter-bearing generic stream as 2.1 T2I.
     #[test]
@@ -16685,14 +16645,8 @@ mod candle_label_tests {
     #[test]
     fn capability_reject_offers_only_truthful_escapes() {
         // SDXL Q4 on the reporter's 8 GB card: the q4 row (12) + HEADROOM_GB (2) against ~6 GB free.
-        let message = candle_capability_reject_message(
-            "sdxl",
-            "q4",
-            14.0,
-            6.0,
-            "0",
-            ResolutionLever::Blind,
-        );
+        let message =
+            candle_capability_reject_message("sdxl", "q4", 14.0, 6.0, "0", ResolutionLever::Blind);
         assert!(
             message.starts_with(
                 "sdxl needs ~14 GB of VRAM even at the smallest installed tier it can run (q4)"
@@ -16720,8 +16674,12 @@ mod candle_label_tests {
         );
 
         // The SDXL admission path prices geometry through the shared selector, so the knob is real.
-        let priced = candle_capability_reject_message("sdxl", "q4", 14.0, 6.0, "0", ResolutionLever::Priced);
-        assert!(priced.contains("Lower the output resolution or run on a GPU with more VRAM."), "{priced}");
+        let priced =
+            candle_capability_reject_message("sdxl", "q4", 14.0, 6.0, "0", ResolutionLever::Priced);
+        assert!(
+            priced.contains("Lower the output resolution or run on a GPU with more VRAM."),
+            "{priced}"
+        );
         assert!(!priced.contains("will not help"), "{priced}");
         assert!(priced.contains("not the tier's on-disk size"), "{priced}");
     }
@@ -16735,26 +16693,14 @@ mod kolors_edit_worker_contract_tests {
     fn settings(data_dir: &Path) -> Settings {
         Settings {
             api_url: "http://127.0.0.1".to_owned(),
-            access_token: None,
-            data_dir: data_dir.to_path_buf(),
             config_dir: data_dir.join("config"),
             worker_id: "test-worker".to_owned(),
             gpu_id: "gpu-0".to_owned(),
-            is_child_worker: false,
-            poll_seconds: 1,
-            heartbeat_seconds: 1,
-            shutdown_timeout_seconds: 1,
             huggingface_base_url: DEFAULT_HUGGINGFACE_BASE_URL.to_owned(),
-            huggingface_token: None,
-            credentials: Vec::new(),
             max_lora_url_bytes: DEFAULT_MAX_LORA_URL_BYTES,
             max_model_url_bytes: DEFAULT_MAX_MODEL_URL_BYTES,
-            allow_private_lora_urls: false,
-            utility_workers: 1,
-            backend_mlx_enabled: false,
             backend_candle_enabled: true,
-            gpu_memory_limit_bytes: 0,
-            external_model_roots: Vec::new(),
+            ..crate::Settings::for_test(data_dir.to_path_buf())
         }
     }
 
@@ -19792,10 +19738,7 @@ mod candle_downtier_emulation_tests {
 // entry the worker receives, so the gate MUST read through `ui`. Reading the top level is a silent
 // no-op end-to-end (the original bug). This drives a real resolved manifest entry through the shared
 // `resolve_text_style_gain` seam — the coverage the engine-only A/B (sc-11878/sc-11884) never had.
-#[cfg(all(
-    test,
-    native_lane
-))]
+#[cfg(all(test, native_lane))]
 mod text_style_gain_gate_tests {
     use super::*;
     use serde_json::json;
