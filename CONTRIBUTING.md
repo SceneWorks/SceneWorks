@@ -172,6 +172,17 @@ So the three Rust configurations each have a local command:
 > the cfg CI compiles it under" — which is precisely the class (E0425 from a cfg-gated symbol,
 > dead code under `-D warnings`) that used to cost a full round-trip on a self-hosted runner.
 
+**SQLite stores:** `store_util::configure_connection` owns connection pragmas and
+`SQLITE_BUSY_TIMEOUT` (five seconds). Project indexes retain rollback journaling;
+jobs attempt WAL with a warning on failure; the catalog requires WAL, NORMAL
+synchronization, disk-backed temporary sorts, a 64 MiB cache and its configured
+checkpoint interval. Character, voice and training indexes use the project profile.
+Run schema setup before any mutator transaction, then take `BEGIN IMMEDIATE`
+before reading mutation predicates. Project migrations acquire their own immediate
+transaction and re-read `user_version` under that lock; never run them inside a
+mutator transaction. This allows cross-process writers to wait within the timeout
+rather than fail immediately while upgrading a deferred read lock.
+
 **Web** (from the repo root):
 
 ```bash
