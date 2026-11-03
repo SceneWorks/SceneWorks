@@ -520,13 +520,8 @@ mod tests {
         use crate::tests::support::{request, test_settings};
         let temp = tempfile::tempdir().unwrap();
         let app = crate::create_app(test_settings(&temp)).unwrap();
-        let (_, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({"name": "Stalled upload"}),
-        )
-        .await;
+        let (_, project) =
+            crate::tests::support::create_project(app.clone(), &"Stalled upload").await;
         let prefix = b"--idle-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\npartial-upload-content";
         let body =
             stream::once(async { Ok::<_, std::io::Error>(axum::body::Bytes::from_static(prefix)) })

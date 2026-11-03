@@ -192,13 +192,8 @@ async fn inspect_creates_no_asset_no_job_and_no_project_mutation() {
     let data_dir = settings.data_dir.clone();
     let app = create_app(settings).expect("app creates");
 
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Inspect Purity" }),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"Inspect Purity").await;
     assert_eq!(status, StatusCode::CREATED);
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let project_path = std::path::PathBuf::from(project["path"].as_str().expect("project path"));
@@ -795,13 +790,7 @@ async fn project_with_imported_image(
     filename: &str,
     bytes: &[u8],
 ) -> (String, String) {
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": name }),
-    )
-    .await;
+    let (status, project) = crate::tests::support::create_project(app.clone(), &(name)).await;
     assert_eq!(status, StatusCode::CREATED);
     let project_id = project["id"].as_str().expect("project id").to_owned();
     let (status, asset) = request_multipart_upload(
@@ -1273,13 +1262,8 @@ async fn the_asset_route_404s_for_an_asset_that_does_not_exist() {
     let temp_dir = tempfile::tempdir().expect("temp dir creates");
     let settings = test_settings(&temp_dir);
     let app = create_app(settings).expect("app creates");
-    let (status, project) = request(
-        app.clone(),
-        "POST",
-        "/api/v1/projects",
-        json!({ "name": "Missing Asset" }),
-    )
-    .await;
+    let (status, project) =
+        crate::tests::support::create_project(app.clone(), &"Missing Asset").await;
     assert_eq!(status, StatusCode::CREATED);
     let project_id = project["id"].as_str().expect("project id");
     let (status, _) = request(

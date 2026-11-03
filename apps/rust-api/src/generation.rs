@@ -3152,13 +3152,8 @@ mod plan_backed_video_enqueue_tests {
     const IMPORT_PLAN: &str = r#","importPlan": { "checkpointId": "ckpt_wan_abc123" }"#;
 
     async fn create_project(app: &axum::Router) {
-        let (status, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Imported Wan" }),
-        )
-        .await;
+        let (status, project) =
+            crate::tests::support::create_project(app.clone(), &"Imported Wan").await;
         assert_eq!(status, StatusCode::CREATED, "project create: {project}");
     }
 
@@ -3331,13 +3326,8 @@ mod imported_minimax_h3_video_tests {
     }
 
     async fn create_project(app: &axum::Router) {
-        let (status, project) = request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({ "name": "Imported H3" }),
-        )
-        .await;
+        let (status, project) =
+            crate::tests::support::create_project(app.clone(), &"Imported H3").await;
         assert_eq!(status, StatusCode::CREATED, "project create: {project}");
     }
 

@@ -1008,13 +1008,7 @@ mod tests {
         held = held.on_execution_updated(Arc::new(|_| panic!("policy refusal precedes dispatch")));
         assert!(matches!(held.complete(request(Vec::new())).await,
             Err(HarnessError::Refused(detail)) if detail.contains("local/LAN")));
-        let (_, project) = api_request(
-            app.clone(),
-            "POST",
-            "/api/v1/projects",
-            json!({"name": "Policy test"}),
-        )
-        .await;
+        let (_, project) = crate::tests::support::create_project(app.clone(), &"Policy test").await;
         let project_id = project["id"].as_str().unwrap();
         let (_, mut draft) = api_request(
             app.clone(),
