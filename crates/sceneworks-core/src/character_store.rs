@@ -1363,16 +1363,20 @@ fn copy_lora_into_project(
         return Ok((None, false));
     };
     let source_path = PathBuf::from(source_path);
-    if !source_path.exists() || !(source_path.is_file() || source_path.is_dir()) {
-        return Err(ProjectStoreError::BadRequest(format!(
+    let source_not_found = || {
+        ProjectStoreError::BadRequest(format!(
             "LoRA source path not found: {}",
             source_path.display()
-        )));
-    }
-    if crate::safe_path::is_link_or_reparse_point(&fs::symlink_metadata(&source_path)?) {
+        ))
+    };
+    let source_metadata = fs::symlink_metadata(&source_path).map_err(|_| source_not_found())?;
+    if crate::safe_path::is_link_or_reparse_point(&source_metadata) {
         return Err(ProjectStoreError::BadRequest(
             "LoRA source must not be a symlink".to_owned(),
         ));
+    }
+    if !source_metadata.is_file() && !source_metadata.is_dir() {
+        return Err(source_not_found());
     }
     assert_allowed_lora_source(project_path, data_dir, &source_path)?;
     let target_dir = project_path
@@ -1398,7 +1402,7 @@ fn copy_lora_into_project(
         ));
     }
     if fs::canonicalize(&source_path).ok() != fs::canonicalize(&target).ok() {
-        if source_path.is_dir() {
+        if source_metadata.is_dir() {
             copy_dir_recursive(&source_path, &target)?;
         } else {
             fs::copy(&source_path, &target)?;
@@ -1614,6 +1618,21 @@ mod tests {
             fs::read(target.join("nested/weights.safetensors")).unwrap(),
             b"fixture"
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn lora_copy_rejects_a_linked_source_root_before_creating_outputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir(&project).unwrap();
+        let data = temp.path().join("data");
+        fs::create_dir_all(data.join("loras")).unwrap();
+        let source = data.join("loras/regular.safetensors");
+        fs::write(&source, b"fixture").unwrap();
+        let linked = data.join("loras/linked.safetensors");
+        std::os::unix::fs::symlink(&source, &linked).unwrap();
+        assert!(copy_lora_into_project(&project, &data, "character", linked.to_str()).is_err());
+        assert!(!project.join("loras/characters/character").exists());
     }
     #[cfg(unix)]
     #[test]
