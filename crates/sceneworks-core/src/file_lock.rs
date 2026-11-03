@@ -43,7 +43,7 @@ pub fn open_regular_lock_file(path: &std::path::Path) -> io::Result<File> {
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
     if let Ok(metadata) = std::fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
+        if crate::safe_path::is_link_or_reparse_point(&metadata) || !metadata.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "lock must be a regular file",
@@ -52,17 +52,7 @@ pub fn open_regular_lock_file(path: &std::path::Path) -> io::Result<File> {
     }
     let file = options.open(path)?;
     let metadata = file.metadata()?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x0000_0400 != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "lock must not be a reparse point",
-            ));
-        }
-    }
-    if !metadata.is_file() {
+    if crate::safe_path::is_link_or_reparse_point(&metadata) || !metadata.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "lock must be a regular file",
