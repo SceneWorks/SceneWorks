@@ -100,9 +100,10 @@ export async function apiFetch(path, token, options = {}) {
     headers.set("X-SceneWorks-Token", token);
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
-  const payload =
-    response.status === 204 ? null : await response.json().catch(() => null);
+  const { responseType, ...fetchOptions } = options;
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...fetchOptions, headers });
+  const payload = response.status === 204 ? null : response.ok && responseType === "blob"
+    ? await response.blob() : await response.json().catch(() => null);
   if (!response.ok) {
     const detail = payload?.detail;
     const message =

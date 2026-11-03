@@ -1379,6 +1379,7 @@ export function App() {
     setActiveTimeline,
     isActiveTimelineDirty,
     refreshTimelines,
+    refreshFilmTimeline,
     createTimeline,
     saveTimeline,
     resolveTimelineTrim,
@@ -3677,6 +3678,7 @@ export function App() {
     extractTimelineFrame,
     queueTimelineVideoJob,
     refreshTimelines,
+    refreshFilmTimeline,
     // Assets / library (sc-1651 Phase B batch 1)
     assets,
     assetsReady: Boolean(
@@ -3866,7 +3868,7 @@ export function App() {
     navigationHydrated,
     activeProject, mediaAssets, openPreview, sendAssetToImage, sendAssetToVideo,
     activeTimeline, timelines, selectedTimelineId, setSelectedTimelineId, setActiveTimeline, isActiveTimelineDirty,
-    createTimeline, saveTimeline, resolveTimelineTrim, exportTimeline, extractTimelineFrame, queueTimelineVideoJob, refreshTimelines,
+    createTimeline, saveTimeline, resolveTimelineTrim, exportTimeline, extractTimelineFrame, queueTimelineVideoJob, refreshTimelines, refreshFilmTimeline,
     assets, loadedAssetsProjectId, activeAssetLoadState, selectedAsset, selectedAssetId, setSelectedAssetId, deleteAsset, purgeAsset, moveAssetToLibrary, moveAssetToCharacter, importAsset,
     updateAssetStatus, updateAssetTags, latestImageAssets,
     jobAction, clearCompletedJobs, cancelPendingJobs, prioritizeJobs, clearJob, createVqaJob, createInterleaveJob, createPlaceholderJob,
