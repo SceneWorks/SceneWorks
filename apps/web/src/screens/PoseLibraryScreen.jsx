@@ -1,3 +1,4 @@
+import { useMediaTicket } from "../hooks/useMediaTicket.js";
 import { isImageUpload } from "../uploadFiles.js";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isAbortError } from "../api.js";
@@ -123,6 +124,7 @@ function annotateDuplicates(built, existingPoses) {
 // The "Create" tab body: pick photos (DatasetAddDialog), run DWPose, then review,
 // categorize, and save one whole-body pose per detected person to the store.
 function PoseCreatePanel({ hidden, categories, onSaved, existingPoses }) {
+  useMediaTicket();
   const {
     token,
     activeProject,
