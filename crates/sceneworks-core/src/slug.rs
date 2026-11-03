@@ -55,6 +55,19 @@ mod tests {
     use super::slugify;
 
     #[test]
+    fn worker_id_slug_policy_preserves_case_dots_and_underscores() {
+        assert_eq!(
+            super::slugify_worker_id_part("GPU_0.1 / device", "fallback"),
+            "GPU_0.1-device"
+        );
+        assert_eq!(super::slugify_worker_id_part("///", "fallback"), "fallback");
+        assert_eq!(
+            slugify("GPU_0.1 / device", "fallback", None),
+            "gpu-0-1-device"
+        );
+    }
+
+    #[test]
     fn lowercases_and_collapses_separators() {
         assert_eq!(slugify("My Project", "fallback", None), "my-project");
         assert_eq!(slugify("  a  b  ", "fallback", None), "a-b");
